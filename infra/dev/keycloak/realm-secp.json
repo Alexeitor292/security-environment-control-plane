@@ -1,8 +1,7 @@
 {
   "realm": "secp",
   "enabled": true,
-  "displayName": "SECP (development)",
-  "_comment": "DEVELOPMENT-ONLY realm. Credentials are placeholders, UNSAFE FOR PRODUCTION.",
+  "displayName": "SECP (development only — placeholder credentials, UNSAFE FOR PRODUCTION)",
   "sslRequired": "none",
   "registrationAllowed": false,
   "clients": [

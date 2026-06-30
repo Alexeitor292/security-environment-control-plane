@@ -55,11 +55,14 @@ services:
       - "8081:8080"
     volumes:
       - ./keycloak/realm-secp.json:/opt/keycloak/data/import/realm-secp.json:ro
+    # Keycloak 25 serves health on the management port (9000), and /dev/tcp is a
+    # bash feature, so the check must run under bash (not the default sh).
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nhost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q UP"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -qi UP"]
       interval: 15s
       timeout: 5s
       retries: 20
+      start_period: 30s
 
   temporal:
     image: temporalio/auto-setup:1.24
@@ -95,8 +98,10 @@ services:
     build:
       context: ../..
       dockerfile: infra/dev/Dockerfile.python
+    # Run migrations from apps/api so Alembic resolves script_location correctly,
+    # then start the API (the package is installed, so importable from anywhere).
     command: >-
-      sh -c "alembic -c apps/api/alembic.ini upgrade head &&
+      sh -c "cd apps/api && alembic upgrade head && cd /app &&
              uvicorn secp_api.main:app --host 0.0.0.0 --port 8080"
     environment:
       SECP_APP_ENV: ${SECP_APP_ENV}
@@ -134,6 +139,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # The worker is not an HTTP service; override the inherited (API) healthcheck
+    # with a process/liveness check that imports the worker and resolves settings.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import secp_worker; from secp_api.config import get_settings; get_settings(); print('ok')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   web:
     build:
