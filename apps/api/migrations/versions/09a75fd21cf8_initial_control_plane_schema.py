@@ -318,7 +318,9 @@ def _install_immutability_trigger() -> None:
         CREATE OR REPLACE FUNCTION secp_block_version_mutation()
         RETURNS trigger AS $$
         BEGIN
-            IF NEW.spec IS DISTINCT FROM OLD.spec
+            -- spec is a json column; json has no equality operator, so compare as
+            -- text. Casting the others is harmless and keeps the check uniform.
+            IF NEW.spec::text IS DISTINCT FROM OLD.spec::text
                OR NEW.content_hash IS DISTINCT FROM OLD.content_hash
                OR NEW.version_number IS DISTINCT FROM OLD.version_number
                OR NEW.api_version IS DISTINCT FROM OLD.api_version THEN
