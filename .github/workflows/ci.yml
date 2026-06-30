@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (format, lint, types, tests, schema, security)
+    runs-on: ubuntu-latest
+    env:
+      SECP_APP_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+
+      - name: Install project
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Format check (ruff)
+        run: ruff format --check apps contracts plugins tests
+
+      - name: Lint (ruff)
+        run: ruff check apps contracts plugins tests
+
+      - name: Type check (mypy)
+        run: mypy apps/api/secp_api apps/worker/secp_worker contracts plugins
+
+      - name: Schema validation (web-breach-101)
+        run: |
+          python - <<'PY'
+          import yaml
+          from secp_scenario_schema import validate_definition
+          validate_definition(yaml.safe_load(open("docs/scenarios/web-breach-101.yaml")))
+          print("web-breach-101 is valid against the schema")
+          PY
+
+      - name: Tests (pytest)
+        run: pytest apps/api/tests tests -q
+
+      - name: Dependency/security scan (pip-audit)
+        run: pip-audit --skip-editable
+
+  frontend:
+    name: Frontend (types, lint, build, tests, security)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm install
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Tests
+        run: npm run test
+
+      - name: Dependency scan (production deps)
+        # The Vite/esbuild dev toolchain carries known dev-server advisories that
+        # require a major bump; the shipped surface (production deps) must be clean.
+        run: npm audit --omit=dev --audit-level=high
