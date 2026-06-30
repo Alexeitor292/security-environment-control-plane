@@ -29,6 +29,12 @@ Admin views sanitized snapshot (API: inventory:read)
 The **API never** calls the Proxmox plugin and **never** resolves the secret
 reference. All provider contact happens in the worker.
 
+Correction pass: the API also never submits to Temporal before commit. A discovery
+request atomically creates the queued snapshot, queued `WorkflowRun`, and durable
+`workflow_dispatch_outbox` row. A worker-side publisher reads only committed
+outbox rows, submits the Discover workflow, marks success as `submitted`, and
+leaves publish failures durable as `failed` and retryable.
+
 ## Resource normalization (provider-neutral)
 
 Proxmox concepts map onto generic `DiscoveredResource` records (no Proxmox-specific

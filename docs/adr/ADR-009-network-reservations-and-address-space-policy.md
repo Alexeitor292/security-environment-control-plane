@@ -25,10 +25,22 @@ Introduce provider-neutral reservation models and a service:
 Rules:
 
 - **Transactional, overlap-free**: reservations are created in a transaction; a
-  uniqueness constraint on `(execution_target_id, cidr, status='reserved')` plus an
-  explicit overlap check reject a CIDR that overlaps an existing active reservation
-  on the same target. Concurrent attempts serialize; the loser retries the next free
-  block or fails cleanly.
+  uniqueness constraint on `(execution_target_id, cidr)` plus an explicit overlap
+  check reject a CIDR that overlaps an existing active reservation on the same
+  target. Released rows may be explicitly reused by flipping status back to
+  `reserved`.
+- **Policy validation**: address-space CIDRs are parsed strictly, subnet prefixes
+  must be within the policy block's IP family range, and overlapping policies on
+  the same execution target are rejected.
+- **Prefix control**: callers cannot choose arbitrary reservation prefixes. If a
+  prefix is supplied it must exactly match one of the target policy
+  `subnet_prefix` values.
+- **Per-target serialization**: allocation takes a database write lock by issuing
+  a no-op update against the target's address-space policy rows before reading
+  reserved blocks and choosing a candidate. PostgreSQL serializes on those rows;
+  SQLite serializes writers for the database. The insert/update happens inside a
+  savepoint; uniqueness races are retried and raw `IntegrityError` does not escape
+  the service.
 - **Approved-space validation**: for a real execution target, a requested per-team
   network must fall within an approved address space.
 - **Deterministic allocation**: given a policy and a set of already-reserved blocks,

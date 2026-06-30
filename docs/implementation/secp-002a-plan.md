@@ -88,6 +88,25 @@ Docker Compose up; verify simulator lifecycle unchanged; verify provider-target 
 fake discovery via Temporal worker (mock provider, fake resolver); document in
 `docs/verification/secp-002a-runtime-verification.md`. No real Proxmox.
 
+## Correction pass
+
+Merge-blocking review fixes applied after the initial slice:
+
+- `ProviderCredential` is an opaque transient value object with explicit
+  `reveal_secret()`, redacted string forms, no public secret field, and regression
+  tests for JSON/Pydantic/FastAPI/logging/pickle/dict safety.
+- Temporal dispatch uses a transactional outbox. API transactions create queued
+  `WorkflowRun` plus durable outbox rows; a worker-side publisher submits only
+  committed rows, records success/failure, and retries failed rows idempotently.
+- CIDR reservations validate strict policy CIDRs/prefixes, reject overlapping
+  policies, lock address-space rows per target during allocation, and retry
+  uniqueness races without leaking raw `IntegrityError`.
+- Discovery workflow linkage is a real foreign key from `WorkflowRun.snapshot_id`
+  to `ProviderInventorySnapshot.id`; snapshot workflow ids are derived, not
+  persisted twice.
+- Proxmox real-target validation requires `https://`, rejects `verify_tls=false`,
+  rejects unsupported config keys, and validates scope-policy shape.
+
 ---
 
 ## Required proof tests (assignment §Validation)
@@ -104,6 +123,12 @@ fake discovery via Temporal worker (mock provider, fake resolver); document in
 | 8 | CIDR reservations prevent collision per target | `test_network_reservations.py` |
 | 9 | Cross-org access to targets/inventory/reservations denied | per-slice tests |
 | 10 | No real endpoint/credential in any file | `test_no_real_endpoints.py` |
+
+Additional correction-pass proofs: no Temporal submission before commit; rollback
+creates no external work; publish failure remains retryable; outbox retry uses the
+same workflow id; discovery outbox is invisible before snapshot/workflow commit;
+dangling discovery workflow snapshot references are rejected by ORM and migration
+tests; Proxmox real-target validation rejects unsafe TLS/config/scope.
 
 ## Build order
 0 → 1 → 5 → 7 → 6 (contract+resolver before plugin) → 2 → 3 → 4 → 8 → 9 → 10 →

@@ -109,6 +109,11 @@ Inventory is organization-scoped and access-controlled (`inventory:read`). Every
 target registration, discovery request/start/complete/failure emits an audit
 event. Secrets never appear in snapshots, resources, audit events, errors, or UI.
 
+Correction pass: discovery workflow ownership is canonical from
+`WorkflowRun.snapshot_id` to `ProviderInventorySnapshot.id` with a real foreign
+key. The snapshot no longer stores a duplicate mutable workflow id; API response
+models derive `workflow_run_id` from the relationship.
+
 ---
 
 ## 5. Network reservations and address-space policy (ADR-009)
@@ -126,6 +131,15 @@ Rules:
 - Reservations are **transactional** per execution target; a unique constraint plus
   an overlap check prevents two concurrent exercises from reserving overlapping
   CIDRs on the same target.
+- Address-space CIDRs are parsed strictly, subnet prefixes must be valid for the
+  CIDR's IP family, and overlapping address-space policies on the same target are
+  rejected.
+- Reservation allocation serializes per target by taking a database write lock on
+  that target's address-space policy rows before choosing a candidate. PostgreSQL
+  gets row locking; SQLite serializes writers. Uniqueness races are retried inside
+  a savepoint so raw `IntegrityError` does not leak.
+- Caller-controlled prefixes are not arbitrary: an explicit prefix must exactly
+  match the policy `subnet_prefix`.
 - For a real execution target, a requested per-team network must fall inside an
   **approved** address space.
 - The Simulator path is unchanged: it does not require an execution target and
@@ -187,6 +201,10 @@ shell execution.
 - The API may validate a `secret_ref`'s **syntax** but must never resolve it.
 - The worker resolves a `secret_ref` only **immediately before** a provider
   operation, via a `SecretResolver` abstraction.
+- The resolved credential is a transient opaque value object with redacted
+  `repr()`/`str()`, no public secret field, no Pydantic/JSON/dict serialization
+  route to the secret, and no pickle support. Worker/plugin code must call the
+  deliberate `reveal_secret()` accessor.
 - Local dev uses a safe `EnvSecretResolver` (resolves from a namespaced env var)
   documented as a placeholder for a real secret manager. Tests use a `FakeResolver`
   and never read real environment secrets.
@@ -203,10 +221,17 @@ The interface is shaped to be compatible with a future production secret manager
 The durable path becomes operational before any real-provider work is allowed:
 
 - Add a `queued` workflow state and durable workflow identifiers.
-- `TemporalDispatcher` actually **enqueues** supported workflows (deploy, reset,
-  destroy, **discover**) instead of raising unavailable.
-- The API **creates/queues** work; the **worker** performs state-changing plugin
-  actions. The inline Simulator-only dev mode is preserved.
+- `TemporalDispatcher` writes a queued `WorkflowRun` and durable
+  `workflow_dispatch_outbox` row in the same API transaction. It never submits to
+  Temporal before commit.
+- A worker-side outbox publisher submits only committed outbox rows to Temporal,
+  marks success as `submitted`, and leaves failures durable as `failed` with
+  redacted error and retry metadata.
+- The API **creates queued intent**; the **worker publisher submits**; the
+  **Temporal worker** performs state-changing plugin actions. The inline
+  Simulator-only dev mode is preserved.
+- Workflow ids are deterministic per `WorkflowRun`, so publisher retries are
+  idempotent and do not create duplicate logical workflow work.
 - `InlineDispatcher` refuses any non-Simulator plugin (identity-based allowlist,
   unchanged from the SECP-001 hardening) — real providers require Temporal.
 - New **provider discovery workflow**; discovery uses the Temporal worker path in

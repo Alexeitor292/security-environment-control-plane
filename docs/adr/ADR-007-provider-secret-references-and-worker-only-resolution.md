@@ -26,6 +26,12 @@ a secret, and the API must never even resolve one.
 - **Redaction is mandatory.** Resolution errors never echo the secret or value.
   Resolved secrets are never persisted and never reach logs, audit events, API
   responses, workflow `detail`, or frontend state.
+- A resolved credential is a transient opaque `ProviderCredential` value object,
+  not a Pydantic model. It has redacted `repr()`/`str()`, no public secret field,
+  no `__dict__`, no dict conversion, no JSON/Pydantic/FastAPI serialization path
+  that exposes material, and it refuses pickling. Worker/plugin code must use the
+  explicit `reveal_secret()` accessor immediately before building the provider
+  transport.
 - The interface is shaped to accept additional schemes (e.g. `vault:`, `aws-sm:`)
   without changing callers, so a production secret manager is a drop-in.
 

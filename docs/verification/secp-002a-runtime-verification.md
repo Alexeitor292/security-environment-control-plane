@@ -142,3 +142,41 @@ rm -f ../../.env
   documented SECP-001 placeholder). Keycloak readiness was verified.
 - The earlier `inline` workflow rows are leftover from the Simulator dev path on the
   same persisted volume; they demonstrate inline behaviour remains intact.
+
+---
+
+## 11. Correction-pass runtime re-run
+
+The correction pass was re-run with explicit throwaway environment variables
+rather than reading a `.env` file. The Compose override still used
+`SECP_PROVIDER_MOCK=1` and the placeholder
+`SECP_PROVIDER_SECRET__LAB=mock-token-not-a-real-secret`.
+
+Additional verified behavior:
+
+```
+health -> HTTP 200 {'status': 'ok'}
+deploy -> HTTP 200, status=queued, dispatch_mode=temporal
+exercise=running instances=[('team1', 'running'), ('team2', 'running')]
+
+target -> HTTP 201, verify_tls=true, secret_ref=env:SECP_PROVIDER_SECRET__LAB
+discovery -> HTTP 202, status=queued, workflow_run_id=<derived from WorkflowRun>
+snapshot=completed summary={'total': 6, 'by_type': {'node': 2, 'vm': 2, 'container': 1, 'storage': 1}}
+resources=6 types=['container', 'node', 'storage', 'vm']
+'mock-token' anywhere in audit/snapshot/resources: False
+
+workflow_dispatch_outbox:
+submitted | 2
+
+workflow_run:
+deploy   | completed | temporal
+discover | completed | temporal
+
+provider_inventory_snapshot:
+completed | finalized=true | 1
+```
+
+The API applied the correction-pass migration `d4c2e7f9a8b1`, which adds the
+transactional workflow outbox and the `WorkflowRun.snapshot_id` foreign key. The
+runtime run confirmed that both deploy and discover are submitted only through the
+outbox publisher and complete through the Temporal worker.

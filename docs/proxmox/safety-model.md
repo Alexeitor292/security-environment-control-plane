@@ -60,6 +60,27 @@ Real-provider work uses the Temporal durable path. `InlineDispatcher` refuses an
 non-Simulator plugin (identity-based allowlist). The API queues work; the worker
 performs it.
 
+## Correction pass controls
+
+- Resolved credentials are opaque transient `ProviderCredential` objects. They are
+  not Pydantic models, cannot be converted to dict/JSON, refuse pickling, and
+  expose material only through the explicit worker/plugin `reveal_secret()`
+  accessor.
+- Temporal submission uses a transactional outbox. The API commits queued
+  `WorkflowRun` plus outbox intent first; the worker-side publisher submits only
+  committed rows. Failures remain durable and retryable.
+- Discovery workflow linkage is canonical from `WorkflowRun.snapshot_id` to
+  `ProviderInventorySnapshot.id` via a real foreign key.
+- CIDR allocation serializes per target by locking the target's address-space
+  policy rows inside the database transaction. Address-space policies are strictly
+  parsed, overlapping policies on the same target are rejected, and reservation
+  prefixes must match the approved policy prefix.
+- For the actual `proxmox` plugin and target registration path, `base_url` must be
+  `https://`, `verify_tls=false` is rejected, unsupported config keys are rejected,
+  and scope policy keys/values are validated. Mock/fake transports used in tests do
+  not weaken the validation required for a real target. A future real deployment
+  must use a trusted CA or a separately designed certificate-pinning approach.
+
 ## Secret reference syntax (dev)
 
 A `secret_ref` is an opaque string of the form `<scheme>:<locator>`. SECP-002A ships
