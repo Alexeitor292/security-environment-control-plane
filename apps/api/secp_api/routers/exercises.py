@@ -40,6 +40,7 @@ def create_exercise(
         template_id=body.template_id,
         version_id=body.version_id,
         name=body.name,
+        execution_target_id=body.execution_target_id,
     )
     return ExerciseOut.model_validate(exercise)
 

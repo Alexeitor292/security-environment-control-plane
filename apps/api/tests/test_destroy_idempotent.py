@@ -5,9 +5,9 @@ from __future__ import annotations
 from secp_api.enums import LifecycleState, WorkflowKind
 from secp_api.models import (
     EnvironmentInstance,
-    SimulatedNetwork,
-    SimulatedNode,
-    SimulatedTopologyEdge,
+    EnvironmentNetwork,
+    EnvironmentNode,
+    EnvironmentTopologyEdge,
     WorkflowRun,
 )
 
@@ -31,15 +31,18 @@ def test_destroy_tears_down_all_instances(session, principal, running_exercise):
     # Simulated resources are cleared.
     for inst in instances:
         assert (
-            session.query(SimulatedNode).filter(SimulatedNode.instance_id == inst.id).count() == 0
-        )
-        assert (
-            session.query(SimulatedNetwork).filter(SimulatedNetwork.instance_id == inst.id).count()
+            session.query(EnvironmentNode).filter(EnvironmentNode.instance_id == inst.id).count()
             == 0
         )
         assert (
-            session.query(SimulatedTopologyEdge)
-            .filter(SimulatedTopologyEdge.instance_id == inst.id)
+            session.query(EnvironmentNetwork)
+            .filter(EnvironmentNetwork.instance_id == inst.id)
+            .count()
+            == 0
+        )
+        assert (
+            session.query(EnvironmentTopologyEdge)
+            .filter(EnvironmentTopologyEdge.instance_id == inst.id)
             .count()
             == 0
         )

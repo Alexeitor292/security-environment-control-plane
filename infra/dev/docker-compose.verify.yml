@@ -1,0 +1,22 @@
+# Runtime-verification override (SECP-002A).
+#
+# Switches the API and worker to the durable Temporal path and enables the MOCK
+# Proxmox transport so discovery can be demonstrated end-to-end WITHOUT any real
+# endpoint. The mock secret value is an obvious placeholder, never a real secret.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.verify.yml \
+#     --env-file ../../.env up -d --build
+name: secp-dev
+
+services:
+  api:
+    environment:
+      SECP_WORKFLOW_DISPATCH_MODE: temporal
+
+  worker:
+    environment:
+      SECP_WORKFLOW_DISPATCH_MODE: temporal
+      SECP_PROVIDER_MOCK: "1"
+      # Placeholder mock token resolved by the worker's EnvSecretResolver for the
+      # target whose secret_ref is env:SECP_PROVIDER_SECRET__LAB. NOT a real secret.
+      SECP_PROVIDER_SECRET__LAB: "mock-token-not-a-real-secret"

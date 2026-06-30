@@ -162,7 +162,20 @@ def _new_workflow(
     kind: WorkflowKind,
     dispatch_mode: str,
     target_instance_id: uuid.UUID | None = None,
+    workflow_run_id: uuid.UUID | None = None,
 ) -> WorkflowRun:
+    # Temporal path: the API pre-created a queued WorkflowRun; the worker picks it
+    # up and transitions it to running. Inline path: create a fresh running run.
+    if workflow_run_id is not None:
+        run = session.get(WorkflowRun, workflow_run_id)
+        if run is None:
+            raise NotFoundError(f"workflow run {workflow_run_id} not found")
+        run.status = WorkflowStatus.running
+        run.dispatch_mode = dispatch_mode
+        if target_instance_id is not None:
+            run.target_instance_id = target_instance_id
+        session.flush()
+        return run
     run = WorkflowRun(
         organization_id=exercise.organization_id,
         exercise_id=exercise.id,
@@ -190,7 +203,10 @@ def _finish_workflow(
 
 
 def run_deploy(
-    session: Session, exercise_id: uuid.UUID, dispatch_mode: str = "inline"
+    session: Session,
+    exercise_id: uuid.UUID,
+    dispatch_mode: str = "inline",
+    workflow_run_id: uuid.UUID | None = None,
 ) -> WorkflowRun:
     exercise = _get_exercise(session, exercise_id)
 
@@ -202,6 +218,22 @@ def run_deploy(
             f"deploy requires exercise in 'approved', found '{exercise.lifecycle_state.value}'"
         )
 
+    # SECP-002A provisioning boundary: plans that pin a real execution target
+    # cannot be deployed in this milestone.  The refusal fires HERE — before any
+    # state mutation, before secret resolution, before any Temporal or provider
+    # interaction, before network creation — so the exercise is left untouched.
+    # Provisioning against a real (Proxmox) target is deferred to SECP-002B.
+    if plan_row.execution_target_id is not None:
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            f"deployment to a non-simulator execution target "
+            f"(target={plan_row.execution_target_id}, "
+            f"target_config_hash={plan_row.target_config_hash}) is not implemented "
+            "in SECP-002A. No provider request, secret resolution, or Temporal "
+            "provider workflow was started. Provisioning is deferred to SECP-002B."
+        )
+
     # Resolve the plugin up front and enforce the inline-execution safety boundary
     # BEFORE any state mutation, so a refusal leaves the exercise untouched.
     version = _get_version(session, exercise.environment_version_id)
@@ -210,7 +242,9 @@ def run_deploy(
     if dispatch_mode == "inline":
         assert_inline_execution_allowed(plugin)
 
-    run = _new_workflow(session, exercise, WorkflowKind.deploy, dispatch_mode)
+    run = _new_workflow(
+        session, exercise, WorkflowKind.deploy, dispatch_mode, workflow_run_id=workflow_run_id
+    )
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.deploying)
     audit.record(
         session,
@@ -271,6 +305,7 @@ def run_reset(
     exercise_id: uuid.UUID,
     instance_id: uuid.UUID,
     dispatch_mode: str = "inline",
+    workflow_run_id: uuid.UUID | None = None,
 ) -> WorkflowRun:
     exercise = _get_exercise(session, exercise_id)
     instance = session.get(EnvironmentInstance, instance_id)
@@ -285,7 +320,12 @@ def run_reset(
         assert_inline_execution_allowed(plugin)
 
     run = _new_workflow(
-        session, exercise, WorkflowKind.reset, dispatch_mode, target_instance_id=instance.id
+        session,
+        exercise,
+        WorkflowKind.reset,
+        dispatch_mode,
+        target_instance_id=instance.id,
+        workflow_run_id=workflow_run_id,
     )
     instance.lifecycle_state = transition(
         instance.lifecycle_state, LifecycleState.resetting, INSTANCE_TRANSITIONS
@@ -327,7 +367,10 @@ def run_reset(
 
 
 def run_destroy(
-    session: Session, exercise_id: uuid.UUID, dispatch_mode: str = "inline"
+    session: Session,
+    exercise_id: uuid.UUID,
+    dispatch_mode: str = "inline",
+    workflow_run_id: uuid.UUID | None = None,
 ) -> WorkflowRun:
     exercise = _get_exercise(session, exercise_id)
 
@@ -341,7 +384,9 @@ def run_destroy(
 
     # Idempotent: destroying an already-destroyed exercise is a safe no-op.
     if exercise.lifecycle_state == LifecycleState.destroyed:
-        run = _new_workflow(session, exercise, WorkflowKind.destroy, dispatch_mode)
+        run = _new_workflow(
+            session, exercise, WorkflowKind.destroy, dispatch_mode, workflow_run_id=workflow_run_id
+        )
         _finish_workflow(session, run, WorkflowStatus.completed, {"idempotent_noop": True})
         audit.record(
             session,
@@ -353,7 +398,9 @@ def run_destroy(
         )
         return run
 
-    run = _new_workflow(session, exercise, WorkflowKind.destroy, dispatch_mode)
+    run = _new_workflow(
+        session, exercise, WorkflowKind.destroy, dispatch_mode, workflow_run_id=workflow_run_id
+    )
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.destroying)
     audit.record(
         session,

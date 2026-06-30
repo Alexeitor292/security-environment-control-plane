@@ -16,6 +16,15 @@ from secp_plugin_api.v1.contract import (
     PluginProtocol,
     ResourcePort,
 )
+from secp_plugin_api.v1.discovery import (
+    DiscoveredResource,
+    DiscoveryProtocol,
+    DiscoveryRequest,
+    DiscoveryResult,
+    ProviderCredential,
+    TargetValidationResult,
+    UnsupportedCapabilityError,
+)
 from secp_plugin_api.v1.models import (
     ApplyResult,
     DestroyResult,
@@ -40,6 +49,13 @@ __all__ = [
     "PluginContext",
     "PluginProtocol",
     "ResourcePort",
+    "DiscoveredResource",
+    "DiscoveryProtocol",
+    "DiscoveryRequest",
+    "DiscoveryResult",
+    "ProviderCredential",
+    "TargetValidationResult",
+    "UnsupportedCapabilityError",
     "ApplyResult",
     "DestroyResult",
     "HealthReport",

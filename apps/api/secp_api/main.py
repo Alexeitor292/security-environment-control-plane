@@ -19,7 +19,14 @@ from secp_api.config import get_settings
 from secp_api.db import get_engine, session_scope
 from secp_api.errors import DomainError, ValidationFailedError
 from secp_api.models import Base
-from secp_api.routers import catalog, exercises, observability, plans, system
+from secp_api.routers import (
+    catalog,
+    exercises,
+    observability,
+    plans,
+    providers,
+    system,
+)
 
 logger = logging.getLogger("secp.api")
 
@@ -83,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(exercises.router)
     app.include_router(plans.router)
     app.include_router(observability.router)
+    app.include_router(providers.router)
 
     @app.on_event("startup")
     def _startup() -> None:

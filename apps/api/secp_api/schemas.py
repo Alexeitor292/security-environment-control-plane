@@ -30,6 +30,7 @@ class ExerciseCreate(BaseModel):
     template_id: uuid.UUID
     version_id: uuid.UUID
     name: str
+    execution_target_id: uuid.UUID | None = None
 
 
 class DecisionBody(BaseModel):
@@ -67,6 +68,7 @@ class ExerciseOut(ORMModel):
     name: str
     lifecycle_state: str
     team_count: int
+    execution_target_id: uuid.UUID | None = None
     created_at: datetime
 
 
@@ -85,6 +87,9 @@ class PlanOut(ORMModel):
     exercise_id: uuid.UUID
     environment_version_id: uuid.UUID
     version_content_hash: str
+    # Target-pinning fields (null for Simulator path).
+    execution_target_id: uuid.UUID | None = None
+    target_config_hash: str | None = None
     status: str
     summary: dict
     approved_content_hash: str | None

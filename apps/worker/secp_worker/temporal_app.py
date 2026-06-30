@@ -1,15 +1,19 @@
-"""Temporal workflow/activity definitions (production-shaped path, ADR-005).
+"""Temporal workflow/activity definitions (durable path, ADR-010).
 
-Wired but not exercised in CI. Requires the optional ``worker`` extra
-(``temporalio``) and a running Temporal server. Activities wrap the SAME shared
-orchestration used by the inline dispatcher, so there is one implementation of
-deploy/reset/destroy — Temporal only adds durability.
+Requires the optional ``worker`` extra (``temporalio``) and a running Temporal
+server. Activities wrap the SAME shared orchestration used by the inline
+dispatcher, so there is one implementation of deploy/reset/destroy/discover —
+Temporal only adds durability. Workflows/activities take plain dict args matching
+``TemporalWorkflowRequest.args`` constructed by the dispatcher, so the API never
+imports worker types.
+
+Discovery is read-only and, in SECP-002A, never runs against a real endpoint.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from datetime import UTC
 
 try:  # temporalio is an optional dependency (the 'worker' extra).
     from temporalio import activity, workflow
@@ -34,35 +38,28 @@ except Exception:  # pragma: no cover - import guard
     activity = workflow = _Stub()  # type: ignore[assignment]
 
 
-@dataclass
-class DeployInput:
-    exercise_id: str
-
-
-@dataclass
-class ResetInput:
-    exercise_id: str
-    instance_id: str
-
-
-@dataclass
-class DestroyInput:
-    exercise_id: str
+def _opt_uuid(value: str | None) -> uuid.UUID | None:
+    return uuid.UUID(value) if value else None
 
 
 @activity.defn
-async def deploy_activity(arg: DeployInput) -> str:
+async def deploy_activity(arg: dict) -> str:
     from secp_api.db import session_scope
 
     from secp_worker.orchestration import run_deploy
 
     with session_scope() as session:
-        run = run_deploy(session, uuid.UUID(arg.exercise_id), dispatch_mode="temporal")
+        run = run_deploy(
+            session,
+            uuid.UUID(arg["exercise_id"]),
+            dispatch_mode="temporal",
+            workflow_run_id=_opt_uuid(arg.get("workflow_run_id")),
+        )
         return run.correlation_id
 
 
 @activity.defn
-async def reset_activity(arg: ResetInput) -> str:
+async def reset_activity(arg: dict) -> str:
     from secp_api.db import session_scope
 
     from secp_worker.orchestration import run_reset
@@ -70,52 +67,99 @@ async def reset_activity(arg: ResetInput) -> str:
     with session_scope() as session:
         run = run_reset(
             session,
-            uuid.UUID(arg.exercise_id),
-            uuid.UUID(arg.instance_id),
+            uuid.UUID(arg["exercise_id"]),
+            uuid.UUID(arg["instance_id"]),
             dispatch_mode="temporal",
+            workflow_run_id=_opt_uuid(arg.get("workflow_run_id")),
         )
         return run.correlation_id
 
 
 @activity.defn
-async def destroy_activity(arg: DestroyInput) -> str:
+async def destroy_activity(arg: dict) -> str:
     from secp_api.db import session_scope
 
     from secp_worker.orchestration import run_destroy
 
     with session_scope() as session:
-        run = run_destroy(session, uuid.UUID(arg.exercise_id), dispatch_mode="temporal")
+        run = run_destroy(
+            session,
+            uuid.UUID(arg["exercise_id"]),
+            dispatch_mode="temporal",
+            workflow_run_id=_opt_uuid(arg.get("workflow_run_id")),
+        )
         return run.correlation_id
+
+
+@activity.defn
+async def discover_activity(arg: dict) -> str:
+    from secp_api.db import session_scope
+    from secp_api.enums import WorkflowStatus
+    from secp_api.models import ProviderInventorySnapshot, WorkflowRun
+
+    from secp_worker.discovery import build_provider_plugin, run_discovery
+    from secp_worker.secrets import EnvSecretResolver
+
+    snapshot_id = uuid.UUID(arg["snapshot_id"])
+    run_id = _opt_uuid(arg.get("workflow_run_id"))
+    with session_scope() as session:
+        snap = session.get(ProviderInventorySnapshot, snapshot_id)
+        if snap is None:
+            raise RuntimeError("snapshot not found")
+        if run_id is not None:
+            run = session.get(WorkflowRun, run_id)
+            if run is not None:
+                run.status = WorkflowStatus.running
+        # Real secret resolution happens here, in the worker, just-in-time.
+        plugin = build_provider_plugin(snap.plugin_name)
+        run_discovery(session, snapshot_id, plugin=plugin, resolver=EnvSecretResolver())
+        if run_id is not None:
+            run = session.get(WorkflowRun, run_id)
+            if run is not None:
+                from datetime import datetime
+
+                run.status = WorkflowStatus.completed
+                run.finished_at = datetime.now(UTC)
+        return str(snapshot_id)
+
+
+def _activity_timeout():
+    from datetime import timedelta
+
+    return timedelta(minutes=10)
 
 
 @workflow.defn
 class DeployWorkflow:
     @workflow.run
-    async def run(self, arg: DeployInput) -> str:  # pragma: no cover - needs Temporal
-        from datetime import timedelta
-
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
-            deploy_activity, arg, start_to_close_timeout=timedelta(minutes=10)
+            deploy_activity, arg, start_to_close_timeout=_activity_timeout()
         )
 
 
 @workflow.defn
 class ResetWorkflow:
     @workflow.run
-    async def run(self, arg: ResetInput) -> str:  # pragma: no cover - needs Temporal
-        from datetime import timedelta
-
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
-            reset_activity, arg, start_to_close_timeout=timedelta(minutes=10)
+            reset_activity, arg, start_to_close_timeout=_activity_timeout()
         )
 
 
 @workflow.defn
 class DestroyWorkflow:
     @workflow.run
-    async def run(self, arg: DestroyInput) -> str:  # pragma: no cover - needs Temporal
-        from datetime import timedelta
-
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
-            destroy_activity, arg, start_to_close_timeout=timedelta(minutes=10)
+            destroy_activity, arg, start_to_close_timeout=_activity_timeout()
+        )
+
+
+@workflow.defn
+class DiscoverWorkflow:
+    @workflow.run
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        return await workflow.execute_activity(
+            discover_activity, arg, start_to_close_timeout=_activity_timeout()
         )

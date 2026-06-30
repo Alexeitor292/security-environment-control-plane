@@ -29,13 +29,39 @@ class PlanStatus(str, Enum):
     applied = "applied"
 
 
+class TargetStatus(str, Enum):
+    """Lifecycle status of an ExecutionTarget (ADR-006)."""
+
+    active = "active"
+    disabled = "disabled"
+    discovery_failed = "discovery_failed"
+
+
+class ReservationStatus(str, Enum):
+    """Status of a network address-space reservation (ADR-009)."""
+
+    reserved = "reserved"
+    released = "released"
+
+
+class SnapshotStatus(str, Enum):
+    """Status of a provider inventory snapshot (ADR-008)."""
+
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
 class WorkflowKind(str, Enum):
     deploy = "deploy"
     reset = "reset"
     destroy = "destroy"
+    discover = "discover"  # provider inventory discovery (read-only)
 
 
 class WorkflowStatus(str, Enum):
+    queued = "queued"  # created by the API, awaiting worker execution (ADR-010)
     running = "running"
     completed = "completed"
     failed = "failed"
@@ -53,6 +79,10 @@ class Permission(str, Enum):
     exercise_reset = "exercise:reset"
     exercise_destroy = "exercise:destroy"
     audit_read = "audit:read"
+    # SECP-002A — provider targets and read-only discovery.
+    target_manage = "target:manage"
+    inventory_discover = "inventory:discover"
+    inventory_read = "inventory:read"
 
 
 class AuditAction(str, Enum):
@@ -79,3 +109,17 @@ class AuditAction(str, Enum):
     destroy_completed = "destroy.completed"
     lifecycle_transition = "lifecycle.transition"
     authorization_denied = "authorization.denied"
+    # SECP-002A — execution targets, discovery, reservations, secret resolution.
+    target_created = "target.created"
+    target_disabled = "target.disabled"
+    discovery_requested = "discovery.requested"
+    discovery_started = "discovery.started"
+    discovery_completed = "discovery.completed"
+    discovery_failed = "discovery.failed"
+    secret_resolution_failed = "secret.resolution_failed"
+    provider_operation_refused = "provider.operation_refused"
+    reservation_created = "reservation.created"
+    reservation_released = "reservation.released"
+    # SECP-002A plan target-pinning.
+    plan_target_bound = "plan.target_bound"
+    target_deploy_refused = "deploy.target_refused"

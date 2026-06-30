@@ -30,7 +30,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from secp_api.enums import LifecycleState, PlanStatus, WorkflowKind, WorkflowStatus
+from secp_api.enums import (
+    LifecycleState,
+    PlanStatus,
+    ReservationStatus,
+    SnapshotStatus,
+    TargetStatus,
+    WorkflowKind,
+    WorkflowStatus,
+)
 from secp_api.types import EnumType
 
 
@@ -182,6 +190,12 @@ class Exercise(Base, TimestampMixin):
         EnumType(LifecycleState), default=LifecycleState.draft, nullable=False
     )
     team_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # Optional approved destination (ADR-006). None => the safe inline Simulator
+    # path (unchanged behavior). SECP-002A does not allow deploying to a real
+    # (e.g. Proxmox) target; that is deferred to SECP-002B.
+    execution_target_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=True, index=True
+    )
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     instances: Mapped[list[EnvironmentInstance]] = relationship(
@@ -212,13 +226,13 @@ class EnvironmentInstance(Base, TimestampMixin):
     provider: Mapped[str] = mapped_column(String(60), default="simulator")
 
     exercise: Mapped[Exercise] = relationship(back_populates="instances")
-    networks: Mapped[list[SimulatedNetwork]] = relationship(
+    networks: Mapped[list[EnvironmentNetwork]] = relationship(
         back_populates="instance", cascade="all, delete-orphan"
     )
-    nodes: Mapped[list[SimulatedNode]] = relationship(
+    nodes: Mapped[list[EnvironmentNode]] = relationship(
         back_populates="instance", cascade="all, delete-orphan"
     )
-    edges: Mapped[list[SimulatedTopologyEdge]] = relationship(
+    edges: Mapped[list[EnvironmentTopologyEdge]] = relationship(
         back_populates="instance", cascade="all, delete-orphan"
     )
 
@@ -240,6 +254,12 @@ class DeploymentPlan(Base, TimestampMixin):
         Uuid, ForeignKey("environment_version.id"), nullable=False
     )
     version_content_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Pin the execution target + its config hash when one is selected (ADR-006), so
+    # approval covers the exact destination. Null for the Simulator path.
+    execution_target_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=True
+    )
+    target_config_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status: Mapped[PlanStatus] = mapped_column(
         EnumType(PlanStatus), default=PlanStatus.generated, nullable=False
     )
@@ -259,8 +279,15 @@ class WorkflowRun(Base, TimestampMixin):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("organization.id"), nullable=False, index=True
     )
-    exercise_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("exercise.id"), nullable=False, index=True
+    # Nullable: discovery workflows are target-scoped, not exercise-scoped.
+    exercise_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("exercise.id"), nullable=True, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=True, index=True
+    )
+    snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("provider_inventory_snapshot.id"), nullable=True, index=True
     )
     kind: Mapped[WorkflowKind] = mapped_column(EnumType(WorkflowKind), nullable=False)
     status: Mapped[WorkflowStatus] = mapped_column(
@@ -268,9 +295,49 @@ class WorkflowRun(Base, TimestampMixin):
     )
     dispatch_mode: Mapped[str] = mapped_column(String(20), default="inline")
     correlation_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Durable workflow identifier (Temporal workflow id) when dispatched durably.
+    workflow_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     target_instance_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    snapshot: Mapped[ProviderInventorySnapshot | None] = relationship(
+        back_populates="workflow_runs"
+    )
+    outbox: Mapped[WorkflowDispatchOutbox | None] = relationship(
+        back_populates="workflow_run", cascade="all, delete-orphan"
+    )
+
+
+class WorkflowDispatchOutbox(Base, TimestampMixin):
+    """Durable post-commit workflow submission request (ADR-010 correction)."""
+
+    __tablename__ = "workflow_dispatch_outbox"
+    __table_args__ = (
+        UniqueConstraint("workflow_run_id"),
+        UniqueConstraint("workflow_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    workflow_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflow_run.id"), nullable=False, index=True
+    )
+    workflow: Mapped[str] = mapped_column(String(120), nullable=False)
+    workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    task_queue: Mapped[str] = mapped_column(String(255), nullable=False)
+    args: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    workflow_run: Mapped[WorkflowRun] = relationship(back_populates="outbox")
 
 
 class Plugin(Base, TimestampMixin):
@@ -321,11 +388,15 @@ class AuditEvent(Base, TimestampMixin):
     data: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
-# --- Simulated inventory / topology projection -------------------------------
+# --- Generic observed inventory / topology projection (ADR-008) --------------
+# Provider-neutral: every provider (the Simulator today; real providers later)
+# populates the SAME tables. No provider-specific columns (Charter Invariant 9).
+# Provenance columns (`provider`, `source`, `simulated`, `observed_at`,
+# `provider_resource_id`, `provider_resource_type`) describe where a row came from.
 
 
-class SimulatedNetwork(Base, TimestampMixin):
-    __tablename__ = "simulated_network"
+class EnvironmentNetwork(Base, TimestampMixin):
+    __tablename__ = "environment_network"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     instance_id: Mapped[uuid.UUID] = mapped_column(
@@ -336,14 +407,21 @@ class SimulatedNetwork(Base, TimestampMixin):
     cidr: Mapped[str] = mapped_column(String(64), nullable=False)
     team_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
     isolated: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(40), default="up")
+    # Generic provenance / provider linkage.
     provider: Mapped[str] = mapped_column(String(60), default="simulator")
+    provider_resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_resource_type: Mapped[str] = mapped_column(String(60), default="network")
+    source: Mapped[str] = mapped_column(String(60), default="simulator")
     simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attributes: Mapped[dict] = mapped_column(JSON, default=dict)
 
     instance: Mapped[EnvironmentInstance] = relationship(back_populates="networks")
 
 
-class SimulatedNode(Base, TimestampMixin):
-    __tablename__ = "simulated_node"
+class EnvironmentNode(Base, TimestampMixin):
+    __tablename__ = "environment_node"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     instance_id: Mapped[uuid.UUID] = mapped_column(
@@ -357,15 +435,20 @@ class SimulatedNode(Base, TimestampMixin):
     network_ref: Mapped[str] = mapped_column(String(120), nullable=False)
     ip_address: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="up")
+    # Generic provenance / provider linkage.
     provider: Mapped[str] = mapped_column(String(60), default="simulator")
+    provider_resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_resource_type: Mapped[str] = mapped_column(String(60), default="node")
+    source: Mapped[str] = mapped_column(String(60), default="simulator")
     simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attributes: Mapped[dict] = mapped_column(JSON, default=dict)
 
     instance: Mapped[EnvironmentInstance] = relationship(back_populates="nodes")
 
 
-class SimulatedTopologyEdge(Base, TimestampMixin):
-    __tablename__ = "simulated_topology_edge"
+class EnvironmentTopologyEdge(Base, TimestampMixin):
+    __tablename__ = "environment_topology_edge"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     instance_id: Mapped[uuid.UUID] = mapped_column(
@@ -374,5 +457,149 @@ class SimulatedTopologyEdge(Base, TimestampMixin):
     source_ref: Mapped[str] = mapped_column(String(120), nullable=False)
     target_ref: Mapped[str] = mapped_column(String(120), nullable=False)
     kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    provider: Mapped[str] = mapped_column(String(60), default="simulator")
+    source: Mapped[str] = mapped_column(String(60), default="simulator")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
 
     instance: Mapped[EnvironmentInstance] = relationship(back_populates="edges")
+
+
+# --- Execution targets and provider discovery (SECP-002A) --------------------
+
+
+class ExecutionTarget(Base, TimestampMixin):
+    """Approved, organization-scoped destination for a deployment (ADR-006).
+
+    Provider-neutral. ``config`` is immutable non-secret JSON; ``secret_ref`` is an
+    opaque pointer (NEVER a secret). ``config``/``config_hash``/``plugin_name`` are
+    immutable after creation — new configuration requires a new target record.
+    """
+
+    __tablename__ = "execution_target"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    plugin_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    config: Mapped[dict] = mapped_column(JSON, nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    secret_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    status: Mapped[TargetStatus] = mapped_column(
+        EnumType(TargetStatus), default=TargetStatus.active, nullable=False
+    )
+    scope_policy: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    address_spaces: Mapped[list[AddressSpacePolicy]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
+
+
+class ProviderInventorySnapshot(Base, TimestampMixin):
+    """Immutable-after-completion provider inventory snapshot (ADR-008)."""
+
+    __tablename__ = "provider_inventory_snapshot"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    plugin_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    plugin_version: Mapped[str] = mapped_column(String(40), default="")
+    target_config_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[SnapshotStatus] = mapped_column(
+        EnumType(SnapshotStatus), default=SnapshotStatus.queued, nullable=False
+    )
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Once True the snapshot is immutable (enforced in secp_api.immutability).
+    finalized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    resources: Mapped[list[ProviderInventoryResource]] = relationship(
+        back_populates="snapshot", cascade="all, delete-orphan"
+    )
+    workflow_runs: Mapped[list[WorkflowRun]] = relationship(back_populates="snapshot")
+
+    @property
+    def workflow_run_id(self) -> uuid.UUID | None:
+        return self.workflow_runs[0].id if self.workflow_runs else None
+
+
+class ProviderInventoryResource(Base, TimestampMixin):
+    """A normalized, provider-neutral inventory resource (no secrets, no Proxmox
+    columns)."""
+
+    __tablename__ = "provider_inventory_resource"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("provider_inventory_snapshot.id"), nullable=False, index=True
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    resource_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    provider_external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), default="")
+    parent_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="unknown")
+    attributes: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    snapshot: Mapped[ProviderInventorySnapshot] = relationship(back_populates="resources")
+
+
+class AddressSpacePolicy(Base, TimestampMixin):
+    """An approved address space (CIDR block + per-team subnet prefix) for a
+    target (ADR-009)."""
+
+    __tablename__ = "address_space_policy"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    cidr_block: Mapped[str] = mapped_column(String(64), nullable=False)
+    subnet_prefix: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    target: Mapped[ExecutionTarget] = relationship(back_populates="address_spaces")
+
+
+class NetworkReservation(Base, TimestampMixin):
+    """A reserved CIDR for a team within an exercise on a target (ADR-009).
+
+    Unique on ``(execution_target_id, cidr)`` so a reserved block is never
+    duplicated; releasing flips status and the block can be re-reserved by reusing
+    the row.
+    """
+
+    __tablename__ = "network_reservation"
+    __table_args__ = (UniqueConstraint("execution_target_id", "cidr"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    exercise_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("exercise.id"), nullable=True, index=True
+    )
+    team_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    cidr: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[ReservationStatus] = mapped_column(
+        EnumType(ReservationStatus), default=ReservationStatus.reserved, nullable=False
+    )

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from secp_api.models import (
     EnvironmentInstance,
-    SimulatedNetwork,
-    SimulatedNode,
-    SimulatedTopologyEdge,
+    EnvironmentNetwork,
+    EnvironmentNode,
+    EnvironmentTopologyEdge,
 )
 
 
@@ -33,7 +33,9 @@ def test_team_networks_have_disjoint_cidrs(session, principal, running_exercise)
     for inst in instances:
         cidrs = {
             n.cidr
-            for n in session.query(SimulatedNetwork).filter(SimulatedNetwork.instance_id == inst.id)
+            for n in session.query(EnvironmentNetwork).filter(
+                EnvironmentNetwork.instance_id == inst.id
+            )
         }
         cidrs_per_team.append(cidrs)
     # Strict isolation => no shared subnet between the two teams.
@@ -48,7 +50,9 @@ def test_team_node_ips_are_disjoint(session, principal, running_exercise):
         ips.append(
             {
                 n.ip_address
-                for n in session.query(SimulatedNode).filter(SimulatedNode.instance_id == inst.id)
+                for n in session.query(EnvironmentNode).filter(
+                    EnvironmentNode.instance_id == inst.id
+                )
             }
         )
     assert ips[0].isdisjoint(ips[1])
@@ -62,14 +66,17 @@ def test_no_cross_instance_topology_edges(session, principal, running_exercise):
     # because each instance's topology is built and stored independently.
     for inst in instances:
         node_refs = {
-            n.ref for n in session.query(SimulatedNode).filter(SimulatedNode.instance_id == inst.id)
+            n.ref
+            for n in session.query(EnvironmentNode).filter(EnvironmentNode.instance_id == inst.id)
         }
         net_refs = {
             n.ref
-            for n in session.query(SimulatedNetwork).filter(SimulatedNetwork.instance_id == inst.id)
+            for n in session.query(EnvironmentNetwork).filter(
+                EnvironmentNetwork.instance_id == inst.id
+            )
         }
-        edges = session.query(SimulatedTopologyEdge).filter(
-            SimulatedTopologyEdge.instance_id == inst.id
+        edges = session.query(EnvironmentTopologyEdge).filter(
+            EnvironmentTopologyEdge.instance_id == inst.id
         )
         for edge in edges:
             assert edge.source_ref in (node_refs | net_refs)

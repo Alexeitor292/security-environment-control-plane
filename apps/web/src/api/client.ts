@@ -3,10 +3,15 @@
 import type {
   AuditEvent,
   DeploymentPlan,
+  ExecutionTarget,
   Exercise,
   Instance,
+  InventoryResource,
+  InventorySnapshot,
   PluginInfo,
   Principal,
+  ProviderCapabilities,
+  TargetCreate,
   TeamTopology,
   Template,
   Version,
@@ -118,4 +123,20 @@ export const api = {
       undefined,
       exerciseId ? { exercise_id: exerciseId } : undefined,
     ),
+
+  // --- Provider Targets (SECP-002A) ---
+  providerCapabilities: () =>
+    request<ProviderCapabilities>("GET", "/api/v1/providers/capabilities"),
+  listTargets: () => request<ExecutionTarget[]>("GET", "/api/v1/targets"),
+  registerTarget: (body: TargetCreate) =>
+    request<ExecutionTarget>("POST", "/api/v1/targets", body),
+  getTarget: (id: string) => request<ExecutionTarget>("GET", `/api/v1/targets/${id}`),
+  disableTarget: (id: string) =>
+    request<ExecutionTarget>("POST", `/api/v1/targets/${id}/disable`),
+  listSnapshots: (targetId: string) =>
+    request<InventorySnapshot[]>("GET", `/api/v1/targets/${targetId}/snapshots`),
+  requestDiscovery: (targetId: string) =>
+    request<InventorySnapshot>("POST", `/api/v1/targets/${targetId}/discover`),
+  snapshotResources: (snapshotId: string) =>
+    request<InventoryResource[]>("GET", `/api/v1/snapshots/${snapshotId}/resources`),
 };
