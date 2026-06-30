@@ -1,11 +1,20 @@
 """Authentication principal and organization-scoped RBAC.
 
-SECP-001 uses an OIDC-compatible dev IdP (Keycloak-compatible) for real tokens,
-plus a clearly-gated **development fallback principal** so the stack is runnable
-without a fully configured realm. The fallback is refused in production
-(see :class:`Settings.dev_auth_enabled`). Authorization is organization-scoped:
-every access is checked against the principal's ``organization_id`` and required
-permissions (Charter §13; assignment Phase 2 rule 7).
+SECP-001 authentication is intentionally minimal: a clearly-gated **development
+fallback principal** keeps the local stack runnable without a configured realm,
+and OIDC bearer-token validation is a documented placeholder for SECP-002+.
+
+The fallback is refused in production (see :class:`Settings.dev_auth_enabled`).
+Authorization is organization-scoped: every access is checked against the
+principal's ``organization_id`` and required permissions (Charter §13; Phase 2 rule 7).
+
+SECP-001 placeholder — bearer-token authentication
+----------------------------------------------------
+Keycloak is wired and reachable in the dev stack (the OIDC discovery endpoint
+returns 200), but the API does **not** validate bearer tokens in this milestone.
+Any token sent is explicitly rejected with a clear error (see
+:func:`secp_api.deps.current_principal`).  Real OIDC validation will be
+implemented in SECP-002+ when the full token-verification seam is wired.
 """
 
 from __future__ import annotations

@@ -28,14 +28,38 @@ def current_principal(
 ) -> Principal:
     """Resolve the request principal.
 
-    Production requires a verified OIDC bearer token. For local development the
-    dev fallback principal is used when no usable token is presented AND the dev
-    fallback is enabled (never in production).
+    SECP-001 authentication behaviour
+    -----------------------------------
+    * **Dev fallback** (``SECP_AUTH_DEV_MODE=true``, ``APP_ENV != production``):
+      the bootstrapped development admin principal is returned unconditionally.
+      This is the only working authentication path in SECP-001.
 
-    NOTE: full OIDC token verification against the dev IdP is a documented
-    SECP-001 placeholder; the seam is here and the dev fallback keeps the stack
-    runnable. See the design doc §11.
+    * **Bearer token presented**: OIDC bearer-token validation is **not
+      implemented** in SECP-001.  Any ``Authorization: Bearer …`` header is
+      explicitly rejected with an ``AuthenticationError`` explaining that OIDC
+      token verification is a SECP-002+ milestone item.  We do not silently
+      ignore the token or fall back to the dev principal, so callers are never
+      misled into thinking their token was verified.
+
+    * **No token + dev fallback disabled**: ``AuthenticationError`` is raised
+      explaining that no usable authentication method is available.
+
+    NOTE: The production startup guard (``Settings`` validator) ensures
+    ``dev_auth_enabled`` is always ``False`` in production, so the dev fallback
+    can never activate there regardless of this function's logic.
     """
     if settings.dev_auth_enabled:
         return dev_principal(session)
-    raise AuthenticationError("OIDC token verification is required; dev auth fallback is disabled")
+
+    if authorization is not None:
+        raise AuthenticationError(
+            "OIDC bearer-token verification is not implemented in SECP-001; "
+            "tokens cannot be validated in this milestone. "
+            "Bearer authentication will be available in SECP-002+."
+        )
+
+    raise AuthenticationError(
+        "No authentication method is available: "
+        "dev auth fallback is disabled and OIDC token verification is not "
+        "implemented in SECP-001."
+    )

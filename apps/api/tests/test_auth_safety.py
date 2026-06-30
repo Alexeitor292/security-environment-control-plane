@@ -50,6 +50,44 @@ def test_current_principal_refused_when_dev_auth_disabled(session, principal):
         current_principal(session=session, settings=settings, authorization=None)
 
 
+def test_bearer_token_explicitly_rejected_with_oidc_not_implemented_error(session):
+    """Any bearer token is explicitly refused with a clear SECP-001 placeholder message.
+
+    OIDC token verification is not implemented in SECP-001; a caller sending a
+    token must receive an unambiguous error — not a silent fallback and not a
+    generic authentication failure that might imply the token was inspected.
+    """
+    from secp_api.deps import current_principal
+
+    settings = Settings(app_env="dev", auth_dev_mode=False)
+    with pytest.raises(AuthenticationError) as exc_info:
+        current_principal(
+            session=session,
+            settings=settings,
+            authorization="Bearer eyJhbGciOiJSUzI1NiJ9.fake.token",
+        )
+    message = str(exc_info.value)
+    assert "not implemented" in message.lower()
+    assert "SECP-001" in message
+
+
+def test_bearer_token_rejected_even_when_dev_auth_disabled_no_production_fallback(session):
+    """Production-like settings (dev_auth disabled) also reject bearer tokens."""
+    from secp_api.deps import current_principal
+
+    # Use dev env but with dev_auth off (matches the code path; production Settings
+    # cannot be constructed with auth_dev_mode=True anyway).
+    settings = Settings(app_env="dev", auth_dev_mode=False)
+    with pytest.raises(AuthenticationError) as exc_info:
+        current_principal(
+            session=session,
+            settings=settings,
+            authorization="Bearer some.opaque.token",
+        )
+    # Must name SECP-001 as the scope of the limitation.
+    assert "SECP-001" in str(exc_info.value)
+
+
 def test_no_credential_defaults_in_settings_source():
     # No Settings field is a password/secret with a non-empty default, and the
     # default database URL embeds no credentials.
