@@ -9,7 +9,8 @@ from __future__ import annotations
 import pytest
 from secp_api.enums import AuditAction, SnapshotStatus
 from secp_api.errors import ImmutableResourceError
-from secp_api.models import AuditEvent, ProviderInventoryResource
+from secp_api.models import AuditEvent, ProviderInventoryResource, WorkflowRun
+from secp_api.schemas_provider import ResourceOut, SnapshotOut
 from secp_plugin_proxmox import ProxmoxPlugin
 from secp_worker.discovery import run_discovery
 from secp_worker.secrets import FakeSecretResolver
@@ -44,7 +45,7 @@ def _target_and_snapshot(session, principal, *, secret_ref=SECRET_REF):
         principal,
         display_name="Lab (placeholder)",
         plugin_name="proxmox",
-        config={"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": False},
+        config={"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True},
         secret_ref=secret_ref,
         scope_policy={"resource_types": ["node", "vm", "storage"]},
         address_spaces=[],
@@ -113,4 +114,8 @@ def test_discovery_never_persists_secret(session, principal):
     blob += str(snap.summary) + str(snap.error)
     for r in session.query(ProviderInventoryResource).all():
         blob += str(r.attributes)
+        blob += ResourceOut.model_validate(r).model_dump_json()
+    blob += SnapshotOut.model_validate(snap).model_dump_json()
+    for run in session.query(WorkflowRun).all():
+        blob += str(run.detail) + str(run.workflow_id)
     assert "top-secret-token" not in blob
