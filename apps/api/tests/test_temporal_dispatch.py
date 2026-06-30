@@ -183,6 +183,105 @@ def test_rollback_creates_no_temporal_submission(session, principal, valid_defin
     assert sub.requests == []
 
 
+def test_temporal_dispatch_refuses_target_bound_plan_before_queuing(
+    session, principal, valid_definition
+):
+    """SECP-002A regression: TemporalDispatcher must refuse a plan pinned to a real
+    execution target before creating any WorkflowRun, outbox row, or Temporal
+    workflow request — and before any lifecycle-state mutation.
+
+    Asserts:
+    - zero new WorkflowRun rows
+    - zero workflow_dispatch_outbox rows
+    - zero fake-submitter calls (no Temporal publisher work)
+    - no provider calls / secret resolution (no inline orchestration runs)
+    - no lifecycle-state change on the exercise
+    - one execution_refused audit event recorded in a separate transaction
+    """
+
+    from secp_api.enums import AuditAction
+    from secp_api.models import AuditEvent, Exercise, WorkflowDispatchOutbox, WorkflowRun
+    from secp_api.safety import InlineExecutionForbidden
+    from secp_api.services import exercises, planning
+    from secp_api.services.catalog import create_template, create_version
+    from secp_api.services.targets import register_target
+
+    template = create_template(session, principal, name="T-pin-temporal", slug="t-pin-temporal")
+    version = create_version(
+        session, principal, template_id=template.id, definition=valid_definition
+    )
+    target = register_target(
+        session,
+        principal,
+        display_name="Lab Proxmox",
+        plugin_name="proxmox",
+        config={"base_url": "https://pve.example.test:8006/api2/json", "verify_tls": True},
+        secret_ref="env:SECP_PROVIDER_SECRET__LAB",
+    )
+    ex = exercises.create_exercise(
+        session,
+        principal,
+        template_id=template.id,
+        version_id=version.id,
+        name="pin-temporal",
+        execution_target_id=target.id,
+    )
+    exercises.validate_exercise(session, principal, ex.id)
+    plan = planning.generate_plan(session, principal, ex.id)
+    planning.submit_plan(session, principal, plan.id)
+    planning.approve_plan(session, principal, plan.id, "test approval")
+    session.commit()
+
+    run_count_before = session.query(WorkflowRun).count()
+    outbox_count_before = session.query(WorkflowDispatchOutbox).count()
+    state_before = ex.lifecycle_state
+
+    sub = FakeSubmitter()
+    dispatcher = TemporalDispatcher(_settings(), submitter=sub)
+
+    with pytest.raises(InlineExecutionForbidden) as exc_info:
+        exercises.start_exercise(session, principal, ex.id, dispatcher=dispatcher)
+
+    assert "non-simulator" in str(exc_info.value) or "SECP-002A" in str(exc_info.value)
+
+    # Zero new WorkflowRun rows.
+    assert session.query(WorkflowRun).count() == run_count_before, (
+        "no WorkflowRun must be created during a Temporal-path refusal"
+    )
+    # Zero new outbox rows.
+    assert session.query(WorkflowDispatchOutbox).count() == outbox_count_before, (
+        "no outbox row must be created during a Temporal-path refusal"
+    )
+    # Zero fake-submitter calls.
+    assert sub.requests == [], "no Temporal workflow request must be submitted"
+
+    # Exercise lifecycle state must be unchanged (still 'approved', not deploying/running).
+    session.expire(ex)
+    refreshed = session.get(Exercise, ex.id)
+    assert refreshed.lifecycle_state == state_before, (
+        f"exercise state must not change; expected {state_before.value!r}, "
+        f"got {refreshed.lifecycle_state.value!r}"
+    )
+
+    # One execution_refused audit event (written in a separate transaction by start_exercise).
+    from secp_api.db import session_scope
+
+    with session_scope() as audit_session:
+        refusals = (
+            audit_session.query(AuditEvent)
+            .filter(
+                AuditEvent.action == AuditAction.execution_refused.value,
+                AuditEvent.outcome == "denied",
+            )
+            .all()
+        )
+        reasons = [r.data.get("reason", "") for r in refusals]
+    assert len(refusals) >= 1, "a refusal audit event must exist after the Temporal-path attempt"
+    assert any("non-simulator" in r for r in reasons), (
+        f"refusal audit must name the non-simulator target; got reasons: {reasons}"
+    )
+
+
 def test_discovery_outbox_is_not_visible_before_snapshot_and_run_commit(session, principal):
     from secp_api.db import get_sessionmaker
     from secp_api.services import inventory, targets

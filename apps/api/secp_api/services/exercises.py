@@ -131,6 +131,24 @@ def start_exercise(
     the execution boundary permits it."""
     actor.require(Permission.exercise_apply)
     exercise = get_exercise(session, actor, exercise_id)
+
+    # SECP-002A preflight: refuse target-pinned plans before any dispatcher
+    # creates WorkflowRun rows, outbox entries, or any state mutation.
+    # This fires before both the inline and Temporal dispatch paths.
+    try:
+        from secp_api.services.planning import assert_deployment_eligible
+
+        assert_deployment_eligible(session, exercise.id)
+    except InlineExecutionForbidden as exc:
+        _audit_refusal(
+            actor,
+            exercise.id,
+            exercise.organization_id,
+            exc.message,
+            action=AuditAction.execution_refused,
+        )
+        raise
+
     dispatcher = dispatcher or get_dispatcher()
     try:
         return dispatcher.dispatch_deploy(session, exercise.id)

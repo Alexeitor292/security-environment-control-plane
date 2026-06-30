@@ -293,3 +293,80 @@ def test_proxmox_deploy_refusal_creates_audit_event(
     assert any("non-simulator" in r for r in reasons), (
         f"refusal audit must name the non-simulator target; got reasons: {reasons}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests 10-12: requiredPlugins list-order must not determine execution provider
+# ---------------------------------------------------------------------------
+
+
+def test_simulator_plan_uses_execution_provider_simulator(session, principal, template_version):
+    """A simulator-only exercise plan must record execution_provider='simulator'."""
+    template, version = template_version
+    ex = exercises.create_exercise(
+        session, principal, template_id=template.id, version_id=version.id, name="ep-sim"
+    )
+    exercises.validate_exercise(session, principal, ex.id)
+    plan = planning.generate_plan(session, principal, ex.id)
+    session.flush()
+
+    assert plan.summary["execution_provider"] == "simulator"
+    assert "topology_preview_provider" not in plan.summary
+
+
+def test_target_bound_plan_summary_records_execution_and_preview_providers(
+    session, principal, proxmox_target, template_version
+):
+    """A target-bound plan must record execution_provider from the target and
+    topology_preview_provider='simulator' (the only topology preview in SECP-002A)."""
+    template, version = template_version
+    _, plan = _approved_target_exercise(
+        session, principal, proxmox_target, template, version, name="ep-tgt"
+    )
+
+    assert plan.summary["execution_provider"] == "proxmox"
+    assert plan.summary["topology_preview_provider"] == "simulator"
+    # The topology preview must have produced real plan data (non-empty).
+    assert plan.summary["total_nodes"] > 0
+
+
+def test_requiredplugins_order_does_not_change_target_bound_execution_provider(
+    session, principal, valid_definition, proxmox_target
+):
+    """Reordering requiredPlugins must not change a target-bound plan's execution_provider.
+    The provider is taken from the pinned target, not from the plugin list order."""
+    import copy
+
+    # Build a definition variant with a non-simulator plugin listed first.
+    # This exercises the old (buggy) code path that would return the first
+    # registered match from requiredPlugins.
+    definition_variant = copy.deepcopy(valid_definition)
+    # Put a fictional registered name first — in the old code, if "simulator"
+    # were registered as "alt-simulator", this would return a different name.
+    # Here we verify that the target's plugin_name always wins regardless.
+    definition_variant["spec"]["requiredPlugins"] = ["simulator", "proxmox"]
+
+    template = create_template(
+        session, principal, name="EP-order", slug=f"ep-order-{proxmox_target.id.hex[:8]}"
+    )
+    version = create_version(
+        session, principal, template_id=template.id, definition=definition_variant
+    )
+    ex = exercises.create_exercise(
+        session,
+        principal,
+        template_id=template.id,
+        version_id=version.id,
+        name="ep-order-ex",
+        execution_target_id=proxmox_target.id,
+    )
+    exercises.validate_exercise(session, principal, ex.id)
+    plan = planning.generate_plan(session, principal, ex.id)
+    session.flush()
+
+    # Despite ["simulator", "proxmox"] order, execution_provider comes from the target.
+    assert plan.summary["execution_provider"] == "proxmox", (
+        "execution_provider must be the target's plugin_name, "
+        f"not the first requiredPlugins entry; got {plan.summary['execution_provider']!r}"
+    )
+    assert plan.summary["topology_preview_provider"] == "simulator"

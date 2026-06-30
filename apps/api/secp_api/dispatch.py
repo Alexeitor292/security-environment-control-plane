@@ -204,6 +204,11 @@ class TemporalDispatcher:
         return exercise.organization_id
 
     def dispatch_deploy(self, session: Session, exercise_id: uuid.UUID) -> WorkflowRun:
+        # Defense in depth: refuse target-pinned plans before any WorkflowRun,
+        # outbox row, or Temporal interaction is created.
+        from secp_api.services.planning import assert_deployment_eligible
+
+        assert_deployment_eligible(session, exercise_id)
         run = self._queue_run(
             session,
             kind=WorkflowKind.deploy,

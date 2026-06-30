@@ -60,21 +60,29 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         if target.status != TargetStatus.active:
             raise DomainError(
                 f"execution target '{target.display_name}' is not active "
-                "(status='{target.status.value}'); only active targets may be used "
+                f"(status='{target.status.value}'); only active targets may be used "
                 "for new deployment plans"
             )
     # -------------------------------------------------------------------------
 
     definition = validate_definition(version.spec)
-    plugin_name = next(
-        (p for p in definition.spec.requiredPlugins if get_registry().has(p)),
-        "simulator",
-    )
-    plugin = get_registry().get(plugin_name)
+    # --- provider selection (ADR-006) ----------------------------------------
+    # requiredPlugins is a *capability declaration*, not an executor list.
+    # For SECP-002A the topology preview is always produced by the Simulator.
+    # A target-bound plan records the intended execution provider in the summary
+    # but does NOT invoke it; provisioning is deferred to SECP-002B.
+    if target is not None:
+        execution_provider = target.plugin_name  # e.g. "proxmox"
+        topology_preview_provider = "simulator"  # only preview available in 002A
+    else:
+        execution_provider = "simulator"
+        topology_preview_provider = "simulator"
+    # -------------------------------------------------------------------------
+    plugin = get_registry().get(topology_preview_provider)
     plugin_plan = plugin.plan(version.spec, _preview_targets(definition))
 
     summary: dict = {
-        "plugin": plugin_name,
+        "execution_provider": execution_provider,
         "teams": definition.spec.teams.count,
         "isolation": definition.spec.teams.isolationPolicy.value,
         "total_networks": plugin_plan.total_networks,
@@ -94,6 +102,7 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
     # Include pinned target info in the human-readable summary so approval
     # clearly covers the exact destination (ADR-006).
     if target is not None:
+        summary["topology_preview_provider"] = topology_preview_provider
         summary["execution_target"] = {
             "id": str(target.id),
             "plugin_name": target.plugin_name,
@@ -116,7 +125,10 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
     )
     session.add(plan)
     session.flush()
-    audit_data: dict = {"content_hash": version.content_hash, "plugin": plugin_name}
+    audit_data: dict = {
+        "content_hash": version.content_hash,
+        "execution_provider": execution_provider,
+    }
     if target is not None:
         audit_data["execution_target_id"] = str(target.id)
         audit_data["target_config_hash"] = target.config_hash
@@ -232,3 +244,40 @@ def reject_plan(
         data={"reason": reason},
     )
     return plan
+
+
+def assert_deployment_eligible(session: Session, exercise_id: uuid.UUID) -> None:
+    """SECP-002A deployment preflight — shared by all dispatch paths.
+
+    Must be called before any WorkflowRun creation, outbox queuing, Temporal
+    workflow request, state mutation, secret resolution, or provider invocation.
+    Refuses when the latest approved (or applied) plan is pinned to a real
+    execution target.
+
+    The normal approval-gate and hash checks remain in the existing downstream
+    guards (_approved_plan in orchestration.py); this function adds the SECP-002A
+    provisioning-boundary enforcement as far upstream as possible.
+    """
+    from secp_api.safety import InlineExecutionForbidden
+
+    plan = (
+        session.execute(
+            select(DeploymentPlan)
+            .where(DeploymentPlan.exercise_id == exercise_id)
+            .order_by(DeploymentPlan.created_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+    # No plan or not yet approved: the normal approval gate handles this.
+    if plan is None or plan.status not in (PlanStatus.approved, PlanStatus.applied):
+        return
+    if plan.execution_target_id is not None:
+        raise InlineExecutionForbidden(
+            f"deployment to a non-simulator execution target "
+            f"(target={plan.execution_target_id}, "
+            f"target_config_hash={plan.target_config_hash}) is not implemented "
+            "in SECP-002A. No WorkflowRun, outbox row, Temporal workflow, "
+            "secret resolution, or state mutation was started. "
+            "Provisioning is deferred to SECP-002B."
+        )
