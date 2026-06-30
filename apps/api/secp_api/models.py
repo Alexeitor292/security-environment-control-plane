@@ -212,13 +212,13 @@ class EnvironmentInstance(Base, TimestampMixin):
     provider: Mapped[str] = mapped_column(String(60), default="simulator")
 
     exercise: Mapped[Exercise] = relationship(back_populates="instances")
-    networks: Mapped[list[SimulatedNetwork]] = relationship(
+    networks: Mapped[list[EnvironmentNetwork]] = relationship(
         back_populates="instance", cascade="all, delete-orphan"
     )
-    nodes: Mapped[list[SimulatedNode]] = relationship(
+    nodes: Mapped[list[EnvironmentNode]] = relationship(
         back_populates="instance", cascade="all, delete-orphan"
     )
-    edges: Mapped[list[SimulatedTopologyEdge]] = relationship(
+    edges: Mapped[list[EnvironmentTopologyEdge]] = relationship(
         back_populates="instance", cascade="all, delete-orphan"
     )
 
@@ -321,11 +321,15 @@ class AuditEvent(Base, TimestampMixin):
     data: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
-# --- Simulated inventory / topology projection -------------------------------
+# --- Generic observed inventory / topology projection (ADR-008) --------------
+# Provider-neutral: every provider (the Simulator today; real providers later)
+# populates the SAME tables. No provider-specific columns (Charter Invariant 9).
+# Provenance columns (`provider`, `source`, `simulated`, `observed_at`,
+# `provider_resource_id`, `provider_resource_type`) describe where a row came from.
 
 
-class SimulatedNetwork(Base, TimestampMixin):
-    __tablename__ = "simulated_network"
+class EnvironmentNetwork(Base, TimestampMixin):
+    __tablename__ = "environment_network"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     instance_id: Mapped[uuid.UUID] = mapped_column(
@@ -336,14 +340,23 @@ class SimulatedNetwork(Base, TimestampMixin):
     cidr: Mapped[str] = mapped_column(String(64), nullable=False)
     team_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
     isolated: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(40), default="up")
+    # Generic provenance / provider linkage.
     provider: Mapped[str] = mapped_column(String(60), default="simulator")
+    provider_resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_resource_type: Mapped[str] = mapped_column(String(60), default="network")
+    source: Mapped[str] = mapped_column(String(60), default="simulator")
     simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attributes: Mapped[dict] = mapped_column(JSON, default=dict)
 
     instance: Mapped[EnvironmentInstance] = relationship(back_populates="networks")
 
 
-class SimulatedNode(Base, TimestampMixin):
-    __tablename__ = "simulated_node"
+class EnvironmentNode(Base, TimestampMixin):
+    __tablename__ = "environment_node"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     instance_id: Mapped[uuid.UUID] = mapped_column(
@@ -357,15 +370,22 @@ class SimulatedNode(Base, TimestampMixin):
     network_ref: Mapped[str] = mapped_column(String(120), nullable=False)
     ip_address: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="up")
+    # Generic provenance / provider linkage.
     provider: Mapped[str] = mapped_column(String(60), default="simulator")
+    provider_resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_resource_type: Mapped[str] = mapped_column(String(60), default="node")
+    source: Mapped[str] = mapped_column(String(60), default="simulator")
     simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     attributes: Mapped[dict] = mapped_column(JSON, default=dict)
 
     instance: Mapped[EnvironmentInstance] = relationship(back_populates="nodes")
 
 
-class SimulatedTopologyEdge(Base, TimestampMixin):
-    __tablename__ = "simulated_topology_edge"
+class EnvironmentTopologyEdge(Base, TimestampMixin):
+    __tablename__ = "environment_topology_edge"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     instance_id: Mapped[uuid.UUID] = mapped_column(
@@ -374,5 +394,8 @@ class SimulatedTopologyEdge(Base, TimestampMixin):
     source_ref: Mapped[str] = mapped_column(String(120), nullable=False)
     target_ref: Mapped[str] = mapped_column(String(120), nullable=False)
     kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    provider: Mapped[str] = mapped_column(String(60), default="simulator")
+    source: Mapped[str] = mapped_column(String(60), default="simulator")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
 
     instance: Mapped[EnvironmentInstance] = relationship(back_populates="edges")

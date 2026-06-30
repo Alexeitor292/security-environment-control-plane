@@ -19,9 +19,9 @@ from secp_api.errors import NotFoundError
 from secp_api.models import (
     AuditEvent,
     EnvironmentInstance,
-    SimulatedNetwork,
-    SimulatedNode,
-    SimulatedTopologyEdge,
+    EnvironmentNetwork,
+    EnvironmentNode,
+    EnvironmentTopologyEdge,
 )
 from secp_api.services.exercises import get_exercise
 
@@ -42,27 +42,27 @@ def instance_topology(session: Session, actor: Principal, instance_id: uuid.UUID
 
     networks = (
         session.execute(
-            select(SimulatedNetwork)
-            .where(SimulatedNetwork.instance_id == instance.id)
-            .order_by(SimulatedNetwork.ref)
+            select(EnvironmentNetwork)
+            .where(EnvironmentNetwork.instance_id == instance.id)
+            .order_by(EnvironmentNetwork.ref)
         )
         .scalars()
         .all()
     )
     nodes = (
         session.execute(
-            select(SimulatedNode)
-            .where(SimulatedNode.instance_id == instance.id)
-            .order_by(SimulatedNode.ref)
+            select(EnvironmentNode)
+            .where(EnvironmentNode.instance_id == instance.id)
+            .order_by(EnvironmentNode.ref)
         )
         .scalars()
         .all()
     )
     edges = (
         session.execute(
-            select(SimulatedTopologyEdge)
-            .where(SimulatedTopologyEdge.instance_id == instance.id)
-            .order_by(SimulatedTopologyEdge.source_ref)
+            select(EnvironmentTopologyEdge)
+            .where(EnvironmentTopologyEdge.instance_id == instance.id)
+            .order_by(EnvironmentTopologyEdge.source_ref)
         )
         .scalars()
         .all()

@@ -25,9 +25,9 @@ EXPECTED_TABLES = {
     "plugin",
     "artifact",
     "audit_event",
-    "simulated_network",
-    "simulated_node",
-    "simulated_topology_edge",
+    "environment_network",
+    "environment_node",
+    "environment_topology_edge",
 }
 
 

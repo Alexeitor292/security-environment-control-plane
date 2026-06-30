@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from secp_api.enums import LifecycleState
-from secp_api.models import EnvironmentInstance, SimulatedNode
+from secp_api.models import EnvironmentInstance, EnvironmentNode
 from secp_worker.resource_port import SqlAlchemyResourcePort
 
 
@@ -62,7 +62,7 @@ def test_reset_does_not_duplicate_nodes(session, principal, running_exercise):
     )
 
     def node_count():
-        return session.query(SimulatedNode).filter(SimulatedNode.instance_id == instance.id).count()
+        return session.query(EnvironmentNode).filter(EnvironmentNode.instance_id == instance.id).count()
 
     original = node_count()
     for _ in range(3):
