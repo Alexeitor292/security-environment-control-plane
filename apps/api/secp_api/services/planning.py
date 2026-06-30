@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
-from secp_api.enums import AuditAction, LifecycleState, Permission, PlanStatus
+from secp_api.enums import AuditAction, LifecycleState, Permission, PlanStatus, TargetStatus
 from secp_api.errors import DomainError, NotFoundError
 from secp_api.lifecycle import transition
 from secp_api.models import DeploymentPlan
@@ -49,6 +49,22 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
     exercise = get_exercise(session, actor, exercise_id)
     version = get_version(session, actor, exercise.environment_version_id)
 
+    # --- execution-target pinning (ADR-006) ----------------------------------
+    # When the exercise is bound to a target, validate it and capture its
+    # immutable config hash so approval covers the exact destination.
+    target = None
+    if exercise.execution_target_id is not None:
+        from secp_api.services.targets import get_target
+
+        target = get_target(session, actor, exercise.execution_target_id)
+        if target.status != TargetStatus.active:
+            raise DomainError(
+                f"execution target '{target.display_name}' is not active "
+                "(status='{target.status.value}'); only active targets may be used "
+                "for new deployment plans"
+            )
+    # -------------------------------------------------------------------------
+
     definition = validate_definition(version.spec)
     plugin_name = next(
         (p for p in definition.spec.requiredPlugins if get_registry().has(p)),
@@ -57,7 +73,7 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
     plugin = get_registry().get(plugin_name)
     plugin_plan = plugin.plan(version.spec, _preview_targets(definition))
 
-    summary = {
+    summary: dict = {
         "plugin": plugin_name,
         "teams": definition.spec.teams.count,
         "isolation": definition.spec.teams.isolationPolicy.value,
@@ -75,6 +91,15 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
             for ip in plugin_plan.instances
         ],
     }
+    # Include pinned target info in the human-readable summary so approval
+    # clearly covers the exact destination (ADR-006).
+    if target is not None:
+        summary["execution_target"] = {
+            "id": str(target.id),
+            "plugin_name": target.plugin_name,
+            "display_name": target.display_name,
+            "config_hash": target.config_hash,
+        }
 
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.planned)
     plan = DeploymentPlan(
@@ -82,6 +107,8 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         exercise_id=exercise.id,
         environment_version_id=version.id,
         version_content_hash=version.content_hash,
+        execution_target_id=target.id if target is not None else None,
+        target_config_hash=target.config_hash if target is not None else None,
         status=PlanStatus.generated,
         plan=plugin_plan.model_dump(mode="json"),
         summary=summary,
@@ -89,6 +116,10 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
     )
     session.add(plan)
     session.flush()
+    audit_data: dict = {"content_hash": version.content_hash, "plugin": plugin_name}
+    if target is not None:
+        audit_data["execution_target_id"] = str(target.id)
+        audit_data["target_config_hash"] = target.config_hash
     audit.record(
         session,
         action=AuditAction.plan_generated,
@@ -96,7 +127,7 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         resource_id=plan.id,
         organization_id=exercise.organization_id,
         actor=str(actor.user_id),
-        data={"content_hash": version.content_hash, "plugin": plugin_name},
+        data=audit_data,
     )
     return plan
 

@@ -120,3 +120,6 @@ class AuditAction(str, Enum):
     provider_operation_refused = "provider.operation_refused"
     reservation_created = "reservation.created"
     reservation_released = "reservation.released"
+    # SECP-002A plan target-pinning.
+    plan_target_bound = "plan.target_bound"
+    target_deploy_refused = "deploy.target_refused"

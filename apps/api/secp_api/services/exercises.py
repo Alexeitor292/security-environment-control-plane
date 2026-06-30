@@ -31,11 +31,18 @@ def create_exercise(
     template_id: uuid.UUID,
     version_id: uuid.UUID,
     name: str,
+    execution_target_id: uuid.UUID | None = None,
 ) -> Exercise:
     actor.require(Permission.exercise_operate)
     version = get_version(session, actor, version_id)
     if version.template_id != template_id:
         raise NotFoundError("version does not belong to template")
+
+    # When a target is supplied validate org-scoped access before binding.
+    if execution_target_id is not None:
+        from secp_api.services.targets import get_target
+
+        get_target(session, actor, execution_target_id)  # org-scoping enforced inside
 
     # team_count comes from the immutable definition (single source of truth).
     definition = validate_definition(version.spec)
@@ -49,6 +56,7 @@ def create_exercise(
         name=name,
         lifecycle_state=LifecycleState.draft,
         team_count=team_count,
+        execution_target_id=execution_target_id,
         created_by=actor.user_id,
     )
     session.add(exercise)

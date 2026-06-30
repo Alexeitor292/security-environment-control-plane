@@ -218,6 +218,22 @@ def run_deploy(
             f"deploy requires exercise in 'approved', found '{exercise.lifecycle_state.value}'"
         )
 
+    # SECP-002A provisioning boundary: plans that pin a real execution target
+    # cannot be deployed in this milestone.  The refusal fires HERE — before any
+    # state mutation, before secret resolution, before any Temporal or provider
+    # interaction, before network creation — so the exercise is left untouched.
+    # Provisioning against a real (Proxmox) target is deferred to SECP-002B.
+    if plan_row.execution_target_id is not None:
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            f"deployment to a non-simulator execution target "
+            f"(target={plan_row.execution_target_id}, "
+            f"target_config_hash={plan_row.target_config_hash}) is not implemented "
+            "in SECP-002A. No provider request, secret resolution, or Temporal "
+            "provider workflow was started. Provisioning is deferred to SECP-002B."
+        )
+
     # Resolve the plugin up front and enforce the inline-execution safety boundary
     # BEFORE any state mutation, so a refusal leaves the exercise untouched.
     version = _get_version(session, exercise.environment_version_id)
