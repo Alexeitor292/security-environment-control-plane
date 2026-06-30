@@ -3,8 +3,13 @@ release, cross-org denial."""
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
-from secp_api.enums import ReservationStatus
+from secp_api.auth import Principal
+from secp_api.db import get_sessionmaker
+from secp_api.enums import Permission, ReservationStatus
 from secp_api.errors import AuthorizationError, DomainError, ValidationFailedError
 from secp_api.models import NetworkReservation
 from sqlalchemy.exc import IntegrityError
@@ -126,6 +131,86 @@ def test_cross_org_reservation_denied(session, principal, other_org_principal):
         reservations.reserve_network(
             session, other_org_principal, target_id=target.id, team_ref="t"
         )
+
+
+def test_independent_sessions_allocate_distinct_same_prefix_cidrs(session, principal):
+    from secp_api.services import reservations
+
+    target = _target(session, principal)
+    target_id = target.id
+    session.commit()
+    factory = get_sessionmaker()
+    barrier = Barrier(2)
+
+    def allocate(team_ref: str) -> str:
+        s = factory()
+        actor = Principal(
+            user_id=principal.user_id,
+            organization_id=principal.organization_id,
+            email=principal.email,
+            permissions=frozenset(Permission),
+        )
+        try:
+            barrier.wait(timeout=5)
+            reservation = reservations.reserve_network(
+                s, actor, target_id=target_id, team_ref=team_ref
+            )
+            cidr = reservation.cidr
+            s.commit()
+            return cidr
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        cidrs = sorted(pool.map(allocate, ["team-a", "team-b"]))
+
+    assert cidrs == ["10.50.0.0/24", "10.50.1.0/24"]
+
+
+def test_different_prefix_request_is_rejected_before_overlap(session, principal):
+    from secp_api.services import reservations
+
+    target = _target(session, principal, prefix=24, block="10.88.0.0/24")
+    session.commit()
+    reservations.reserve_network(
+        session, principal, target_id=target.id, team_ref="team-a", prefix=24
+    )
+    with pytest.raises(ValidationFailedError):
+        reservations.reserve_network(
+            session, principal, target_id=target.id, team_ref="team-b", prefix=25
+        )
+
+
+def test_overlapping_address_space_policies_are_rejected(session, principal):
+    from secp_api.services import targets
+
+    with pytest.raises(ValidationFailedError) as exc:
+        targets.register_target(
+            session,
+            principal,
+            display_name="overlap",
+            plugin_name="proxmox",
+            config={"base_url": "https://proxmox.example.test:8006", "verify_tls": True},
+            secret_ref="env:SECP_PROVIDER_SECRET__OVERLAP",
+            address_spaces=[
+                {"cidr_block": "10.70.0.0/24", "subnet_prefix": 26},
+                {"cidr_block": "10.70.0.128/25", "subnet_prefix": 26},
+            ],
+        )
+    assert "overlaps" in " ".join(exc.value.errors)
+
+
+def test_raw_integrity_error_does_not_escape_reservation_service(session, principal, monkeypatch):
+    from secp_api.services import reservations
+
+    target = _target(session, principal)
+
+    def always_race(*args, **kwargs):
+        raise IntegrityError("insert", {}, Exception("duplicate"))
+
+    monkeypatch.setattr(reservations, "_persist_reservation", always_race)
+    with pytest.raises(DomainError):
+        reservations.reserve_network(session, principal, target_id=target.id, team_ref="racy")
 
 
 def test_exhausted_space_raises(session, principal):
