@@ -165,3 +165,58 @@ export interface TeamTopology {
 export interface ApiError {
   error: { code: string; message: string; details?: string[] };
 }
+
+// --- Provider Targets (SECP-002A) ---
+
+export interface ProviderCapabilities {
+  milestone: string;
+  provisioning_enabled: boolean;
+  discovery: string;
+  note: string;
+}
+
+export interface ExecutionTarget {
+  id: string;
+  organization_id: string;
+  display_name: string;
+  plugin_name: string;
+  config: Record<string, unknown>;
+  config_hash: string;
+  secret_ref: string | null;
+  status: string;
+  scope_policy: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TargetCreate {
+  display_name: string;
+  plugin_name: string;
+  config: Record<string, unknown>;
+  secret_ref?: string | null;
+  scope_policy?: Record<string, unknown>;
+  address_spaces?: { cidr_block: string; subnet_prefix: number }[];
+}
+
+export interface InventorySnapshot {
+  id: string;
+  execution_target_id: string;
+  plugin_name: string;
+  plugin_version: string;
+  target_config_hash: string;
+  status: string;
+  workflow_run_id: string | null;
+  requested_at: string;
+  completed_at: string | null;
+  summary: Record<string, unknown>;
+  error: string | null;
+}
+
+export interface InventoryResource {
+  id: string;
+  resource_type: string;
+  provider_external_id: string;
+  display_name: string;
+  parent_ref: string | null;
+  status: string;
+  attributes: Record<string, unknown>;
+}

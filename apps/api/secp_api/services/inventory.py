@@ -15,9 +15,11 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
+from secp_api.db import session_scope
 from secp_api.enums import AuditAction, Permission, SnapshotStatus, TargetStatus
 from secp_api.errors import DomainError, NotFoundError
 from secp_api.models import (
+    ExecutionTarget,
     ProviderInventoryResource,
     ProviderInventorySnapshot,
 )
@@ -26,6 +28,21 @@ from secp_api.services.targets import get_target
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _audit_provider_refusal(actor: Principal, target: ExecutionTarget, reason: str) -> None:
+    """Persist a provider-operation refusal in its own transaction (survives raise)."""
+    with session_scope() as s:
+        audit.record(
+            s,
+            action=AuditAction.provider_operation_refused,
+            resource_type="execution_target",
+            resource_id=target.id,
+            organization_id=target.organization_id,
+            actor=str(actor.user_id),
+            outcome="denied",
+            data={"reason": reason},
+        )
 
 
 # --- API-side: request discovery (queue) -------------------------------------
@@ -37,6 +54,8 @@ def request_discovery(
     """Queue a read-only discovery for a target. The worker performs it (ADR-010).
 
     The API never calls the provider plugin and never resolves the secret ref.
+    Discovery requires the Temporal worker path; an inline dispatcher is refused
+    up front (and audited) before any snapshot is created.
     """
     actor.require(Permission.inventory_discover)
     target = get_target(session, actor, target_id)
@@ -44,6 +63,16 @@ def request_discovery(
         raise DomainError(
             f"execution target is '{target.status.value}'; discovery requires 'active'"
         )
+
+    if dispatcher is not None and getattr(dispatcher, "mode", None) == "inline":
+        from secp_api.safety import InlineExecutionForbidden
+
+        reason = (
+            "provider discovery requires the Temporal worker path; "
+            "set SECP_WORKFLOW_DISPATCH_MODE=temporal"
+        )
+        _audit_provider_refusal(actor, target, reason)
+        raise InlineExecutionForbidden(reason)
 
     snapshot = ProviderInventorySnapshot(
         organization_id=actor.organization_id,
