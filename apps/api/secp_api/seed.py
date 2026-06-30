@@ -37,13 +37,19 @@ def bootstrap_dev(session: Session) -> Principal:
     role = session.execute(
         select(Role).where(Role.name == PLATFORM_ADMIN_ROLE)
     ).scalar_one_or_none()
+    all_permissions = [p.value for p in Permission]
     if role is None:
         role = Role(
             name=PLATFORM_ADMIN_ROLE,
             description="DEV ONLY: all permissions.",
-            permissions=[p.value for p in Permission],
+            permissions=all_permissions,
         )
         session.add(role)
+        session.flush()
+    elif set(role.permissions or []) != set(all_permissions):
+        # Keep the dev admin in sync with new permissions across milestones so a
+        # persisted dev database does not retain a stale permission set.
+        role.permissions = all_permissions
         session.flush()
 
     user = session.execute(
