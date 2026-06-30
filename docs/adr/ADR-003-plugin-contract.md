@@ -47,6 +47,12 @@ Rules:
 - **Execution location**: plugins are invoked **only** from the worker
   (Charter Invariants 6, 7), never from the API. The contract types are importable by
   the API for typing/plan-shaping, but the API never calls `apply/reset/destroy`.
+- **`health().simulated` is observability, not authorization**: the `simulated` field
+  in `HealthReport` is a descriptive/observability field only. It is NOT the
+  authorization control for inline execution routing. The `PluginRegistry` maintains
+  a closed-world allowlist of plugins explicitly approved for inline execution
+  (currently only the built-in Simulator); a plugin cannot self-authorize by returning
+  `simulated=True`. See ADR-005.
 
 The Simulator (`plugins/simulator`) is the reference implementation and the target of
 a **conformance test suite** that every future plugin must also pass.
