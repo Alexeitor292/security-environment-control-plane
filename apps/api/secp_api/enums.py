@@ -29,6 +29,30 @@ class PlanStatus(str, Enum):
     applied = "applied"
 
 
+class TargetStatus(str, Enum):
+    """Lifecycle status of an ExecutionTarget (ADR-006)."""
+
+    active = "active"
+    disabled = "disabled"
+    discovery_failed = "discovery_failed"
+
+
+class ReservationStatus(str, Enum):
+    """Status of a network address-space reservation (ADR-009)."""
+
+    reserved = "reserved"
+    released = "released"
+
+
+class SnapshotStatus(str, Enum):
+    """Status of a provider inventory snapshot (ADR-008)."""
+
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
 class WorkflowKind(str, Enum):
     deploy = "deploy"
     reset = "reset"

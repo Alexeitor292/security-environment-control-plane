@@ -28,6 +28,11 @@ EXPECTED_TABLES = {
     "environment_network",
     "environment_node",
     "environment_topology_edge",
+    "execution_target",
+    "provider_inventory_snapshot",
+    "provider_inventory_resource",
+    "address_space_policy",
+    "network_reservation",
 }
 
 
