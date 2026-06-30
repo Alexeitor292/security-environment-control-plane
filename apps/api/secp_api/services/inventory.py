@@ -97,8 +97,7 @@ def request_discovery(
 
     if dispatcher is not None:
         # Dispatch to the worker boundary; inline refuses non-simulator providers.
-        run = dispatcher.dispatch_discovery(session, snapshot.id)
-        snapshot.workflow_run_id = run.id
+        dispatcher.dispatch_discovery(session, snapshot.id)
         session.flush()
     return snapshot
 

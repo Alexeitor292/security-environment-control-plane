@@ -7,23 +7,29 @@ implementations:
   is the dev/test default and is safe only because the Simulator's side effects are
   simulated rows. It refuses any non-Simulator plugin and refuses provider
   discovery (which has no inline-safe provider).
-* ``TemporalDispatcher`` creates a queued ``WorkflowRun`` and *enqueues* the
-  workflow on Temporal; the separate worker executes it durably. A ``submitter`` is
-  injectable so request construction is testable without a live server.
+* ``TemporalDispatcher`` creates a queued ``WorkflowRun`` plus a durable outbox
+  record. A worker-side publisher submits committed outbox rows to Temporal; the
+  separate Temporal worker executes them durably.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Protocol
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from secp_api.config import Settings, get_settings
 from secp_api.enums import WorkflowKind, WorkflowStatus
 from secp_api.errors import NotFoundError
-from secp_api.models import ProviderInventorySnapshot, WorkflowRun
+from secp_api.models import ProviderInventorySnapshot, WorkflowDispatchOutbox, WorkflowRun
+
+OUTBOX_PENDING = "pending"
+OUTBOX_FAILED = "failed"
+OUTBOX_SUBMITTED = "submitted"
 
 
 class WorkflowDispatcher(Protocol):
@@ -108,20 +114,29 @@ class TemporalClientSubmitter:
 
     async def _submit_async(self, request: TemporalWorkflowRequest) -> None:  # pragma: no cover
         from temporalio.client import Client
+        from temporalio.exceptions import WorkflowAlreadyStartedError
 
         client = await Client.connect(
             self.settings.temporal_host, namespace=self.settings.temporal_namespace
         )
-        await client.start_workflow(
-            request.workflow,
-            request.args,
-            id=request.workflow_id,
-            task_queue=request.task_queue,
-        )
+        try:
+            await client.start_workflow(
+                request.workflow,
+                request.args,
+                id=request.workflow_id,
+                task_queue=request.task_queue,
+            )
+        except WorkflowAlreadyStartedError:
+            # Deterministic workflow ids make duplicate publisher attempts safe.
+            return
 
 
 class TemporalDispatcher:
-    """Creates a queued WorkflowRun and enqueues the workflow on Temporal."""
+    """Creates queued workflow state plus a durable outbox record.
+
+    The API transaction must commit before any Temporal submission is attempted.
+    ``WorkflowOutboxPublisher`` is the only component that calls the submitter.
+    """
 
     mode = "temporal"
 
@@ -135,7 +150,6 @@ class TemporalDispatcher:
         *,
         kind: WorkflowKind,
         organization_id: uuid.UUID,
-        workflow_id: str,
         exercise_id: uuid.UUID | None = None,
         execution_target_id: uuid.UUID | None = None,
         snapshot_id: uuid.UUID | None = None,
@@ -150,12 +164,36 @@ class TemporalDispatcher:
             status=WorkflowStatus.queued,
             dispatch_mode=self.mode,
             correlation_id=uuid.uuid4().hex,
-            workflow_id=workflow_id,
             target_instance_id=target_instance_id,
         )
         session.add(run)
         session.flush()
+        run.workflow_id = f"{kind.value}-{run.id}"
+        session.flush()
         return run
+
+    def _queue_outbox(
+        self,
+        session: Session,
+        run: WorkflowRun,
+        *,
+        workflow: str,
+        args: dict,
+    ) -> None:
+        if run.workflow_id is None:  # pragma: no cover - defensive
+            raise RuntimeError("workflow_run.workflow_id must be assigned before outbox enqueue")
+        session.add(
+            WorkflowDispatchOutbox(
+                organization_id=run.organization_id,
+                workflow_run_id=run.id,
+                workflow=workflow,
+                workflow_id=run.workflow_id,
+                task_queue=self.settings.temporal_task_queue,
+                args=args,
+                status=OUTBOX_PENDING,
+            )
+        )
+        session.flush()
 
     def _exercise_org(self, session: Session, exercise_id: uuid.UUID) -> uuid.UUID:
         from secp_api.models import Exercise
@@ -166,66 +204,54 @@ class TemporalDispatcher:
         return exercise.organization_id
 
     def dispatch_deploy(self, session: Session, exercise_id: uuid.UUID) -> WorkflowRun:
-        wid = f"deploy-{exercise_id}-{uuid.uuid4().hex[:8]}"
         run = self._queue_run(
             session,
             kind=WorkflowKind.deploy,
             organization_id=self._exercise_org(session, exercise_id),
-            workflow_id=wid,
             exercise_id=exercise_id,
         )
-        self.submitter.submit(
-            TemporalWorkflowRequest(
-                workflow="DeployWorkflow",
-                workflow_id=wid,
-                task_queue=self.settings.temporal_task_queue,
-                args={"exercise_id": str(exercise_id), "workflow_run_id": str(run.id)},
-            )
+        self._queue_outbox(
+            session,
+            run,
+            workflow="DeployWorkflow",
+            args={"exercise_id": str(exercise_id), "workflow_run_id": str(run.id)},
         )
         return run
 
     def dispatch_reset(
         self, session: Session, exercise_id: uuid.UUID, instance_id: uuid.UUID
     ) -> WorkflowRun:
-        wid = f"reset-{instance_id}-{uuid.uuid4().hex[:8]}"
         run = self._queue_run(
             session,
             kind=WorkflowKind.reset,
             organization_id=self._exercise_org(session, exercise_id),
-            workflow_id=wid,
             exercise_id=exercise_id,
             target_instance_id=instance_id,
         )
-        self.submitter.submit(
-            TemporalWorkflowRequest(
-                workflow="ResetWorkflow",
-                workflow_id=wid,
-                task_queue=self.settings.temporal_task_queue,
-                args={
-                    "exercise_id": str(exercise_id),
-                    "instance_id": str(instance_id),
-                    "workflow_run_id": str(run.id),
-                },
-            )
+        self._queue_outbox(
+            session,
+            run,
+            workflow="ResetWorkflow",
+            args={
+                "exercise_id": str(exercise_id),
+                "instance_id": str(instance_id),
+                "workflow_run_id": str(run.id),
+            },
         )
         return run
 
     def dispatch_destroy(self, session: Session, exercise_id: uuid.UUID) -> WorkflowRun:
-        wid = f"destroy-{exercise_id}-{uuid.uuid4().hex[:8]}"
         run = self._queue_run(
             session,
             kind=WorkflowKind.destroy,
             organization_id=self._exercise_org(session, exercise_id),
-            workflow_id=wid,
             exercise_id=exercise_id,
         )
-        self.submitter.submit(
-            TemporalWorkflowRequest(
-                workflow="DestroyWorkflow",
-                workflow_id=wid,
-                task_queue=self.settings.temporal_task_queue,
-                args={"exercise_id": str(exercise_id), "workflow_run_id": str(run.id)},
-            )
+        self._queue_outbox(
+            session,
+            run,
+            workflow="DestroyWorkflow",
+            args={"exercise_id": str(exercise_id), "workflow_run_id": str(run.id)},
         )
         return run
 
@@ -233,24 +259,86 @@ class TemporalDispatcher:
         snap = session.get(ProviderInventorySnapshot, snapshot_id)
         if snap is None:
             raise NotFoundError(f"snapshot {snapshot_id} not found")
-        wid = f"discover-{snapshot_id}"
         run = self._queue_run(
             session,
             kind=WorkflowKind.discover,
             organization_id=snap.organization_id,
-            workflow_id=wid,
             execution_target_id=snap.execution_target_id,
             snapshot_id=snap.id,
         )
-        self.submitter.submit(
-            TemporalWorkflowRequest(
-                workflow="DiscoverWorkflow",
-                workflow_id=wid,
-                task_queue=self.settings.temporal_task_queue,
-                args={"snapshot_id": str(snapshot_id), "workflow_run_id": str(run.id)},
-            )
+        self._queue_outbox(
+            session,
+            run,
+            workflow="DiscoverWorkflow",
+            args={"snapshot_id": str(snapshot_id), "workflow_run_id": str(run.id)},
         )
         return run
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _redacted_submit_error(exc: Exception) -> str:
+    return f"{type(exc).__name__}: workflow submission failed"
+
+
+class WorkflowOutboxPublisher:
+    """Publishes committed workflow outbox rows to Temporal."""
+
+    def __init__(self, settings: Settings, submitter: TemporalSubmitter | None = None) -> None:
+        self.settings = settings
+        self.submitter = submitter or TemporalClientSubmitter(settings)
+
+    def publish_one(self, session: Session, outbox_id: uuid.UUID) -> bool:
+        outbox = session.get(WorkflowDispatchOutbox, outbox_id)
+        if outbox is None:
+            raise NotFoundError(f"workflow dispatch outbox {outbox_id} not found")
+        if outbox.status == OUTBOX_SUBMITTED:
+            return False
+
+        outbox.attempts += 1
+        outbox.updated_at = _utcnow()
+        request = TemporalWorkflowRequest(
+            workflow=outbox.workflow,
+            workflow_id=outbox.workflow_id,
+            task_queue=outbox.task_queue,
+            args=dict(outbox.args),
+        )
+        try:
+            self.submitter.submit(request)
+        except Exception as exc:
+            outbox.status = OUTBOX_FAILED
+            outbox.last_error = _redacted_submit_error(exc)
+            outbox.updated_at = _utcnow()
+            session.flush()
+            return False
+
+        outbox.status = OUTBOX_SUBMITTED
+        outbox.last_error = None
+        outbox.submitted_at = _utcnow()
+        outbox.updated_at = outbox.submitted_at
+        if outbox.workflow_run.workflow_id != outbox.workflow_id:
+            outbox.workflow_run.workflow_id = outbox.workflow_id
+        session.flush()
+        return True
+
+    def publish_pending(self, session: Session, *, limit: int = 100) -> int:
+        rows = (
+            session.execute(
+                select(WorkflowDispatchOutbox)
+                .where(WorkflowDispatchOutbox.status.in_([OUTBOX_PENDING, OUTBOX_FAILED]))
+                .order_by(WorkflowDispatchOutbox.created_at)
+                .limit(limit)
+            )
+            .scalars()
+            .all()
+        )
+        published = 0
+        for row in rows:
+            if self.publish_one(session, row.id):
+                published += 1
+        return published
 
 
 def get_dispatcher(

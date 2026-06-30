@@ -286,7 +286,9 @@ class WorkflowRun(Base, TimestampMixin):
     execution_target_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("execution_target.id"), nullable=True, index=True
     )
-    snapshot_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("provider_inventory_snapshot.id"), nullable=True, index=True
+    )
     kind: Mapped[WorkflowKind] = mapped_column(EnumType(WorkflowKind), nullable=False)
     status: Mapped[WorkflowStatus] = mapped_column(
         EnumType(WorkflowStatus), default=WorkflowStatus.running, nullable=False
@@ -298,6 +300,44 @@ class WorkflowRun(Base, TimestampMixin):
     target_instance_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    snapshot: Mapped[ProviderInventorySnapshot | None] = relationship(
+        back_populates="workflow_runs"
+    )
+    outbox: Mapped[WorkflowDispatchOutbox | None] = relationship(
+        back_populates="workflow_run", cascade="all, delete-orphan"
+    )
+
+
+class WorkflowDispatchOutbox(Base, TimestampMixin):
+    """Durable post-commit workflow submission request (ADR-010 correction)."""
+
+    __tablename__ = "workflow_dispatch_outbox"
+    __table_args__ = (
+        UniqueConstraint("workflow_run_id"),
+        UniqueConstraint("workflow_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    workflow_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflow_run.id"), nullable=False, index=True
+    )
+    workflow: Mapped[str] = mapped_column(String(120), nullable=False)
+    workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    task_queue: Mapped[str] = mapped_column(String(255), nullable=False)
+    args: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    workflow_run: Mapped[WorkflowRun] = relationship(back_populates="outbox")
 
 
 class Plugin(Base, TimestampMixin):
@@ -475,7 +515,6 @@ class ProviderInventorySnapshot(Base, TimestampMixin):
     status: Mapped[SnapshotStatus] = mapped_column(
         EnumType(SnapshotStatus), default=SnapshotStatus.queued, nullable=False
     )
-    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     requested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
@@ -489,6 +528,11 @@ class ProviderInventorySnapshot(Base, TimestampMixin):
     resources: Mapped[list[ProviderInventoryResource]] = relationship(
         back_populates="snapshot", cascade="all, delete-orphan"
     )
+    workflow_runs: Mapped[list[WorkflowRun]] = relationship(back_populates="snapshot")
+
+    @property
+    def workflow_run_id(self) -> uuid.UUID | None:
+        return self.workflow_runs[0].id if self.workflow_runs else None
 
 
 class ProviderInventoryResource(Base, TimestampMixin):

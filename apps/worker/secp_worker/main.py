@@ -42,7 +42,27 @@ async def _run_temporal() -> None:  # pragma: no cover - requires Temporal serve
         activities=[deploy_activity, reset_activity, destroy_activity, discover_activity],
     )
     logger.info("Temporal worker started on task queue %s", settings.temporal_task_queue)
-    await worker.run()
+    await asyncio.gather(worker.run(), _run_outbox_publisher_loop())
+
+
+def _publish_outbox_once() -> int:  # pragma: no cover - exercised by integration/runtime
+    from secp_api.db import session_scope
+    from secp_api.dispatch import WorkflowOutboxPublisher
+
+    settings = get_settings()
+    with session_scope() as session:
+        return WorkflowOutboxPublisher(settings).publish_pending(session)
+
+
+async def _run_outbox_publisher_loop() -> None:  # pragma: no cover - requires Temporal server
+    while True:
+        try:
+            published = await asyncio.to_thread(_publish_outbox_once)
+            if published:
+                logger.info("Submitted %s committed workflow outbox record(s)", published)
+        except Exception as exc:
+            logger.error("Workflow outbox publisher failed: %s", exc)
+        await asyncio.sleep(2.0)
 
 
 def main() -> None:

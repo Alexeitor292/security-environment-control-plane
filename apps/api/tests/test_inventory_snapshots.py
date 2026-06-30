@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from secp_api.enums import AuditAction, SnapshotStatus
+from secp_api.enums import AuditAction, SnapshotStatus, WorkflowKind, WorkflowStatus
 from secp_api.errors import AuthorizationError, ImmutableResourceError
-from secp_api.models import AuditEvent
+from secp_api.models import AuditEvent, WorkflowRun
+from sqlalchemy.exc import IntegrityError
 
 
 def _target(session, actor):
@@ -82,3 +83,41 @@ def test_cross_org_snapshot_access_denied(session, principal, other_org_principa
     session.commit()
     with pytest.raises(AuthorizationError):
         inventory.get_snapshot(session, other_org_principal, snap.id)
+
+
+def test_workflow_run_snapshot_fk_rejects_dangling_reference(session, principal):
+    import uuid
+
+    run = WorkflowRun(
+        organization_id=principal.organization_id,
+        snapshot_id=uuid.uuid4(),
+        kind=WorkflowKind.discover,
+        status=WorkflowStatus.queued,
+        dispatch_mode="temporal",
+        correlation_id=uuid.uuid4().hex,
+    )
+    session.add(run)
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_snapshot_workflow_run_id_is_derived_from_workflow_run(session, principal):
+    from secp_api.services import inventory
+
+    target = _target(session, principal)
+    snap = inventory.request_discovery(session, principal, target.id)
+    session.flush()
+    run = WorkflowRun(
+        organization_id=principal.organization_id,
+        execution_target_id=target.id,
+        snapshot_id=snap.id,
+        kind=WorkflowKind.discover,
+        status=WorkflowStatus.queued,
+        dispatch_mode="temporal",
+        correlation_id="corr",
+        workflow_id="discover-test",
+    )
+    session.add(run)
+    session.flush()
+    assert snap.workflow_run_id == run.id
+    assert "workflow_run_id" not in snap.__dict__

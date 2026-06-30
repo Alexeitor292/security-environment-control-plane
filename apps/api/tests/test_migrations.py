@@ -22,6 +22,7 @@ EXPECTED_TABLES = {
     "environment_instance",
     "deployment_plan",
     "workflow_run",
+    "workflow_dispatch_outbox",
     "plugin",
     "artifact",
     "audit_event",
@@ -52,10 +53,17 @@ def test_migration_upgrades_empty_database(tmp_path, monkeypatch):
     command.upgrade(cfg, "head")
 
     engine = create_engine(url)
-    tables = set(inspect(engine).get_table_names())
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    workflow_fks = inspector.get_foreign_keys("workflow_run")
     engine.dispose()
     get_settings.cache_clear()
 
     missing = EXPECTED_TABLES - tables
     assert not missing, f"migration missing tables: {missing}"
     assert "alembic_version" in tables
+    assert any(
+        fk["referred_table"] == "provider_inventory_snapshot"
+        and fk["constrained_columns"] == ["snapshot_id"]
+        for fk in workflow_fks
+    )
