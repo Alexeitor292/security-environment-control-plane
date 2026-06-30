@@ -41,21 +41,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install project
-        run: uv pip install --system -e ".[dev]"
+      - name: Create venv and install project
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[dev]"
 
       - name: Format check (ruff)
-        run: ruff format --check apps contracts plugins tests
+        run: uv run ruff format --check apps contracts plugins tests
 
       - name: Lint (ruff)
-        run: ruff check apps contracts plugins tests
+        run: uv run ruff check apps contracts plugins tests
 
       - name: Type check (mypy)
-        run: mypy apps/api/secp_api apps/worker/secp_worker contracts plugins
+        run: uv run mypy apps/api/secp_api apps/worker/secp_worker contracts plugins
 
       - name: Schema validation (web-breach-101)
         run: |
-          python - <<'PY'
+          uv run python - <<'PY'
           import yaml
           from secp_scenario_schema import validate_definition
           validate_definition(yaml.safe_load(open("docs/scenarios/web-breach-101.yaml")))
@@ -63,13 +65,13 @@ jobs:
           PY
 
       - name: Architecture boundary checks
-        run: pytest tests/test_architecture_boundary.py -q
+        run: uv run pytest tests/test_architecture_boundary.py -q
 
       - name: Tests (pytest, incl. PostgreSQL immutability)
-        run: pytest apps/api/tests tests -q
+        run: uv run pytest apps/api/tests tests -q
 
       - name: Dependency/security scan (pip-audit)
-        run: pip-audit --skip-editable
+        run: uv run pip-audit --skip-editable
 
   frontend:
     name: Frontend (types, lint, build, tests, security)
