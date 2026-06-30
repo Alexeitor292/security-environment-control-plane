@@ -47,6 +47,7 @@ packages = [
     "contracts/scenario-schema/secp_scenario_schema",
     "contracts/plugin-api/secp_plugin_api",
     "plugins/simulator/secp_plugin_simulator",
+    "plugins/proxmox/secp_plugin_proxmox",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
@@ -64,6 +65,7 @@ pythonpath = [
     "contracts/scenario-schema",
     "contracts/plugin-api",
     "plugins/simulator",
+    "plugins/proxmox",
 ]
 testpaths = ["apps/api/tests", "tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
@@ -91,6 +93,7 @@ mypy_path = [
     "contracts/scenario-schema",
     "contracts/plugin-api",
     "plugins/simulator",
+    "plugins/proxmox",
 ]
 explicit_package_bases = true
 check_untyped_defs = true
