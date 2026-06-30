@@ -57,7 +57,9 @@ def test_no_credential_defaults_in_settings_source():
         lowered = field_name.lower()
         if "password" in lowered or "secret" in lowered:
             assert not field.default, f"settings field {field_name} has a default secret"
-    assert Settings(app_env="test").database_url.startswith("sqlite")
+    # Check the SOURCE-declared default (not a runtime instance, which may read a
+    # developer's local .env): the default database URL embeds no credentials.
+    assert str(Settings.model_fields["database_url"].default).startswith("sqlite")
 
 
 # --- authorization coverage: cross-org + role-gated destroy -------------------

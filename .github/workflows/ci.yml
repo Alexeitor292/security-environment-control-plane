@@ -15,10 +15,24 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (format, lint, types, tests, schema, security)
+    name: Backend (format, lint, types, tests, schema, boundary, security)
     runs-on: ubuntu-latest
     env:
       SECP_APP_ENV: test
+      # Enables the DB-level immutability tests against the service container.
+      SECP_TEST_POSTGRES_URL: postgresql+psycopg://secp:secp@localhost:5432/secptest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: secp
+          POSTGRES_PASSWORD: secp
+          POSTGRES_DB: secptest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U secp -d secptest"
+          --health-interval 10s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +62,10 @@ jobs:
           print("web-breach-101 is valid against the schema")
           PY
 
-      - name: Tests (pytest)
+      - name: Architecture boundary checks
+        run: pytest tests/test_architecture_boundary.py -q
+
+      - name: Tests (pytest, incl. PostgreSQL immutability)
         run: pytest apps/api/tests tests -q
 
       - name: Dependency/security scan (pip-audit)

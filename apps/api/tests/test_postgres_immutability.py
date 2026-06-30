@@ -40,6 +40,7 @@ def pg_engine():
     from secp_api.config import get_settings
 
     api_dir = __import__("pathlib").Path(__file__).resolve().parents[1]
+    previous_db_url = os.environ.get("SECP_DATABASE_URL")
     os.environ["SECP_DATABASE_URL"] = PG_URL
     get_settings.cache_clear()
     cfg = Config(str(api_dir / "alembic.ini"))
@@ -49,6 +50,11 @@ def pg_engine():
 
     yield engine
     engine.dispose()
+    # Restore env so we never pollute other tests' settings.
+    if previous_db_url is None:
+        os.environ.pop("SECP_DATABASE_URL", None)
+    else:
+        os.environ["SECP_DATABASE_URL"] = previous_db_url
     get_settings.cache_clear()
 
 
