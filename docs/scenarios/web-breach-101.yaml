@@ -1,0 +1,78 @@
+# Web Breach 101 — starter environment definition.
+#
+# A two-team web-exploitation scenario: each team gets an isolated network with a
+# Kali attacker and a deliberately vulnerable Ubuntu web server, Wazuh telemetry,
+# and CTFd-based objective validation. Validated by automated tests
+# (tests/test_scenario_schema.py). Realised by the Simulator Plugin in SECP-001 —
+# NO real infrastructure is created.
+apiVersion: controlplane.security/v1alpha1
+kind: Environment
+metadata:
+  name: web-breach-101
+  displayName: Web Breach 101
+  description: >-
+    Two isolated teams each attack a vulnerable Ubuntu web server from a Kali host.
+    Wazuh provides telemetry; CTFd validates objectives.
+  labels:
+    difficulty: intro
+    domain: web-exploitation
+
+spec:
+  teams:
+    count: 2
+    isolationPolicy: strict
+
+  networks:
+    - name: team-network
+      cidrStrategy: per-team
+      baseCidr: 10.20.0.0/16
+      isolated: true
+
+  roles:
+    - name: attacker
+      kind: attacker
+      image: kali-linux
+      network: team-network
+    - name: web-server
+      kind: target
+      image: ubuntu-server-22.04
+      network: team-network
+      vulnerabilityPacks:
+        - weak-ssh
+    - name: wazuh-sensor
+      kind: sensor
+      image: wazuh-agent
+      network: team-network
+
+  vulnerabilityPacks:
+    - ref: weak-ssh
+      version: "1.0.0"
+
+  telemetry:
+    providers:
+      - wazuh
+
+  validation:
+    provider: ctfd
+    objectives:
+      - id: gain-initial-access
+        description: Obtain a shell on the vulnerable web server.
+        points: 100
+      - id: retrieve-flag
+        description: Read the flag file from the web server.
+        points: 150
+      - id: submit-remediation-note
+        description: Document how to remediate the weak-ssh configuration.
+        points: 50
+
+  requiredPlugins:
+    - simulator
+    - proxmox
+    - wazuh
+    - ctfd
+
+  resetPolicy:
+    strategy: rebuild-from-baseline
+
+  destroyPolicy:
+    strategy: full-teardown
