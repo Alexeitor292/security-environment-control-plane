@@ -71,12 +71,33 @@ def test_bearer_token_explicitly_rejected_with_oidc_not_implemented_error(sessio
     assert "SECP-001" in message
 
 
+def test_bearer_token_rejected_even_when_dev_auth_enabled(session):
+    """A bearer token is rejected EVEN when dev_auth_mode=True.
+
+    The Authorization header check runs BEFORE the dev fallback, so a token is
+    never silently dropped in favour of the dev admin principal.  This prevents
+    callers from being misled into thinking their token was validated.
+    """
+    from secp_api.deps import current_principal
+
+    # dev mode enabled — would normally return the dev principal for unauthenticated
+    # requests, but a presented token must still be refused explicitly.
+    settings = Settings(app_env="dev", auth_dev_mode=True, workflow_dispatch_mode="inline")
+    with pytest.raises(AuthenticationError) as exc_info:
+        current_principal(
+            session=session,
+            settings=settings,
+            authorization="Bearer eyJhbGciOiJSUzI1NiJ9.fake.token",
+        )
+    message = str(exc_info.value)
+    assert "not implemented" in message.lower()
+    assert "SECP-001" in message
+
+
 def test_bearer_token_rejected_even_when_dev_auth_disabled_no_production_fallback(session):
     """Production-like settings (dev_auth disabled) also reject bearer tokens."""
     from secp_api.deps import current_principal
 
-    # Use dev env but with dev_auth off (matches the code path; production Settings
-    # cannot be constructed with auth_dev_mode=True anyway).
     settings = Settings(app_env="dev", auth_dev_mode=False)
     with pytest.raises(AuthenticationError) as exc_info:
         current_principal(
@@ -84,7 +105,6 @@ def test_bearer_token_rejected_even_when_dev_auth_disabled_no_production_fallbac
             settings=settings,
             authorization="Bearer some.opaque.token",
         )
-    # Must name SECP-001 as the scope of the limitation.
     assert "SECP-001" in str(exc_info.value)
 
 
