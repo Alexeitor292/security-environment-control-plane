@@ -21,10 +21,21 @@ from secp_worker.secrets import SecretResolutionError, SecretResolver
 
 
 def build_provider_plugin(plugin_name: str):
-    """Construct a discovery-capable provider plugin (worker-only import)."""
+    """Construct a discovery-capable provider plugin (worker-only import).
+
+    When ``SECP_PROVIDER_MOCK=1`` the Proxmox plugin uses a mock transport that
+    returns canned inventory and contacts no network — for verifying the Temporal
+    discovery path without any real endpoint. Never enabled in production.
+    """
+    import os
+
     if plugin_name == "proxmox":
         from secp_plugin_proxmox import ProxmoxPlugin
 
+        if os.environ.get("SECP_PROVIDER_MOCK") == "1":
+            from secp_plugin_proxmox.mock import mock_transport_factory
+
+            return ProxmoxPlugin(transport_factory=mock_transport_factory)
         return ProxmoxPlugin()
     raise ValueError(f"no discovery provider plugin for '{plugin_name}'")
 
