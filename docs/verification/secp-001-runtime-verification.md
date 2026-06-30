@@ -1,6 +1,6 @@
 # SECP-001 — Runtime Verification
 
-**Date:** 2026-06-30
+**Last updated:** 2026-06-30 (hardening patch: closed-world allowlist + OIDC placeholder fix)
 **Performed on:** Windows 11, Docker Engine 29.4.0, Docker Compose v5.1.2
 **Branch:** `feature/secp-001-control-plane-foundation`
 **Dispatch mode:** `inline` (default; simulated execution only)
@@ -158,8 +158,18 @@ Running the stack (not just `docker compose config`) surfaced four real defects:
 A fifth defect was found by the PostgreSQL immutability tests and fixed before this
 run: the version-immutability trigger compared the `json` `spec` column with
 `IS DISTINCT FROM`, which PostgreSQL rejects (`json` has no equality operator).
-Fixed by comparing `spec::text`.
-
+Fixed by comparing `spec::text`.\r
+\r
+### Hardening patch (2026-06-30)\r
+\r
+Three additional issues addressed before this verification pass:\r
+\r
+6. **`InlineDispatcher` guard relied on plugin self-attestation** -- `health().simulated` could be set `true` by any future plugin, bypassing the intended safety boundary. Replaced with a closed-world registry allowlist (`inline_safe=True` at registration time). Only the built-in `SimulatorPlugin` is in the allowlist. A plugin claiming `simulated=true` that is not allowlisted is still refused. New tests prove all four guard cases.\r
+\r
+7. **OIDC placeholder language was misleading** -- any bearer token presented when dev fallback is disabled now returns an explicit `AuthenticationError` naming SECP-001 and 'not implemented'. Tested by two new auth-safety tests.\r
+\r
+8. **MinIO `latest` floating tag** -- replaced with `RELEASE.2025-09-07T16-13-09Z`.\r
+\r
 ## 7. Teardown
 
 ```bash
