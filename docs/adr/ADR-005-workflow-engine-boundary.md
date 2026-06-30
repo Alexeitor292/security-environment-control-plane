@@ -37,15 +37,16 @@ API ──dispatch(workflow, input)──► WorkflowDispatcher
   side effects are limited to simulated rows; it is explicitly a development
   convenience and is documented as such. It still goes through the approval gate
   (ADR-004) and the full lifecycle state machine.
-- **Closed-world inline-execution allowlist**: authorization to run inline is a
-  **registry-owned** decision. The `PluginRegistry` holds an explicit set of plugin
-  names approved for inline execution; currently this set contains only the built-in
-  `SimulatorPlugin` (registered with `inline_safe=True`). A plugin cannot grant its
-  own inline-execution permission by returning `health().simulated = True` — that field
-  is observability only. Future real-provider plugins default to `inline_safe=False`
-  and are refused by `assert_inline_execution_allowed` regardless of their reported
-  metadata. This guard fires before any lifecycle state mutation and its refusal is
-  audited.
+- **Closed-world inline-execution — identity-based**: authorization to run inline is
+  a **registry-owned, identity-based** decision. `PluginRegistry.is_inline_safe(plugin)`
+  performs a Python `is` check against the exact `SimulatorPlugin` instance stored
+  during bootstrap (`_register_builtin_simulator`). The public `register()` API has no
+  `inline_safe` argument — no external caller can grant inline permission. A plugin
+  named 'simulator', a new `SimulatorPlugin()` instance, or any plugin reporting
+  `health().simulated=True` are all refused unless they ARE the bootstrapped object.
+  Plugin names are also immutable once registered, preventing replacement of the
+  built-in Simulator at the same name. This guard fires before any lifecycle state
+  mutation and its refusal is audited.
 - **`TemporalDispatcher`** enqueues the workflow on Temporal; the separate `apps/worker`
   process hosts the workflows/activities and executes durably with retries and
   recovery. This is the path that real (privileged) plugins will use.
