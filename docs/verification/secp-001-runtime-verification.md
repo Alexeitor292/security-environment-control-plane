@@ -160,16 +160,16 @@ run: the version-immutability trigger compared the `json` `spec` column with
 `IS DISTINCT FROM`, which PostgreSQL rejects (`json` has no equality operator).
 Fixed by comparing `spec::text`.\r
 \r
-### Hardening patch (2026-06-30)\r
-\r
-Three additional issues addressed before this verification pass:\r
-\r
-6. **`InlineDispatcher` guard relied on plugin self-attestation** -- `health().simulated` could be set `true` by any future plugin, bypassing the intended safety boundary. Replaced with a closed-world registry allowlist (`inline_safe=True` at registration time). Only the built-in `SimulatorPlugin` is in the allowlist. A plugin claiming `simulated=true` that is not allowlisted is still refused. New tests prove all four guard cases.\r
-\r
-7. **OIDC placeholder language was misleading** -- any bearer token presented when dev fallback is disabled now returns an explicit `AuthenticationError` naming SECP-001 and 'not implemented'. Tested by two new auth-safety tests.\r
-\r
-8. **MinIO `latest` floating tag** -- replaced with `RELEASE.2025-09-07T16-13-09Z`.\r
-\r
+### Hardening patch 1 (2026-06-30)
+
+Issues 6-8 documented above (closed-world allowlist, OIDC placeholder, MinIO pin).
+
+### Hardening patch 2 (2026-06-30)
+
+9. **Inline-execution allowlist made truly closed-world** — replaced the inline_safe=True keyword argument on egister() with an identity-based model: egister() has no inline_safe parameter; _register_builtin_simulator() (called only by bootstrap) stores the exact SimulatorPlugin instance; is_inline_safe(plugin) is a Python is identity check. A fake plugin named 'simulator', a fresh SimulatorPlugin(), or any plugin claiming simulated=True are all refused. Plugin names are immutable after registration, preventing replacement of the built-in Simulator. 8 new registry/guard tests added.
+
+10. **Bearer token rejected before dev fallback** — current_principal() now checks the Authorization header FIRST. Any bearer token is refused with the SECP-001 placeholder error even when AUTH_DEV_MODE=true, preventing silent token discard. Verified live: GET /api/v1/me with Authorization: Bearer fake.jwt.token -> HTTP 401 with 'SECP-001'/'not implemented' message even with dev auth active.
+
 ## 7. Teardown
 
 ```bash
