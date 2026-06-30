@@ -42,6 +42,12 @@ HARD_FORBIDDEN_MODULES = {
     "googleapiclient",
     "kubernetes",
     "docker",
+    # SECP-002A: the API must not import the Proxmox plugin/client or a provider
+    # HTTP client (proof #2). Provider contact is worker-only.
+    "secp_plugin_proxmox",
+    "httpx",
+    "requests",
+    "aiohttp",
 }
 
 # Modules allowed only in specific seam files.
