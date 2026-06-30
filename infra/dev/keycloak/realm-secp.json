@@ -1,0 +1,55 @@
+{
+  "realm": "secp",
+  "enabled": true,
+  "displayName": "SECP (development only — placeholder credentials, UNSAFE FOR PRODUCTION)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "clients": [
+    {
+      "clientId": "secp-web",
+      "name": "SECP Web (dev)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "secp-api",
+      "name": "SECP API (dev)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "dev-only-client-secret-change-me",
+      "bearerOnly": true,
+      "protocol": "openid-connect"
+    }
+  ],
+  "roles": {
+    "realm": [
+      { "name": "platform-admin", "description": "DEV: all permissions" },
+      { "name": "operator", "description": "DEV: operate exercises" },
+      { "name": "approver", "description": "DEV: approve deployment plans" },
+      { "name": "auditor", "description": "DEV: read audit log" }
+    ]
+  },
+  "users": [
+    {
+      "username": "dev-admin",
+      "enabled": true,
+      "email": "dev-admin@local.test",
+      "firstName": "Development",
+      "lastName": "Admin",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-only-admin-password-change-me",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["platform-admin"]
+    }
+  ]
+}

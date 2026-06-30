@@ -1,0 +1,164 @@
+# SECP-001 local development stack.
+#
+# DEVELOPMENT-SAFE SERVICES ONLY. All credentials come from ../../.env and are
+# development-only placeholders, UNSAFE FOR PRODUCTION. This stack does NOT touch
+# any real infrastructure (no Proxmox/VMware/cloud/OpenTofu/Ansible). Execution is
+# simulated by the Simulator Plugin.
+#
+# Usage:
+#   cp ../../.env.example ../../.env   # then review the dev-only values
+#   docker compose up --build
+name: secp-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: ["start-dev", "--import-realm", "--health-enabled=true"]
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HTTP_PORT: "8080"
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./keycloak/realm-secp.json:/opt/keycloak/data/import/realm-secp.json:ro
+    # Keycloak 25 serves health on the management port (9000), and /dev/tcp is a
+    # bash feature, so the check must run under bash (not the default sh).
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -qi UP"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+      POSTGRES_SEEDS: postgres
+      # Temporal uses its own databases on the shared dev PostgreSQL instance.
+    ports:
+      - "7233:7233"
+    healthcheck:
+      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  temporal-ui:
+    image: temporalio/ui:2.31.0
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8088:8080"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/dev/Dockerfile.python
+    # Run migrations from apps/api so Alembic resolves script_location correctly,
+    # then start the API (the package is installed, so importable from anywhere).
+    command: >-
+      sh -c "cd apps/api && alembic upgrade head && cd /app &&
+             uvicorn secp_api.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      SECP_APP_ENV: ${SECP_APP_ENV}
+      SECP_DATABASE_URL: ${SECP_DATABASE_URL}
+      SECP_WORKFLOW_DISPATCH_MODE: ${SECP_WORKFLOW_DISPATCH_MODE}
+      SECP_OIDC_ISSUER: ${SECP_OIDC_ISSUER}
+      SECP_OIDC_AUDIENCE: ${SECP_OIDC_AUDIENCE}
+      SECP_AUTH_DEV_MODE: ${SECP_AUTH_DEV_MODE}
+      SECP_S3_ENDPOINT: ${SECP_S3_ENDPOINT}
+      SECP_S3_BUCKET: ${SECP_S3_BUCKET}
+      SECP_TEMPORAL_HOST: ${SECP_TEMPORAL_HOST}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/dev/Dockerfile.python
+    command: ["python", "-m", "secp_worker.main"]
+    environment:
+      SECP_APP_ENV: ${SECP_APP_ENV}
+      SECP_DATABASE_URL: ${SECP_DATABASE_URL}
+      SECP_WORKFLOW_DISPATCH_MODE: ${SECP_WORKFLOW_DISPATCH_MODE}
+      SECP_TEMPORAL_HOST: ${SECP_TEMPORAL_HOST}
+      SECP_TEMPORAL_NAMESPACE: ${SECP_TEMPORAL_NAMESPACE}
+      SECP_TEMPORAL_TASK_QUEUE: ${SECP_TEMPORAL_TASK_QUEUE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The worker is not an HTTP service; override the inherited (API) healthcheck
+    # with a process/liveness check that imports the worker and resolves settings.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import secp_worker; from secp_api.config import get_settings; get_settings(); print('ok')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: ../../apps/web
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+  minio-data:

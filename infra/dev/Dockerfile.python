@@ -1,0 +1,36 @@
+# Shared image for the API and worker (Charter §15). Build context is the repo
+# root so the whole monorepo Python project is available.
+FROM python:3.11-slim
+
+# uv for fast, reproducible installs.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=1
+
+WORKDIR /app
+
+# Copy project metadata first for layer caching, then sources.
+COPY pyproject.toml README.md ./
+COPY contracts ./contracts
+COPY plugins ./plugins
+COPY apps/api ./apps/api
+COPY apps/worker ./apps/worker
+COPY docs ./docs
+
+# Install the project (with the optional worker extra for the durable path).
+RUN uv pip install --system -e ".[worker]"
+
+# Non-root runtime user.
+RUN useradd --create-home --uid 10001 secp && chown -R secp:secp /app
+USER secp
+
+EXPOSE 8080
+
+# Default command runs the API; the worker service overrides it in compose.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+    CMD python -c "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8080/health').status==200 else sys.exit(1)" || exit 1
+
+CMD ["uvicorn", "secp_api.main:app", "--host", "0.0.0.0", "--port", "8080"]
