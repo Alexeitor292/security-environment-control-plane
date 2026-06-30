@@ -1,0 +1,9 @@
+# Normalize line endings to LF for all text files to keep diffs clean across
+# Windows/macOS/Linux developers.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
