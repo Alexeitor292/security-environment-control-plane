@@ -34,18 +34,30 @@ def _install_error_handlers(app: FastAPI) -> None:
 
 
 def _bootstrap_dev() -> None:
-    """Create the schema and seed dev data (development/test only)."""
-    settings = get_settings()
-    Base.metadata.create_all(bind=get_engine())
-    if settings.app_env in ("dev", "test"):
-        from secp_api.seed import bootstrap_dev, seed_sample_environment
+    """Create the schema and seed dev data — DEVELOPMENT/TEST ONLY.
 
-        with session_scope() as session:
-            principal = bootstrap_dev(session)
-            try:
-                seed_sample_environment(session, principal)
-            except FileNotFoundError:
-                logger.warning("sample environment file not found; skipping seed")
+    In production the schema is managed exclusively by Alembic migrations and NO
+    bootstrap administrator is ever seeded (assignment hardening §2). Auto-creating
+    tables or seeding an admin in production is refused here as defense in depth.
+    """
+    settings = get_settings()
+    if settings.app_env not in ("dev", "test"):
+        logger.info(
+            "production startup: skipping schema auto-create and dev seed "
+            "(use 'alembic upgrade head'); env=%s",
+            settings.app_env,
+        )
+        return
+
+    Base.metadata.create_all(bind=get_engine())
+    from secp_api.seed import bootstrap_dev, seed_sample_environment
+
+    with session_scope() as session:
+        principal = bootstrap_dev(session)
+        try:
+            seed_sample_environment(session, principal)
+        except FileNotFoundError:
+            logger.warning("sample environment file not found; skipping seed")
 
 
 def create_app() -> FastAPI:
@@ -75,7 +87,12 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _startup() -> None:
         _bootstrap_dev()
-        logger.info("control-plane API started (env=%s)", settings.app_env)
+        logger.info(
+            "control-plane API started (env=%s, dispatch=%s, dev_auth=%s)",
+            settings.app_env,
+            settings.workflow_dispatch_mode,
+            settings.dev_auth_enabled,
+        )
 
     return app
 

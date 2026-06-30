@@ -92,4 +92,13 @@ def get_dispatcher(settings: Settings | None = None) -> WorkflowDispatcher:
     settings = settings or get_settings()
     if settings.workflow_dispatch_mode == "temporal":
         return TemporalDispatcher(settings)
+    # Defense in depth: the inline dispatcher must never be selected in production
+    # (the Settings validator already refuses this combination at construction).
+    if settings.is_production:
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            "inline dispatcher is forbidden when APP_ENV=production; "
+            "configure SECP_WORKFLOW_DISPATCH_MODE=temporal"
+        )
     return InlineDispatcher()

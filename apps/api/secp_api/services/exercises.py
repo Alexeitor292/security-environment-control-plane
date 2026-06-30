@@ -20,6 +20,7 @@ from secp_api.enums import AuditAction, LifecycleState, Permission
 from secp_api.errors import ApprovalRequiredError, NotFoundError
 from secp_api.lifecycle import transition
 from secp_api.models import EnvironmentInstance, Exercise, WorkflowRun
+from secp_api.safety import InlineExecutionForbidden
 from secp_api.services.catalog import ensure_teams, get_version
 
 
@@ -90,14 +91,19 @@ def validate_exercise(session: Session, actor: Principal, exercise_id: uuid.UUID
     return exercise
 
 
-def _audit_apply_refusal(
-    actor: Principal, exercise_id: uuid.UUID, organization_id: uuid.UUID, reason: str
+def _audit_refusal(
+    actor: Principal,
+    exercise_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    reason: str,
+    *,
+    action: AuditAction = AuditAction.apply_refused,
 ) -> None:
     """Persist a refusal audit in its own transaction (survives the rollback)."""
     with session_scope() as s:
         audit.record(
             s,
-            action=AuditAction.apply_refused,
+            action=action,
             resource_type="exercise",
             resource_id=exercise_id,
             organization_id=organization_id,
@@ -113,7 +119,8 @@ def start_exercise(
     exercise_id: uuid.UUID,
     dispatcher: WorkflowDispatcher | None = None,
 ) -> WorkflowRun:
-    """Approve-gated deploy. Refused (and audited) unless the plan is approved."""
+    """Approve-gated deploy. Refused (and audited) unless the plan is approved and
+    the execution boundary permits it."""
     actor.require(Permission.exercise_apply)
     exercise = get_exercise(session, actor, exercise_id)
     dispatcher = dispatcher or get_dispatcher()
@@ -121,7 +128,16 @@ def start_exercise(
         return dispatcher.dispatch_deploy(session, exercise.id)
     except ApprovalRequiredError as exc:
         # The main transaction will roll back; record the refusal separately.
-        _audit_apply_refusal(actor, exercise.id, exercise.organization_id, exc.message)
+        _audit_refusal(actor, exercise.id, exercise.organization_id, exc.message)
+        raise
+    except InlineExecutionForbidden as exc:
+        _audit_refusal(
+            actor,
+            exercise.id,
+            exercise.organization_id,
+            exc.message,
+            action=AuditAction.execution_refused,
+        )
         raise
 
 
@@ -135,7 +151,17 @@ def reset_instance(
     actor.require(Permission.exercise_reset)
     exercise = get_exercise(session, actor, exercise_id)
     dispatcher = dispatcher or get_dispatcher()
-    return dispatcher.dispatch_reset(session, exercise.id, instance_id)
+    try:
+        return dispatcher.dispatch_reset(session, exercise.id, instance_id)
+    except InlineExecutionForbidden as exc:
+        _audit_refusal(
+            actor,
+            exercise.id,
+            exercise.organization_id,
+            exc.message,
+            action=AuditAction.execution_refused,
+        )
+        raise
 
 
 def destroy_exercise(
@@ -147,7 +173,17 @@ def destroy_exercise(
     actor.require(Permission.exercise_destroy)
     exercise = get_exercise(session, actor, exercise_id)
     dispatcher = dispatcher or get_dispatcher()
-    return dispatcher.dispatch_destroy(session, exercise.id)
+    try:
+        return dispatcher.dispatch_destroy(session, exercise.id)
+    except InlineExecutionForbidden as exc:
+        _audit_refusal(
+            actor,
+            exercise.id,
+            exercise.organization_id,
+            exc.message,
+            action=AuditAction.execution_refused,
+        )
+        raise
 
 
 def list_instances(

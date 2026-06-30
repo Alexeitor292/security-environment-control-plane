@@ -45,6 +45,10 @@ class PluginRegistry:
                 ) from exc
         self._plugins[plugin.name] = plugin
 
+    def unregister(self, name: str) -> None:
+        """Remove a plugin (primarily for test isolation)."""
+        self._plugins.pop(name, None)
+
     def get(self, name: str) -> PluginProtocol:
         if name not in self._plugins:
             raise PluginRegistryError(f"plugin '{name}' is not registered")

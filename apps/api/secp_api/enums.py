@@ -69,6 +69,7 @@ class AuditAction(str, Enum):
     plan_approved = "plan.approved"
     plan_rejected = "plan.rejected"
     apply_refused = "apply.refused"
+    execution_refused = "execution.refused"
     deploy_started = "deploy.started"
     deploy_completed = "deploy.completed"
     instance_created = "instance.created"

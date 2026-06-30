@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,8 +54,35 @@ class Settings(BaseSettings):
 
     @property
     def dev_auth_enabled(self) -> bool:
-        # Defense in depth: never allow the dev auth fallback in production.
+        # The dev fallback principal requires BOTH a non-production environment AND
+        # explicit dev-auth mode. Production can never enable it (see validator).
         return self.auth_dev_mode and not self.is_production
+
+    @model_validator(mode="after")
+    def _reject_unsafe_production_config(self) -> Settings:
+        """Refuse to construct an unsafe production configuration.
+
+        Production must not silently fall back to the bootstrap administrator or
+        run privileged work through the inline dispatcher. These are hard errors
+        (not silent disables), so a misconfigured production deployment fails fast
+        rather than booting in an unsafe state (assignment hardening §1, §2).
+        """
+        if self.app_env != "production":
+            return self
+        problems: list[str] = []
+        if self.auth_dev_mode:
+            problems.append(
+                "SECP_AUTH_DEV_MODE must be false in production "
+                "(the dev auth fallback / bootstrap admin is forbidden)"
+            )
+        if self.workflow_dispatch_mode == "inline":
+            problems.append(
+                "SECP_WORKFLOW_DISPATCH_MODE must be 'temporal' in production "
+                "(inline execution is for local development/tests only)"
+            )
+        if problems:
+            raise ValueError("unsafe production configuration refused: " + "; ".join(problems))
+        return self
 
 
 @lru_cache

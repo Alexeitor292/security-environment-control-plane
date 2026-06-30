@@ -31,6 +31,7 @@ from secp_api.models import (
     WorkflowRun,
 )
 from secp_api.registry import get_registry
+from secp_api.safety import assert_inline_execution_allowed
 from secp_plugin_api.v1 import PluginContext, TargetInstance
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -201,6 +202,14 @@ def run_deploy(
             f"deploy requires exercise in 'approved', found '{exercise.lifecycle_state.value}'"
         )
 
+    # Resolve the plugin up front and enforce the inline-execution safety boundary
+    # BEFORE any state mutation, so a refusal leaves the exercise untouched.
+    version = _get_version(session, exercise.environment_version_id)
+    plugin_name = _select_plugin_name(version.spec)
+    plugin = get_registry().get(plugin_name)
+    if dispatch_mode == "inline":
+        assert_inline_execution_allowed(plugin)
+
     run = _new_workflow(session, exercise, WorkflowKind.deploy, dispatch_mode)
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.deploying)
     audit.record(
@@ -214,9 +223,6 @@ def run_deploy(
 
     _ensure_instances(session, exercise)
 
-    version = _get_version(session, exercise.environment_version_id)
-    plugin_name = _select_plugin_name(version.spec)
-    plugin = get_registry().get(plugin_name)
     targets = _targets_for(session, exercise)
     plugin_plan = plugin.plan(version.spec, targets)
 
@@ -271,6 +277,13 @@ def run_reset(
     if instance is None or instance.exercise_id != exercise.id:
         raise NotFoundError(f"instance {instance_id} not found for exercise")
 
+    # Enforce the inline-execution boundary before any mutation.
+    version = _get_version(session, exercise.environment_version_id)
+    plugin_name = _select_plugin_name(version.spec)
+    plugin = get_registry().get(plugin_name)
+    if dispatch_mode == "inline":
+        assert_inline_execution_allowed(plugin)
+
     run = _new_workflow(
         session, exercise, WorkflowKind.reset, dispatch_mode, target_instance_id=instance.id
     )
@@ -286,9 +299,6 @@ def run_reset(
         data={"workflow_run": run.correlation_id},
     )
 
-    version = _get_version(session, exercise.environment_version_id)
-    plugin_name = _select_plugin_name(version.spec)
-    plugin = get_registry().get(plugin_name)
     targets = _targets_for(session, exercise)
     plugin_plan = plugin.plan(version.spec, targets)
 
@@ -320,6 +330,14 @@ def run_destroy(
     session: Session, exercise_id: uuid.UUID, dispatch_mode: str = "inline"
 ) -> WorkflowRun:
     exercise = _get_exercise(session, exercise_id)
+
+    # Enforce the inline-execution boundary before any mutation (applies even to
+    # the idempotent no-op path below).
+    version = _get_version(session, exercise.environment_version_id)
+    plugin_name = _select_plugin_name(version.spec)
+    plugin = get_registry().get(plugin_name)
+    if dispatch_mode == "inline":
+        assert_inline_execution_allowed(plugin)
 
     # Idempotent: destroying an already-destroyed exercise is a safe no-op.
     if exercise.lifecycle_state == LifecycleState.destroyed:
@@ -353,9 +371,6 @@ def run_destroy(
         .scalars()
         .all()
     )
-    version = _get_version(session, exercise.environment_version_id)
-    plugin_name = _select_plugin_name(version.spec)
-    plugin = get_registry().get(plugin_name)
     port = SqlAlchemyResourcePort(session, provider=plugin_name)
     context = PluginContext(resources=port, correlation_id=run.correlation_id)
 
