@@ -866,6 +866,24 @@ SECP-001 explicitly excludes:
 * VM lifecycle support
 * observed-state reconciliation
 
+SECP-002 is delivered in safe sub-phases. This clarification adds detail only; it
+does not remove or weaken any architectural invariant in §6.
+
+* **SECP-002A — Provider safety, targets, inventory discovery, Temporal activation,
+  address-space reservations.** Introduces organization-scoped, secret-free
+  execution targets; provider-neutral observed inventory/topology; immutable
+  provider inventory snapshots; transactional network/address-space reservations;
+  worker-only secret resolution; activation of the durable Temporal path; and a
+  **read-only** Proxmox plugin (validate/health/discover/status only). No real
+  provisioning, mutation, or real-endpoint discovery occurs. See
+  [`docs/architecture/secp-002a-proxmox-discovery.md`](architecture/secp-002a-proxmox-discovery.md)
+  and ADR-006…010.
+* **SECP-002B — Controlled provisioning.** OpenTofu runner, isolated network
+  creation, VM/container lifecycle — all behind plan approval and worker-only
+  execution.
+* **SECP-002C — Reconciliation, reset/destroy, drift handling** against real
+  infrastructure.
+
 ### SECP-003: Configuration and Content
 
 * Ansible runner plugin
