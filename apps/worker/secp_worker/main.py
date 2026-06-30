@@ -25,9 +25,11 @@ async def _run_temporal() -> None:  # pragma: no cover - requires Temporal serve
     from secp_worker.temporal_app import (
         DeployWorkflow,
         DestroyWorkflow,
+        DiscoverWorkflow,
         ResetWorkflow,
         deploy_activity,
         destroy_activity,
+        discover_activity,
         reset_activity,
     )
 
@@ -36,8 +38,8 @@ async def _run_temporal() -> None:  # pragma: no cover - requires Temporal serve
     worker = Worker(
         client,
         task_queue=settings.temporal_task_queue,
-        workflows=[DeployWorkflow, ResetWorkflow, DestroyWorkflow],
-        activities=[deploy_activity, reset_activity, destroy_activity],
+        workflows=[DeployWorkflow, ResetWorkflow, DestroyWorkflow, DiscoverWorkflow],
+        activities=[deploy_activity, reset_activity, destroy_activity, discover_activity],
     )
     logger.info("Temporal worker started on task queue %s", settings.temporal_task_queue)
     await worker.run()

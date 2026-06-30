@@ -279,15 +279,22 @@ class WorkflowRun(Base, TimestampMixin):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("organization.id"), nullable=False, index=True
     )
-    exercise_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("exercise.id"), nullable=False, index=True
+    # Nullable: discovery workflows are target-scoped, not exercise-scoped.
+    exercise_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("exercise.id"), nullable=True, index=True
     )
+    execution_target_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=True, index=True
+    )
+    snapshot_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     kind: Mapped[WorkflowKind] = mapped_column(EnumType(WorkflowKind), nullable=False)
     status: Mapped[WorkflowStatus] = mapped_column(
         EnumType(WorkflowStatus), default=WorkflowStatus.running, nullable=False
     )
     dispatch_mode: Mapped[str] = mapped_column(String(20), default="inline")
     correlation_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Durable workflow identifier (Temporal workflow id) when dispatched durably.
+    workflow_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     target_instance_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
