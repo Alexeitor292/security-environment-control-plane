@@ -69,6 +69,8 @@ def run_discovery(
             correlation_id=str(snap.id),
         )
         result = plugin.discover(request, credential)
+        if not result.ok:
+            raise RuntimeError("provider discovery returned validation errors")
         inventory.complete_snapshot(
             session,
             snap.id,

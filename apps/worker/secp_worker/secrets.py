@@ -48,7 +48,7 @@ class EnvSecretResolver:
         if not value:
             # Redacted: name the missing variable, never a value.
             raise SecretResolutionError(f"secret for reference scheme '{scheme}' is not available")
-        return ProviderCredential(secret=value)
+        return ProviderCredential.from_secret(value)
 
 
 class FakeSecretResolver:
@@ -64,4 +64,4 @@ class FakeSecretResolver:
         parse_secret_ref(secret_ref)  # enforce valid syntax even in tests
         if secret_ref not in self._mapping:
             raise SecretResolutionError("secret for reference is not available")
-        return ProviderCredential(secret=self._mapping[secret_ref])
+        return ProviderCredential.from_secret(self._mapping[secret_ref])

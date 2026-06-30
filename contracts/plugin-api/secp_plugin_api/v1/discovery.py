@@ -11,9 +11,9 @@ never persisted or serialized into a snapshot/audit/response.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import NoReturn, Protocol, SupportsIndex, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class UnsupportedCapabilityError(Exception):
@@ -26,21 +26,42 @@ class UnsupportedCapabilityError(Exception):
         super().__init__(f"plugin '{plugin}' does not support capability '{capability}'")
 
 
-class ProviderCredential(BaseModel):
-    """Transient resolved credential passed to ``discover`` at call time only.
+class ProviderCredential:
+    """Transient opaque credential passed to ``discover`` at call time only.
 
-    NEVER persisted, logged, or serialized into snapshots/audit/responses. The
-    repr is redacted so accidental logging cannot leak the secret.
+    This is intentionally not a Pydantic model and has no public secret field, no
+    ``__dict__``, no iterator, and no pickle support. Worker/plugin code must use
+    the narrow ``reveal_secret()`` accessor at the last possible moment.
     """
 
-    model_config = ConfigDict(frozen=True)
+    __slots__ = ("__secret",)
 
-    secret: str
+    def __init__(self, secret: str) -> None:
+        if not isinstance(secret, str) or not secret:
+            raise ValueError("provider credential secret must be a non-empty string")
+        self.__secret = secret
+
+    @classmethod
+    def from_secret(cls, secret: str) -> ProviderCredential:
+        return cls(secret)
+
+    def reveal_secret(self) -> str:
+        """Return the secret for worker/plugin transport code only."""
+        return self.__secret
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return "ProviderCredential(secret='***redacted***')"
 
     __str__ = __repr__
+
+    def __getstate__(self) -> NoReturn:
+        raise TypeError("ProviderCredential cannot be serialized")
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("ProviderCredential cannot be pickled")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
+        raise TypeError("ProviderCredential cannot be pickled")
 
 
 class DiscoveryRequest(BaseModel):
@@ -91,7 +112,9 @@ class DiscoveryProtocol(Protocol):
     plane checks capability support before dispatching discovery.
     """
 
-    def validate_target(self, config: dict) -> TargetValidationResult: ...
+    def validate_target(
+        self, config: dict, scope_policy: dict | None = None
+    ) -> TargetValidationResult: ...
 
     def discover(
         self, request: DiscoveryRequest, credential: ProviderCredential

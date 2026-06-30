@@ -55,7 +55,7 @@ def test_plaintext_detection():
 def test_env_resolver_reads_namespaced_env(monkeypatch):
     monkeypatch.setenv("SECP_PROVIDER_SECRET__TARGET_ABC", "tok-123")
     cred = EnvSecretResolver().resolve(VALID_REF)
-    assert cred.secret == "tok-123"
+    assert cred.reveal_secret() == "tok-123"
 
 
 def test_env_resolver_missing_value_is_redacted(monkeypatch):
@@ -68,7 +68,7 @@ def test_env_resolver_missing_value_is_redacted(monkeypatch):
 
 def test_fake_resolver_for_tests():
     resolver = FakeSecretResolver({VALID_REF: "fake-token"})
-    assert resolver.resolve(VALID_REF).secret == "fake-token"
+    assert resolver.resolve(VALID_REF).reveal_secret() == "fake-token"
     with pytest.raises(SecretResolutionError):
         resolver.resolve("env:SECP_PROVIDER_SECRET__MISSING")
 

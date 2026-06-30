@@ -20,7 +20,7 @@ function RegisterForm({ onCreated }: { onCreated: () => void }) {
       await api.registerTarget({
         display_name: displayName,
         plugin_name: "proxmox",
-        config: { base_url: baseUrl, verify_tls: false },
+        config: { base_url: baseUrl, verify_tls: true },
         secret_ref: secretRef || null,
         scope_policy: {},
         address_spaces: cidr ? [{ cidr_block: cidr, subnet_prefix: 24 }] : [],

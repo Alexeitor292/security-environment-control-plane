@@ -2,13 +2,14 @@
 
 Capabilities advertised: validate, health, discover, status. The mutating
 capabilities (plan/apply/reset/destroy) exist only to satisfy the structural
-``PluginProtocol`` and immediately raise ``UnsupportedCapabilityError`` — no
-provider request is ever attempted for them.
+``PluginProtocol`` and immediately raise ``UnsupportedCapabilityError`` before
+any provider request can be attempted.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from urllib.parse import urlparse
 
 from secp_plugin_api.v1 import (
     ApplyResult,
@@ -34,8 +35,10 @@ PLUGIN_NAME = "proxmox"
 PLUGIN_VERSION = "0.1.0"
 CONTRACT_VERSION = "1"
 
-# Transport factory: (config, token) -> ReadOnlyHttpTransport.
 TransportFactory = Callable[[dict, str], ReadOnlyHttpTransport]
+CONFIG_KEYS = frozenset({"base_url", "verify_tls"})
+SCOPE_KEYS = frozenset({"resource_types", "nodes"})
+RESOURCE_TYPES = frozenset({"node", "vm", "container", "storage", "network"})
 
 
 def _default_transport_factory(config: dict, token: str) -> ReadOnlyHttpTransport:
@@ -56,8 +59,6 @@ class ProxmoxPlugin:
     def __init__(self, transport_factory: TransportFactory | None = None) -> None:
         self._transport_factory = transport_factory or _default_transport_factory
 
-    # --- read-only capabilities ----------------------------------------------
-
     def health(self) -> HealthReport:
         return HealthReport(
             name=PLUGIN_NAME,
@@ -75,25 +76,14 @@ class ProxmoxPlugin:
         )
 
     def validate(self, spec: dict) -> ValidationResult:
-        # SECP-002A: the Proxmox plugin only performs read-only discovery; there is
-        # no provisioning spec to validate. Always ok (no provider request).
         return ValidationResult(ok=True)
 
-    def validate_target(self, config: dict) -> TargetValidationResult:
-        errors: list[str] = []
-        base_url = config.get("base_url")
-        if not isinstance(base_url, str) or not base_url.startswith(("http://", "https://")):
-            errors.append("config.base_url must be an http(s) URL")
-        if "verify_tls" in config and not isinstance(config["verify_tls"], bool):
-            errors.append("config.verify_tls must be a boolean")
-        return TargetValidationResult(
-            ok=not errors,
-            errors=errors,
-            detail={"base_url": base_url} if isinstance(base_url, str) else {},
-        )
+    def validate_target(
+        self, config: dict, scope_policy: dict | None = None
+    ) -> TargetValidationResult:
+        return _validate_target_config(config, scope_policy)
 
     def status(self, instance_id: str, context: PluginContext) -> ObservedState:
-        # Reads only from persisted data via the ResourcePort (no provider call).
         topo = context.resources.read_instance_topology(instance_id)
         return ObservedState(
             instance_id=instance_id,
@@ -103,12 +93,14 @@ class ProxmoxPlugin:
             topology=topo,
         )
 
-    # --- discovery (read-only) -----------------------------------------------
-
     def discover(
         self, request: DiscoveryRequest, credential: ProviderCredential
     ) -> DiscoveryResult:
-        transport = self._transport_factory(request.config, credential.secret)
+        validation = self.validate_target(request.config, request.scope)
+        if not validation.ok:
+            return DiscoveryResult(ok=False, errors=validation.errors)
+
+        transport = self._transport_factory(request.config, credential.reveal_secret())
         scope = request.scope or {}
         resources: list[DiscoveredResource] = []
 
@@ -152,10 +144,7 @@ class ProxmoxPlugin:
                 )
 
         resources = _apply_scope(resources, scope)
-        summary = _summarize(resources)
-        return DiscoveryResult(ok=True, resources=resources, summary=summary)
-
-    # --- unsupported (mutating) capabilities — hard-fail before any request ---
+        return DiscoveryResult(ok=True, resources=resources, summary=_summarize(resources))
 
     def plan(self, spec: dict, targets: list) -> PluginPlan:
         raise UnsupportedCapabilityError(PLUGIN_NAME, "plan")
@@ -170,6 +159,72 @@ class ProxmoxPlugin:
         raise UnsupportedCapabilityError(PLUGIN_NAME, "destroy")
 
 
+def _validate_target_config(
+    config: dict, scope_policy: dict | None = None
+) -> TargetValidationResult:
+    if not isinstance(config, dict):
+        return TargetValidationResult(ok=False, errors=["config must be an object"])
+
+    errors: list[str] = []
+    unsupported = sorted(set(config) - CONFIG_KEYS)
+    if unsupported:
+        errors.append(f"unsupported Proxmox config keys: {', '.join(unsupported)}")
+
+    base_url = config.get("base_url")
+    if not isinstance(base_url, str):
+        errors.append("config.base_url must be an https:// URL")
+    else:
+        parsed = urlparse(base_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            errors.append("config.base_url must use https:// and include a host")
+
+    verify_tls = config.get("verify_tls", True)
+    if not isinstance(verify_tls, bool):
+        errors.append("config.verify_tls must be a boolean")
+    elif verify_tls is not True:
+        errors.append("config.verify_tls=false is not allowed for Proxmox targets")
+
+    errors.extend(_validate_scope_policy(scope_policy))
+    return TargetValidationResult(
+        ok=not errors,
+        errors=errors,
+        detail={"base_url": base_url} if isinstance(base_url, str) else {},
+    )
+
+
+def _validate_scope_policy(scope_policy: dict | None) -> list[str]:
+    if scope_policy in (None, {}):
+        return []
+    if not isinstance(scope_policy, dict):
+        return ["scope_policy must be an object"]
+
+    errors: list[str] = []
+    unsupported = sorted(set(scope_policy) - SCOPE_KEYS)
+    if unsupported:
+        errors.append(f"unsupported Proxmox scope_policy keys: {', '.join(unsupported)}")
+
+    resource_types = scope_policy.get("resource_types")
+    if resource_types is not None:
+        if not isinstance(resource_types, list) or not all(
+            isinstance(v, str) for v in resource_types
+        ):
+            errors.append("scope_policy.resource_types must be a list of strings")
+        else:
+            unknown = sorted(set(resource_types) - RESOURCE_TYPES)
+            if unknown:
+                errors.append(
+                    "scope_policy.resource_types contains unsupported values: " + ", ".join(unknown)
+                )
+
+    nodes = scope_policy.get("nodes")
+    if nodes is not None and (
+        not isinstance(nodes, list) or not all(isinstance(v, str) and v for v in nodes)
+    ):
+        errors.append("scope_policy.nodes must be a list of non-empty strings")
+
+    return errors
+
+
 def _as_list(value: object) -> list[dict]:
     if isinstance(value, list):
         return [v for v in value if isinstance(v, dict)]
@@ -177,7 +232,6 @@ def _as_list(value: object) -> list[dict]:
 
 
 def _safe_attrs(row: dict, keys: tuple[str, ...]) -> dict:
-    # Copy only a small, explicit set of non-sensitive fields.
     return {k: row[k] for k in keys if k in row}
 
 
@@ -185,24 +239,24 @@ def _apply_scope(resources: list[DiscoveredResource], scope: dict) -> list[Disco
     allowed_types = set(scope.get("resource_types") or [])
     allowed_nodes = set(scope.get("nodes") or [])
 
-    def keep(r: DiscoveredResource) -> bool:
-        if allowed_types and r.resource_type not in allowed_types:
+    def keep(resource: DiscoveredResource) -> bool:
+        if allowed_types and resource.resource_type not in allowed_types:
             return False
         if allowed_nodes:
             node = (
-                r.provider_external_id.split("/")[0]
-                if r.resource_type != "node"
-                else r.provider_external_id
+                resource.provider_external_id.split("/")[0]
+                if resource.resource_type != "node"
+                else resource.provider_external_id
             )
             if node not in allowed_nodes:
                 return False
         return True
 
-    return [r for r in resources if keep(r)]
+    return [resource for resource in resources if keep(resource)]
 
 
 def _summarize(resources: list[DiscoveredResource]) -> dict:
     counts: dict[str, int] = {}
-    for r in resources:
-        counts[r.resource_type] = counts.get(r.resource_type, 0) + 1
+    for resource in resources:
+        counts[resource.resource_type] = counts.get(resource.resource_type, 0) + 1
     return {"total": len(resources), "by_type": counts}

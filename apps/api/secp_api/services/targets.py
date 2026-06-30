@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import uuid
+from ipaddress import ip_network
+from urllib.parse import urlparse
 
 from secp_scenario_schema import content_hash
 from sqlalchemy import select
@@ -30,6 +32,9 @@ _SECRET_KEY_PATTERN = re.compile(
     r"(password|passwd|secret|token|api[_-]?key|apikey|private[_-]?key|credential)",
     re.IGNORECASE,
 )
+_PROXMOX_CONFIG_KEYS = frozenset({"base_url", "verify_tls"})
+_PROXMOX_SCOPE_KEYS = frozenset({"resource_types", "nodes"})
+_PROXMOX_RESOURCE_TYPES = frozenset({"node", "vm", "container", "storage", "network"})
 
 
 def _assert_no_plaintext_secret(config: dict) -> None:
@@ -52,6 +57,103 @@ def _assert_no_plaintext_secret(config: dict) -> None:
     walk(config, "")
 
 
+def _validate_proxmox_target(config: dict, scope_policy: dict | None) -> None:
+    """Validate Proxmox target shape without importing/invoking the plugin."""
+
+    errors: list[str] = []
+    unsupported = sorted(set(config) - _PROXMOX_CONFIG_KEYS)
+    if unsupported:
+        errors.append(f"unsupported Proxmox config keys: {', '.join(unsupported)}")
+
+    base_url = config.get("base_url")
+    if not isinstance(base_url, str):
+        errors.append("config.base_url must be an https:// URL")
+    else:
+        parsed = urlparse(base_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            errors.append("config.base_url must use https:// and include a host")
+
+    verify_tls = config.get("verify_tls", True)
+    if not isinstance(verify_tls, bool):
+        errors.append("config.verify_tls must be a boolean")
+    elif verify_tls is not True:
+        errors.append("config.verify_tls=false is not allowed for Proxmox targets")
+
+    errors.extend(_validate_proxmox_scope_policy(scope_policy or {}))
+    if errors:
+        raise ValidationFailedError("invalid Proxmox target configuration", errors=errors)
+
+
+def _validate_proxmox_scope_policy(scope_policy: dict) -> list[str]:
+    if not isinstance(scope_policy, dict):
+        return ["scope_policy must be an object"]
+
+    errors: list[str] = []
+    unsupported = sorted(set(scope_policy) - _PROXMOX_SCOPE_KEYS)
+    if unsupported:
+        errors.append(f"unsupported Proxmox scope_policy keys: {', '.join(unsupported)}")
+
+    resource_types = scope_policy.get("resource_types")
+    if resource_types is not None:
+        if not isinstance(resource_types, list) or not all(
+            isinstance(v, str) for v in resource_types
+        ):
+            errors.append("scope_policy.resource_types must be a list of strings")
+        else:
+            unknown = sorted(set(resource_types) - _PROXMOX_RESOURCE_TYPES)
+            if unknown:
+                errors.append(
+                    "scope_policy.resource_types contains unsupported values: " + ", ".join(unknown)
+                )
+
+    nodes = scope_policy.get("nodes")
+    if nodes is not None and (
+        not isinstance(nodes, list) or not all(isinstance(v, str) and v for v in nodes)
+    ):
+        errors.append("scope_policy.nodes must be a list of non-empty strings")
+    return errors
+
+
+def _validate_address_spaces(address_spaces: list[dict] | None) -> list[tuple[str, int]]:
+    normalized: list[tuple[str, int]] = []
+    errors: list[str] = []
+
+    for index, space in enumerate(address_spaces or []):
+        try:
+            block = ip_network(str(space["cidr_block"]), strict=True)
+        except Exception:
+            errors.append(f"address_spaces[{index}].cidr_block must be a valid CIDR block")
+            continue
+        try:
+            subnet_prefix = int(space["subnet_prefix"])
+        except Exception:
+            errors.append(f"address_spaces[{index}].subnet_prefix must be an integer")
+            continue
+        if subnet_prefix < block.prefixlen or subnet_prefix > block.max_prefixlen:
+            errors.append(
+                f"address_spaces[{index}].subnet_prefix must be between "
+                f"{block.prefixlen} and {block.max_prefixlen}"
+            )
+            continue
+        overlaps_existing = False
+        for existing_cidr, _existing_prefix in normalized:
+            existing = ip_network(existing_cidr)
+            if block.version == existing.version and block.overlaps(existing):
+                errors.append(
+                    f"address_spaces[{index}].cidr_block overlaps an existing "
+                    "address-space policy on this target"
+                )
+                overlaps_existing = True
+                break
+        if overlaps_existing:
+            continue
+        normalized.append((str(block), subnet_prefix))
+
+    if errors:
+        raise ValidationFailedError("invalid address-space policy", errors=errors)
+    return normalized
+
+
 def register_target(
     session: Session,
     actor: Principal,
@@ -68,6 +170,12 @@ def register_target(
     if not isinstance(config, dict):
         raise ValidationFailedError("config must be an object")
     _assert_no_plaintext_secret(config)
+    scope_policy = scope_policy or {}
+    if not isinstance(scope_policy, dict):
+        raise ValidationFailedError("scope_policy must be an object")
+    if plugin_name == "proxmox":
+        _validate_proxmox_target(config, scope_policy)
+    normalized_address_spaces = _validate_address_spaces(address_spaces)
 
     if secret_ref is not None:
         if looks_like_plaintext_secret(secret_ref):
@@ -88,19 +196,19 @@ def register_target(
         config_hash=content_hash(config),
         secret_ref=secret_ref,
         status=TargetStatus.active,
-        scope_policy=scope_policy or {},
+        scope_policy=scope_policy,
         created_by=actor.user_id,
     )
     session.add(target)
     session.flush()
 
-    for space in address_spaces or []:
+    for cidr_block, subnet_prefix in normalized_address_spaces:
         session.add(
             AddressSpacePolicy(
                 organization_id=actor.organization_id,
                 execution_target_id=target.id,
-                cidr_block=str(space["cidr_block"]),
-                subnet_prefix=int(space["subnet_prefix"]),
+                cidr_block=cidr_block,
+                subnet_prefix=subnet_prefix,
             )
         )
     session.flush()

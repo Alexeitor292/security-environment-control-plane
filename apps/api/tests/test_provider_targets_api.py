@@ -22,7 +22,7 @@ def client(engine):
 GOOD = {
     "display_name": "Lab Proxmox (placeholder)",
     "plugin_name": "proxmox",
-    "config": {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": False},
+    "config": {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True},
     "secret_ref": "env:SECP_PROVIDER_SECRET__LAB",
     "scope_policy": {"resource_types": ["node", "vm"]},
     "address_spaces": [{"cidr_block": "10.60.0.0/16", "subnet_prefix": 24}],

@@ -30,7 +30,7 @@ FAKE_INVENTORY = {
     "/nodes/node-b/storage": [],
 }
 
-GOOD_CONFIG = {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": False}
+GOOD_CONFIG = {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True}
 
 
 class FakeTransport:
@@ -83,7 +83,7 @@ def test_health_advertises_only_readonly_capabilities():
 def test_discover_normalizes_inventory():
     factory, _ = _capturing_factory()
     plugin = ProxmoxPlugin(transport_factory=factory)
-    result = plugin.discover(_req(), ProviderCredential(secret="tok"))
+    result = plugin.discover(_req(), ProviderCredential.from_secret("tok"))
     assert result.ok
     by_type = result.summary["by_type"]
     assert by_type == {"node": 2, "vm": 1, "container": 1, "storage": 1}
@@ -97,7 +97,7 @@ def test_discover_normalizes_inventory():
 def test_discover_issues_only_get_requests():
     factory, created = _capturing_factory()
     plugin = ProxmoxPlugin(transport_factory=factory)
-    plugin.discover(_req(), ProviderCredential(secret="tok"))
+    plugin.discover(_req(), ProviderCredential.from_secret("tok"))
     assert created, "transport should have been created"
     methods = {m for t in created for (m, _path) in t.calls}
     assert methods == {"GET"}, f"discovery must issue GET only, saw {methods}"
@@ -107,13 +107,15 @@ def test_scope_filter_restricts_resources():
     factory, _ = _capturing_factory()
     plugin = ProxmoxPlugin(transport_factory=factory)
     result = plugin.discover(
-        _req(scope={"resource_types": ["node"]}), ProviderCredential(secret="t")
+        _req(scope={"resource_types": ["node"]}), ProviderCredential.from_secret("t")
     )
     assert {r.resource_type for r in result.resources} == {"node"}
 
     factory2, _ = _capturing_factory()
     plugin2 = ProxmoxPlugin(transport_factory=factory2)
-    result2 = plugin2.discover(_req(scope={"nodes": ["node-a"]}), ProviderCredential(secret="t"))
+    result2 = plugin2.discover(
+        _req(scope={"nodes": ["node-a"]}), ProviderCredential.from_secret("t")
+    )
     nodes = {r.provider_external_id.split("/")[0] for r in result2.resources}
     assert nodes == {"node-a"}
 
@@ -147,6 +149,14 @@ def test_validate_target():
     assert plugin.validate_target(GOOD_CONFIG).ok is True
     bad = plugin.validate_target({"base_url": "ftp://nope"})
     assert bad.ok is False and bad.errors
+    insecure = plugin.validate_target(
+        {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": False}
+    )
+    assert insecure.ok is False
+    unsupported = plugin.validate_target({**GOOD_CONFIG, "extra": True})
+    assert unsupported.ok is False
+    bad_scope = plugin.validate_target(GOOD_CONFIG, {"resource_types": ["vm", "secret"]})
+    assert bad_scope.ok is False
 
 
 class _EmptyPort:

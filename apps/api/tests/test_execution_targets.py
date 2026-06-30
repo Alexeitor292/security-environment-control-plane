@@ -8,7 +8,7 @@ from secp_api.enums import AuditAction, TargetStatus
 from secp_api.errors import AuthorizationError, ImmutableResourceError, ValidationFailedError
 from secp_api.models import AuditEvent, ExecutionTarget
 
-GOOD_CONFIG = {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": False}
+GOOD_CONFIG = {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True}
 GOOD_SECRET_REF = "env:SECP_PROVIDER_SECRET__TARGET_ONE"
 
 
@@ -63,6 +63,24 @@ def test_register_rejects_plaintext_secret_ref(session, principal):
 def test_register_rejects_unsafe_env_ref(session, principal):
     with pytest.raises(ValidationFailedError):
         _register(session, principal, secret_ref="env:HOME")  # not namespaced
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"base_url": "http://proxmox.example.test:8006/api2/json", "verify_tls": True},
+        {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": False},
+        {"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True, "x": 1},
+    ],
+)
+def test_register_rejects_unsafe_proxmox_config(session, principal, config):
+    with pytest.raises(ValidationFailedError):
+        _register(session, principal, config=config)
+
+
+def test_register_rejects_invalid_proxmox_scope_policy(session, principal):
+    with pytest.raises(ValidationFailedError):
+        _register(session, principal, scope_policy={"resource_types": ["vm", "secret"]})
 
 
 def test_target_config_is_immutable(session, principal):
