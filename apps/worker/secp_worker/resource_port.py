@@ -8,7 +8,7 @@ the provider-neutral ``environment_*`` projection tables (ADR-008).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from secp_api.models import EnvironmentNetwork, EnvironmentNode, EnvironmentTopologyEdge
 from secp_plugin_api.v1 import InstanceTopology
@@ -22,7 +22,7 @@ def _as_uuid(value: str | uuid.UUID) -> uuid.UUID:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class SqlAlchemyResourcePort:
@@ -120,9 +120,7 @@ class SqlAlchemyResourcePort:
             self.session.execute(
                 select(EnvironmentTopologyEdge)
                 .where(EnvironmentTopologyEdge.instance_id == iid)
-                .order_by(
-                    EnvironmentTopologyEdge.source_ref, EnvironmentTopologyEdge.target_ref
-                )
+                .order_by(EnvironmentTopologyEdge.source_ref, EnvironmentTopologyEdge.target_ref)
             )
             .scalars()
             .all()

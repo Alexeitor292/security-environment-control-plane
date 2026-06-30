@@ -31,10 +31,13 @@ def test_destroy_tears_down_all_instances(session, principal, running_exercise):
     # Simulated resources are cleared.
     for inst in instances:
         assert (
-            session.query(EnvironmentNode).filter(EnvironmentNode.instance_id == inst.id).count() == 0
+            session.query(EnvironmentNode).filter(EnvironmentNode.instance_id == inst.id).count()
+            == 0
         )
         assert (
-            session.query(EnvironmentNetwork).filter(EnvironmentNetwork.instance_id == inst.id).count()
+            session.query(EnvironmentNetwork)
+            .filter(EnvironmentNetwork.instance_id == inst.id)
+            .count()
             == 0
         )
         assert (

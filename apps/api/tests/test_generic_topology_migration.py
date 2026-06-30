@@ -11,14 +11,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
-
 from secp_api.models import EnvironmentNetwork, EnvironmentNode, EnvironmentTopologyEdge
+from sqlalchemy import create_engine, text
 
 API_DIR = Path(__file__).resolve().parents[1]
 
 
 # --- behavior preserved -------------------------------------------------------
+
 
 def test_simulator_writes_generic_provenance(session, principal, running_exercise):
     from secp_api.models import EnvironmentInstance
@@ -29,11 +29,7 @@ def test_simulator_writes_generic_provenance(session, principal, running_exercis
         .filter(EnvironmentInstance.exercise_id == exercise.id)
         .first()
     )
-    nodes = (
-        session.query(EnvironmentNode)
-        .filter(EnvironmentNode.instance_id == instance.id)
-        .all()
-    )
+    nodes = session.query(EnvironmentNode).filter(EnvironmentNode.instance_id == instance.id).all()
     assert nodes, "simulator should still produce nodes"
     for n in nodes:
         assert n.provider == "simulator"
@@ -71,6 +67,7 @@ def test_topology_projection_shape_unchanged(session, principal, running_exercis
 
 
 # --- data preservation across the rename migration ----------------------------
+
 
 def test_rename_migration_preserves_existing_rows(tmp_path, monkeypatch):
     from alembic import command
@@ -129,4 +126,4 @@ def test_rename_migration_preserves_existing_rows(tmp_path, monkeypatch):
     assert ref == "attacker"
     assert provider == "simulator"
     assert source == "simulator"  # backfilled default
-    assert prt == "node"          # backfilled default
+    assert prt == "node"  # backfilled default
