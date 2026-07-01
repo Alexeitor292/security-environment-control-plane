@@ -53,6 +53,28 @@ class SnapshotStatus(str, Enum):
     failed = "failed"
 
 
+class ProvisioningOperationKind(str, Enum):
+    """The kind of provisioning operation (SECP-002B-0, ADR-012)."""
+
+    dry_run = "dry_run"
+    apply = "apply"
+    destroy = "destroy"
+
+
+class ProvisioningStatus(str, Enum):
+    """Durable provisioning-operation lifecycle (SECP-002B-0, ADR-011/012)."""
+
+    manifest_generated = "manifest_generated"
+    pending_approval = "pending_approval"
+    queued = "queued"
+    dry_run_completed = "dry_run_completed"
+    applying = "applying"
+    applied = "applied"
+    failed = "failed"
+    destroy_queued = "destroy_queued"
+    destroyed = "destroyed"
+
+
 class WorkflowKind(str, Enum):
     deploy = "deploy"
     reset = "reset"
@@ -83,6 +105,9 @@ class Permission(str, Enum):
     target_manage = "target:manage"
     inventory_discover = "inventory:discover"
     inventory_read = "inventory:read"
+    # SECP-002B-0 — provisioning safety harness (manifests + fake runner).
+    provisioning_manage = "provisioning:manage"
+    provisioning_read = "provisioning:read"
 
 
 class AuditAction(str, Enum):
@@ -123,3 +148,15 @@ class AuditAction(str, Enum):
     # SECP-002A plan target-pinning.
     plan_target_bound = "plan.target_bound"
     target_deploy_refused = "deploy.target_refused"
+    # SECP-002B-0 — provisioning manifests and fake-runner operations.
+    manifest_generated = "manifest.generated"
+    manifest_validated = "manifest.validated"
+    manifest_generation_refused = "manifest.generation_refused"
+    provisioning_operation_created = "provisioning.operation_created"
+    provisioning_dry_run_completed = "provisioning.dry_run_completed"
+    provisioning_apply_started = "provisioning.apply_started"
+    provisioning_applied = "provisioning.applied"
+    provisioning_failed = "provisioning.failed"
+    provisioning_destroy_queued = "provisioning.destroy_queued"
+    provisioning_destroyed = "provisioning.destroyed"
+    provisioning_refused = "provisioning.refused"

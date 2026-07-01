@@ -33,7 +33,9 @@ _SECRET_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _PROXMOX_CONFIG_KEYS = frozenset({"base_url", "verify_tls"})
-_PROXMOX_SCOPE_KEYS = frozenset({"resource_types", "nodes"})
+# "provisioning" carries the SECP-002B-0 provisioning scope policy; its strict shape
+# is validated at manifest generation (secp_api.provisioning_scope).
+_PROXMOX_SCOPE_KEYS = frozenset({"resource_types", "nodes", "provisioning"})
 _PROXMOX_RESOURCE_TYPES = frozenset({"node", "vm", "container", "storage", "network"})
 
 
@@ -111,6 +113,10 @@ def _validate_proxmox_scope_policy(scope_policy: dict) -> list[str]:
         not isinstance(nodes, list) or not all(isinstance(v, str) and v for v in nodes)
     ):
         errors.append("scope_policy.nodes must be a list of non-empty strings")
+
+    provisioning = scope_policy.get("provisioning")
+    if provisioning is not None and not isinstance(provisioning, dict):
+        errors.append("scope_policy.provisioning must be an object")
     return errors
 
 

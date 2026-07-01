@@ -17,10 +17,18 @@ from secp_api.models import (
     EnvironmentVersion,
     ExecutionTarget,
     ProviderInventorySnapshot,
+    ProvisioningManifest,
 )
 
 _VERSION_PROTECTED = ("spec", "content_hash", "version_number", "api_version")
 _TARGET_PROTECTED = ("config", "config_hash", "plugin_name")
+_MANIFEST_PROTECTED = (
+    "content",
+    "content_hash",
+    "deployment_plan_id",
+    "execution_target_id",
+    "target_config_hash",
+)
 
 
 def _attr_changed(obj: object, attr: str) -> bool:
@@ -64,6 +72,14 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             if bool(_previous_value(obj, "finalized")):
                 raise ImmutableResourceError(
                     "ProviderInventorySnapshot is immutable after completion"
+                )
+        # ProvisioningManifest: content/hash/bindings immutable after creation (ADR-011).
+        if isinstance(obj, ProvisioningManifest):
+            changed = [a for a in _MANIFEST_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "ProvisioningManifest is immutable after generation; "
+                    f"attempted to change {changed}"
                 )
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):

@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     s3_endpoint: str = "http://localhost:9000"
     s3_bucket: str = "secp-artifacts"
 
+    # SECP-002B-0: explicit dev/test gate for the FakeOpenTofuRunner. Never enabled
+    # in production (enforced below). Even when true it only reaches the FAKE runner,
+    # and only when every provisioning precondition is met (ADR-012).
+    enable_fake_provisioning: bool = False
+
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 
     @property
@@ -79,6 +84,11 @@ class Settings(BaseSettings):
             problems.append(
                 "SECP_WORKFLOW_DISPATCH_MODE must be 'temporal' in production "
                 "(inline execution is for local development/tests only)"
+            )
+        if self.enable_fake_provisioning:
+            problems.append(
+                "SECP_ENABLE_FAKE_PROVISIONING must be false in production "
+                "(the fake provisioning runner is for local development/tests only)"
             )
         if problems:
             raise ValueError("unsafe production configuration refused: " + "; ".join(problems))
