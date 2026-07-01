@@ -34,15 +34,27 @@ _PROXMOX_CONFIG = {"base_url": "https://proxmox.lab.test:8006/api2/json", "verif
 
 @pytest.fixture
 def proxmox_target(session, principal):
-    """An active Proxmox execution target owned by the principal's organization."""
-    return register_target(
+    """An active Proxmox execution target with an approved & active onboarding."""
+    import copy
+
+    from tests.conftest import (  # type: ignore
+        VALID_PROVISIONING_SCOPE,
+        onboard_and_activate,
+    )
+
+    target = register_target(
         session,
         principal,
         display_name="Lab Proxmox",
         plugin_name="proxmox",
         config=_PROXMOX_CONFIG,
         secret_ref="env:SECP_PROVIDER_SECRET__LAB",
+        scope_policy={"provisioning": copy.deepcopy(VALID_PROVISIONING_SCOPE)},
     )
+    # A target-bound plan requires an approved & active onboarding (SECP-002B-1B-0).
+    onboard_and_activate(session, principal, target)
+    session.commit()
+    return target
 
 
 @pytest.fixture

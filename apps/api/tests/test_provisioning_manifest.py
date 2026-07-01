@@ -376,6 +376,17 @@ def test_new_plan_under_new_policy_allows_generation(session, principal, provisi
     with pytest.raises(ValidationFailedError, match="scope-policy hash mismatch"):
         manifests.generate_manifest(session, principal, env.plan.id)
 
+    # The scope change also invalidates the policy-A onboarding approval (SECP-002B-1B-0);
+    # re-onboard the target under policy B before generating a new plan.
+    from secp_api.services import onboarding as onb
+    from tests.conftest import onboard_and_activate
+
+    old_ob = onb.active_onboarding_for_target(session, env.target.id)
+    onb.retire_onboarding(session, principal, old_ob.id)
+    session.commit()
+    onboard_and_activate(session, principal, session.get(ExecutionTarget, env.target.id))
+    session.commit()
+
     # Create a fresh exercise on the same target — it will capture policy B's hash.
     tmpl = catalog.create_template(
         session, principal, name="Prov2", slug=f"prov2-{uuid.uuid4().hex[:8]}"

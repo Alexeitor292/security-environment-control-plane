@@ -227,6 +227,8 @@ def build_provisioning_env(
         scope_policy={"provisioning": copy.deepcopy(scope or VALID_PROVISIONING_SCOPE)},
         address_spaces=address_spaces or [{"cidr_block": "10.60.0.0/16", "subnet_prefix": 24}],
     )
+    # A target-bound plan requires an approved & active onboarding (SECP-002B-1B-0).
+    onboard_and_activate(session, principal, target)
     template = catalog.create_template(
         session, principal, name="Prov", slug=f"prov-{uuid.uuid4().hex[:8]}"
     )
@@ -310,15 +312,23 @@ VALID_ONBOARDING_BOUNDARY: dict = {
 
 
 def onboard_and_activate(session, principal, target, *, isolation_model=None, boundary=None):
-    """Drive a target onboarding to 'active' (create → preflight → submit → approve → activate)."""
+    """Drive a target onboarding to 'active' (create → preflight → submit → approve → activate).
+
+    The declared boundary defaults to one derived from the target scope policy (always
+    within scope). Uses the API-style simulated preflight (no arbitrary caller checks).
+    """
     import copy
 
     from secp_api.enums import IsolationModel, OnboardingMode
+    from secp_api.onboarding import boundary_from_scope
     from secp_api.services import onboarding as onb
-    from secp_worker.onboarding import FakePreflightCollector
 
     isolation_model = isolation_model or IsolationModel.logical
-    b = copy.deepcopy(boundary or VALID_ONBOARDING_BOUNDARY)
+    b = (
+        copy.deepcopy(boundary)
+        if boundary is not None
+        else boundary_from_scope(target.scope_policy)
+    )
     ob = onb.create_onboarding(
         session,
         principal,
@@ -327,10 +337,7 @@ def onboard_and_activate(session, principal, target, *, isolation_model=None, bo
         isolation_model=isolation_model,
         declared_boundary=b,
     )
-    checks = FakePreflightCollector().collect(
-        declared_boundary=b, isolation_model=isolation_model.value
-    )
-    onb.record_preflight(session, principal, ob.id, checks=checks)
+    onb.record_simulated_preflight(session, principal, ob.id)
     onb.submit_for_review(session, principal, ob.id)
     onb.approve_onboarding(session, principal, ob.id, "approved for test")
     onb.activate_onboarding(session, principal, ob.id)

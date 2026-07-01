@@ -210,6 +210,10 @@ def test_temporal_dispatch_refuses_target_bound_plan_before_queuing(
     version = create_version(
         session, principal, template_id=template.id, definition=valid_definition
     )
+    import copy
+
+    from tests.conftest import VALID_PROVISIONING_SCOPE, onboard_and_activate  # type: ignore
+
     target = register_target(
         session,
         principal,
@@ -217,7 +221,9 @@ def test_temporal_dispatch_refuses_target_bound_plan_before_queuing(
         plugin_name="proxmox",
         config={"base_url": "https://pve.example.test:8006/api2/json", "verify_tls": True},
         secret_ref="env:SECP_PROVIDER_SECRET__LAB",
+        scope_policy={"provisioning": copy.deepcopy(VALID_PROVISIONING_SCOPE)},
     )
+    onboard_and_activate(session, principal, target)
     ex = exercises.create_exercise(
         session,
         principal,
