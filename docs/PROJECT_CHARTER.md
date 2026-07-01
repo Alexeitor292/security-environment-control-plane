@@ -878,9 +878,22 @@ does not remove or weaken any architectural invariant in §6.
   provisioning, mutation, or real-endpoint discovery occurs. See
   [`docs/architecture/secp-002a-proxmox-discovery.md`](architecture/secp-002a-proxmox-discovery.md)
   and ADR-006…010.
-* **SECP-002B — Controlled provisioning.** OpenTofu runner, isolated network
-  creation, VM/container lifecycle — all behind plan approval and worker-only
-  execution.
+* **SECP-002B — Controlled provisioning.** Delivered in safe sub-phases:
+  * **SECP-002B-0 — Provisioning safety harness + fake OpenTofu runner.** Immutable,
+    secret-free provisioning manifests bound to an approved plan + pinned target;
+    a strict blast-radius scope policy (allowlists/bounds, default-deny external
+    connectivity); a worker-only `ProvisioningRunner` seam implemented **only** by a
+    `FakeOpenTofuRunner` (no subprocess, network, provider client, or OpenTofu
+    binary); and a durable provisioning-operation lifecycle. Target-bound deployment
+    remains refused by default; the fake runner is reachable only behind an explicit
+    dev/test gate with all preconditions met. **No real provisioning or
+    infrastructure.** See
+    [`docs/architecture/secp-002b-0-provisioning-safety.md`](architecture/secp-002b-0-provisioning-safety.md)
+    and ADR-011/ADR-012.
+  * **SECP-002B-1 — First disposable isolated Proxmox lab via worker-only OpenTofu.**
+    A real, pinned OpenTofu runner behind the SECP-002B-0 seam and gate: isolated
+    network creation and VM/container lifecycle on a disposable lab, all behind plan
+    approval and worker-only execution.
 * **SECP-002C — Reconciliation, reset/destroy, drift handling** against real
   infrastructure.
 

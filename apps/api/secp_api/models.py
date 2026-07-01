@@ -33,6 +33,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from secp_api.enums import (
     LifecycleState,
     PlanStatus,
+    ProvisioningOperationKind,
+    ProvisioningStatus,
     ReservationStatus,
     SnapshotStatus,
     TargetStatus,
@@ -260,6 +262,9 @@ class DeploymentPlan(Base, TimestampMixin):
         Uuid, ForeignKey("execution_target.id"), nullable=True
     )
     target_config_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Hash of scope_policy["provisioning"] at plan-generation time (SECP-002B-0).
+    # Nullable for pre-migration rows; manifest generation fails closed when None.
+    target_scope_policy_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status: Mapped[PlanStatus] = mapped_column(
         EnumType(PlanStatus), default=PlanStatus.generated, nullable=False
     )
@@ -603,3 +608,78 @@ class NetworkReservation(Base, TimestampMixin):
     status: Mapped[ReservationStatus] = mapped_column(
         EnumType(ReservationStatus), default=ReservationStatus.reserved, nullable=False
     )
+
+
+# --- Provisioning safety harness (SECP-002B-0) -------------------------------
+
+
+class ProvisioningManifest(Base, TimestampMixin):
+    """Immutable, secret-free provisioning manifest (ADR-011).
+
+    Generated only from an approved plan + pinned target/hash + finalized
+    reservations + validated scope policy. ``content``/``content_hash`` and the
+    binding columns are immutable after creation (see :mod:`secp_api.immutability`).
+    Contains NO secrets, secret references, credentials, or endpoint auth material.
+    """
+
+    __tablename__ = "provisioning_manifest"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    deployment_plan_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("deployment_plan.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    target_config_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Scope-policy hash binding (SECP-002B-0): immutable once set.
+    target_scope_policy_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    content: Mapped[dict] = mapped_column(JSON, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    operations: Mapped[list[ProvisioningOperation]] = relationship(
+        back_populates="manifest", cascade="all, delete-orphan"
+    )
+
+
+class ProvisioningOperation(Base, TimestampMixin):
+    """Durable provisioning-operation record with an idempotency key (ADR-011/012).
+
+    ``idempotency_key`` = sha256(manifest content hash + operation kind); a duplicate
+    request maps to the same operation, so retries are safe.
+    """
+
+    __tablename__ = "provisioning_operation"
+    __table_args__ = (UniqueConstraint("idempotency_key"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    manifest_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("provisioning_manifest.id"), nullable=False, index=True
+    )
+    kind: Mapped[ProvisioningOperationKind] = mapped_column(
+        EnumType(ProvisioningOperationKind), nullable=False
+    )
+    status: Mapped[ProvisioningStatus] = mapped_column(
+        EnumType(ProvisioningStatus, length=40),
+        default=ProvisioningStatus.manifest_generated,
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    # Deterministic runner operation id (fake runner); no secrets.
+    runner: Mapped[str] = mapped_column(String(60), default="")
+    operation_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    manifest: Mapped[ProvisioningManifest] = relationship(back_populates="operations")

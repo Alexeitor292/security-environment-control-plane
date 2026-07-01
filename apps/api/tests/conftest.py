@@ -176,3 +176,88 @@ def running_exercise(session, principal):
         return _make_running_exercise(session, principal, name=name)
 
     return _factory
+
+
+# --- SECP-002B-0 provisioning fixtures ---------------------------------------
+
+VALID_PROVISIONING_SCOPE: dict = {
+    "allowed_nodes": ["pve-node-1", "pve-node-2"],
+    "allowed_storage": ["local-lvm"],
+    "allowed_bridges": ["vmbr0"],
+    "allowed_templates": ["kali-linux", "ubuntu-server-22.04", "wazuh-agent"],
+    "vmid_range": {"start": 9000, "end": 9100},
+    "max_teams": 4,
+    "max_vms": 20,
+    "max_containers": 10,
+    "max_total_vcpu": 64,
+    "max_total_memory_mb": 131072,
+    "max_total_disk_gb": 2048,
+    "allowed_cidr_reservations": ["10.60.0.0/16"],
+    "external_connectivity": {"policy": "deny"},
+    "node_sizing": {
+        "kali-linux": {"vcpu": 2, "memory_mb": 4096, "disk_gb": 40},
+        "ubuntu-server-22.04": {"vcpu": 1, "memory_mb": 2048, "disk_gb": 20},
+        "wazuh-agent": {"vcpu": 1, "memory_mb": 1024, "disk_gb": 10},
+    },
+}
+
+
+class ProvisioningEnv:
+    def __init__(self, target, exercise, plan):
+        self.target = target
+        self.exercise = exercise
+        self.plan = plan
+
+
+def build_provisioning_env(
+    session, principal, *, scope=None, address_spaces=None, approve=True
+) -> ProvisioningEnv:
+    """Set up an approved, target-bound plan + finalized reservations for 2 teams."""
+    import copy
+
+    from secp_api.services import catalog, exercises, planning, reservations, targets
+
+    target = targets.register_target(
+        session,
+        principal,
+        display_name="Lab (placeholder)",
+        plugin_name="proxmox",
+        config={"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True},
+        secret_ref="env:SECP_PROVIDER_SECRET__LAB",
+        scope_policy={"provisioning": copy.deepcopy(scope or VALID_PROVISIONING_SCOPE)},
+        address_spaces=address_spaces or [{"cidr_block": "10.60.0.0/16", "subnet_prefix": 24}],
+    )
+    template = catalog.create_template(
+        session, principal, name="Prov", slug=f"prov-{uuid.uuid4().hex[:8]}"
+    )
+    version = catalog.create_version(
+        session, principal, template_id=template.id, definition=VALID_DEFINITION
+    )
+    exercise = exercises.create_exercise(
+        session,
+        principal,
+        template_id=template.id,
+        version_id=version.id,
+        name="prov",
+        execution_target_id=target.id,
+    )
+    exercises.validate_exercise(session, principal, exercise.id)
+    plan = planning.generate_plan(session, principal, exercise.id)
+    planning.submit_plan(session, principal, plan.id)
+    if approve:
+        planning.approve_plan(session, principal, plan.id, "approved for provisioning test")
+    # Finalized reservations for both teams.
+    for team in ("team1", "team2"):
+        reservations.reserve_network(
+            session, principal, target_id=target.id, team_ref=team, exercise_id=exercise.id
+        )
+    session.commit()
+    return ProvisioningEnv(target, exercise, plan)
+
+
+@pytest.fixture
+def provisioning_env(session, principal):
+    def _factory(**kwargs):
+        return build_provisioning_env(session, principal, **kwargs)
+
+    return _factory

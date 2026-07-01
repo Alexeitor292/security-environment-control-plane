@@ -1,0 +1,17 @@
+# Runtime-verification override (SECP-002B-0).
+#
+# Enables the FakeOpenTofuRunner gate on the WORKER only, so the fake provisioning
+# lifecycle can be demonstrated end-to-end without any real infrastructure,
+# OpenTofu/Terraform binary, subprocess, or network. Default dispatch stays inline
+# so the Simulator lifecycle is exercised unchanged.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.provisioning-verify.yml \
+#     --env-file ../../.env up -d --build
+name: secp-dev
+
+services:
+  worker:
+    environment:
+      # Dev/test only. Even when true it only reaches the FAKE runner, and only
+      # when every provisioning precondition is met (ADR-012). Never in production.
+      SECP_ENABLE_FAKE_PROVISIONING: "true"

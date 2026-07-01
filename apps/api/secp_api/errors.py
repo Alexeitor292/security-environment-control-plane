@@ -44,6 +44,13 @@ class ApprovalRequiredError(DomainError):
     code = "approval_required"
 
 
+class ProvisioningRefusedError(DomainError):
+    """Raised when a (fake) provisioning operation is refused by the safety gate."""
+
+    http_status = 403
+    code = "provisioning_refused"
+
+
 class ValidationFailedError(DomainError):
     http_status = 422
     code = "validation_failed"
