@@ -10,10 +10,26 @@ worker-only OpenTofu dry run against a disposable Proxmox lab. It is intentional
 conservative: the first real run is narrowly scoped, reviewed, applied, verified, and
 destroyed.
 
+## 0. Approved target onboarding (SECP-002B-1B-0, ADR-014)
+
+- [ ] The target has an **approved & active `TargetOnboarding`** record with no config/scope
+      drift since approval (the real-provisioning gate enforces this).
+- [ ] The **onboarding mode** is declared (`clean_server` or `existing_environment`) and the
+      **isolation model** is explicit (`physical` preferred; `logical` only behind a
+      complete, declared, enforceable boundary).
+- [ ] The **declared boundary** is complete and matches the target scope policy (nodes /
+      storage / network segments / CIDRs / VM-ID range / quotas / deny-external /
+      least-privilege credential scope).
+- [ ] Preflight evidence is present, redacted, and **passing** — for `logical` isolation the
+      `no_route_to_protected` check must pass. (B1-B replaces the fake collector with a real,
+      still-redacted collector.)
+
 ## 1. Dedicated, disposable target
 
 - [ ] A **dedicated** Proxmox host/cluster reserved for disposable labs only — never a
-      production, home, or shared cluster.
+      production, home, or shared cluster. *(Physical isolation is preferred but not
+      mandatory; a shared environment is acceptable only with an approved `logical`
+      onboarding boundary per §0.)*
 - [ ] The environment is **rebuildable from scratch** and contains no data of value.
 - [ ] Registered as a distinct `ExecutionTarget` classified via an `isolated_lab`
       toolchain profile; not reused from any other purpose.

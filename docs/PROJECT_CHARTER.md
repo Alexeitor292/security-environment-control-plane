@@ -918,6 +918,26 @@ does not remove or weaken any architectural invariant in §6.
       **narrowly scoped first real apply**; verification; and a tested **destroy**, all
       behind the B1-A contract. Prerequisites are enumerated in the
       [B1-B lab prerequisite checklist](proxmox/b1b-lab-prerequisite-checklist.md).
+      * **SECP-002B-1B-0 — Target onboarding and automated deployment contract.** A
+        design/model/API/**fake-only** slice that formalizes *how a target becomes
+        eligible*. Two isolation models are valid: **physical** (dedicated hardware — a
+        recommended secure preset, **not** a product requirement) and **logical** (a shared
+        existing environment, allowed **only** behind an explicitly declared, enforceable,
+        auditable, independently verifiable boundary). Two onboarding modes are supported:
+        **clean_server** (bring a new/empty eligible server) and **existing_environment**
+        (select an existing node/cluster and declare a constrained boundary — node/storage/
+        network/CIDR/VM-ID/quota/deny-external/least-privilege-credential). Adds a
+        provider-neutral onboarding lifecycle (draft → preflight → review → **approval** →
+        active), immutable declared boundaries, redacted immutable preflight evidence (a
+        worker-only **fake** collector inspects nothing real), and a drift-invalidated
+        activation gate. **Standard provider-backed deployment is automated and
+        declarative**: SECP allocates IDs/addresses and creates scenario VMs/containers/
+        networks/disks/attachments inside the declared boundary — users do **not** manually
+        pre-create resources; import/adoption of pre-existing assets is a future explicit
+        opt-in workflow, never the default. Target onboarding and scenario deployment are
+        **separate lifecycle stages**. No real infrastructure is contacted. See
+        [`docs/architecture/secp-002b-1b-target-onboarding.md`](architecture/secp-002b-1b-target-onboarding.md)
+        and ADR-014.
 * **SECP-002C — Reconciliation, reset/destroy, drift handling** against real
   infrastructure.
 
