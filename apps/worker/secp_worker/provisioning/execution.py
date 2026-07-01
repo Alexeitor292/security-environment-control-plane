@@ -3,11 +3,26 @@
 Runs the FakeOpenTofuRunner ONLY when the explicit gate is enabled AND every
 provisioning precondition holds. This is the only place the runner is reached. The
 API never imports this module or the runner.
+
+Per-kind operations
+-------------------
+Each call to ``run_provisioning`` for a (manifest_id, kind) pair creates or
+retrieves an independent ProvisioningOperation record whose idempotency key is
+``sha256(manifest_content_hash + ":" + kind.value)``.  The kind, idempotency key,
+and historical result of any completed operation are never mutated.
+
+Durable state
+-------------
+The ProvisioningOperation record IS the authoritative state.  FakeOpenTofuRunner's
+in-memory ``_state`` dict is a local cache only; a fresh runner instance will
+never produce incorrect idempotency answers because ``run_provisioning`` reads
+operation.status from the database before calling the runner.
 """
 
 from __future__ import annotations
 
 import uuid
+from typing import NoReturn
 
 from secp_api import audit
 from secp_api.config import Settings, get_settings
@@ -37,7 +52,7 @@ from sqlalchemy import select
 from secp_worker.provisioning.runner import ProvisioningRunner, RunnerError
 
 
-def _refuse(session, operation: ProvisioningOperation, reason: str) -> None:
+def _refuse(session, operation: ProvisioningOperation, reason: str) -> NoReturn:
     """Audit + mark the operation failed, then raise ProvisioningRefusedError."""
     audit.record(
         session,
@@ -90,7 +105,18 @@ def _assert_gate_and_preconditions(
     # 5. Strict provisioning scope policy still valid.
     validate_provisioning_scope(target.scope_policy)
 
-    # 6. Finalized reservations still present for every team.
+    # 6. Scope policy must exactly match the manifest snapshot (no drift allowed).
+    current_provisioning_policy = (target.scope_policy or {}).get("provisioning", {})
+    manifest_policy_snapshot = manifest.content.get("scope_policy", {})
+    if current_provisioning_policy != manifest_policy_snapshot:
+        _refuse(
+            session,
+            operation,
+            "target scope_policy has drifted from the manifest snapshot; "
+            "generate a new manifest and obtain fresh approval before proceeding",
+        )
+
+    # 7. Finalized reservations still present for every team in the manifest.
     version = session.get(EnvironmentVersion, plan.environment_version_id)
     teams = validate_definition(version.spec).spec.teams.count
     reserved = (
@@ -104,31 +130,71 @@ def _assert_gate_and_preconditions(
         .scalars()
         .all()
     )
-    if len({r.team_ref for r in reserved}) < teams:
+    db_by_team: dict[str, NetworkReservation] = {r.team_ref: r for r in reserved}
+    if len(db_by_team) < teams:
         _refuse(session, operation, "finalized CIDR reservations are missing or released")
+
+    # 8. Exact reservation binding: every manifest snapshot entry must exactly
+    #    match an active DB reservation (team_ref, CIDR, org, exercise).
+    manifest_reservations = {
+        r["team_ref"]: r["cidr"] for r in manifest.content.get("reservations", [])
+    }
+    for team_ref, expected_cidr in manifest_reservations.items():
+        db_res = db_by_team.get(team_ref)
+        if db_res is None:
+            _refuse(
+                session,
+                operation,
+                f"reservation for {team_ref} is missing or released; "
+                "the manifest snapshot is stale — generate a new manifest",
+            )
+        if db_res.cidr != expected_cidr:
+            _refuse(
+                session,
+                operation,
+                f"reservation for {team_ref} has CIDR {db_res.cidr!r} but manifest "
+                f"snapshot expected {expected_cidr!r}; "
+                "generate a new manifest to reflect the updated reservation",
+            )
+        if db_res.organization_id != manifest.organization_id:
+            _refuse(
+                session,
+                operation,
+                f"reservation for {team_ref} belongs to a different organization",
+            )
+        if db_res.exercise_id != plan.exercise_id:
+            _refuse(
+                session,
+                operation,
+                f"reservation for {team_ref} is assigned to a different exercise",
+            )
 
 
 def run_provisioning(
     session,
-    operation_id: uuid.UUID,
+    manifest_id: uuid.UUID,
     kind: ProvisioningOperationKind,
     runner: ProvisioningRunner,
     *,
     settings: Settings | None = None,
 ) -> ProvisioningOperation:
-    """Execute a fake provisioning operation of ``kind`` (worker-only)."""
+    """Execute a fake provisioning operation of ``kind`` for the given manifest.
+
+    Each (manifest_id, kind) pair maps to an independent, durable
+    ProvisioningOperation record.  The operation is created on first call and
+    returned idempotently on subsequent calls.  No raw IntegrityError escapes.
+    """
     settings = settings or get_settings()
-    operation = session.get(ProvisioningOperation, operation_id)
-    if operation is None:
-        raise ProvisioningRefusedError(f"operation {operation_id} not found")
-    manifest = session.get(ProvisioningManifest, operation.manifest_id)
+    manifest = session.get(ProvisioningManifest, manifest_id)
     if manifest is None:
-        _refuse(session, operation, "manifest not found")
+        raise ProvisioningRefusedError(f"manifest {manifest_id} not found")
+
+    # Get or create the per-kind durable operation record.
+    operation = prov_service.get_or_create_operation(session, manifest, kind)
 
     _assert_gate_and_preconditions(session, operation, manifest, settings)
 
     op_ref = manifest_idempotency_key(manifest.content_hash, kind)
-    operation.kind = kind
     operation.operation_ref = op_ref
     operation.attempts = (operation.attempts or 0) + 1
 
@@ -184,9 +250,10 @@ def _run_dry_run(session, operation, manifest, runner, op_ref):
 
 def _run_apply(session, operation, manifest, runner, op_ref):
     if operation.status == ProvisioningStatus.applied:
-        # Idempotent: already applied.
-        result = runner.apply(manifest.content, operation_id=op_ref)
-        operation.result = result.model_dump()
+        # DB-authoritative idempotent noop: the operation is already complete.
+        # Do NOT call the runner — its in-memory state may be empty (fresh instance).
+        # The prior resources are stored in operation.result; tag as idempotent.
+        operation.result = {**operation.result, "idempotent_noop": True}
         session.flush()
         return operation
     if operation.status in (
@@ -223,6 +290,18 @@ def _run_apply(session, operation, manifest, runner, op_ref):
 def _run_destroy(session, operation, manifest, runner, op_ref):
     if operation.status == ProvisioningStatus.destroyed:
         return operation  # idempotent noop
+    # Advance through queued if starting from manifest_generated or pending_approval.
+    if operation.status in (
+        ProvisioningStatus.manifest_generated,
+        ProvisioningStatus.pending_approval,
+    ):
+        prov_service.advance(
+            session,
+            operation,
+            ProvisioningStatus.queued,
+            action=AuditAction.provisioning_operation_created,
+            data={"kind": "destroy"},
+        )
     prov_service.advance(
         session,
         operation,

@@ -23,7 +23,6 @@ from secp_api.enums import (
     Permission,
     PlanStatus,
     ProvisioningOperationKind,
-    ProvisioningStatus,
     ReservationStatus,
     TargetStatus,
 )
@@ -33,7 +32,6 @@ from secp_api.models import (
     EnvironmentVersion,
     NetworkReservation,
     ProvisioningManifest,
-    ProvisioningOperation,
 )
 from secp_api.provisioning_scope import ProvisioningScopePolicy, validate_provisioning_scope
 from secp_api.services.targets import get_target
@@ -95,7 +93,12 @@ def _cidr_in_policy(cidr: str, policy: ProvisioningScopePolicy) -> bool:
 def _build_topology(
     definition, reservations_by_team: dict[str, str], policy: ProvisioningScopePolicy
 ) -> tuple[list[dict], dict[str, int]]:
-    """Build a secret-free desired topology bounded by the scope policy."""
+    """Build a secret-free desired topology bounded by the scope policy.
+
+    Every node gets a deterministic vmid inside vmid_range and explicit
+    vcpu/memory_mb/disk_gb from the approved node_sizing profile.  Missing
+    sizing data fails closed rather than applying hidden defaults.
+    """
     spec = definition.spec
     nodes_per_team = spec.roles
     distinct_images = {role.image for role in nodes_per_team}
@@ -105,10 +108,22 @@ def _build_topology(
             "desired images are not in the scope policy allowed_templates",
             errors=[f"template(s) not allowed: {sorted(missing_templates)}"],
         )
+    # Fail closed: every image used must have an explicit sizing profile.
+    missing_sizing = distinct_images - set(policy.node_sizing)
+    if missing_sizing:
+        raise ValidationFailedError(
+            "node_sizing profile missing for image(s); no silent defaults are applied",
+            errors=[f"no sizing for image '{img}'" for img in sorted(missing_sizing)],
+        )
 
     topology: list[dict] = []
     total_vms = 0
     total_containers = 0
+    total_vcpu = 0
+    total_memory_mb = 0
+    total_disk_gb = 0
+    # Deterministic vmid assignment: start from vmid_range.start, increment per node.
+    vmid_counter = policy.vmid_range.start
     node_pool = policy.allowed_nodes
     for team_index in range(spec.teams.count):
         team_ref = f"team{team_index + 1}"
@@ -128,10 +143,21 @@ def _build_topology(
         for i, role in enumerate(nodes_per_team):
             for c in range(role.count):
                 is_container = role.kind.value in _CONTAINER_KINDS
+                sizing = policy.node_sizing[role.image]
+                if vmid_counter > policy.vmid_range.end:
+                    raise ValidationFailedError(
+                        f"vmid_range [{policy.vmid_range.start}, {policy.vmid_range.end}] "
+                        "is exhausted; reduce the topology or widen the vmid_range",
+                    )
+                vmid = vmid_counter
+                vmid_counter += 1
                 if is_container:
                     total_containers += 1
                 else:
                     total_vms += 1
+                total_vcpu += sizing.vcpu
+                total_memory_mb += sizing.memory_mb
+                total_disk_gb += sizing.disk_gb
                 nodes.append(
                     {
                         "ref": f"{role.name}-{c}" if role.count > 1 else role.name,
@@ -140,6 +166,10 @@ def _build_topology(
                         "image": role.image,
                         "node": node_pool[(team_index + i) % len(node_pool)],
                         "storage": policy.allowed_storage[0],
+                        "vmid": vmid,
+                        "vcpu": sizing.vcpu,
+                        "memory_mb": sizing.memory_mb,
+                        "disk_gb": sizing.disk_gb,
                     }
                 )
         topology.append({"team_ref": team_ref, "networks": networks, "nodes": nodes})
@@ -148,6 +178,9 @@ def _build_topology(
         "teams": spec.teams.count,
         "vms": total_vms,
         "containers": total_containers,
+        "total_vcpu": total_vcpu,
+        "total_memory_mb": total_memory_mb,
+        "total_disk_gb": total_disk_gb,
     }
     return topology, totals
 
@@ -161,6 +194,20 @@ def _enforce_limits(totals: dict[str, int], policy: ProvisioningScopePolicy) -> 
     if totals["containers"] > policy.max_containers:
         problems.append(
             f"containers {totals['containers']} exceeds max_containers {policy.max_containers}"
+        )
+    if totals["total_vcpu"] > policy.max_total_vcpu:
+        problems.append(
+            f"total_vcpu {totals['total_vcpu']} exceeds max_total_vcpu {policy.max_total_vcpu}"
+        )
+    if totals["total_memory_mb"] > policy.max_total_memory_mb:
+        problems.append(
+            f"total_memory_mb {totals['total_memory_mb']} exceeds "
+            f"max_total_memory_mb {policy.max_total_memory_mb}"
+        )
+    if totals["total_disk_gb"] > policy.max_total_disk_gb:
+        problems.append(
+            f"total_disk_gb {totals['total_disk_gb']} exceeds "
+            f"max_total_disk_gb {policy.max_total_disk_gb}"
         )
     if problems:
         raise ValidationFailedError("desired topology exceeds blast-radius limits", errors=problems)
@@ -264,19 +311,9 @@ def generate_manifest(
     session.add(manifest)
     session.flush()
 
-    # A manifest_generated operation record starts the durable lifecycle. One
-    # operation row per manifest (stable idempotency key); per-kind runner
-    # invocations use manifest_idempotency_key(content_hash, kind).
-    operation = ProvisioningOperation(
-        organization_id=plan.organization_id,
-        manifest_id=manifest.id,
-        kind=ProvisioningOperationKind.dry_run,
-        status=ProvisioningStatus.manifest_generated,
-        idempotency_key=f"prov:{manifest.content_hash}",
-        created_by=actor.user_id,
-    )
-    session.add(operation)
-    session.flush()
+    # Per-kind ProvisioningOperation records are created on first call to
+    # run_provisioning (not here).  Each kind (dry_run, apply, destroy) gets
+    # its own durable record with an idempotency key that includes the kind.
 
     audit.record(
         session,

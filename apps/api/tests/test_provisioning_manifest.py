@@ -154,4 +154,129 @@ def _narrow_templates_scope() -> dict:
         "max_total_disk_gb": 2048,
         "allowed_cidr_reservations": ["10.60.0.0/16"],
         "external_connectivity": {"policy": "deny"},
+        "node_sizing": {
+            "only-this-one": {"vcpu": 1, "memory_mb": 512, "disk_gb": 5},
+        },
     }
+
+
+# ---------------------------------------------------------------------------
+# Proofs #7 – resource / VM-ID enforcement
+# ---------------------------------------------------------------------------
+
+
+def _base_scope():
+    """A tight scope that the VALID_DEFINITION topology easily fits within."""
+    import copy
+
+    from apps.api.tests.conftest import VALID_PROVISIONING_SCOPE  # type: ignore[import]
+
+    return copy.deepcopy(VALID_PROVISIONING_SCOPE)
+
+
+def _tight_scope(**overrides) -> dict:
+    """Build a provisioning scope from the valid defaults with overrides applied."""
+    import copy
+
+    from tests.conftest import VALID_PROVISIONING_SCOPE  # accessed via pytest path
+
+    scope = copy.deepcopy(VALID_PROVISIONING_SCOPE)
+    scope.update(overrides)
+    return scope
+
+
+def test_manifest_nodes_have_vmid_and_sizing(session, principal, provisioning_env):
+    """Every node in the manifest topology must have vmid, vcpu, memory_mb, disk_gb."""
+    env = provisioning_env()
+    manifest = manifests.generate_manifest(session, principal, env.plan.id)
+    session.commit()
+
+    for team in manifest.content["topology"]:
+        for node in team["nodes"]:
+            assert "vmid" in node, f"node {node['ref']} missing vmid"
+            assert "vcpu" in node, f"node {node['ref']} missing vcpu"
+            assert "memory_mb" in node, f"node {node['ref']} missing memory_mb"
+            assert "disk_gb" in node, f"node {node['ref']} missing disk_gb"
+            assert node["vcpu"] >= 1
+            assert node["memory_mb"] >= 128
+            assert node["disk_gb"] >= 1
+
+
+def test_vmids_are_within_range_and_deterministic(session, principal, provisioning_env):
+    """All assigned vmids must be within vmid_range and deterministic (no overlap)."""
+    env = provisioning_env()
+    manifest = manifests.generate_manifest(session, principal, env.plan.id)
+    session.commit()
+
+    vmid_range = manifest.content["scope_policy"]["vmid_range"]
+    vmids = []
+    for team in manifest.content["topology"]:
+        for node in team["nodes"]:
+            vmid = node["vmid"]
+            assert vmid_range["start"] <= vmid <= vmid_range["end"], (
+                f"vmid {vmid} is outside vmid_range [{vmid_range['start']}, {vmid_range['end']}]"
+            )
+            vmids.append(vmid)
+    # No duplicate vmids.
+    assert len(vmids) == len(set(vmids)), "duplicate vmids assigned"
+
+
+def test_vcpu_cap_exceeded_blocks_generation(session, principal, provisioning_env):
+    """Aggregate vCPU exceeding max_total_vcpu is refused at manifest generation."""
+    # With 2 teams x 3 nodes: attacker(2)+web(1)+wazuh(1) = 4 vcpu per team = 8 total.
+    # Set the cap below 8 to trigger the limit.
+    from tests.conftest import VALID_PROVISIONING_SCOPE
+
+    scope = copy.deepcopy(VALID_PROVISIONING_SCOPE)
+    scope["max_total_vcpu"] = 3  # below 8
+    env = provisioning_env(scope=scope)
+    with pytest.raises(ValidationFailedError, match="blast-radius"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+
+
+def test_memory_cap_exceeded_blocks_generation(session, principal, provisioning_env):
+    """Aggregate memory_mb exceeding max_total_memory_mb is refused."""
+    from tests.conftest import VALID_PROVISIONING_SCOPE
+
+    # 2 teams × (4096 + 2048 + 1024) = 14336 MB total
+    scope = copy.deepcopy(VALID_PROVISIONING_SCOPE)
+    scope["max_total_memory_mb"] = 1000  # below 14336
+    env = provisioning_env(scope=scope)
+    with pytest.raises(ValidationFailedError, match="blast-radius"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+
+
+def test_disk_cap_exceeded_blocks_generation(session, principal, provisioning_env):
+    """Aggregate disk_gb exceeding max_total_disk_gb is refused."""
+    from tests.conftest import VALID_PROVISIONING_SCOPE
+
+    # 2 teams × (40 + 20 + 10) = 140 GB total
+    scope = copy.deepcopy(VALID_PROVISIONING_SCOPE)
+    scope["max_total_disk_gb"] = 10  # below 140
+    env = provisioning_env(scope=scope)
+    with pytest.raises(ValidationFailedError, match="blast-radius"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+
+
+def test_vmid_range_exhausted_blocks_generation(session, principal, provisioning_env):
+    """A vmid_range too narrow to assign one vmid per node is refused."""
+    from tests.conftest import VALID_PROVISIONING_SCOPE
+
+    # 2 teams × 3 nodes = 6 nodes need vmids 9000–9005; range 9000–9002 only fits 3.
+    scope = copy.deepcopy(VALID_PROVISIONING_SCOPE)
+    scope["vmid_range"] = {"start": 9000, "end": 9002}
+    env = provisioning_env(scope=scope)
+    with pytest.raises(ValidationFailedError, match="exhausted"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+
+
+def test_missing_node_sizing_fails_closed(session, principal, provisioning_env):
+    """If node_sizing is missing for any image, generation fails closed (no hidden default)."""
+    from tests.conftest import VALID_PROVISIONING_SCOPE
+
+    scope = copy.deepcopy(VALID_PROVISIONING_SCOPE)
+    # Remove one image from node_sizing — this must fail.
+    del scope["node_sizing"]["kali-linux"]
+    env = provisioning_env(scope=scope)
+    with pytest.raises(ValidationFailedError, match="node_sizing"):
+        manifests.generate_manifest(session, principal, env.plan.id)

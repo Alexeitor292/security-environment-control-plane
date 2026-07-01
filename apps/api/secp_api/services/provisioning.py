@@ -10,13 +10,14 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import exc as sa_exc
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
-from secp_api.enums import AuditAction, Permission, ProvisioningStatus
-from secp_api.errors import NotFoundError
+from secp_api.enums import AuditAction, Permission, ProvisioningOperationKind, ProvisioningStatus
+from secp_api.errors import DomainError, NotFoundError
 from secp_api.models import ProvisioningManifest, ProvisioningOperation
 from secp_api.provisioning_lifecycle import transition
 
@@ -46,6 +47,62 @@ def operation_for_manifest(
         .scalars()
         .first()
     )
+
+
+def get_or_create_operation(
+    session: Session,
+    manifest: ProvisioningManifest,
+    kind: ProvisioningOperationKind,
+    created_by: uuid.UUID | None = None,
+) -> ProvisioningOperation:
+    """Get the existing per-kind operation or create a new durable one.
+
+    Idempotency key = sha256(manifest_content_hash + ":" + kind.value) so dry_run,
+    apply, and destroy each have an independent record.  Concurrent duplicate
+    creation is handled via a savepoint and IntegrityError recovery — no raw
+    IntegrityError escapes this function.
+    """
+    from secp_api.services.manifests import manifest_idempotency_key
+
+    key = manifest_idempotency_key(manifest.content_hash, kind)
+    existing = (
+        session.execute(
+            select(ProvisioningOperation).where(ProvisioningOperation.idempotency_key == key)
+        )
+        .scalars()
+        .first()
+    )
+    if existing is not None:
+        return existing
+
+    op = ProvisioningOperation(
+        organization_id=manifest.organization_id,
+        manifest_id=manifest.id,
+        kind=kind,
+        status=ProvisioningStatus.manifest_generated,
+        idempotency_key=key,
+        created_by=created_by,
+    )
+    try:
+        sp = session.begin_nested()
+        session.add(op)
+        session.flush()
+        sp.commit()
+    except sa_exc.IntegrityError:
+        sp.rollback()
+        existing = (
+            session.execute(
+                select(ProvisioningOperation).where(ProvisioningOperation.idempotency_key == key)
+            )
+            .scalars()
+            .first()
+        )
+        if existing is None:
+            raise DomainError(
+                "concurrent operation creation conflict; duplicate idempotency key"
+            ) from None
+        return existing
+    return op
 
 
 def list_operations(

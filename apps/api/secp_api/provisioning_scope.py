@@ -59,6 +59,18 @@ class ExternalConnectivity(_Strict):
         return v
 
 
+class NodeSizing(_Strict):
+    """Per-image/template resource sizing (vcpu, memory_mb, disk_gb).
+
+    Captured in the approved scope policy so every node's resources come from
+    an immutable approved input.  No silent defaults: a missing image fails closed.
+    """
+
+    vcpu: int = Field(ge=1)
+    memory_mb: int = Field(ge=128)
+    disk_gb: int = Field(ge=1)
+
+
 def _no_wildcards(values: list[str], field: str) -> list[str]:
     if not values:
         raise ValueError(f"{field} must be a non-empty allowlist")
@@ -84,11 +96,20 @@ class ProvisioningScopePolicy(_Strict):
     max_total_disk_gb: int = Field(ge=1)
     allowed_cidr_reservations: list[str]
     external_connectivity: ExternalConnectivity
+    # Required per-image sizing profile.  No defaults — missing image fails closed.
+    node_sizing: dict[str, NodeSizing]
 
     @field_validator("allowed_nodes", "allowed_storage", "allowed_bridges", "allowed_templates")
     @classmethod
     def _allowlists_no_wildcards(cls, v: list[str], info) -> list[str]:
         return _no_wildcards(v, info.field_name)
+
+    @field_validator("node_sizing")
+    @classmethod
+    def _node_sizing_non_empty(cls, v: dict) -> dict:
+        if not v:
+            raise ValueError("node_sizing must have at least one entry")
+        return v
 
     @field_validator("allowed_cidr_reservations")
     @classmethod

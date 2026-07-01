@@ -194,6 +194,11 @@ VALID_PROVISIONING_SCOPE: dict = {
     "max_total_disk_gb": 2048,
     "allowed_cidr_reservations": ["10.60.0.0/16"],
     "external_connectivity": {"policy": "deny"},
+    "node_sizing": {
+        "kali-linux": {"vcpu": 2, "memory_mb": 4096, "disk_gb": 40},
+        "ubuntu-server-22.04": {"vcpu": 1, "memory_mb": 2048, "disk_gb": 20},
+        "wazuh-agent": {"vcpu": 1, "memory_mb": 1024, "disk_gb": 10},
+    },
 }
 
 
