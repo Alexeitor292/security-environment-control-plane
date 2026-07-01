@@ -94,6 +94,32 @@ workflow, never the default. Onboarding and scenario deployment are **separate s
 5. SECP deploys the requested scenario **only within the declared boundary**, automatically —
    the user never hand-creates VMs, containers, networks, addresses, or storage.
 
+## Enforceable bindings (correction pass)
+
+Onboarding is not documentation — it is a hash-bound execution input:
+
+- **Plan/manifest bindings.** Target-bound `DeploymentPlan`s and `ProvisioningManifest`s carry
+  immutable `target_onboarding_id`, `onboarding_boundary_hash`, `approved_preflight_id`,
+  `approved_preflight_evidence_hash`, and `onboarding_verification_level` (the manifest echoes
+  them into immutable `content`/`content_hash`). A target-bound plan is generated only with
+  exactly one active onboarding.
+- **Exact agreement, fail-closed.** Manifest generation and the real worker gate require
+  onboarding record → plan → manifest → recomputed approved-preflight evidence to agree, and
+  refuse on boundary/evidence/level drift, target-config or scope drift, altered/stale
+  evidence, or ambiguous active onboarding.
+- **Simulated vs live.** Evidence carries `verification_level` + `collector_kind`. The API
+  preflight route is a *request* that only ever yields `simulated` / `fake_declared_boundary`
+  evidence (no caller-supplied checks/labels), so no API path forges live eligibility. Live
+  real provisioning structurally requires `live_verified` evidence from the trusted
+  `provider_worker` collector (future B1-B); simulated supports UX/review only.
+- **Complete evidence hash.** The evidence hash covers schema version, onboarding id, boundary/
+  config/scope/toolchain hashes, verification level, collector kind + identity, a monotonic
+  version, and every redacted check — never secrets/endpoints/inventories.
+- **One active onboarding per target.** A portable partial unique index plus service checks;
+  selection fails closed on zero/multiple actives.
+- **Boundary ⊆ scope.** A boundary broader than the target scope is refused; the worker executes
+  only within `boundary ∩ scope` (a provider adapter seam handles future naming).
+
 ## What this slice intentionally does NOT do
 
 No real Proxmox host/cluster/node/bridge/VLAN/storage/network/credential/endpoint is

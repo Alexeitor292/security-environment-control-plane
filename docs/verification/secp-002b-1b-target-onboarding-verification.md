@@ -1,6 +1,6 @@
 # SECP-002B-1B-0 — Target Onboarding Verification
 
-**Date:** 2026-07-01
+**Date:** 2026-07-01 (amended — enforceable-binding correction pass)
 **Branch:** `feature/secp-002b1b-target-onboarding-contract`
 
 This records an **actual** in-process run of the target onboarding + automated deployment
@@ -58,6 +58,47 @@ run, per the safety boundaries.
   real-provisioning gate refuses.
 - **Preflight evidence is redacted**: no token/password/secret and no real (fake fixture)
   node/storage/bridge/CIDR/VM-ID values survive into the stored evidence.
+
+## Enforceable-binding correction pass (actual output)
+
+```
+== plan + manifest carry exact onboarding bindings ==
+  plan.onboarding_id == active ob : True
+  manifest evidence hash bound    : True
+  manifest.content.onboarding     : True
+
+== simulated evidence: fine for review, never for live ==
+  approved level                  : simulated
+  require_live=False              : accepted
+  require_live=True               : refused -> live real provisioning requires live_verified
+
+== API preflight cannot forge live eligibility ==
+  API-recorded preflight level    : simulated (always simulated)
+
+== trusted worker collector CAN produce live_verified ==
+  worker-recorded preflight level : live_verified
+
+== boundary broader than target scope is refused ==
+  refused                         : declared boundary is broader than the target p
+
+== binding drift refuses manifest + real provisioning ==
+  manifest gen after retire       : refused -> target has no active onboarding; onboard
+  real dry-run after retire       : refused -> target has no approved & active onboardi
+```
+
+This demonstrates: plan + manifest carry the exact onboarding/preflight bindings (echoed
+into immutable manifest content); simulated evidence is accepted for the fake/review path
+but **refused for live** provisioning; the API preflight route always yields `simulated`
+evidence (no live forgery); only the trusted worker collector produces `live_verified`; a
+boundary broader than the target scope is refused; and any onboarding binding drift fails
+closed at both manifest generation and the real-provisioning gate.
+
+Focused correction-pass tests: `test_onboarding_bindings.py` (plan/manifest bindings,
+retire/verification-level/evidence-tamper drift refusals at manifest + gate,
+simulated-vs-live eligibility, boundary/scope intersection), `test_target_onboarding.py`
+(boundary⊆scope, single-active DB index + service fail-closed on multiples),
+`test_onboarding_preflight.py` (request/result contract, collector/level contract,
+complete evidence-package hash, immutability).
 
 ## Automated proof coverage
 
