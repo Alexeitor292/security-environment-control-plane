@@ -128,6 +128,36 @@ provenance, change-set metadata, approvals, apply/destroy idempotency keys, runn
 and redacted failures — so a worker restart is safe. No raw OpenTofu binary plan is
 persisted.
 
+## Execution integrity (correction pass)
+
+- **Exact prepared plan.** `run_real_provisioning` renders once, offline-inits, generates
+  **one** plan, canonicalizes it, compares that hash to the human approval, and applies
+  **that same plan file** (`OpenTofuRunner.apply_prepared` / `destroy_prepared`) — no
+  second render or plan. The transient `PreparedOpenTofuPlan` (canonical change set, hashes,
+  ephemeral workspace + plan-file handles) is never serialized anywhere and is always
+  removed in a `finally` block, including on failure/refusal. No raw binary plan is
+  persisted.
+- **Redacted canonical change set.** `plan_json.canonicalize_plan_json` consumes
+  `tofu show -json` and keeps only address/mode/type/name/provider/actions/replace plus
+  workspace + provenance hashes; before/after/sensitive/config/state/raw-JSON never
+  survive, and malformed plans fail closed. The `FakeProcessExecutor` returns safe fixture
+  `show -json`.
+- **Verified, pinned toolchain.** The runner uses the profile's pinned executable
+  (validated safe identifier / approved absolute path), validates every interpolated
+  identifier, and requires a `ToolchainVerifier` attestation (executable, version, binary
+  digest, module-bundle, lockfile, mirror, renderer) before executing. The worker gate
+  additionally enforces `profile.id == plan == manifest`, `profile.execution_target_id ==
+  target.id`, `profile.organization_id == manifest.organization_id`, a recomputed canonical
+  profile hash equal to the stored/plan/manifest hashes, and `activation_class ==
+  isolated_lab`.
+- **Idempotent/retryable.** Re-applying/destroying a terminal operation is a durable no-op
+  (no renderer/executor/runner/secret/approval interaction); a failed operation retries via
+  `failed → queued`; a re-run dry run while awaiting approval takes no illegal transition; a
+  changed dry run records a new pending approval preserving history.
+- **Sealed subprocess.** `build_process_executor` requires a post-gate `RealLabActivationGrant`
+  and a hard B1-A seal keeps it a `FakeProcessExecutor`; configuration alone can never
+  construct the real executor.
+
 ## What B1-A intentionally does NOT do
 
 No real OpenTofu/Terraform/provider/endpoint is installed, downloaded, or invoked. Arming

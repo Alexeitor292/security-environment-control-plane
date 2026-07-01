@@ -1,6 +1,6 @@
 # SECP-002B-1A — Runtime Verification
 
-**Date:** 2026-06-30
+**Date:** 2026-06-30 (amended 2026-07-01 — execution-integrity correction pass)
 **Branch:** `feature/secp-002b1-opentofu-lab-contract`
 
 This records an **actual** end-to-end run of the sealed OpenTofu contract using **only the
@@ -91,6 +91,56 @@ CI on the authoritative Ubuntu / Python 3.11 / uv environment with a Postgres se
   set.
 - **No leakage:** no secret, endpoint, or workspace filesystem path appears in operation
   records or audit data.
+
+## Execution-integrity correction pass (actual output)
+
+Re-run after the correction pass (exact prepared plan, redacted canonical `show -json`,
+verified pinned toolchain, idempotent retries, sealed subprocess):
+
+```
+== subprocess construction is sealed ==
+  bare construction refused (disarmed)
+  config flag alone -> FakeProcessExecutor
+  valid grant + enabled -> FakeProcessExecutor (B1-A seal)
+
+== dry run (exact prepared plan) ==
+  status              : awaiting_change_set_approval
+  change_set_hash      : sha256:6c9b2abcddac8b66d2f ...
+  result keys          : ['change_set_hash', 'kind', 'resources', 'summary', 'workspace_hash']
+  raw-json leaked?     : False
+
+== apply refused without approval ==
+  refused: apply requires an explicit human-approved dry-run change set
+
+== approve + apply (same prepared plan) ==
+  status              : applied
+  approval            : consumed
+  ephemeral residue    : NONE (cleaned up)
+
+== idempotent apply retry invokes nothing ==
+  status              : applied | idempotent_noop: True | executor calls: 0
+
+== destroy needs its own approved change set ==
+  status              : destroyed
+
+== leakage scan ==
+  leaks found         : NONE
+```
+
+This demonstrates: the applied plan is the exact prepared plan (no re-render/re-plan); the
+durable record holds only the redacted canonical change set (no raw `show -json`); the
+ephemeral workspace + binary plan are cleaned up; an idempotent apply retry invokes the
+process executor **0** times; destroy requires its own approval; the real subprocess
+executor cannot be constructed from configuration or even a valid grant in B1-A; and no
+secret/endpoint/workspace path leaks.
+
+Focused correction-pass tests (all green locally): `test_real_provisioning_integrity.py`
+(exact prepared plan, cleanup on success/failure, idempotent/retry, failed re-entry,
+re-run-while-awaiting, changed-dry-run-new-approval, DB-corruption binding),
+`test_plan_json_canonicalization.py` (action-diff hash change, sensitive-value redaction,
+malformed fail-closed, pinned executable, unsafe-identifier rejection, verifier requirement,
+backend-reference non-interpolation), and the extended `test_no_real_process.py`
+(config-alone/grant/seal).
 
 ## Automated proof coverage
 

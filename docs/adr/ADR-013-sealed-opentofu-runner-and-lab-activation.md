@@ -1,7 +1,7 @@
 # ADR-013 — Sealed OpenTofu runtime, immutable toolchain provenance, and isolated-lab activation
 
-- **Status:** Accepted
-- **Date:** 2026-06-30
+- **Status:** Accepted (amended — execution-integrity correction pass)
+- **Date:** 2026-06-30 (amended 2026-07-01)
 - **Milestone:** SECP-002B-1A (first slice of chartered SECP-002B-1)
 - **Related:** Charter §5 (Layers 4/5/7), §6 (Invariants 4–7, 11, 12, 17), §13; ADR-003,
   ADR-004, ADR-005, ADR-006, ADR-007, ADR-010, ADR-011, ADR-012
@@ -187,3 +187,58 @@ persisted).
   B1-A. Arming `SubprocessProcessExecutor`, real remote-state wiring, real provider mirror
   verification, drift/reconcile handling, and the first real dry-run/apply/destroy against
   a disposable lab are **B1-B** and later work.
+
+## Amendment — execution-integrity correction pass (2026-07-01)
+
+Independent review found that the original real-path flow regenerated a dry run to compare
+the approved hash and then *rendered and planned again* inside apply — a time-of-check /
+time-of-use gap. The following corrections are now part of the decision:
+
+1. **Exact prepared-plan application (TOCTOU eliminated).** A worker-only, transient
+   `PreparedOpenTofuPlan` holds the canonical redacted change set, its hash, the workspace
+   hash, the kind, and handles to the ephemeral workspace and the exact generated plan
+   file. `run_real_provisioning` renders → offline-inits → generates **one** plan →
+   canonicalizes it → compares that hash to the human approval → and applies **that same
+   plan file** via `apply_prepared` (destroy via `destroy_prepared`) with no second render
+   or plan. `PreparedOpenTofuPlan` is never serialized into any response/record/audit/log,
+   and the ephemeral workspace + binary plan are always removed in a `finally` block
+   (including failure/refusal paths). No raw binary plan is persisted.
+
+2. **Redacted canonical `show -json` handling (no synthetic marker).** The real change set
+   is derived by `plan_json.canonicalize_plan_json`, which consumes a `tofu show -json`
+   structure and keeps only safe review fields (address, mode, type, name, provider,
+   actions, replacement indicator) plus workspace/provenance hashes. Before/after values,
+   provider config, sensitive values, unknown fields, state, and raw JSON never survive;
+   malformed plans fail closed. The `FakeProcessExecutor` returns realistic safe fixture
+   `show -json` (deliberately carrying fake secrets so redaction is proven) — the earlier
+   `plan_digest` marker is gone.
+
+3. **Verified toolchain provenance + stronger binding.** The runner uses the **pinned
+   executable** from the profile (validated as a safe bare identifier or approved absolute
+   worker path; shell metacharacters, whitespace, traversal, and relative paths are
+   rejected), and validates the mirror identity, backend kind/reference, and bundle id
+   before interpolation (the backend reference is never written into HCL). A worker-only
+   `ToolchainVerifier` (fake in B1-A, inert real scaffold) must attest executable, version,
+   binary digest, module-bundle, lockfile, mirror, and renderer before init/plan/apply/
+   destroy. The worker gate additionally requires `profile.id == plan == manifest`,
+   `profile.execution_target_id == target.id`, `profile.organization_id ==
+   manifest.organization_id`, a **recomputed** canonical profile hash equal to the stored
+   `content_hash` and to the plan/manifest hashes, and `activation_class == isolated_lab`
+   — all *before* rendering, secret resolution, or executor/runner construction.
+
+4. **Idempotent, retryable durable operations.** Retrying an already-`applied`/`destroyed`
+   operation returns the durable record with **no** renderer/executor/runner/secret/
+   approval interaction. A `failed` apply/destroy may re-enter through `failed → queued`
+   and retry after a valid plan + approval. Re-running a dry run while `awaiting_change_set_
+   approval` takes no illegal transition; a *changed* regenerated dry run records a **new**
+   pending approval while preserving the original approval and audit history.
+
+5. **Sealed subprocess construction.** `build_process_executor` never returns a
+   `SubprocessProcessExecutor` from configuration alone: it requires a worker-only
+   `RealLabActivationGrant` minted only after the full gate succeeds, and a hard B1-A seal
+   keeps it a `FakeProcessExecutor` in all cases. Simulator mode, a missing
+   real-provisioning setting, inline dispatch, or an incomplete gate can never construct or
+   invoke the real executor.
+
+No real binary, provider, endpoint, filesystem/binary verification, Docker socket, or live
+infrastructure is used by any of these corrections in B1-A.

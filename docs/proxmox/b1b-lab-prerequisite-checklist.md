@@ -55,6 +55,11 @@ destroyed.
       mirror; runtime internet download disabled.
 - [ ] Provider lockfile hash and module-bundle hash recorded in the toolchain profile and
       verified against the mirror.
+- [ ] A **real `ToolchainVerifier`** (replacing the B1-A `FakeToolchainVerifier`) attests
+      the executable identity, exact version, binary-integrity digest, module-bundle
+      identity/hash, provider lockfile hash, offline mirror identity, and renderer version
+      against the actual on-disk toolchain **before** any init/plan/apply/destroy. The
+      runner refuses to execute unless every facet is attested.
 
 ## 6. Remote state protection
 
