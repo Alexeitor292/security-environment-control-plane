@@ -48,6 +48,12 @@ HARD_FORBIDDEN_MODULES = {
     "httpx",
     "requests",
     "aiohttp",
+    # SECP-002B-0: the API must not import an IaC runner/tool. The provisioning
+    # runner is worker-only; OpenTofu/Terraform are never imported anywhere.
+    "opentofu",
+    "terraform",
+    "python_tofu",
+    "libtmux",
 }
 
 # Modules allowed only in specific seam files.

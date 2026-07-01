@@ -26,6 +26,8 @@ EXPECTED_TABLES = {
     "plugin",
     "artifact",
     "audit_event",
+    "provisioning_manifest",
+    "provisioning_operation",
     "environment_network",
     "environment_node",
     "environment_topology_edge",
