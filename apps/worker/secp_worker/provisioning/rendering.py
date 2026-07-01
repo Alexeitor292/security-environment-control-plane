@@ -73,22 +73,30 @@ def _assert_secret_free(files: dict[str, str]) -> None:
 
 
 def _render_backend(profile: dict) -> str:
-    """Render a REMOTE backend block from the profile. Local state is refused."""
+    """Render a REMOTE backend block from the profile. Local state is refused.
+
+    The backend *kind* is validated as a safe identifier before interpolation. The
+    backend *reference* (which may be operator-supplied) is validated but **never**
+    interpolated into the file — backend config is supplied out-of-band at init time —
+    so no untrusted text reaches the rendered HCL.
+    """
+    from secp_worker.provisioning.identifiers import IdentifierError, validate_identifier
+
     backend = profile.get("state_backend") or {}
-    kind = str(backend.get("kind", "")).strip().lower()
-    reference = str(backend.get("reference", ""))
-    if kind in _LOCAL_STATE_TOKENS:
+    raw_kind = str(backend.get("kind", "")).strip()
+    if raw_kind.lower() in _LOCAL_STATE_TOKENS:
         raise RenderingError(
             "local-only OpenTofu state is refused; a remote state backend is required"
         )
-    if not reference:
-        raise RenderingError("state backend reference is missing")
+    try:
+        kind = validate_identifier(raw_kind.lower(), "state_backend.kind")
+        validate_identifier(backend.get("reference"), "state_backend.reference")
+    except IdentifierError as exc:
+        raise RenderingError(f"unsafe state backend identifier: {exc}") from exc
     return (
-        "# GENERATED — remote state backend (no local state). Secret-free reference only.\n"
+        "# GENERATED — remote state backend (no local state). Config supplied at init.\n"
         "terraform {\n"
-        f'  backend "{kind}" {{\n'
-        f"    # workspace_key reference: {reference}\n"
-        "  }\n"
+        f'  backend "{kind}" {{}}\n'
         "}\n"
     )
 
@@ -103,7 +111,17 @@ class WorkspaceRenderer:
         # registration; the worker never trusts unvalidated input).
         from secp_api.toolchain_profile import toolchain_profile_hash, validate_toolchain_profile
 
+        from secp_worker.provisioning.identifiers import (
+            IdentifierError,
+            validate_toolchain_identifiers,
+        )
+
         spec = validate_toolchain_profile(profile)
+        # Every pinned identifier that gets interpolated into a file is validated first.
+        try:
+            validate_toolchain_identifiers(profile)
+        except IdentifierError as exc:
+            raise RenderingError(f"unsafe toolchain identifier: {exc}") from exc
 
         # Renderer-version binding: a profile pinned to a different renderer fails closed.
         if spec.renderer_version != RENDERER_VERSION:

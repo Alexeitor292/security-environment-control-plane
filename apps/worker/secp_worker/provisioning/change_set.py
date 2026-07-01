@@ -1,18 +1,14 @@
-"""Canonical, redacted change-set representation + hashing (SECP-002B-1A, ADR-013).
+"""Manifest-derived resource helpers (SECP-002B-1A, ADR-013).
 
-Durable approvals bind to a *canonical, redacted, hashed JSON change-set representation*
-— never a raw OpenTofu binary plan (which is not proven secret-free). The change set
-combines the deterministic intended resources (from the immutable manifest), the rendered
-workspace hash, and a non-secret ``plan_digest`` marker extracted from the runner's
-``show -json`` step. Two identical dry runs produce an identical hash; any real-plan drift
-changes the ``plan_digest`` and therefore the hash (so apply fails closed, proof #10).
+Deterministic, secret-free helpers used to build the fixture ``show -json`` and to
+summarize apply/destroy results. The authoritative change-set canonicalization + hashing
+lives in :mod:`secp_worker.provisioning.plan_json` (it consumes the OpenTofu plan JSON and
+redacts it). No raw binary plan is ever persisted.
 """
 
 from __future__ import annotations
 
 import hashlib
-
-from secp_scenario_schema import content_hash
 
 
 def planned_resources(manifest: dict) -> list[dict]:
@@ -58,26 +54,3 @@ def summarize(resources: list[dict]) -> dict:
     for r in resources:
         by_type[r["type"]] = by_type.get(r["type"], 0) + 1
     return {"create": len(resources), "by_type": by_type}
-
-
-def canonical_change_set(
-    *,
-    kind: str,
-    workspace_hash: str,
-    resources: list[dict],
-    plan_digest: str,
-) -> dict:
-    """Build the canonical, redacted change-set dict (secret-free)."""
-    return {
-        "change_set_version": "secp-002b-1a/change-set/v1",
-        "kind": kind,
-        "workspace_hash": workspace_hash,
-        "plan_digest": plan_digest,
-        "resources": sorted(resources, key=lambda r: r["resource_id"]),
-        "summary": summarize(resources),
-    }
-
-
-def change_set_hash(change_set: dict) -> str:
-    """Deterministic SHA-256 over a canonical redacted change set."""
-    return content_hash(change_set)

@@ -46,6 +46,7 @@ from secp_api.models import (
     ProvisioningOperation,
     ToolchainProfile,
 )
+from secp_api.provisioning_lifecycle import is_permitted
 from secp_api.provisioning_scope import provisioning_scope_policy_hash, validate_provisioning_scope
 from secp_api.services import approvals as approvals_service
 from secp_api.services import provisioning as prov_service
@@ -454,8 +455,10 @@ def _assert_toolchain_and_activation(
     plan: DeploymentPlan,
     target: ExecutionTarget,
 ) -> ToolchainProfile:
-    from secp_api.toolchain_profile import validate_toolchain_profile
+    from secp_api.errors import ValidationFailedError
+    from secp_api.toolchain_profile import toolchain_profile_hash, validate_toolchain_profile
 
+    # Must be pinned on both the plan and the manifest, and the ids must agree.
     if plan.toolchain_profile_id is None or manifest.toolchain_profile_id is None:
         _refuse_real(
             session,
@@ -463,31 +466,54 @@ def _assert_toolchain_and_activation(
             "no toolchain profile is pinned; the real OpenTofu path requires a pinned "
             "isolated_lab toolchain profile",
         )
+    if plan.toolchain_profile_id != manifest.toolchain_profile_id:
+        _refuse_real(
+            session,
+            operation,
+            "toolchain profile id disagreement between plan and manifest",
+        )
     profile = session.get(ToolchainProfile, manifest.toolchain_profile_id)
     if profile is None or profile.status != ToolchainProfileStatus.active:
         _refuse_real(session, operation, "pinned toolchain profile is missing or not active")
-    if profile.activation_class != "isolated_lab":
+    # Exact id agreement: profile.id == plan == manifest.
+    if not (profile.id == plan.toolchain_profile_id == manifest.toolchain_profile_id):
+        _refuse_real(session, operation, "toolchain profile id mismatch")
+    # The profile must belong to this exact target and organization.
+    if profile.execution_target_id != target.id:
+        _refuse_real(
+            session, operation, "toolchain profile is bound to a different execution target"
+        )
+    if profile.organization_id != manifest.organization_id:
+        _refuse_real(session, operation, "toolchain profile belongs to a different organization")
+    # Validate the stored content (shape/safety) and confirm activation class.
+    try:
+        spec = validate_toolchain_profile(profile.content)
+    except ValidationFailedError:
+        _refuse_real(session, operation, "toolchain profile failed validation (redacted)")
+    if spec.activation_class != "isolated_lab":
         _refuse_real(
             session,
             operation,
             "toolchain profile activation_class is not 'isolated_lab'; the target is not "
             "classified as an isolated disposable lab",
         )
-    # Complete toolchain hash agreement: current profile == plan == manifest.
-    if not (profile.content_hash == plan.toolchain_profile_hash == manifest.toolchain_profile_hash):
+    # Recompute the canonical hash of profile.content: detects content tampering that did
+    # not update content_hash, and confirms profile == plan == manifest hash agreement.
+    recomputed = toolchain_profile_hash(profile.content)
+    if recomputed != profile.content_hash:
+        _refuse_real(
+            session,
+            operation,
+            "toolchain profile content hash does not match its recorded hash "
+            "(content tampering); regenerate the profile",
+        )
+    if not (recomputed == plan.toolchain_profile_hash == manifest.toolchain_profile_hash):
         _refuse_real(
             session,
             operation,
             "toolchain profile has drifted (profile/plan/manifest hash disagreement); "
             "regenerate the plan and manifest and obtain fresh approval",
         )
-    # Re-validate profile shape (pinned versions, offline mirror, remote state).
-    from secp_api.errors import ValidationFailedError
-
-    try:
-        validate_toolchain_profile(profile.content)
-    except ValidationFailedError:
-        _refuse_real(session, operation, "toolchain profile failed validation (redacted)")
     # Remote state backend must be present and non-local.
     backend = profile.content.get("state_backend") or {}
     if str(backend.get("kind", "")).strip().lower() in _LOCAL_STATE_TOKENS:
@@ -539,18 +565,26 @@ def run_real_provisioning(
     manifest_id: uuid.UUID,
     kind: ProvisioningOperationKind,
     *,
-    executor,
+    executor=None,
     settings: Settings | None = None,
     dispatch_mode: str = "temporal",
     secret_resolver=None,
     workspace_root: str | None = None,
+    verifier=None,
 ) -> ProvisioningOperation:
     """Execute a REAL isolated-lab OpenTofu operation behind the full activation gate.
 
-    ``executor`` is the worker-only ProcessExecutor (always a FakeProcessExecutor in
-    B1-A). No FakeOpenTofuRunner fallback exists on this path.
+    The process ``executor`` is worker-only (always a FakeProcessExecutor in B1-A). When
+    not injected it is produced by ``build_process_executor`` using a grant minted ONLY
+    after the full gate succeeds — and a hard B1-A seal keeps it a FakeProcessExecutor.
+    There is NO FakeOpenTofuRunner fallback on this path.
     """
+    from secp_worker.provisioning.activation import (
+        build_process_executor,
+        grant_real_lab_activation,
+    )
     from secp_worker.provisioning.opentofu import OpenTofuRunner
+    from secp_worker.provisioning.toolchain_verify import FakeToolchainVerifier
 
     settings = settings or get_settings()
     manifest = session.get(ProvisioningManifest, manifest_id)
@@ -560,15 +594,23 @@ def run_real_provisioning(
     operation = prov_service.get_or_create_operation(session, manifest, kind)
     plan, target, profile = _assert_real_gate(session, operation, manifest, settings, dispatch_mode)
 
+    # The full gate has passed: mint the worker-only activation grant. Configuration alone
+    # can never construct a real subprocess executor; in B1-A a hard seal keeps it fake.
+    grant = grant_real_lab_activation(manifest_id=manifest_id, gate_passed=True)
+
     op_ref = manifest_idempotency_key(manifest.content_hash, kind)
     operation.operation_ref = op_ref
     operation.attempts = (operation.attempts or 0) + 1
     operation.runner = "opentofu"
 
     secret_env = _resolve_lab_secret_env(session, operation, target, kind, secret_resolver)
+    process_executor = (
+        executor if executor is not None else build_process_executor(settings, grant=grant)
+    )
     runner = OpenTofuRunner(
-        executor,
+        process_executor,
         profile=profile.content,
+        verifier=verifier or FakeToolchainVerifier(),
         secret_env=secret_env,
         workspace_root=workspace_root,
     )
@@ -595,7 +637,7 @@ def run_real_provisioning(
         return prov_service.mark_failed(session, operation, error="provisioning error (redacted)")
 
 
-def _record_workspace_rendered(session, operation, manifest, change_set) -> None:
+def _record_workspace_rendered(session, operation, prepared) -> None:
     audit.record(
         session,
         action=AuditAction.workspace_rendered,
@@ -604,74 +646,104 @@ def _record_workspace_rendered(session, operation, manifest, change_set) -> None
         organization_id=operation.organization_id,
         actor="worker",
         data={
-            "workspace_hash": change_set.workspace_hash,
-            "change_set_hash": change_set.change_set_hash,
-            "kind": change_set.kind,
+            "workspace_hash": prepared.workspace_hash,
+            "change_set_hash": prepared.change_set_hash,
+            "kind": prepared.kind,
         },
     )
 
 
-def _real_dry_run(session, operation, manifest, profile, runner, op_ref, *, destroy):
+def _advance_to_queued(session, operation: ProvisioningOperation, kind_label: str) -> None:
+    """Advance an early or previously-failed operation to queued (retry-safe)."""
     if operation.status in (
         ProvisioningStatus.manifest_generated,
         ProvisioningStatus.pending_approval,
-    ):
+        ProvisioningStatus.failed,
+    ) and is_permitted(operation.status, ProvisioningStatus.queued):
         prov_service.advance(
             session,
             operation,
             ProvisioningStatus.queued,
             action=AuditAction.provisioning_operation_created,
-            data={"kind": "destroy_dry_run" if destroy else "dry_run"},
+            data={"kind": kind_label},
         )
-    if destroy:
-        change_set = runner.dry_run_destroy(manifest.content, operation_id=op_ref)
-        authorizes = ProvisioningOperationKind.destroy
-        completed_state = ProvisioningStatus.destroy_dry_run_completed
-    else:
-        change_set = runner.dry_run(manifest.content, operation_id=op_ref)
-        authorizes = ProvisioningOperationKind.apply
-        completed_state = ProvisioningStatus.dry_run_completed
 
-    _record_workspace_rendered(session, operation, manifest, change_set)
-    # Durable, redacted result (no secrets, no workspace filesystem path).
-    operation.result = {
-        "kind": change_set.kind,
-        "summary": change_set.summary,
-        "change_set_hash": change_set.change_set_hash,
-        "workspace_hash": change_set.workspace_hash,
-        "plan_digest": change_set.plan_digest,
-        "creates": change_set.creates,
-    }
-    # Record the pending human-approval binding for this exact change set.
-    approvals_service.record_change_set(
-        session,
-        manifest,
-        profile,
-        authorizes_kind=authorizes,
-        change_set_hash=change_set.change_set_hash,
-        rendered_workspace_hash=change_set.workspace_hash,
-        summary=change_set.summary,
-        created_by=operation.created_by,
-    )
-    if operation.status != completed_state:
-        prov_service.advance(
+
+def _real_dry_run(session, operation, manifest, profile, runner, op_ref, *, destroy):
+    # Exact-artifact prepare; the ephemeral workspace + plan are always cleaned up.
+    prepared = runner.prepare(manifest.content, operation_id=op_ref, destroy=destroy)
+    try:
+        if destroy:
+            authorizes = ProvisioningOperationKind.destroy
+            completed_state = ProvisioningStatus.destroy_dry_run_completed
+        else:
+            authorizes = ProvisioningOperationKind.apply
+            completed_state = ProvisioningStatus.dry_run_completed
+
+        # Advance to queued only from an early state (re-run while awaiting stays put).
+        if operation.status in (
+            ProvisioningStatus.manifest_generated,
+            ProvisioningStatus.pending_approval,
+        ):
+            prov_service.advance(
+                session,
+                operation,
+                ProvisioningStatus.queued,
+                action=AuditAction.provisioning_operation_created,
+                data={"kind": "destroy_dry_run" if destroy else "dry_run"},
+            )
+
+        _record_workspace_rendered(session, operation, prepared)
+        # Durable, redacted result: canonical change set only — no secrets, no raw plan
+        # JSON, no workspace filesystem path.
+        operation.result = {
+            "kind": prepared.kind,
+            "summary": prepared.change_set.get("summary", {}),
+            "change_set_hash": prepared.change_set_hash,
+            "workspace_hash": prepared.workspace_hash,
+            "resources": prepared.change_set.get("resources", []),
+        }
+        # Record the pending human-approval binding for this exact change set. A changed
+        # regenerated dry run produces a new hash -> a new pending approval, preserving
+        # the original approval/audit history.
+        approvals_service.record_change_set(
             session,
-            operation,
-            completed_state,
-            action=AuditAction.provisioning_dry_run_completed,
-            data={"summary": change_set.summary, "change_set_hash": change_set.change_set_hash},
+            manifest,
+            profile,
+            authorizes_kind=authorizes,
+            change_set_hash=prepared.change_set_hash,
+            rendered_workspace_hash=prepared.workspace_hash,
+            summary=prepared.change_set.get("summary", {}),
+            created_by=operation.created_by,
         )
-    else:
+        # Advance queued -> completed -> awaiting when legal; a re-run while already
+        # awaiting takes no (illegal) transition.
+        if operation.status == ProvisioningStatus.queued:
+            prov_service.advance(
+                session,
+                operation,
+                completed_state,
+                action=AuditAction.provisioning_dry_run_completed,
+                data={
+                    "summary": prepared.change_set.get("summary", {}),
+                    "change_set_hash": prepared.change_set_hash,
+                },
+            )
+        if operation.status == completed_state:
+            prov_service.advance(
+                session,
+                operation,
+                ProvisioningStatus.awaiting_change_set_approval,
+                action=AuditAction.change_set_recorded,
+                data={
+                    "authorizes_kind": authorizes.value,
+                    "change_set_hash": prepared.change_set_hash,
+                },
+            )
         session.flush()
-    # Durable pause awaiting explicit human approval.
-    prov_service.advance(
-        session,
-        operation,
-        ProvisioningStatus.awaiting_change_set_approval,
-        action=AuditAction.change_set_recorded,
-        data={"authorizes_kind": authorizes.value, "change_set_hash": change_set.change_set_hash},
-    )
-    return operation
+        return operation
+    finally:
+        runner.cleanup(prepared)
 
 
 def _assert_approval_bindings(session, operation, manifest, profile, approval) -> None:
@@ -723,87 +795,88 @@ def _require_approved_change_set(session, operation, manifest, authorizes_kind, 
 
 
 def _real_apply(session, operation, manifest, profile, runner, op_ref):
-    # Regenerate the dry run and require an exact approved change-set match (#9, #10).
-    regen = runner.dry_run(manifest.content, operation_id=op_ref)
-    approval = _require_approved_change_set(
-        session, operation, manifest, ProvisioningOperationKind.apply, regen.change_set_hash
-    )
-    _assert_approval_bindings(session, operation, manifest, profile, approval)
+    # Idempotent: an already-applied operation returns immediately, invoking NO renderer,
+    # executor, runner, secret resolution, or approval consumption.
+    if operation.status == ProvisioningStatus.applied:
+        operation.result = {**(operation.result or {}), "idempotent_noop": True}
+        session.flush()
+        return operation
 
-    if operation.status in (
-        ProvisioningStatus.manifest_generated,
-        ProvisioningStatus.pending_approval,
-    ):
+    # Prepare exactly one plan; the SAME prepared plan file is applied (no re-plan).
+    prepared = runner.prepare(manifest.content, operation_id=op_ref, destroy=False)
+    try:
+        approval = _require_approved_change_set(
+            session, operation, manifest, ProvisioningOperationKind.apply, prepared.change_set_hash
+        )
+        _assert_approval_bindings(session, operation, manifest, profile, approval)
+
+        _advance_to_queued(session, operation, "apply")
         prov_service.advance(
             session,
             operation,
-            ProvisioningStatus.queued,
-            action=AuditAction.provisioning_operation_created,
-            data={"kind": "apply"},
+            ProvisioningStatus.applying,
+            action=AuditAction.provisioning_apply_started,
+            data={"change_set_hash": prepared.change_set_hash},
         )
-    prov_service.advance(
-        session,
-        operation,
-        ProvisioningStatus.applying,
-        action=AuditAction.provisioning_apply_started,
-        data={"change_set_hash": regen.change_set_hash},
-    )
-    result = runner.apply(manifest.content, operation_id=op_ref)
-    operation.result = {
-        "summary": result.summary,
-        "resources": result.resources,
-        "change_set_hash": regen.change_set_hash,
-    }
-    prov_service.advance(
-        session,
-        operation,
-        ProvisioningStatus.applied,
-        action=AuditAction.provisioning_applied,
-        data={"summary": result.summary},
-        finished=True,
-    )
-    approvals_service.mark_consumed(session, approval)
-    return operation
+        result = runner.apply_prepared(prepared, operation_id=op_ref)
+        operation.result = {
+            "summary": result.summary,
+            "resources": result.resources,
+            "change_set_hash": prepared.change_set_hash,
+        }
+        prov_service.advance(
+            session,
+            operation,
+            ProvisioningStatus.applied,
+            action=AuditAction.provisioning_applied,
+            data={"summary": result.summary},
+            finished=True,
+        )
+        approvals_service.mark_consumed(session, approval)
+        return operation
+    finally:
+        runner.cleanup(prepared)
 
 
 def _real_destroy(session, operation, manifest, profile, runner, op_ref):
-    regen = runner.dry_run_destroy(manifest.content, operation_id=op_ref)
-    approval = _require_approved_change_set(
-        session, operation, manifest, ProvisioningOperationKind.destroy, regen.change_set_hash
-    )
-    _assert_approval_bindings(session, operation, manifest, profile, approval)
+    # Idempotent: an already-destroyed operation returns immediately, invoking nothing.
+    if operation.status == ProvisioningStatus.destroyed:
+        return operation
 
-    if operation.status in (
-        ProvisioningStatus.manifest_generated,
-        ProvisioningStatus.pending_approval,
-    ):
+    prepared = runner.prepare(manifest.content, operation_id=op_ref, destroy=True)
+    try:
+        approval = _require_approved_change_set(
+            session,
+            operation,
+            manifest,
+            ProvisioningOperationKind.destroy,
+            prepared.change_set_hash,
+        )
+        _assert_approval_bindings(session, operation, manifest, profile, approval)
+
+        _advance_to_queued(session, operation, "destroy")
         prov_service.advance(
             session,
             operation,
-            ProvisioningStatus.queued,
-            action=AuditAction.provisioning_operation_created,
-            data={"kind": "destroy"},
+            ProvisioningStatus.destroy_queued,
+            action=AuditAction.provisioning_destroy_queued,
+            data={"change_set_hash": prepared.change_set_hash},
         )
-    prov_service.advance(
-        session,
-        operation,
-        ProvisioningStatus.destroy_queued,
-        action=AuditAction.provisioning_destroy_queued,
-        data={"change_set_hash": regen.change_set_hash},
-    )
-    result = runner.destroy(manifest.content, operation_id=op_ref)
-    operation.result = {
-        "destroyed": len(result.destroyed),
-        "resources": result.destroyed,
-        "change_set_hash": regen.change_set_hash,
-    }
-    prov_service.advance(
-        session,
-        operation,
-        ProvisioningStatus.destroyed,
-        action=AuditAction.provisioning_destroyed,
-        data={"destroyed": len(result.destroyed)},
-        finished=True,
-    )
-    approvals_service.mark_consumed(session, approval)
-    return operation
+        result = runner.destroy_prepared(prepared, operation_id=op_ref)
+        operation.result = {
+            "destroyed": len(result.destroyed),
+            "resources": result.destroyed,
+            "change_set_hash": prepared.change_set_hash,
+        }
+        prov_service.advance(
+            session,
+            operation,
+            ProvisioningStatus.destroyed,
+            action=AuditAction.provisioning_destroyed,
+            data={"destroyed": len(result.destroyed)},
+            finished=True,
+        )
+        approvals_service.mark_consumed(session, approval)
+        return operation
+    finally:
+        runner.cleanup(prepared)

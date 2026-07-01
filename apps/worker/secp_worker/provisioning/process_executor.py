@@ -120,24 +120,23 @@ class ProcessExecutor:
 
 
 class FakeProcessExecutor(ProcessExecutor):
-    """Runs nothing. Records every ``ProcessSpec`` and returns scripted output.
+    """Runs nothing. Records every ``ProcessSpec`` and returns scripted, safe output.
 
-    * ``plan_digest`` — the non-secret marker returned in ``show``-style JSON so the
-      runner can fold a deterministic (or, when scripted, drifting) plan identity into
-      its change set. A fixed value makes two dry runs identical; a script lets a test
-      force a mismatch (proof #10).
+    * ``show_json`` — a realistic, safe ``tofu show -json`` fixture returned for the
+      ``show`` step (default: an empty-plan fixture). The runner canonicalizes and
+      redacts it; different fixtures produce different change-set hashes (proof #10).
     * ``script`` — optional per-call ``ProcessResult`` overrides (consumed in order).
     """
 
     def __init__(
         self,
         *,
-        plan_digest: str = "fake-plan-deterministic",
+        show_json: dict | None = None,
         returncode: int = 0,
         script: list[ProcessResult] | None = None,
     ) -> None:
         self.calls: list[ProcessSpec] = []
-        self._plan_digest = plan_digest
+        self._show_json = show_json
         self._returncode = returncode
         self._script = list(script or [])
 
@@ -146,10 +145,19 @@ class FakeProcessExecutor(ProcessExecutor):
         self.calls.append(spec)
         if self._script:
             return self._script.pop(0)
-        import json
+        if spec.label == "show":
+            import json
 
-        stdout = json.dumps({"plan_digest": self._plan_digest, "label": spec.label})
-        return ProcessResult(returncode=self._returncode, stdout=stdout, duration_s=0.0)
+            payload = (
+                self._show_json
+                if self._show_json is not None
+                else {"format_version": "1.2", "resource_changes": []}
+            )
+            return ProcessResult(
+                returncode=self._returncode, stdout=json.dumps(payload), duration_s=0.0
+            )
+        # init / plan / apply / destroy produce no parsed stdout in the fake.
+        return ProcessResult(returncode=self._returncode, stdout="", duration_s=0.0)
 
 
 class SubprocessProcessExecutor(ProcessExecutor):

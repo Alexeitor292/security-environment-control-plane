@@ -34,7 +34,6 @@ class RunnerChangeSet(BaseModel):
     summary: dict = Field(default_factory=dict)
     change_set_hash: str = ""
     workspace_hash: str = ""
-    plan_digest: str = ""
     kind: str = "apply"
 
 

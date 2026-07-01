@@ -8,13 +8,15 @@ client, or OpenTofu/Terraform binary). The ``SubprocessProcessExecutor`` exists 
 inert and never invoked in B1-A.
 """
 
-from secp_worker.provisioning.change_set import (
-    canonical_change_set,
-    change_set_hash,
-    planned_resources,
-)
+from secp_worker.provisioning.change_set import planned_resources, summarize
 from secp_worker.provisioning.fake_opentofu import FakeOpenTofuRunner
-from secp_worker.provisioning.opentofu import OpenTofuRunner
+from secp_worker.provisioning.opentofu import OpenTofuRunner, PreparedOpenTofuPlan
+from secp_worker.provisioning.plan_json import (
+    PlanCanonicalizationError,
+    build_fixture_show_json,
+    canonicalize_plan_json,
+    change_set_hash,
+)
 from secp_worker.provisioning.process_executor import (
     FakeProcessExecutor,
     ProcessExecutor,
@@ -33,12 +35,20 @@ from secp_worker.provisioning.runner import (
     RunnerValidationResult,
 )
 from secp_worker.provisioning.state_store import DbRunnerStateStore, RunnerStateStore
+from secp_worker.provisioning.toolchain_verify import (
+    FakeToolchainVerifier,
+    ToolchainVerification,
+    ToolchainVerifier,
+)
 
 __all__ = [
     "DbRunnerStateStore",
     "FakeOpenTofuRunner",
     "FakeProcessExecutor",
+    "FakeToolchainVerifier",
     "OpenTofuRunner",
+    "PlanCanonicalizationError",
+    "PreparedOpenTofuPlan",
     "ProcessExecutor",
     "ProcessResult",
     "ProcessSpec",
@@ -52,8 +62,12 @@ __all__ = [
     "RunnerStateStore",
     "RunnerValidationResult",
     "SubprocessProcessExecutor",
+    "ToolchainVerification",
+    "ToolchainVerifier",
     "WorkspaceRenderer",
-    "canonical_change_set",
+    "build_fixture_show_json",
+    "canonicalize_plan_json",
     "change_set_hash",
     "planned_resources",
+    "summarize",
 ]
