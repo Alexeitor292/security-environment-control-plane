@@ -1,7 +1,7 @@
 # ADR-012 — Worker-only provisioning runner abstraction and future OpenTofu integration
 
-- **Status:** Accepted
-- **Date:** 2026-06-30
+- **Status:** Accepted (amended SECP-002B-0 correction pass)
+- **Date:** 2026-06-30 (amended 2026-06-30)
 - **Milestone:** SECP-002B-0
 - **Related:** Charter §5 (Layers 4/5), Invariants 6, 7; ADR-003, ADR-005, ADR-007, ADR-010, ADR-011
 
@@ -37,11 +37,36 @@ Only a **`FakeOpenTofuRunner`** is implemented in SECP-002B-0. It:
   operation id yields the same result);
 - returns **redacted** errors and keeps **durable fake operation state**.
 
+### Durable runner state mechanism
+
+`FakeOpenTofuRunner` maintains a process-local `_state` dict (a write-through cache
+for within-instance reuse) **and** accepts an optional `state_store: RunnerStateStore`
+at construction time.  The `RunnerStateStore` protocol has a single method:
+`get(operation_id: str) -> dict | None`.
+
+`DbRunnerStateStore` (in `secp_worker.provisioning.state_store`) implements this
+protocol by querying `ProvisioningOperation` rows keyed on `idempotency_key`
+(= `sha256(manifest_content_hash + ":" + kind.value)`), returning the terminal
+runner state inferred from `op.status` and the resources stored in `op.result`.
+
+On every `apply()`, `destroy()`, and `status()` call the runner first consults its
+local `_state` cache; if the operation is absent it falls through to the
+`state_store`.  This means a freshly constructed runner instance given a
+`DbRunnerStateStore` will answer `status()` correctly after a worker restart
+— the `ProvisioningOperation` row written by the prior `run_provisioning` call is
+the authoritative state.
+
+`DbRunnerStateStore` is **read-only from the runner's perspective**.  All writes to
+`ProvisioningOperation` are performed exclusively by the worker execution layer
+(`execution.py` via `secp_api.services.provisioning`) — there is exactly one writer.
+
 Boundary rules:
 
 - The runner lives in `secp_worker` (worker-only). **`apps/api` never imports the
   runner, OpenTofu code, or a provider client, and never resolves secrets.** An
   architecture test enforces this.
+- `DbRunnerStateStore` also lives in `secp_worker`; it reads `secp_api.models` and
+  `secp_api.enums`, which is an existing and permitted dependency direction.
 - The control plane (API) only *generates* manifests (ADR-011) and *records*
   provisioning operations; the **worker** executes the runner.
 - The interface is shaped so a future `OpenTofuRunner` can use a **pinned binary and
@@ -64,6 +89,11 @@ in production). Any missing precondition refuses the operation, audited.
 **Positive**
 - The privileged-execution seam exists and is proven with a fake, keeping the API
   free of runner/provider/IaC code (Invariants 6, 7).
+- A fresh runner instance is fully functional after a worker restart: `status()`,
+  `apply()` (idempotent noop), and `destroy()` (idempotent noop) all read from the
+  durable `ProvisioningOperation` record via `DbRunnerStateStore`.
+- No new DB model or migration is required; durable state is derived from the
+  already-audited `ProvisioningOperation.result` and `status` columns.
 - A future real OpenTofu runner is a drop-in behind the same protocol + gate.
 
 **Negative / risks**

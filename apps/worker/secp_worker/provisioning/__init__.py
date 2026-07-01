@@ -16,8 +16,10 @@ from secp_worker.provisioning.runner import (
     RunnerStatus,
     RunnerValidationResult,
 )
+from secp_worker.provisioning.state_store import DbRunnerStateStore, RunnerStateStore
 
 __all__ = [
+    "DbRunnerStateStore",
     "FakeOpenTofuRunner",
     "ProvisioningRunner",
     "RunnerApplyResult",
@@ -25,5 +27,6 @@ __all__ = [
     "RunnerDestroyResult",
     "RunnerError",
     "RunnerStatus",
+    "RunnerStateStore",
     "RunnerValidationResult",
 ]

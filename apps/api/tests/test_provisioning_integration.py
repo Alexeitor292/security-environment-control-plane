@@ -13,7 +13,8 @@ from secp_api.enums import AuditAction, ProvisioningOperationKind, ProvisioningS
 from secp_api.errors import ProvisioningRefusedError
 from secp_api.models import AuditEvent, ProvisioningManifest, ProvisioningOperation
 from secp_api.services import manifests, provisioning
-from secp_worker.provisioning import FakeOpenTofuRunner
+from secp_api.services.manifests import manifest_idempotency_key
+from secp_worker.provisioning import DbRunnerStateStore, FakeOpenTofuRunner
 from secp_worker.provisioning.execution import run_provisioning
 
 GATE_ON = Settings(app_env="test", enable_fake_provisioning=True, workflow_dispatch_mode="inline")
@@ -321,6 +322,83 @@ def test_operation_result_has_no_secret(session, principal, provisioning_env):
     blob = str(apply_op.result).lower()
     for needle in ("secret", "token", "password", "credential"):
         assert needle not in blob
+
+
+def test_durable_runner_status_via_db_state_store(session, principal, provisioning_env):
+    """Required regression: runner.status() is accurate after simulated worker restart.
+
+    Lifecycle:
+    - Generate manifest.
+    - Apply through runner A and commit.
+    - Create fresh runner B (DbRunnerStateStore injected); call status() → applied.
+    - Retry apply through B → idempotent_noop, resource list preserved.
+    - Destroy through fresh runner C and commit.
+    - Create fresh runner D (DbRunnerStateStore injected); call status() → destroyed.
+    - Confirm audit events are all present.
+    """
+    manifest = _manifest_only(session, principal, provisioning_env)
+    apply_op_ref = manifest_idempotency_key(manifest.content_hash, ProvisioningOperationKind.apply)
+    destroy_op_ref = manifest_idempotency_key(
+        manifest.content_hash, ProvisioningOperationKind.destroy
+    )
+
+    # --- Apply with runner A ---
+    runner_a = FakeOpenTofuRunner()
+    apply_op = run_provisioning(
+        session, manifest.id, ProvisioningOperationKind.apply, runner_a, settings=GATE_ON
+    )
+    session.commit()
+    first_resources = list(apply_op.result.get("resources", []))
+    assert apply_op.status == ProvisioningStatus.applied
+    assert len(first_resources) > 0
+
+    # --- Fresh runner B with DB state store: status() must see applied state ---
+    runner_b = FakeOpenTofuRunner(state_store=DbRunnerStateStore(session))
+    session.expire_all()
+
+    status_b = runner_b.status(apply_op_ref)
+    assert status_b.exists is True
+    assert status_b.state == "applied"
+    assert status_b.summary.get("resources") == len(first_resources)
+
+    # Retry apply through B → idempotent noop, resources preserved from first apply.
+    op_retry = run_provisioning(
+        session, manifest.id, ProvisioningOperationKind.apply, runner_b, settings=GATE_ON
+    )
+    session.commit()
+    assert op_retry.id == apply_op.id
+    assert op_retry.status == ProvisioningStatus.applied
+    assert op_retry.result.get("idempotent_noop") is True
+    assert op_retry.result.get("resources") == first_resources
+
+    # --- Destroy through fresh runner C ---
+    runner_c = FakeOpenTofuRunner()
+    destroy_op = run_provisioning(
+        session, manifest.id, ProvisioningOperationKind.destroy, runner_c, settings=GATE_ON
+    )
+    session.commit()
+    assert destroy_op.status == ProvisioningStatus.destroyed
+
+    # --- Fresh runner D with DB state store: status() must see destroyed state ---
+    runner_d = FakeOpenTofuRunner(state_store=DbRunnerStateStore(session))
+    session.expire_all()
+
+    status_d = runner_d.status(destroy_op_ref)
+    assert status_d.exists is True
+    assert status_d.state == "destroyed"
+
+    # Durable DB records and audit events remain correct.
+    apply_op_db = session.get(ProvisioningOperation, apply_op.id)
+    destroy_op_db = session.get(ProvisioningOperation, destroy_op.id)
+    assert apply_op_db.status == ProvisioningStatus.applied
+    assert destroy_op_db.status == ProvisioningStatus.destroyed
+
+    actions = {e.action for e in session.query(AuditEvent).all()}
+    for expected in (
+        AuditAction.provisioning_applied,
+        AuditAction.provisioning_destroyed,
+    ):
+        assert expected.value in actions
 
 
 def test_simulator_deployment_creates_no_provisioning_records(session, principal, running_exercise):

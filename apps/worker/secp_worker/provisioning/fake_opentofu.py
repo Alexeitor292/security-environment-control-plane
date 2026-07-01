@@ -3,8 +3,20 @@
 No subprocess, no network, no provider client, no OpenTofu/Terraform binary. All
 operations are pure functions of the manifest content, so operation and resource
 IDs and dry-run change sets are deterministic, and apply/destroy are idempotent.
-Errors are redacted. Fake state is kept in-process (durable for the worker process)
-and the caller persists results to the ProvisioningOperation record.
+Errors are redacted.
+
+Durable state
+-------------
+The runner accepts an optional ``state_store`` (a ``RunnerStateStore``) at
+construction time.  When present it is consulted on every ``apply()``,
+``destroy()``, and ``status()`` call before the process-local ``_state`` cache.
+This means a freshly constructed runner instance can answer ``status()``
+correctly after a worker restart as long as it is given a ``DbRunnerStateStore``
+backed by the same database that ``run_provisioning`` wrote to.
+
+When ``state_store`` is ``None`` the runner falls back to its in-process
+``_state`` dict only — suitable for unit tests that do not need cross-instance
+durability.
 """
 
 from __future__ import annotations
@@ -20,6 +32,7 @@ from secp_worker.provisioning.runner import (
     RunnerStatus,
     RunnerValidationResult,
 )
+from secp_worker.provisioning.state_store import RunnerStateStore
 
 _REQUIRED_KEYS = ("manifest_version", "topology", "reservations", "resource_limits")
 
@@ -70,9 +83,20 @@ def _planned_resources(manifest: dict) -> list[dict]:
 class FakeOpenTofuRunner:
     name = "fake-opentofu"
 
-    def __init__(self) -> None:
-        # operation_id -> {"state": str, "resources": list}
+    def __init__(self, state_store: RunnerStateStore | None = None) -> None:
+        # Process-local write-through cache: operation_id -> {"state": str, "resources": list}.
+        # Consulted first; state_store (if present) is the durable fallback.
         self._state: dict[str, dict] = {}
+        self._state_store = state_store
+
+    def _get_state(self, operation_id: str) -> dict | None:
+        """Return cached or persisted state, or None if unknown."""
+        local = self._state.get(operation_id)
+        if local is not None:
+            return local
+        if self._state_store is not None:
+            return self._state_store.get(operation_id)
+        return None
 
     def validate(self, manifest: dict) -> RunnerValidationResult:
         errors = [k for k in _REQUIRED_KEYS if k not in manifest]
@@ -99,9 +123,9 @@ class FakeOpenTofuRunner:
         )
 
     def apply(self, manifest: dict, *, operation_id: str) -> RunnerApplyResult:
-        existing = self._state.get(operation_id)
+        existing = self._get_state(operation_id)
         if existing is not None and existing.get("state") == "applied":
-            # Idempotent: the same operation was already applied.
+            # Idempotent: the same operation was already applied (local or DB).
             return RunnerApplyResult(
                 operation_id=operation_id,
                 ok=True,
@@ -123,7 +147,7 @@ class FakeOpenTofuRunner:
         )
 
     def destroy(self, manifest: dict, *, operation_id: str) -> RunnerDestroyResult:
-        existing = self._state.get(operation_id)
+        existing = self._get_state(operation_id)
         if existing is not None and existing.get("state") == "destroyed":
             return RunnerDestroyResult(
                 operation_id=operation_id, ok=True, destroyed=[], idempotent_noop=True
@@ -139,7 +163,7 @@ class FakeOpenTofuRunner:
         )
 
     def status(self, operation_id: str) -> RunnerStatus:
-        record = self._state.get(operation_id)
+        record = self._get_state(operation_id)
         if record is None:
             return RunnerStatus(operation_id=operation_id, state="unknown", exists=False)
         return RunnerStatus(

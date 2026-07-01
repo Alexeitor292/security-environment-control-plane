@@ -32,7 +32,8 @@ apps/api/secp_api/
   models.py                      ProvisioningManifest, ProvisioningOperation (+ enums)
 apps/worker/secp_worker/provisioning/
   runner.py                      ProvisioningRunner protocol + result types + errors (WORKER ONLY)
-  fake_opentofu.py               FakeOpenTofuRunner (deterministic, idempotent, no I/O)
+  fake_opentofu.py               FakeOpenTofuRunner (deterministic, idempotent, durable via store)
+  state_store.py                 RunnerStateStore protocol + DbRunnerStateStore (WORKER ONLY)
   execution.py                   run_provisioning worker orchestration + fake gate
 ```
 
@@ -72,6 +73,22 @@ requires explicit allowlists/bounds and **rejects** empty lists, wildcards
 `FakeOpenTofuRunner` is the only implementation: deterministic operation/resource IDs
 (hashes), deterministic dry-run change sets, idempotent apply/destroy, redacted
 errors, durable fake state. No subprocess/network/provider imports.
+
+### Durable runner state
+
+`FakeOpenTofuRunner` accepts an optional `state_store: RunnerStateStore` at
+construction.  When provided it is a `DbRunnerStateStore`, which queries
+`ProvisioningOperation.idempotency_key` and returns the persisted terminal state
+(`applied` or `destroyed`) from the operation's `status` and `result` columns.
+
+On `apply()`, `destroy()`, and `status()` the runner checks its process-local
+`_state` cache first; on a miss it falls through to the store.  A fresh runner
+instance constructed with `DbRunnerStateStore(session)` therefore answers
+`status(operation_ref)` correctly after a simulated worker restart — the
+`ProvisioningOperation` row is the authoritative state, no new model is needed.
+
+`DbRunnerStateStore` is read-only from the runner's perspective.  All writes to
+`ProvisioningOperation` are performed by the worker execution layer only.
 
 ## 6. Durable provisioning operation lifecycle (§4)
 

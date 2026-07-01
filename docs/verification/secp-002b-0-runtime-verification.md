@@ -123,6 +123,15 @@ rm -f ../../.env
 - No real Proxmox endpoint or secret was contacted; the target used placeholder
   configuration (`proxmox.example.test`) and an opaque secret reference that was
   never resolved.
+- **Durable runner state mechanism:** `FakeOpenTofuRunner` accepts an optional
+  `state_store: RunnerStateStore` (injected as `DbRunnerStateStore(session)` in
+  tests and future worker wiring).  On `status()`, `apply()`, and `destroy()` the
+  runner checks its process-local `_state` cache and falls through to the store on a
+  miss.  `DbRunnerStateStore` queries `ProvisioningOperation.idempotency_key` and
+  returns the terminal state inferred from `op.status` + `op.result["resources"]`.
+  A fresh runner instance constructed with a `DbRunnerStateStore` therefore answers
+  `status()` correctly after a worker restart — the `ProvisioningOperation` row is
+  the authoritative state.  No new model or migration is required.
 - Executing a fake provisioning operation through a durable Temporal workflow is
   wired conceptually like discovery but is a SECP-002B-1 concern; B-0 executes the
   fake runner directly in the worker for verification.
