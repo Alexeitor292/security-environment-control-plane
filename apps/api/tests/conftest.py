@@ -261,3 +261,111 @@ def provisioning_env(session, principal):
         return build_provisioning_env(session, principal, **kwargs)
 
     return _factory
+
+
+# --- SECP-002B-1A sealed-OpenTofu / lab fixtures -----------------------------
+
+# Clearly-fake, non-routable, well-formed placeholder toolchain profile. The version
+# is not a real OpenTofu release; digests are repeated-byte placeholders; the state
+# backend and provider mirror reference fake, offline, non-routable identities.
+VALID_TOOLCHAIN_PROFILE: dict = {
+    "runner_kind": "opentofu",
+    "executable": "tofu",
+    "opentofu_version": "9.9.9",
+    "binary_integrity": "sha256:" + "de" * 32,
+    "adapter_kind": "proxmox",
+    "module_bundle_id": "secp-fake-lab-bundle",
+    "module_bundle_hash": "sha256:" + "ab" * 32,
+    "provider_lockfile_hash": "sha256:" + "cd" * 32,
+    "renderer_version": "secp-002b-1a/renderer/v1",
+    "state_backend": {"kind": "http", "reference": "secp-fake-remote-state/lab"},
+    "provider_mirror": {
+        "identity": "secp-fake-offline-mirror",
+        "network_access": "offline",
+        "allow_runtime_download": False,
+    },
+    "activation_class": "isolated_lab",
+}
+
+
+class LabEnv:
+    def __init__(self, target, exercise, plan, manifest, toolchain):
+        self.target = target
+        self.exercise = exercise
+        self.plan = plan
+        self.manifest = manifest
+        self.toolchain = toolchain
+
+
+def build_lab_env(session, principal, *, toolchain=None, scope=None, approve=True) -> LabEnv:
+    """Approved target-bound plan + reservations + toolchain profile + manifest.
+
+    The toolchain profile is registered BEFORE plan generation so the plan pins it,
+    and the manifest copies the binding — the full real-lab chain (ADR-013).
+    """
+    import copy
+
+    from secp_api.services import (
+        catalog,
+        exercises,
+        manifests,
+        planning,
+        reservations,
+        targets,
+    )
+    from secp_api.services import (
+        toolchain as toolchain_svc,
+    )
+
+    target = targets.register_target(
+        session,
+        principal,
+        display_name="Disposable Lab (placeholder)",
+        plugin_name="proxmox",
+        config={"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True},
+        secret_ref="env:SECP_PROVIDER_SECRET__LAB",
+        scope_policy={"provisioning": copy.deepcopy(scope or VALID_PROVISIONING_SCOPE)},
+        address_spaces=[{"cidr_block": "10.60.0.0/16", "subnet_prefix": 24}],
+    )
+    tp = toolchain_svc.register_toolchain_profile(
+        session,
+        principal,
+        target_id=target.id,
+        name="lab-opentofu",
+        profile=copy.deepcopy(toolchain or VALID_TOOLCHAIN_PROFILE),
+    )
+    template = catalog.create_template(
+        session, principal, name="Lab", slug=f"lab-{uuid.uuid4().hex[:8]}"
+    )
+    version = catalog.create_version(
+        session, principal, template_id=template.id, definition=VALID_DEFINITION
+    )
+    exercise = exercises.create_exercise(
+        session,
+        principal,
+        template_id=template.id,
+        version_id=version.id,
+        name="lab",
+        execution_target_id=target.id,
+    )
+    exercises.validate_exercise(session, principal, exercise.id)
+    plan = planning.generate_plan(session, principal, exercise.id)
+    planning.submit_plan(session, principal, plan.id)
+    if approve:
+        planning.approve_plan(session, principal, plan.id, "approved for lab test")
+    for team in ("team1", "team2"):
+        reservations.reserve_network(
+            session, principal, target_id=target.id, team_ref=team, exercise_id=exercise.id
+        )
+    session.commit()
+    manifest = manifests.generate_manifest(session, principal, plan.id)
+    session.commit()
+    return LabEnv(target, exercise, plan, manifest, tp)
+
+
+@pytest.fixture
+def lab_env(session, principal):
+    def _factory(**kwargs):
+        return build_lab_env(session, principal, **kwargs)
+
+    return _factory

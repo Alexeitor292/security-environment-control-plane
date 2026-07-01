@@ -17,6 +17,7 @@ API_PKG = Path(__file__).resolve().parents[1] / "apps" / "api" / "secp_api"
 # Import module roots / substrings the API must never import.
 FORBIDDEN_IMPORT_SUBSTRINGS = (
     "secp_worker.provisioning",
+    "secp_worker.secrets",
     "fake_opentofu",
     "opentofu",
     "terraform",
@@ -25,14 +26,26 @@ FORBIDDEN_IMPORT_SUBSTRINGS = (
     "secp_plugin_proxmox",
     "httpx",
     "paramiko",
+    # SECP-002B-1A: process executor, adapters, and workspace rendering are worker-only.
+    "process_executor",
+    "provisioning.adapters",
+    "provisioning.rendering",
 )
 
-# Symbols that name a runner; the API must not import them.
+# Symbols that name a runner / executor / renderer / secret resolver; the API must not
+# import them (SECP-002B-1A adds the real OpenTofu seam symbols).
 FORBIDDEN_IMPORT_NAMES = {
     "ProvisioningRunner",
     "FakeOpenTofuRunner",
     "run_provisioning",
+    "run_real_provisioning",
     "OpenTofuRunner",
+    "ProcessExecutor",
+    "FakeProcessExecutor",
+    "SubprocessProcessExecutor",
+    "WorkspaceRenderer",
+    "EnvSecretResolver",
+    "SecretResolver",
 }
 
 
@@ -65,17 +78,48 @@ def test_api_never_imports_runner_or_iac(path: Path):
 
 
 def test_runner_lives_only_in_worker():
-    # The runner/execution modules must exist under the worker, not the API.
+    # The runner/execution/executor/adapter/rendering modules must exist under the
+    # worker, not the API (SECP-002B-0/1A).
     worker = Path(__file__).resolve().parents[1] / "apps" / "worker" / "secp_worker"
-    assert (worker / "provisioning" / "runner.py").exists()
-    assert (worker / "provisioning" / "fake_opentofu.py").exists()
-    assert (worker / "provisioning" / "execution.py").exists()
-    # And there is no runner module under the API package.
-    assert not (API_PKG / "provisioning" / "runner.py").exists()
+    prov = worker / "provisioning"
+    for rel in (
+        "runner.py",
+        "fake_opentofu.py",
+        "execution.py",
+        "opentofu.py",
+        "process_executor.py",
+        "rendering.py",
+        "change_set.py",
+        "activation.py",
+        "adapters/proxmox.py",
+    ):
+        assert (prov / rel).exists(), f"missing worker module {rel}"
+    # And there is no runner / executor / adapter / rendering module under the API.
+    assert not (API_PKG / "provisioning").exists()
+
+
+def test_subprocess_executor_defined_only_in_worker():
+    """Proof #2 — SubprocessProcessExecutor exists only in the worker boundary."""
+    worker = Path(__file__).resolve().parents[1] / "apps" / "worker" / "secp_worker"
+    src = (worker / "provisioning" / "process_executor.py").read_text(encoding="utf-8")
+    assert "class SubprocessProcessExecutor" in src
+    # It must NOT be defined or imported anywhere in the API package.
+    for path in _py_files():
+        text = path.read_text(encoding="utf-8")
+        assert "SubprocessProcessExecutor" not in text, (
+            f"{path.name} references SubprocessProcessExecutor (worker-only)"
+        )
 
 
 def test_api_provisioning_modules_have_no_shell_or_http():
-    for name in ("services/manifests.py", "services/provisioning.py", "provisioning_scope.py"):
+    for name in (
+        "services/manifests.py",
+        "services/provisioning.py",
+        "services/toolchain.py",
+        "services/approvals.py",
+        "provisioning_scope.py",
+        "toolchain_profile.py",
+    ):
         src = (API_PKG / name).read_text(encoding="utf-8")
         for forbidden in ("import subprocess", "os.system(", "import httpx", "subprocess."):
             assert forbidden not in src, f"{name} contains '{forbidden}'"
