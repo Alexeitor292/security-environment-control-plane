@@ -35,15 +35,14 @@ class OnboardingOut(ORMModel):
     boundary_hash: str
     approved_target_config_hash: str | None
     approved_scope_policy_hash: str | None
+    approved_preflight_id: uuid.UUID | None
+    approved_preflight_evidence_hash: str | None
+    approved_boundary_hash: str | None
+    approved_verification_level: str | None
     decided_at: datetime | None
     decision_reason: str
     activated_at: datetime | None
     created_at: datetime
-
-
-class PreflightSubmit(BaseModel):
-    checks: list[dict]
-    collector: str = "fake"
 
 
 class PreflightOut(ORMModel):
@@ -51,6 +50,10 @@ class PreflightOut(ORMModel):
     organization_id: uuid.UUID
     onboarding_id: uuid.UUID
     collector: str
+    verification_level: str
+    collector_kind: str
+    collector_identity: str
+    evidence_version: int
     passed: bool
     checks: list
     evidence_hash: str

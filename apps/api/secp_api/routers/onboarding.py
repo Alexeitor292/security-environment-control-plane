@@ -21,7 +21,6 @@ from secp_api.schemas_onboarding import (
     OnboardingDecision,
     OnboardingOut,
     PreflightOut,
-    PreflightSubmit,
 )
 from secp_api.services import onboarding
 
@@ -70,15 +69,19 @@ def get_onboarding(
 
 
 @router.post("/onboarding/{onboarding_id}/preflight", response_model=PreflightOut, status_code=201)
-def record_preflight(
+def request_preflight(
     onboarding_id: uuid.UUID,
-    body: PreflightSubmit,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> PreflightOut:
-    pf = onboarding.record_preflight(
-        session, principal, onboarding_id, checks=body.checks, collector=body.collector
-    )
+    """Request a SIMULATED preflight (derived from the declared boundary).
+
+    Takes no caller-supplied checks or collector labels: the result is always
+    ``simulated`` / ``fake_declared_boundary`` and can never make a target eligible for
+    live real provisioning. Live_verified evidence is produced only by the trusted
+    worker-only provider collector (future B1-B).
+    """
+    pf = onboarding.record_simulated_preflight(session, principal, onboarding_id)
     return PreflightOut.model_validate(pf)
 
 

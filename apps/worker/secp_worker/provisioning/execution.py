@@ -445,18 +445,31 @@ def _assert_real_gate(
     _assert_reservation_binding(session, operation, manifest, plan, target)
     # 9. Toolchain profile + isolated-lab classification + hash agreement + remote state.
     profile = _assert_toolchain_and_activation(session, operation, manifest, plan, target)
-    # 10. Target onboarding: the target must have an approved & active onboarding record
-    #     with no config/scope drift since approval (SECP-002B-1B-0, ADR-014).
-    _assert_target_onboarded(session, operation, target)
+    # 10. Target onboarding: exact agreement onboarding → plan → manifest → approved
+    #     preflight evidence, with no config/scope/boundary drift (SECP-002B-1B-0, ADR-014).
+    _assert_target_onboarded(session, operation, manifest, plan, target)
     return plan, target, profile
 
 
 def _assert_target_onboarded(
-    session, operation: ProvisioningOperation, target: ExecutionTarget
-) -> None:
-    from secp_api.services.onboarding import active_onboarding_for_target, onboarding_drift
+    session,
+    operation: ProvisioningOperation,
+    manifest: ProvisioningManifest,
+    plan: DeploymentPlan,
+    target: ExecutionTarget,
+):
+    from secp_api.errors import DomainError
+    from secp_api.models import TargetPreflight
+    from secp_api.services.onboarding import (
+        active_onboarding_for_target,
+        onboarding_drift,
+        recompute_evidence_hash,
+    )
 
-    ob = active_onboarding_for_target(session, target.id)
+    try:
+        ob = active_onboarding_for_target(session, target.id)
+    except DomainError:
+        _refuse_real(session, operation, "ambiguous active onboarding for target; fail closed")
     if ob is None:
         _refuse_real(
             session,
@@ -470,6 +483,61 @@ def _assert_target_onboarded(
             session,
             operation,
             f"onboarding approval is invalidated: {drift}; re-onboard and obtain fresh approval",
+        )
+    # Exact agreement across onboarding record, plan, and manifest bindings.
+    checks = (
+        (plan.target_onboarding_id == ob.id, "plan onboarding id mismatch"),
+        (manifest.target_onboarding_id == ob.id, "manifest onboarding id mismatch"),
+        (
+            plan.onboarding_boundary_hash == ob.approved_boundary_hash,
+            "plan onboarding boundary hash mismatch",
+        ),
+        (
+            manifest.onboarding_boundary_hash == ob.approved_boundary_hash,
+            "manifest onboarding boundary hash mismatch",
+        ),
+        (
+            plan.approved_preflight_evidence_hash == ob.approved_preflight_evidence_hash,
+            "plan approved preflight evidence hash mismatch",
+        ),
+        (
+            manifest.approved_preflight_evidence_hash == ob.approved_preflight_evidence_hash,
+            "manifest approved preflight evidence hash mismatch",
+        ),
+        (
+            plan.onboarding_verification_level == ob.approved_verification_level,
+            "plan onboarding verification level mismatch",
+        ),
+        (
+            manifest.onboarding_verification_level == ob.approved_verification_level,
+            "manifest onboarding verification level mismatch",
+        ),
+    )
+    for ok, reason in checks:
+        if not ok:
+            _refuse_real(session, operation, f"onboarding binding drift: {reason}")
+    # Recompute the approved preflight evidence hash (altered/stale evidence refused).
+    pf = (
+        session.get(TargetPreflight, ob.approved_preflight_id) if ob.approved_preflight_id else None
+    )
+    if pf is None or recompute_evidence_hash(pf) != ob.approved_preflight_evidence_hash:
+        _refuse_real(session, operation, "approved preflight evidence is missing or altered")
+    return ob
+
+
+def assert_evidence_sufficient_for_execution(onboarding, *, require_live: bool) -> None:
+    """Structural enforcement (ADR-014 §2): live provisioning requires ``live_verified``
+    evidence. Simulated evidence supports onboarding UX/review but never unlocks live
+    real provisioning. Raises ``ProvisioningRefusedError`` when insufficient."""
+    from secp_api.enums import VerificationLevel
+
+    if (
+        require_live
+        and onboarding.approved_verification_level != VerificationLevel.live_verified.value
+    ):
+        raise ProvisioningRefusedError(
+            "live real provisioning requires live_verified onboarding evidence; simulated "
+            "evidence cannot satisfy live eligibility (SECP-002B-1B, ADR-014)"
         )
 
 
@@ -655,6 +723,18 @@ def run_real_provisioning(
             operation,
             "process executor is not approved for B1-A fake-only execution; a real or "
             "unknown executor cannot be used (the subprocess path is sealed)",
+        )
+
+    # Structural: LIVE execution (a real, non-fake executor) requires live_verified
+    # onboarding evidence. In B1-B-0 the executor is always fake, so simulated evidence is
+    # accepted for the fake/contract path; a would-be live executor is refused above and,
+    # even if reached, would require live_verified evidence here (ADR-014 §2).
+    require_live = not getattr(process_executor, "b1a_fake_only", False)
+    if require_live:  # pragma: no cover - unreachable in B1-B-0 (fake-only)
+        from secp_api.services.onboarding import active_onboarding_for_target
+
+        assert_evidence_sufficient_for_execution(
+            active_onboarding_for_target(session, target.id), require_live=True
         )
 
     secret_env = _resolve_lab_secret_env(session, operation, target, kind, secret_resolver)

@@ -157,10 +157,33 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         else:
             toolchain_profile_id = None
             toolchain_profile_hash = None
+        # Enforceable onboarding binding (SECP-002B-1B-0, ADR-014). A target-bound plan
+        # may be generated only when exactly ONE active onboarding exists for the target;
+        # the plan binds that onboarding + its approved preflight evidence.
+        from secp_api.services.onboarding import require_single_active_onboarding
+
+        onboarding = require_single_active_onboarding(session, target.id)
+        onboarding_id = onboarding.id
+        onboarding_boundary_hash = onboarding.approved_boundary_hash
+        approved_preflight_id = onboarding.approved_preflight_id
+        approved_preflight_evidence_hash = onboarding.approved_preflight_evidence_hash
+        onboarding_verification_level = onboarding.approved_verification_level
+        summary["onboarding"] = {
+            "id": str(onboarding.id),
+            "isolation_model": onboarding.isolation_model.value,
+            "onboarding_mode": onboarding.onboarding_mode.value,
+            "boundary_hash": onboarding_boundary_hash,
+            "verification_level": onboarding_verification_level,
+        }
     else:
         scope_hash = None
         toolchain_profile_id = None
         toolchain_profile_hash = None
+        onboarding_id = None
+        onboarding_boundary_hash = None
+        approved_preflight_id = None
+        approved_preflight_evidence_hash = None
+        onboarding_verification_level = None
 
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.planned)
     plan = DeploymentPlan(
@@ -173,6 +196,11 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         target_scope_policy_hash=scope_hash,
         toolchain_profile_id=toolchain_profile_id,
         toolchain_profile_hash=toolchain_profile_hash,
+        target_onboarding_id=onboarding_id,
+        onboarding_boundary_hash=onboarding_boundary_hash,
+        approved_preflight_id=approved_preflight_id,
+        approved_preflight_evidence_hash=approved_preflight_evidence_hash,
+        onboarding_verification_level=onboarding_verification_level,
         status=PlanStatus.generated,
         plan=plugin_plan.model_dump(mode="json"),
         summary=summary,

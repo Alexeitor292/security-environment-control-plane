@@ -67,6 +67,53 @@ def _refuse(actor: Principal, plan: DeploymentPlan, reason: str) -> NoReturn:
     raise ValidationFailedError(reason)
 
 
+def _resolve_onboarding_binding(session, actor, plan, target) -> dict:
+    """Verify the plan's onboarding bindings match the current single active onboarding.
+
+    Returns the durable binding dict for the manifest. Fails closed on missing/ambiguous
+    onboarding, boundary/evidence-hash drift, verification-level change, or a stale/altered
+    approved preflight (SECP-002B-1B-0, ADR-014).
+    """
+    from secp_api.models import TargetPreflight
+    from secp_api.services.onboarding import (
+        active_onboarding_for_target,
+        onboarding_drift,
+        recompute_evidence_hash,
+    )
+
+    if plan.target_onboarding_id is None:
+        _refuse(actor, plan, "target-bound plan has no onboarding binding; regenerate the plan")
+    try:
+        onboarding = active_onboarding_for_target(session, target.id)
+    except Exception:
+        _refuse(actor, plan, "ambiguous active onboarding for target; fail closed")
+    if onboarding is None:
+        _refuse(actor, plan, "target has no active onboarding; onboard the target first")
+    if onboarding.id != plan.target_onboarding_id:
+        _refuse(actor, plan, "plan onboarding id does not match the active onboarding")
+    if onboarding.approved_boundary_hash != plan.onboarding_boundary_hash:
+        _refuse(actor, plan, "onboarding boundary hash has drifted since plan approval")
+    if str(onboarding.approved_preflight_id) != str(plan.approved_preflight_id):
+        _refuse(actor, plan, "approved preflight id has changed since plan approval")
+    if onboarding.approved_preflight_evidence_hash != plan.approved_preflight_evidence_hash:
+        _refuse(actor, plan, "approved preflight evidence hash has changed since plan approval")
+    if onboarding.approved_verification_level != plan.onboarding_verification_level:
+        _refuse(actor, plan, "onboarding verification level has changed since plan approval")
+    drift = onboarding_drift(onboarding, target)
+    if drift is not None:
+        _refuse(actor, plan, f"onboarding approval invalidated: {drift}")
+    pf = session.get(TargetPreflight, onboarding.approved_preflight_id)
+    if pf is None or recompute_evidence_hash(pf) != onboarding.approved_preflight_evidence_hash:
+        _refuse(actor, plan, "approved preflight evidence is missing or altered")
+    return {
+        "target_onboarding_id": onboarding.id,
+        "onboarding_boundary_hash": onboarding.approved_boundary_hash,
+        "approved_preflight_id": onboarding.approved_preflight_id,
+        "approved_preflight_evidence_hash": onboarding.approved_preflight_evidence_hash,
+        "onboarding_verification_level": onboarding.approved_verification_level,
+    }
+
+
 def _finalized_reservations(session: Session, plan: DeploymentPlan) -> list[NetworkReservation]:
     return list(
         session.execute(
@@ -293,6 +340,11 @@ def generate_manifest(
         toolchain_profile_id = toolchain.id
         toolchain_profile_hash = toolchain.content_hash
 
+    # 5d. Onboarding binding (SECP-002B-1B-0, ADR-014). The plan's onboarding bindings must
+    #     exactly match the single active onboarding for the target and its pinned approved
+    #     preflight evidence. Fail closed on any mismatch/ambiguity/drift.
+    onboarding_binding = _resolve_onboarding_binding(session, actor, plan, target)
+
     # 6. Valid, finalized, in-policy, same-org reservations.
     version = session.get(EnvironmentVersion, plan.environment_version_id)
     if version is None:
@@ -330,6 +382,15 @@ def generate_manifest(
         "target_scope_policy_hash": current_scope_hash,
         "toolchain_profile_id": str(toolchain_profile_id) if toolchain_profile_id else None,
         "toolchain_profile_hash": toolchain_profile_hash,
+        "onboarding": {
+            "target_onboarding_id": str(onboarding_binding["target_onboarding_id"]),
+            "onboarding_boundary_hash": onboarding_binding["onboarding_boundary_hash"],
+            "approved_preflight_id": str(onboarding_binding["approved_preflight_id"]),
+            "approved_preflight_evidence_hash": onboarding_binding[
+                "approved_preflight_evidence_hash"
+            ],
+            "verification_level": onboarding_binding["onboarding_verification_level"],
+        },
         "plugin_name": target.plugin_name,
         "teams": teams,
         "scope_policy": policy.model_dump(),
@@ -369,6 +430,11 @@ def generate_manifest(
         target_scope_policy_hash=current_scope_hash,
         toolchain_profile_id=toolchain_profile_id,
         toolchain_profile_hash=toolchain_profile_hash,
+        target_onboarding_id=onboarding_binding["target_onboarding_id"],
+        onboarding_boundary_hash=onboarding_binding["onboarding_boundary_hash"],
+        approved_preflight_id=onboarding_binding["approved_preflight_id"],
+        approved_preflight_evidence_hash=onboarding_binding["approved_preflight_evidence_hash"],
+        onboarding_verification_level=onboarding_binding["onboarding_verification_level"],
         content=content,
         content_hash=content_hash(content),
         validated_at=_now(),
