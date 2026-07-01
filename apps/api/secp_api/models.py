@@ -262,6 +262,9 @@ class DeploymentPlan(Base, TimestampMixin):
         Uuid, ForeignKey("execution_target.id"), nullable=True
     )
     target_config_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Hash of scope_policy["provisioning"] at plan-generation time (SECP-002B-0).
+    # Nullable for pre-migration rows; manifest generation fails closed when None.
+    target_scope_policy_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status: Mapped[PlanStatus] = mapped_column(
         EnumType(PlanStatus), default=PlanStatus.generated, nullable=False
     )
@@ -632,6 +635,8 @@ class ProvisioningManifest(Base, TimestampMixin):
         Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
     )
     target_config_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Scope-policy hash binding (SECP-002B-0): immutable once set.
+    target_scope_policy_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     content: Mapped[dict] = mapped_column(JSON, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

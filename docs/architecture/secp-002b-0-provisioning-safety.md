@@ -65,7 +65,26 @@ requires explicit allowlists/bounds and **rejects** empty lists, wildcards
 - `max_teams`, `max_vms`, `max_containers`, `max_total_vcpu`, `max_total_memory_mb`,
   `max_total_disk_gb` (all present, positive where required);
 - `allowed_cidr_reservations` (non-empty CIDRs; no `0.0.0.0/0`);
-- `external_connectivity` (**default deny**; anything permissive is rejected).
+- `external_connectivity` (**default deny**; anything permissive is rejected);
+- `node_sizing` per-image (vcpu, memory_mb, disk_gb; required; no silent defaults).
+
+### Scope-policy hash binding (plan → manifest → execution)
+
+`scope_policy` is mutable on `ExecutionTarget`.  To prevent a target manager from
+broadening the policy after plan approval, `generate_plan()` hashes
+`scope_policy["provisioning"]` and stores the result as
+`DeploymentPlan.target_scope_policy_hash`.  Plan approval therefore covers the exact
+provisioning policy in effect.
+
+`generate_manifest()` re-computes the hash, verifies it matches the plan's pinned
+hash (refuses if the plan has no hash or if the hashes differ), and stores the same
+hash on `ProvisioningManifest.target_scope_policy_hash` and in
+`manifest.content["target_scope_policy_hash"]`.
+
+`run_provisioning()` (check 6) requires all three to agree: current target hash,
+plan hash, and manifest hash.  Any mismatch refuses the operation and requires plan
+regeneration plus fresh approval.  Pre-migration plans (NULL hash) always fail
+closed.
 
 ## 5. Worker-only runner + fake (ADR-012)
 

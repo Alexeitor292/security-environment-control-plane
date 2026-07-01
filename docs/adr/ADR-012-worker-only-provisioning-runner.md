@@ -79,10 +79,16 @@ Boundary rules:
 For a target-bound plan the SECP-002A refusal (`assert_deployment_eligible`) remains
 the default. The fake runner is reachable **only** when ALL of the following hold:
 
-1. approved plan; 2. pinned target id + config hash; 3. an immutable, validated
-manifest; 4. valid, finalized CIDR reservations; 5. a strict provisioning scope
-policy; and 6. an explicit `enable_fake_provisioning` setting (dev/test only, refused
-in production). Any missing precondition refuses the operation, audited.
+1. approved plan with a non-null `target_scope_policy_hash`;
+2. pinned target id + config hash (no drift);
+3. scope-policy hash agreement: current target hash == plan hash == manifest hash;
+4. an immutable, validated manifest;
+5. valid, finalized CIDR reservations (exact CIDR/org/exercise binding);
+6. a strict provisioning scope policy (validated at execution time);
+7. an explicit `enable_fake_provisioning` setting (dev/test only, refused in
+   production).
+
+Any missing precondition refuses the operation, audited.
 
 ## Consequences
 

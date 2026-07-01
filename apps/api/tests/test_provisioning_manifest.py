@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import uuid
 
 import pytest
 from secp_api.enums import PlanStatus, TargetStatus
@@ -280,3 +281,135 @@ def test_missing_node_sizing_fails_closed(session, principal, provisioning_env):
     env = provisioning_env(scope=scope)
     with pytest.raises(ValidationFailedError, match="node_sizing"):
         manifests.generate_manifest(session, principal, env.plan.id)
+
+
+# ---------------------------------------------------------------------------
+# Proofs #8 — provisioning scope-policy hash binding
+# ---------------------------------------------------------------------------
+
+
+def test_plan_carries_scope_policy_hash(session, principal, provisioning_env):
+    """A target-bound plan must carry a non-null scope-policy hash at generation."""
+    from secp_api.provisioning_scope import provisioning_scope_policy_hash
+
+    env = provisioning_env()
+    assert env.plan.target_scope_policy_hash is not None
+    assert env.plan.target_scope_policy_hash.startswith("sha256:")
+    expected = provisioning_scope_policy_hash(env.target.scope_policy)
+    assert env.plan.target_scope_policy_hash == expected
+
+
+def test_manifest_binds_scope_policy_hash(session, principal, provisioning_env):
+    """A generated manifest must carry the scope-policy hash and agree with its plan."""
+    from secp_api.provisioning_scope import provisioning_scope_policy_hash
+
+    env = provisioning_env()
+    manifest = manifests.generate_manifest(session, principal, env.plan.id)
+    session.commit()
+
+    # Plan and manifest must agree.
+    assert manifest.target_scope_policy_hash == env.plan.target_scope_policy_hash
+    # Hash must be in the manifest content (self-documenting).
+    assert manifest.content.get("target_scope_policy_hash") == env.plan.target_scope_policy_hash
+    # Hash must match the current target scope policy.
+    expected = provisioning_scope_policy_hash(env.target.scope_policy)
+    assert manifest.target_scope_policy_hash == expected
+
+
+def test_scope_policy_drift_after_plan_approval_blocks_generation(
+    session, principal, provisioning_env
+):
+    """Broadening scope_policy after plan approval must block manifest generation."""
+    env = provisioning_env()  # plan approved with original policy
+    original_hash = env.plan.target_scope_policy_hash
+
+    # Broaden the scope policy on the target AFTER approval.
+    drifted = copy.deepcopy(env.target.scope_policy)
+    drifted["provisioning"]["max_vms"] = 9999  # broader than approved
+    session.execute(
+        ExecutionTarget.__table__.update()
+        .where(ExecutionTarget.__table__.c.id == env.target.id)
+        .values(scope_policy=drifted)
+    )
+    session.commit()
+    session.expire_all()
+
+    with pytest.raises(ValidationFailedError, match="scope-policy hash mismatch"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+    # No manifest must have been persisted.
+    assert session.query(ProvisioningManifest).count() == 0
+    # The plan's stored hash must not have changed (it's on the plan, not the target).
+    session.expire_all()
+    refreshed_plan = session.get(type(env.plan), env.plan.id)
+    assert refreshed_plan.target_scope_policy_hash == original_hash
+
+
+def test_new_plan_under_new_policy_allows_generation(session, principal, provisioning_env):
+    """A new plan generated under the updated policy allows manifest generation.
+
+    Scenario: policy changes after approval → old plan refused, new exercise + plan
+    under the updated policy succeeds.
+    """
+    from secp_api.services import catalog, exercises, planning, reservations
+    from tests.conftest import VALID_DEFINITION
+
+    env = provisioning_env()  # plan approved under policy A
+
+    # Change the scope policy on the target to policy B.
+    policy_b = copy.deepcopy(env.target.scope_policy)
+    policy_b["provisioning"]["max_vms"] = 9999
+    session.execute(
+        ExecutionTarget.__table__.update()
+        .where(ExecutionTarget.__table__.c.id == env.target.id)
+        .values(scope_policy=policy_b)
+    )
+    session.commit()
+    session.expire_all()
+
+    # Old plan (policy A hash) is refused under policy B.
+    with pytest.raises(ValidationFailedError, match="scope-policy hash mismatch"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+
+    # Create a fresh exercise on the same target — it will capture policy B's hash.
+    tmpl = catalog.create_template(
+        session, principal, name="Prov2", slug=f"prov2-{uuid.uuid4().hex[:8]}"
+    )
+    ver = catalog.create_version(
+        session, principal, template_id=tmpl.id, definition=VALID_DEFINITION
+    )
+    ex2 = exercises.create_exercise(
+        session,
+        principal,
+        template_id=tmpl.id,
+        version_id=ver.id,
+        name="prov-new",
+        execution_target_id=env.target.id,
+    )
+    exercises.validate_exercise(session, principal, ex2.id)
+    new_plan = planning.generate_plan(session, principal, ex2.id)
+    planning.submit_plan(session, principal, new_plan.id)
+    planning.approve_plan(session, principal, new_plan.id, "approved under policy B")
+    for team in ("team1", "team2"):
+        reservations.reserve_network(
+            session, principal, target_id=env.target.id, team_ref=team, exercise_id=ex2.id
+        )
+    session.commit()
+
+    # New plan (policy B hash) succeeds under policy B.
+    manifest = manifests.generate_manifest(session, principal, new_plan.id)
+    session.commit()
+    assert manifest is not None
+    assert manifest.target_scope_policy_hash == new_plan.target_scope_policy_hash
+
+
+def test_missing_scope_policy_hash_on_plan_blocks_generation(session, principal, provisioning_env):
+    """A plan without a scope-policy hash (pre-migration row) must fail closed."""
+    env = provisioning_env()
+    # Simulate pre-migration plan by clearing the hash.
+    env.plan.target_scope_policy_hash = None
+    session.flush()
+    session.commit()
+
+    with pytest.raises(ValidationFailedError, match="no scope-policy hash"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+    assert session.query(ProvisioningManifest).count() == 0

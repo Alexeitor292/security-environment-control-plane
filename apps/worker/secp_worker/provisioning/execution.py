@@ -43,7 +43,7 @@ from secp_api.models import (
     ProvisioningManifest,
     ProvisioningOperation,
 )
-from secp_api.provisioning_scope import validate_provisioning_scope
+from secp_api.provisioning_scope import provisioning_scope_policy_hash, validate_provisioning_scope
 from secp_api.services import provisioning as prov_service
 from secp_api.services.manifests import manifest_idempotency_key
 from secp_scenario_schema import content_hash, validate_definition
@@ -105,7 +105,38 @@ def _assert_gate_and_preconditions(
     # 5. Strict provisioning scope policy still valid.
     validate_provisioning_scope(target.scope_policy)
 
-    # 6. Scope policy must exactly match the manifest snapshot (no drift allowed).
+    # 6. Scope policy hash must agree across current target, approved plan, and manifest.
+    #    Any mismatch means the policy changed after approval — refuse and require
+    #    plan regeneration + fresh approval (SECP-002B-0, ADR-011).
+    current_scope_hash = provisioning_scope_policy_hash(target.scope_policy or {})
+    if plan.target_scope_policy_hash is None:
+        _refuse(
+            session,
+            operation,
+            "approved plan has no scope-policy hash (pre-migration plan); "
+            "regenerate the plan and obtain fresh approval",
+        )
+    if current_scope_hash != plan.target_scope_policy_hash:
+        _refuse(
+            session,
+            operation,
+            "target scope_policy has drifted since plan approval; "
+            "regenerate the plan and obtain fresh approval before provisioning",
+        )
+    if manifest.target_scope_policy_hash is None:
+        _refuse(
+            session,
+            operation,
+            "manifest has no scope-policy hash binding; generate a new manifest",
+        )
+    if current_scope_hash != manifest.target_scope_policy_hash:
+        _refuse(
+            session,
+            operation,
+            "target scope_policy has drifted from the manifest binding; "
+            "generate a new manifest and obtain fresh approval before proceeding",
+        )
+    # Belt-and-suspenders: exact content comparison against manifest snapshot.
     current_provisioning_policy = (target.scope_policy or {}).get("provisioning", {})
     manifest_policy_snapshot = manifest.content.get("scope_policy", {})
     if current_provisioning_policy != manifest_policy_snapshot:

@@ -132,6 +132,15 @@ rm -f ../../.env
   A fresh runner instance constructed with a `DbRunnerStateStore` therefore answers
   `status()` correctly after a worker restart — the `ProvisioningOperation` row is
   the authoritative state.  No new model or migration is required.
+- **Scope-policy hash binding:** `generate_plan()` hashes `scope_policy["provisioning"]`
+  and stores `target_scope_policy_hash` on `DeploymentPlan`.  `generate_manifest()`
+  verifies the current hash matches the plan's pinned hash (refuses on mismatch or
+  NULL); the hash is also stored on `ProvisioningManifest` and in the manifest
+  content.  `run_provisioning()` (check 6) requires all three to agree — current
+  target, plan, and manifest.  A target manager broadening the policy after approval
+  is detected before any manifest or operation is created.  Migration
+  `a3b1c0d9e8f7` adds the nullable `target_scope_policy_hash` column to both
+  `deployment_plan` and `provisioning_manifest`.
 - Executing a fake provisioning operation through a durable Temporal workflow is
   wired conceptually like discovery but is a SECP-002B-1 concern; B-0 executes the
   fake runner directly in the worker for verification.

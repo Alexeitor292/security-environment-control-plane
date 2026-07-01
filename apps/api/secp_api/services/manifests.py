@@ -33,7 +33,11 @@ from secp_api.models import (
     NetworkReservation,
     ProvisioningManifest,
 )
-from secp_api.provisioning_scope import ProvisioningScopePolicy, validate_provisioning_scope
+from secp_api.provisioning_scope import (
+    ProvisioningScopePolicy,
+    provisioning_scope_policy_hash,
+    validate_provisioning_scope,
+)
 from secp_api.services.targets import get_target
 
 MANIFEST_VERSION = "secp-002b-0/v1"
@@ -239,12 +243,32 @@ def generate_manifest(
     if plan.target_config_hash != target.config_hash:
         _refuse(actor, plan, "target configuration hash has drifted from the approved plan")
 
+    # 4b. Plan must carry a scope-policy hash (pre-migration plans are refused: fail closed).
+    if plan.target_scope_policy_hash is None:
+        _refuse(
+            actor,
+            plan,
+            "approved plan has no scope-policy hash; "
+            "regenerate the plan and obtain fresh approval to provision",
+        )
+
     # 5. Strict provisioning scope policy.
     try:
         policy = validate_provisioning_scope(target.scope_policy)
     except ValidationFailedError as exc:
         _refuse(actor, plan, f"invalid provisioning scope policy: {exc.message}")
         raise  # unreachable (keeps type-checkers happy)
+
+    # 5b. Current scope policy must not have changed since plan approval.
+    current_scope_hash = provisioning_scope_policy_hash(target.scope_policy)
+    if current_scope_hash != plan.target_scope_policy_hash:
+        _refuse(
+            actor,
+            plan,
+            "target scope_policy has changed since plan approval "
+            "(scope-policy hash mismatch); "
+            "regenerate the plan and obtain fresh approval before generating a manifest",
+        )
 
     # 6. Valid, finalized, in-policy, same-org reservations.
     version = session.get(EnvironmentVersion, plan.environment_version_id)
@@ -280,6 +304,7 @@ def generate_manifest(
         "deployment_plan_id": str(plan.id),
         "execution_target_id": str(target.id),
         "target_config_hash": target.config_hash,
+        "target_scope_policy_hash": current_scope_hash,
         "plugin_name": target.plugin_name,
         "teams": teams,
         "scope_policy": policy.model_dump(),
@@ -303,6 +328,7 @@ def generate_manifest(
         deployment_plan_id=plan.id,
         execution_target_id=target.id,
         target_config_hash=target.config_hash,
+        target_scope_policy_hash=current_scope_hash,
         content=content,
         content_hash=content_hash(content),
         validated_at=_now(),

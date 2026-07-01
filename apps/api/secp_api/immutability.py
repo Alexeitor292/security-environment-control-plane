@@ -28,6 +28,7 @@ _MANIFEST_PROTECTED = (
     "deployment_plan_id",
     "execution_target_id",
     "target_config_hash",
+    "target_scope_policy_hash",
 )
 
 

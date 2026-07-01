@@ -145,3 +145,18 @@ def validate_provisioning_scope(scope_policy: dict | None) -> ProvisioningScopeP
             "invalid provisioning scope policy",
             errors=[f"{'/'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()],
         ) from exc
+
+
+def provisioning_scope_policy_hash(scope_policy: dict) -> str:
+    """Deterministic SHA-256 of the ``provisioning`` section of a target scope policy.
+
+    Hashing only the provisioning sub-section makes the binding precise: unrelated
+    scope keys (e.g. discovery ``resource_types``) do not affect the hash.
+
+    Used to bind a ``DeploymentPlan`` and ``ProvisioningManifest`` to the exact
+    provisioning policy in effect at generation time (SECP-002B-0, ADR-011).
+    """
+    from secp_scenario_schema import content_hash
+
+    section = (scope_policy or {}).get("provisioning") or {}
+    return content_hash(section)

@@ -21,6 +21,7 @@ from secp_api.enums import AuditAction, LifecycleState, Permission, PlanStatus, 
 from secp_api.errors import DomainError, NotFoundError
 from secp_api.lifecycle import transition
 from secp_api.models import DeploymentPlan
+from secp_api.provisioning_scope import provisioning_scope_policy_hash
 from secp_api.registry import get_registry
 from secp_api.services.catalog import get_version
 from secp_api.services.exercises import get_exercise
@@ -109,6 +110,12 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
             "display_name": target.display_name,
             "config_hash": target.config_hash,
         }
+        # Hash scope_policy["provisioning"] so plan approval covers the exact
+        # provisioning policy, not just the target config hash (SECP-002B-0).
+        scope_hash = provisioning_scope_policy_hash(target.scope_policy)
+        summary["scope_policy_hash"] = scope_hash
+    else:
+        scope_hash = None
 
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.planned)
     plan = DeploymentPlan(
@@ -118,6 +125,7 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         version_content_hash=version.content_hash,
         execution_target_id=target.id if target is not None else None,
         target_config_hash=target.config_hash if target is not None else None,
+        target_scope_policy_hash=scope_hash,
         status=PlanStatus.generated,
         plan=plugin_plan.model_dump(mode="json"),
         summary=summary,
@@ -132,6 +140,7 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
     if target is not None:
         audit_data["execution_target_id"] = str(target.id)
         audit_data["target_config_hash"] = target.config_hash
+        audit_data["target_scope_policy_hash"] = scope_hash
     audit.record(
         session,
         action=AuditAction.plan_generated,
