@@ -270,6 +270,29 @@ def generate_manifest(
             "regenerate the plan and obtain fresh approval before generating a manifest",
         )
 
+    # 5c. Toolchain-profile binding (SECP-002B-1A). Optional: a plan with no pinned
+    #     profile keeps the fake-runner/Simulator behaviour (the real-lab gate fails
+    #     closed later). When pinned, the profile must still exist, be active, and its
+    #     content hash must match the plan's pinned hash (fail closed on drift).
+    from secp_api.enums import ToolchainProfileStatus
+    from secp_api.models import ToolchainProfile
+
+    toolchain_profile_id = None
+    toolchain_profile_hash = None
+    if plan.toolchain_profile_id is not None:
+        toolchain = session.get(ToolchainProfile, plan.toolchain_profile_id)
+        if toolchain is None or toolchain.status != ToolchainProfileStatus.active:
+            _refuse(actor, plan, "pinned toolchain profile is missing or not active")
+        if toolchain.content_hash != plan.toolchain_profile_hash:
+            _refuse(
+                actor,
+                plan,
+                "toolchain profile has drifted since plan approval "
+                "(profile hash mismatch); regenerate the plan and obtain fresh approval",
+            )
+        toolchain_profile_id = toolchain.id
+        toolchain_profile_hash = toolchain.content_hash
+
     # 6. Valid, finalized, in-policy, same-org reservations.
     version = session.get(EnvironmentVersion, plan.environment_version_id)
     if version is None:
@@ -305,6 +328,8 @@ def generate_manifest(
         "execution_target_id": str(target.id),
         "target_config_hash": target.config_hash,
         "target_scope_policy_hash": current_scope_hash,
+        "toolchain_profile_id": str(toolchain_profile_id) if toolchain_profile_id else None,
+        "toolchain_profile_hash": toolchain_profile_hash,
         "plugin_name": target.plugin_name,
         "teams": teams,
         "scope_policy": policy.model_dump(),
@@ -329,6 +354,8 @@ def generate_manifest(
         execution_target_id=target.id,
         target_config_hash=target.config_hash,
         target_scope_policy_hash=current_scope_hash,
+        toolchain_profile_id=toolchain_profile_id,
+        toolchain_profile_hash=toolchain_profile_hash,
         content=content,
         content_hash=content_hash(content),
         validated_at=_now(),
