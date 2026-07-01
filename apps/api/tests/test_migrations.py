@@ -30,6 +30,8 @@ EXPECTED_TABLES = {
     "provisioning_operation",
     "toolchain_profile",
     "provisioning_change_set_approval",
+    "target_onboarding",
+    "target_preflight",
     "environment_network",
     "environment_node",
     "environment_topology_edge",
