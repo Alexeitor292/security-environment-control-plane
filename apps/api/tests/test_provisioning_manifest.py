@@ -59,13 +59,19 @@ def test_unapproved_plan_blocks_generation(session, principal, provisioning_env)
 
 def test_target_hash_drift_blocks_generation(session, principal, provisioning_env):
     """Proof #4 — target config-hash drift blocks generation."""
+    from secp_api.models import DeploymentPlan
+
     env = provisioning_env()
-    # Simulate drift: the plan's pinned hash no longer matches the target.
-    plan = env.plan
-    plan.target_config_hash = "sha256:stale-hash"
+    # Simulate out-of-band drift via direct DB update (ORM would now raise ImmutableResourceError).
+    session.execute(
+        DeploymentPlan.__table__.update()
+        .where(DeploymentPlan.__table__.c.id == env.plan.id)
+        .values(target_config_hash="sha256:stale-hash")
+    )
     session.commit()
+    session.expire_all()
     with pytest.raises(ValidationFailedError):
-        manifests.generate_manifest(session, principal, plan.id)
+        manifests.generate_manifest(session, principal, env.plan.id)
 
 
 def test_disabled_target_blocks_generation(session, principal, provisioning_env):
@@ -404,12 +410,113 @@ def test_new_plan_under_new_policy_allows_generation(session, principal, provisi
 
 def test_missing_scope_policy_hash_on_plan_blocks_generation(session, principal, provisioning_env):
     """A plan without a scope-policy hash (pre-migration row) must fail closed."""
+    from secp_api.models import DeploymentPlan
+
     env = provisioning_env()
-    # Simulate pre-migration plan by clearing the hash.
-    env.plan.target_scope_policy_hash = None
-    session.flush()
+    # Use direct DB update to simulate a pre-migration NULL (bypasses ORM guard).
+    session.execute(
+        DeploymentPlan.__table__.update()
+        .where(DeploymentPlan.__table__.c.id == env.plan.id)
+        .values(target_scope_policy_hash=None)
+    )
     session.commit()
+    session.expire_all()
 
     with pytest.raises(ValidationFailedError, match="no scope-policy hash"):
         manifests.generate_manifest(session, principal, env.plan.id)
     assert session.query(ProvisioningManifest).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Proofs #9 — DeploymentPlan binding-field immutability (SECP-002B-0)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_lifecycle_works_normally(session, principal, provisioning_env):
+    """Proof #9a — generate, submit, approve transitions work with the ORM guard in place."""
+    from secp_api.enums import PlanStatus
+    from secp_api.services import planning
+
+    env = provisioning_env(approve=False)
+    assert env.plan.status == PlanStatus.awaiting_approval
+
+    # Approve — must not raise (status/decided_by/decided_at are NOT protected).
+    planning.approve_plan(session, principal, env.plan.id, "approved")
+    session.commit()
+    session.expire_all()
+    plan = session.get(type(env.plan), env.plan.id)
+    assert plan.status == PlanStatus.approved
+
+
+def test_approved_plan_target_scope_policy_hash_immutable(session, principal, provisioning_env):
+    """Proof #9b — target_scope_policy_hash raises ImmutableResourceError after creation."""
+    env = provisioning_env()
+    env.plan.target_scope_policy_hash = "sha256:tampered"
+    with pytest.raises(ImmutableResourceError, match="DeploymentPlan binding"):
+        session.flush()
+
+
+def test_approved_plan_target_config_hash_immutable(session, principal, provisioning_env):
+    """Proof #9c — target_config_hash raises ImmutableResourceError after creation."""
+    env = provisioning_env()
+    env.plan.target_config_hash = "sha256:tampered"
+    with pytest.raises(ImmutableResourceError, match="DeploymentPlan binding"):
+        session.flush()
+
+
+def test_approved_plan_plan_field_immutable(session, principal, provisioning_env):
+    """Proof #9d — 'plan' JSON field raises ImmutableResourceError after creation."""
+    env = provisioning_env()
+    env.plan.plan = {"tampered": True}
+    with pytest.raises(ImmutableResourceError, match="DeploymentPlan binding"):
+        session.flush()
+
+
+def test_approved_plan_summary_immutable(session, principal, provisioning_env):
+    """Proof #9e — 'summary' raises ImmutableResourceError after creation."""
+    env = provisioning_env()
+    env.plan.summary = {"tampered": True}
+    with pytest.raises(ImmutableResourceError, match="DeploymentPlan binding"):
+        session.flush()
+
+
+def test_manifest_generation_detects_out_of_band_plan_hash_corruption(
+    session, principal, provisioning_env
+):
+    """Proof #9f — direct-DB corruption of plan's scope hash is detected at generation.
+
+    The ORM guard protects the ORM path; for defense in depth the manifest service
+    also catches a mismatch between the (corrupted) plan hash and the live target.
+    """
+    from secp_api.models import DeploymentPlan
+
+    env = provisioning_env()
+
+    # Corrupt the plan's stored hash using a direct DB update (bypasses ORM guard).
+    session.execute(
+        DeploymentPlan.__table__.update()
+        .where(DeploymentPlan.__table__.c.id == env.plan.id)
+        .values(target_scope_policy_hash="sha256:corrupted-hash")
+    )
+    session.commit()
+    session.expire_all()
+
+    # Manifest generation must refuse: current target hash != corrupted plan hash.
+    with pytest.raises(ValidationFailedError, match="scope-policy hash mismatch"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+    assert session.query(ProvisioningManifest).count() == 0
+
+
+def test_simulator_plan_lifecycle_unchanged(session, principal, running_exercise):
+    """Proof #9g — non-target-bound (simulator) plan is unaffected by the new guard."""
+    from secp_api.enums import PlanStatus
+    from secp_api.services import planning
+
+    exercise = running_exercise()
+    plan = planning.latest_plan(session, principal, exercise.id)
+    assert plan is not None
+    # After start_exercise, the simulator plan transitions to applied.
+    assert plan.status in (PlanStatus.approved, PlanStatus.applied)
+    assert plan.execution_target_id is None
+    assert plan.target_config_hash is None
+    assert plan.target_scope_policy_hash is None

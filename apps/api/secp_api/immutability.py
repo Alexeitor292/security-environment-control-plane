@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from secp_api.errors import ImmutableResourceError
 from secp_api.models import (
     AuditEvent,
+    DeploymentPlan,
     EnvironmentVersion,
     ExecutionTarget,
     ProviderInventorySnapshot,
@@ -22,6 +23,20 @@ from secp_api.models import (
 
 _VERSION_PROTECTED = ("spec", "content_hash", "version_number", "api_version")
 _TARGET_PROTECTED = ("config", "config_hash", "plugin_name")
+# Binding fields that plan approval covers — mutable lifecycle fields (status,
+# approved_content_hash, decided_by, decided_at, decision_reason) are excluded.
+_PLAN_PROTECTED = (
+    "organization_id",
+    "exercise_id",
+    "environment_version_id",
+    "version_content_hash",
+    "execution_target_id",
+    "target_config_hash",
+    "target_scope_policy_hash",
+    "plan",
+    "summary",
+    "generated_by",
+)
 _MANIFEST_PROTECTED = (
     "content",
     "content_hash",
@@ -67,6 +82,15 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                 raise ImmutableResourceError(
                     "ExecutionTarget configuration is immutable after creation; "
                     f"attempted to change {changed}. Register a new target instead."
+                )
+        # DeploymentPlan: binding fields are immutable after creation (SECP-002B-0).
+        # Lifecycle fields (status, decided_by, decided_at, etc.) remain mutable.
+        if isinstance(obj, DeploymentPlan):
+            changed = [a for a in _PLAN_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "DeploymentPlan binding fields are immutable after creation; "
+                    f"attempted to change {changed}"
                 )
         # ProviderInventorySnapshot: immutable once finalized (ADR-008).
         if isinstance(obj, ProviderInventorySnapshot):
