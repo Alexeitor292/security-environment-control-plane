@@ -484,10 +484,24 @@ def _assert_target_onboarded(
             operation,
             f"onboarding approval is invalidated: {drift}; re-onboard and obtain fresh approval",
         )
-    # Exact agreement across onboarding record, plan, and manifest bindings.
+    # Exact agreement across onboarding record, plan, manifest columns, AND the immutable
+    # manifest content block. The approved preflight IDENTITY (id) must agree everywhere, not
+    # just the evidence hash (ADR-014 §3 correction pass).
+    ob_pf_id = str(ob.approved_preflight_id)
+    content_ob = manifest.content.get("onboarding", {}) or {}
     checks = (
         (plan.target_onboarding_id == ob.id, "plan onboarding id mismatch"),
         (manifest.target_onboarding_id == ob.id, "manifest onboarding id mismatch"),
+        (content_ob.get("target_onboarding_id") == str(ob.id), "content onboarding id mismatch"),
+        (str(plan.approved_preflight_id) == ob_pf_id, "plan approved preflight id mismatch"),
+        (
+            str(manifest.approved_preflight_id) == ob_pf_id,
+            "manifest approved preflight id mismatch",
+        ),
+        (
+            content_ob.get("approved_preflight_id") == ob_pf_id,
+            "content approved preflight id mismatch",
+        ),
         (
             plan.onboarding_boundary_hash == ob.approved_boundary_hash,
             "plan onboarding boundary hash mismatch",
@@ -495,6 +509,10 @@ def _assert_target_onboarded(
         (
             manifest.onboarding_boundary_hash == ob.approved_boundary_hash,
             "manifest onboarding boundary hash mismatch",
+        ),
+        (
+            content_ob.get("onboarding_boundary_hash") == ob.approved_boundary_hash,
+            "content onboarding boundary hash mismatch",
         ),
         (
             plan.approved_preflight_evidence_hash == ob.approved_preflight_evidence_hash,
@@ -505,12 +523,21 @@ def _assert_target_onboarded(
             "manifest approved preflight evidence hash mismatch",
         ),
         (
+            content_ob.get("approved_preflight_evidence_hash")
+            == ob.approved_preflight_evidence_hash,
+            "content approved preflight evidence hash mismatch",
+        ),
+        (
             plan.onboarding_verification_level == ob.approved_verification_level,
             "plan onboarding verification level mismatch",
         ),
         (
             manifest.onboarding_verification_level == ob.approved_verification_level,
             "manifest onboarding verification level mismatch",
+        ),
+        (
+            content_ob.get("verification_level") == ob.approved_verification_level,
+            "content onboarding verification level mismatch",
         ),
     )
     for ok, reason in checks:
@@ -522,7 +549,71 @@ def _assert_target_onboarded(
     )
     if pf is None or recompute_evidence_hash(pf) != ob.approved_preflight_evidence_hash:
         _refuse_real(session, operation, "approved preflight evidence is missing or altered")
+    # Toolchain provenance binding (ADR-014 §4): the approved preflight's toolchain provenance
+    # must equal the plan's pinned profile (already proven == manifest == current active by
+    # _assert_toolchain_and_activation), so pf == plan == manifest == active.
+    if plan.toolchain_profile_id is not None:
+        if str(pf.toolchain_profile_id) != str(plan.toolchain_profile_id) or (
+            pf.toolchain_profile_hash != plan.toolchain_profile_hash
+        ):
+            _refuse_real(
+                session,
+                operation,
+                "approved preflight toolchain provenance disagrees with the pinned profile",
+            )
+    # Effective execution boundary (ADR-014 §2): recompute from the active onboarding +
+    # current target scope, require non-empty and exact agreement with plan, manifest, and
+    # manifest content, then enforce every declared action against it BEFORE rendering,
+    # secret resolution, executor construction, or process calls.
+    _assert_effective_boundary(session, operation, manifest, plan, target, ob)
     return ob
+
+
+def _assert_effective_boundary(
+    session,
+    operation: ProvisioningOperation,
+    manifest: ProvisioningManifest,
+    plan: DeploymentPlan,
+    target: ExecutionTarget,
+    ob,
+) -> None:
+    from secp_api.onboarding import (
+        OnboardingBoundarySpec,
+        effective_boundary_hash,
+        effective_boundary_is_empty,
+    )
+    from secp_api.onboarding import effective_boundary as compute_effective_boundary
+
+    from secp_worker.provisioning.boundary import enforce_manifest_within_boundary
+
+    spec = OnboardingBoundarySpec.model_validate(ob.declared_boundary)
+    eff = compute_effective_boundary(spec, target.scope_policy or {})
+    if effective_boundary_is_empty(eff):
+        _refuse_real(
+            session, operation, "effective execution boundary is empty; re-onboard the target"
+        )
+    eff_hash = effective_boundary_hash(eff)
+    content_ob = manifest.content.get("onboarding", {}) or {}
+    content_eff = content_ob.get("effective_boundary")
+    content_eff_hash = content_ob.get("effective_boundary_hash")
+    boundary_checks = (
+        (plan.effective_boundary == eff, "plan effective boundary mismatch"),
+        (plan.effective_boundary_hash == eff_hash, "plan effective boundary hash mismatch"),
+        (manifest.effective_boundary == eff, "manifest effective boundary mismatch"),
+        (manifest.effective_boundary_hash == eff_hash, "manifest effective boundary hash mismatch"),
+        (content_eff == eff, "manifest content effective boundary mismatch"),
+        (content_eff_hash == eff_hash, "manifest content effective boundary hash mismatch"),
+    )
+    for ok, reason in boundary_checks:
+        if not ok:
+            _refuse_real(session, operation, f"effective boundary drift: {reason}")
+    violations = enforce_manifest_within_boundary(manifest.content, eff)
+    if violations:
+        _refuse_real(
+            session,
+            operation,
+            f"manifest action outside the effective execution boundary: {violations[0]}",
+        )
 
 
 def assert_evidence_sufficient_for_execution(onboarding, *, require_live: bool) -> None:

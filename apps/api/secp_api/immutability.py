@@ -44,6 +44,8 @@ _PLAN_PROTECTED = (
     "approved_preflight_id",
     "approved_preflight_evidence_hash",
     "onboarding_verification_level",
+    "effective_boundary",
+    "effective_boundary_hash",
     "plan",
     "summary",
     "generated_by",
@@ -62,6 +64,8 @@ _MANIFEST_PROTECTED = (
     "approved_preflight_id",
     "approved_preflight_evidence_hash",
     "onboarding_verification_level",
+    "effective_boundary",
+    "effective_boundary_hash",
 )
 _TOOLCHAIN_PROFILE_PROTECTED = (
     "organization_id",

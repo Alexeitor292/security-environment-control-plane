@@ -26,7 +26,11 @@ from secp_api.enums import (
     VerificationLevel,
 )
 from secp_api.enums import OnboardingStatus as S
-from secp_api.errors import InvalidTransitionError, ValidationFailedError
+from secp_api.errors import (
+    InvalidTransitionError,
+    LiveEvidenceSealedError,
+    ValidationFailedError,
+)
 
 # Tokens that would broaden an allowlist into an unsafe wildcard.
 _WILDCARD_TOKENS = {"*", "any", "all", "", "0.0.0.0/0", "::/0", "0/0"}
@@ -36,6 +40,51 @@ _SECRET_RE = re.compile(
     r"(pass|passwd|password|secret|token|api[_-]?key|apikey|private[_-]?key|credential)",
     re.IGNORECASE,
 )
+
+# --- Robust redaction of preflight detail text (correction pass, ADR-014 §5) ---
+# Preflight details are review-only strings. They must never carry a secret, endpoint,
+# credential, or raw-inventory VALUE. These patterns reject secret-bearing text robustly
+# (not only the colon/equals form) while leaving generic, value-free descriptions valid.
+_SECRET_WORD = (
+    r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|apikey|private[_-]?key|"
+    r"credentials?|bearer|authorization|session[_-]?id)"
+)
+# A secret keyword directly followed by a value (":", "=", or a following token).
+_SECRET_ASSIGNMENT_RE = re.compile(rf"{_SECRET_WORD}\s*[:=]\s*\S", re.IGNORECASE)
+_SECRET_VALUE_RE = re.compile(rf"{_SECRET_WORD}\s+\S{{6,}}", re.IGNORECASE)
+_PRIVATE_KEY_RE = re.compile(r"-----BEGIN[ A-Z]*PRIVATE KEY-----", re.IGNORECASE)
+# Endpoint-like: URL schemes, IPv4 (with optional CIDR/port), or multi-label hostnames.
+_URL_RE = re.compile(r"[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+_IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_HOSTNAME_RE = re.compile(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+){2,}\b", re.IGNORECASE)
+# Raw-inventory-like: provider node/storage/bridge/VNet/VLAN tokens.
+_INVENTORY_RE = re.compile(
+    r"\bvmbr\d+\b|\bpve-node-?\d+\b|\blocal-lvm\b|\blocal-zfs\b|\bvnet\d+\b|\bvlan\d+\b",
+    re.IGNORECASE,
+)
+# High-entropy token-like run (16+ alphanumerics containing at least one digit).
+_HIGH_ENTROPY_RE = re.compile(r"\b(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{16,}\b")
+
+_REDACTION_REJECT_RES = (
+    _PRIVATE_KEY_RE,
+    _SECRET_ASSIGNMENT_RE,
+    _SECRET_VALUE_RE,
+    _URL_RE,
+    _IPV4_RE,
+    _HOSTNAME_RE,
+    _INVENTORY_RE,
+    _HIGH_ENTROPY_RE,
+)
+
+
+def detail_is_secret_bearing(text: str) -> bool:
+    """True when a preflight detail string carries a secret/endpoint/inventory value.
+
+    Robust redaction check: rejects secret keywords with a value, private keys, URLs,
+    IPv4/CIDR, multi-label hostnames, provider inventory tokens, and high-entropy tokens.
+    Generic value-free descriptions (the simulated details) are accepted.
+    """
+    return any(rx.search(text) for rx in _REDACTION_REJECT_RES)
 
 
 class _Strict(BaseModel):
@@ -213,9 +262,13 @@ class PreflightCheck(_Strict):
     @classmethod
     def _detail_is_redacted(cls, v: str) -> str:
         # Defense-in-depth: preflight details are for human review and must never carry a
-        # secret. (Real values are redacted by the worker collector; this rejects leaks.)
-        if _SECRET_RE.search(v) and (":" in v or "=" in v):
-            raise ValueError("preflight detail must be redacted; it must not contain a secret")
+        # secret, credential, endpoint, or raw inventory value. (Real values are redacted by
+        # the worker collector; this rejects any leak robustly — not only ":"/"=" forms.)
+        if detail_is_secret_bearing(v):
+            raise ValueError(
+                "preflight detail must be redacted; it must not contain a secret, "
+                "credential, endpoint, or raw inventory value"
+            )
         return v
 
 
@@ -379,6 +432,37 @@ def validate_collector_and_level(collector_kind: str, verification_level: str) -
         )
 
 
+# --- B1-B-0 live-evidence seal (correction pass) -----------------------------
+#
+# Live-verified preflight evidence is a FUTURE B1-B capability that requires a real,
+# separately-reviewed ``provider_worker`` collector. In SECP-002B-1B-0 NO code path may
+# create ``live_verified`` evidence or use the ``provider_worker`` collector: the seam
+# exists (the ``PreflightCollector`` protocol and the enum values) but its implementation
+# is unavailable/inert. This is a deliberate, UNCONDITIONAL code-level seal — not a
+# configuration setting — lifted only by a separately reviewed B1-B change that adds a real
+# collector. ``record_preflight_result`` therefore accepts only simulated fake evidence in
+# this release.
+B1B0_LIVE_EVIDENCE_SEALED = True
+
+
+def assert_live_evidence_unsealed_allowed(collector_kind: str, verification_level: str) -> None:
+    """Refuse any attempt to create live_verified / provider_worker evidence in B1-B-0.
+
+    Raises :class:`LiveEvidenceSealedError` while :data:`B1B0_LIVE_EVIDENCE_SEALED` holds.
+    """
+    if not B1B0_LIVE_EVIDENCE_SEALED:  # pragma: no cover - only a reviewed B1-B change lifts this
+        return
+    if (
+        verification_level == VerificationLevel.live_verified.value
+        or collector_kind == CollectorKind.provider_worker.value
+    ):
+        raise LiveEvidenceSealedError(
+            "live_verified onboarding evidence cannot be created in SECP-002B-1B-0; the "
+            "provider_worker collector is a sealed future B1-B seam and only simulated fake "
+            "evidence is permitted. Lifting this seal requires a separately reviewed B1-B change."
+        )
+
+
 # --- Boundary <-> target scope compatibility (ADR-014 §5) --------------------
 
 
@@ -489,6 +573,73 @@ def boundary_scope_intersection(boundary: OnboardingBoundarySpec, scope_policy: 
             "end": min(boundary.vmid_range.end, prov.get("vmid_range", {}).get("end", 0)),
         },
     }
+
+
+# --- Effective execution boundary (correction pass, ADR-014 §2) --------------
+
+EFFECTIVE_BOUNDARY_SCHEMA_VERSION = "secp-002b-1b-0/effective-boundary/v1"
+
+
+def effective_boundary(boundary: OnboardingBoundarySpec, scope_policy: dict) -> dict:
+    """Canonical effective execution boundary = declared boundary ∩ target scope policy.
+
+    Deterministic and provider-neutral. Extends :func:`boundary_scope_intersection` with the
+    min-of quotas and the (deny) external-connectivity policy so it is the *complete* set of
+    resources the worker may act within. When the declared boundary is within scope (enforced
+    at onboarding) the allowlist/CIDR/VM-ID parts equal the declared boundary. An empty
+    allowlist or an inverted VM-ID range denotes an *empty* boundary (refused upstream).
+    """
+    prov = (scope_policy or {}).get("provisioning", {}) or {}
+    inter = boundary_scope_intersection(boundary, scope_policy)
+    q = boundary.quotas
+    quotas = {
+        "max_teams": min(q.max_teams, prov.get("max_teams", q.max_teams)),
+        "max_vms": min(q.max_vms, prov.get("max_vms", q.max_vms)),
+        "max_containers": min(q.max_containers, prov.get("max_containers", q.max_containers)),
+        "max_total_vcpu": min(q.max_total_vcpu, prov.get("max_total_vcpu", q.max_total_vcpu)),
+        "max_total_memory_mb": min(
+            q.max_total_memory_mb, prov.get("max_total_memory_mb", q.max_total_memory_mb)
+        ),
+        "max_total_disk_gb": min(
+            q.max_total_disk_gb, prov.get("max_total_disk_gb", q.max_total_disk_gb)
+        ),
+    }
+    return {
+        "schema_version": EFFECTIVE_BOUNDARY_SCHEMA_VERSION,
+        "nodes": inter["nodes"],
+        "storage": inter["storage"],
+        "network_segments": inter["network_segments"],
+        "cidrs": inter["cidrs"],
+        "vmid_range": inter["vmid_range"],
+        "quotas": quotas,
+        # External connectivity is always deny within the effective boundary.
+        "external_connectivity": {"policy": "deny"},
+    }
+
+
+def effective_boundary_is_empty(eb: dict) -> bool:
+    """True when the effective boundary permits nothing (fail-closed sentinel)."""
+    if not eb:
+        return True
+    vr = eb.get("vmid_range", {}) or {}
+    start, end = vr.get("start"), vr.get("end")
+    if start is None or end is None or start > end:
+        return True
+    return not (
+        eb.get("nodes") and eb.get("storage") and eb.get("network_segments") and eb.get("cidrs")
+    )
+
+
+def effective_boundary_hash(eb: dict) -> str:
+    """Deterministic SHA-256 of a canonical effective boundary."""
+    from secp_scenario_schema import content_hash
+
+    return content_hash(eb)
+
+
+def cidr_within_allowed(cidr: str, allowed: list[str]) -> bool:
+    """True when ``cidr`` is a subnet of any allowed CIDR (public helper for the worker seam)."""
+    return _cidr_within_any(cidr, allowed)
 
 
 # --- Onboarding lifecycle -----------------------------------------------------

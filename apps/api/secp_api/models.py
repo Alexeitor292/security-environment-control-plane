@@ -288,6 +288,11 @@ class DeploymentPlan(Base, TimestampMixin):
     approved_preflight_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     approved_preflight_evidence_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     onboarding_verification_level: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Effective execution boundary = declared onboarding boundary ∩ target scope policy
+    # (SECP-002B-1B-0 correction pass, ADR-014 §2). Immutable; recomputed + required to
+    # agree at manifest generation and the worker gate. Null for the Simulator path.
+    effective_boundary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    effective_boundary_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status: Mapped[PlanStatus] = mapped_column(
         EnumType(PlanStatus), default=PlanStatus.generated, nullable=False
     )
@@ -821,6 +826,10 @@ class ProvisioningManifest(Base, TimestampMixin):
     approved_preflight_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     approved_preflight_evidence_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     onboarding_verification_level: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Effective execution boundary (declared boundary ∩ scope): copied from the plan, echoed
+    # into immutable ``content``/``content_hash``, and re-verified at the worker gate.
+    effective_boundary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    effective_boundary_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     content: Mapped[dict] = mapped_column(JSON, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

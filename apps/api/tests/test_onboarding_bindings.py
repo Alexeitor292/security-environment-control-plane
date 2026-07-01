@@ -9,7 +9,12 @@ import pytest
 from secp_api.config import Settings
 from secp_api.enums import CollectorKind, ProvisioningOperationKind, VerificationLevel
 from secp_api.errors import ProvisioningRefusedError, ValidationFailedError
-from secp_api.models import TargetOnboarding, TargetPreflight
+from secp_api.models import (
+    DeploymentPlan,
+    ProvisioningManifest,
+    TargetOnboarding,
+    TargetPreflight,
+)
 from secp_api.onboarding import (
     OnboardingBoundarySpec,
     boundary_scope_intersection,
@@ -157,19 +162,30 @@ def test_simulated_evidence_cannot_satisfy_live(lab_env):
         assert_evidence_sufficient_for_execution(env.onboarding, require_live=True)
 
 
-def test_live_verified_evidence_satisfies_live(session, principal):
-    """A live_verified onboarding (fake worker fixture) satisfies the live requirement."""
+def test_live_verified_onboarding_satisfies_live_structurally():
+    """The structural check accepts live_verified. Live evidence CANNOT be created in B1-B-0
+    (sealed — see test_onboarding_preflight.py), so this uses a stub to prove only that the
+    ``require_live`` gate keys off ``approved_verification_level``."""
+    from types import SimpleNamespace
+
+    live_ob = SimpleNamespace(approved_verification_level=VerificationLevel.live_verified.value)
+    assert_evidence_sufficient_for_execution(live_ob, require_live=True)  # no raise
+
+
+def test_b1b0_seal_refuses_live_evidence_creation(session, principal):
+    """No path (API or worker seam) can mint live_verified evidence in B1-B-0."""
     from secp_api.enums import IsolationModel, OnboardingMode
+    from secp_api.errors import LiveEvidenceSealedError
     from secp_api.onboarding import boundary_from_scope, simulate_boundary_checks
     from secp_api.services import targets
 
     t = targets.register_target(
         session,
         principal,
-        display_name="Live",
+        display_name="Sealed",
         plugin_name="proxmox",
         config={"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True},
-        secret_ref="env:SECP_PROVIDER_SECRET__LIVE",
+        secret_ref="env:SECP_PROVIDER_SECRET__SEALED",
         scope_policy={"provisioning": copy.deepcopy(VALID_PROVISIONING_SCOPE)},
     )
     session.commit()
@@ -182,19 +198,70 @@ def test_live_verified_evidence_satisfies_live(session, principal):
         declared_boundary=boundary_from_scope(t.scope_policy),
     )
     checks = simulate_boundary_checks(ob.declared_boundary, IsolationModel.logical)
-    onb.record_preflight_result(
-        session,
-        ob.id,
-        checks=checks,
-        verification_level=VerificationLevel.live_verified.value,
-        collector_kind=CollectorKind.provider_worker.value,
-        collector_identity="fake-provider-worker",
+    with pytest.raises(LiveEvidenceSealedError):
+        onb.record_preflight_result(
+            session,
+            ob.id,
+            checks=checks,
+            verification_level=VerificationLevel.live_verified.value,
+            collector_kind=CollectorKind.provider_worker.value,
+            collector_identity="fake-provider-worker",
+        )
+
+
+# --- exact approved-preflight identity everywhere (corruption tests) ----------
+
+
+def test_plan_preflight_id_disagreement_refuses_real_provisioning(session, principal, lab_env):
+    import uuid
+
+    env = lab_env()
+    session.execute(
+        DeploymentPlan.__table__.update()
+        .where(DeploymentPlan.__table__.c.id == env.plan.id)
+        .values(approved_preflight_id=uuid.uuid4())
     )
-    onb.submit_for_review(session, principal, ob.id)
-    onb.approve_onboarding(session, principal, ob.id, "live reviewed")
-    onb.activate_onboarding(session, principal, ob.id)
-    assert ob.approved_verification_level == VerificationLevel.live_verified.value
-    assert_evidence_sufficient_for_execution(ob, require_live=True)  # no raise
+    session.commit()
+    session.expire_all()
+    with pytest.raises(ProvisioningRefusedError, match="preflight id"):
+        _dry(session, env.manifest)
+
+
+def test_manifest_preflight_id_disagreement_refuses_real_provisioning(session, principal, lab_env):
+    import uuid
+
+    env = lab_env()
+    session.execute(
+        ProvisioningManifest.__table__.update()
+        .where(ProvisioningManifest.__table__.c.id == env.manifest.id)
+        .values(approved_preflight_id=uuid.uuid4())
+    )
+    session.commit()
+    session.expire_all()
+    with pytest.raises(ProvisioningRefusedError, match="preflight id"):
+        _dry(session, env.manifest)
+
+
+def test_manifest_content_preflight_id_disagreement_refuses_real_provisioning(
+    session, principal, lab_env
+):
+    """Even a content tamper that re-signs the content hash is refused (explicit content check)."""
+    import uuid
+
+    from secp_scenario_schema import content_hash
+
+    env = lab_env()
+    tampered = copy.deepcopy(env.manifest.content)
+    tampered["onboarding"]["approved_preflight_id"] = str(uuid.uuid4())
+    session.execute(
+        ProvisioningManifest.__table__.update()
+        .where(ProvisioningManifest.__table__.c.id == env.manifest.id)
+        .values(content=tampered, content_hash=content_hash(tampered))
+    )
+    session.commit()
+    session.expire_all()
+    with pytest.raises(ProvisioningRefusedError, match="content approved preflight id"):
+        _dry(session, env.manifest)
 
 
 # --- boundary / scope intersection -------------------------------------------

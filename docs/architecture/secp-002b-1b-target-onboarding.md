@@ -110,8 +110,9 @@ Onboarding is not documentation — it is a hash-bound execution input:
 - **Simulated vs live.** Evidence carries `verification_level` + `collector_kind`. The API
   preflight route is a *request* that only ever yields `simulated` / `fake_declared_boundary`
   evidence (no caller-supplied checks/labels), so no API path forges live eligibility. Live
-  real provisioning structurally requires `live_verified` evidence from the trusted
-  `provider_worker` collector (future B1-B); simulated supports UX/review only.
+  real provisioning structurally requires `live_verified` evidence from a future trusted
+  `provider_worker` collector; in B1-B-0 that collector is sealed and simulated evidence
+  supports UX/review only.
 - **Complete evidence hash.** The evidence hash covers schema version, onboarding id, boundary/
   config/scope/toolchain hashes, verification level, collector kind + identity, a monotonic
   version, and every redacted check — never secrets/endpoints/inventories.
@@ -119,6 +120,29 @@ Onboarding is not documentation — it is a hash-bound execution input:
   selection fails closed on zero/multiple actives.
 - **Boundary ⊆ scope.** A boundary broader than the target scope is refused; the worker executes
   only within `boundary ∩ scope` (a provider adapter seam handles future naming).
+
+### Execution-boundary correction pass
+
+- **Live-evidence seal.** `record_preflight_result` accepts only simulated fake evidence in
+  B1-B-0; `live_verified` / `provider_worker` creation is refused everywhere by an unconditional
+  code-level seal (`assert_live_evidence_unsealed_allowed`). The `provider_worker` collector
+  seam exists but is inert (`SealedProviderWorkerCollector.collect` refuses). A future B1-B
+  change adds a real collector under separate review.
+- **Effective execution boundary.** `effective_boundary = declared boundary ∩ target scope` and
+  `effective_boundary_hash` are persisted on the plan + manifest and echoed into immutable
+  manifest content. Manifest generation and the worker gate recompute and require exact
+  agreement for both the boundary object and hash (plan == manifest == content) and fail closed
+  on empty/broadened/changed/mismatched boundaries. The **worker-only seam**
+  `secp_worker.provisioning.boundary` enforces every declared node/storage/network/CIDR/
+  VM-ID/quota/external action against it before rendering, secret resolution, executor
+  construction, or process calls. `apps/api` never imports this seam.
+- **Exact approved-preflight identity.** The gate requires `approved_preflight_id` to agree
+  across onboarding → plan → manifest column → immutable content (not just the evidence hash).
+- **Toolchain provenance.** Bound through preflight approval → manifest generation → gate:
+  preflight == onboarding-approved == plan == manifest == current active profile; a profile
+  added/replaced/disabled/altered after preflight approval is refused.
+- **Robust redaction.** Preflight detail text carrying a secret/credential/endpoint/inventory/
+  private-key/high-entropy value is refused before persistence.
 
 ## What this slice intentionally does NOT do
 

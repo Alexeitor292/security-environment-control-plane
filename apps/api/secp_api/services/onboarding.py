@@ -36,6 +36,7 @@ from secp_api.enums import (
 from secp_api.errors import DomainError, NotFoundError, ValidationFailedError
 from secp_api.models import ExecutionTarget, TargetOnboarding, TargetPreflight
 from secp_api.onboarding import (
+    assert_live_evidence_unsealed_allowed,
     build_evidence_package,
     evidence_package_hash,
     onboarding_boundary_hash,
@@ -170,6 +171,42 @@ def _evidence_provenance(session: Session, ob: TargetOnboarding, target: Executi
     }
 
 
+def preflight_toolchain_matches_active(
+    session: Session, target: ExecutionTarget, pf: TargetPreflight
+) -> str | None:
+    """Return a mismatch reason if the preflight toolchain provenance disagrees with the
+    current active toolchain profile, else None. No mismatch when no profile is involved.
+
+    Shared by onboarding approval and manifest generation (ADR-014 §4).
+    """
+    from secp_api.services.toolchain import active_profile_for_target
+
+    tp = active_profile_for_target(session, target.id)
+    involved = tp is not None or pf.toolchain_profile_id is not None
+    if not involved:
+        return None
+    if tp is None:
+        return "the toolchain profile present at preflight is no longer active"
+    if pf.toolchain_profile_id is None:
+        return "a toolchain profile was added after the preflight was recorded"
+    if str(pf.toolchain_profile_id) != str(tp.id):
+        return "the active toolchain profile differs from the one recorded at preflight"
+    if pf.toolchain_profile_hash != tp.content_hash:
+        return "the active toolchain profile content has drifted since the preflight"
+    return None
+
+
+def _assert_preflight_toolchain_matches_active(
+    session: Session, target: ExecutionTarget, pf: TargetPreflight
+) -> None:
+    reason = preflight_toolchain_matches_active(session, target, pf)
+    if reason is not None:
+        raise DomainError(
+            f"preflight toolchain provenance is invalid: {reason}; re-run the preflight "
+            "against the current active toolchain profile before approving"
+        )
+
+
 def _next_evidence_version(session: Session, onboarding_id: uuid.UUID) -> int:
     from sqlalchemy import func
 
@@ -217,6 +254,9 @@ def _record_preflight(
             "draft or preflight_pending"
         )
     validate_collector_and_level(collector_kind, verification_level)
+    # B1-B-0 seal: no code path may create live_verified / provider_worker evidence in this
+    # release (unconditional code-level seal, not a config toggle). Only simulated fakes.
+    assert_live_evidence_unsealed_allowed(collector_kind, verification_level)
     validated = validate_preflight_evidence(checks)
     ok, _missing = required_checks_passed(validated, isolation_model=ob.isolation_model)
     canonical_checks = [c.model_dump(mode="json") for c in validated]
@@ -325,9 +365,10 @@ def record_preflight_result(
 ) -> TargetPreflight:
     """Worker-callable recorder for collector-produced evidence (not on the API router).
 
-    Enforces the collector/level contract (a fake collector can only produce simulated
-    evidence; only ``provider_worker`` may produce ``live_verified``). Used by the worker
-    preflight collector seam.
+    Enforces the collector/level contract AND the B1-B-0 live-evidence seal: in this release
+    it accepts only *simulated* fake evidence. Any attempt to record ``live_verified`` /
+    ``provider_worker`` evidence is refused (:class:`LiveEvidenceSealedError`). The seam is
+    kept for a future, separately-reviewed B1-B change that adds a real collector.
     """
     ob = session.get(TargetOnboarding, onboarding_id)
     if ob is None:
@@ -418,6 +459,11 @@ def approve_onboarding(
         raise DomainError("preflight evidence was collected for a different boundary")
     if pf.target_config_hash != current_config or pf.scope_policy_hash != current_scope:
         raise DomainError("preflight evidence does not match the current target config/scope")
+    # Toolchain provenance binding (ADR-014 §4): when a toolchain profile is required or
+    # present, the approved evidence must have been collected against the current active
+    # profile (exact id + hash). Refuse if a profile was added, replaced, disabled, or
+    # altered since the preflight was recorded.
+    _assert_preflight_toolchain_matches_active(session, target, pf)
 
     ob.status = transition(ob.status, OnboardingStatus.approved)
     ob.approved_target_config_hash = current_config

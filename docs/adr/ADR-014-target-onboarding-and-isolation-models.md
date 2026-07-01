@@ -1,6 +1,6 @@
 # ADR-014 — Target onboarding modes, isolation models, and automated declarative deployment
 
-- **Status:** Accepted (amended — enforceable-binding correction pass)
+- **Status:** Accepted (amended — enforceable-binding + execution-boundary correction passes)
 - **Date:** 2026-07-01 (amended 2026-07-01)
 - **Milestone:** SECP-002B-1B-0 (Target Onboarding and Automated Deployment Contract)
 - **Related:** Charter §5 (Layers 4/5/7), §6 (Invariants 1–7, 11, 12, 17), §13; ADR-006,
@@ -122,10 +122,11 @@ cryptographically bound into deployment, and that an API caller could submit arb
    (`fake_declared_boundary` | `provider_worker`). The API preflight route is a **request**
    that produces only `simulated` / `fake_declared_boundary` evidence — it takes **no**
    caller-supplied checks or collector labels, so **no API path can forge live eligibility**.
-   A fake collector may only produce `simulated` evidence; only the trusted worker
-   `provider_worker` collector may produce `live_verified`. **Live real provisioning
-   structurally requires `live_verified` evidence** — simulated evidence supports onboarding
-   UX/review but never unlocks live provisioning. B1-B-0 records simulated evidence only.
+   A fake collector may only produce `simulated` evidence; only a future trusted worker
+   `provider_worker` collector may produce `live_verified` after the B1-B-0 seal is lifted by
+   a separately reviewed change. **Live real provisioning structurally requires
+   `live_verified` evidence** — simulated evidence supports onboarding UX/review but never
+   unlocks live provisioning. B1-B-0 records simulated evidence only.
 
 3. **Complete, hash-bound evidence package.** The evidence hash covers the schema version,
    onboarding id, boundary hash, target config hash, scope-policy hash, toolchain profile
@@ -150,3 +151,51 @@ cryptographically bound into deployment, and that an API caller could submit arb
 
 No real infrastructure, endpoint, credential, or provider is accessed by any of these
 corrections.
+
+## Amendment — execution-boundary correction pass (2026-07-01)
+
+A second review found that (a) fake `live_verified` evidence could still be manufactured, (b)
+the onboarding boundary was bound as hashes but never used to *constrain* worker actions, (c)
+the approved-preflight *identity* was not required to agree everywhere, and (d) toolchain
+provenance was not carried through preflight approval. The following are now part of the
+decision:
+
+1. **B1-B-0 live-evidence seal.** Live-verified evidence collection is a future B1-B
+   capability. In this release an **unconditional code-level seal** (not a configuration
+   toggle) refuses creation of `live_verified` / `provider_worker` evidence on every path:
+   `record_preflight_result` accepts only *simulated fake* evidence, and the `provider_worker`
+   collector seam exists but is **inert** (its `collect` refuses). Lifting the seal requires a
+   separately reviewed B1-B change that adds a real collector.
+
+2. **Effective boundary is an execution boundary.** The canonical
+   `effective_boundary = declared_onboarding_boundary ∩ target_scope_policy` (nodes, storage,
+   network segments, CIDRs, VM-ID range, min-of quotas, deny external) and
+   `effective_boundary_hash` are persisted on `DeploymentPlan` and `ProvisioningManifest` and
+   echoed into immutable manifest content. Manifest generation and the worker gate
+   **recompute** it from the active onboarding + current scope and require exact agreement for
+   both the boundary object and the hash across plan, manifest, and content; an empty,
+   broadened, changed, or mismatched boundary **fails closed**. A **worker-only enforcement
+   seam** validates every declared action — node/storage/network/CIDR/VM-ID selections,
+   requested totals vs quotas, and deny external connectivity — **before** rendering, secret
+   resolution, executor construction, or process calls. Out-of-bound actions are refused.
+
+3. **Exact approved-preflight identity everywhere.** The real worker gate requires
+   `approved_preflight_id` to agree across the onboarding, the plan, the manifest column, **and**
+   the immutable manifest content (in addition to the exact evidence-hash agreement). Direct-SQL
+   corruption of any of the three is refused before rendering/secret/executor/runner.
+
+4. **Toolchain provenance through preflight approval + execution.** When a toolchain profile is
+   required or present, onboarding approval validates the preflight's toolchain id/hash against
+   the current active profile; manifest generation and the worker gate require
+   preflight == onboarding-approved == plan == manifest == current active profile. A profile that
+   is added, replaced, disabled, or altered after preflight approval is refused at approval,
+   manifest generation, and the gate.
+
+5. **Robust redaction.** Preflight detail text is rejected when it carries a secret, credential,
+   endpoint (URL / IPv4 / multi-label host), raw inventory token (node/storage/bridge/VNet/VLAN),
+   private key, or high-entropy value — not merely the `:`/`=` form. Generic simulated details
+   remain value-free.
+
+No real infrastructure, endpoint, credential, provider, OpenTofu binary, or Docker socket is
+accessed by any of these corrections; all evidence remains fake-only and standard deployment
+remains automated + declarative.

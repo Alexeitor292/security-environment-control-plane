@@ -1,6 +1,6 @@
 # SECP-002B-1B-0 — Target Onboarding Verification
 
-**Date:** 2026-07-01 (amended — enforceable-binding correction pass)
+**Date:** 2026-07-01 (amended — enforceable-binding + execution-boundary correction passes)
 **Branch:** `feature/secp-002b1b-target-onboarding-contract`
 
 This records an **actual** in-process run of the target onboarding + automated deployment
@@ -72,11 +72,9 @@ run, per the safety boundaries.
   require_live=False              : accepted
   require_live=True               : refused -> live real provisioning requires live_verified
 
-== API preflight cannot forge live eligibility ==
+== API/worker preflight cannot forge live eligibility ==
   API-recorded preflight level    : simulated (always simulated)
-
-== trusted worker collector CAN produce live_verified ==
-  worker-recorded preflight level : live_verified
+  worker live_verified attempt    : refused -> live_verified onboarding evidence cannot be
 
 == boundary broader than target scope is refused ==
   refused                         : declared boundary is broader than the target p
@@ -89,9 +87,10 @@ run, per the safety boundaries.
 This demonstrates: plan + manifest carry the exact onboarding/preflight bindings (echoed
 into immutable manifest content); simulated evidence is accepted for the fake/review path
 but **refused for live** provisioning; the API preflight route always yields `simulated`
-evidence (no live forgery); only the trusted worker collector produces `live_verified`; a
-boundary broader than the target scope is refused; and any onboarding binding drift fails
-closed at both manifest generation and the real-provisioning gate.
+evidence (no live forgery); the B1-B-0 worker seam also refuses `live_verified` /
+`provider_worker` evidence until a separately reviewed B1-B collector exists; a boundary
+broader than the target scope is refused; and any onboarding binding drift fails closed at
+both manifest generation and the real-provisioning gate.
 
 Focused correction-pass tests: `test_onboarding_bindings.py` (plan/manifest bindings,
 retire/verification-level/evidence-tamper drift refusals at manifest + gate,
@@ -99,6 +98,89 @@ simulated-vs-live eligibility, boundary/scope intersection), `test_target_onboar
 (boundary⊆scope, single-active DB index + service fail-closed on multiples),
 `test_onboarding_preflight.py` (request/result contract, collector/level contract,
 complete evidence-package hash, immutability).
+
+## Execution-boundary correction pass (actual output)
+
+```
+== B1-B-0 live-evidence seal (code-level, not config) ==
+  API preflight level             : simulated (always simulated)
+  worker live_verified attempt    : refused -> live_verified onboarding evidence cannot be
+  provider_worker collector        : inert (collect refuses)
+
+== simulated evidence: contract path OK, never live ==
+  require_live=True               : refused -> live real provisioning requires live_verifie
+
+== effective boundary (declared ∩ scope) is bound + enforced ==
+  plan.effective_boundary_hash    : sha256:b97e1b79763ae7dde
+  boundary object plan/manifest/content: True
+  boundary hash plan/manifest/content  : True
+  in-bound manifest dry-run        : allowed by the effective-boundary gate
+  out-of-bound node action         : refused -> team1: node 'pve-node-99' is outside the
+  boundary object tamper           : refused -> effective boundary drift
+  boundary hash tamper             : refused -> effective boundary drift
+
+== exact approved-preflight identity everywhere ==
+  plan preflight-id tamper         : refused -> onboarding binding drift: plan approved
+
+== toolchain provenance binding ==
+  disabled toolchain after manifest: refused -> pinned toolchain profile is missing or n
+
+== robust redaction of preflight detail ==
+  secret-bearing 'password=hunter2trustm'  : refused
+  secret-bearing 'https://proxmox.exampl'  : refused
+  secret-bearing 'vmbr0 local-lvm'         : refused
+  generic simulated detail leaks   : NONE
+```
+
+This demonstrates: (1) **live evidence is sealed** in B1-B-0 by an unconditional code-level
+seal — the API preflight is always `simulated`, the worker recorder refuses `live_verified` /
+`provider_worker`, and the `provider_worker` collector is inert; (2) simulated evidence is
+accepted for the fake/contract path but **never** for live; (3) the **effective execution
+boundary** (declared onboarding boundary ∩ target scope) object and hash are persisted and
+hash-bound across plan, manifest column, and immutable manifest content; manifest generation
+and the worker gate recompute and require exact object+hash agreement, an in-bound manifest
+passes the gate, and every out-of-bound node/storage/network/CIDR/VM-ID/quota/external action
+is refused by the worker enforcement seam; (4) the **exact approved-preflight identity** must
+agree across plan/manifest/content (a direct-SQL id tamper is refused before rendering/secret/executor/
+runner); (5) **toolchain provenance** is bound through preflight approval → manifest → gate
+(a disabled/replaced profile is refused); and (6) preflight detail redaction robustly rejects
+secret/endpoint/inventory values while the generic simulated details leak nothing.
+
+Focused execution-boundary tests: `test_effective_boundary.py` (computation, emptiness,
+enforcement seam in-bound pass + every out-of-bound dimension refused, plan/manifest/content
+object+hash binding, direct-SQL boundary object/hash tampers at manifest gen + gate),
+`test_onboarding_bindings.py`
+(seal refusal, exact preflight-id corruption tests for plan/manifest/content),
+`test_onboarding_toolchain_binding.py` (toolchain drift refused at approval/manifest/gate),
+`test_onboarding_preflight.py` (seal + inert collector, robust redaction of token/password/
+credential/endpoint/inventory detail values).
+
+## Final local verification (actual commands)
+
+All commands below ran on 2026-07-01 from
+`feature/secp-002b1b-target-onboarding-contract` using the repository Python 3.11.15 virtual
+environment. No Docker, OpenTofu, provider endpoint, credential, or real infrastructure command
+was run.
+
+```
+uv run ruff format --check apps contracts plugins tests
+141 files already formatted
+
+uv run ruff check apps contracts plugins tests
+All checks passed!
+
+uv run python -m mypy apps/api/secp_api apps/worker/secp_worker contracts plugins
+Success: no issues found in 89 source files
+
+uv run pytest apps/api/tests/test_migrations.py apps/api/tests/test_generic_topology_migration.py -q
+4 passed in 6.84s
+
+uv run pytest apps/api/tests/test_effective_boundary.py apps/api/tests/test_onboarding_bindings.py apps/api/tests/test_onboarding_toolchain_binding.py apps/api/tests/test_onboarding_preflight.py -q
+61 passed in 21.00s
+
+uv run pytest apps/api/tests tests -q
+565 passed, 8 skipped, 1 warning in 137.14s (0:02:17)
+```
 
 ## Automated proof coverage
 

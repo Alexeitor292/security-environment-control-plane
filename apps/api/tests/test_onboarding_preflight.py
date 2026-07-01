@@ -13,7 +13,12 @@ from secp_api.enums import (
     PreflightCheckStatus,
     VerificationLevel,
 )
-from secp_api.errors import ImmutableResourceError, ValidationFailedError
+from secp_api.errors import (
+    ImmutableResourceError,
+    LiveEvidenceSealedError,
+    ProvisioningRefusedError,
+    ValidationFailedError,
+)
 from secp_api.onboarding import (
     BASE_REQUIRED_CHECKS,
     CHECK_NO_ROUTE_TO_PROTECTED,
@@ -120,19 +125,44 @@ def test_collector_level_contract_rejects_unknown():
         validate_collector_and_level(CollectorKind.provider_worker.value, "trust_me")
 
 
-def test_worker_result_recorder_can_produce_live_verified(session, principal):
-    """The trusted worker collector seam can produce live_verified evidence (fake fixture)."""
+def test_worker_result_recorder_cannot_produce_live_verified(session, principal):
+    """B1-B-0 seal: even the worker seam cannot create live_verified evidence in this release."""
     ob = _onboarding(session, principal, "live")
     checks = simulate_boundary_checks(ob.declared_boundary, ob.isolation_model)
-    pf = onb.record_preflight_result(
-        session,
-        ob.id,
-        checks=checks,
-        verification_level=VerificationLevel.live_verified.value,
-        collector_kind=CollectorKind.provider_worker.value,
-        collector_identity="fake-provider-worker",
-    )
-    assert pf.verification_level == VerificationLevel.live_verified.value
+    with pytest.raises(LiveEvidenceSealedError):
+        onb.record_preflight_result(
+            session,
+            ob.id,
+            checks=checks,
+            verification_level=VerificationLevel.live_verified.value,
+            collector_kind=CollectorKind.provider_worker.value,
+            collector_identity="fake-provider-worker",
+        )
+
+
+def test_worker_recorder_rejects_provider_worker_even_when_simulated(session, principal):
+    """The sealed provider_worker collector is inert: it cannot record ANY evidence in B1-B-0."""
+    ob = _onboarding(session, principal, "pw")
+    checks = simulate_boundary_checks(ob.declared_boundary, ob.isolation_model)
+    with pytest.raises(LiveEvidenceSealedError):
+        onb.record_preflight_result(
+            session,
+            ob.id,
+            checks=checks,
+            verification_level=VerificationLevel.simulated.value,
+            collector_kind=CollectorKind.provider_worker.value,
+            collector_identity="fake-provider-worker",
+        )
+
+
+def test_sealed_provider_worker_collector_is_inert():
+    """The provider_worker collector seam exists but its implementation is unavailable."""
+    from secp_worker.onboarding.preflight import SealedProviderWorkerCollector
+
+    collector = SealedProviderWorkerCollector()
+    assert collector.collector_kind == CollectorKind.provider_worker.value
+    with pytest.raises(LiveEvidenceSealedError):
+        collector.collect(declared_boundary=VALID_ONBOARDING_BOUNDARY, isolation_model="logical")
 
 
 def test_api_simulated_path_cannot_forge_live(session, principal):
@@ -140,6 +170,55 @@ def test_api_simulated_path_cannot_forge_live(session, principal):
     ob = _onboarding(session, principal, "forge")
     pf = onb.record_simulated_preflight(session, principal, ob.id)
     assert pf.verification_level == VerificationLevel.simulated.value  # always simulated
+
+
+def test_simulated_onboarding_supports_contract_but_never_live(session, principal):
+    """A simulated onboarding is valid for the fake/contract path but never live-eligible."""
+    from secp_worker.provisioning.execution import assert_evidence_sufficient_for_execution
+
+    ob = _onboarding(session, principal, "contract")
+    onb.record_simulated_preflight(session, principal, ob.id)
+    onb.submit_for_review(session, principal, ob.id)
+    onb.approve_onboarding(session, principal, ob.id, "ok")
+    onb.activate_onboarding(session, principal, ob.id)
+    assert ob.approved_verification_level == VerificationLevel.simulated.value
+    assert_evidence_sufficient_for_execution(ob, require_live=False)  # contract path: fine
+    with pytest.raises(ProvisioningRefusedError, match="live_verified"):
+        assert_evidence_sufficient_for_execution(ob, require_live=True)
+
+
+# --- robust redaction of detail text (correction pass) -----------------------
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "auth token ABCDEF0123456789ABCDEF",  # token-like (high-entropy)
+        "password: hunter2trustme",  # password-like
+        "password=hunter2trustme",  # password-like (assignment)
+        "credential=abc123def456ghi",  # credential-like (assignment)
+        "https://proxmox.example.test:8006/api2/json",  # endpoint-like (URL)
+        "reachable at 10.60.0.5:8006",  # endpoint-like (IPv4)
+        "node pve-node-1 storage local-lvm bridge vmbr0",  # raw-inventory-like
+        "reserved 10.60.0.0/16",  # raw-inventory-like (CIDR)
+        "-----BEGIN RSA PRIVATE KEY-----",  # private key
+    ],
+)
+def test_secret_bearing_detail_is_refused_before_persistence(detail):
+    with pytest.raises(ValidationFailedError):
+        validate_preflight_evidence(
+            [{"check": "nodes_in_allowlist", "status": "passed", "detail": detail}]
+        )
+
+
+def test_generic_simulated_details_all_pass_redaction():
+    from secp_api.onboarding import _SIMULATED_DETAILS, detail_is_secret_bearing
+
+    for detail in _SIMULATED_DETAILS.values():
+        assert not detail_is_secret_bearing(detail), detail
+    # And they validate structurally.
+    checks = simulate_boundary_checks(VALID_ONBOARDING_BOUNDARY, IsolationModel.logical)
+    assert validate_preflight_evidence(checks)
 
 
 # --- complete evidence-package hash ------------------------------------------

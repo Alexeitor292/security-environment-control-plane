@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from secp_api.enums import CollectorKind, IsolationModel, VerificationLevel
+from secp_api.errors import LiveEvidenceSealedError
 from secp_api.onboarding import simulate_boundary_checks
 
 
@@ -53,3 +54,24 @@ class FakePreflightCollector:
             else IsolationModel.physical
         )
         return simulate_boundary_checks(declared_boundary, iso, fail=self._fail, omit=self._omit)
+
+
+class SealedProviderWorkerCollector:
+    """Inert placeholder for the FUTURE ``provider_worker`` (``live_verified``) collector.
+
+    The seam (this class + the ``PreflightCollector`` protocol + the ``provider_worker`` /
+    ``live_verified`` enum values) is kept so a future B1-B change can supply a real collector.
+    In SECP-002B-1B-0 the implementation is UNAVAILABLE: any attempt to collect refuses via
+    the B1-B-0 live-evidence seal. It is not wired into any code path in this release.
+    """
+
+    name = "provider_worker"
+    collector_kind = CollectorKind.provider_worker.value
+    verification_level = VerificationLevel.live_verified.value
+
+    def collect(self, *, declared_boundary: dict, isolation_model: str) -> list[dict]:
+        raise LiveEvidenceSealedError(
+            "the provider_worker (live_verified) preflight collector is unavailable in "
+            "SECP-002B-1B-0; live evidence collection is a sealed future B1-B capability that "
+            "requires a separately reviewed change"
+        )

@@ -58,3 +58,16 @@ class ValidationFailedError(DomainError):
     def __init__(self, message: str, errors: list[str] | None = None):
         super().__init__(message)
         self.errors = errors or []
+
+
+class LiveEvidenceSealedError(ValidationFailedError):
+    """Raised when code attempts to create live_verified / provider_worker onboarding
+    evidence while the SECP-002B-1B-0 live-evidence seal is in force (correction pass).
+
+    Live evidence collection is a future B1-B capability; in this release the seal is an
+    unconditional code-level constant, not a configuration toggle. Subclasses
+    ``ValidationFailedError`` so existing validation handlers still surface it.
+    """
+
+    http_status = 403
+    code = "live_evidence_sealed"

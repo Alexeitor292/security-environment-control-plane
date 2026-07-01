@@ -105,12 +105,42 @@ def _resolve_onboarding_binding(session, actor, plan, target) -> dict:
     pf = session.get(TargetPreflight, onboarding.approved_preflight_id)
     if pf is None or recompute_evidence_hash(pf) != onboarding.approved_preflight_evidence_hash:
         _refuse(actor, plan, "approved preflight evidence is missing or altered")
+    # Toolchain provenance binding (ADR-014 §4): the approved preflight must have been
+    # collected against the current active toolchain profile (which the plan also pins).
+    from secp_api.services.onboarding import preflight_toolchain_matches_active
+
+    tc_reason = preflight_toolchain_matches_active(session, target, pf)
+    if tc_reason is not None:
+        _refuse(actor, plan, f"onboarding toolchain provenance drift: {tc_reason}")
+    # Effective execution boundary (ADR-014 §2): recompute from the active onboarding +
+    # current target scope and require exact agreement with the plan's bound boundary. Fail
+    # closed if it is empty, absent on the plan, broadened, or otherwise changed.
+    from secp_api.onboarding import (
+        OnboardingBoundarySpec,
+        effective_boundary_hash,
+        effective_boundary_is_empty,
+    )
+    from secp_api.onboarding import effective_boundary as compute_effective_boundary
+
+    spec = OnboardingBoundarySpec.model_validate(onboarding.declared_boundary)
+    eff = compute_effective_boundary(spec, target.scope_policy or {})
+    if effective_boundary_is_empty(eff):
+        _refuse(actor, plan, "effective execution boundary is empty; re-onboard the target")
+    eff_hash = effective_boundary_hash(eff)
+    if plan.effective_boundary != eff:
+        _refuse(actor, plan, "effective execution boundary has drifted since plan approval")
+    if plan.effective_boundary_hash is None:
+        _refuse(actor, plan, "approved plan has no effective-boundary binding; regenerate the plan")
+    if eff_hash != plan.effective_boundary_hash:
+        _refuse(actor, plan, "effective execution boundary has drifted since plan approval")
     return {
         "target_onboarding_id": onboarding.id,
         "onboarding_boundary_hash": onboarding.approved_boundary_hash,
         "approved_preflight_id": onboarding.approved_preflight_id,
         "approved_preflight_evidence_hash": onboarding.approved_preflight_evidence_hash,
         "onboarding_verification_level": onboarding.approved_verification_level,
+        "effective_boundary": eff,
+        "effective_boundary_hash": eff_hash,
     }
 
 
@@ -390,6 +420,8 @@ def generate_manifest(
                 "approved_preflight_evidence_hash"
             ],
             "verification_level": onboarding_binding["onboarding_verification_level"],
+            "effective_boundary": onboarding_binding["effective_boundary"],
+            "effective_boundary_hash": onboarding_binding["effective_boundary_hash"],
         },
         "plugin_name": target.plugin_name,
         "teams": teams,
@@ -435,6 +467,8 @@ def generate_manifest(
         approved_preflight_id=onboarding_binding["approved_preflight_id"],
         approved_preflight_evidence_hash=onboarding_binding["approved_preflight_evidence_hash"],
         onboarding_verification_level=onboarding_binding["onboarding_verification_level"],
+        effective_boundary=onboarding_binding["effective_boundary"],
+        effective_boundary_hash=onboarding_binding["effective_boundary_hash"],
         content=content,
         content_hash=content_hash(content),
         validated_at=_now(),
