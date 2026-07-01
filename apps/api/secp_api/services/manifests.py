@@ -346,6 +346,19 @@ def generate_manifest(
         ],
         "topology": topology,
         "requested_totals": totals,
+        # Automated, declarative deployment contract (SECP-002B-1B-0, ADR-014): SECP
+        # creates the scenario resources automatically inside the declared boundary; no
+        # manual per-scenario guest/network/address/storage creation is required, and no
+        # pre-existing user assets are adopted in standard mode.
+        "deployment": {
+            "mode": "automated",
+            "provisioning_model": "declarative",
+            "scenario_resources_created_by_secp": True,
+            "manual_pre_creation_required": False,
+            "user_provided_preexisting_assets": [],
+            "subject_to_approval": True,
+            "subject_to_scope_policy": True,
+        },
     }
 
     manifest = ProvisioningManifest(

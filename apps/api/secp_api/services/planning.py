@@ -110,6 +110,30 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
             "display_name": target.display_name,
             "config_hash": target.config_hash,
         }
+        # Automated, declarative deployment contract (SECP-002B-1B-0, ADR-014). Standard
+        # provider-backed deployment is automated: SECP allocates IDs/addresses and creates
+        # the scenario resources — the user does NOT manually pre-create VMs, containers,
+        # networks, addresses, or storage. Every action remains subject to plan approval,
+        # the target scope policy, immutable manifests, and worker-only execution.
+        summary["deployment_contract"] = {
+            "mode": "automated",
+            "provisioning_model": "declarative",
+            "target_boundary_source": "target.scope_policy.provisioning + onboarding boundary",
+            "secp_automated_actions": [
+                "allocate_vm_ids",
+                "allocate_addresses",
+                "create_networks",
+                "create_vms",
+                "create_containers",
+                "create_disks",
+                "create_attachments",
+            ],
+            "scenario_resources_created_by_secp": True,
+            "manual_pre_creation_required": False,
+            "user_provided_preexisting_assets": [],  # excluded from standard mode
+            "subject_to_approval": True,
+            "subject_to_scope_policy": True,
+        }
         # Hash scope_policy["provisioning"] so plan approval covers the exact
         # provisioning policy, not just the target config hash (SECP-002B-0).
         scope_hash = provisioning_scope_policy_hash(target.scope_policy)

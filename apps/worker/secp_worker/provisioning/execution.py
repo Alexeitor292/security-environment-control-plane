@@ -445,7 +445,32 @@ def _assert_real_gate(
     _assert_reservation_binding(session, operation, manifest, plan, target)
     # 9. Toolchain profile + isolated-lab classification + hash agreement + remote state.
     profile = _assert_toolchain_and_activation(session, operation, manifest, plan, target)
+    # 10. Target onboarding: the target must have an approved & active onboarding record
+    #     with no config/scope drift since approval (SECP-002B-1B-0, ADR-014).
+    _assert_target_onboarded(session, operation, target)
     return plan, target, profile
+
+
+def _assert_target_onboarded(
+    session, operation: ProvisioningOperation, target: ExecutionTarget
+) -> None:
+    from secp_api.services.onboarding import active_onboarding_for_target, onboarding_drift
+
+    ob = active_onboarding_for_target(session, target.id)
+    if ob is None:
+        _refuse_real(
+            session,
+            operation,
+            "target has no approved & active onboarding record; real provisioning requires "
+            "an approved target onboarding (SECP-002B-1B, ADR-014)",
+        )
+    drift = onboarding_drift(ob, target)
+    if drift is not None:
+        _refuse_real(
+            session,
+            operation,
+            f"onboarding approval is invalidated: {drift}; re-onboard and obtain fresh approval",
+        )
 
 
 def _assert_toolchain_and_activation(
