@@ -18,7 +18,13 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from secp_api.enums import IsolationModel, OnboardingMode, PreflightCheckStatus
+from secp_api.enums import (
+    CollectorKind,
+    IsolationModel,
+    OnboardingMode,
+    PreflightCheckStatus,
+    VerificationLevel,
+)
 from secp_api.enums import OnboardingStatus as S
 from secp_api.errors import InvalidTransitionError, ValidationFailedError
 
@@ -234,16 +240,6 @@ def validate_preflight_evidence(checks: list[dict] | None) -> list[PreflightChec
     return out
 
 
-def preflight_evidence_hash(checks: list[dict]) -> str:
-    from secp_scenario_schema import content_hash
-
-    canonical = sorted(
-        ({"check": c["check"], "status": c["status"]} for c in checks),
-        key=lambda c: c["check"],
-    )
-    return content_hash({"checks": canonical})
-
-
 def required_checks_passed(
     checks: list[PreflightCheck], *, isolation_model: IsolationModel
 ) -> tuple[bool, list[str]]:
@@ -254,6 +250,245 @@ def required_checks_passed(
     passed = {c.check for c in checks if c.status == PreflightCheckStatus.passed}
     missing = sorted(required - passed)
     return (not missing, missing)
+
+
+# --- Complete, hash-bound preflight evidence package (ADR-014 §3) -------------
+
+EVIDENCE_SCHEMA_VERSION = "secp-002b-1b-0/preflight-evidence/v1"
+
+# Generic, redacted, review-safe descriptions for simulated evidence. No real
+# hostnames/IPs/nodes/storage/bridges/CIDRs/VM-IDs.
+_SIMULATED_DETAILS = {
+    CHECK_NODES_IN_ALLOWLIST: "all selected nodes are within the declared node allowlist",
+    CHECK_STORAGE_IN_ALLOWLIST: "all selected storage is within the declared storage allowlist",
+    CHECK_NETWORK_IN_BOUNDARY: "requested network segments are within the declared boundary",
+    CHECK_CIDR_NON_OVERLAPPING: "declared CIDR ranges are non-overlapping",
+    CHECK_VMID_NON_OVERLAPPING: "declared VM-ID range is non-overlapping",
+    CHECK_CAPACITY_WITHIN_QUOTA: "requested capacity is within the declared quotas",
+    CHECK_EXTERNAL_CONNECTIVITY_DENY: "external connectivity policy is deny by default",
+    CHECK_NO_ROUTE_TO_PROTECTED: "no route to management/home/corporate/public network classes",
+    CHECK_TLS_POSTURE: "TLS posture is acceptable (trusted CA / pinning)",
+    CHECK_CREDENTIAL_LEAST_PRIVILEGE: "credential scope is least privilege (opaque reference)",
+    CHECK_REMOTE_STATE_PRESENT: "remote state backend prerequisite is present",
+    CHECK_PINNED_TOOLCHAIN_PRESENT: "pinned toolchain prerequisite is present",
+}
+
+
+def simulate_boundary_checks(
+    boundary: dict,
+    isolation_model: IsolationModel,
+    *,
+    fail: set[str] | None = None,
+    omit: set[str] | None = None,
+) -> list[dict]:
+    """Deterministically derive SIMULATED checks from a declared boundary.
+
+    This is not infrastructure inspection — it derives review-safe evidence from
+    already-declared data. Used by both the control-plane simulated-preflight path and
+    the worker ``FakePreflightCollector``. Every detail is generic and redacted.
+    """
+    fail = set(fail or ())
+    omit = set(omit or ())
+    required = set(BASE_REQUIRED_CHECKS) | {CHECK_NO_ROUTE_TO_PROTECTED}
+    checks: list[dict] = []
+    for name in sorted(required):
+        if name in omit:
+            continue
+        if name in fail:
+            status = PreflightCheckStatus.failed
+        elif name == CHECK_NO_ROUTE_TO_PROTECTED and isolation_model != IsolationModel.logical:
+            status = PreflightCheckStatus.skipped
+        else:
+            status = PreflightCheckStatus.passed
+        checks.append(
+            {"check": name, "status": status.value, "detail": _SIMULATED_DETAILS.get(name, "check")}
+        )
+    return checks
+
+
+def build_evidence_package(
+    *,
+    onboarding_id: str,
+    boundary_hash: str,
+    target_config_hash: str,
+    scope_policy_hash: str,
+    toolchain_profile_id: str | None,
+    toolchain_profile_hash: str | None,
+    verification_level: str,
+    collector_kind: str,
+    collector_identity: str,
+    evidence_version: int,
+    checks: list[dict],
+) -> dict:
+    """Assemble the canonical, redacted evidence package that the evidence hash covers.
+
+    Includes schema version, onboarding id, all binding hashes + provenance, trust level,
+    collector identity, monotonic evidence version, and every redacted check field. It
+    contains NO secrets, endpoints, credentials, raw inventories, or unredacted output.
+    """
+    canonical_checks = sorted(
+        (
+            {"check": c["check"], "status": c["status"], "detail": c.get("detail", "")}
+            for c in checks
+        ),
+        key=lambda c: c["check"],
+    )
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "onboarding_id": onboarding_id,
+        "boundary_hash": boundary_hash,
+        "target_config_hash": target_config_hash,
+        "scope_policy_hash": scope_policy_hash,
+        "toolchain_profile_id": toolchain_profile_id,
+        "toolchain_profile_hash": toolchain_profile_hash,
+        "verification_level": verification_level,
+        "collector_kind": collector_kind,
+        "collector_identity": collector_identity,
+        "evidence_version": evidence_version,
+        "checks": canonical_checks,
+    }
+
+
+def evidence_package_hash(package: dict) -> str:
+    from secp_scenario_schema import content_hash
+
+    return content_hash(package)
+
+
+def validate_collector_and_level(collector_kind: str, verification_level: str) -> None:
+    """Reject arbitrary collector labels and unsafe collector/level combinations."""
+    if collector_kind not in {c.value for c in CollectorKind}:
+        raise ValidationFailedError(f"unknown collector_kind '{collector_kind}'")
+    if verification_level not in {v.value for v in VerificationLevel}:
+        raise ValidationFailedError(f"unknown verification_level '{verification_level}'")
+    # A fake/declared-boundary collector can only ever produce simulated evidence; only the
+    # trusted worker provider collector may produce live_verified evidence.
+    if (
+        collector_kind == CollectorKind.fake_declared_boundary.value
+        and verification_level != VerificationLevel.simulated.value
+    ):
+        raise ValidationFailedError(
+            "fake_declared_boundary collector may only produce 'simulated' evidence"
+        )
+    if (
+        verification_level == VerificationLevel.live_verified.value
+        and collector_kind != CollectorKind.provider_worker.value
+    ):
+        raise ValidationFailedError(
+            "live_verified evidence may only be produced by the provider_worker collector"
+        )
+
+
+# --- Boundary <-> target scope compatibility (ADR-014 §5) --------------------
+
+
+def boundary_from_scope(scope_policy: dict) -> dict:
+    """Derive a provider-neutral declared boundary from a provisioning scope policy.
+
+    The derived boundary is exactly the scope's boundary-relevant fields, so it is always
+    equal to (⊆) the scope. Useful for UX ("suggest a boundary") and tests.
+    """
+    prov = (scope_policy or {}).get("provisioning", scope_policy) or {}
+    return {
+        "nodes": list(prov.get("allowed_nodes", [])),
+        "storage": list(prov.get("allowed_storage", [])),
+        "network_segments": list(prov.get("allowed_bridges", [])),
+        "cidrs": list(prov.get("allowed_cidr_reservations", [])),
+        "vmid_range": dict(prov.get("vmid_range", {})),
+        "quotas": {
+            "max_teams": prov.get("max_teams"),
+            "max_vms": prov.get("max_vms"),
+            "max_containers": prov.get("max_containers"),
+            "max_total_vcpu": prov.get("max_total_vcpu"),
+            "max_total_memory_mb": prov.get("max_total_memory_mb"),
+            "max_total_disk_gb": prov.get("max_total_disk_gb"),
+        },
+        "external_connectivity": dict(prov.get("external_connectivity", {"policy": "deny"})),
+        "credential_scope": "least_privilege",
+    }
+
+
+def _cidr_within_any(cidr: str, allowed: list[str]) -> bool:
+    net = ipaddress.ip_network(cidr, strict=True)
+    for a in allowed:
+        block = ipaddress.ip_network(a, strict=True)
+        if net.version == block.version and net.subnet_of(block):  # type: ignore[arg-type]
+            return True
+    return False
+
+
+def validate_boundary_within_scope(boundary: OnboardingBoundarySpec, scope_policy: dict) -> None:
+    """Refuse a declared boundary that is broader than the target provisioning scope.
+
+    Provider-neutral: names are compared as opaque strings. Provider-specific naming
+    normalization is a worker adapter concern (a seam, not implemented here).
+    """
+    prov = (scope_policy or {}).get("provisioning")
+    if not isinstance(prov, dict) or not prov:
+        raise ValidationFailedError(
+            "target has no provisioning scope policy; a scope policy is required before "
+            "an onboarding boundary can be validated"
+        )
+    problems: list[str] = []
+    if not set(boundary.nodes) <= set(prov.get("allowed_nodes", [])):
+        problems.append("nodes exceed the target allowed_nodes")
+    if not set(boundary.storage) <= set(prov.get("allowed_storage", [])):
+        problems.append("storage exceeds the target allowed_storage")
+    if not set(boundary.network_segments) <= set(prov.get("allowed_bridges", [])):
+        problems.append("network_segments exceed the target allowed_bridges")
+    allowed_cidrs = prov.get("allowed_cidr_reservations", [])
+    if not all(_cidr_within_any(c, allowed_cidrs) for c in boundary.cidrs):
+        problems.append("cidrs exceed the target allowed_cidr_reservations")
+    srange = prov.get("vmid_range", {})
+    if not (
+        srange.get("start", 0) <= boundary.vmid_range.start
+        and boundary.vmid_range.end <= srange.get("end", 0)
+    ):
+        problems.append("vmid_range exceeds the target vmid_range")
+    q = boundary.quotas
+    for field, scope_key in (
+        ("max_teams", "max_teams"),
+        ("max_vms", "max_vms"),
+        ("max_containers", "max_containers"),
+        ("max_total_vcpu", "max_total_vcpu"),
+        ("max_total_memory_mb", "max_total_memory_mb"),
+        ("max_total_disk_gb", "max_total_disk_gb"),
+    ):
+        if getattr(q, field) > prov.get(scope_key, 0):
+            problems.append(f"quota {field} exceeds the target {scope_key}")
+    if boundary.external_connectivity.policy != prov.get("external_connectivity", {}).get(
+        "policy", "deny"
+    ):
+        problems.append("external_connectivity policy disagrees with the target scope")
+    if problems:
+        raise ValidationFailedError(
+            "declared boundary is broader than the target provisioning scope", errors=problems
+        )
+
+
+def boundary_scope_intersection(boundary: OnboardingBoundarySpec, scope_policy: dict) -> dict:
+    """The provider-neutral effective boundary = boundary ∩ target scope policy.
+
+    The worker must later execute only within this intersection. When the boundary is
+    within scope (enforced at onboarding) the intersection equals the declared boundary.
+    """
+    prov = (scope_policy or {}).get("provisioning", {}) or {}
+    return {
+        "nodes": sorted(set(boundary.nodes) & set(prov.get("allowed_nodes", []))),
+        "storage": sorted(set(boundary.storage) & set(prov.get("allowed_storage", []))),
+        "network_segments": sorted(
+            set(boundary.network_segments) & set(prov.get("allowed_bridges", []))
+        ),
+        "cidrs": [
+            c
+            for c in boundary.cidrs
+            if _cidr_within_any(c, prov.get("allowed_cidr_reservations", []))
+        ],
+        "vmid_range": {
+            "start": max(boundary.vmid_range.start, prov.get("vmid_range", {}).get("start", 0)),
+            "end": min(boundary.vmid_range.end, prov.get("vmid_range", {}).get("end", 0)),
+        },
+    }
 
 
 # --- Onboarding lifecycle -----------------------------------------------------

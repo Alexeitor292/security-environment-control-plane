@@ -39,6 +39,11 @@ _PLAN_PROTECTED = (
     "target_scope_policy_hash",
     "toolchain_profile_id",
     "toolchain_profile_hash",
+    "target_onboarding_id",
+    "onboarding_boundary_hash",
+    "approved_preflight_id",
+    "approved_preflight_evidence_hash",
+    "onboarding_verification_level",
     "plan",
     "summary",
     "generated_by",
@@ -52,6 +57,11 @@ _MANIFEST_PROTECTED = (
     "target_scope_policy_hash",
     "toolchain_profile_id",
     "toolchain_profile_hash",
+    "target_onboarding_id",
+    "onboarding_boundary_hash",
+    "approved_preflight_id",
+    "approved_preflight_evidence_hash",
+    "onboarding_verification_level",
 )
 _TOOLCHAIN_PROFILE_PROTECTED = (
     "organization_id",
@@ -89,11 +99,20 @@ _ONBOARDING_PROTECTED = (
     "declared_boundary",
     "boundary_hash",
 )
-# Preflight evidence is append-only: immutable once recorded.
+# Preflight evidence is append-only: immutable once recorded (incl. provenance + level).
 _PREFLIGHT_PROTECTED = (
     "organization_id",
     "onboarding_id",
     "collector",
+    "verification_level",
+    "collector_kind",
+    "collector_identity",
+    "evidence_version",
+    "target_config_hash",
+    "scope_policy_hash",
+    "boundary_hash",
+    "toolchain_profile_id",
+    "toolchain_profile_hash",
     "passed",
     "checks",
     "evidence_hash",

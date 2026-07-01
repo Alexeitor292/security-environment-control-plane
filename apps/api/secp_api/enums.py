@@ -149,6 +149,31 @@ class PreflightCheckStatus(str, Enum):
     skipped = "skipped"
 
 
+class VerificationLevel(str, Enum):
+    """Trust level of preflight evidence (SECP-002B-1B-0, ADR-014).
+
+    ``simulated`` — deterministically derived from the declared boundary; useful for
+    onboarding UX/review but **never** proof of live infrastructure and never sufficient
+    for live real provisioning. ``live_verified`` — collected by a trusted worker-only
+    provider collector against a real (reviewed disposable) target (future B1-B).
+    """
+
+    simulated = "simulated"
+    live_verified = "live_verified"
+
+
+class CollectorKind(str, Enum):
+    """Which collector produced preflight evidence (SECP-002B-1B-0, ADR-014).
+
+    ``fake_declared_boundary`` derives simulated evidence from the declared boundary and
+    inspects nothing real. ``provider_worker`` is the future trusted worker-only collector
+    that produces ``live_verified`` evidence. Arbitrary/caller-supplied kinds are refused.
+    """
+
+    fake_declared_boundary = "fake_declared_boundary"
+    provider_worker = "provider_worker"
+
+
 class ProvisioningApplicationMode(str, Enum):
     """Which provisioning path a request targets (SECP-002B-1A, ADR-013).
 
@@ -270,3 +295,4 @@ class AuditAction(str, Enum):
     onboarding_activated = "onboarding.activated"
     onboarding_retired = "onboarding.retired"
     onboarding_refused = "onboarding.refused"
+    onboarding_preflight_requested = "onboarding.preflight_requested"
