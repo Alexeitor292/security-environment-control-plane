@@ -32,7 +32,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from secp_api.enums import (
     ChangeSetApprovalStatus,
+    IsolationModel,
     LifecycleState,
+    OnboardingMode,
+    OnboardingStatus,
     PlanStatus,
     ProvisioningOperationKind,
     ProvisioningStatus,
@@ -509,6 +512,85 @@ class ExecutionTarget(Base, TimestampMixin):
     address_spaces: Mapped[list[AddressSpacePolicy]] = relationship(
         back_populates="target", cascade="all, delete-orphan"
     )
+    onboardings: Mapped[list[TargetOnboarding]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
+
+
+# --- Target onboarding + automated deployment contract (SECP-002B-1B-0) -------
+
+
+class TargetOnboarding(Base, TimestampMixin):
+    """Provider-neutral onboarding record for an execution target (ADR-014).
+
+    Captures the onboarding mode (clean vs existing environment), the isolation model
+    (physical vs logical), the immutable declared boundary + its hash, and the human
+    approval. A target is cleared for real provisioning only when an onboarding reaches
+    ``active`` with no config/scope drift since approval. ``declared_boundary``,
+    ``boundary_hash``, ``onboarding_mode``, ``isolation_model``, ``execution_target_id``,
+    and ``organization_id`` are immutable after creation (see
+    :mod:`secp_api.immutability`). Secret-free.
+    """
+
+    __tablename__ = "target_onboarding"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    onboarding_mode: Mapped[OnboardingMode] = mapped_column(
+        EnumType(OnboardingMode), nullable=False
+    )
+    isolation_model: Mapped[IsolationModel] = mapped_column(
+        EnumType(IsolationModel), nullable=False
+    )
+    status: Mapped[OnboardingStatus] = mapped_column(
+        EnumType(OnboardingStatus, length=40), default=OnboardingStatus.draft, nullable=False
+    )
+    declared_boundary: Mapped[dict] = mapped_column(JSON, nullable=False)
+    boundary_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    # Pinned at approval so config/scope drift invalidates the approval (checked at activation).
+    approved_target_config_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_scope_policy_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_reason: Mapped[str] = mapped_column(Text, default="")
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    target: Mapped[ExecutionTarget] = relationship(back_populates="onboardings")
+    preflights: Mapped[list[TargetPreflight]] = relationship(
+        back_populates="onboarding", cascade="all, delete-orphan"
+    )
+
+
+class TargetPreflight(Base, TimestampMixin):
+    """Immutable, redacted, structured onboarding preflight evidence (ADR-014).
+
+    Provider-neutral. ``checks`` holds only redacted, review-safe entries; ``evidence_hash``
+    binds them. ``collector`` names the seam that produced the evidence (``fake`` in
+    SECP-002B-1B-0). No real target is inspected. Append-only: immutable after creation.
+    """
+
+    __tablename__ = "target_preflight"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=False, index=True
+    )
+    collector: Mapped[str] = mapped_column(String(60), default="fake", nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    checks: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    onboarding: Mapped[TargetOnboarding] = relationship(back_populates="preflights")
 
 
 class ProviderInventorySnapshot(Base, TimestampMixin):

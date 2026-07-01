@@ -20,6 +20,8 @@ from secp_api.models import (
     ProviderInventorySnapshot,
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
+    TargetOnboarding,
+    TargetPreflight,
     ToolchainProfile,
 )
 
@@ -76,6 +78,25 @@ _CHANGE_SET_APPROVAL_PROTECTED = (
     "reservations_hash",
     "renderer_version",
     "module_bundle_hash",
+)
+# An onboarding's identity + declared boundary are immutable; the lifecycle/decision
+# fields (status, decided_by/at, decision_reason, approved_*_hash, activated_at) change.
+_ONBOARDING_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "onboarding_mode",
+    "isolation_model",
+    "declared_boundary",
+    "boundary_hash",
+)
+# Preflight evidence is append-only: immutable once recorded.
+_PREFLIGHT_PROTECTED = (
+    "organization_id",
+    "onboarding_id",
+    "collector",
+    "passed",
+    "checks",
+    "evidence_hash",
 )
 
 
@@ -153,6 +174,22 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             if changed:
                 raise ImmutableResourceError(
                     "ProvisioningChangeSetApproval bindings are immutable after creation; "
+                    f"attempted to change {changed}"
+                )
+        # TargetOnboarding: identity + declared boundary immutable; lifecycle mutable (ADR-014).
+        if isinstance(obj, TargetOnboarding):
+            changed = [a for a in _ONBOARDING_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "TargetOnboarding identity/declared-boundary is immutable after creation; "
+                    f"attempted to change {changed}. Create a new onboarding record instead."
+                )
+        # TargetPreflight: append-only, immutable once recorded (ADR-014).
+        if isinstance(obj, TargetPreflight):
+            changed = [a for a in _PREFLIGHT_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "TargetPreflight evidence is immutable after recording; "
                     f"attempted to change {changed}"
                 )
         # AuditEvent: append-only.
