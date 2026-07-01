@@ -592,6 +592,21 @@ def run_real_provisioning(
         raise ProvisioningRefusedError(f"manifest {manifest_id} not found")
 
     operation = prov_service.get_or_create_operation(session, manifest, kind)
+
+    # Terminal idempotent replay FIRST — before ANY privileged setup. A retry of an
+    # already-applied apply (or already-destroyed destroy) returns the durable operation
+    # unchanged: no gate evaluation, no attempt-count mutation, no secret resolution, no
+    # executor/runner construction, no toolchain verification, no rendering, no process
+    # calls, and no approval lookup/consumption. The completed historical result is left
+    # intact (the no-op is derivable at the API/view level from the terminal status).
+    if kind == ProvisioningOperationKind.apply and operation.status == ProvisioningStatus.applied:
+        return operation
+    if (
+        kind == ProvisioningOperationKind.destroy
+        and operation.status == ProvisioningStatus.destroyed
+    ):
+        return operation
+
     plan, target, profile = _assert_real_gate(session, operation, manifest, settings, dispatch_mode)
 
     # The full gate has passed: mint the worker-only activation grant. Configuration alone
@@ -603,10 +618,21 @@ def run_real_provisioning(
     operation.attempts = (operation.attempts or 0) + 1
     operation.runner = "opentofu"
 
-    secret_env = _resolve_lab_secret_env(session, operation, target, kind, secret_resolver)
     process_executor = (
         executor if executor is not None else build_process_executor(settings, grant=grant)
     )
+    # Defense-in-depth: the executor must be approved for B1-A fake-only execution. An
+    # injected real/unknown executor is refused BEFORE any secret resolution, runner
+    # construction, or process call — the subprocess seal is not the only guard.
+    if not getattr(process_executor, "b1a_fake_only", False):
+        _refuse_real(
+            session,
+            operation,
+            "process executor is not approved for B1-A fake-only execution; a real or "
+            "unknown executor cannot be used (the subprocess path is sealed)",
+        )
+
+    secret_env = _resolve_lab_secret_env(session, operation, target, kind, secret_resolver)
     runner = OpenTofuRunner(
         process_executor,
         profile=profile.content,
@@ -795,13 +821,8 @@ def _require_approved_change_set(session, operation, manifest, authorizes_kind, 
 
 
 def _real_apply(session, operation, manifest, profile, runner, op_ref):
-    # Idempotent: an already-applied operation returns immediately, invoking NO renderer,
-    # executor, runner, secret resolution, or approval consumption.
-    if operation.status == ProvisioningStatus.applied:
-        operation.result = {**(operation.result or {}), "idempotent_noop": True}
-        session.flush()
-        return operation
-
+    # Terminal idempotency is handled up-front in run_real_provisioning (before any
+    # privileged setup); here the operation is guaranteed non-terminal.
     # Prepare exactly one plan; the SAME prepared plan file is applied (no re-plan).
     prepared = runner.prepare(manifest.content, operation_id=op_ref, destroy=False)
     try:
@@ -839,10 +860,8 @@ def _real_apply(session, operation, manifest, profile, runner, op_ref):
 
 
 def _real_destroy(session, operation, manifest, profile, runner, op_ref):
-    # Idempotent: an already-destroyed operation returns immediately, invoking nothing.
-    if operation.status == ProvisioningStatus.destroyed:
-        return operation
-
+    # Terminal idempotency is handled up-front in run_real_provisioning; here the
+    # operation is guaranteed non-terminal.
     prepared = runner.prepare(manifest.content, operation_id=op_ref, destroy=True)
     try:
         approval = _require_approved_change_set(

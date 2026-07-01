@@ -112,8 +112,24 @@ def build_process_env(
     return merged
 
 
+# =============================================================================
+# HARD, NON-BYPASSABLE B1-A SUBPROCESS SEAL
+# =============================================================================
+# This is a CODE constant, not a configuration setting. While True, the real
+# ``SubprocessProcessExecutor`` cannot be constructed at all — even directly, even with
+# ``armed=True``, even with a valid activation grant. Unsealing for the reviewed
+# disposable lab (B1-B) is a deliberate code-and-review change to this constant, not
+# something any runtime configuration, environment variable, or caller can flip.
+_B1A_SUBPROCESS_SEALED = True
+
+
 class ProcessExecutor:
     """Structural type for a process executor. See the two implementations."""
+
+    # Only executors that run NOTHING (fakes) set this True. ``run_real_provisioning``
+    # refuses any executor that is not B1-A fake-only, defense-in-depth against an
+    # injected real executor bypassing the factory.
+    b1a_fake_only: bool = False
 
     def run(self, spec: ProcessSpec) -> ProcessResult:  # pragma: no cover - interface
         raise NotImplementedError
@@ -127,6 +143,8 @@ class FakeProcessExecutor(ProcessExecutor):
       redacts it; different fixtures produce different change-set hashes (proof #10).
     * ``script`` — optional per-call ``ProcessResult`` overrides (consumed in order).
     """
+
+    b1a_fake_only = True
 
     def __init__(
         self,
@@ -161,19 +179,28 @@ class FakeProcessExecutor(ProcessExecutor):
 
 
 class SubprocessProcessExecutor(ProcessExecutor):
-    """The ONLY real-process executor. Inert unless explicitly armed (B1-B).
+    """The ONLY real-process executor. SEALED in B1-A — cannot be constructed at all.
 
-    Not constructed or invoked anywhere in B1-A. When armed it runs argv arrays with
-    ``shell=False`` in a fixed cwd, an explicit timeout, an output cap, and an
+    While ``_B1A_SUBPROCESS_SEALED`` is True, construction is refused unconditionally,
+    even directly and even with ``armed=True``. This makes the B1-A seal non-bypassable:
+    no caller, configuration, or activation grant can obtain a real executor. Unsealing
+    is a deliberate code-and-review change for B1-B. When (someday) unsealed it runs argv
+    arrays with ``shell=False`` in a fixed cwd, an explicit timeout, an output cap, and an
     allowlisted, redacted environment.
     """
 
     def __init__(self, *, armed: bool = False, max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES):
-        if not armed:
+        if _B1A_SUBPROCESS_SEALED:
             raise ProcessExecutionError(
-                "SubprocessProcessExecutor is disarmed; real OpenTofu execution is not "
-                "enabled in SECP-002B-1A. Arming is deferred to a reviewed disposable "
-                "lab (B1-B) behind the isolated-lab activation gate."
+                "SubprocessProcessExecutor is SEALED in SECP-002B-1A and cannot be "
+                "constructed (even with armed=True, even directly). Real OpenTofu "
+                "execution is unavailable; unsealing is a deliberate code-and-review "
+                "change for a reviewed disposable lab (B1-B), never a configuration "
+                "setting or an injected executor."
+            )
+        if not armed:  # pragma: no cover - B1-B only (unreachable while sealed)
+            raise ProcessExecutionError(
+                "SubprocessProcessExecutor is disarmed; arming is a reviewed B1-B step."
             )
         self._armed = armed
         self._max_output_bytes = max_output_bytes

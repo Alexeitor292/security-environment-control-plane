@@ -168,6 +168,8 @@ class WorkspaceRenderer:
         Returns the created directory path. Files are written 0o600 inside a 0o700
         directory (best-effort on platforms without full POSIX permissions).
         """
+        import shutil
+
         base = root or tempfile.gettempdir()
         os.makedirs(base, exist_ok=True)
         workdir = tempfile.mkdtemp(prefix="secp-tofu-ws-", dir=base)
@@ -175,13 +177,18 @@ class WorkspaceRenderer:
             os.chmod(workdir, stat.S_IRWXU)  # 0o700
         except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
             pass
-        for rel_path, body in workspace.files.items():
-            full = os.path.join(workdir, rel_path)
-            os.makedirs(os.path.dirname(full) or workdir, exist_ok=True)
-            with open(full, "w", encoding="utf-8") as fh:
-                fh.write(body)
-            try:
-                os.chmod(full, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-            except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
-                pass
+        try:
+            for rel_path, body in workspace.files.items():
+                full = os.path.join(workdir, rel_path)
+                os.makedirs(os.path.dirname(full) or workdir, exist_ok=True)
+                with open(full, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+                try:
+                    os.chmod(full, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+                except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+                    pass
+        except BaseException:
+            # Never leak a partially-materialized workspace.
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
         return workdir

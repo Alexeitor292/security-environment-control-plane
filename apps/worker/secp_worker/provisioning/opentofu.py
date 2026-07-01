@@ -215,43 +215,59 @@ class OpenTofuRunner:
         for ``apply_prepared`` / ``destroy_prepared`` without any further render or plan.
         The caller owns the lifecycle and MUST call ``cleanup`` (in a finally block).
         """
+        # These may raise before any workspace exists on disk — nothing to clean up yet.
         if not self.validate(manifest).ok:
             raise RunnerError("manifest is not runnable (redacted)")
         self._verify_toolchain()
         workspace = self._render(manifest)
+
+        # After materialization, prepare() OWNS the ephemeral workspace. On any failure
+        # before a PreparedOpenTofuPlan is successfully returned it removes it itself; on
+        # success ownership transfers to the caller (whose cleanup is idempotent).
         workdir = self._renderer.materialize(workspace, root=self._workspace_root)
-        plan_file = f"{workdir}/plan.tfplan"
-        if not self._executor.run(self._spec(self._offline_init_argv(workdir), workdir, "init")).ok:
-            raise RunnerError("opentofu init failed (redacted)")
-        label = "destroy-plan" if destroy else "plan"
-        if not self._executor.run(
-            self._spec(self._plan_argv(workdir, plan_file, destroy=destroy), workdir, label)
-        ).ok:
-            raise RunnerError("opentofu plan failed (redacted)")
-        show = self._executor.run(self._spec(self._show_argv(workdir, plan_file), workdir, "show"))
-        if not show.ok:
-            raise RunnerError("opentofu show failed (redacted)")
         try:
-            show_json = json.loads(show.stdout or "{}")
-        except (ValueError, TypeError) as exc:
-            raise RunnerError("opentofu show output was not valid JSON (redacted)") from exc
-        try:
-            cs = canonicalize_plan_json(
-                show_json,
-                kind="destroy" if destroy else "apply",
-                workspace_hash=workspace.content_hash,
-                provenance=self._provenance(workspace),
+            plan_file = f"{workdir}/plan.tfplan"
+            if not self._executor.run(
+                self._spec(self._offline_init_argv(workdir), workdir, "init")
+            ).ok:
+                raise RunnerError("opentofu init failed (redacted)")
+            label = "destroy-plan" if destroy else "plan"
+            if not self._executor.run(
+                self._spec(self._plan_argv(workdir, plan_file, destroy=destroy), workdir, label)
+            ).ok:
+                raise RunnerError("opentofu plan failed (redacted)")
+            show = self._executor.run(
+                self._spec(self._show_argv(workdir, plan_file), workdir, "show")
             )
-        except PlanCanonicalizationError as exc:
-            raise RunnerError("opentofu plan could not be canonicalized (redacted)") from exc
-        return PreparedOpenTofuPlan(
-            change_set=cs,
-            change_set_hash=change_set_hash(cs),
-            workspace_hash=workspace.content_hash,
-            kind=cs["kind"],
-            _workdir=workdir,
-            _plan_file=plan_file,
-        )
+            if not show.ok:
+                raise RunnerError("opentofu show failed (redacted)")
+            try:
+                show_json = json.loads(show.stdout or "{}")
+            except (ValueError, TypeError) as exc:
+                raise RunnerError("opentofu show output was not valid JSON (redacted)") from exc
+            try:
+                cs = canonicalize_plan_json(
+                    show_json,
+                    kind="destroy" if destroy else "apply",
+                    workspace_hash=workspace.content_hash,
+                    provenance=self._provenance(workspace),
+                )
+            except PlanCanonicalizationError as exc:
+                raise RunnerError("opentofu plan could not be canonicalized (redacted)") from exc
+            prepared = PreparedOpenTofuPlan(
+                change_set=cs,
+                change_set_hash=change_set_hash(cs),
+                workspace_hash=workspace.content_hash,
+                kind=cs["kind"],
+                _workdir=workdir,
+                _plan_file=plan_file,
+            )
+        except BaseException:
+            # Any failure (RunnerError, KeyboardInterrupt, etc.) before a successful
+            # return: prepare() cleans up the workspace + binary plan it owns, then re-raises.
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
+        return prepared
 
     def apply_prepared(
         self, prepared: PreparedOpenTofuPlan, *, operation_id: str
