@@ -31,6 +31,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from secp_api.enums import (
+    ChangeSetApprovalStatus,
     LifecycleState,
     PlanStatus,
     ProvisioningOperationKind,
@@ -38,6 +39,7 @@ from secp_api.enums import (
     ReservationStatus,
     SnapshotStatus,
     TargetStatus,
+    ToolchainProfileStatus,
     WorkflowKind,
     WorkflowStatus,
 )
@@ -265,6 +267,13 @@ class DeploymentPlan(Base, TimestampMixin):
     # Hash of scope_policy["provisioning"] at plan-generation time (SECP-002B-0).
     # Nullable for pre-migration rows; manifest generation fails closed when None.
     target_scope_policy_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Pinned toolchain profile for the real OpenTofu path (SECP-002B-1A, ADR-013).
+    # Null for the Simulator path and for fake-runner (B0) targets with no profile;
+    # the real-lab activation gate fails closed when either is None.
+    toolchain_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("toolchain_profile.id"), nullable=True
+    )
+    toolchain_profile_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status: Mapped[PlanStatus] = mapped_column(
         EnumType(PlanStatus), default=PlanStatus.generated, nullable=False
     )
@@ -610,6 +619,43 @@ class NetworkReservation(Base, TimestampMixin):
     )
 
 
+# --- Sealed OpenTofu runtime provenance (SECP-002B-1A) -----------------------
+
+
+class ToolchainProfile(Base, TimestampMixin):
+    """Immutable, secret-free, provider-neutral toolchain profile (ADR-013).
+
+    Binds an ``ExecutionTarget`` to a worker-side IaC runtime. ``content`` holds the
+    full validated provenance (pinned OpenTofu version + binary integrity + adapter/
+    module-bundle hash + provider lockfile hash + renderer version + remote state-backend
+    reference + offline provider-mirror identity + activation class). ``content``,
+    ``content_hash``, ``runner_kind``, ``activation_class``, and ``execution_target_id``
+    are immutable after creation (see :mod:`secp_api.immutability`). Contains NO secrets.
+    """
+
+    __tablename__ = "toolchain_profile"
+    __table_args__ = (UniqueConstraint("execution_target_id", "version"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    runner_kind: Mapped[str] = mapped_column(String(60), nullable=False)
+    activation_class: Mapped[str] = mapped_column(String(60), nullable=False)
+    renderer_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    content: Mapped[dict] = mapped_column(JSON, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    status: Mapped[ToolchainProfileStatus] = mapped_column(
+        EnumType(ToolchainProfileStatus), default=ToolchainProfileStatus.active, nullable=False
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+
 # --- Provisioning safety harness (SECP-002B-0) -------------------------------
 
 
@@ -637,12 +683,20 @@ class ProvisioningManifest(Base, TimestampMixin):
     target_config_hash: Mapped[str] = mapped_column(String(80), nullable=False)
     # Scope-policy hash binding (SECP-002B-0): immutable once set.
     target_scope_policy_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Toolchain-profile binding (SECP-002B-1A): copied from the plan, immutable once set.
+    toolchain_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("toolchain_profile.id"), nullable=True
+    )
+    toolchain_profile_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     content: Mapped[dict] = mapped_column(JSON, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     operations: Mapped[list[ProvisioningOperation]] = relationship(
+        back_populates="manifest", cascade="all, delete-orphan"
+    )
+    change_set_approvals: Mapped[list[ProvisioningChangeSetApproval]] = relationship(
         back_populates="manifest", cascade="all, delete-orphan"
     )
 
@@ -683,3 +737,53 @@ class ProvisioningOperation(Base, TimestampMixin):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     manifest: Mapped[ProvisioningManifest] = relationship(back_populates="operations")
+
+
+class ProvisioningChangeSetApproval(Base, TimestampMixin):
+    """Durable human approval of an exact dry-run change set (SECP-002B-1A, ADR-013).
+
+    Apply/destroy on the real OpenTofu path are permitted only when a *freshly
+    regenerated* dry run reproduces the exact ``change_set_hash`` this row approved AND
+    every binding (manifest content hash, toolchain profile hash, scope-policy hash,
+    reservations hash) still matches. Secret-free: stores only canonical, redacted
+    hashes and a change-set summary — never a raw OpenTofu binary plan, endpoint, or
+    credential.
+    """
+
+    __tablename__ = "provisioning_change_set_approval"
+    __table_args__ = (UniqueConstraint("manifest_id", "authorizes_kind", "change_set_hash"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    manifest_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("provisioning_manifest.id"), nullable=False, index=True
+    )
+    toolchain_profile_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("toolchain_profile.id"), nullable=False, index=True
+    )
+    # The operation kind this approval authorizes: apply or destroy.
+    authorizes_kind: Mapped[ProvisioningOperationKind] = mapped_column(
+        EnumType(ProvisioningOperationKind), nullable=False
+    )
+    change_set_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    rendered_workspace_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    manifest_content_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    toolchain_profile_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_scope_policy_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    reservations_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    renderer_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    module_bundle_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[ChangeSetApprovalStatus] = mapped_column(
+        EnumType(ChangeSetApprovalStatus),
+        default=ChangeSetApprovalStatus.pending,
+        nullable=False,
+    )
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_reason: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    manifest: Mapped[ProvisioningManifest] = relationship(back_populates="change_set_approvals")

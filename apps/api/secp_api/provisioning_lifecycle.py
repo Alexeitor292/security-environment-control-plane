@@ -10,12 +10,36 @@ from secp_api.enums import ProvisioningStatus as S
 from secp_api.errors import InvalidTransitionError
 
 PROVISIONING_TRANSITIONS: dict[S, frozenset[S]] = {
-    S.manifest_generated: frozenset({S.pending_approval, S.queued, S.failed}),
+    S.manifest_generated: frozenset(
+        {
+            S.pending_approval,
+            S.queued,
+            S.dry_run_completed,
+            S.destroy_dry_run_completed,
+            S.failed,
+        }
+    ),
     S.pending_approval: frozenset({S.queued, S.failed}),
-    S.queued: frozenset({S.dry_run_completed, S.applying, S.destroy_queued, S.failed}),
-    S.dry_run_completed: frozenset({S.queued, S.applying, S.failed}),
+    S.queued: frozenset(
+        {
+            S.dry_run_completed,
+            S.destroy_dry_run_completed,
+            S.applying,
+            S.destroy_queued,
+            S.failed,
+        }
+    ),
+    # Real (B1-A) dry runs record a change set that must be human-approved before
+    # apply/destroy. ``awaiting_change_set_approval`` is a durable pause point.
+    S.dry_run_completed: frozenset(
+        {S.queued, S.awaiting_change_set_approval, S.applying, S.failed}
+    ),
+    S.destroy_dry_run_completed: frozenset(
+        {S.queued, S.awaiting_change_set_approval, S.destroy_queued, S.failed}
+    ),
+    S.awaiting_change_set_approval: frozenset({S.applying, S.destroy_queued, S.failed}),
     S.applying: frozenset({S.applied, S.failed}),
-    S.applied: frozenset({S.destroy_queued, S.queued, S.failed}),
+    S.applied: frozenset({S.destroy_queued, S.queued, S.destroy_dry_run_completed, S.failed}),
     S.failed: frozenset({S.queued, S.destroy_queued}),
     S.destroy_queued: frozenset({S.destroyed, S.failed}),
     S.destroyed: frozenset(),  # terminal
