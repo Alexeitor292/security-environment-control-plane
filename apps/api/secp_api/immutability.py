@@ -18,7 +18,9 @@ from secp_api.models import (
     EnvironmentVersion,
     ExecutionTarget,
     ProviderInventorySnapshot,
+    ProvisioningChangeSetApproval,
     ProvisioningManifest,
+    ToolchainProfile,
 )
 
 _VERSION_PROTECTED = ("spec", "content_hash", "version_number", "api_version")
@@ -33,6 +35,8 @@ _PLAN_PROTECTED = (
     "execution_target_id",
     "target_config_hash",
     "target_scope_policy_hash",
+    "toolchain_profile_id",
+    "toolchain_profile_hash",
     "plan",
     "summary",
     "generated_by",
@@ -44,6 +48,34 @@ _MANIFEST_PROTECTED = (
     "execution_target_id",
     "target_config_hash",
     "target_scope_policy_hash",
+    "toolchain_profile_id",
+    "toolchain_profile_hash",
+)
+_TOOLCHAIN_PROFILE_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "version",
+    "runner_kind",
+    "activation_class",
+    "renderer_version",
+    "content",
+    "content_hash",
+)
+# A change-set approval's bindings are immutable; only the decision fields
+# (status, decided_by, decided_at, decision_reason) may change.
+_CHANGE_SET_APPROVAL_PROTECTED = (
+    "organization_id",
+    "manifest_id",
+    "toolchain_profile_id",
+    "authorizes_kind",
+    "change_set_hash",
+    "rendered_workspace_hash",
+    "manifest_content_hash",
+    "toolchain_profile_hash",
+    "target_scope_policy_hash",
+    "reservations_hash",
+    "renderer_version",
+    "module_bundle_hash",
 )
 
 
@@ -104,6 +136,23 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             if changed:
                 raise ImmutableResourceError(
                     "ProvisioningManifest is immutable after generation; "
+                    f"attempted to change {changed}"
+                )
+        # ToolchainProfile: provenance is immutable after creation (ADR-013).
+        if isinstance(obj, ToolchainProfile):
+            changed = [a for a in _TOOLCHAIN_PROFILE_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "ToolchainProfile provenance is immutable after creation; "
+                    f"attempted to change {changed}. Register a new profile version instead."
+                )
+        # ProvisioningChangeSetApproval: bindings/hashes immutable; only the decision
+        # fields (status, decided_by, decided_at, decision_reason) may change (ADR-013).
+        if isinstance(obj, ProvisioningChangeSetApproval):
+            changed = [a for a in _CHANGE_SET_APPROVAL_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "ProvisioningChangeSetApproval bindings are immutable after creation; "
                     f"attempted to change {changed}"
                 )
         # AuditEvent: append-only.

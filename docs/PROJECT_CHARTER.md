@@ -893,7 +893,31 @@ does not remove or weaken any architectural invariant in §6.
   * **SECP-002B-1 — First disposable isolated Proxmox lab via worker-only OpenTofu.**
     A real, pinned OpenTofu runner behind the SECP-002B-0 seam and gate: isolated
     network creation and VM/container lifecycle on a disposable lab, all behind plan
-    approval and worker-only execution.
+    approval and worker-only execution. Delivered in two safe slices:
+    * **SECP-002B-1A — Sealed OpenTofu runner and disposable-lab activation contract.**
+      Builds the real worker-only OpenTofu execution *architecture* without touching any
+      live infrastructure: an immutable, provider-neutral, secret-free **toolchain
+      profile** (pinned OpenTofu version + binary integrity + adapter/module-bundle hash +
+      provider lockfile hash + renderer version + **remote** state-backend reference +
+      offline provider-mirror identity + `isolated_lab` activation class); a worker-only
+      **`OpenTofuRunner`** behind a sealed **`ProcessExecutor`** seam
+      (`FakeProcessExecutor` everywhere in B1-A; a `SubprocessProcessExecutor` that exists
+      but is inert and never invoked); provider-neutral, deterministic, **secret-free
+      workspace rendering**; an explicit **dry-run change-set approval** model (apply/
+      destroy only after a human approves the exact regenerated, redacted change-set hash);
+      a **disabled-by-default isolated-lab activation gate** (Temporal-only, no inline, full
+      hash agreement, remote state, deny external connectivity, no fake-runner fallback);
+      and **fake-process validation**. It must **not** contact, inspect, configure, mutate,
+      or validate any live Proxmox environment, and must not run a real OpenTofu/Terraform
+      binary, provider, or endpoint anywhere. See
+      [`docs/architecture/secp-002b-1a-opentofu-lab-contract.md`](architecture/secp-002b-1a-opentofu-lab-contract.md)
+      and ADR-013.
+    * **SECP-002B-1B — First real disposable-lab dry run, apply, and destroy.**
+      Human-reviewed registration of one intentionally disposable, isolated lab target;
+      a **real, human-reviewed dry run**; explicit approval of that exact change set; a
+      **narrowly scoped first real apply**; verification; and a tested **destroy**, all
+      behind the B1-A contract. Prerequisites are enumerated in the
+      [B1-B lab prerequisite checklist](proxmox/b1b-lab-prerequisite-checklist.md).
 * **SECP-002C — Reconciliation, reset/destroy, drift handling** against real
   infrastructure.
 

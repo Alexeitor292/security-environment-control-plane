@@ -94,10 +94,63 @@ A real production secret manager (e.g. Vault, cloud KMS) is a future integration
 the `SecretResolver` interface is shaped to accept additional schemes without
 changing callers.
 
+## SECP-002B-1A controls (sealed OpenTofu runner + lab activation)
+
+SECP-002B-1A builds the *real* worker-only OpenTofu architecture but still contacts **no**
+live infrastructure and invokes **no** real binary/provider/endpoint anywhere (source,
+tests, CI, Docker). The following controls extend the model (ADR-013):
+
+### L9 — Immutable, secret-free toolchain provenance
+An `ExecutionTarget` is bound to a worker runtime by an immutable, org-scoped
+`ToolchainProfile` (pinned OpenTofu version + binary integrity + adapter/module-bundle
+hash + provider lockfile hash + renderer version + **remote** state-backend reference +
+offline provider-mirror identity + `isolated_lab` activation class). Profiles reject
+floating/`latest`/wildcard/empty/unpinned versions, missing hashes, **local-only state**,
+**direct-internet provider downloads**, unknown adapters, and permissive/unconfigured
+production-style profiles. The exact profile id + hash are pinned to the plan, manifest,
+change-set approval, and apply/destroy; any drift fails closed.
+
+### L10 — Sealed process executor (no real process in B1-A)
+The `OpenTofuRunner` runs OpenTofu only through a worker-only `ProcessExecutor`.
+`FakeProcessExecutor` is used everywhere in B1-A and runs nothing. A
+`SubprocessProcessExecutor` exists but is **inert unless an explicit isolated-lab runtime
+gate is armed**, uses **argv arrays only** (never a shell), a fixed restrictive-permission
+working directory, an explicit timeout, an output-size cap, an environment allowlist, and
+mandatory output redaction. It is **not constructed or invoked anywhere in B1-A**.
+
+### L11 — Deterministic, secret-free workspace rendering
+A worker-only adapter/renderer converts an immutable manifest + toolchain profile into a
+deterministic, secret-free rendered workspace with a content hash. Provider endpoint and
+token are referenced only as input variables injected just-in-time in the worker at real
+apply (B1-B), never written into the durable, hashed artifact. Local state is refused;
+providers/modules are expected from an offline, pinned, verified mirror.
+
+### L12 — Explicit dry-run change-set approval
+Apply requires a human-approved, canonical, redacted **dry-run change-set hash** that still
+matches a freshly regenerated dry run. Destroy requires its own separately approved destroy
+change set. No automatic apply, no AI approval, no environment-variable bypass. Raw
+OpenTofu binary plans are never persisted.
+
+### L13 — Isolated-lab activation gate (default-deny)
+Real provisioning is disabled by default. The gate requires: isolated-lab application
+mode; Temporal-only (inline refused); an active target whose pinned toolchain profile is
+`isolated_lab`; approved plan + immutable manifest; full target/config/policy/reservation/
+toolchain hash agreement; an explicit approved dry-run change set; an explicit
+real-provisioning setting; worker-only JIT secret resolution; `deny` external connectivity;
+a validated remote state backend; and **no fallback** to the fake runner.
+
 ## What a reviewer should verify
 
 - No file contains a real hostname, IP, cluster/node/pool/storage name, VLAN, or
   credential (`test_no_real_endpoints.py`).
-- `apps/api` imports nothing that could touch a provider (`test_architecture_boundary.py`).
+- `apps/api` imports nothing that could touch a provider, runner, process executor,
+  adapter, workspace rendering, OpenTofu, or `subprocess`
+  (`test_architecture_boundary.py`, `test_provisioning_boundary.py`).
 - Discovery issues only GET requests (`test_proxmox_plugin.py`).
 - Inline execution refuses the Proxmox plugin (`test_inline_refuses_real_provider.py`).
+- Toolchain profiles reject floating versions, missing hashes, local state, direct
+  downloads, and unconfigured activation (`test_toolchain_profile.py`).
+- No test, CI path, Docker verification, or runner invokes a real binary, network,
+  provider, or endpoint (`test_opentofu_runner.py`, `test_no_real_process.py`).
+- Apply/destroy are refused without — or on drift from — an approved dry-run change set
+  (`test_lab_activation_gate.py`).

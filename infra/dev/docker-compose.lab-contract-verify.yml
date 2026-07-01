@@ -1,0 +1,27 @@
+# Lab-contract verification override (SECP-002B-1A).
+#
+# Selects the isolated-lab application mode + real-provisioning setting on the WORKER,
+# but DELIBERATELY leaves the real subprocess executor DISARMED
+# (SECP_ENABLE_OPENTOFU_SUBPROCESS is not set), so any real provisioning would use the
+# FakeProcessExecutor. No real OpenTofu/Terraform binary, provider, network, or endpoint
+# is ever used. The Simulator path stays inline and unchanged.
+#
+# NOTE: In B1-A the real path is proven with an in-process, fake-executor end-to-end test
+# (docs/verification/secp-002b-1a-runtime-verification.md). Wiring the real path through a
+# durable Temporal workflow against a disposable lab is SECP-002B-1B; arming the real
+# subprocess executor is gated by the B1-B lab prerequisite checklist.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.lab-contract-verify.yml \
+#     --env-file ../../.env up -d --build
+name: secp-dev
+
+services:
+  worker:
+    environment:
+      # Fake OpenTofu harness (SECP-002B-0) remains available for harness checks.
+      SECP_ENABLE_FAKE_PROVISIONING: "true"
+      # Real-lab path selectors (SECP-002B-1A). Even with these set, the real
+      # SubprocessProcessExecutor is NOT armed, so execution uses the FakeProcessExecutor.
+      SECP_PROVISIONING_APPLICATION_MODE: "isolated_lab"
+      SECP_ENABLE_REAL_PROVISIONING: "true"
+      # SECP_ENABLE_OPENTOFU_SUBPROCESS is intentionally UNSET (disarmed) in B1-A.

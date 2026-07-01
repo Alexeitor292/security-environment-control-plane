@@ -54,25 +54,60 @@ class SnapshotStatus(str, Enum):
 
 
 class ProvisioningOperationKind(str, Enum):
-    """The kind of provisioning operation (SECP-002B-0, ADR-012)."""
+    """The kind of provisioning operation (SECP-002B-0/1A, ADR-012/013).
+
+    ``dry_run`` previews an apply; ``destroy_dry_run`` previews a destroy. Apply and
+    destroy each require a human-approved change set produced by the matching dry run
+    (SECP-002B-1A).
+    """
 
     dry_run = "dry_run"
     apply = "apply"
     destroy = "destroy"
+    destroy_dry_run = "destroy_dry_run"
 
 
 class ProvisioningStatus(str, Enum):
-    """Durable provisioning-operation lifecycle (SECP-002B-0, ADR-011/012)."""
+    """Durable provisioning-operation lifecycle (SECP-002B-0/1A, ADR-011/012/013)."""
 
     manifest_generated = "manifest_generated"
     pending_approval = "pending_approval"
     queued = "queued"
     dry_run_completed = "dry_run_completed"
+    destroy_dry_run_completed = "destroy_dry_run_completed"
+    awaiting_change_set_approval = "awaiting_change_set_approval"
     applying = "applying"
     applied = "applied"
     failed = "failed"
     destroy_queued = "destroy_queued"
     destroyed = "destroyed"
+
+
+class ToolchainProfileStatus(str, Enum):
+    """Lifecycle status of an immutable toolchain profile (SECP-002B-1A, ADR-013)."""
+
+    active = "active"
+    disabled = "disabled"
+
+
+class ChangeSetApprovalStatus(str, Enum):
+    """Lifecycle of a human approval of an exact dry-run change set (SECP-002B-1A)."""
+
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+    consumed = "consumed"
+
+
+class ProvisioningApplicationMode(str, Enum):
+    """Which provisioning path a request targets (SECP-002B-1A, ADR-013).
+
+    ``simulator`` is the unchanged default. ``isolated_lab`` is the only mode eligible
+    for the real, worker-only OpenTofu path, and only behind the full activation gate.
+    """
+
+    simulator = "simulator"
+    isolated_lab = "isolated_lab"
 
 
 class WorkflowKind(str, Enum):
@@ -108,6 +143,9 @@ class Permission(str, Enum):
     # SECP-002B-0 — provisioning safety harness (manifests + fake runner).
     provisioning_manage = "provisioning:manage"
     provisioning_read = "provisioning:read"
+    # SECP-002B-1A — sealed OpenTofu runner, toolchain profiles, change-set approval.
+    toolchain_manage = "toolchain:manage"
+    provisioning_approve = "provisioning:approve"
 
 
 class AuditAction(str, Enum):
@@ -160,3 +198,12 @@ class AuditAction(str, Enum):
     provisioning_destroy_queued = "provisioning.destroy_queued"
     provisioning_destroyed = "provisioning.destroyed"
     provisioning_refused = "provisioning.refused"
+    # SECP-002B-1A — toolchain profiles, change-set approval, real-lab activation.
+    toolchain_profile_created = "toolchain.profile_created"
+    toolchain_profile_disabled = "toolchain.profile_disabled"
+    toolchain_profile_refused = "toolchain.profile_refused"
+    change_set_recorded = "provisioning.change_set_recorded"
+    change_set_approved = "provisioning.change_set_approved"
+    change_set_rejected = "provisioning.change_set_rejected"
+    real_provisioning_refused = "provisioning.real_refused"
+    workspace_rendered = "provisioning.workspace_rendered"

@@ -114,8 +114,29 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         # provisioning policy, not just the target config hash (SECP-002B-0).
         scope_hash = provisioning_scope_policy_hash(target.scope_policy)
         summary["scope_policy_hash"] = scope_hash
+        # Pin the active toolchain profile (if any) so plan approval also covers the
+        # exact worker-side IaC runtime for the real OpenTofu path (SECP-002B-1A).
+        # No profile => fake-runner/Simulator paths only; the real-lab gate fails closed.
+        from secp_api.services.toolchain import active_profile_for_target
+
+        toolchain = active_profile_for_target(session, target.id)
+        if toolchain is not None:
+            toolchain_profile_id = toolchain.id
+            toolchain_profile_hash = toolchain.content_hash
+            summary["toolchain_profile"] = {
+                "id": str(toolchain.id),
+                "content_hash": toolchain.content_hash,
+                "runner_kind": toolchain.runner_kind,
+                "activation_class": toolchain.activation_class,
+                "version": toolchain.version,
+            }
+        else:
+            toolchain_profile_id = None
+            toolchain_profile_hash = None
     else:
         scope_hash = None
+        toolchain_profile_id = None
+        toolchain_profile_hash = None
 
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.planned)
     plan = DeploymentPlan(
@@ -126,6 +147,8 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         execution_target_id=target.id if target is not None else None,
         target_config_hash=target.config_hash if target is not None else None,
         target_scope_policy_hash=scope_hash,
+        toolchain_profile_id=toolchain_profile_id,
+        toolchain_profile_hash=toolchain_profile_hash,
         status=PlanStatus.generated,
         plan=plugin_plan.model_dump(mode="json"),
         summary=summary,
