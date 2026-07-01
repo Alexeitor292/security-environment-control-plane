@@ -15,9 +15,19 @@ from secp_worker.provisioning.process_executor import ProcessExecutionError, Pro
 WORKER_PROV = Path(__file__).resolve().parents[2] / "worker" / "secp_worker" / "provisioning"
 
 
-def test_subprocess_executor_is_disarmed_by_default():
-    with pytest.raises(ProcessExecutionError, match="disarmed|not enabled"):
+def test_subprocess_executor_is_sealed_and_cannot_be_constructed():
+    """Proof #1 (hardened) — the real executor is SEALED: construction refused
+    unconditionally in B1-A, even directly and even with armed=True."""
+    with pytest.raises(ProcessExecutionError, match="SEALED|sealed"):
         SubprocessProcessExecutor()
+    with pytest.raises(ProcessExecutionError, match="SEALED|sealed"):
+        SubprocessProcessExecutor(armed=True)
+
+
+def test_b1a_subprocess_seal_is_a_code_constant_set_true():
+    from secp_worker.provisioning import process_executor as pe
+
+    assert pe._B1A_SUBPROCESS_SEALED is True
 
 
 def test_fake_executor_runs_nothing_but_records_calls():

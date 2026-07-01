@@ -23,10 +23,29 @@ from secp_api.models import (
     ToolchainProfile,
 )
 from secp_api.services import approvals, toolchain
-from secp_worker.provisioning import FakeProcessExecutor, build_fixture_show_json
+from secp_worker.provisioning import FakeProcessExecutor, OpenTofuRunner, build_fixture_show_json
 from secp_worker.provisioning.execution import run_real_provisioning
 from secp_worker.provisioning.process_executor import ProcessResult
+from secp_worker.provisioning.runner import RunnerError
 from secp_worker.secrets import FakeSecretResolver
+
+
+class _PoisonExecutor:
+    """A B1-A-approved executor whose run() must never be called on a terminal replay."""
+
+    b1a_fake_only = True
+
+    def __init__(self):
+        self.calls = []
+
+    def run(self, spec):  # pragma: no cover - must not be reached
+        raise AssertionError("process executor invoked on a terminal idempotent replay")
+
+
+class _PoisonResolver:
+    def resolve(self, secret_ref):  # pragma: no cover - must not be reached
+        raise AssertionError("secret resolver invoked on a terminal idempotent replay")
+
 
 REAL_ON = Settings(
     app_env="test",
@@ -124,44 +143,158 @@ def test_dry_run_persists_only_canonical_change_set(session, principal, lab_env)
         assert set(r) == {"address", "mode", "type", "name", "provider", "actions", "replace"}
 
 
+# --- Part 1: non-bypassable seal + injected-executor refusal ------------------
+
+
+def test_injected_non_fake_executor_is_refused_without_process(session, principal, lab_env):
+    """An injected non-fake executor is refused before any process call (defense-in-depth)."""
+
+    class _Evil:  # not marked b1a_fake_only
+        def __init__(self):
+            self.ran = False
+
+        def run(self, spec):  # pragma: no cover - must not be reached
+            self.ran = True
+            raise AssertionError("evil executor ran")
+
+    env = lab_env()
+    evil = _Evil()
+    with pytest.raises(ProvisioningRefusedError, match="not approved for B1-A"):
+        run_real_provisioning(
+            session,
+            env.manifest.id,
+            K.dry_run,
+            executor=evil,
+            settings=REAL_ON,
+            dispatch_mode="temporal",
+        )
+    assert evil.ran is False
+
+
+# --- Part 3: prepare() self-cleanup on internal failure ----------------------
+
+
+def _prepare_runner(env, script, root):
+    return OpenTofuRunner(
+        FakeProcessExecutor(script=script),
+        profile=env.toolchain.content,
+        workspace_root=str(root),
+    )
+
+
+def _ok():
+    return ProcessResult(returncode=0)
+
+
+def _good_show(env):
+    return ProcessResult(
+        returncode=0, stdout=json.dumps(build_fixture_show_json(env.manifest.content))
+    )
+
+
+@pytest.mark.parametrize(
+    "script_builder",
+    [
+        lambda env: [ProcessResult(returncode=1)],  # init nonzero
+        lambda env: [_ok(), ProcessResult(returncode=1)],  # plan nonzero
+        lambda env: [_ok(), _ok(), ProcessResult(returncode=1)],  # show nonzero
+        lambda env: [_ok(), _ok(), ProcessResult(returncode=0, stdout="{not json")],  # malformed
+        lambda env: [
+            _ok(),
+            _ok(),
+            ProcessResult(returncode=0, stdout=json.dumps({"resource_changes": "x"})),
+        ],  # canonicalization refusal
+    ],
+)
+def test_prepare_cleans_up_on_internal_failure(lab_env, tmp_path, script_builder):
+    env = lab_env()
+    runner = _prepare_runner(env, script_builder(env), tmp_path)
+    with pytest.raises(RunnerError):
+        runner.prepare(env.manifest.content, operation_id="op", destroy=False)
+    # prepare() owns and removes the ephemeral workspace on any internal failure.
+    assert list(tmp_path.glob("secp-tofu-ws-*")) == []
+
+
+def test_apply_prepared_failure_is_cleaned_up_by_caller(lab_env, tmp_path):
+    env = lab_env()
+    # prepare succeeds (init, plan, show ok); apply fails.
+    runner = _prepare_runner(
+        env, [_ok(), _ok(), _good_show(env), ProcessResult(returncode=1)], tmp_path
+    )
+    prepared = runner.prepare(env.manifest.content, operation_id="op", destroy=False)
+    assert list(tmp_path.glob("secp-tofu-ws-*"))  # workspace exists after successful prepare
+    try:
+        with pytest.raises(RunnerError):
+            runner.apply_prepared(prepared, operation_id="op")
+    finally:
+        runner.cleanup(prepared)
+    # Caller cleanup is idempotent and always runs; nothing remains.
+    runner.cleanup(prepared)  # second call is a safe no-op
+    assert list(tmp_path.glob("secp-tofu-ws-*")) == []
+
+
 # --- Part 2: idempotency / retry --------------------------------------------
 
 
-def test_retry_applied_operation_is_idempotent_noop(session, principal, lab_env):
+def test_retry_applied_is_terminal_noop_with_zero_privileged_setup(session, principal, lab_env):
     env = lab_env()
     m = env.manifest
     _approve_apply(session, principal, m)
-    _run(session, m, K.apply, resolver=_resolver())
+    applied = _run(session, m, K.apply, resolver=_resolver())
     session.commit()
-    # Retry with a fresh executor that records calls — nothing must be invoked.
-    retry_exec = _exec(m)
-    op = _run(session, m, K.apply, executor=retry_exec, resolver=_resolver())
+    before_attempts = applied.attempts
+    before_result = copy.deepcopy(applied.result)
+    approval = session.get(ProvisioningChangeSetApproval, _pending(session, m.id, K.apply).id)
+    before_approval_status = approval.status
+
+    # Retry with POISON fakes: any resolver/executor invocation raises. The terminal
+    # replay must return before any privileged setup, so nothing is called.
+    op = run_real_provisioning(
+        session,
+        m.id,
+        K.apply,
+        executor=_PoisonExecutor(),
+        settings=REAL_ON,
+        dispatch_mode="temporal",
+        secret_resolver=_PoisonResolver(),
+    )
     session.commit()
     assert op.status == ProvisioningStatus.applied
-    assert op.result.get("idempotent_noop") is True
-    assert retry_exec.calls == []  # no renderer/executor/runner invocation
+    assert op.attempts == before_attempts  # no attempt-count mutation
+    assert op.result == before_result  # completed historical result unchanged
+    assert "idempotent_noop" not in op.result  # no mutation of the durable result
+    # Approval was neither re-consumed nor re-looked-up destructively.
+    assert session.get(ProvisioningChangeSetApproval, approval.id).status == before_approval_status
 
 
-def test_retry_destroyed_operation_is_idempotent_noop(session, principal, lab_env):
+def test_retry_destroyed_is_terminal_noop_with_zero_privileged_setup(session, principal, lab_env):
     env = lab_env()
     m = env.manifest
-    # dry -> approve -> apply
     _approve_apply(session, principal, m)
     _run(session, m, K.apply, resolver=_resolver())
     session.commit()
-    # destroy dry -> approve -> destroy
     _run(session, m, K.destroy_dry_run, actions=("delete",))
     session.commit()
     approvals.approve_change_set(session, principal, _pending(session, m.id, K.destroy).id, "ok")
     session.commit()
-    _run(session, m, K.destroy, actions=("delete",), resolver=_resolver())
+    destroyed = _run(session, m, K.destroy, actions=("delete",), resolver=_resolver())
     session.commit()
-    # Retry destroy — idempotent noop, nothing invoked.
-    retry_exec = _exec(m, actions=("delete",))
-    op = _run(session, m, K.destroy, executor=retry_exec, actions=("delete",), resolver=_resolver())
+    before_attempts = destroyed.attempts
+    before_result = copy.deepcopy(destroyed.result)
+
+    op = run_real_provisioning(
+        session,
+        m.id,
+        K.destroy,
+        executor=_PoisonExecutor(),
+        settings=REAL_ON,
+        dispatch_mode="temporal",
+        secret_resolver=_PoisonResolver(),
+    )
     session.commit()
     assert op.status == ProvisioningStatus.destroyed
-    assert retry_exec.calls == []
+    assert op.attempts == before_attempts
+    assert op.result == before_result
 
 
 def test_failed_apply_can_retry_after_new_valid_plan(session, principal, lab_env):
