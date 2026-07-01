@@ -242,3 +242,38 @@ time-of-use gap. The following corrections are now part of the decision:
 
 No real binary, provider, endpoint, filesystem/binary verification, Docker socket, or live
 infrastructure is used by any of these corrections in B1-A.
+
+## Amendment — final safety hardening (2026-07-01)
+
+A second review found three residual gaps; the following are now part of the decision:
+
+1. **Non-bypassable subprocess seal.** The B1-A seal no longer lives only in the
+   `build_process_executor` factory. `SubprocessProcessExecutor.__init__` refuses
+   construction **unconditionally** while the code constant `_B1A_SUBPROCESS_SEALED` is
+   True — even directly, even with `armed=True`, even given a valid activation grant. A
+   worker-side caller therefore cannot construct a real executor and inject it. Unsealing
+   for B1-B is a deliberate **code-and-review** change to that constant, never a
+   configuration setting. As defense-in-depth, `run_real_provisioning` also **refuses any
+   injected executor** that is not marked B1-A fake-only (`b1a_fake_only`), before any
+   secret resolution, runner construction, or process call.
+
+2. **Terminal idempotency before all privileged setup.** A retry of an already-`applied`
+   apply (or already-`destroyed` destroy) returns the durable operation **immediately after
+   the operation is retrieved** — before gate evaluation, attempt-count mutation, secret
+   resolution, executor/runner construction, toolchain verification, rendering, process
+   calls, or any approval lookup/consumption. The completed historical result is left
+   **unmutated** (no `idempotent_noop` write); the no-op is derivable at the API/view level
+   from the terminal status.
+
+3. **`prepare()` owns cleanup on internal failure.** After materialization, `prepare()`
+   owns the ephemeral workspace and removes it itself on **any** exception before a
+   `PreparedOpenTofuPlan` is successfully returned (init/plan/show nonzero, malformed
+   `show -json`, canonicalization refusal). On success, ownership transfers to the caller,
+   whose `cleanup` is idempotent and always runs in a `finally` block (covering
+   apply/destroy failures after a successful prepare). `materialize` also self-cleans on a
+   partial write. No ephemeral workspace or binary plan is ever left behind.
+
+These hardening steps preserve all prior gains (exact prepared-plan apply/destroy, redacted
+canonical `show -json`, toolchain binding + verifier seam, fake-only verification, the API/
+worker boundary, and unchanged Simulator/B0 behavior). No real process, binary, endpoint,
+provider, credential, Docker socket, or live infrastructure is accessed.

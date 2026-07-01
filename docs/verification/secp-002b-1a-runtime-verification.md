@@ -1,6 +1,6 @@
 # SECP-002B-1A — Runtime Verification
 
-**Date:** 2026-06-30 (amended 2026-07-01 — execution-integrity correction pass)
+**Date:** 2026-06-30 (amended 2026-07-01 — execution-integrity + final safety hardening)
 **Branch:** `feature/secp-002b1-opentofu-lab-contract`
 
 This records an **actual** end-to-end run of the sealed OpenTofu contract using **only the
@@ -141,6 +141,32 @@ re-run-while-awaiting, changed-dry-run-new-approval, DB-corruption binding),
 malformed fail-closed, pinned executable, unsafe-identifier rejection, verifier requirement,
 backend-reference non-interpolation), and the extended `test_no_real_process.py`
 (config-alone/grant/seal).
+
+## Final safety hardening (actual output)
+
+Re-run after the safety hardening (non-bypassable subprocess seal, injected-executor
+refusal, terminal idempotency before all privileged setup, `prepare()` cleanup ownership):
+
+```
+== subprocess construction is sealed (non-bypassable) ==
+  bare construction refused
+  armed=True construction refused
+  config flag alone -> FakeProcessExecutor
+  valid grant + enabled -> FakeProcessExecutor (B1-A seal)
+
+== injected non-fake executor is refused ==
+  refused: process executor is not approved for B1-A fake-only  | evil ran: False
+
+== terminal apply retry: zero privileged setup (poison fakes) ==
+  status              : applied | attempts unchanged: True | result unchanged: True
+```
+
+`SubprocessProcessExecutor` cannot be constructed even with `armed=True` or a valid grant;
+an injected non-fake executor is refused without running; and a terminal apply retry with
+**poison** resolver/executor fakes (which raise if called) returns `applied` with attempts
+and result unchanged — proving zero privileged setup. `prepare()` failure-stage cleanup
+(init/plan/show nonzero, malformed JSON, canonicalization refusal, apply-after-prepare) is
+covered by `test_real_provisioning_integrity.py` with no ephemeral residue in any case.
 
 ## Automated proof coverage
 

@@ -158,6 +158,22 @@ persisted.
   and a hard B1-A seal keeps it a `FakeProcessExecutor`; configuration alone can never
   construct the real executor.
 
+## Final safety hardening
+
+- **Non-bypassable seal.** `SubprocessProcessExecutor.__init__` refuses construction
+  unconditionally while `_B1A_SUBPROCESS_SEALED` is True (even directly / `armed=True` /
+  with a grant) — the seal is a code constant, not config; unsealing is a code-and-review
+  change for B1-B. `run_real_provisioning` additionally refuses any injected executor not
+  marked `b1a_fake_only`, before any secret resolution / runner construction / process call.
+- **Terminal idempotency first.** A retry of an `applied`/`destroyed` operation returns the
+  durable record immediately after retrieval — before gate evaluation, attempt-count
+  mutation, secret resolution, executor/runner construction, verification, rendering,
+  process calls, or approval lookup/consumption. The completed result is left unmutated.
+- **`prepare()` cleanup ownership.** After materialization `prepare()` removes the ephemeral
+  workspace itself on any internal failure (init/plan/show nonzero, malformed JSON,
+  canonicalization refusal); on success ownership transfers to the caller whose idempotent
+  `cleanup` always runs in a `finally` block. No workspace or binary plan is ever left behind.
+
 ## What B1-A intentionally does NOT do
 
 No real OpenTofu/Terraform/provider/endpoint is installed, downloaded, or invoked. Arming
