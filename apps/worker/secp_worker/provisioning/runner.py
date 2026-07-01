@@ -22,11 +22,20 @@ class RunnerValidationResult(BaseModel):
 
 
 class RunnerChangeSet(BaseModel):
-    """Deterministic dry-run change set (plan). Secret-free."""
+    """Deterministic dry-run change set (plan). Secret-free.
+
+    ``change_set_hash`` / ``workspace_hash`` / ``plan_digest`` are populated by the real
+    ``OpenTofuRunner`` (SECP-002B-1A) so a change set can be bound to a human approval;
+    the ``FakeOpenTofuRunner`` (B0) leaves them empty.
+    """
 
     operation_id: str
     creates: list[dict] = Field(default_factory=list)
     summary: dict = Field(default_factory=dict)
+    change_set_hash: str = ""
+    workspace_hash: str = ""
+    plan_digest: str = ""
+    kind: str = "apply"
 
 
 class RunnerApplyResult(BaseModel):
