@@ -21,20 +21,54 @@ def test_subprocess_executor_is_disarmed_by_default():
 
 
 def test_fake_executor_runs_nothing_but_records_calls():
-    executor = FakeProcessExecutor(plan_digest="x")
-    result = executor.run(
+    executor = FakeProcessExecutor()
+    # A non-show step produces no parsed stdout; the fake runs nothing.
+    plan = executor.run(
         ProcessSpec(argv=["tofu", "version"], cwd=".", timeout_s=1.0, label="probe")
     )
-    assert result.returncode == 0
+    assert plan.returncode == 0 and plan.stdout == ""
+    # The show step returns only safe, canned fixture JSON — no host state is touched.
+    show = executor.run(ProcessSpec(argv=["tofu", "show"], cwd=".", timeout_s=1.0, label="show"))
+    assert '"resource_changes"' in show.stdout
     assert executor.calls and executor.calls[0].argv == ["tofu", "version"]
-    # The fake returns only canned, secret-free JSON — no host state is touched.
-    assert "plan_digest" in result.stdout
 
 
 def test_default_settings_select_the_fake_executor():
     # In B1-A (no subprocess arm) the factory always returns the fake executor.
     executor = build_process_executor(Settings(app_env="test"))
     assert isinstance(executor, FakeProcessExecutor)
+
+
+def test_config_flag_alone_cannot_construct_real_subprocess():
+    """Proof #6 — SECP_ENABLE_OPENTOFU_SUBPROCESS=true alone yields a FakeProcessExecutor."""
+    settings = Settings(app_env="dev", enable_opentofu_subprocess=True)
+    assert isinstance(build_process_executor(settings, grant=None), FakeProcessExecutor)
+
+
+def test_grant_requires_a_passed_gate():
+    from secp_worker.provisioning.activation import grant_real_lab_activation
+
+    with pytest.raises(RuntimeError, match="gate"):
+        grant_real_lab_activation(manifest_id="m", gate_passed=False)
+
+
+def test_even_a_valid_grant_stays_sealed_in_b1a():
+    """A valid grant + enabled + non-prod still returns Fake due to the hard B1-A seal."""
+    from secp_worker.provisioning.activation import grant_real_lab_activation
+
+    settings = Settings(app_env="dev", enable_opentofu_subprocess=True)
+    grant = grant_real_lab_activation(manifest_id="m", gate_passed=True)
+    assert isinstance(build_process_executor(settings, grant=grant), FakeProcessExecutor)
+
+
+def test_negative_gates_never_construct_real_subprocess():
+    # Simulator mode, missing real-provisioning, and inline dispatch all keep the fake.
+    for settings in (
+        Settings(app_env="test", provisioning_application_mode="simulator"),
+        Settings(app_env="test", enable_real_provisioning=False),
+        Settings(app_env="test", enable_opentofu_subprocess=False),
+    ):
+        assert isinstance(build_process_executor(settings), FakeProcessExecutor)
 
 
 def test_subprocess_arm_is_refused_in_production():

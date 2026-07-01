@@ -4,7 +4,12 @@ process invocation, and redacted errors. No real binary/provider/endpoint is use
 from __future__ import annotations
 
 import pytest
-from secp_worker.provisioning import FakeProcessExecutor, OpenTofuRunner, WorkspaceRenderer
+from secp_worker.provisioning import (
+    FakeProcessExecutor,
+    OpenTofuRunner,
+    WorkspaceRenderer,
+    build_fixture_show_json,
+)
 from secp_worker.provisioning.process_executor import DEFAULT_TIMEOUT_S
 from secp_worker.provisioning.rendering import RENDERER_VERSION, RenderingError
 from secp_worker.provisioning.runner import RunnerError
@@ -78,7 +83,7 @@ def test_renderer_refuses_local_state(lab_env):
 
 def test_dry_run_uses_safe_sealed_process_calls(lab_env):
     manifest, profile = _manifest_and_profile(lab_env)
-    executor = FakeProcessExecutor()
+    executor = FakeProcessExecutor(show_json=build_fixture_show_json(manifest))
     runner = OpenTofuRunner(executor, profile=profile, secret_env=_SECRET_ENV)
     cs = runner.dry_run(manifest, operation_id="op-1")
 
@@ -89,14 +94,11 @@ def test_dry_run_uses_safe_sealed_process_calls(lab_env):
     assert {"init", "plan", "show"} <= labels
 
     for spec in executor.calls:
-        # argv arrays only, never a shell string.
+        # argv arrays only, never a shell string. The pinned executable is used.
         assert isinstance(spec.argv, list) and spec.argv
-        assert spec.argv[0] == "tofu"
+        assert spec.argv[0] == profile["executable"] == "tofu"
         assert not any(tok in " ".join(spec.argv) for tok in (";", "&&", "|", "`", "$("))
-        # restricted, real working directory (the ephemeral workspace).
-        import os
-
-        assert os.path.isdir(spec.cwd)
+        # the working directory is the ephemeral restrictive-permission workspace.
         assert "secp-tofu-ws-" in spec.cwd
         # bounded timeout.
         assert 0 < spec.timeout_s <= DEFAULT_TIMEOUT_S
@@ -116,15 +118,22 @@ def test_dry_run_uses_safe_sealed_process_calls(lab_env):
     assert "-upgrade=false" in init.argv
     assert "-input=false" in joined
 
+    # The ephemeral workspace is cleaned up after dry_run returns (no residue).
+    import os
 
-def test_change_set_hash_changes_when_plan_digest_changes(lab_env):
+    assert not os.path.isdir(executor.calls[0].cwd)
+
+
+def test_change_set_hash_changes_when_plan_actions_change(lab_env):
     manifest, profile = _manifest_and_profile(lab_env)
-    a = OpenTofuRunner(FakeProcessExecutor(plan_digest="A"), profile=profile).dry_run(
-        manifest, operation_id="op"
-    )
-    b = OpenTofuRunner(FakeProcessExecutor(plan_digest="B"), profile=profile).dry_run(
-        manifest, operation_id="op"
-    )
+    a = OpenTofuRunner(
+        FakeProcessExecutor(show_json=build_fixture_show_json(manifest, actions=("create",))),
+        profile=profile,
+    ).dry_run(manifest, operation_id="op")
+    b = OpenTofuRunner(
+        FakeProcessExecutor(show_json=build_fixture_show_json(manifest, actions=("update",))),
+        profile=profile,
+    ).dry_run(manifest, operation_id="op")
     assert a.change_set_hash != b.change_set_hash
 
 
