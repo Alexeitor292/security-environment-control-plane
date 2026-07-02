@@ -133,6 +133,7 @@ def test_worker_result_recorder_cannot_produce_live_verified(session, principal)
         onb.record_preflight_result(
             session,
             ob.id,
+            evidence_record=None,
             checks=checks,
             verification_level=VerificationLevel.live_verified.value,
             collector_kind=CollectorKind.provider_worker.value,
@@ -148,6 +149,7 @@ def test_worker_recorder_rejects_provider_worker_even_when_simulated(session, pr
         onb.record_preflight_result(
             session,
             ob.id,
+            evidence_record=None,
             checks=checks,
             verification_level=VerificationLevel.simulated.value,
             collector_kind=CollectorKind.provider_worker.value,

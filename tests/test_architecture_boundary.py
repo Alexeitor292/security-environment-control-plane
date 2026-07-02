@@ -65,6 +65,18 @@ RESTRICTED_MODULES = {
     "secp_worker": {"dispatch.py"},
 }
 
+# Full module paths that must never be imported by any API file, including dispatch.py.
+# These are worker-internal collector implementations; the API must only dispatch.
+FULL_MODULE_FORBIDDEN = frozenset({
+    "secp_worker.onboarding.target_evidence",
+})
+
+# Specific names that must never be imported by any API file.
+FORBIDDEN_IMPORT_NAMES = frozenset({
+    "SimulatedTargetEvidenceCollector",
+    "TargetEvidenceCollector",
+})
+
 # Plugin side-effecting capability methods the API must never call directly.
 PLUGIN_SIDE_EFFECT_METHODS = {"apply", "reset", "destroy"}
 
@@ -102,14 +114,33 @@ def _scan(path: Path):
                 root = _root_module(alias.name)
                 if root in HARD_FORBIDDEN_MODULES:
                     forbidden_imports.append(alias.name)
+                if alias.name in FULL_MODULE_FORBIDDEN:
+                    forbidden_imports.append(
+                        f"{alias.name} (worker collector import forbidden in all API files)"
+                    )
+                for name in node.names:
+                    if name.name in FORBIDDEN_IMPORT_NAMES:
+                        forbidden_imports.append(f"{name.name} (collector class forbidden)")
                 if root in RESTRICTED_MODULES and path.name not in RESTRICTED_MODULES[root]:
                     restricted_imports.append(alias.name)
         elif isinstance(node, ast.ImportFrom):
             root = _root_module(node.module or "")
             if root in HARD_FORBIDDEN_MODULES:
                 forbidden_imports.append(node.module or "")
+            mod = node.module or ""
+            if mod in FULL_MODULE_FORBIDDEN or any(
+                mod == m or mod.startswith(m + ".") for m in FULL_MODULE_FORBIDDEN
+            ):
+                forbidden_imports.append(
+                    f"{mod} (worker collector import forbidden in all API files)"
+                )
+            for alias in node.names:
+                if alias.name in FORBIDDEN_IMPORT_NAMES:
+                    forbidden_imports.append(
+                        f"{mod}.{alias.name} (collector class import forbidden)"
+                    )
             if root in RESTRICTED_MODULES and path.name not in RESTRICTED_MODULES[root]:
-                restricted_imports.append(node.module or "")
+                restricted_imports.append(mod)
         elif isinstance(node, ast.Call):
             parts = _dotted_parts(node.func)
             if parts:

@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from secp_api.dispatch import request_simulated_target_evidence_result
 from secp_api.enums import EvidenceStatus, IsolationModel, OnboardingMode, VerificationLevel
 from secp_api.errors import DomainError, ImmutableResourceError, ValidationFailedError
 from secp_api.models import AuditEvent, TargetEvidenceRecord, TargetPreflight
@@ -62,7 +61,10 @@ def _new_onboarding(session, principal, target):
 
 
 def _payload(boundary: dict) -> dict:
-    return request_simulated_target_evidence_result(declared_boundary=copy.deepcopy(boundary))
+    # Tests may call the worker collector directly; the architecture test only scans secp_api.
+    from secp_worker.onboarding.target_evidence import SimulatedTargetEvidenceCollector
+
+    return SimulatedTargetEvidenceCollector().collect(declared_boundary=copy.deepcopy(boundary))
 
 
 def _hash_context(payload: dict, findings: list[dict]) -> dict:

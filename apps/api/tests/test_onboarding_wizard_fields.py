@@ -224,6 +224,7 @@ def test_new_fields_do_not_unlock_live_or_break_execution(session, principal, la
         onb.record_preflight_result(
             session,
             ob.id,
+            evidence_record=None,
             checks=checks,
             verification_level=VerificationLevel.live_verified.value,
             collector_kind=CollectorKind.provider_worker.value,

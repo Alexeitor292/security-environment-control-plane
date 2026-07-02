@@ -202,6 +202,7 @@ def test_b1b0_seal_refuses_live_evidence_creation(session, principal):
         onb.record_preflight_result(
             session,
             ob.id,
+            evidence_record=None,
             checks=checks,
             verification_level=VerificationLevel.live_verified.value,
             collector_kind=CollectorKind.provider_worker.value,

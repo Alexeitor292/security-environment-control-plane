@@ -158,9 +158,19 @@ def test_logical_isolation_requires_no_route_evidence(session, principal):
     checks = simulate_boundary_checks(
         ob.declared_boundary, IsolationModel.logical, omit={"no_route_to_protected"}
     )
+    # The worker path: collect evidence first, then record the preflight.
+    from secp_api.models import ExecutionTarget
+    from secp_worker.onboarding.target_evidence import SimulatedTargetEvidenceCollector
+
+    target = session.get(ExecutionTarget, ob.execution_target_id)
+    payload = SimulatedTargetEvidenceCollector().collect(declared_boundary=ob.declared_boundary)
+    ev = onb.record_target_evidence_from_payload(
+        session, ob, target, payload=payload, created_by=None
+    )
     pf = onb.record_preflight_result(
         session,
         ob.id,
+        evidence_record=ev,
         checks=checks,
         verification_level=VerificationLevel.simulated.value,
         collector_kind=CollectorKind.fake_declared_boundary.value,
