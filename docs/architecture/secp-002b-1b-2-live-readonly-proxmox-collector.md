@@ -232,7 +232,9 @@ adapter code and run with the live gate disabled.
   version**. The worker re-verifies every bound value before connecting. **Any** mismatch,
   expired or superseded authorization, target/config/boundary drift, or collector-contract /
   allowlist version mismatch **fails closed** and produces **no reusable passing result**
-  (a prior job's `passed` outcome is never reused under a changed binding).
+  (a prior job's `passed` outcome is never reused under a changed binding). All of these values
+  — including a canonical authorization expiry — are folded into the immutable binding
+  fingerprint used as the idempotency key (§5).
 - **Rotation / revocation / expiration / failure (conceptual):** credentials are short-lived
   and rot=able at the secret store without code change; a revoked/expired credential yields a
   redacted resolution failure and an `unverifiable` result — never a partial write, never a
@@ -246,13 +248,15 @@ adapter code and run with the live gate disabled.
 - **Default-disabled feature gate:** a dedicated setting (e.g. `SECP_ENABLE_LIVE_READONLY_COLLECTOR`,
   default `false`, refused in production without explicit review) gates the entire live path.
   With it disabled, the collector is inert and the seal stands.
-- **Idempotency:** each job has a deterministic idempotency key derived from the **full
-  binding** — `sha256(execution_target_id + config_hash + onboarding_id + boundary_hash +
-  authorization_id + authorization_version + evidence_source + verification_level +
-  endpoint_allowlist_version)`. A duplicate request with an identical binding maps to the same
-  job; if **any** bound value differs — including the authorization version/expiry or the
-  collector-contract / endpoint-allowlist version — the key differs and **no** prior passing
-  result is reused.
+- **Idempotency:** each job's key is an **immutable binding fingerprint** over the *complete*
+  binding — `sha256(execution_target_id + config_hash + onboarding_id + boundary_hash +
+  authorization_id + authorization_version + authorization_expiry + evidence_source +
+  verification_level + endpoint_allowlist_version)`, where `authorization_expiry` is the
+  authorization's canonical UTC expiry timestamp. Because the expiry is folded into the
+  fingerprint, a re-issued authorization with a new expiry (or version) yields a different key.
+  A duplicate request with an identical binding maps to the same job; if **any** bound value
+  differs — including the authorization expiry/version or the collector-contract /
+  endpoint-allowlist version — the key differs and **no** prior passing result is reused.
 - **Timeout / retry / cancellation:** bounded per-request timeout; capped, backed-off retries
   of idempotent GETs only; a job is cancellable; a cancelled/timed-out job records
   `unverifiable` and audits, never a partial pass.

@@ -136,6 +136,20 @@ def test_complete_job_binding_is_documented():
         assert marker in text, f"design doc missing job-binding element: {marker!r}"
 
 
+def test_idempotency_key_includes_authorization_expiry():
+    """The idempotency key must include a canonical authorization expiry, not only its version,
+    so that an expiry change changes the key (consistent across the design and the ADR)."""
+    design = _normalized(DESIGN)
+    # The key formula itself must fold in the expiry, not just the version.
+    assert "authorization_version + authorization_expiry" in design, (
+        "idempotency-key formula must include authorization_expiry"
+    )
+    assert "immutable binding fingerprint" in design
+    adr = _normalized(ADR)
+    assert "immutable binding fingerprint" in adr
+    assert "authorization" in adr and "expiry" in adr
+
+
 def test_fully_segregated_verification_is_documented():
     """Correction 3: generic inventory is insufficient; required facts verified or unverifiable."""
     text = _normalized(DESIGN)

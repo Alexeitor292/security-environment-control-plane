@@ -46,7 +46,9 @@ credential/endpoint is created, and the live-evidence seal is not lifted.
    and its idempotency key — binds, at minimum, **all** of: `execution_target_id`, the target
    `config_hash`, `onboarding_id`, the onboarding `boundary_hash`, `authorization_id` **and**
    authorization expiry/version, `evidence_source` / `verification_level`, and the
-   collector-contract / endpoint-allowlist version. Any mismatch, expiry, target/config/boundary
+   collector-contract / endpoint-allowlist version. The idempotency key is an **immutable
+   binding fingerprint** over all of these values — including a canonical authorization
+   **expiry** (not only its version) — so any mismatch, expiry change, target/config/boundary
    drift, or contract-version mismatch **fails closed** and yields **no reusable passing
    result**.
 
