@@ -20,9 +20,13 @@ tests.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol, runtime_checkable
 
 from secp_api.enums import VerificationLevel
 from secp_plugin_proxmox.live_collector import (
@@ -59,6 +63,57 @@ class LiveReadCollectionDisabled(Exception):
 class InvalidLiveReadBinding(Exception):
     """Raised when the immutable live-read binding is missing, expired, malformed, or
     internally inconsistent — before any secret resolution or transport construction."""
+
+
+class LiveReadAuthorizationDenied(Exception):
+    """Raised when the authorization verifier does not approve the binding."""
+
+
+class CanonicalizationError(Exception):
+    """Raised when an object cannot be canonicalized (NaN/inf/unsupported type)."""
+
+
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def canonical_json(obj: object) -> str:
+    """Deterministic JSON: sorted keys, compact separators, UTF-8, no NaN/inf, no unsupported
+    types (``json.dumps`` raises ``ValueError`` on NaN/inf and ``TypeError`` on unknown types)."""
+    return json.dumps(
+        obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+
+
+def canonical_sha256(obj: object) -> str:
+    """``sha256:<hex>`` over the canonical JSON encoding of ``obj``."""
+    try:
+        encoded = canonical_json(obj).encode("utf-8")
+    except (ValueError, TypeError) as exc:
+        raise CanonicalizationError(
+            "object is not canonicalizable (NaN/inf or unsupported type)"
+        ) from exc
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+@runtime_checkable
+class LiveReadAuthorizationVerifier(Protocol):
+    """Worker-only seam that must approve the immutable binding before secret resolution.
+
+    Only fake test implementations exist in this PR — there is no real authorization backend.
+    """
+
+    def verify(self, binding: LiveReadCollectionBinding, *, now: datetime) -> bool: ...
+
+
+def _assert_hash_matches(obj: object, expected: str, label: str) -> None:
+    if not isinstance(expected, str) or not _DIGEST_RE.match(expected):
+        raise InvalidLiveReadBinding(f"{label} hash is malformed")
+    try:
+        actual = canonical_sha256(obj)
+    except CanonicalizationError as exc:
+        raise InvalidLiveReadBinding(f"{label} could not be canonicalized: {exc}") from exc
+    if actual != expected:
+        raise InvalidLiveReadBinding(f"{label} hash mismatch")
 
 
 @dataclass(frozen=True)
@@ -126,28 +181,62 @@ def run_live_readonly_collection(
     *,
     gate: LiveReadCollectionGate,
     binding: LiveReadCollectionBinding,
+    target_config: dict,
+    declared_boundary: dict,
     secret_ref: str,
     secret_resolver: SecretResolver,
     transport_factory: TransportFactory,
-    declared_boundary: dict,
+    authorization_verifier: LiveReadAuthorizationVerifier,
     now: datetime | None = None,
 ) -> dict:
     """Run the dormant live read-only collection. Returns an in-memory observed dict.
 
-    Fails closed on a disabled gate (before anything) and on an invalid/expired/inconsistent
-    binding (before secret resolution or transport construction). Never persists evidence.
+    Fail-closed sequence (each step must pass before the next runs):
+
+    1. **gate** — a disabled gate refuses before the verifier, resolver, transport factory,
+       collector, or any persistence code is touched;
+    2. **binding structure** — completeness/expiry/internal-consistency;
+    3. **target-config hash** — recomputed from the redacted, secret-free ``target_config`` and
+       compared to ``binding.target_config_hash``;
+    4. **boundary hash** — recomputed from ``declared_boundary`` and compared to
+       ``binding.boundary_hash``;
+    5. **credential reference** — the opaque ``credential_ref`` in ``target_config`` must be
+       present and exactly equal (in-memory) to the supplied ``secret_ref`` (never logged/hashed);
+    6. **authorization** — the verifier must approve the binding (before secret resolution);
+    7. **secret resolution** — transient credential via the injected resolver;
+    8. **transport + collect** — injected transport; returns in-memory observed data only.
+
+    It never persists evidence, creates a ``TargetEvidenceRecord``, or unseals live evidence.
     """
     now = now or datetime.now(UTC)
-    # 1. Default-disabled gate — refuse before resolver, transport, endpoint, request, evidence.
+    # 1. Default-disabled gate — before verifier / resolver / transport / collector / persistence.
     if not gate.enabled:
         raise LiveReadCollectionDisabled(
             "live read-only collection is disabled by default (SECP-002B-1B-4); a separately "
             "authorized activation is required before it can be reached outside unit tests"
         )
-    # 2. Immutable binding — refuse before secret resolution or transport construction.
+    # 2. Immutable binding structure — before hashes / verifier / resolver / transport.
     binding.assert_valid(now=now)
-    # 3. Only now: resolve the opaque secret (transient; never stored/logged/hashed/audited).
+    # 3-4. Recompute and match both binding hashes from the actual inputs.
+    _assert_hash_matches(target_config, binding.target_config_hash, "target configuration")
+    _assert_hash_matches(declared_boundary, binding.boundary_hash, "declared boundary")
+    # 5. Opaque credential-reference binding — exact in-memory equality only (ref never hashed).
+    credential_ref = (
+        target_config.get("credential_ref") if isinstance(target_config, dict) else None
+    )
+    if not credential_ref:
+        raise InvalidLiveReadBinding(
+            "target configuration is missing the opaque credential reference"
+        )
+    if secret_ref != credential_ref:
+        raise InvalidLiveReadBinding(
+            "supplied secret reference does not match the target credential reference"
+        )
+    # 6. Authorization verification — must approve before any secret resolution.
+    if not authorization_verifier.verify(binding, now=now):
+        raise LiveReadAuthorizationDenied("authorization was not verified for this binding")
+    # 7. Resolve the opaque secret (transient; never stored/logged/hashed/audited/returned).
     credential = secret_resolver.resolve(secret_ref)
-    # 4. Build the transport (injected fake in tests) and run the plugin collector.
+    # 8. Build the transport (injected fake in tests) and run the plugin collector.
     transport = transport_factory(credential.reveal_secret())
     return LiveReadOnlyProxmoxCollector().collect(transport, declared_boundary=declared_boundary)

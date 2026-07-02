@@ -34,6 +34,7 @@ from secp_plugin_proxmox import (
     HttpxReadOnlyTransport,
     LiveReadOnlyProxmoxCollector,
     MutatingRequestRefused,
+    QueryParametersRefused,
     RedirectRefused,
     UnknownPathRefused,
     path_is_allowed,
@@ -41,15 +42,26 @@ from secp_plugin_proxmox import (
 from secp_plugin_proxmox.readonly_transport import FakeProxmoxReadOnlyTransport
 from secp_worker.onboarding.live_readonly import (
     InvalidLiveReadBinding,
+    LiveReadAuthorizationDenied,
     LiveReadCollectionBinding,
     LiveReadCollectionDisabled,
     LiveReadCollectionGate,
+    canonical_sha256,
     run_live_readonly_collection,
 )
 from tests.conftest import VALID_ONBOARDING_BOUNDARY  # type: ignore
 
 NOW = datetime(2026, 7, 2, tzinfo=UTC)
 BOUNDARY = VALID_ONBOARDING_BOUNDARY
+SECRET_REF = "env:SECP_PROVIDER_SECRET__FAKE"
+
+# Redacted, secret-free target configuration: non-secret connection metadata + an OPAQUE
+# credential reference identifier only. Never contains a secret value.
+TARGET_CONFIG = {
+    "base_url": "https://proxmox.example.test:8006/api2/json",
+    "verify_tls": True,
+    "credential_ref": SECRET_REF,
+}
 
 FAKE_INV = {
     "/nodes": [
@@ -74,6 +86,18 @@ class RecordingResolver:
         return ProviderCredential.from_secret(self._token)
 
 
+class RecordingVerifier:
+    """Fake authorization verifier that records calls and returns a fixed decision."""
+
+    def __init__(self, approve: bool = True) -> None:
+        self.approve = approve
+        self.calls: list[tuple] = []
+
+    def verify(self, binding, *, now) -> bool:
+        self.calls.append((binding, now))
+        return self.approve
+
+
 def _recording_factory(responses):
     created: list[tuple[str, FakeProxmoxReadOnlyTransport]] = []
 
@@ -88,9 +112,9 @@ def _recording_factory(responses):
 def _binding(**over) -> LiveReadCollectionBinding:
     base = dict(
         execution_target_id="t-1",
-        target_config_hash="sha256:cfg",
+        target_config_hash=canonical_sha256(TARGET_CONFIG),
         onboarding_id="ob-1",
-        boundary_hash="sha256:boundary",
+        boundary_hash=canonical_sha256(BOUNDARY),
         authorization_id="auth-1",
         authorization_version=1,
         authorization_expiry="2999-01-01T00:00:00Z",
@@ -101,6 +125,30 @@ def _binding(**over) -> LiveReadCollectionBinding:
     )
     base.update(over)
     return LiveReadCollectionBinding(**base)
+
+
+def _run(
+    *,
+    gate,
+    resolver,
+    factory,
+    verifier,
+    binding=None,
+    target_config=None,
+    secret_ref=SECRET_REF,
+    now=NOW,
+):
+    return run_live_readonly_collection(
+        gate=gate,
+        binding=_binding() if binding is None else binding,
+        target_config=dict(TARGET_CONFIG) if target_config is None else target_config,
+        declared_boundary=BOUNDARY,
+        secret_ref=secret_ref,
+        secret_resolver=resolver,
+        transport_factory=factory,
+        authorization_verifier=verifier,
+        now=now,
+    )
 
 
 def _sim_payload(observed: dict) -> dict:
@@ -117,28 +165,22 @@ def _sim_payload(observed: dict) -> dict:
 # --- default-disabled gate --------------------------------------------------------
 
 
-def test_disabled_gate_refuses_before_resolver_and_transport():
-    resolver = RecordingResolver()
-    factory, created = _recording_factory(FAKE_INV)
-    with pytest.raises(LiveReadCollectionDisabled):
-        run_live_readonly_collection(
-            gate=LiveReadCollectionGate(),  # default disabled
-            binding=_binding(),
-            secret_ref="env:SECP_PROVIDER_SECRET__FAKE",
-            secret_resolver=resolver,
-            transport_factory=factory,
-            declared_boundary=BOUNDARY,
-            now=NOW,
-        )
-    assert resolver.calls == []  # no secret resolution
-    assert created == []  # no transport construction
-
-
 def test_gate_default_is_disabled():
     assert LiveReadCollectionGate().enabled is False
 
 
-# --- immutable binding validation (before resolver / transport) -------------------
+def test_disabled_gate_refuses_before_verifier_resolver_transport():
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    with pytest.raises(LiveReadCollectionDisabled):
+        _run(gate=LiveReadCollectionGate(), resolver=resolver, factory=factory, verifier=verifier)
+    assert verifier.calls == []  # no authorization verification
+    assert resolver.calls == []  # no secret resolution
+    assert created == []  # no transport construction
+
+
+# --- immutable binding validation (before verifier / resolver / transport) --------
 
 
 @pytest.mark.parametrize(
@@ -157,39 +199,137 @@ def test_gate_default_is_disabled():
         {"endpoint_allowlist_version": "bogus/v0"},  # allowlist mismatch
     ],
 )
-def test_invalid_binding_refuses_before_resolver_and_transport(over):
+def test_invalid_binding_refuses_before_verifier_resolver_transport(over):
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
     with pytest.raises(InvalidLiveReadBinding):
-        run_live_readonly_collection(
-            gate=LiveReadCollectionGate(enabled=True),  # gate enabled: reach binding check
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
             binding=_binding(**over),
-            secret_ref="env:SECP_PROVIDER_SECRET__FAKE",
-            secret_resolver=resolver,
-            transport_factory=factory,
-            declared_boundary=BOUNDARY,
-            now=NOW,
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
         )
+    assert verifier.calls == []
     assert resolver.calls == []
     assert created == []
 
 
-# --- explicitly enabled test-only path (fake resolver + fake transport) -----------
+# --- recomputed binding hashes + credential-ref binding (before verifier/resolver) --
 
 
-def test_enabled_gate_with_fakes_returns_in_memory_observed():
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"binding": None, "mutate_hash": "target_config_hash"},  # config hash mismatch
+        {"binding": None, "mutate_hash": "boundary_hash"},  # boundary hash mismatch
+        {"binding": None, "malformed": "target_config_hash"},  # malformed digest
+    ],
+)
+def test_hash_mismatch_or_malformed_refused_before_verifier(kwargs):
+    over = {}
+    if kwargs.get("mutate_hash"):
+        over[kwargs["mutate_hash"]] = canonical_sha256({"tampered": True})
+    if kwargs.get("malformed"):
+        over[kwargs["malformed"]] = "not-a-sha256-digest"
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
-    observed = run_live_readonly_collection(
-        gate=LiveReadCollectionGate(enabled=True),
-        binding=_binding(),
-        secret_ref="env:SECP_PROVIDER_SECRET__FAKE",
-        secret_resolver=resolver,
-        transport_factory=factory,
-        declared_boundary=BOUNDARY,
-        now=NOW,
+    verifier = RecordingVerifier()
+    with pytest.raises(InvalidLiveReadBinding):
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            binding=_binding(**over),
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+def test_canonicalization_failure_refused_before_verifier():
+    # A target config carrying a non-finite float cannot be canonicalized -> refused.
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    bad_config = {**TARGET_CONFIG, "nan": float("nan")}
+    with pytest.raises(InvalidLiveReadBinding):
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            target_config=bad_config,
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+def test_missing_credential_reference_refused_before_verifier():
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    config = {"base_url": TARGET_CONFIG["base_url"], "verify_tls": True}  # no credential_ref
+    with pytest.raises(InvalidLiveReadBinding):
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            binding=_binding(target_config_hash=canonical_sha256(config)),
+            target_config=config,
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+def test_secret_ref_mismatch_refused_before_verifier():
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    with pytest.raises(InvalidLiveReadBinding):
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            secret_ref="env:SECP_PROVIDER_SECRET__OTHER",  # != target_config credential_ref
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+# --- authorization verifier (before secret resolution) ----------------------------
+
+
+def test_authorization_denied_refuses_before_resolver_and_transport():
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier(approve=False)  # verifier is reached, but denies
+    with pytest.raises(LiveReadAuthorizationDenied):
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert len(verifier.calls) == 1  # verifier consulted
+    assert resolver.calls == []  # but no secret resolution
+    assert created == []  # and no transport construction
+
+
+# --- explicitly enabled test-only path: all matching -------------------------------
+
+
+def test_enabled_path_requires_all_matching_returns_observed():
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier(approve=True)
+    observed = _run(
+        gate=LiveReadCollectionGate(enabled=True),  # valid gate
+        resolver=resolver,  # fake resolver
+        factory=factory,  # fake transport
+        verifier=verifier,  # verified authorization
     )
-    assert resolver.calls == ["env:SECP_PROVIDER_SECRET__FAKE"]  # resolved once
+    assert len(verifier.calls) == 1  # authorization verified
+    assert resolver.calls == [SECRET_REF]  # resolved once, with the bound ref
     assert created and created[0][0] == "fake-token"  # transport built with resolved token
     assert observed["nodes"] == ["pve-node-1", "pve-node-2"]
     assert observed["storage"] == ["local-lvm"]
@@ -282,7 +422,7 @@ def test_httptransport_applies_policy_before_injected_client():
 def test_httptransport_refuses_and_never_follows_redirect():
     redirect = _FakeResp(status_code=302, headers={"location": "https://elsewhere/nodes"})
     client = _FakeClient(redirect)
-    t = HttpxReadOnlyTransport("https://proxmox.example.test:8006", "tok", client=client)
+    t = HttpxReadOnlyTransport("https://proxmox.example.test:8006/api2/json", "tok", client=client)
     with pytest.raises(RedirectRefused):
         t.get("/nodes")
     assert len(client.get_calls) == 1  # issued once, redirect NOT followed
@@ -290,22 +430,75 @@ def test_httptransport_refuses_and_never_follows_redirect():
 
 def test_httptransport_tls_cannot_be_disabled():
     with pytest.raises(ValueError, match="verify_tls"):
-        HttpxReadOnlyTransport("https://proxmox.example.test:8006", "tok", verify_tls=False)
+        HttpxReadOnlyTransport(
+            "https://proxmox.example.test:8006/api2/json", "tok", verify_tls=False
+        )
 
 
 @pytest.mark.parametrize(
     "base_url",
     [
-        "http://proxmox.example.test:8006",  # not https
-        "https://user:pass@proxmox.example.test:8006",  # userinfo
+        "http://proxmox.example.test:8006/api2/json",  # not https
+        "https://user:pass@proxmox.example.test:8006/api2/json",  # userinfo
         "https://proxmox.example.test:8006/api2/json?x=1",  # query
         "https://proxmox.example.test:8006/api2/json#frag",  # fragment
         "https://proxmox.example.test:8006/api2/%2e%2e",  # escape/traversal
+        "https://proxmox.example.test:8006",  # empty root
+        "https://proxmox.example.test:8006/",  # root only, not the API root
+        "https://proxmox.example.test:8006/api2/json/nodes",  # arbitrary deeper path
     ],
 )
 def test_httptransport_base_url_validation(base_url):
     with pytest.raises(ValueError):
         HttpxReadOnlyTransport(base_url, "tok")
+
+
+def test_httptransport_accepts_exact_api_root(monkeypatch):
+    # Both /api2/json and /api2/json/ normalize to the same accepted root.
+    class _CapturingClient(_FakeClient):
+        def __init__(self, **kwargs):
+            super().__init__(_FakeResp(200, {"data": []}))
+
+    monkeypatch.setattr(httpx, "Client", _CapturingClient)
+    for base_url in (
+        "https://proxmox.example.test:8006/api2/json",
+        "https://proxmox.example.test:8006/api2/json/",
+    ):
+        HttpxReadOnlyTransport(base_url, "tok").get("/nodes")  # no ValueError
+
+
+# --- Part 1: query parameters are refused before client / lookup activity ---------
+
+
+def test_httptransport_refuses_nonempty_params_before_client():
+    client = _FakeClient()
+    t = HttpxReadOnlyTransport("https://proxmox.example.test:8006/api2/json", "tok", client=client)
+    with pytest.raises(QueryParametersRefused):
+        t.get("/nodes", params={"full": "1"})
+    with pytest.raises(QueryParametersRefused):
+        t.request("GET", "/nodes", {"x": "y"})
+    assert client.get_calls == []  # refused before any client activity
+
+
+def test_fake_transport_refuses_nonempty_params_before_lookup():
+    t = FakeProxmoxReadOnlyTransport({"/nodes": [{"node": "pve-node-1"}]})
+    with pytest.raises(QueryParametersRefused):
+        t.get("/nodes", params={"full": "1"})
+    assert t.calls == []  # refused before canned-response lookup
+
+
+def test_params_none_and_empty_preserve_valid_get():
+    # Fake transport: None and {} both yield the canned data.
+    fake = FakeProxmoxReadOnlyTransport({"/nodes": [{"node": "pve-node-1"}]})
+    assert fake.get("/nodes") == [{"node": "pve-node-1"}]
+    assert fake.get("/nodes", params={}) == [{"node": "pve-node-1"}]
+    assert fake.get("/nodes", params=None) == [{"node": "pve-node-1"}]
+    # Httpx transport: None and {} both reach the injected client and return data.
+    client = _FakeClient(_FakeResp(200, {"data": [{"node": "pve-node-1"}]}))
+    t = HttpxReadOnlyTransport("https://proxmox.example.test:8006/api2/json", "tok", client=client)
+    assert t.get("/nodes") == [{"node": "pve-node-1"}]
+    assert t.get("/nodes", params={}) == [{"node": "pve-node-1"}]
+    assert len(client.get_calls) == 2
 
 
 def test_httptransport_own_client_uses_verify_trustenv_noredirect(monkeypatch):
@@ -374,14 +567,16 @@ def test_no_evidence_persistence_in_live_run():
     import secp_worker.onboarding.live_readonly as lr
 
     src = inspect.getsource(lr)
-    if lr.__doc__:  # strip the module docstring so prose is not mistaken for code
-        src = src.replace(lr.__doc__, "")
+    # Scan for code-shaped persistence tokens (call/attribute forms), so prose in docstrings
+    # that merely names TargetEvidenceRecord is not mistaken for a persistence call.
     for token in (
-        "TargetEvidenceRecord",
+        "TargetEvidenceRecord(",
+        "import TargetEvidenceRecord",
         "record_target_evidence",
-        "session.add",
-        "session.commit",
+        "session.add(",
+        "session.commit(",
         "sessionmaker",
+        "session_scope",
     ):
         assert token not in src, f"live run must not persist evidence ({token})"
 

@@ -57,6 +57,10 @@ def _validate_base_url(base_url: str) -> None:
         or any(seg in (".", "..") for seg in parts.path.split("/"))
     ):
         raise ValueError("base_url path must not contain escapes or dot-segment traversal")
+    # The Proxmox API root must normalize exactly to /api2/json (with or without a trailing
+    # slash). An empty root or any other path is refused.
+    if parts.path not in ("/api2/json", "/api2/json/"):
+        raise ValueError("base_url path must be the Proxmox API root '/api2/json'")
 
 
 class HttpxReadOnlyTransport:
@@ -91,10 +95,16 @@ class HttpxReadOnlyTransport:
 
     def request(self, method: str, path: str, params: dict | None = None) -> Any:
         # Enforce the closed canonical request policy BEFORE constructing a client or sending:
-        # GET-only, canonical path, closed allowlist, and cross-host refusal (PR #10).
-        from secp_plugin_proxmox.readonly_policy import RedirectRefused, assert_request_allowed
+        # GET-only, canonical path, closed allowlist, cross-host refusal, and NO query params
+        # (this milestone allowlists none) (PR #10 / SECP-002B-1B-4).
+        from secp_plugin_proxmox.readonly_policy import (
+            RedirectRefused,
+            assert_no_params,
+            assert_request_allowed,
+        )
 
         assert_request_allowed(method, path)
+        assert_no_params(params)
         import httpx  # local import: provider HTTP client stays out of apps/api
 
         url = f"{self._base_url}/{path.lstrip('/')}"

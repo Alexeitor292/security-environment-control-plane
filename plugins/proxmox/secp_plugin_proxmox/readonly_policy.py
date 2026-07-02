@@ -75,6 +75,21 @@ class CrossHostRequestRefused(Exception):
         super().__init__(f"refused cross-host / absolute destination {path!r}")
 
 
+class QueryParametersRefused(Exception):
+    """Raised when a request carries query parameters. This milestone allowlists **no** query
+    parameters, so any non-empty ``params`` mapping is refused before client/lookup activity."""
+
+    def __init__(self, keys):
+        self.keys = sorted(str(k) for k in keys)
+        super().__init__(f"refused query parameters {self.keys}: no query params are allowlisted")
+
+
+def assert_no_params(params: dict | None) -> None:
+    """Refuse any non-empty params mapping. Only ``None`` or ``{}`` are permitted."""
+    if params:
+        raise QueryParametersRefused(params.keys() if hasattr(params, "keys") else params)
+
+
 class NonCanonicalPathRefused(Exception):
     """Raised when a path is non-canonical: its decoded/canonical form could differ from the
     literal path evaluated (encoded delimiters, backslashes, repeated slashes, traversal, or

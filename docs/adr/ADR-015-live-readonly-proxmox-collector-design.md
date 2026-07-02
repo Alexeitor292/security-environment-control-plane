@@ -139,3 +139,22 @@ onboarding-preflight lifecycle. It is testable exclusively via injected fakes.
   the human activation checklist and an independent security review — is required before this
   dormant collector can be reached outside unit tests.** No real Proxmox target was contacted,
   and no secret backend, API trigger, database persistence path, or live activation exists.
+
+Two follow-up hardening fixes close remaining contract gaps (still dormant/fake-only):
+
+- **No query parameters.** This milestone allowlists **no** query parameters, so both transports
+  (`Fake` and `Httpx`) refuse any non-empty `params` mapping with `QueryParametersRefused`
+  **before** client construction or canned-response lookup; only `None`/`{}` are permitted. The
+  base URL must normalize exactly to the Proxmox API root `/api2/json` (with or without a
+  trailing slash); an empty or arbitrary path is refused.
+- **Real (recomputed) binding.** `run_live_readonly_collection` now receives a redacted,
+  secret-free `target_config` (non-secret connection metadata + an opaque `credential_ref` only)
+  and the declared boundary. Before authorization, secret resolution, or transport construction
+  it recomputes deterministic canonical-JSON SHA-256 digests (sorted keys, compact separators,
+  UTF-8, NaN/inf and unsupported types rejected) and requires them to equal
+  `binding.target_config_hash` and `binding.boundary_hash`; binds the supplied opaque
+  `secret_ref` to `credential_ref` by exact in-memory equality (never logged/hashed); and
+  requires a worker-only `LiveReadAuthorizationVerifier` (fake-only) to approve. Hash mismatch,
+  malformed digest, canonicalization failure, missing credential reference, secret-ref mismatch,
+  a disabled gate, or an invalid binding all fail closed **without** calling the verifier,
+  resolver, transport factory, collector, or any persistence code.
