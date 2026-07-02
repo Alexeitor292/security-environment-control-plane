@@ -34,11 +34,15 @@ from secp_plugin_proxmox import (
     HttpxReadOnlyTransport,
     LiveReadOnlyProxmoxCollector,
     MutatingRequestRefused,
+    ProxmoxTargetConfigError,
     QueryParametersRefused,
     RedirectRefused,
     UnknownPathRefused,
+    ValidatedProxmoxTargetConfig,
+    parse_proxmox_target_config,
     path_is_allowed,
 )
+from secp_plugin_proxmox.readonly_policy import assert_no_params
 from secp_plugin_proxmox.readonly_transport import FakeProxmoxReadOnlyTransport
 from secp_worker.onboarding.live_readonly import (
     InvalidLiveReadBinding,
@@ -99,11 +103,13 @@ class RecordingVerifier:
 
 
 def _recording_factory(responses):
-    created: list[tuple[str, FakeProxmoxReadOnlyTransport]] = []
+    # Records (validated_config, token, transport) so tests can prove the transport is built
+    # from the VALIDATED config supplied to construction, not a separate factory choice.
+    created: list[tuple] = []
 
-    def factory(token: str) -> FakeProxmoxReadOnlyTransport:
+    def factory(validated_config, token: str) -> FakeProxmoxReadOnlyTransport:
         t = FakeProxmoxReadOnlyTransport(responses)
-        created.append((token, t))
+        created.append((validated_config, token, t))
         return t
 
     return factory, created
@@ -135,6 +141,7 @@ def _run(
     verifier,
     binding=None,
     target_config=None,
+    declared_boundary=None,
     secret_ref=SECRET_REF,
     now=NOW,
 ):
@@ -142,7 +149,7 @@ def _run(
         gate=gate,
         binding=_binding() if binding is None else binding,
         target_config=dict(TARGET_CONFIG) if target_config is None else target_config,
-        declared_boundary=BOUNDARY,
+        declared_boundary=BOUNDARY if declared_boundary is None else declared_boundary,
         secret_ref=secret_ref,
         secret_resolver=resolver,
         transport_factory=factory,
@@ -247,12 +254,46 @@ def test_hash_mismatch_or_malformed_refused_before_verifier(kwargs):
     assert verifier.calls == [] and resolver.calls == [] and created == []
 
 
-def test_canonicalization_failure_refused_before_verifier():
-    # A target config carrying a non-finite float cannot be canonicalized -> refused.
+def test_boundary_canonicalization_failure_refused_before_verifier():
+    # A declared boundary carrying a non-finite float cannot be canonicalized -> refused.
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
-    bad_config = {**TARGET_CONFIG, "nan": float("nan")}
+    with pytest.raises(InvalidLiveReadBinding):
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            declared_boundary={**BOUNDARY, "nan": float("nan")},
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+# --- invalid target config is rejected at parse (before hashing/verifier/resolver/transport) ---
+
+
+@pytest.mark.parametrize(
+    "bad_config",
+    [
+        {**TARGET_CONFIG, "token": "raw-secret-value"},  # secret-like unknown key
+        {**TARGET_CONFIG, "password": "raw-secret-value"},  # secret-like unknown key
+        {**TARGET_CONFIG, "headers": {"Authorization": "Bearer x"}},  # headers / nested
+        {**TARGET_CONFIG, "extra": 1},  # unknown key
+        {"base_url": TARGET_CONFIG["base_url"], "verify_tls": True},  # missing credential_ref
+        {"base_url": {"nested": "x"}, "verify_tls": True, "credential_ref": SECRET_REF},  # nested
+        {**TARGET_CONFIG, "verify_tls": False},  # not exactly True
+        {**TARGET_CONFIG, "verify_tls": "true"},  # non-boolean
+        {**TARGET_CONFIG, "credential_ref": ""},  # empty ref
+        {**TARGET_CONFIG, "credential_ref": 123},  # non-string ref
+        {**TARGET_CONFIG, "base_url": "https://proxmox.example.test:8006"},  # not the API root
+        {**TARGET_CONFIG, "base_url": "http://proxmox.example.test:8006/api2/json"},  # not https
+    ],
+)
+def test_invalid_target_config_refused_before_hash_verifier_resolver_transport(bad_config):
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
@@ -264,21 +305,32 @@ def test_canonicalization_failure_refused_before_verifier():
     assert verifier.calls == [] and resolver.calls == [] and created == []
 
 
-def test_missing_credential_reference_refused_before_verifier():
-    resolver = RecordingResolver()
-    factory, created = _recording_factory(FAKE_INV)
-    verifier = RecordingVerifier()
-    config = {"base_url": TARGET_CONFIG["base_url"], "verify_tls": True}  # no credential_ref
-    with pytest.raises(InvalidLiveReadBinding):
-        _run(
-            gate=LiveReadCollectionGate(enabled=True),
-            binding=_binding(target_config_hash=canonical_sha256(config)),
-            target_config=config,
-            resolver=resolver,
-            factory=factory,
-            verifier=verifier,
-        )
-    assert verifier.calls == [] and resolver.calls == [] and created == []
+def test_secret_value_is_never_echoed_by_config_rejection():
+    # A rejected raw config must not leak the secret-like VALUE into the error.
+    try:
+        parse_proxmox_target_config({**TARGET_CONFIG, "token": "TOP-SECRET-VALUE"})
+    except ProxmoxTargetConfigError as exc:
+        assert "TOP-SECRET-VALUE" not in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected rejection")
+
+
+# --- plugin-owned target-config model ---------------------------------------------
+
+
+def test_parse_accepts_valid_and_binding_representation_is_secret_free():
+    cfg = parse_proxmox_target_config(dict(TARGET_CONFIG))
+    assert isinstance(cfg, ValidatedProxmoxTargetConfig)
+    rep = cfg.binding_representation()
+    assert set(rep) == {"base_url", "verify_tls", "credential_ref"}
+    assert rep["verify_tls"] is True
+    # Deterministic + equal to hashing the original 3-field config.
+    assert canonical_sha256(rep) == canonical_sha256(TARGET_CONFIG)
+
+
+def test_binding_default_config_hash_matches_validated_representation():
+    cfg = parse_proxmox_target_config(dict(TARGET_CONFIG))
+    assert _binding().target_config_hash == canonical_sha256(cfg.binding_representation())
 
 
 def test_secret_ref_mismatch_refused_before_verifier():
@@ -330,7 +382,12 @@ def test_enabled_path_requires_all_matching_returns_observed():
     )
     assert len(verifier.calls) == 1  # authorization verified
     assert resolver.calls == [SECRET_REF]  # resolved once, with the bound ref
-    assert created and created[0][0] == "fake-token"  # transport built with resolved token
+    # The transport is built from the VALIDATED config (exact bound destination), not a raw dict.
+    cfg, token, _t = created[0]
+    assert isinstance(cfg, ValidatedProxmoxTargetConfig)
+    assert cfg.base_url == TARGET_CONFIG["base_url"]
+    assert cfg.verify_tls is True and cfg.credential_ref == SECRET_REF
+    assert token == "fake-token"  # transport built with the resolved transient token
     assert observed["nodes"] == ["pve-node-1", "pve-node-2"]
     assert observed["storage"] == ["local-lvm"]
     assert observed["network_segments"] == ["vmbr0"]
@@ -499,6 +556,30 @@ def test_params_none_and_empty_preserve_valid_get():
     assert t.get("/nodes") == [{"node": "pve-node-1"}]
     assert t.get("/nodes", params={}) == [{"node": "pve-node-1"}]
     assert len(client.get_calls) == 2
+
+
+def test_assert_no_params_accepts_only_none_or_empty_dict():
+    assert_no_params(None)  # no raise
+    assert_no_params({})  # no raise
+
+
+@pytest.mark.parametrize("bad", [[], (), "", "abc", 0, False, True, [1], ("x",), {"full": "1"}])
+def test_assert_no_params_rejects_all_other_values(bad):
+    with pytest.raises(QueryParametersRefused):
+        assert_no_params(bad)
+
+
+@pytest.mark.parametrize("bad", [[], (), "", 0, False, {"full": "1"}])
+def test_both_transports_refuse_strict_params_before_activity(bad):
+    fake = FakeProxmoxReadOnlyTransport({"/nodes": [{"node": "pve-node-1"}]})
+    with pytest.raises(QueryParametersRefused):
+        fake.get("/nodes", params=bad)
+    assert fake.calls == []  # refused before canned-response lookup
+    client = _FakeClient()
+    t = HttpxReadOnlyTransport("https://proxmox.example.test:8006/api2/json", "tok", client=client)
+    with pytest.raises(QueryParametersRefused):
+        t.get("/nodes", params=bad)
+    assert client.get_calls == []  # refused before injected-client activity
 
 
 def test_httptransport_own_client_uses_verify_trustenv_noredirect(monkeypatch):

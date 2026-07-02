@@ -33,6 +33,11 @@ from secp_plugin_proxmox.readonly_transport import (
     RedirectResponse,
     fake_transport_factory,
 )
+from secp_plugin_proxmox.target_config import (
+    ProxmoxTargetConfigError,
+    ValidatedProxmoxTargetConfig,
+    parse_proxmox_target_config,
+)
 from secp_plugin_proxmox.transport import (
     HttpxReadOnlyTransport,
     MutatingRequestRefused,
@@ -64,4 +69,7 @@ __all__ = [
     "LiveReadOnlyProxmoxCollector",
     "LIVE_READ_EVIDENCE_SOURCE",
     "LIVE_READ_COLLECTOR_CONTRACT_VERSION",
+    "ProxmoxTargetConfigError",
+    "ValidatedProxmoxTargetConfig",
+    "parse_proxmox_target_config",
 ]

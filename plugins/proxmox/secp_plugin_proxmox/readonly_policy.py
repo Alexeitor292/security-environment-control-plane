@@ -77,17 +77,25 @@ class CrossHostRequestRefused(Exception):
 
 class QueryParametersRefused(Exception):
     """Raised when a request carries query parameters. This milestone allowlists **no** query
-    parameters, so any non-empty ``params`` mapping is refused before client/lookup activity."""
+    parameters, so only ``None`` or an empty ``dict`` is accepted; anything else is refused
+    before client/lookup activity. Never echoes values — only the type / key names."""
 
-    def __init__(self, keys):
-        self.keys = sorted(str(k) for k in keys)
-        super().__init__(f"refused query parameters {self.keys}: no query params are allowlisted")
+    def __init__(self, params: object = None):
+        if isinstance(params, dict):
+            detail = f"keys={sorted(str(k) for k in params)}"
+        else:
+            detail = f"type={type(params).__name__}"
+        super().__init__(
+            f"refused query parameters ({detail}): only None or an empty dict is allowed"
+        )
 
 
-def assert_no_params(params: dict | None) -> None:
-    """Refuse any non-empty params mapping. Only ``None`` or ``{}`` are permitted."""
-    if params:
-        raise QueryParametersRefused(params.keys() if hasattr(params, "keys") else params)
+def assert_no_params(params: object) -> None:
+    """Accept ONLY ``None`` or an empty ``dict``. Reject everything else (non-empty mappings and
+    any other type — ``[]``, ``()``, ``""``, ``0``, ``False``, …) before client/lookup activity."""
+    if params is None or (isinstance(params, dict) and not params):
+        return
+    raise QueryParametersRefused(params)
 
 
 class NonCanonicalPathRefused(Exception):

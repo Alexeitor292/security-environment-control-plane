@@ -142,19 +142,25 @@ onboarding-preflight lifecycle. It is testable exclusively via injected fakes.
 
 Two follow-up hardening fixes close remaining contract gaps (still dormant/fake-only):
 
-- **No query parameters.** This milestone allowlists **no** query parameters, so both transports
-  (`Fake` and `Httpx`) refuse any non-empty `params` mapping with `QueryParametersRefused`
-  **before** client construction or canned-response lookup; only `None`/`{}` are permitted. The
-  base URL must normalize exactly to the Proxmox API root `/api2/json` (with or without a
-  trailing slash); an empty or arbitrary path is refused.
-- **Real (recomputed) binding.** `run_live_readonly_collection` now receives a redacted,
-  secret-free `target_config` (non-secret connection metadata + an opaque `credential_ref` only)
-  and the declared boundary. Before authorization, secret resolution, or transport construction
-  it recomputes deterministic canonical-JSON SHA-256 digests (sorted keys, compact separators,
-  UTF-8, NaN/inf and unsupported types rejected) and requires them to equal
-  `binding.target_config_hash` and `binding.boundary_hash`; binds the supplied opaque
-  `secret_ref` to `credential_ref` by exact in-memory equality (never logged/hashed); and
-  requires a worker-only `LiveReadAuthorizationVerifier` (fake-only) to approve. Hash mismatch,
-  malformed digest, canonicalization failure, missing credential reference, secret-ref mismatch,
+- **Strict no-query-parameters contract.** This milestone allowlists **no** query parameters, so
+  both transports (`Fake` and `Httpx`) accept **only** `None` or an empty `dict` and refuse
+  everything else (`[]`, `()`, `""`, `0`, `False`, any non-empty mapping) with
+  `QueryParametersRefused` **before** client construction or canned-response lookup. The base URL
+  must normalize exactly to the Proxmox API root `/api2/json` (with or without a trailing slash);
+  an empty or arbitrary path is refused.
+- **Real (recomputed) binding bound to a validated config.** A plugin-owned, immutable
+  `ValidatedProxmoxTargetConfig` (`parse_proxmox_target_config`) accepts **exactly** `base_url`,
+  `verify_tls`, `credential_ref` and rejects unknown/secret-like/nested/mistyped fields (rejected
+  raw values are never logged/hashed/returned). `run_live_readonly_collection` receives the raw
+  `target_config` + declared boundary and, before authorization/secret-resolution/transport,
+  parses the config, canonical-hashes **only** the validated model's secret-free binding
+  representation (deterministic JSON: sorted keys, compact separators, UTF-8, NaN/inf and
+  unsupported types rejected) and compares it to `binding.target_config_hash`, recomputes +
+  compares the boundary hash, binds the supplied opaque `secret_ref` to the validated
+  `credential_ref` by exact in-memory equality (never logged/hashed), and requires a worker-only
+  `LiveReadAuthorizationVerifier` (fake-only) to approve. The transport factory receives the
+  **validated config** (never a raw dict) + the transient token, so the validated, authorized
+  configuration — not a separate factory choice — controls the future transport destination.
+  Parse failure, hash mismatch, malformed digest, canonicalization failure, secret-ref mismatch,
   a disabled gate, or an invalid binding all fail closed **without** calling the verifier,
   resolver, transport factory, collector, or any persistence code.

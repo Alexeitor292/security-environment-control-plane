@@ -35,12 +35,19 @@ from secp_plugin_proxmox.live_collector import (
     LiveReadOnlyProxmoxCollector,
 )
 from secp_plugin_proxmox.readonly_policy import PROXMOX_READONLY_POLICY_VERSION
+from secp_plugin_proxmox.target_config import (
+    ProxmoxTargetConfigError,
+    ValidatedProxmoxTargetConfig,
+    parse_proxmox_target_config,
+)
 from secp_plugin_proxmox.transport import ReadOnlyHttpTransport
 
 from secp_worker.secrets import SecretResolver
 
-# A transport factory receives the just-resolved token and returns a read-only transport.
-TransportFactory = Callable[[str], ReadOnlyHttpTransport]
+# A transport factory receives the VALIDATED target config (never a raw dict) + the just-resolved
+# transient token, and returns a read-only transport. The validated config — not a separate
+# factory choice — controls the destination the future transport connects to.
+TransportFactory = Callable[[ValidatedProxmoxTargetConfig, str], ReadOnlyHttpTransport]
 
 _STRING_FIELDS = (
     "execution_target_id",
@@ -193,50 +200,58 @@ def run_live_readonly_collection(
 
     Fail-closed sequence (each step must pass before the next runs):
 
-    1. **gate** — a disabled gate refuses before the verifier, resolver, transport factory,
-       collector, or any persistence code is touched;
-    2. **binding structure** — completeness/expiry/internal-consistency;
-    3. **target-config hash** — recomputed from the redacted, secret-free ``target_config`` and
+    a. **gate** — a disabled gate refuses before parse, hashes, the verifier, resolver, transport
+       factory, collector, or any persistence code is touched;
+    b. **binding structure** — completeness/expiry/internal-consistency;
+    c. **parse/validate config** — the raw ``target_config`` is parsed into the plugin-owned,
+       secret-free ``ValidatedProxmoxTargetConfig`` (rejects unknown/secret/nested/typed fields);
+    d-e. **target-config hash** — canonical hash of the validated model's binding representation,
        compared to ``binding.target_config_hash``;
-    4. **boundary hash** — recomputed from ``declared_boundary`` and compared to
+    f. **boundary hash** — recomputed from ``declared_boundary`` and compared to
        ``binding.boundary_hash``;
-    5. **credential reference** — the opaque ``credential_ref`` in ``target_config`` must be
-       present and exactly equal (in-memory) to the supplied ``secret_ref`` (never logged/hashed);
-    6. **authorization** — the verifier must approve the binding (before secret resolution);
-    7. **secret resolution** — transient credential via the injected resolver;
-    8. **transport + collect** — injected transport; returns in-memory observed data only.
+    g. **credential reference** — the validated ``credential_ref`` must equal the supplied
+       ``secret_ref`` by exact in-memory equality (never logged/hashed);
+    h. **authorization** — the verifier must approve the binding (before secret resolution);
+    i. **secret resolution** — transient credential via the injected resolver;
+    j-k. **transport + collect** — transport built from the VALIDATED config (never a raw dict)
+       + transient token; returns in-memory observed data only.
 
     It never persists evidence, creates a ``TargetEvidenceRecord``, or unseals live evidence.
     """
     now = now or datetime.now(UTC)
-    # 1. Default-disabled gate — before verifier / resolver / transport / collector / persistence.
+    # a. Default-disabled gate — before parse / hashes / verifier / resolver / transport.
     if not gate.enabled:
         raise LiveReadCollectionDisabled(
             "live read-only collection is disabled by default (SECP-002B-1B-4); a separately "
             "authorized activation is required before it can be reached outside unit tests"
         )
-    # 2. Immutable binding structure — before hashes / verifier / resolver / transport.
+    # b. Immutable binding structure.
     binding.assert_valid(now=now)
-    # 3-4. Recompute and match both binding hashes from the actual inputs.
-    _assert_hash_matches(target_config, binding.target_config_hash, "target configuration")
-    _assert_hash_matches(declared_boundary, binding.boundary_hash, "declared boundary")
-    # 5. Opaque credential-reference binding — exact in-memory equality only (ref never hashed).
-    credential_ref = (
-        target_config.get("credential_ref") if isinstance(target_config, dict) else None
+    # c. Parse/validate the target config into the plugin-owned secret-free model BEFORE any
+    #    hashing. Rejected raw values are never logged, hashed, or returned.
+    try:
+        validated_config = parse_proxmox_target_config(target_config)
+    except ProxmoxTargetConfigError as exc:
+        raise InvalidLiveReadBinding(f"invalid target configuration: {exc}") from exc
+    # d-e. Canonical-hash ONLY the validated model's secret-free binding representation and match.
+    _assert_hash_matches(
+        validated_config.binding_representation(),
+        binding.target_config_hash,
+        "target configuration",
     )
-    if not credential_ref:
-        raise InvalidLiveReadBinding(
-            "target configuration is missing the opaque credential reference"
-        )
-    if secret_ref != credential_ref:
+    # f. Recompute + match the declared-boundary hash.
+    _assert_hash_matches(declared_boundary, binding.boundary_hash, "declared boundary")
+    # g. Opaque credential-reference binding — exact in-memory equality only (ref never hashed).
+    if secret_ref != validated_config.credential_ref:
         raise InvalidLiveReadBinding(
             "supplied secret reference does not match the target credential reference"
         )
-    # 6. Authorization verification — must approve before any secret resolution.
+    # h. Authorization verification — must approve before any secret resolution.
     if not authorization_verifier.verify(binding, now=now):
         raise LiveReadAuthorizationDenied("authorization was not verified for this binding")
-    # 7. Resolve the opaque secret (transient; never stored/logged/hashed/audited/returned).
+    # i. Resolve the opaque secret (transient; never stored/logged/hashed/audited/returned).
     credential = secret_resolver.resolve(secret_ref)
-    # 8. Build the transport (injected fake in tests) and run the plugin collector.
-    transport = transport_factory(credential.reveal_secret())
+    # j. Build the transport bound to the VALIDATED config (never a raw dict) + transient token.
+    transport = transport_factory(validated_config, credential.reveal_secret())
+    # k. Run the plugin collector; return in-memory observed data only.
     return LiveReadOnlyProxmoxCollector().collect(transport, declared_boundary=declared_boundary)
