@@ -102,3 +102,40 @@ architecture boundary that forbids `apps/api` from importing any provider/collec
 
 No real infrastructure, endpoint, credential, provider, SDK, HTTP client, or secret is
 introduced by this ADR.
+
+## Amendment — dormant, default-disabled implementation (SECP-002B-1B-4, 2026-07-02)
+
+The dormant live read-only collection path now exists in code, but every real execution path
+remains **disabled by default** and unreachable from the API, UI, dispatcher, or normal
+onboarding-preflight lifecycle. It is testable exclusively via injected fakes.
+
+- **Default-disabled gate.** A worker-owned `LiveReadCollectionGate` defaults to `enabled=False`
+  and is **not** wired to environment variables, Compose, API settings, UI, or any mutable
+  runtime endpoint. A disabled gate fails **before** secret resolution, transport construction,
+  endpoint validation, provider request creation, or evidence generation/persistence. Tests may
+  enable it only through direct dependency injection.
+- **Immutable binding.** A frozen `LiveReadCollectionBinding` carries `execution_target_id`,
+  `target_config_hash`, `onboarding_id`, `boundary_hash`, `authorization_id`,
+  `authorization_version`, canonical `authorization_expiry`, `evidence_source`,
+  `verification_level`, `collector_contract_version`, and `endpoint_allowlist_version`. A
+  missing, expired, malformed, or internally-inconsistent binding is refused **before** any
+  secret resolution or transport construction.
+- **Secret boundary.** The worker's existing `SecretResolver` Protocol (opaque `secret_ref` →
+  transient `ProviderCredential`) is reused; **no real secret backend** is implemented; secrets
+  are never stored/logged/hashed/serialized/audited/returned. Disabled or invalid cases never
+  call the resolver.
+- **Collector.** A plugin-owned `LiveReadOnlyProxmoxCollector` uses the PR-#10 closed canonical
+  path policy, issues only allowlisted GETs through an **injected** transport, uses the existing
+  pure normalizer, **never infers isolation**, and returns only an in-memory provider-neutral
+  observed dict. It creates no evidence record. `fully_segregated` cannot pass; incomplete or
+  generic inventory stays `unverifiable`.
+- **Transport hardening.** `HttpxReadOnlyTransport` now applies `assert_request_allowed` before
+  client construction, forces `verify_tls=True`, sets `trust_env=False`, disables and explicitly
+  refuses redirects, and validates the base URL (HTTPS, no userinfo/query/fragment/escape). It
+  remains dormant — no real endpoint is contacted anywhere.
+- **No activation wiring.** The normal preflight dispatcher is unchanged; no live evidence source
+  is added to any persistence flow; `SealedProviderTargetEvidenceCollector` stays sealed; the
+  simulated collector is unchanged. **A later, separately-authorized activation PR — gated on
+  the human activation checklist and an independent security review — is required before this
+  dormant collector can be reached outside unit tests.** No real Proxmox target was contacted,
+  and no secret backend, API trigger, database persistence path, or live activation exists.
