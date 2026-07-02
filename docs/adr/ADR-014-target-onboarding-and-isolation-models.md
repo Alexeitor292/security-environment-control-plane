@@ -174,10 +174,13 @@ decision:
    echoed into immutable manifest content. Manifest generation and the worker gate
    **recompute** it from the active onboarding + current scope and require exact agreement for
    both the boundary object and the hash across plan, manifest, and content; an empty,
-   broadened, changed, or mismatched boundary **fails closed**. A **worker-only enforcement
-   seam** validates every declared action — node/storage/network/CIDR/VM-ID selections,
-   requested totals vs quotas, and deny external connectivity — **before** rendering, secret
-   resolution, executor construction, or process calls. Out-of-bound actions are refused.
+   broadened, changed, or mismatched boundary **fails closed**. Manifest generation derives an
+   effective provisioning-policy view from that boundary (preserving templates/sizing metadata
+   while narrowing execution-bound fields) and runs the shared pure boundary checker before
+   persisting. The worker gate runs the same checker as defense in depth, validating every
+   declared action — node/storage/network/CIDR/VM-ID selections, requested totals vs quotas,
+   and deny external connectivity — **before** rendering, secret resolution, executor
+   construction, or process calls. Out-of-bound actions are refused.
 
 3. **Exact approved-preflight identity everywhere.** The real worker gate requires
    `approved_preflight_id` to agree across the onboarding, the plan, the manifest column, **and**

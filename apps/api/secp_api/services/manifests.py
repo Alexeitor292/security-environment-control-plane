@@ -18,6 +18,10 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
+from secp_api.effective_boundary import (
+    effective_policy_view,
+    enforce_manifest_within_boundary,
+)
 from secp_api.enums import (
     AuditAction,
     Permission,
@@ -194,7 +198,7 @@ def _cidr_in_policy(cidr: str, policy: ProvisioningScopePolicy) -> bool:
 def _build_topology(
     definition, reservations_by_team: dict[str, str], policy: ProvisioningScopePolicy
 ) -> tuple[list[dict], dict[str, int]]:
-    """Build a secret-free desired topology bounded by the scope policy.
+    """Build a secret-free desired topology bounded by the provisioning policy view.
 
     Every node gets a deterministic vmid inside vmid_range and explicit
     vcpu/memory_mb/disk_gb from the approved node_sizing profile.  Missing
@@ -394,6 +398,8 @@ def generate_manifest(
     #     exactly match the single active onboarding for the target and its pinned approved
     #     preflight evidence. Fail closed on any mismatch/ambiguity/drift.
     onboarding_binding = _resolve_onboarding_binding(session, actor, plan, target)
+    effective_boundary = onboarding_binding["effective_boundary"]
+    effective_policy = effective_policy_view(policy, effective_boundary)
 
     # 6. Valid, finalized, in-policy, same-org reservations.
     version = session.get(EnvironmentVersion, plan.environment_version_id)
@@ -413,16 +419,20 @@ def generate_manifest(
     for res in reservations:
         if res.organization_id != plan.organization_id:
             _refuse(actor, plan, "reservation belongs to a different organization")
-        if not _cidr_in_policy(res.cidr, policy):
-            _refuse(actor, plan, f"reservation {res.cidr} is outside the scope policy")
+        if not _cidr_in_policy(res.cidr, effective_policy):
+            _refuse(
+                actor,
+                plan,
+                f"reservation {res.cidr} is outside the effective boundary CIDRs",
+            )
         reservations_by_team[res.team_ref] = res.cidr
     missing_team_refs = {f"team{i + 1}" for i in range(teams)} - set(reservations_by_team)
     if missing_team_refs:
         _refuse(actor, plan, f"no finalized reservation for teams {sorted(missing_team_refs)}")
 
     # 7. Build secret-free desired topology and enforce blast-radius limits.
-    topology, totals = _build_topology(definition, reservations_by_team, policy)
-    _enforce_limits(totals, policy)
+    topology, totals = _build_topology(definition, reservations_by_team, effective_policy)
+    _enforce_limits(totals, effective_policy)
 
     content = {
         "manifest_version": MANIFEST_VERSION,
@@ -445,14 +455,14 @@ def generate_manifest(
         },
         "plugin_name": target.plugin_name,
         "teams": teams,
-        "scope_policy": policy.model_dump(),
+        "scope_policy": effective_policy.model_dump(mode="json"),
         "resource_limits": {
-            "max_teams": policy.max_teams,
-            "max_vms": policy.max_vms,
-            "max_containers": policy.max_containers,
-            "max_total_vcpu": policy.max_total_vcpu,
-            "max_total_memory_mb": policy.max_total_memory_mb,
-            "max_total_disk_gb": policy.max_total_disk_gb,
+            "max_teams": effective_policy.max_teams,
+            "max_vms": effective_policy.max_vms,
+            "max_containers": effective_policy.max_containers,
+            "max_total_vcpu": effective_policy.max_total_vcpu,
+            "max_total_memory_mb": effective_policy.max_total_memory_mb,
+            "max_total_disk_gb": effective_policy.max_total_disk_gb,
         },
         "reservations": [
             {"team_ref": t, "cidr": c} for t, c in sorted(reservations_by_team.items())
@@ -473,6 +483,13 @@ def generate_manifest(
             "subject_to_scope_policy": True,
         },
     }
+    violations = enforce_manifest_within_boundary(content, effective_boundary)
+    if violations:
+        _refuse(
+            actor,
+            plan,
+            f"generated manifest action outside the effective execution boundary: {violations[0]}",
+        )
 
     manifest = ProvisioningManifest(
         organization_id=plan.organization_id,

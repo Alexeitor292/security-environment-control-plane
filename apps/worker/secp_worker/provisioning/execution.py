@@ -146,17 +146,9 @@ def _assert_scope_binding(
             "target scope_policy has drifted from the manifest binding; "
             "generate a new manifest and obtain fresh approval before proceeding",
         )
-    # Belt-and-suspenders: exact content comparison against manifest snapshot.
-    current_provisioning_policy = (target.scope_policy or {}).get("provisioning", {})
+    # The content snapshot is the effective provisioning-policy view. The exact effective
+    # snapshot is verified after onboarding/effective-boundary recomputation below.
     manifest_policy_snapshot = manifest.content.get("scope_policy", {})
-    if current_provisioning_policy != manifest_policy_snapshot:
-        _refuse(
-            session,
-            operation,
-            "target scope_policy has drifted from the manifest snapshot; "
-            "generate a new manifest and obtain fresh approval before proceeding",
-        )
-    # External connectivity must remain deny (never permissive).
     if manifest_policy_snapshot.get("external_connectivity", {}).get("policy") != "deny":
         _refuse(
             session,
@@ -577,6 +569,7 @@ def _assert_effective_boundary(
     target: ExecutionTarget,
     ob,
 ) -> None:
+    from secp_api.effective_boundary import effective_policy_view
     from secp_api.onboarding import (
         OnboardingBoundarySpec,
         effective_boundary_hash,
@@ -607,6 +600,14 @@ def _assert_effective_boundary(
     for ok, reason in boundary_checks:
         if not ok:
             _refuse_real(session, operation, f"effective boundary drift: {reason}")
+    target_policy = validate_provisioning_scope(target.scope_policy)
+    expected_policy_snapshot = effective_policy_view(target_policy, eff).model_dump(mode="json")
+    if manifest.content.get("scope_policy", {}) != expected_policy_snapshot:
+        _refuse_real(
+            session,
+            operation,
+            "effective provisioning policy snapshot has drifted from the effective boundary",
+        )
     violations = enforce_manifest_within_boundary(manifest.content, eff)
     if violations:
         _refuse_real(

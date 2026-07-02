@@ -6,6 +6,7 @@ every declared manifest action. Fakes only; nothing real is contacted."""
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 from secp_api.config import Settings
@@ -52,6 +53,80 @@ def _dry(session, manifest):
 def _eb():
     spec = OnboardingBoundarySpec.model_validate(VALID_ONBOARDING_BOUNDARY)
     return effective_boundary(spec, {"provisioning": VALID_PROVISIONING_SCOPE})
+
+
+def _broad_scope_for_narrow_boundary() -> dict:
+    scope = copy.deepcopy(VALID_PROVISIONING_SCOPE)
+    scope["allowed_storage"] = ["local-lvm", "local-zfs"]
+    scope["allowed_bridges"] = ["vmbr0", "vmbr1"]
+    scope["allowed_cidr_reservations"] = ["10.60.0.0/16"]
+    scope["vmid_range"] = {"start": 9000, "end": 9100}
+    scope["max_teams"] = 4
+    scope["max_vms"] = 20
+    scope["max_containers"] = 10
+    scope["max_total_vcpu"] = 64
+    scope["max_total_memory_mb"] = 131072
+    scope["max_total_disk_gb"] = 2048
+    return scope
+
+
+def _narrow_boundary() -> dict:
+    return {
+        "nodes": ["pve-node-2"],
+        "storage": ["local-zfs"],
+        "network_segments": ["vmbr1"],
+        "cidrs": ["10.60.42.0/24"],
+        "vmid_range": {"start": 9050, "end": 9060},
+        "quotas": {
+            "max_teams": 2,
+            "max_vms": 4,
+            "max_containers": 2,
+            "max_total_vcpu": 8,
+            "max_total_memory_mb": 14336,
+            "max_total_disk_gb": 140,
+        },
+        "external_connectivity": {"policy": "deny"},
+        "credential_scope": "least_privilege",
+    }
+
+
+def _build_narrow_boundary_plan(session, principal, slug: str, *, address_spaces=None):
+    from secp_api.services import catalog, exercises, planning, reservations, targets
+    from tests.conftest import VALID_DEFINITION, onboard_and_activate
+
+    target = targets.register_target(
+        session,
+        principal,
+        display_name=f"Narrow Boundary {slug}",
+        plugin_name="proxmox",
+        config={"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True},
+        secret_ref=f"env:SECP_PROVIDER_SECRET__{slug.upper()}",
+        scope_policy={"provisioning": _broad_scope_for_narrow_boundary()},
+        address_spaces=address_spaces or [{"cidr_block": "10.60.42.0/24", "subnet_prefix": 25}],
+    )
+    onboarding = onboard_and_activate(session, principal, target, boundary=_narrow_boundary())
+    tmpl = catalog.create_template(session, principal, name=f"NB-{slug}", slug=f"nb-{slug}")
+    ver = catalog.create_version(
+        session, principal, template_id=tmpl.id, definition=VALID_DEFINITION
+    )
+    exercise = exercises.create_exercise(
+        session,
+        principal,
+        template_id=tmpl.id,
+        version_id=ver.id,
+        name=f"nb-{slug}",
+        execution_target_id=target.id,
+    )
+    exercises.validate_exercise(session, principal, exercise.id)
+    plan = planning.generate_plan(session, principal, exercise.id)
+    planning.submit_plan(session, principal, plan.id)
+    planning.approve_plan(session, principal, plan.id, "ok")
+    for team in ("team1", "team2"):
+        reservations.reserve_network(
+            session, principal, target_id=target.id, team_ref=team, exercise_id=exercise.id
+        )
+    session.commit()
+    return SimpleNamespace(target=target, onboarding=onboarding, exercise=exercise, plan=plan)
 
 
 def test_effective_boundary_equals_declared_when_within_scope():
@@ -161,6 +236,107 @@ def test_gate_allows_in_bound_manifest(session, principal, lab_env):
     env = lab_env()
     op = _dry(session, env.manifest)
     assert op is not None  # the dry run passed the effective-boundary gate
+
+
+def test_manifest_generation_uses_narrow_effective_policy(session, principal):
+    env = _build_narrow_boundary_plan(session, principal, "inside")
+    manifest = manifests.generate_manifest(session, principal, env.plan.id)
+    session.commit()
+
+    target_policy = env.target.scope_policy["provisioning"]
+    snapshot = manifest.content["scope_policy"]
+    narrow = _narrow_boundary()
+
+    # The target remains broader than the selected onboarding boundary.
+    assert "pve-node-1" in target_policy["allowed_nodes"]
+    assert "local-lvm" in target_policy["allowed_storage"]
+    assert "vmbr0" in target_policy["allowed_bridges"]
+    assert target_policy["allowed_cidr_reservations"] == ["10.60.0.0/16"]
+
+    # The manifest execution view is narrowed to the effective boundary.
+    assert snapshot["allowed_nodes"] == narrow["nodes"]
+    assert snapshot["allowed_storage"] == narrow["storage"]
+    assert snapshot["allowed_bridges"] == narrow["network_segments"]
+    assert snapshot["allowed_cidr_reservations"] == narrow["cidrs"]
+    assert snapshot["vmid_range"] == narrow["vmid_range"]
+    assert snapshot["allowed_templates"] == VALID_PROVISIONING_SCOPE["allowed_templates"]
+    assert snapshot["node_sizing"] == VALID_PROVISIONING_SCOPE["node_sizing"]
+    assert manifest.content["resource_limits"] == narrow["quotas"]
+
+    nodes = [node for team in manifest.content["topology"] for node in team["nodes"]]
+    networks = [net for team in manifest.content["topology"] for net in team["networks"]]
+    assert {node["node"] for node in nodes} == {"pve-node-2"}
+    assert {node["storage"] for node in nodes} == {"local-zfs"}
+    assert {net["bridge"] for net in networks} == {"vmbr1"}
+    assert {net["cidr"] for net in networks} == {"10.60.42.0/25", "10.60.42.128/25"}
+    assert sorted(node["vmid"] for node in nodes) == list(range(9050, 9056))
+    assert manifest.content["requested_totals"] == {
+        "teams": 2,
+        "vms": 4,
+        "containers": 2,
+        "total_vcpu": 8,
+        "total_memory_mb": 14336,
+        "total_disk_gb": 140,
+    }
+    assert enforce_manifest_within_boundary(manifest.content, manifest.effective_boundary) == []
+
+
+def test_reservation_outside_narrow_boundary_refuses_manifest_generation(session, principal):
+    env = _build_narrow_boundary_plan(
+        session,
+        principal,
+        "outside",
+        address_spaces=[{"cidr_block": "10.60.0.0/16", "subnet_prefix": 24}],
+    )
+
+    with pytest.raises(ValidationFailedError, match="effective boundary CIDRs"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+    assert (
+        session.query(ProvisioningManifest)
+        .filter(ProvisioningManifest.deployment_plan_id == env.plan.id)
+        .count()
+        == 0
+    )
+
+
+def test_generated_escape_is_refused_before_manifest_persist(session, principal, monkeypatch):
+    env = _build_narrow_boundary_plan(session, principal, "escape")
+    original_build_topology = manifests._build_topology
+
+    def escaping_topology(definition, reservations_by_team, policy):
+        topology, totals = original_build_topology(definition, reservations_by_team, policy)
+        topology[0]["nodes"][0]["node"] = "pve-node-1"
+        return topology, totals
+
+    monkeypatch.setattr(manifests, "_build_topology", escaping_topology)
+    with pytest.raises(ValidationFailedError, match="outside the effective execution boundary"):
+        manifests.generate_manifest(session, principal, env.plan.id)
+    assert (
+        session.query(ProvisioningManifest)
+        .filter(ProvisioningManifest.deployment_plan_id == env.plan.id)
+        .count()
+        == 0
+    )
+
+
+def test_full_scope_onboarding_manifest_still_works(session, principal, provisioning_env):
+    env = provisioning_env()
+    manifest = manifests.generate_manifest(session, principal, env.plan.id)
+    session.commit()
+
+    assert (
+        manifest.content["scope_policy"]["allowed_nodes"]
+        == VALID_PROVISIONING_SCOPE["allowed_nodes"]
+    )
+    assert (
+        manifest.content["scope_policy"]["allowed_storage"]
+        == VALID_PROVISIONING_SCOPE["allowed_storage"]
+    )
+    assert (
+        manifest.content["scope_policy"]["allowed_bridges"]
+        == VALID_PROVISIONING_SCOPE["allowed_bridges"]
+    )
+    assert enforce_manifest_within_boundary(manifest.content, manifest.effective_boundary) == []
 
 
 def test_plan_effective_boundary_tamper_refuses_manifest_generation(session, principal):

@@ -132,10 +132,12 @@ Onboarding is not documentation — it is a hash-bound execution input:
   `effective_boundary_hash` are persisted on the plan + manifest and echoed into immutable
   manifest content. Manifest generation and the worker gate recompute and require exact
   agreement for both the boundary object and hash (plan == manifest == content) and fail closed
-  on empty/broadened/changed/mismatched boundaries. The **worker-only seam**
-  `secp_worker.provisioning.boundary` enforces every declared node/storage/network/CIDR/
-  VM-ID/quota/external action against it before rendering, secret resolution, executor
-  construction, or process calls. `apps/api` never imports this seam.
+  on empty/broadened/changed/mismatched boundaries. Manifest generation builds topology from an
+  effective provisioning-policy view (preserving templates/sizing metadata while narrowing
+  execution-bound fields) and runs the shared pure boundary checker before persisting. The
+  worker seam `secp_worker.provisioning.boundary` delegates to the same checker and enforces
+  every declared node/storage/network/CIDR/VM-ID/quota/external action before rendering, secret
+  resolution, executor construction, or process calls. `apps/api` never imports the worker seam.
 - **Exact approved-preflight identity.** The gate requires `approved_preflight_id` to agree
   across onboarding → plan → manifest column → immutable content (not just the evidence hash).
 - **Toolchain provenance.** Bound through preflight approval → manifest generation → gate:

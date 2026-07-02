@@ -138,7 +138,9 @@ seal — the API preflight is always `simulated`, the worker recorder refuses `l
 accepted for the fake/contract path but **never** for live; (3) the **effective execution
 boundary** (declared onboarding boundary ∩ target scope) object and hash are persisted and
 hash-bound across plan, manifest column, and immutable manifest content; manifest generation
-and the worker gate recompute and require exact object+hash agreement, an in-bound manifest
+and the worker gate recompute and require exact object+hash agreement; manifest generation
+uses an effective provisioning-policy view for reservations/topology/limits/scope snapshot and
+refuses generated actions that escape the boundary before persistence; an in-bound manifest
 passes the gate, and every out-of-bound node/storage/network/CIDR/VM-ID/quota/external action
 is refused by the worker enforcement seam; (4) the **exact approved-preflight identity** must
 agree across plan/manifest/content (a direct-SQL id tamper is refused before rendering/secret/executor/
@@ -148,7 +150,8 @@ secret/endpoint/inventory values while the generic simulated details leak nothin
 
 Focused execution-boundary tests: `test_effective_boundary.py` (computation, emptiness,
 enforcement seam in-bound pass + every out-of-bound dimension refused, plan/manifest/content
-object+hash binding, direct-SQL boundary object/hash tampers at manifest gen + gate),
+object+hash binding, effective-policy manifest generation for narrower onboarding boundaries,
+direct-SQL boundary object/hash tampers at manifest gen + gate),
 `test_onboarding_bindings.py`
 (seal refusal, exact preflight-id corruption tests for plan/manifest/content),
 `test_onboarding_toolchain_binding.py` (toolchain drift refused at approval/manifest/gate),
@@ -164,22 +167,22 @@ was run.
 
 ```
 uv run ruff format --check apps contracts plugins tests
-141 files already formatted
+142 files already formatted
 
 uv run ruff check apps contracts plugins tests
 All checks passed!
 
 uv run python -m mypy apps/api/secp_api apps/worker/secp_worker contracts plugins
-Success: no issues found in 89 source files
+Success: no issues found in 90 source files
 
 uv run pytest apps/api/tests/test_migrations.py apps/api/tests/test_generic_topology_migration.py -q
-4 passed in 6.84s
+4 passed in 3.85s
 
 uv run pytest apps/api/tests/test_effective_boundary.py apps/api/tests/test_onboarding_bindings.py apps/api/tests/test_onboarding_toolchain_binding.py apps/api/tests/test_onboarding_preflight.py -q
-61 passed in 21.00s
+67 passed in 21.29s
 
 uv run pytest apps/api/tests tests -q
-565 passed, 8 skipped, 1 warning in 137.14s (0:02:17)
+573 passed, 8 skipped, 1 warning in 163.78s (0:02:43)
 ```
 
 ## Automated proof coverage
