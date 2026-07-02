@@ -172,6 +172,25 @@ scenario resources inside the declared boundary. Plans/manifests state
 import/adoption is a future explicit opt-in workflow. Onboarding and scenario deployment are
 separate lifecycle stages.
 
+## SECP-002B-1B-2 controls (live read-only collector — design only)
+
+SECP-002B-1B-2 is **design/threat-model/checklist documentation only**: no provider client/
+SDK/HTTP/socket/subprocess is added, no real target is contacted, no credential/endpoint is
+created, and the B1-B-1 live-evidence seal is **not** lifted (see ADR-015 and the
+[design package](../architecture/secp-002b-1b-2-live-readonly-proxmox-collector.md)).
+
+### L18 — Read-only, worker-owned, default-deny live collection (designed, not enabled)
+The first real Proxmox collector is designed to be **read-only by construction**: a GET-only
+method allowlist plus a closed endpoint allowlist enforced before send, no redirects, no
+cross-target destinations, and no task/action/config/console/agent/backup/upload/write endpoint
+ever reachable. It runs on the **durable worker only** (inline refused) behind a
+**default-disabled** feature gate, binds each job to an approved `(execution_target_id,
+config_hash, authorization_id)`, resolves an opaque `secret_ref` just-in-time in the worker
+(never logged/persisted/hashed/returned/audited), reuses the immutable full-record evidence hash
+and fail-closed (`unverifiable`) comparison, and may be enabled only after the
+[activation checklist](live-readonly-collector-activation-checklist.md) is completed and an
+explicit human authorization is recorded — all in a **future** PR.
+
 ## What a reviewer should verify
 
 - No file contains a real hostname, IP, cluster/node/pool/storage name, VLAN, or
@@ -187,3 +206,6 @@ separate lifecycle stages.
   provider, or endpoint (`test_opentofu_runner.py`, `test_no_real_process.py`).
 - Apply/destroy are refused without — or on drift from — an approved dry-run change set
   (`test_lab_activation_gate.py`).
+- The B1-B-2 design PR adds no provider SDK/HTTP client and does not lift the live-evidence
+  seal; the design/threat-model/checklist docs exist and are secret-free
+  (`test_live_collector_design.py`).
