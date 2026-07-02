@@ -92,7 +92,11 @@ _PERCENT_TRIPLET_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 # semantics: path/segment delimiters, dot (traversal), reserved delimiters, whitespace, and any
 # C0/C1 control byte (incl. NUL, CR, LF).
 _DANGEROUS_DECODED: frozenset[str] = frozenset(
-    set("/\\.") | {"?", "#", ";", "%", " "} | {chr(c) for c in range(0x00, 0x20)} | {chr(0x7F)}
+    set("/\\.")
+    | {"?", "#", ";", "%", " "}
+    | {chr(c) for c in range(0x00, 0x20)}  # C0 controls
+    | {chr(0x7F)}  # DEL
+    | {chr(c) for c in range(0x80, 0xA0)}  # C1 controls (0x80–0x9F)
 )
 
 

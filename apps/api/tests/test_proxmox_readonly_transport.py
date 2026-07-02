@@ -213,6 +213,19 @@ def test_encoded_slash_smuggling_is_rejected_specifically():
         assert_request_allowed("GET", path)
 
 
+@pytest.mark.parametrize("path", ["/nodes/%80", "/nodes/%85", "/nodes/%9f", "/nodes/%9F"])
+def test_percent_encoded_c1_controls_refused_before_lookup(path):
+    # Consistency: percent-decoded C1 controls (0x80–0x9F) are as forbidden as C0/DEL.
+    assert canonical_path_violation(path) == "percent-encoded delimiter or control character"
+    assert not path_is_allowed(path), path
+    with pytest.raises(NonCanonicalPathRefused):
+        assert_request_allowed("GET", path)
+    t = FakeProxmoxReadOnlyTransport({path: [{"node": "x"}]})
+    with pytest.raises(NonCanonicalPathRefused):
+        t.get(path)
+    assert t.calls == []  # refused before any canned-response lookup
+
+
 def test_valid_paths_remain_canonical_and_allowed():
     # Regression: legitimate allowlisted paths are untouched by canonicalization.
     for path in (
