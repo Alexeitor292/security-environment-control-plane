@@ -30,11 +30,13 @@ from secp_plugin_proxmox import (
     CrossHostRequestRefused,
     FakeProxmoxReadOnlyTransport,
     MutatingRequestRefused,
+    NonCanonicalPathRefused,
     ProxmoxPlugin,
     RedirectRefused,
     RedirectResponse,
     UnknownPathRefused,
     assert_request_allowed,
+    canonical_path_violation,
     fake_transport_factory,
     normalize_proxmox_observations,
     path_is_allowed,
@@ -162,6 +164,71 @@ def test_redirect_responses_are_refused():
         t.get("/nodes")
     with pytest.raises(RedirectRefused):
         t.follow("https://elsewhere/nodes")
+
+
+# --- canonical path validation (encoded-delimiter smuggling) ---------------------
+
+# Each of these could decode to a DIFFERENT endpoint path and must be refused before matching.
+NON_CANONICAL_PATHS = [
+    "/nodes/node-a%2Fqemu%2F9000%2Fconfig",  # encoded '/' smuggling a deeper path
+    "/nodes/node-a%2fqemu",  # lowercase encoded '/'
+    "/nodes/%2e%2e%2fcluster",  # encoded traversal ../
+    "/nodes/%2E%2E/cluster",  # encoded dot-segment (uppercase)
+    "/nodes/..%2fcluster",  # mixed raw + encoded traversal
+    "/nodes/node-a%5Cqemu",  # encoded backslash (uppercase)
+    "/nodes/node-a%5cqemu",  # encoded backslash (lowercase)
+    "/nodes/node-a\\qemu",  # raw backslash
+    "\\nodes",  # raw backslash at start
+    "/nodes//qemu",  # repeated internal slash
+    "/nodes///status",  # repeated internal slash (triple)
+    "/nodes/..",  # raw dot-segment traversal
+    "/nodes/./status",  # raw single-dot segment
+    "/nodes/%00",  # encoded NUL control
+    "/nodes/%0a/status",  # encoded newline control
+    "/nodes/node%2",  # malformed percent-encoding (truncated)
+    "/nodes/node%zz",  # malformed percent-encoding (non-hex)
+    "/nodes/node%",  # malformed percent-encoding (bare percent)
+]
+
+
+@pytest.mark.parametrize("path", NON_CANONICAL_PATHS)
+def test_non_canonical_paths_refused_before_lookup(path):
+    assert canonical_path_violation(path) is not None, path
+    assert not path_is_allowed(path), path
+    # Refused by the policy (either canonical or, for backslash-prefixed, cross-host first).
+    with pytest.raises((NonCanonicalPathRefused, CrossHostRequestRefused)):
+        assert_request_allowed("GET", path)
+    # Refused by the transport BEFORE any canned-response lookup.
+    t = FakeProxmoxReadOnlyTransport({path: [{"node": "x"}]})
+    with pytest.raises((NonCanonicalPathRefused, CrossHostRequestRefused)):
+        t.get(path)
+    assert t.calls == []
+
+
+def test_encoded_slash_smuggling_is_rejected_specifically():
+    # The motivating bypass: %2F must not let /nodes/{node} match a deeper mutation path.
+    path = "/nodes/node-a%2Fqemu%2F9000%2Fconfig"
+    assert canonical_path_violation(path) == "percent-encoded delimiter or control character"
+    with pytest.raises(NonCanonicalPathRefused):
+        assert_request_allowed("GET", path)
+
+
+def test_valid_paths_remain_canonical_and_allowed():
+    # Regression: legitimate allowlisted paths are untouched by canonicalization.
+    for path in (
+        "/nodes",
+        "/nodes/pve-node-1",
+        "/nodes/pve-node-1/status",
+        "/nodes/pve-node-1/storage",
+        "/nodes/pve-node-1/qemu",
+        "/nodes/pve-node-1/lxc",
+        "/cluster/resources",
+        "/cluster/sdn/vnets",
+        "/cluster/sdn/zones",
+    ):
+        assert canonical_path_violation(path) is None, path
+        assert path_is_allowed(path), path
+        assert_request_allowed("GET", path)  # does not raise
 
 
 # --- offline: no network-capable imports -----------------------------------------

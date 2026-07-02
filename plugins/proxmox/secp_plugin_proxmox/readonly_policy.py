@@ -18,6 +18,7 @@ upload/download/create/config/delete/firewall/network-mutation/ACL/token endpoin
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 from secp_plugin_proxmox.transport import ALLOWED_METHODS, MutatingRequestRefused
@@ -71,6 +72,59 @@ class CrossHostRequestRefused(Exception):
         super().__init__(f"refused cross-host / absolute destination {path!r}")
 
 
+class NonCanonicalPathRefused(Exception):
+    """Raised when a path is non-canonical: its decoded/canonical form could differ from the
+    literal path evaluated (encoded delimiters, backslashes, repeated slashes, traversal, or
+    malformed percent-encoding). Refused BEFORE template matching or any response lookup."""
+
+    def __init__(self, path: str, reason: str):
+        self.path = path
+        self.reason = reason
+        super().__init__(f"refused non-canonical path {path!r}: {reason}")
+
+
+# A well-formed percent triplet.
+_PERCENT_TRIPLET_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+# Characters that, if produced by percent-decoding, would change path segmentation or endpoint
+# semantics: path/segment delimiters, dot (traversal), reserved delimiters, whitespace, and any
+# C0/C1 control byte (incl. NUL, CR, LF).
+_DANGEROUS_DECODED: frozenset[str] = frozenset(
+    set("/\\.") | {"?", "#", ";", "%", " "} | {chr(c) for c in range(0x00, 0x20)} | {chr(0x7F)}
+)
+
+
+def canonical_path_violation(path: str) -> str | None:
+    """Return a reason string if ``path`` is non-canonical (could decode to a different endpoint
+    path), else ``None``. Evaluated on the path portion (before any ``?``).
+
+    Deterministic and pure. Rejects, in order: raw backslashes; malformed percent-encoding; any
+    percent-escape that decodes to a delimiter/control character (e.g. ``%2f``/``%2F``->'/',
+    ``%5c``->'\\', ``%2e``->'.', ``%00``); ambiguous repeated internal slashes; and raw
+    dot-segment traversal (``.``/``..``). Encoded traversal is caught by the decode rule.
+    """
+    p = path.split("?", 1)[0]
+    if "\\" in p:
+        return "raw backslash"
+    # Every '%' must begin a well-formed %XX triplet.
+    pos = p.find("%")
+    while pos != -1:
+        if not _PERCENT_TRIPLET_RE.match(p, pos):
+            return "malformed percent-encoding"
+        pos = p.find("%", pos + 3)
+    # No percent-escape may decode to a delimiter or control character.
+    for m in _PERCENT_TRIPLET_RE.finditer(p):
+        if bytes.fromhex(m.group(0)[1:]).decode("latin-1") in _DANGEROUS_DECODED:
+            return "percent-encoded delimiter or control character"
+    # Ambiguous repeated internal slashes (a single leading slash is fine).
+    core = p[1:] if p.startswith("/") else p
+    if "//" in core:
+        return "ambiguous repeated slash"
+    # Raw dot-segment traversal.
+    if any(seg in (".", "..") for seg in p.split("/")):
+        return "dot-segment traversal"
+    return None
+
+
 def _segments(path: str) -> list[str]:
     # Strip any query string; split into non-empty segments.
     base = path.split("?", 1)[0]
@@ -99,8 +153,14 @@ def is_absolute_or_cross_host(path: str) -> bool:
 
 
 def path_is_allowed(path: str) -> bool:
-    """Deterministic: True iff ``path`` matches exactly one allowlisted GET template."""
+    """Deterministic: True iff ``path`` matches exactly one allowlisted GET template.
+
+    A non-canonical path (see :func:`canonical_path_violation`) is never allowed, so encoded
+    delimiters cannot smuggle a different endpoint past the matcher.
+    """
     if is_absolute_or_cross_host(path):
+        return False
+    if canonical_path_violation(path) is not None:
         return False
     segments = _segments(path)
     if not segments or any(seg == ".." for seg in segments):
@@ -111,12 +171,16 @@ def path_is_allowed(path: str) -> bool:
 def assert_request_allowed(method: str, path: str) -> None:
     """Enforce the closed policy BEFORE any response lookup. Raises on any violation.
 
-    Order matters: method is checked first, then absolute/cross-host, then the allowlist.
+    Order matters: method first, then absolute/cross-host, then canonical-form validation, then
+    the allowlist — so a path whose canonical form could differ is rejected before matching.
     """
     if method.upper() not in ALLOWED_METHODS:
         raise MutatingRequestRefused(method)
     if is_absolute_or_cross_host(path):
         raise CrossHostRequestRefused(path)
+    reason = canonical_path_violation(path)
+    if reason is not None:
+        raise NonCanonicalPathRefused(path, reason)
     if not path_is_allowed(path):
         raise UnknownPathRefused(path)
 

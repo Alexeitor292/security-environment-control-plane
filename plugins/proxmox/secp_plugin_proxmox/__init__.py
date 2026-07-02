@@ -14,9 +14,11 @@ from secp_plugin_proxmox.readonly_policy import (
     ALLOWED_PATH_TEMPLATES,
     PROXMOX_READONLY_POLICY_VERSION,
     CrossHostRequestRefused,
+    NonCanonicalPathRefused,
     RedirectRefused,
     UnknownPathRefused,
     assert_request_allowed,
+    canonical_path_violation,
     path_is_allowed,
 )
 from secp_plugin_proxmox.readonly_transport import (
@@ -42,9 +44,11 @@ __all__ = [
     "ALLOWED_PATH_TEMPLATES",
     "PROXMOX_READONLY_POLICY_VERSION",
     "CrossHostRequestRefused",
+    "NonCanonicalPathRefused",
     "RedirectRefused",
     "UnknownPathRefused",
     "assert_request_allowed",
+    "canonical_path_violation",
     "path_is_allowed",
     "normalize_proxmox_observations",
 ]
