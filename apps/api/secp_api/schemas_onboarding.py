@@ -77,6 +77,22 @@ class PreflightOut(ORMModel):
     passed: bool
     checks: list
     evidence_hash: str
+    target_evidence_id: uuid.UUID | None
+    target_evidence_hash: str | None
+    created_at: datetime
+
+
+class TargetEvidenceOut(ORMModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    onboarding_id: uuid.UUID
+    execution_target_id: uuid.UUID
+    evidence_source: str
+    verification_level: str
+    status: str
+    findings: list
+    collected_at: datetime
+    evidence_hash: str
     created_at: datetime
 
 

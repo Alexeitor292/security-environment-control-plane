@@ -31,6 +31,7 @@ EXPECTED_TABLES = {
     "toolchain_profile",
     "provisioning_change_set_approval",
     "target_onboarding",
+    "target_evidence_record",
     "target_preflight",
     "environment_network",
     "environment_node",

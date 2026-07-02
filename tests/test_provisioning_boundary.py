@@ -51,6 +51,8 @@ FORBIDDEN_IMPORT_NAMES = {
     "SecretResolver",
     "FakePreflightCollector",
     "PreflightCollector",
+    "SimulatedTargetEvidenceCollector",
+    "TargetEvidenceCollector",
 }
 
 
@@ -101,6 +103,16 @@ def test_runner_lives_only_in_worker():
         assert (prov / rel).exists(), f"missing worker module {rel}"
     # And there is no runner / executor / adapter / rendering module under the API.
     assert not (API_PKG / "provisioning").exists()
+
+
+def test_onboarding_collectors_live_only_in_worker():
+    worker = Path(__file__).resolve().parents[1] / "apps" / "worker" / "secp_worker"
+    assert (worker / "onboarding" / "preflight.py").exists()
+    assert (worker / "onboarding" / "target_evidence.py").exists()
+    for path in _py_files():
+        text = path.read_text(encoding="utf-8")
+        assert "SimulatedTargetEvidenceCollector" not in text
+        assert "TargetEvidenceCollector" not in text
 
 
 def test_subprocess_executor_defined_only_in_worker():

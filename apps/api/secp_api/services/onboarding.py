@@ -34,7 +34,7 @@ from secp_api.enums import (
     VerificationLevel,
 )
 from secp_api.errors import DomainError, NotFoundError, ValidationFailedError
-from secp_api.models import ExecutionTarget, TargetOnboarding, TargetPreflight
+from secp_api.models import ExecutionTarget, TargetEvidenceRecord, TargetOnboarding, TargetPreflight
 from secp_api.onboarding import (
     assert_live_evidence_unsealed_allowed,
     build_evidence_package,
@@ -49,6 +49,14 @@ from secp_api.onboarding import (
     validate_preflight_evidence,
 )
 from secp_api.provisioning_scope import provisioning_scope_policy_hash
+from secp_api.target_evidence import (
+    SIMULATED_EVIDENCE_SOURCE,
+    build_simulated_evidence_payload,
+    compare_boundary_to_evidence,
+    findings_pass,
+    summarize_findings,
+    target_evidence_hash,
+)
 
 
 def _utcnow() -> datetime:
@@ -155,6 +163,21 @@ def list_preflights(
     )
 
 
+def list_target_evidence(
+    session: Session, actor: Principal, onboarding_id: uuid.UUID
+) -> list[TargetEvidenceRecord]:
+    ob = get_onboarding(session, actor, onboarding_id)
+    return list(
+        session.execute(
+            select(TargetEvidenceRecord)
+            .where(TargetEvidenceRecord.onboarding_id == ob.id)
+            .order_by(TargetEvidenceRecord.collected_at, TargetEvidenceRecord.created_at)
+        )
+        .scalars()
+        .all()
+    )
+
+
 # --- Preflight recording (request/result contract) ---------------------------
 
 
@@ -234,8 +257,76 @@ def recompute_evidence_hash(pf: TargetPreflight) -> str:
         collector_identity=pf.collector_identity,
         evidence_version=pf.evidence_version,
         checks=pf.checks,
+        target_evidence_id=str(pf.target_evidence_id) if pf.target_evidence_id else None,
+        target_evidence_hash=pf.target_evidence_hash,
     )
     return evidence_package_hash(package)
+
+
+def recompute_target_evidence_hash(record: TargetEvidenceRecord) -> str:
+    return target_evidence_hash(record.evidence_payload, record.findings)
+
+
+def _record_simulated_target_evidence(
+    session: Session,
+    ob: TargetOnboarding,
+    target: ExecutionTarget,
+    *,
+    created_by: uuid.UUID | None,
+) -> TargetEvidenceRecord:
+    payload = build_simulated_evidence_payload(ob.declared_boundary)
+    findings = compare_boundary_to_evidence(ob.declared_boundary, payload)
+    status = summarize_findings(findings)
+    record = TargetEvidenceRecord(
+        organization_id=ob.organization_id,
+        onboarding_id=ob.id,
+        execution_target_id=target.id,
+        evidence_source=SIMULATED_EVIDENCE_SOURCE,
+        verification_level=VerificationLevel.simulated.value,
+        status=status,
+        evidence_payload=payload,
+        findings=findings,
+        collected_at=_utcnow(),
+        evidence_hash="",
+        created_by=created_by,
+    )
+    record.evidence_hash = target_evidence_hash(payload, findings)
+    session.add(record)
+    session.flush()
+    audit.record(
+        session,
+        action=AuditAction.target_evidence_collected,
+        resource_type="target_evidence_record",
+        resource_id=record.id,
+        organization_id=ob.organization_id,
+        actor="worker" if created_by is None else str(created_by),
+        data={
+            "onboarding_id": str(ob.id),
+            "evidence_source": record.evidence_source,
+            "verification_level": record.verification_level,
+            "status": record.status.value,
+            "evidence_hash": record.evidence_hash,
+        },
+    )
+    audit.record(
+        session,
+        action=AuditAction.target_evidence_compared,
+        resource_type="target_evidence_record",
+        resource_id=record.id,
+        organization_id=ob.organization_id,
+        actor="worker" if created_by is None else str(created_by),
+        data={
+            "onboarding_id": str(ob.id),
+            "status": record.status.value,
+            "finding_counts": {
+                "pass": sum(1 for f in findings if f.get("status") == "pass"),
+                "fail": sum(1 for f in findings if f.get("status") == "fail"),
+                "unverifiable": sum(1 for f in findings if f.get("status") == "unverifiable"),
+            },
+            "evidence_hash": record.evidence_hash,
+        },
+    )
+    return record
 
 
 def _record_preflight(
@@ -266,6 +357,8 @@ def _record_preflight(
         raise NotFoundError("execution target no longer exists")
     prov = _evidence_provenance(session, ob, target)
     version = _next_evidence_version(session, ob.id)
+    target_evidence = _record_simulated_target_evidence(session, ob, target, created_by=created_by)
+    comparison_passed = findings_pass(target_evidence.findings)
 
     pf = TargetPreflight(
         organization_id=ob.organization_id,
@@ -280,9 +373,11 @@ def _record_preflight(
         boundary_hash=prov["boundary_hash"],
         toolchain_profile_id=prov["toolchain_profile_id"],
         toolchain_profile_hash=prov["toolchain_profile_hash"],
-        passed=ok,
+        passed=ok and comparison_passed,
         checks=canonical_checks,
         evidence_hash="",  # set after we have the full package below
+        target_evidence_id=target_evidence.id,
+        target_evidence_hash=target_evidence.evidence_hash,
         created_by=created_by,
     )
     pf.evidence_hash = evidence_package_hash(
@@ -298,6 +393,8 @@ def _record_preflight(
             collector_identity=pf.collector_identity,
             evidence_version=pf.evidence_version,
             checks=canonical_checks,
+            target_evidence_id=str(target_evidence.id),
+            target_evidence_hash=target_evidence.evidence_hash,
         )
     )
     session.add(pf)
@@ -313,10 +410,11 @@ def _record_preflight(
         actor="worker" if created_by is None else str(created_by),
         data={
             "onboarding_id": str(ob.id),
-            "passed": ok,
+            "passed": pf.passed,
             "verification_level": verification_level,
             "collector_kind": collector_kind,
             "evidence_hash": pf.evidence_hash,
+            "target_evidence_hash": pf.target_evidence_hash,
         },
     )
     return pf
@@ -399,6 +497,25 @@ def _latest_passing_preflight(session: Session, onboarding_id: uuid.UUID) -> Tar
     )
 
 
+def _assert_preflight_target_evidence_integrity(
+    session: Session, pf: TargetPreflight
+) -> TargetEvidenceRecord:
+    if pf.target_evidence_id is None or not pf.target_evidence_hash:
+        raise DomainError("preflight target evidence is missing or unverifiable")
+    record = session.get(TargetEvidenceRecord, pf.target_evidence_id)
+    if record is None:
+        raise DomainError("preflight target evidence record is missing")
+    if str(record.onboarding_id) != str(pf.onboarding_id):
+        raise DomainError("preflight target evidence belongs to a different onboarding")
+    if record.evidence_hash != pf.target_evidence_hash:
+        raise DomainError("preflight target evidence hash mismatch")
+    if recompute_target_evidence_hash(record) != record.evidence_hash:
+        raise DomainError("preflight target evidence integrity check failed")
+    if not findings_pass(record.findings):
+        raise DomainError("preflight target evidence comparison is not passing")
+    return record
+
+
 def submit_for_review(
     session: Session, actor: Principal, onboarding_id: uuid.UUID
 ) -> TargetOnboarding:
@@ -418,6 +535,7 @@ def submit_for_review(
             "onboarding requires a passing preflight result before review; record a "
             "preflight whose required checks all pass"
         )
+    _assert_preflight_target_evidence_integrity(session, pf)
     ob.status = transition(ob.status, OnboardingStatus.ready_for_review)
     audit.record(
         session,
@@ -453,6 +571,7 @@ def approve_onboarding(
         raise DomainError("no complete, passing preflight evidence to approve")
     if recompute_evidence_hash(pf) != pf.evidence_hash:
         raise DomainError("preflight evidence integrity check failed (hash mismatch)")
+    _assert_preflight_target_evidence_integrity(session, pf)
     current_config = target.config_hash
     current_scope = provisioning_scope_policy_hash(target.scope_policy or {})
     if pf.boundary_hash != ob.boundary_hash:
@@ -580,6 +699,7 @@ def activate_onboarding(
         raise DomainError("approved preflight evidence is missing")
     if recompute_evidence_hash(pf) != ob.approved_preflight_evidence_hash:
         raise DomainError("approved preflight evidence hash mismatch (altered or stale)")
+    _assert_preflight_target_evidence_integrity(session, pf)
 
     ob.status = transition(ob.status, OnboardingStatus.active)
     ob.activated_at = _utcnow()

@@ -34,6 +34,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from secp_api.enums import (
     ChangeSetApprovalStatus,
+    EvidenceStatus,
     IsolationModel,
     LifecycleState,
     OnboardingMode,
@@ -598,6 +599,44 @@ class TargetOnboarding(Base, TimestampMixin):
     preflights: Mapped[list[TargetPreflight]] = relationship(
         back_populates="onboarding", cascade="all, delete-orphan"
     )
+    evidence_records: Mapped[list[TargetEvidenceRecord]] = relationship(back_populates="onboarding")
+
+
+class TargetEvidenceRecord(Base, TimestampMixin):
+    """Append-only provider-neutral read-only target evidence (SECP-002B-1B-1).
+
+    Stores a canonical, secret-free observed-target evidence payload plus structured
+    comparison findings against one onboarding's declared boundary. In this release the
+    only accepted source is simulated evidence; live collector support remains sealed.
+    """
+
+    __tablename__ = "target_evidence_record"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    evidence_source: Mapped[str] = mapped_column(String(80), nullable=False)
+    verification_level: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[EvidenceStatus] = mapped_column(
+        EnumType(EvidenceStatus, length=40), nullable=False
+    )
+    evidence_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    findings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    onboarding: Mapped[TargetOnboarding] = relationship(back_populates="evidence_records")
+    preflights: Mapped[list[TargetPreflight]] = relationship(back_populates="target_evidence")
 
 
 class TargetPreflight(Base, TimestampMixin):
@@ -635,9 +674,14 @@ class TargetPreflight(Base, TimestampMixin):
     passed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     checks: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    target_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("target_evidence_record.id"), nullable=True, index=True
+    )
+    target_evidence_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     onboarding: Mapped[TargetOnboarding] = relationship(back_populates="preflights")
+    target_evidence: Mapped[TargetEvidenceRecord | None] = relationship(back_populates="preflights")
 
 
 class ProviderInventorySnapshot(Base, TimestampMixin):

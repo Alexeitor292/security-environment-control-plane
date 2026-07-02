@@ -9,10 +9,12 @@ import {
   NETWORK_SEGMENT_HELPER_TEXT,
   NO_APPROVED_SEGMENTS_MESSAGE,
   REVIEW_STATEMENT,
+  SIMULATED_EVIDENCE_NOTICE,
   buildBoundary,
   canAdvanceWizardStep,
   canCreateOnboardingDraft,
   draftFromScope,
+  evidenceHashPrefix,
   emptyDraft,
   isTerminalRejected,
   isolationProfileAvailable,
@@ -118,6 +120,12 @@ describe("lifecycle rendering", () => {
     expect(lifecycleIndex("rejected")).toBe(-1);
     expect(isTerminalRejected("retired")).toBe(true);
     expect(isTerminalRejected("active")).toBe(false);
+  });
+
+  it("labels target evidence as simulated and shortens the hash", () => {
+    expect(SIMULATED_EVIDENCE_NOTICE).toContain("simulated evidence only");
+    expect(SIMULATED_EVIDENCE_NOTICE).toContain("not live target validation");
+    expect(evidenceHashPrefix("sha256:abcdef1234567890")).toBe("abcdef123456");
   });
 });
 

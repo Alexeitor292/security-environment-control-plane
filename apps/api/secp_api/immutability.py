@@ -20,6 +20,7 @@ from secp_api.models import (
     ProviderInventorySnapshot,
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
+    TargetEvidenceRecord,
     TargetOnboarding,
     TargetPreflight,
     ToolchainProfile,
@@ -120,6 +121,20 @@ _PREFLIGHT_PROTECTED = (
     "passed",
     "checks",
     "evidence_hash",
+    "target_evidence_id",
+    "target_evidence_hash",
+)
+_TARGET_EVIDENCE_PROTECTED = (
+    "organization_id",
+    "onboarding_id",
+    "execution_target_id",
+    "evidence_source",
+    "verification_level",
+    "status",
+    "evidence_payload",
+    "findings",
+    "collected_at",
+    "evidence_hash",
 )
 
 
@@ -215,11 +230,23 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                     "TargetPreflight evidence is immutable after recording; "
                     f"attempted to change {changed}"
                 )
+        # TargetEvidenceRecord: append-only, immutable once recorded (SECP-002B-1B-1).
+        if isinstance(obj, TargetEvidenceRecord):
+            changed = [a for a in _TARGET_EVIDENCE_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "TargetEvidenceRecord is immutable after recording; "
+                    f"attempted to change {changed}"
+                )
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
 
     for obj in session.deleted:
+        if isinstance(obj, TargetEvidenceRecord):
+            raise ImmutableResourceError("TargetEvidenceRecord records cannot be deleted")
+        if isinstance(obj, TargetPreflight):
+            raise ImmutableResourceError("TargetPreflight records cannot be deleted")
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records cannot be deleted")
 

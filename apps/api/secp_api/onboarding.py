@@ -394,6 +394,8 @@ def build_evidence_package(
     collector_identity: str,
     evidence_version: int,
     checks: list[dict],
+    target_evidence_id: str | None = None,
+    target_evidence_hash: str | None = None,
 ) -> dict:
     """Assemble the canonical, redacted evidence package that the evidence hash covers.
 
@@ -420,6 +422,8 @@ def build_evidence_package(
         "collector_kind": collector_kind,
         "collector_identity": collector_identity,
         "evidence_version": evidence_version,
+        "target_evidence_id": target_evidence_id,
+        "target_evidence_hash": target_evidence_hash,
         "checks": canonical_checks,
     }
 

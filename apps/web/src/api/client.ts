@@ -15,6 +15,7 @@ import type {
   Principal,
   ProviderCapabilities,
   TargetCreate,
+  TargetEvidence,
   TeamTopology,
   Template,
   Version,
@@ -153,6 +154,8 @@ export const api = {
     request<Preflight>("POST", `/api/v1/onboarding/${id}/preflight`),
   listPreflights: (id: string) =>
     request<Preflight[]>("GET", `/api/v1/onboarding/${id}/preflight`),
+  listTargetEvidence: (id: string) =>
+    request<TargetEvidence[]>("GET", `/api/v1/onboarding/${id}/evidence`),
   submitOnboarding: (id: string) =>
     request<Onboarding>("POST", `/api/v1/onboarding/${id}/submit`),
   approveOnboarding: (id: string, reason: string) =>

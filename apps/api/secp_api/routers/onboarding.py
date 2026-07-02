@@ -21,6 +21,7 @@ from secp_api.schemas_onboarding import (
     OnboardingDecision,
     OnboardingOut,
     PreflightOut,
+    TargetEvidenceOut,
 )
 from secp_api.services import onboarding
 
@@ -94,6 +95,18 @@ def list_preflights(
     return [
         PreflightOut.model_validate(p)
         for p in onboarding.list_preflights(session, principal, onboarding_id)
+    ]
+
+
+@router.get("/onboarding/{onboarding_id}/evidence", response_model=list[TargetEvidenceOut])
+def list_target_evidence(
+    onboarding_id: uuid.UUID,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> list[TargetEvidenceOut]:
+    return [
+        TargetEvidenceOut.model_validate(e)
+        for e in onboarding.list_target_evidence(session, principal, onboarding_id)
     ]
 
 
