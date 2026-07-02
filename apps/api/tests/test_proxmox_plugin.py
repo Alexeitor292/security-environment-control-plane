@@ -123,7 +123,7 @@ def test_scope_filter_restricts_resources():
 def test_transport_refuses_non_get_before_sending():
     client = _FakeHttpClient()
     transport = HttpxReadOnlyTransport(
-        base_url="https://proxmox.example.test:8006", token="tok", client=client
+        base_url="https://proxmox.example.test:8006/api2/json", token="tok", client=client
     )
     for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
         with pytest.raises(MutatingRequestRefused):

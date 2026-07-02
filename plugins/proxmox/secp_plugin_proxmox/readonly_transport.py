@@ -18,6 +18,7 @@ from typing import Any
 
 from secp_plugin_proxmox.readonly_policy import (
     RedirectRefused,
+    assert_no_params,
     assert_request_allowed,
     is_absolute_or_cross_host,
 )
@@ -46,8 +47,9 @@ class FakeProxmoxReadOnlyTransport:
         self.calls: list[tuple[str, str]] = []
 
     def request(self, method: str, path: str, params: dict | None = None) -> Any:
-        # Refuse mutating methods / cross-host / unknown paths BEFORE any response lookup.
+        # Refuse mutating methods / cross-host / unknown paths / query params BEFORE any lookup.
         assert_request_allowed(method, path)
+        assert_no_params(params)
         self.calls.append((method.upper(), path))
         value = self._responses.get(path, [])
         if isinstance(value, RedirectResponse):

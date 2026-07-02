@@ -75,6 +75,29 @@ class CrossHostRequestRefused(Exception):
         super().__init__(f"refused cross-host / absolute destination {path!r}")
 
 
+class QueryParametersRefused(Exception):
+    """Raised when a request carries query parameters. This milestone allowlists **no** query
+    parameters, so only ``None`` or an empty ``dict`` is accepted; anything else is refused
+    before client/lookup activity. Never echoes values — only the type / key names."""
+
+    def __init__(self, params: object = None):
+        if isinstance(params, dict):
+            detail = f"keys={sorted(str(k) for k in params)}"
+        else:
+            detail = f"type={type(params).__name__}"
+        super().__init__(
+            f"refused query parameters ({detail}): only None or an empty dict is allowed"
+        )
+
+
+def assert_no_params(params: object) -> None:
+    """Accept ONLY ``None`` or an empty ``dict``. Reject everything else (non-empty mappings and
+    any other type — ``[]``, ``()``, ``""``, ``0``, ``False``, …) before client/lookup activity."""
+    if params is None or (isinstance(params, dict) and not params):
+        return
+    raise QueryParametersRefused(params)
+
+
 class NonCanonicalPathRefused(Exception):
     """Raised when a path is non-canonical: its decoded/canonical form could differ from the
     literal path evaluated (encoded delimiters, backslashes, repeated slashes, traversal, or

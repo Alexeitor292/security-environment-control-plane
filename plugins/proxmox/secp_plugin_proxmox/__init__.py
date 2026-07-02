@@ -8,6 +8,11 @@ development, tests, CI, or runtime verification. See ADR-006/007/010 and
 ``docs/proxmox/``.
 """
 
+from secp_plugin_proxmox.live_collector import (
+    LIVE_READ_COLLECTOR_CONTRACT_VERSION,
+    LIVE_READ_EVIDENCE_SOURCE,
+    LiveReadOnlyProxmoxCollector,
+)
 from secp_plugin_proxmox.plugin import ProxmoxPlugin
 from secp_plugin_proxmox.readonly_normalize import normalize_proxmox_observations
 from secp_plugin_proxmox.readonly_policy import (
@@ -15,8 +20,10 @@ from secp_plugin_proxmox.readonly_policy import (
     PROXMOX_READONLY_POLICY_VERSION,
     CrossHostRequestRefused,
     NonCanonicalPathRefused,
+    QueryParametersRefused,
     RedirectRefused,
     UnknownPathRefused,
+    assert_no_params,
     assert_request_allowed,
     canonical_path_violation,
     path_is_allowed,
@@ -25,6 +32,11 @@ from secp_plugin_proxmox.readonly_transport import (
     FakeProxmoxReadOnlyTransport,
     RedirectResponse,
     fake_transport_factory,
+)
+from secp_plugin_proxmox.target_config import (
+    ProxmoxTargetConfigError,
+    ValidatedProxmoxTargetConfig,
+    parse_proxmox_target_config,
 )
 from secp_plugin_proxmox.transport import (
     HttpxReadOnlyTransport,
@@ -45,10 +57,19 @@ __all__ = [
     "PROXMOX_READONLY_POLICY_VERSION",
     "CrossHostRequestRefused",
     "NonCanonicalPathRefused",
+    "QueryParametersRefused",
     "RedirectRefused",
     "UnknownPathRefused",
+    "assert_no_params",
     "assert_request_allowed",
     "canonical_path_violation",
     "path_is_allowed",
     "normalize_proxmox_observations",
+    # SECP-002B-1B-4 — dormant live read-only collector (default-disabled; DI-only).
+    "LiveReadOnlyProxmoxCollector",
+    "LIVE_READ_EVIDENCE_SOURCE",
+    "LIVE_READ_COLLECTOR_CONTRACT_VERSION",
+    "ProxmoxTargetConfigError",
+    "ValidatedProxmoxTargetConfig",
+    "parse_proxmox_target_config",
 ]

@@ -191,6 +191,24 @@ and fail-closed (`unverifiable`) comparison, and may be enabled only after the
 [activation checklist](live-readonly-collector-activation-checklist.md) is completed and an
 explicit human authorization is recorded — all in a **future** PR.
 
+### L19 — Dormant, default-disabled live collector (SECP-002B-1B-3/1B-4; implemented, not enabled)
+The offline fake transport + closed canonical path policy + normalizer (B1-B-3) and the dormant
+live collection path (B1-B-4) now exist in code, but every real execution path stays disabled
+and unreachable outside unit tests. A worker-owned `LiveReadCollectionGate` defaults to
+disabled and is not wired to env/Compose/API/UI; it fails before secret resolution, transport
+construction, endpoint validation, request creation, or evidence generation/persistence. An
+immutable `LiveReadCollectionBinding` (target/config/onboarding/boundary/authorization +
+expiry/version + evidence source/level + collector-contract + endpoint-allowlist versions) is
+validated before any resolver/transport use. The plugin `LiveReadOnlyProxmoxCollector` issues
+only allowlisted canonical GETs through an injected transport, never infers isolation, and
+returns an in-memory observed dict — it persists nothing and creates no `TargetEvidenceRecord`.
+`HttpxReadOnlyTransport` is hardened (policy before client, `verify_tls=True` only,
+`trust_env=False`, redirects disabled + refused, validated HTTPS base URL) but contacts nothing.
+`apps/api` imports none of this; the sealed provider collector and the simulated collector are
+unchanged. **No real Proxmox target was contacted, no secret backend exists, and no API trigger,
+database persistence path, or live activation was introduced.** An independent security review
+plus a separately-authorized activation PR are required before any staging activation.
+
 ## What a reviewer should verify
 
 - No file contains a real hostname, IP, cluster/node/pool/storage name, VLAN, or
