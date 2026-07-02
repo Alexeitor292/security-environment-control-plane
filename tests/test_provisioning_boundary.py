@@ -55,6 +55,10 @@ FORBIDDEN_IMPORT_NAMES = {
     "TargetEvidenceCollector",
 }
 
+DISPATCH_WORKER_ONBOARDING_IMPORTS = {
+    "secp_worker.onboarding.target_evidence": {"SimulatedTargetEvidenceCollector"},
+}
+
 
 def _py_files():
     return [p for p in API_PKG.rglob("*.py") if "__pycache__" not in p.parts]
@@ -73,14 +77,22 @@ def _imports(path: Path):
     return modules, names
 
 
+def _is_allowed_dispatch_worker_onboarding_import(path: Path, mod: str) -> bool:
+    return path.name == "dispatch.py" and mod in DISPATCH_WORKER_ONBOARDING_IMPORTS
+
+
 @pytest.mark.parametrize("path", _py_files(), ids=lambda p: p.name)
 def test_api_never_imports_runner_or_iac(path: Path):
     modules, names = _imports(path)
     for mod in modules:
+        if _is_allowed_dispatch_worker_onboarding_import(path, mod):
+            continue
         low = mod.lower()
         for bad in FORBIDDEN_IMPORT_SUBSTRINGS:
             assert bad not in low, f"{path.name} imports forbidden module '{mod}'"
     bad_names = FORBIDDEN_IMPORT_NAMES & set(names)
+    if path.name == "dispatch.py":
+        bad_names -= set().union(*DISPATCH_WORKER_ONBOARDING_IMPORTS.values())
     assert not bad_names, f"{path.name} imports runner symbol(s) {bad_names}"
 
 
@@ -111,8 +123,25 @@ def test_onboarding_collectors_live_only_in_worker():
     assert (worker / "onboarding" / "target_evidence.py").exists()
     for path in _py_files():
         text = path.read_text(encoding="utf-8")
+        if path.name == "dispatch.py":
+            continue
         assert "SimulatedTargetEvidenceCollector" not in text
         assert "TargetEvidenceCollector" not in text
+
+
+def test_api_routes_and_services_do_not_collect_target_evidence_directly():
+    """Routes/services may request simulated evidence work, but must not perform it."""
+    for rel in [*Path(API_PKG / "services").glob("*.py"), *Path(API_PKG / "routers").glob("*.py")]:
+        text = rel.read_text(encoding="utf-8")
+        for forbidden in (
+            "secp_worker.onboarding",
+            "SimulatedTargetEvidenceCollector",
+            "TargetEvidenceCollector",
+            "build_simulated_evidence_payload",
+            "_simulated_evidence_payload_from_boundary",
+            ".collect(",
+        ):
+            assert forbidden not in text, f"{rel.relative_to(API_PKG)} directly collects evidence"
 
 
 def test_subprocess_executor_defined_only_in_worker():

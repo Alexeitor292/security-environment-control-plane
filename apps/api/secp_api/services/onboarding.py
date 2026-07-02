@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
+from secp_api.dispatch import request_simulated_target_evidence_result
 from secp_api.enums import (
     AuditAction,
     CollectorKind,
@@ -51,7 +52,6 @@ from secp_api.onboarding import (
 from secp_api.provisioning_scope import provisioning_scope_policy_hash
 from secp_api.target_evidence import (
     SIMULATED_EVIDENCE_SOURCE,
-    build_simulated_evidence_payload,
     compare_boundary_to_evidence,
     findings_pass,
     summarize_findings,
@@ -264,7 +264,18 @@ def recompute_evidence_hash(pf: TargetPreflight) -> str:
 
 
 def recompute_target_evidence_hash(record: TargetEvidenceRecord) -> str:
-    return target_evidence_hash(record.evidence_payload, record.findings)
+    status = record.status.value if hasattr(record.status, "value") else str(record.status)
+    return target_evidence_hash(
+        organization_id=str(record.organization_id),
+        onboarding_id=str(record.onboarding_id),
+        execution_target_id=str(record.execution_target_id),
+        evidence_source=record.evidence_source,
+        verification_level=record.verification_level,
+        status=status,
+        collected_at=record.collected_at,
+        evidence_payload=record.evidence_payload,
+        findings=record.findings,
+    )
 
 
 def _record_simulated_target_evidence(
@@ -274,9 +285,10 @@ def _record_simulated_target_evidence(
     *,
     created_by: uuid.UUID | None,
 ) -> TargetEvidenceRecord:
-    payload = build_simulated_evidence_payload(ob.declared_boundary)
+    payload = request_simulated_target_evidence_result(declared_boundary=ob.declared_boundary)
     findings = compare_boundary_to_evidence(ob.declared_boundary, payload)
     status = summarize_findings(findings)
+    collected_at = _utcnow()
     record = TargetEvidenceRecord(
         organization_id=ob.organization_id,
         onboarding_id=ob.id,
@@ -286,11 +298,21 @@ def _record_simulated_target_evidence(
         status=status,
         evidence_payload=payload,
         findings=findings,
-        collected_at=_utcnow(),
+        collected_at=collected_at,
         evidence_hash="",
         created_by=created_by,
     )
-    record.evidence_hash = target_evidence_hash(payload, findings)
+    record.evidence_hash = target_evidence_hash(
+        organization_id=str(ob.organization_id),
+        onboarding_id=str(ob.id),
+        execution_target_id=str(target.id),
+        evidence_source=record.evidence_source,
+        verification_level=record.verification_level,
+        status=status.value,
+        collected_at=collected_at,
+        evidence_payload=payload,
+        findings=findings,
+    )
     session.add(record)
     session.flush()
     audit.record(

@@ -80,6 +80,17 @@ class InlineDispatcher:
         )
 
 
+def request_simulated_target_evidence_result(*, declared_boundary: dict) -> dict:
+    """Request worker-owned simulated target evidence collection.
+
+    This is the inline dev/test analogue of durable worker work. It is intentionally
+    limited to the deterministic simulated collector; live provider collectors remain sealed.
+    """
+    from secp_worker.onboarding.target_evidence import SimulatedTargetEvidenceCollector
+
+    return SimulatedTargetEvidenceCollector().collect(declared_boundary=declared_boundary)
+
+
 # --- Temporal path ------------------------------------------------------------
 
 

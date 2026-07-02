@@ -59,14 +59,15 @@ def upgrade() -> None:
         "target_evidence_record",
         ["organization_id"],
     )
-    op.add_column(
-        "target_preflight",
-        sa.Column("target_evidence_id", sa.Uuid(), nullable=True),
-    )
-    op.add_column(
-        "target_preflight",
-        sa.Column("target_evidence_hash", sa.String(length=80), nullable=True),
-    )
+    with op.batch_alter_table("target_preflight", schema=None) as b:
+        b.add_column(sa.Column("target_evidence_id", sa.Uuid(), nullable=True))
+        b.add_column(sa.Column("target_evidence_hash", sa.String(length=80), nullable=True))
+        b.create_foreign_key(
+            "fk_target_preflight_target_evidence_id",
+            "target_evidence_record",
+            ["target_evidence_id"],
+            ["id"],
+        )
     op.create_index(
         "ix_target_preflight_target_evidence_id",
         "target_preflight",
@@ -77,6 +78,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_target_preflight_target_evidence_id", table_name="target_preflight")
     with op.batch_alter_table("target_preflight", schema=None) as b:
+        b.drop_constraint("fk_target_preflight_target_evidence_id", type_="foreignkey")
         b.drop_column("target_evidence_hash")
         b.drop_column("target_evidence_id")
     op.drop_index("ix_target_evidence_record_organization_id", table_name="target_evidence_record")

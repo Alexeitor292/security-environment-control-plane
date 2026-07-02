@@ -63,6 +63,7 @@ def test_migration_upgrades_empty_database(tmp_path, monkeypatch):
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     workflow_fks = inspector.get_foreign_keys("workflow_run")
+    preflight_fks = inspector.get_foreign_keys("target_preflight")
     engine.dispose()
     get_settings.cache_clear()
 
@@ -73,4 +74,9 @@ def test_migration_upgrades_empty_database(tmp_path, monkeypatch):
         fk["referred_table"] == "provider_inventory_snapshot"
         and fk["constrained_columns"] == ["snapshot_id"]
         for fk in workflow_fks
+    )
+    assert any(
+        fk["referred_table"] == "target_evidence_record"
+        and fk["constrained_columns"] == ["target_evidence_id"]
+        for fk in preflight_fks
     )

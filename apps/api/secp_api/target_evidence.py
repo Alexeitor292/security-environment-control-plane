@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from secp_scenario_schema import content_hash
 
@@ -88,33 +89,6 @@ def _cidr_within_any(cidr: str, observed: Iterable[str]) -> bool | None:
         if net.version == block.version and net.subnet_of(block):  # type: ignore[arg-type]
             matched = True
     return matched
-
-
-def build_simulated_evidence_payload(boundary: dict) -> dict:
-    """Build a deterministic simulated observed-target payload from a declared boundary.
-
-    It is evidence-shaped but not live evidence: no real target is contacted and no
-    endpoint, credential, or provider-specific inventory is inspected.
-    """
-    spec = OnboardingBoundarySpec.model_validate(boundary)
-    return {
-        "schema_version": TARGET_EVIDENCE_SCHEMA_VERSION,
-        "evidence_source": SIMULATED_EVIDENCE_SOURCE,
-        "verification_level": VerificationLevel.simulated.value,
-        "observed": {
-            "nodes": sorted(spec.nodes),
-            "storage": sorted(spec.storage),
-            "network_segments": sorted(spec.network_segments),
-            "cidr_reservations": sorted(spec.cidrs),
-            "vmid_range": spec.vmid_range.model_dump(mode="json"),
-            "quotas": spec.quotas.model_dump(mode="json"),
-            "isolation": {
-                "profile": spec.isolation_profile.value,
-                "external_connectivity_policy": spec.external_connectivity.policy,
-                "route_to_protected": False,
-            },
-        },
-    }
 
 
 def validate_target_evidence_payload(payload: dict) -> dict:
@@ -245,16 +219,48 @@ def missing_evidence_findings(detail: str) -> list[dict]:
     return [_finding(check, FINDING_UNVERIFIABLE, detail) for check in COMPARISON_CHECKS]
 
 
-def target_evidence_package(payload: dict, findings: list[dict]) -> dict:
-    validated = validate_target_evidence_payload(payload)
+def _canonical_collected_at(value: datetime | str) -> str:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return value
+
+
+def target_evidence_package(
+    *,
+    organization_id: str,
+    onboarding_id: str,
+    execution_target_id: str,
+    evidence_source: str,
+    verification_level: str,
+    status: str,
+    collected_at: datetime | str,
+    evidence_payload: dict,
+    findings: list[dict],
+) -> dict:
+    validated = validate_target_evidence_payload(evidence_payload)
     if _contains_secret_token(findings):
         raise ValidationFailedError(
             "target evidence findings must not contain secret-like material"
         )
+    if evidence_source != SIMULATED_EVIDENCE_SOURCE:
+        raise ValidationFailedError("only simulated target evidence is accepted in SECP-002B-1B-1")
+    if verification_level != VerificationLevel.simulated.value:
+        raise ValidationFailedError("only simulated target evidence is accepted in SECP-002B-1B-1")
+    if validated["evidence_source"] != evidence_source:
+        raise ValidationFailedError("target evidence context does not match payload source")
+    if validated["verification_level"] != verification_level:
+        raise ValidationFailedError("target evidence context does not match payload level")
     return {
         "schema_version": TARGET_EVIDENCE_SCHEMA_VERSION,
-        "evidence_source": validated["evidence_source"],
-        "verification_level": validated["verification_level"],
+        "organization_id": organization_id,
+        "onboarding_id": onboarding_id,
+        "execution_target_id": execution_target_id,
+        "evidence_source": evidence_source,
+        "verification_level": verification_level,
+        "status": status,
+        "collected_at": _canonical_collected_at(collected_at),
         "evidence_payload": validated,
         "findings": sorted(
             (
@@ -270,8 +276,31 @@ def target_evidence_package(payload: dict, findings: list[dict]) -> dict:
     }
 
 
-def target_evidence_hash(payload: dict, findings: list[dict]) -> str:
-    return content_hash(target_evidence_package(payload, findings))
+def target_evidence_hash(
+    *,
+    organization_id: str,
+    onboarding_id: str,
+    execution_target_id: str,
+    evidence_source: str,
+    verification_level: str,
+    status: str,
+    collected_at: datetime | str,
+    evidence_payload: dict,
+    findings: list[dict],
+) -> str:
+    return content_hash(
+        target_evidence_package(
+            organization_id=organization_id,
+            onboarding_id=onboarding_id,
+            execution_target_id=execution_target_id,
+            evidence_source=evidence_source,
+            verification_level=verification_level,
+            status=status,
+            collected_at=collected_at,
+            evidence_payload=evidence_payload,
+            findings=findings,
+        )
+    )
 
 
 def summarize_findings(findings: list[dict]) -> EvidenceStatus:

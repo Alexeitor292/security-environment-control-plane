@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import copy
+import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from secp_api.dispatch import request_simulated_target_evidence_result
 from secp_api.enums import EvidenceStatus, IsolationModel, OnboardingMode, VerificationLevel
 from secp_api.errors import DomainError, ImmutableResourceError, ValidationFailedError
 from secp_api.models import AuditEvent, TargetEvidenceRecord, TargetPreflight
@@ -22,7 +25,6 @@ from secp_api.target_evidence import (
     FINDING_FAIL,
     FINDING_UNVERIFIABLE,
     SIMULATED_EVIDENCE_SOURCE,
-    build_simulated_evidence_payload,
     compare_boundary_to_evidence,
     target_evidence_hash,
     validate_target_evidence_payload,
@@ -59,9 +61,28 @@ def _new_onboarding(session, principal, target):
     )
 
 
+def _payload(boundary: dict) -> dict:
+    return request_simulated_target_evidence_result(declared_boundary=copy.deepcopy(boundary))
+
+
+def _hash_context(payload: dict, findings: list[dict]) -> dict:
+    return {
+        "organization_id": str(uuid.uuid4()),
+        "onboarding_id": str(uuid.uuid4()),
+        "execution_target_id": str(uuid.uuid4()),
+        "evidence_source": SIMULATED_EVIDENCE_SOURCE,
+        "verification_level": VerificationLevel.simulated.value,
+        "status": EvidenceStatus.passed.value,
+        "collected_at": datetime.now(UTC),
+        "evidence_payload": payload,
+        "findings": findings,
+    }
+
+
 def test_canonical_evidence_hashing_is_stable():
-    payload = build_simulated_evidence_payload(copy.deepcopy(VALID_ONBOARDING_BOUNDARY))
+    payload = _payload(VALID_ONBOARDING_BOUNDARY)
     findings = compare_boundary_to_evidence(VALID_ONBOARDING_BOUNDARY, payload)
+    base = _hash_context(payload, findings)
     same_payload = {
         "verification_level": payload["verification_level"],
         "observed": copy.deepcopy(payload["observed"]),
@@ -69,9 +90,61 @@ def test_canonical_evidence_hashing_is_stable():
         "evidence_source": payload["evidence_source"],
     }
 
-    assert target_evidence_hash(payload, findings) == target_evidence_hash(
-        same_payload, copy.deepcopy(findings)
+    assert target_evidence_hash(**base) == target_evidence_hash(
+        **{**base, "evidence_payload": same_payload, "findings": copy.deepcopy(findings)}
     )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "execution_target_id",
+        "onboarding_id",
+        "collected_at",
+        "status",
+        "evidence_payload",
+        "findings",
+    ],
+)
+def test_evidence_hash_commits_to_full_record_context(field):
+    payload = _payload(VALID_ONBOARDING_BOUNDARY)
+    findings = compare_boundary_to_evidence(VALID_ONBOARDING_BOUNDARY, payload)
+    base = _hash_context(payload, findings)
+    changed = copy.deepcopy(base)
+    if field in {"execution_target_id", "onboarding_id"}:
+        changed[field] = str(uuid.uuid4())
+    elif field == "collected_at":
+        changed[field] = base["collected_at"] + timedelta(seconds=1)
+    elif field == "status":
+        changed[field] = EvidenceStatus.failed.value
+    elif field == "evidence_payload":
+        drifted_payload = copy.deepcopy(payload)
+        drifted_payload["observed"]["nodes"] = drifted_payload["observed"]["nodes"][:-1]
+        changed[field] = drifted_payload
+    else:
+        changed[field] = [
+            {**findings[0], "status": FINDING_FAIL, "detail": "changed finding"},
+            *findings[1:],
+        ]
+
+    assert target_evidence_hash(**base) != target_evidence_hash(**changed)
+
+
+def test_evidence_hash_refuses_verification_level_drift():
+    payload = _payload(VALID_ONBOARDING_BOUNDARY)
+    findings = compare_boundary_to_evidence(VALID_ONBOARDING_BOUNDARY, payload)
+    base = _hash_context(payload, findings)
+    drifted_payload = copy.deepcopy(payload)
+    drifted_payload["verification_level"] = VerificationLevel.live_verified.value
+
+    with pytest.raises(ValidationFailedError, match="only simulated"):
+        target_evidence_hash(
+            **{
+                **base,
+                "verification_level": VerificationLevel.live_verified.value,
+                "evidence_payload": drifted_payload,
+            }
+        )
 
 
 def test_target_evidence_record_is_append_only(session, principal):
@@ -91,7 +164,7 @@ def test_target_evidence_record_is_append_only(session, principal):
 
 
 def test_only_simulated_evidence_source_is_accepted():
-    payload = build_simulated_evidence_payload(copy.deepcopy(VALID_ONBOARDING_BOUNDARY))
+    payload = _payload(VALID_ONBOARDING_BOUNDARY)
     validate_target_evidence_payload(payload)
 
     bad_source = copy.deepcopy(payload)
@@ -135,7 +208,7 @@ def test_only_simulated_evidence_source_is_accepted():
     ],
 )
 def test_boundary_comparison_mismatches_fail_closed(check, mutate):
-    payload = build_simulated_evidence_payload(copy.deepcopy(VALID_ONBOARDING_BOUNDARY))
+    payload = _payload(VALID_ONBOARDING_BOUNDARY)
     mutate(payload["observed"])
 
     findings = compare_boundary_to_evidence(VALID_ONBOARDING_BOUNDARY, payload)
