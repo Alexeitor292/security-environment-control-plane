@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from secp_api.enums import (
     CollectorKind,
     IsolationModel,
+    IsolationProfile,
+    NetworkApproach,
     OnboardingMode,
     PreflightCheckStatus,
     VerificationLevel,
@@ -35,6 +37,9 @@ from secp_api.errors import (
 # Tokens that would broaden an allowlist into an unsafe wildcard.
 _WILDCARD_TOKENS = {"*", "any", "all", "", "0.0.0.0/0", "::/0", "0/0"}
 _MAX_VMID_WIDTH = 100_000
+# Isolation profiles enabled in this release. Only fully-segregated is available; the roadmap
+# profiles are rejected server-side (SECP-002B-1B-0.1) — never merely hidden in the UI.
+SUPPORTED_ISOLATION_PROFILES = frozenset({IsolationProfile.fully_segregated})
 # A secret must never appear in submitted preflight evidence details.
 _SECRET_RE = re.compile(
     r"(pass|passwd|password|secret|token|api[_-]?key|apikey|private[_-]?key|credential)",
@@ -156,6 +161,23 @@ class OnboardingBoundarySpec(_Strict):
     quotas: BoundaryQuotas
     external_connectivity: BoundaryExternalConnectivity
     credential_scope: str = Field(min_length=1)
+    # Provider-neutral operator declarations (SECP-002B-1B-0.1). Optional with safe,
+    # backward-compatible defaults so pre-0.1 boundaries validate unchanged. Both are part of
+    # the hashed, immutable declared boundary.
+    network_approach: NetworkApproach = NetworkApproach.use_approved_existing_segment
+    isolation_profile: IsolationProfile = IsolationProfile.fully_segregated
+
+    @field_validator("isolation_profile")
+    @classmethod
+    def _isolation_profile_supported(cls, v: IsolationProfile) -> IsolationProfile:
+        # Reject roadmap profiles server-side (not merely disabled in the UI). No NAT/gateway/
+        # firewall/egress behaviour exists in this release.
+        if v not in SUPPORTED_ISOLATION_PROFILES:
+            raise ValueError(
+                f"isolation profile '{v.value}' is planned but not available yet; only "
+                f"'{IsolationProfile.fully_segregated.value}' is supported in this release"
+            )
+        return v
 
     @field_validator("nodes", "storage", "network_segments")
     @classmethod

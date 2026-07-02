@@ -9,9 +9,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 
-from secp_api.enums import IsolationModel, OnboardingMode
+from secp_api.enums import IsolationModel, IsolationProfile, NetworkApproach, OnboardingMode
 
 
 class ORMModel(BaseModel):
@@ -43,6 +43,26 @@ class OnboardingOut(ORMModel):
     decision_reason: str
     activated_at: datetime | None
     created_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def network_approach(self) -> str:
+        """Durable network approach declared in the boundary (backward-compatible default)."""
+        return str(
+            (self.declared_boundary or {}).get(
+                "network_approach", NetworkApproach.use_approved_existing_segment.value
+            )
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def isolation_profile(self) -> str:
+        """Declared isolation profile (backward-compatible default: fully_segregated)."""
+        return str(
+            (self.declared_boundary or {}).get(
+                "isolation_profile", IsolationProfile.fully_segregated.value
+            )
+        )
 
 
 class PreflightOut(ORMModel):

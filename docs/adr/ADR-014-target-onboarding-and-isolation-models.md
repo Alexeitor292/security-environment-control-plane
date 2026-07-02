@@ -202,3 +202,30 @@ decision:
 No real infrastructure, endpoint, credential, provider, OpenTofu binary, or Docker socket is
 accessed by any of these corrections; all evidence remains fake-only and standard deployment
 remains automated + declarative.
+
+## Amendment — onboarding wizard + isolation profiles (SECP-002B-1B-0.1, 2026-07-01)
+
+The operator-facing onboarding wizard (React/TypeScript) is added on top of the B1-B-0
+contract. It introduces two **provider-neutral, durable** declarations carried inside the
+immutable, hashed declared boundary (`OnboardingBoundarySpec`) — no new model column is
+required and pre-0.1 boundaries validate unchanged via safe defaults:
+
+- **`network_approach`** ∈ {`use_approved_existing_segment`, `secp_managed_dedicated_segment`}.
+  Default `use_approved_existing_segment`. The declared `network_segments` must be within the
+  target's approved segments for **both** approaches (boundary ⊆ scope is unchanged).
+  `secp_managed_dedicated_segment` is a durable declaration of intent only: **no bridge/VNet is
+  created in this release** (activation pending).
+- **`isolation_profile`** ∈ {`fully_segregated`, `internet_egress_only`,
+  `controlled_service_access`, `advanced_custom_policy`}. Default and **only supported value**
+  is `fully_segregated` (no Internet, no default route, no path to
+  management/home/corporate/storage/public networks). The roadmap profiles are **rejected
+  server-side** (`SUPPORTED_ISOLATION_PROFILES`) — not merely disabled in the UI — until a
+  separately reviewed change enables them. No NAT/gateway/firewall/egress behaviour is
+  introduced here.
+
+The wizard wires only the already-approved **simulated** lifecycle
+(draft → simulated preflight → ready for review → human approval → active). It does **not**
+weaken or lift the B1-B-0 live-evidence seal, boundary hashing, effective-boundary behaviour,
+manifest binding, worker gates, scope restrictions, or the logical-isolation no-route
+requirement. No real server, network, bridge, VNet, firewall, provider, OpenTofu binary,
+Docker socket, or secret manager is contacted.

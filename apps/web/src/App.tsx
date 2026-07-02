@@ -8,6 +8,7 @@ const NAV = [
   { to: "/templates", label: "Environment Library" },
   { to: "/templates/new", label: "Definition Editor" },
   { to: "/provider-targets", label: "Provider Targets" },
+  { to: "/onboarding", label: "Target Onboarding" },
   { to: "/audit", label: "Audit Log" },
 ];
 

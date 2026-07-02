@@ -8,6 +8,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { DefinitionEditor } from "./pages/DefinitionEditor";
 import { ExerciseDetail } from "./pages/ExerciseDetail";
 import { Login } from "./pages/Login";
+import { OnboardingWizard } from "./pages/OnboardingWizard";
 import { PlanApproval } from "./pages/PlanApproval";
 import { ProviderTargets } from "./pages/ProviderTargets";
 import { Templates } from "./pages/Templates";
@@ -28,6 +29,7 @@ const router = createBrowserRouter([
       { path: "exercises/:exerciseId/plan", element: <PlanApproval /> },
       { path: "exercises/:exerciseId/topology", element: <TopologyView /> },
       { path: "provider-targets", element: <ProviderTargets /> },
+      { path: "onboarding", element: <OnboardingWizard /> },
       { path: "audit", element: <AuditLog /> },
     ],
   },

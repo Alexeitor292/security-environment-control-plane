@@ -8,7 +8,10 @@ import type {
   Instance,
   InventoryResource,
   InventorySnapshot,
+  Onboarding,
+  OnboardingCreate,
   PluginInfo,
+  Preflight,
   Principal,
   ProviderCapabilities,
   TargetCreate,
@@ -139,4 +142,25 @@ export const api = {
     request<InventorySnapshot>("POST", `/api/v1/targets/${targetId}/discover`),
   snapshotResources: (snapshotId: string) =>
     request<InventoryResource[]>("GET", `/api/v1/snapshots/${snapshotId}/resources`),
+
+  // --- Target Onboarding (SECP-002B-1B-0 / 0.1) ---
+  listOnboardings: (targetId: string) =>
+    request<Onboarding[]>("GET", `/api/v1/targets/${targetId}/onboarding`),
+  createOnboarding: (targetId: string, body: OnboardingCreate) =>
+    request<Onboarding>("POST", `/api/v1/targets/${targetId}/onboarding`, body),
+  getOnboarding: (id: string) => request<Onboarding>("GET", `/api/v1/onboarding/${id}`),
+  requestPreflight: (id: string) =>
+    request<Preflight>("POST", `/api/v1/onboarding/${id}/preflight`),
+  listPreflights: (id: string) =>
+    request<Preflight[]>("GET", `/api/v1/onboarding/${id}/preflight`),
+  submitOnboarding: (id: string) =>
+    request<Onboarding>("POST", `/api/v1/onboarding/${id}/submit`),
+  approveOnboarding: (id: string, reason: string) =>
+    request<Onboarding>("POST", `/api/v1/onboarding/${id}/approve`, { reason }),
+  rejectOnboarding: (id: string, reason: string) =>
+    request<Onboarding>("POST", `/api/v1/onboarding/${id}/reject`, { reason }),
+  activateOnboarding: (id: string) =>
+    request<Onboarding>("POST", `/api/v1/onboarding/${id}/activate`),
+  retireOnboarding: (id: string) =>
+    request<Onboarding>("POST", `/api/v1/onboarding/${id}/retire`),
 };
