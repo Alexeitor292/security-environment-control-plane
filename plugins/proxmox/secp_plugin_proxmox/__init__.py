@@ -9,6 +9,23 @@ development, tests, CI, or runtime verification. See ADR-006/007/010 and
 """
 
 from secp_plugin_proxmox.plugin import ProxmoxPlugin
+from secp_plugin_proxmox.readonly_normalize import normalize_proxmox_observations
+from secp_plugin_proxmox.readonly_policy import (
+    ALLOWED_PATH_TEMPLATES,
+    PROXMOX_READONLY_POLICY_VERSION,
+    CrossHostRequestRefused,
+    NonCanonicalPathRefused,
+    RedirectRefused,
+    UnknownPathRefused,
+    assert_request_allowed,
+    canonical_path_violation,
+    path_is_allowed,
+)
+from secp_plugin_proxmox.readonly_transport import (
+    FakeProxmoxReadOnlyTransport,
+    RedirectResponse,
+    fake_transport_factory,
+)
 from secp_plugin_proxmox.transport import (
     HttpxReadOnlyTransport,
     MutatingRequestRefused,
@@ -20,4 +37,18 @@ __all__ = [
     "HttpxReadOnlyTransport",
     "MutatingRequestRefused",
     "ReadOnlyHttpTransport",
+    # SECP-002B-1B-3 — offline fake read-only transport, closed policy, normalizer.
+    "FakeProxmoxReadOnlyTransport",
+    "RedirectResponse",
+    "fake_transport_factory",
+    "ALLOWED_PATH_TEMPLATES",
+    "PROXMOX_READONLY_POLICY_VERSION",
+    "CrossHostRequestRefused",
+    "NonCanonicalPathRefused",
+    "RedirectRefused",
+    "UnknownPathRefused",
+    "assert_request_allowed",
+    "canonical_path_violation",
+    "path_is_allowed",
+    "normalize_proxmox_observations",
 ]
