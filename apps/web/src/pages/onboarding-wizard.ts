@@ -182,6 +182,14 @@ export const CIDR_HELPER_TEXT =
 export const NETWORK_SEGMENT_HELPER_TEXT =
   "A network segment is a bridge, VNet, or VLAN name, not an IP range.";
 
+export const SIMULATED_EVIDENCE_NOTICE =
+  "simulated evidence only; this is not live target validation";
+
+export function evidenceHashPrefix(hash: string | null | undefined): string {
+  if (!hash) return "pending";
+  return hash.replace(/^sha256:/, "").slice(0, 12);
+}
+
 export function emptyDraft(): BoundaryDraft {
   return {
     nodes: "",

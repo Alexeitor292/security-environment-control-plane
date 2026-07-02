@@ -295,6 +295,27 @@ export interface Preflight {
   passed: boolean;
   checks: PreflightCheck[];
   evidence_hash: string;
+  target_evidence_id: string | null;
+  target_evidence_hash: string | null;
+  created_at: string;
+}
+
+export interface TargetEvidenceFinding {
+  check: string;
+  status: "pass" | "fail" | "unverifiable" | string;
+  detail: string;
+}
+
+export interface TargetEvidence {
+  id: string;
+  onboarding_id: string;
+  execution_target_id: string;
+  evidence_source: string;
+  verification_level: string;
+  status: "pass" | "fail" | "unverifiable" | string;
+  findings: TargetEvidenceFinding[];
+  collected_at: string;
+  evidence_hash: string;
   created_at: string;
 }
 

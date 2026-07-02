@@ -204,6 +204,14 @@ class CollectorKind(str, Enum):
     provider_worker = "provider_worker"
 
 
+class EvidenceStatus(str, Enum):
+    """Summary status for provider-neutral read-only target evidence (SECP-002B-1B-1)."""
+
+    passed = "pass"
+    failed = "fail"
+    unverifiable = "unverifiable"
+
+
 class ProvisioningApplicationMode(str, Enum):
     """Which provisioning path a request targets (SECP-002B-1A, ADR-013).
 
@@ -326,3 +334,5 @@ class AuditAction(str, Enum):
     onboarding_retired = "onboarding.retired"
     onboarding_refused = "onboarding.refused"
     onboarding_preflight_requested = "onboarding.preflight_requested"
+    target_evidence_collected = "target_evidence.collected"
+    target_evidence_compared = "target_evidence.compared"

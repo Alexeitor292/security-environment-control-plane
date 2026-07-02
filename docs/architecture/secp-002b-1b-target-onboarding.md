@@ -23,7 +23,11 @@ validated in this slice** — preflight is fake-only.
 apps/api/secp_api/                       (control plane — never inspects a real target)
   onboarding.py                          OnboardingBoundarySpec + preflight model + lifecycle
                                          (provider-neutral validation, redaction, hashing)
+  target_evidence.py                     provider-neutral evidence validation, comparison,
+                                         and full-record canonical hashing (pure)
   models.py                              TargetOnboarding, TargetPreflight (immutable-bound)
+                                         TargetEvidenceRecord (append-only)
+  dispatch.py                            request seam for inline simulated worker collection
   services/onboarding.py                 lifecycle: create → preflight → submit → approve →
                                          activate/retire; active_onboarding_for_target + drift
   routers/onboarding.py                  control-plane REST for the whole lifecycle
@@ -32,11 +36,16 @@ apps/api/secp_api/                       (control plane — never inspects a rea
 
 apps/worker/secp_worker/onboarding/      (worker only)
   preflight.py                           PreflightCollector protocol + FakePreflightCollector
+  target_evidence.py                     TargetEvidenceCollector protocol +
+                                         SimulatedTargetEvidenceCollector; live collector sealed
 ```
 
-**Boundary:** `apps/api` never imports the worker preflight collector (or any worker /
-provider / runner / subprocess / secret-resolver code) — enforced by the architecture and
-provisioning boundary tests.
+**Boundary:** API routes/services never import worker collectors and never build observed-target
+evidence directly. They may request the simulated collector result through `dispatch.py`, then
+persist it and run the pure provider-neutral comparison/hash code. `dispatch.py` is the only API
+seam allowed to import the worker simulated evidence collector for inline dev/test execution.
+No API route/service imports provider / runner / subprocess / secret-resolver code, and live
+collector support remains sealed.
 
 ## Onboarding lifecycle
 
@@ -54,6 +63,11 @@ draft ── record preflight ──▶ preflight_pending ── submit ──�
   `evidence_hash`. Required checks must all pass to submit; **logical** isolation additionally
   requires `no_route_to_protected`. A fake collector derives evidence from the declared
   boundary and inspects nothing real.
+- **Target evidence** (`TargetEvidenceRecord`) - immutable provider-neutral observed-target
+  evidence and structured findings. In B1-B-1 the only accepted source is simulated evidence
+  produced by the worker-owned simulated collector. The record hash covers the full immutable
+  context (organization, onboarding, target, source, verification level, status, collection
+  time, payload, and findings), and preflight stores the evidence id/hash relation.
 - **Approval** pins `approved_target_config_hash` + `approved_scope_policy_hash`; **activation**
   refuses if either has drifted since approval. The real-provisioning gate (ADR-013)
   additionally requires an active, non-drifted onboarding for the target.

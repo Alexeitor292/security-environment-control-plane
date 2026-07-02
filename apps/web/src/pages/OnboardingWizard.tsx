@@ -5,6 +5,7 @@ import type {
   IsolationModelName,
   Onboarding,
   OnboardingMode,
+  TargetEvidence,
 } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAsync } from "../hooks";
@@ -18,10 +19,12 @@ import {
   NO_APPROVED_SEGMENTS_MESSAGE,
   ONBOARDING_MODES,
   REVIEW_STATEMENT,
+  SIMULATED_EVIDENCE_NOTICE,
   buildBoundary,
   canAdvanceWizardStep,
   canCreateOnboardingDraft,
   draftFromScope,
+  evidenceHashPrefix,
   emptyDraft,
   isTerminalRejected,
   lifecycleIndex,
@@ -501,6 +504,39 @@ function ApprovedValuePicker({
   );
 }
 
+function EvidencePanel({ onboardingId }: { onboardingId: string }) {
+  const evidence = useAsync(() => api.listTargetEvidence(onboardingId), [onboardingId]);
+  const latest: TargetEvidence | undefined = evidence.data?.[evidence.data.length - 1];
+  return (
+    <div className="panel" style={{ marginTop: 12, background: "#0b0f15" }}>
+      <h3 style={{ marginTop: 0 }}>Observed target evidence</h3>
+      <p className="muted">
+        <strong>simulated evidence</strong> - {SIMULATED_EVIDENCE_NOTICE}.
+      </p>
+      {evidence.error && <div className="error-box">{evidence.error}</div>}
+      {!latest && !evidence.error && (
+        <p className="muted">Run simulated preflight to collect comparison evidence.</p>
+      )}
+      {latest && (
+        <div>
+          <p className="muted mono">
+            source={latest.evidence_source} | verification={latest.verification_level} |
+            hash={evidenceHashPrefix(latest.evidence_hash)} | status={latest.status}
+          </p>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {latest.findings.map((finding) => (
+              <li key={finding.check}>
+                <span className="mono">{finding.status}</span> {finding.check}:{" "}
+                {finding.detail}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LifecycleStep({
   onboarding,
   busy,
@@ -540,6 +576,7 @@ function LifecycleStep({
         no real infrastructure is contacted. Human approval is required before{" "}
         <span className="mono">active</span>.
       </p>
+      <EvidencePanel onboardingId={onboarding.id} />
       {error && <div className="error-box">{error}</div>}
 
       <div className="row" style={{ marginTop: 8 }}>

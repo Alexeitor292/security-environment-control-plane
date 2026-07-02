@@ -25,7 +25,12 @@ from sqlalchemy.orm import Session
 from secp_api.config import Settings, get_settings
 from secp_api.enums import WorkflowKind, WorkflowStatus
 from secp_api.errors import NotFoundError
-from secp_api.models import ProviderInventorySnapshot, WorkflowDispatchOutbox, WorkflowRun
+from secp_api.models import (
+    ProviderInventorySnapshot,
+    TargetPreflight,
+    WorkflowDispatchOutbox,
+    WorkflowRun,
+)
 
 OUTBOX_PENDING = "pending"
 OUTBOX_FAILED = "failed"
@@ -44,6 +49,18 @@ class WorkflowDispatcher(Protocol):
     def dispatch_destroy(self, session: Session, exercise_id: uuid.UUID) -> WorkflowRun: ...
 
     def dispatch_discovery(self, session: Session, snapshot_id: uuid.UUID) -> WorkflowRun: ...
+
+    def dispatch_simulated_preflight(
+        self,
+        session: Session,
+        onboarding_id: uuid.UUID,
+        *,
+        checks: list[dict],
+        verification_level: str,
+        collector_kind: str,
+        collector_identity: str,
+        created_by: uuid.UUID | None,
+    ) -> TargetPreflight: ...
 
 
 class InlineDispatcher:
@@ -77,6 +94,29 @@ class InlineDispatcher:
             "provider discovery is not permitted via the inline dispatcher; "
             "it must run through the Temporal worker path (set "
             "SECP_WORKFLOW_DISPATCH_MODE=temporal)"
+        )
+
+    def dispatch_simulated_preflight(
+        self,
+        session: Session,
+        onboarding_id: uuid.UUID,
+        *,
+        checks: list[dict],
+        verification_level: str,
+        collector_kind: str,
+        collector_identity: str,
+        created_by: uuid.UUID | None,
+    ) -> TargetPreflight:
+        from secp_worker.onboarding.orchestration import run_simulated_preflight
+
+        return run_simulated_preflight(  # type: ignore[return-value]
+            session,
+            onboarding_id,
+            checks=checks,
+            verification_level=verification_level,
+            collector_kind=collector_kind,
+            collector_identity=collector_identity,
+            created_by=created_by,
         )
 
 
@@ -278,6 +318,25 @@ class TemporalDispatcher:
             args={"snapshot_id": str(snapshot_id), "workflow_run_id": str(run.id)},
         )
         return run
+
+    def dispatch_simulated_preflight(
+        self,
+        session: Session,
+        onboarding_id: uuid.UUID,
+        *,
+        checks: list[dict],
+        verification_level: str,
+        collector_kind: str,
+        collector_identity: str,
+        created_by: uuid.UUID | None,
+    ) -> TargetPreflight:
+        from secp_api.errors import DomainError
+
+        raise DomainError(
+            "simulated preflight orchestration is not supported via the Temporal dispatcher "
+            "in SECP-002B-1B-1; use the inline dispatcher (SECP_WORKFLOW_DISPATCH_MODE=inline) "
+            "for dev/test, or wait for a future durable B1-B implementation"
+        )
 
 
 def _utcnow() -> datetime:

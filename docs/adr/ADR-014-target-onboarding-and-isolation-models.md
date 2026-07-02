@@ -229,3 +229,29 @@ weaken or lift the B1-B-0 live-evidence seal, boundary hashing, effective-bounda
 manifest binding, worker gates, scope restrictions, or the logical-isolation no-route
 requirement. No real server, network, bridge, VNet, firewall, provider, OpenTofu binary,
 Docker socket, or secret manager is contacted.
+
+## Amendment - read-only target evidence contract (SECP-002B-1B-1, 2026-07-02)
+
+SECP-002B-1B-1 adds immutable, provider-neutral observed-target evidence records and
+comparison findings, still **simulated-only**:
+
+1. **Worker-owned simulated collection.** API routes/services never directly build or collect
+   observed-target evidence. They may request simulated evidence work through the existing
+   dispatch seam and then persist the returned collector result. The comparison, validation,
+   and canonical hash code is provider-neutral and pure, so API services may use it only after
+   receiving a collector result.
+
+2. **Full-record evidence hash.** `TargetEvidenceRecord.evidence_hash` commits to the complete
+   immutable record context: schema version, organization id, onboarding id, execution target
+   id, evidence source, verification level, status, collection time, canonical evidence payload,
+   and canonical findings. Preflight binding stores and verifies the target-evidence id/hash.
+
+3. **Live evidence remains sealed.** The only collector implementation in this milestone is the
+   deterministic simulated collector. The provider/live collector placeholder remains inert, and
+   any live read-only collector requires a separate reviewed milestone before code may contact a
+   real provider or inspect real infrastructure.
+
+4. **No new side effects or secrets.** The evidence payload and findings are secret-free,
+   append-only, and API-readable only as redacted metadata/findings. This amendment adds no
+   provider SDK/client, HTTP/socket/subprocess/Docker/OpenTofu/Ansible/firewall/provisioning
+   action, endpoint handling, credential resolution, or live network behavior.
