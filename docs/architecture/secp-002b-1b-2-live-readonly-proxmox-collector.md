@@ -74,8 +74,9 @@ future, separately reviewed activation PR.
 | T5 | **API mutation** (accidental or malicious write) | Strict **GET-only** method allowlist enforced in the transport *before send*; endpoint allowlist excludes all task/action/config/console/agent/backup endpoints; unknown endpoints denied. |
 | T6 | **Unsafe retries** (a retried request causes side effects) | Only idempotent GETs are retried, with capped attempts and backoff; retries never change method/endpoint; a task-triggering endpoint can never be reached (not on the allowlist), so retries cannot start work. |
 | T7 | **Inventory-data leakage** (topology/workload metadata over-collected) | Minimal evidence categories only; provider-neutral normalization; redaction rules drop notes/descriptions/tokens/keys; out-of-scope resources filtered before persistence. |
-| T8 | **Tampered evidence** (forged "passing" result) | Full-record immutable evidence hash (unchanged from B1-B-1); comparison fails closed to `unverifiable`; findings never inferred as passing; approval re-verifies the hash. |
-| T9 | **Worker compromise** | Least-privilege read-only identity; default-disabled live gate; durable audit of every job; egress allowlist; short-lived credentials with rotation/revocation; no write capability even if abused. |
+| T8 | **Post-collection tampering / binding drift** (persisted record altered, or its bindings changed, after collection) | Full-record immutable evidence hash + immutable record detect **post-collection** alteration and binding drift; approval and the gate re-verify the hash. This does **not** prove the response was truthful at collection time (see T10 and §1.5). |
+| T9 | **Worker compromise** | Least-privilege read-only identity; default-disabled live gate; durable audit of every job; egress allowlist; short-lived credentials with rotation/revocation; no write capability even if abused. Does not prevent a compromised worker from producing false read data (T10). |
+| T10 | **False-but-plausible evidence** (a compromised target or worker returns well-formed but untrue read data) | **Not fully mitigated — no remote attestation exists.** Plausible false evidence can compare as `passed`; the evidence hash does not detect forgery committed at collection time. TLS identity verification, strict target/config/boundary binding, worker hardening, minimal read-only collection, least-privilege identity, audit, and mandatory human review **reduce** but do not eliminate this residual (§1.5). |
 
 ### 1.4 Residual risks and human review gates
 
@@ -86,12 +87,36 @@ future, separately reviewed activation PR.
   normalized shape is required before activation.
 - **TLS trust** — a mis-issued/mis-pinned certificate could enable interception; certificate
   identity must be verified out of band (checklist §3). `verify_tls=false` remains refused.
-- **Compromised approved target** — SECP treats the target as semi-trusted; a hostile target
-  can only feed misleading *read* data, which fails closed to `unverifiable`/`fail`, never a
-  silent pass.
+- **Compromised target or worker (false evidence)** — the collected payload is **not**
+  independently attested. A compromised target or worker can return well-formed, plausible but
+  untrue read data that **passes** comparison; a hostile target does **not** necessarily produce
+  an `unverifiable`/`fail` result. The evidence hash does not detect forgery committed at
+  collection time (it detects only post-collection alteration and binding drift). This residual
+  is **reduced, not removed**, by TLS identity verification, strict target/config/boundary
+  binding, worker hardening, minimal read-only collection, least-privilege identity, audit, and
+  mandatory human review.
 
 These residuals are accepted **only** behind the activation checklist and an explicit,
 recorded human authorization; none is unlocked by this design PR.
+
+### 1.5 Evidence integrity vs. evidence truthfulness
+
+These are distinct properties and must not be conflated:
+
+- **Integrity (what the hash gives us).** The immutable, full-record evidence hash detects
+  **post-collection alteration** of the persisted record and **binding drift** (a record that
+  no longer matches its onboarding / target / boundary / authorization bindings). Approval and
+  the worker gate re-verify the hash.
+- **Truthfulness (what the hash does NOT give us).** The hash does **not** prove the provider
+  response was truthful, complete, or independently attested, and it cannot detect evidence that
+  was **false at the moment of collection** (a compromised target or worker returning plausible
+  but untrue data). SECP has **no remote attestation** of the target in this design.
+
+Consequently, well-formed false data can compare as `passed`; a hostile target is **not**
+guaranteed to fail closed. The controls in this document reduce the likelihood and blast radius
+of false evidence but are **not** a substitute for attestation — which is why activation
+additionally mandates out-of-band verification (endpoint/certificate identity, effective
+permissions) and human review before any real collector is enabled.
 
 ## 2. Read-only collector contract
 
@@ -105,9 +130,9 @@ The first collector may observe **only** what the boundary comparison already co
 - **VM-ID availability / ranges** — in-use VM-IDs / free ranges (for `vmid_range`
   non-overlap).
 - **Capacity / quotas** — node/cluster capacity signals (for quota headroom).
-- **Isolation-relevant posture signals** — read-only indicators relevant to
-  `fully_segregated` (e.g. presence of an external route / default gateway on a segment) —
-  observed, never changed.
+- **Isolation-relevant posture signals** — specifically approved, allowlisted read-only
+  observations relevant to `fully_segregated` (see §2.5), observed, never changed. Generic
+  inventory alone is **not** sufficient to pass isolation.
 
 ### 2.2 Out of scope for the first connector
 
@@ -134,7 +159,35 @@ the existing `_contains_secret_token` guard).
 Missing, malformed, ambiguous, partial, or errored observations map to **`unverifiable`** per
 comparison dimension (existing `missing_evidence_findings` / fail-closed semantics). A category
 is `passed` only on an explicit, well-formed, matching observation. `unverifiable` and `fail`
-both block approval; silence is never success.
+both block approval; silence is never success. (Passing comparison proves the observation
+*matched the declared boundary* — not that the observation was *true*; see §1.5.)
+
+### 2.5 Verifying `fully_segregated` isolation (necessary rigor)
+
+Generic inventory data — the mere **presence** of a bridge/VNet, a segment **name**, or a
+node/storage list — is **insufficient** to pass `fully_segregated` isolation. Names and
+presence do not prove isolation.
+
+A future collector may return `passed` for `fully_segregated` **only** when **every** required
+isolation assertion is verified using specifically approved, allowlisted, read-only
+observations and deterministic rules. At minimum the applicable required facts include:
+
+- **Dedicated lab segment identity** — the segment is the approved dedicated lab segment by
+  verified identity, not merely a matching name.
+- **No protected-network uplink/routing** — no uplink or route from the lab segment to any
+  management / home / corporate / storage / public network class.
+- **No default route / no external connectivity where policy is `deny`** — no default gateway
+  and no external egress on the segment when the declared boundary denies external
+  connectivity.
+- **Host-side isolation controls** — any host/hypervisor-side isolation controls required by
+  the declared boundary are observed to be in place.
+
+When any required fact is **unavailable, ambiguous, not safely observable with read-only
+allowlisted calls, or out of scope** for the first connector, the isolation result is
+**`unverifiable`** and **blocks approval**. It must **never** be inferred from incomplete
+inventory, from segment names, or from segment presence. Which of these facts are safely
+observable read-only is itself part of the reviewed activation decision; any fact that is not
+so observable remains `unverifiable`.
 
 ## 3. Non-mutation enforcement design
 
@@ -172,10 +225,14 @@ adapter code and run with the live gate disabled.
   The API never resolves it.
 - **No secret exposure:** secrets are never logged, persisted, hashed, returned in API
   responses, or written to audit payloads; resolution errors are redacted.
-- **Job binding:** every live collection job binds to `(execution_target_id, config_hash,
-  authorization_id)` — an approved target identity, its pinned immutable config hash, and an
-  explicit human authorization record. The worker refuses if the current target hash differs
-  from the authorized hash (drift ⇒ fail closed).
+- **Complete job binding:** every live collection job binds to, at minimum, **all** of:
+  `execution_target_id`; the target `config_hash`; the `onboarding_id`; the onboarding
+  `boundary_hash`; the `authorization_id` **and** the authorization's **expiry/version**; the
+  `evidence_source` / `verification_level`; and the **collector-contract / endpoint-allowlist
+  version**. The worker re-verifies every bound value before connecting. **Any** mismatch,
+  expired or superseded authorization, target/config/boundary drift, or collector-contract /
+  allowlist version mismatch **fails closed** and produces **no reusable passing result**
+  (a prior job's `passed` outcome is never reused under a changed binding).
 - **Rotation / revocation / expiration / failure (conceptual):** credentials are short-lived
   and rot=able at the secret store without code change; a revoked/expired credential yields a
   redacted resolution failure and an `unverifiable` result — never a partial write, never a
@@ -189,9 +246,13 @@ adapter code and run with the live gate disabled.
 - **Default-disabled feature gate:** a dedicated setting (e.g. `SECP_ENABLE_LIVE_READONLY_COLLECTOR`,
   default `false`, refused in production without explicit review) gates the entire live path.
   With it disabled, the collector is inert and the seal stands.
-- **Idempotency:** each job has a deterministic idempotency key
-  (`sha256(target_config_hash + authorization_id + evidence_source)`); a duplicate request maps
-  to the same job.
+- **Idempotency:** each job has a deterministic idempotency key derived from the **full
+  binding** — `sha256(execution_target_id + config_hash + onboarding_id + boundary_hash +
+  authorization_id + authorization_version + evidence_source + verification_level +
+  endpoint_allowlist_version)`. A duplicate request with an identical binding maps to the same
+  job; if **any** bound value differs — including the authorization version/expiry or the
+  collector-contract / endpoint-allowlist version — the key differs and **no** prior passing
+  result is reused.
 - **Timeout / retry / cancellation:** bounded per-request timeout; capped, backed-off retries
   of idempotent GETs only; a job is cancellable; a cancelled/timed-out job records
   `unverifiable` and audits, never a partial pass.

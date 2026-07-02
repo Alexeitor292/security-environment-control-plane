@@ -88,3 +88,64 @@ def test_live_evidence_seal_is_unchanged():
     assert B1B0_LIVE_EVIDENCE_SEALED is True
     with pytest.raises(LiveEvidenceSealedError):
         SealedProviderTargetEvidenceCollector().collect(declared_boundary={})
+
+
+def _normalized(path: Path) -> str:
+    """Lowercased text with all whitespace runs collapsed to single spaces.
+
+    Markdown wraps phrases across lines, so substring checks must be newline-insensitive.
+    """
+    return " ".join(path.read_text(encoding="utf-8").lower().split())
+
+
+def test_integrity_vs_truthfulness_is_documented():
+    """Correction 1: the hash proves integrity/binding, not truthfulness; no remote attestation."""
+    text = _normalized(DESIGN)
+    for marker in (
+        "evidence integrity vs. evidence truthfulness",
+        "post-collection alteration",
+        "binding drift",
+        "prove the provider response was truthful",
+        "remote attestation",
+        "false at the moment of collection",
+    ):
+        assert marker in text, f"design doc missing integrity/truthfulness statement: {marker!r}"
+    # The over-strong claim that a hostile target necessarily fails closed must be gone.
+    assert "can only feed misleading" not in text
+    assert "never a silent pass" not in text
+    adr = _normalized(ADR)
+    assert "no remote attestation" in adr
+    assert "post-collection alteration and binding drift" in adr
+
+
+def test_complete_job_binding_is_documented():
+    """Correction 2: live jobs + idempotency key bind the full identity and fail closed."""
+    text = _normalized(DESIGN)
+    for marker in (
+        "execution_target_id",
+        "config_hash",
+        "onboarding_id",
+        "boundary_hash",
+        "authorization_id",
+        "expiry/version",
+        "verification_level",
+        "endpoint_allowlist_version",
+        "no reusable passing result",
+        "fails closed",
+    ):
+        assert marker in text, f"design doc missing job-binding element: {marker!r}"
+
+
+def test_fully_segregated_verification_is_documented():
+    """Correction 3: generic inventory is insufficient; required facts verified or unverifiable."""
+    text = _normalized(DESIGN)
+    for marker in (
+        "insufficient",
+        "dedicated lab segment identity",
+        "no protected-network uplink",
+        "no default route",
+        "host-side isolation controls",
+        "inferred from incomplete inventory",
+        "unverifiable",
+    ):
+        assert marker in text, f"design doc missing fully_segregated safeguard: {marker!r}"

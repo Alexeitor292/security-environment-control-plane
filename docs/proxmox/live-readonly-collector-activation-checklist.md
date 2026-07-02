@@ -45,6 +45,18 @@ a specific approved target. The collector is **read-only**; it never mutates a t
 - [ ] Every authorization, job start/complete/fail, and refusal is audited (secret-free).
 - [ ] Alerting on unexpected methods/endpoints/redirects/egress is configured and tested.
 - [ ] A human reviewed the normalized evidence shape + redaction rules for information leakage.
+- [ ] Reviewer explicitly accepts that collected evidence is **not remotely attested**: the
+      full-record hash proves post-collection **integrity and binding**, not **truthfulness**;
+      a compromised target or worker could return plausible false data that passes comparison.
+      Human review and out-of-band checks (not the hash) are what compensate.
+
+## 6a. Fully-segregated isolation verification
+- [ ] `fully_segregated` is **not** inferred from inventory, bridge/VNet presence, or segment
+      names. Each required fact is verified by an approved, allowlisted, read-only observation:
+      dedicated lab segment **identity**; **no** protected-network uplink/route; **no** default
+      route / external egress where policy is `deny`; required host-side isolation controls.
+- [ ] Any required isolation fact that is unavailable, ambiguous, not safely observable, or out
+      of scope yields **`unverifiable`** and **blocks approval** — never a pass.
 
 ## 7. Rollback / revocation procedure tested
 - [ ] Disabling the feature gate immediately inerts the collector (verified).

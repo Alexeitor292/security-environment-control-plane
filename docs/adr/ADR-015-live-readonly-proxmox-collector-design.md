@@ -40,21 +40,40 @@ credential/endpoint is created, and the live-evidence seal is not lifted.
    agent/backup/upload/write endpoint is ever reachable. This is proven with a fake transport
    **before** any live-capable code.
 
-4. **Credentials stay opaque and worker-only.** Control-plane records hold only an opaque
-   `secret_ref`; the worker resolves it just-in-time into a transient credential and never
-   logs/persists/hashes/returns/audits the secret. Every collection job binds to an approved
-   `(execution_target_id, config_hash, authorization_id)`; hash drift fails closed.
+4. **Credentials stay opaque and worker-only; jobs are fully bound.** Control-plane records
+   hold only an opaque `secret_ref`; the worker resolves it just-in-time into a transient
+   credential and never logs/persists/hashes/returns/audits the secret. Every collection job —
+   and its idempotency key — binds, at minimum, **all** of: `execution_target_id`, the target
+   `config_hash`, `onboarding_id`, the onboarding `boundary_hash`, `authorization_id` **and**
+   authorization expiry/version, `evidence_source` / `verification_level`, and the
+   collector-contract / endpoint-allowlist version. Any mismatch, expiry, target/config/boundary
+   drift, or contract-version mismatch **fails closed** and yields **no reusable passing
+   result**.
 
 5. **Durable, default-disabled execution.** Live collection runs on the durable worker path
    only (inline refused), behind a **default-disabled** feature gate, with deterministic
    idempotency, bounded timeout, capped idempotent-GET retries, cancellation, immutable
    evidence retention, and fail-closed (`unverifiable`) failure semantics.
 
-6. **Fail closed, never infer.** Missing/malformed/ambiguous observations are `unverifiable`;
-   a dimension passes only on an explicit matching observation. Tampered/forged evidence is
-   caught by the immutable full-record hash.
+6. **Fail closed, never infer — but note integrity ≠ truthfulness.** Missing/malformed/
+   ambiguous observations are `unverifiable`; a dimension passes only on an explicit matching
+   observation. The immutable full-record hash detects **post-collection alteration and binding
+   drift** — it does **not** prove the response was truthful and cannot detect evidence that was
+   **false at collection time**. There is **no remote attestation**: a compromised target or
+   worker can return plausible false data that passes comparison; a hostile target does **not**
+   necessarily fail closed. TLS identity, target/config/boundary binding, worker hardening,
+   minimal collection, audit, and human review reduce — but do not remove — this residual.
 
-7. **Human activation gate.** A real collector may be enabled only after the
+7. **`fully_segregated` isolation requires specific verification.** Generic inventory, bridge/
+   VNet presence, and segment names are **insufficient**. A collector may return `passed` for
+   `fully_segregated` only when every required isolation assertion — dedicated lab segment
+   identity, no protected-network uplink/routing, no default route / external connectivity where
+   policy is `deny`, and required host-side isolation controls — is verified via approved,
+   allowlisted, read-only observations and deterministic rules. Any unavailable, ambiguous,
+   unsafely-observable, or out-of-scope fact is `unverifiable` and blocks approval; it is never
+   inferred from incomplete inventory.
+
+8. **Human activation gate.** A real collector may be enabled only after the
    [activation checklist](../proxmox/live-readonly-collector-activation-checklist.md) is
    completed and an explicit human authorization is recorded — in a **future** PR.
 
