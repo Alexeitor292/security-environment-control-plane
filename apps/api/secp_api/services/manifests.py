@@ -112,6 +112,26 @@ def _resolve_onboarding_binding(session, actor, plan, target) -> dict:
     tc_reason = preflight_toolchain_matches_active(session, target, pf)
     if tc_reason is not None:
         _refuse(actor, plan, f"onboarding toolchain provenance drift: {tc_reason}")
+    plan_toolchain = (
+        str(plan.toolchain_profile_id) if plan.toolchain_profile_id is not None else None,
+        plan.toolchain_profile_hash,
+    )
+    preflight_toolchain = (
+        str(pf.toolchain_profile_id) if pf.toolchain_profile_id is not None else None,
+        pf.toolchain_profile_hash,
+    )
+    for label, binding in (
+        ("plan", plan_toolchain),
+        ("approved preflight", preflight_toolchain),
+    ):
+        if (binding[0] is None) != (binding[1] is None):
+            _refuse(actor, plan, f"{label} toolchain provenance binding is incomplete")
+    if plan_toolchain != preflight_toolchain:
+        _refuse(
+            actor,
+            plan,
+            "approved preflight toolchain provenance disagrees with the plan's pinned profile",
+        )
     # Effective execution boundary (ADR-014 §2): recompute from the active onboarding +
     # current target scope and require exact agreement with the plan's bound boundary. Fail
     # closed if it is empty, absent on the plan, broadened, or otherwise changed.

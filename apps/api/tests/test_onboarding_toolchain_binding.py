@@ -57,6 +57,77 @@ def _target_with_toolchain(session, principal, slug):
     return target, tp
 
 
+def _profile_variant(label: str, byte: str) -> dict:
+    profile = copy.deepcopy(VALID_TOOLCHAIN_PROFILE)
+    profile["module_bundle_id"] = f"secp-fake-lab-bundle-{label}"
+    profile["module_bundle_hash"] = "sha256:" + byte * 32
+    return profile
+
+
+def _target_with_two_active_toolchains(session, principal, slug):
+    from secp_api.services import targets
+
+    target = targets.register_target(
+        session,
+        principal,
+        display_name=f"TC2-{slug}",
+        plugin_name="proxmox",
+        config={"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True},
+        secret_ref=f"env:SECP_PROVIDER_SECRET__{slug.upper()}",
+        scope_policy={"provisioning": copy.deepcopy(VALID_PROVISIONING_SCOPE)},
+        address_spaces=[{"cidr_block": "10.60.0.0/16", "subnet_prefix": 24}],
+    )
+    older = toolchain_svc.register_toolchain_profile(
+        session,
+        principal,
+        target_id=target.id,
+        name=f"{slug}-v1",
+        profile=_profile_variant(f"{slug}-old", "aa"),
+    )
+    current = toolchain_svc.register_toolchain_profile(
+        session,
+        principal,
+        target_id=target.id,
+        name=f"{slug}-v2",
+        profile=_profile_variant(f"{slug}-current", "bb"),
+    )
+    session.commit()
+    assert older.version < current.version
+    assert older.status == current.status
+    return target, older, current
+
+
+def _approved_plan_with_reservations(session, principal, target, slug):
+    from secp_api.models import TargetPreflight
+    from secp_api.services import catalog, exercises, planning, reservations
+    from tests.conftest import VALID_DEFINITION, onboard_and_activate
+
+    onboarding = onboard_and_activate(session, principal, target)
+    preflight = session.get(TargetPreflight, onboarding.approved_preflight_id)
+    tmpl = catalog.create_template(session, principal, name=f"TCP-{slug}", slug=f"tcp-{slug}")
+    ver = catalog.create_version(
+        session, principal, template_id=tmpl.id, definition=VALID_DEFINITION
+    )
+    ex = exercises.create_exercise(
+        session,
+        principal,
+        template_id=tmpl.id,
+        version_id=ver.id,
+        name=f"tcp-{slug}",
+        execution_target_id=target.id,
+    )
+    exercises.validate_exercise(session, principal, ex.id)
+    plan = planning.generate_plan(session, principal, ex.id)
+    planning.submit_plan(session, principal, plan.id)
+    planning.approve_plan(session, principal, plan.id, "ok")
+    for team in ("team1", "team2"):
+        reservations.reserve_network(
+            session, principal, target_id=target.id, team_ref=team, exercise_id=ex.id
+        )
+    session.commit()
+    return onboarding, preflight, plan
+
+
 def test_toolchain_drift_refuses_onboarding_approval(session, principal):
     target, _tp = _target_with_toolchain(session, principal, "appr")
     ob = onb.create_onboarding(
@@ -123,6 +194,41 @@ def test_toolchain_drift_refuses_manifest_generation(session, principal):
         manifests.generate_manifest(session, principal, plan.id)
 
 
+def test_manifest_generation_refuses_plan_pinned_to_older_active_toolchain(session, principal):
+    """Regression: preflight == current active is not enough; plan must also pin exactly
+    that same toolchain profile id/hash before a manifest can be created."""
+    from secp_api.models import DeploymentPlan, ProvisioningManifest
+    from secp_api.services import manifests
+
+    target, older, current = _target_with_two_active_toolchains(session, principal, "pin")
+    _onboarding, preflight, plan = _approved_plan_with_reservations(
+        session, principal, target, "pin"
+    )
+    assert preflight.toolchain_profile_id == current.id
+    assert preflight.toolchain_profile_hash == current.content_hash
+    assert plan.toolchain_profile_id == current.id
+    assert plan.toolchain_profile_hash == current.content_hash
+
+    # Direct-SQL corruption: the plan still points at a valid, active profile, but it is the
+    # older one, not the approved preflight/current-active profile.
+    session.execute(
+        DeploymentPlan.__table__.update()
+        .where(DeploymentPlan.__table__.c.id == plan.id)
+        .values(toolchain_profile_id=older.id, toolchain_profile_hash=older.content_hash)
+    )
+    session.commit()
+    session.expire_all()
+
+    with pytest.raises(ValidationFailedError, match="toolchain provenance"):
+        manifests.generate_manifest(session, principal, plan.id)
+    assert (
+        session.query(ProvisioningManifest)
+        .filter(ProvisioningManifest.deployment_plan_id == plan.id)
+        .count()
+        == 0
+    )
+
+
 def test_toolchain_disabled_after_manifest_refuses_real_provisioning(session, principal, lab_env):
     env = lab_env()
     toolchain_svc.disable_toolchain_profile(session, principal, env.toolchain.id)
@@ -133,6 +239,39 @@ def test_toolchain_disabled_after_manifest_refuses_real_provisioning(session, pr
             env.manifest.id,
             ProvisioningOperationKind.dry_run,
             executor=FakeProcessExecutor(show_json=build_fixture_show_json(env.manifest.content)),
+            settings=REAL_ON,
+            dispatch_mode="temporal",
+        )
+
+
+def test_worker_gate_refuses_plan_pinned_to_older_active_toolchain(session, principal):
+    """Worker-side equivalent: if a valid manifest exists and the plan is later corrupted to
+    an older still-active profile, the gate refuses before rendering/process work."""
+    from secp_api.models import DeploymentPlan
+    from secp_api.services import manifests
+
+    target, older, current = _target_with_two_active_toolchains(session, principal, "gate")
+    _onboarding, preflight, plan = _approved_plan_with_reservations(
+        session, principal, target, "gate"
+    )
+    assert preflight.toolchain_profile_id == current.id
+    manifest = manifests.generate_manifest(session, principal, plan.id)
+    session.commit()
+
+    session.execute(
+        DeploymentPlan.__table__.update()
+        .where(DeploymentPlan.__table__.c.id == plan.id)
+        .values(toolchain_profile_id=older.id, toolchain_profile_hash=older.content_hash)
+    )
+    session.commit()
+    session.expire_all()
+
+    with pytest.raises(ProvisioningRefusedError, match="toolchain profile"):
+        run_real_provisioning(
+            session,
+            manifest.id,
+            ProvisioningOperationKind.dry_run,
+            executor=FakeProcessExecutor(show_json=build_fixture_show_json(manifest.content)),
             settings=REAL_ON,
             dispatch_mode="temporal",
         )
