@@ -118,12 +118,15 @@ def _recording_factory(responses):
 def _binding(**over) -> LiveReadCollectionBinding:
     base = dict(
         execution_target_id="t-1",
-        target_config_hash=canonical_sha256(TARGET_CONFIG),
+        target_config_hash=canonical_sha256(
+            parse_proxmox_target_config(TARGET_CONFIG).connection_representation()
+        ),
         onboarding_id="ob-1",
         boundary_hash=canonical_sha256(BOUNDARY),
         authorization_id="auth-1",
         authorization_version=1,
         authorization_expiry="2999-01-01T00:00:00Z",
+        credential_ref=SECRET_REF,
         evidence_source=LIVE_READ_EVIDENCE_SOURCE,
         verification_level=VerificationLevel.live_verified.value,
         collector_contract_version=LIVE_READ_COLLECTOR_CONTRACT_VERSION,
@@ -318,19 +321,83 @@ def test_secret_value_is_never_echoed_by_config_rejection():
 # --- plugin-owned target-config model ---------------------------------------------
 
 
-def test_parse_accepts_valid_and_binding_representation_is_secret_free():
+def test_connection_representation_excludes_credential_ref():
     cfg = parse_proxmox_target_config(dict(TARGET_CONFIG))
     assert isinstance(cfg, ValidatedProxmoxTargetConfig)
-    rep = cfg.binding_representation()
-    assert set(rep) == {"base_url", "verify_tls", "credential_ref"}
+    rep = cfg.connection_representation()
+    # ONLY base_url + verify_tls are hashed; the opaque credential_ref is never in the hash.
+    assert set(rep) == {"base_url", "verify_tls"}
+    assert "credential_ref" not in rep
     assert rep["verify_tls"] is True
-    # Deterministic + equal to hashing the original 3-field config.
-    assert canonical_sha256(rep) == canonical_sha256(TARGET_CONFIG)
+    # The credential reference value must not appear in the canonical (hashed) representation.
+    assert SECRET_REF not in canonical_sha256(rep)
+    from secp_worker.onboarding.live_readonly import canonical_json
+
+    assert SECRET_REF not in canonical_json(rep)
 
 
-def test_binding_default_config_hash_matches_validated_representation():
+def test_binding_default_config_hash_matches_connection_representation():
     cfg = parse_proxmox_target_config(dict(TARGET_CONFIG))
-    assert _binding().target_config_hash == canonical_sha256(cfg.binding_representation())
+    assert _binding().target_config_hash == canonical_sha256(cfg.connection_representation())
+
+
+def test_changing_only_credential_ref_fails_before_verifier_even_though_hash_matches():
+    # The connection hash covers only base_url + verify_tls, so a config whose credential_ref
+    # differs still hashes identically — the three-way equality check (not the hash) catches it.
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    other_config = {**TARGET_CONFIG, "credential_ref": "env:SECP_PROVIDER_SECRET__OTHER"}
+    # Sanity: the connection hash is unchanged by a different credential_ref.
+    assert (
+        canonical_sha256(parse_proxmox_target_config(other_config).connection_representation())
+        == _binding().target_config_hash
+    )
+    with pytest.raises(InvalidLiveReadBinding):
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            target_config=other_config,  # binding.credential_ref (SECRET_REF) != config ref
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+def test_binding_credential_ref_mismatch_fails_before_verifier():
+    # binding.credential_ref differs from the (matching) config + supplied secret ref.
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    with pytest.raises(InvalidLiveReadBinding):
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            binding=_binding(credential_ref="env:SECP_PROVIDER_SECRET__BINDINGREF"),
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+def test_credential_reference_never_echoed_in_mismatch_error():
+    resolver = RecordingResolver()
+    factory, _created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    secret_like_ref = "env:SECP_PROVIDER_SECRET__TOPSECRET"
+    try:
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            secret_ref=secret_like_ref,  # != binding/config credential_ref
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    except InvalidLiveReadBinding as exc:
+        assert secret_like_ref not in str(exc)
+        assert SECRET_REF not in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected credential reference mismatch")
 
 
 def test_secret_ref_mismatch_refused_before_verifier():

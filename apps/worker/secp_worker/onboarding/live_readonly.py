@@ -56,6 +56,7 @@ _STRING_FIELDS = (
     "boundary_hash",
     "authorization_id",
     "authorization_expiry",
+    "credential_ref",
     "evidence_source",
     "verification_level",
     "collector_contract_version",
@@ -143,6 +144,8 @@ class LiveReadCollectionBinding:
     authorization_id: str
     authorization_version: int
     authorization_expiry: str  # canonical ISO-8601 UTC, e.g. "2026-07-02T00:00:00Z"
+    # Opaque credential reference — bound ONLY by exact in-memory equality, NEVER hashed/logged.
+    credential_ref: str
     evidence_source: str
     verification_level: str
     collector_contract_version: str
@@ -205,15 +208,17 @@ def run_live_readonly_collection(
     b. **binding structure** — completeness/expiry/internal-consistency;
     c. **parse/validate config** — the raw ``target_config`` is parsed into the plugin-owned,
        secret-free ``ValidatedProxmoxTargetConfig`` (rejects unknown/secret/nested/typed fields);
-    d-e. **target-config hash** — canonical hash of the validated model's binding representation,
-       compared to ``binding.target_config_hash``;
-    f. **boundary hash** — recomputed from ``declared_boundary`` and compared to
+    d. **connection hash** — canonical hash of the validated model's connection representation
+       (ONLY ``base_url`` + ``verify_tls``; ``credential_ref`` is never hashed), compared to
+       ``binding.target_config_hash``;
+    e. **boundary hash** — recomputed from ``declared_boundary`` and compared to
        ``binding.boundary_hash``;
-    g. **credential reference** — the validated ``credential_ref`` must equal the supplied
-       ``secret_ref`` by exact in-memory equality (never logged/hashed);
-    h. **authorization** — the verifier must approve the binding (before secret resolution);
-    i. **secret resolution** — transient credential via the injected resolver;
-    j-k. **transport + collect** — transport built from the VALIDATED config (never a raw dict)
+    f. **credential reference** — exact three-way in-memory equality
+       ``binding.credential_ref == validated_config.credential_ref == secret_ref`` (never
+       hashed/logged; the mismatch error never echoes the reference);
+    g. **authorization** — the verifier must approve the binding (before secret resolution);
+    h. **secret resolution** — transient credential via the injected resolver;
+    i-j. **transport + collect** — transport built from the VALIDATED config (never a raw dict)
        + transient token; returns in-memory observed data only.
 
     It never persists evidence, creates a ``TargetEvidenceRecord``, or unseals live evidence.
@@ -233,18 +238,21 @@ def run_live_readonly_collection(
         validated_config = parse_proxmox_target_config(target_config)
     except ProxmoxTargetConfigError as exc:
         raise InvalidLiveReadBinding(f"invalid target configuration: {exc}") from exc
-    # d-e. Canonical-hash ONLY the validated model's secret-free binding representation and match.
+    # d. Canonical-hash ONLY the connection identity (base_url + verify_tls). The opaque
+    #    credential_ref is deliberately NOT part of this hash.
     _assert_hash_matches(
-        validated_config.binding_representation(),
+        validated_config.connection_representation(),
         binding.target_config_hash,
         "target configuration",
     )
-    # f. Recompute + match the declared-boundary hash.
+    # e. Recompute + match the declared-boundary hash.
     _assert_hash_matches(declared_boundary, binding.boundary_hash, "declared boundary")
-    # g. Opaque credential-reference binding — exact in-memory equality only (ref never hashed).
-    if secret_ref != validated_config.credential_ref:
+    # f. Opaque credential reference — bound ONLY by exact three-way in-memory equality
+    #    (binding == validated config == supplied secret ref). Never hashed/logged; the error
+    #    never echoes the reference value.
+    if not (binding.credential_ref == validated_config.credential_ref == secret_ref):
         raise InvalidLiveReadBinding(
-            "supplied secret reference does not match the target credential reference"
+            "credential reference mismatch (binding / validated config / supplied secret ref)"
         )
     # h. Authorization verification — must approve before any secret resolution.
     if not authorization_verifier.verify(binding, now=now):

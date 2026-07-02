@@ -9,8 +9,10 @@ secret value).
 
 Rejected raw configuration values are never logged, serialized, returned, or hashed — parse
 errors report only field/key names and value *types*, never values. The validated model exposes
-a deterministic, secret-free binding representation containing only the three allowed fields,
-which is the only thing that is ever canonical-hashed for the binding contract.
+a deterministic **connection representation** containing ONLY ``base_url`` + ``verify_tls`` — the
+only thing that is ever canonical-hashed. The opaque ``credential_ref`` is deliberately excluded
+from the hash: an opaque credential reference is never hashed and is bound only through exact
+in-memory equality.
 """
 
 from __future__ import annotations
@@ -37,13 +39,13 @@ class ValidatedProxmoxTargetConfig:
     verify_tls: bool
     credential_ref: str
 
-    def binding_representation(self) -> dict:
-        """Deterministic, secret-free dict with ONLY the three allowed fields (for hashing)."""
-        return {
-            "base_url": self.base_url,
-            "verify_tls": self.verify_tls,
-            "credential_ref": self.credential_ref,
-        }
+    def connection_representation(self) -> dict:
+        """Deterministic connection identity for hashing — ONLY ``base_url`` + ``verify_tls``.
+
+        The opaque ``credential_ref`` is deliberately EXCLUDED: an opaque credential reference is
+        never hashed; it is bound only through exact in-memory equality.
+        """
+        return {"base_url": self.base_url, "verify_tls": self.verify_tls}
 
 
 def parse_proxmox_target_config(raw: object) -> ValidatedProxmoxTargetConfig:
