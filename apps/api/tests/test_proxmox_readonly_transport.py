@@ -231,6 +231,62 @@ def test_valid_paths_remain_canonical_and_allowed():
         assert_request_allowed("GET", path)  # does not raise
 
 
+def test_all_allowlisted_templates_are_canonical_and_allowed():
+    """Regression: every allowlisted template, instantiated concretely, stays canonical + valid."""
+    for template in ALLOWED_PATH_TEMPLATES:
+        concrete = template.replace("{node}", "pve-node-1")
+        assert "{" not in concrete, template
+        assert canonical_path_violation(concrete) is None, concrete
+        assert path_is_allowed(concrete), concrete
+        assert_request_allowed("GET", concrete)  # does not raise
+
+
+# --- canonical absolute request path: no query/fragment/matrix/whitespace/control ---
+
+# Each of these is a non-canonical *request form* that must be refused before any lookup.
+NON_CANONICAL_REQUEST_FORMS = [
+    "/nodes?full=1",  # query string
+    "/nodes?anything",  # bare query
+    "/nodes/node-a;param=value",  # matrix parameter
+    "/nodes/node-a#fragment",  # fragment
+    "/nodes/node-a ",  # raw trailing space
+    "/nodes /node-a",  # raw internal space
+    "/nodes\n",  # raw newline (C0 control)
+    "/nodes\t/status",  # raw tab
+    "/nodes\x00",  # raw NUL
+    "/nodes\x1f",  # raw C0 control
+    "/nodes\x7f",  # raw DEL
+    "/nodes\x85",  # raw C1 control (NEL)
+    "nodes",  # relative (no leading slash)
+    "",  # empty
+]
+
+
+@pytest.mark.parametrize("path", NON_CANONICAL_REQUEST_FORMS, ids=lambda p: repr(p))
+def test_non_canonical_request_forms_refused_before_lookup(path):
+    assert canonical_path_violation(path) is not None, repr(path)
+    assert not path_is_allowed(path), repr(path)
+    with pytest.raises((NonCanonicalPathRefused, CrossHostRequestRefused)):
+        assert_request_allowed("GET", path)
+    t = FakeProxmoxReadOnlyTransport({path: [{"node": "x"}]})
+    with pytest.raises((NonCanonicalPathRefused, CrossHostRequestRefused)):
+        t.get(path)
+    assert t.calls == []  # refused before any canned-response lookup
+
+
+def test_query_string_refused_even_for_allowlisted_prefix():
+    # /nodes is allowlisted, but ANY query string is refused in this milestone.
+    assert canonical_path_violation("/nodes?full=1") == "query string not permitted"
+    with pytest.raises(NonCanonicalPathRefused):
+        assert_request_allowed("GET", "/nodes?full=1")
+
+
+def test_relative_path_is_refused():
+    assert canonical_path_violation("nodes") == "path must be absolute (exactly one leading slash)"
+    with pytest.raises(NonCanonicalPathRefused):
+        assert_request_allowed("GET", "nodes")
+
+
 # --- offline: no network-capable imports -----------------------------------------
 
 

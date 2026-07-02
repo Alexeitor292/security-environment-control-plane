@@ -9,6 +9,9 @@ this PR. It encodes the ADR-015 non-mutation contract as data + deterministic ru
   VM-ID / resource inventory, capacity / quotas, and approved isolation observations).
 * Unknown paths are refused before lookup.
 * Absolute URLs / cross-host destinations are refused.
+* Only **canonical absolute paths** are accepted: exactly one leading ``/`` and no query,
+  fragment, matrix parameter, raw whitespace/control character, encoded delimiter, repeated
+  slash, or dot-segment traversal (see :func:`canonical_path_violation`).
 
 It performs no I/O, imports no HTTP/socket/subprocess/provider SDK, and contacts nothing. It
 does not enable, construct, or invoke any real collector. Task/console/guest-agent/backup/
@@ -94,33 +97,53 @@ _DANGEROUS_DECODED: frozenset[str] = frozenset(
 
 
 def canonical_path_violation(path: str) -> str | None:
-    """Return a reason string if ``path`` is non-canonical (could decode to a different endpoint
-    path), else ``None``. Evaluated on the path portion (before any ``?``).
+    """Return a reason if ``path`` is not a canonical absolute request path, else ``None``.
 
-    Deterministic and pure. Rejects, in order: raw backslashes; malformed percent-encoding; any
-    percent-escape that decodes to a delimiter/control character (e.g. ``%2f``/``%2F``->'/',
-    ``%5c``->'\\', ``%2e``->'.', ``%00``); ambiguous repeated internal slashes; and raw
-    dot-segment traversal (``.``/``..``). Encoded traversal is caught by the decode rule.
+    The **entire** string is evaluated (not just the part before ``?``): the closed allowlist
+    accepts only a canonical absolute path with no query, fragment, matrix parameter, raw
+    whitespace, or raw control characters. Deterministic and pure. Rejects, in order:
+
+    * a path that is not exactly one leading ``/`` (relative paths; ``//`` prefixes);
+    * any raw ``?`` (query — none are allowlisted in this milestone), ``#`` (fragment), or
+      ``;`` (matrix parameter);
+    * any raw whitespace or C0/C1 control character;
+    * raw backslashes;
+    * malformed percent-encoding (a ``%`` not beginning a valid ``%XX`` triplet);
+    * any percent-escape that decodes to a delimiter/control character (``%2f``/``%2F``->'/',
+      ``%5c``->'\\', ``%2e``->'.', ``%00`` …) — this also catches encoded traversal;
+    * ambiguous repeated internal slashes (``//``);
+    * raw dot-segment traversal (``.`` / ``..``).
     """
-    p = path.split("?", 1)[0]
-    if "\\" in p:
+    if not path.startswith("/"):
+        return "path must be absolute (exactly one leading slash)"
+    if path.startswith("//"):
+        return "ambiguous repeated slash"
+    # No query, fragment, or matrix parameters are permitted in this milestone.
+    for ch, label in (("?", "query string"), ("#", "fragment"), (";", "matrix parameter")):
+        if ch in path:
+            return f"{label} not permitted"
+    # No raw whitespace or C0/C1 control characters.
+    for ch in path:
+        codepoint = ord(ch)
+        if ch.isspace() or codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+            return "raw whitespace or control character"
+    if "\\" in path:
         return "raw backslash"
     # Every '%' must begin a well-formed %XX triplet.
-    pos = p.find("%")
+    pos = path.find("%")
     while pos != -1:
-        if not _PERCENT_TRIPLET_RE.match(p, pos):
+        if not _PERCENT_TRIPLET_RE.match(path, pos):
             return "malformed percent-encoding"
-        pos = p.find("%", pos + 3)
+        pos = path.find("%", pos + 3)
     # No percent-escape may decode to a delimiter or control character.
-    for m in _PERCENT_TRIPLET_RE.finditer(p):
+    for m in _PERCENT_TRIPLET_RE.finditer(path):
         if bytes.fromhex(m.group(0)[1:]).decode("latin-1") in _DANGEROUS_DECODED:
             return "percent-encoded delimiter or control character"
     # Ambiguous repeated internal slashes (a single leading slash is fine).
-    core = p[1:] if p.startswith("/") else p
-    if "//" in core:
+    if "//" in path[1:]:
         return "ambiguous repeated slash"
     # Raw dot-segment traversal.
-    if any(seg in (".", "..") for seg in p.split("/")):
+    if any(seg in (".", "..") for seg in path.split("/")):
         return "dot-segment traversal"
     return None
 
