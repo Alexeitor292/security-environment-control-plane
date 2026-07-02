@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
 import type {
-  ExecutionTarget,
   IsolationModelName,
   Onboarding,
   OnboardingMode,
@@ -12,15 +11,24 @@ import { useAsync } from "../hooks";
 import {
   ISOLATION_MODELS,
   ISOLATION_PROFILES,
+  CIDR_HELPER_TEXT,
   LIFECYCLE_STEPS,
   NETWORK_APPROACHES,
+  NETWORK_SEGMENT_HELPER_TEXT,
+  NO_APPROVED_SEGMENTS_MESSAGE,
   ONBOARDING_MODES,
   REVIEW_STATEMENT,
   buildBoundary,
+  canAdvanceWizardStep,
+  canCreateOnboardingDraft,
   draftFromScope,
   emptyDraft,
   isTerminalRejected,
   lifecycleIndex,
+  parseList,
+  scopeOptionsFromPolicy,
+  targetHasApprovedSegments,
+  toggleDraftListValue,
   type BoundaryDraft,
 } from "./onboarding-wizard";
 
@@ -34,11 +42,6 @@ const STEP_TITLES = [
   "Lifecycle (simulated)",
 ];
 
-function approvedSegmentsOf(target: ExecutionTarget | undefined): string[] {
-  const prov = (target?.scope_policy as any)?.provisioning ?? {};
-  return Array.isArray(prov.allowed_bridges) ? prov.allowed_bridges.map(String) : [];
-}
-
 export function OnboardingWizard() {
   const targets = useAsync(() => api.listTargets(), []);
   const [step, setStep] = useState(0);
@@ -51,10 +54,14 @@ export function OnboardingWizard() {
   const [busy, setBusy] = useState(false);
 
   const target = targets.data?.find((t) => t.id === targetId);
-  const approvedSegments = useMemo(() => approvedSegmentsOf(target), [target]);
+  const targetOptions = useMemo(
+    () => scopeOptionsFromPolicy(target?.scope_policy),
+    [target?.scope_policy],
+  );
+  const hasApprovedSegments = targetHasApprovedSegments(targetOptions);
   const validation = useMemo(
-    () => buildBoundary(draft, approvedSegments),
-    [draft, approvedSegments],
+    () => buildBoundary(draft, targetOptions),
+    [draft, targetOptions],
   );
 
   function selectTarget(id: string) {
@@ -80,8 +87,19 @@ export function OnboardingWizard() {
     }
   }
 
-  const canNext =
-    (step !== 0 || !!targetId) && (step !== 5 || validation.ok || !!onboarding);
+  const canNext = canAdvanceWizardStep(
+    step,
+    !!targetId,
+    hasApprovedSegments,
+    validation.ok,
+    !!onboarding,
+  );
+  const canCreateDraft = canCreateOnboardingDraft(
+    busy,
+    !!targetId,
+    hasApprovedSegments,
+    validation.ok,
+  );
 
   return (
     <div>
@@ -129,6 +147,11 @@ export function OnboardingWizard() {
                 </option>
               ))}
             </select>
+            {targetId && !hasApprovedSegments && (
+              <div className="error-box" style={{ marginTop: 10 }}>
+                {NO_APPROVED_SEGMENTS_MESSAGE}
+              </div>
+            )}
           </div>
         )}
 
@@ -171,10 +194,15 @@ export function OnboardingWizard() {
                 The declared segment must still be within the target’s approved segments.
               </div>
             )}
-            {approvedSegments.length > 0 && (
+            {targetOptions.networkSegments.length > 0 && (
               <p className="muted mono" style={{ marginTop: 8 }}>
-                approved segments: {approvedSegments.join(", ")}
+                approved segments: {targetOptions.networkSegments.join(", ")}
               </p>
+            )}
+            {targetId && !hasApprovedSegments && (
+              <div className="error-box" style={{ marginTop: 10 }}>
+                {NO_APPROVED_SEGMENTS_MESSAGE}
+              </div>
             )}
           </div>
         )}
@@ -209,17 +237,33 @@ export function OnboardingWizard() {
           <div>
             <div className="grid cols-2">
               <div>
-                <label>Allowed nodes</label>
-                <input value={draft.nodes} onChange={(e) => set("nodes", e.target.value)} />
-                <label>Allowed storage</label>
-                <input value={draft.storage} onChange={(e) => set("storage", e.target.value)} />
-                <label>Network segments</label>
-                <input
-                  value={draft.networkSegments}
-                  onChange={(e) => set("networkSegments", e.target.value)}
+                <ApprovedValuePicker
+                  label="Allowed nodes"
+                  approvedValues={targetOptions.nodes}
+                  selectedRaw={draft.nodes}
+                  onChange={(value) => set("nodes", value)}
                 />
-                <label>CIDRs</label>
-                <input value={draft.cidrs} onChange={(e) => set("cidrs", e.target.value)} />
+                <ApprovedValuePicker
+                  label="Allowed storage"
+                  approvedValues={targetOptions.storage}
+                  selectedRaw={draft.storage}
+                  onChange={(value) => set("storage", value)}
+                />
+                <ApprovedValuePicker
+                  label="Network segments / bridges"
+                  approvedValues={targetOptions.networkSegments}
+                  selectedRaw={draft.networkSegments}
+                  onChange={(value) => set("networkSegments", value)}
+                  helper={NETWORK_SEGMENT_HELPER_TEXT}
+                  emptyText={NO_APPROVED_SEGMENTS_MESSAGE}
+                />
+                <ApprovedValuePicker
+                  label="CIDR reservations"
+                  approvedValues={targetOptions.cidrs}
+                  selectedRaw={draft.cidrs}
+                  onChange={(value) => set("cidrs", value)}
+                  helper={CIDR_HELPER_TEXT}
+                />
                 <label>Credential-scope label (opaque, non-secret)</label>
                 <input
                   value={draft.credentialScope}
@@ -231,33 +275,86 @@ export function OnboardingWizard() {
                   <div>
                     <label>VM-ID start</label>
                     <input
+                      type="number"
+                      min={targetOptions.vmidRange?.start}
+                      max={targetOptions.vmidRange?.end}
                       value={draft.vmidStart}
                       onChange={(e) => set("vmidStart", e.target.value)}
                     />
                   </div>
                   <div>
                     <label>VM-ID end</label>
-                    <input value={draft.vmidEnd} onChange={(e) => set("vmidEnd", e.target.value)} />
+                    <input
+                      type="number"
+                      min={targetOptions.vmidRange?.start}
+                      max={targetOptions.vmidRange?.end}
+                      value={draft.vmidEnd}
+                      onChange={(e) => set("vmidEnd", e.target.value)}
+                    />
                   </div>
                 </div>
+                {targetOptions.vmidRange && (
+                  <p className="muted mono" style={{ marginTop: 4 }}>
+                    approved VM-ID range: {targetOptions.vmidRange.start}-
+                    {targetOptions.vmidRange.end}
+                  </p>
+                )}
                 <label>Max teams / VMs / containers</label>
                 <div className="grid cols-2">
-                  <input value={draft.maxTeams} onChange={(e) => set("maxTeams", e.target.value)} />
-                  <input value={draft.maxVms} onChange={(e) => set("maxVms", e.target.value)} />
+                  <input
+                    type="number"
+                    min={1}
+                    max={targetOptions.quotas.maxTeams}
+                    value={draft.maxTeams}
+                    onChange={(e) => set("maxTeams", e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={targetOptions.quotas.maxVms}
+                    value={draft.maxVms}
+                    onChange={(e) => set("maxVms", e.target.value)}
+                  />
                 </div>
                 <input
+                  type="number"
+                  min={0}
+                  max={targetOptions.quotas.maxContainers}
                   value={draft.maxContainers}
                   onChange={(e) => set("maxContainers", e.target.value)}
                 />
                 <label>Max vCPU / memory (MB) / disk (GB)</label>
                 <div className="grid cols-2">
-                  <input value={draft.maxVcpu} onChange={(e) => set("maxVcpu", e.target.value)} />
                   <input
+                    type="number"
+                    min={1}
+                    max={targetOptions.quotas.maxVcpu}
+                    value={draft.maxVcpu}
+                    onChange={(e) => set("maxVcpu", e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={targetOptions.quotas.maxMemoryMb}
                     value={draft.maxMemoryMb}
                     onChange={(e) => set("maxMemoryMb", e.target.value)}
                   />
                 </div>
-                <input value={draft.maxDiskGb} onChange={(e) => set("maxDiskGb", e.target.value)} />
+                <input
+                  type="number"
+                  min={1}
+                  max={targetOptions.quotas.maxDiskGb}
+                  value={draft.maxDiskGb}
+                  onChange={(e) => set("maxDiskGb", e.target.value)}
+                />
+                <p className="muted mono" style={{ marginTop: 8 }}>
+                  approved limits: teams={targetOptions.quotas.maxTeams ?? "unset"}, vms=
+                  {targetOptions.quotas.maxVms ?? "unset"}, containers=
+                  {targetOptions.quotas.maxContainers ?? "unset"}, vcpu=
+                  {targetOptions.quotas.maxVcpu ?? "unset"}, memory_mb=
+                  {targetOptions.quotas.maxMemoryMb ?? "unset"}, disk_gb=
+                  {targetOptions.quotas.maxDiskGb ?? "unset"}
+                </p>
                 <p className="muted mono" style={{ marginTop: 8 }}>
                   external connectivity: deny (fixed)
                 </p>
@@ -284,7 +381,7 @@ export function OnboardingWizard() {
               {!onboarding ? (
                 <button
                   className="ok"
-                  disabled={busy || !validation.ok || !targetId}
+                  disabled={!canCreateDraft}
                   onClick={() =>
                     act(() =>
                       api.createOnboarding(targetId, {
@@ -353,6 +450,53 @@ function RadioGroup<T extends string>({
           </span>
         </label>
       ))}
+    </div>
+  );
+}
+
+function ApprovedValuePicker({
+  label,
+  approvedValues,
+  selectedRaw,
+  helper,
+  emptyText,
+  onChange,
+}: {
+  label: string;
+  approvedValues: string[];
+  selectedRaw: string;
+  helper?: string;
+  emptyText?: string;
+  onChange: (value: string) => void;
+}) {
+  const selected = new Set(parseList(selectedRaw));
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <label>{label}</label>
+      {helper && <p className="muted">{helper}</p>}
+      {approvedValues.length === 0 ? (
+        <div className="error-box" style={{ marginTop: 6 }}>
+          {emptyText ?? `No approved values configured for ${label}.`}
+        </div>
+      ) : (
+        <div>
+          <p className="muted mono" style={{ marginTop: 0 }}>
+            approved values: {approvedValues.join(", ")}
+          </p>
+          {approvedValues.map((value) => (
+            <label key={value} className="radio-row">
+              <input
+                type="checkbox"
+                checked={selected.has(value)}
+                onChange={(e) =>
+                  onChange(toggleDraftListValue(selectedRaw, value, e.target.checked))
+                }
+              />
+              <span className="mono">{value}</span>
+            </label>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

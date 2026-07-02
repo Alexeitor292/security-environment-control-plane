@@ -149,6 +149,39 @@ export interface BoundaryDraft {
   isolationProfile: IsolationProfile;
 }
 
+export interface TargetScopeOptions {
+  nodes: string[];
+  storage: string[];
+  networkSegments: string[];
+  cidrs: string[];
+  vmidRange?: { start: number; end: number };
+  quotas: {
+    maxTeams?: number;
+    maxVms?: number;
+    maxContainers?: number;
+    maxVcpu?: number;
+    maxMemoryMb?: number;
+    maxDiskGb?: number;
+  };
+}
+
+export const EMPTY_TARGET_SCOPE_OPTIONS: TargetScopeOptions = {
+  nodes: [],
+  storage: [],
+  networkSegments: [],
+  cidrs: [],
+  quotas: {},
+};
+
+export const NO_APPROVED_SEGMENTS_MESSAGE =
+  "This target has no approved lab network segments. Configure an approved segment in Provider Targets before onboarding.";
+
+export const CIDR_HELPER_TEXT =
+  "CIDRs are lab address ranges, for example 10.60.0.0/16. Select only approved ranges for this target.";
+
+export const NETWORK_SEGMENT_HELPER_TEXT =
+  "A network segment is a bridge, VNet, or VLAN name, not an IP range.";
+
 export function emptyDraft(): BoundaryDraft {
   return {
     nodes: "",
@@ -169,28 +202,51 @@ export function emptyDraft(): BoundaryDraft {
   };
 }
 
-/** Prefill a draft from a target's provisioning scope policy (a safe, in-scope starting point). */
-export function draftFromScope(scopePolicy: unknown): BoundaryDraft {
+/** Extract target-approved values from a provisioning scope policy. */
+export function scopeOptionsFromPolicy(scopePolicy: unknown): TargetScopeOptions {
   const prov = ((scopePolicy as Record<string, unknown>)?.provisioning ??
     scopePolicy ??
     {}) as Record<string, any>;
-  const list = (v: unknown): string => (Array.isArray(v) ? v.join(", ") : "");
-  const num = (v: unknown): string => (v === undefined || v === null ? "" : String(v));
+  const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
   const range = (prov.vmid_range ?? {}) as Record<string, unknown>;
+  const start = typeof range.start === "number" ? range.start : undefined;
+  const end = typeof range.end === "number" ? range.end : undefined;
   return {
-    ...emptyDraft(),
     nodes: list(prov.allowed_nodes),
     storage: list(prov.allowed_storage),
     networkSegments: list(prov.allowed_bridges),
     cidrs: list(prov.allowed_cidr_reservations),
-    vmidStart: num(range.start),
-    vmidEnd: num(range.end),
-    maxTeams: num(prov.max_teams),
-    maxVms: num(prov.max_vms),
-    maxContainers: num(prov.max_containers),
-    maxVcpu: num(prov.max_total_vcpu),
-    maxMemoryMb: num(prov.max_total_memory_mb),
-    maxDiskGb: num(prov.max_total_disk_gb),
+    vmidRange: start !== undefined && end !== undefined ? { start, end } : undefined,
+    quotas: {
+      maxTeams: typeof prov.max_teams === "number" ? prov.max_teams : undefined,
+      maxVms: typeof prov.max_vms === "number" ? prov.max_vms : undefined,
+      maxContainers: typeof prov.max_containers === "number" ? prov.max_containers : undefined,
+      maxVcpu: typeof prov.max_total_vcpu === "number" ? prov.max_total_vcpu : undefined,
+      maxMemoryMb:
+        typeof prov.max_total_memory_mb === "number" ? prov.max_total_memory_mb : undefined,
+      maxDiskGb: typeof prov.max_total_disk_gb === "number" ? prov.max_total_disk_gb : undefined,
+    },
+  };
+}
+
+/** Prefill a draft from a target's provisioning scope policy (a safe, in-scope starting point). */
+export function draftFromScope(scopePolicy: unknown): BoundaryDraft {
+  const options = scopeOptionsFromPolicy(scopePolicy);
+  const num = (v: unknown): string => (v === undefined || v === null ? "" : String(v));
+  return {
+    ...emptyDraft(),
+    nodes: options.nodes.join(", "),
+    storage: options.storage.join(", "),
+    networkSegments: options.networkSegments.join(", "),
+    cidrs: options.cidrs.join(", "),
+    vmidStart: num(options.vmidRange?.start),
+    vmidEnd: num(options.vmidRange?.end),
+    maxTeams: num(options.quotas.maxTeams),
+    maxVms: num(options.quotas.maxVms),
+    maxContainers: num(options.quotas.maxContainers),
+    maxVcpu: num(options.quotas.maxVcpu),
+    maxMemoryMb: num(options.quotas.maxMemoryMb),
+    maxDiskGb: num(options.quotas.maxDiskGb),
   };
 }
 
@@ -223,6 +279,53 @@ export function segmentsWithinApproved(
   return segments.filter((s) => !approved.has(s));
 }
 
+export function valuesOutsideApproved(values: string[], approvedValues: string[]): string[] {
+  const approved = new Set(approvedValues);
+  return values.filter((s) => !approved.has(s));
+}
+
+function normalizeTargetOptions(
+  approved: TargetScopeOptions | string[],
+): TargetScopeOptions {
+  if (Array.isArray(approved)) {
+    return { ...EMPTY_TARGET_SCOPE_OPTIONS, networkSegments: approved };
+  }
+  return approved;
+}
+
+export function targetHasApprovedSegments(options: TargetScopeOptions): boolean {
+  return options.networkSegments.length > 0;
+}
+
+export function canAdvanceWizardStep(
+  step: number,
+  targetSelected: boolean,
+  targetHasSegments: boolean,
+  validationOk: boolean,
+  onboardingExists: boolean,
+): boolean {
+  if (step === 0) return targetSelected && targetHasSegments;
+  if (step === 5) return validationOk || onboardingExists;
+  return true;
+}
+
+export function canCreateOnboardingDraft(
+  busy: boolean,
+  targetSelected: boolean,
+  targetHasSegments: boolean,
+  validationOk: boolean,
+): boolean {
+  return !busy && targetSelected && targetHasSegments && validationOk;
+}
+
+export function toggleDraftListValue(raw: string, value: string, checked: boolean): string {
+  const current = parseList(raw);
+  const next = checked
+    ? Array.from(new Set([...current, value]))
+    : current.filter((item) => item !== value);
+  return next.join(", ");
+}
+
 /**
  * Validate a boundary draft and build the provider-neutral boundary payload. Mirrors the
  * server contract (which re-validates authoritatively): non-empty allowlists, a bounded
@@ -231,9 +334,10 @@ export function segmentsWithinApproved(
  */
 export function buildBoundary(
   draft: BoundaryDraft,
-  approvedSegments: string[],
+  approvedOptions: TargetScopeOptions | string[],
 ): BoundaryValidation {
   const errors: string[] = [];
+  const targetOptions = normalizeTargetOptions(approvedOptions);
   const nodes = parseList(draft.nodes);
   const storage = parseList(draft.storage);
   const segments = parseList(draft.networkSegments);
@@ -254,6 +358,14 @@ export function buildBoundary(
   } else {
     if (start < 100) errors.push("VM-ID range start must be >= 100.");
     if (end <= start) errors.push("VM-ID range end must be greater than start.");
+    if (
+      targetOptions.vmidRange &&
+      (start < targetOptions.vmidRange.start || end > targetOptions.vmidRange.end)
+    ) {
+      errors.push(
+        `VM-ID range must stay within the target-approved range ${targetOptions.vmidRange.start}-${targetOptions.vmidRange.end}.`,
+      );
+    }
   }
 
   const quotaFields: [keyof BoundaryDraft, string, number][] = [
@@ -273,6 +385,20 @@ export function buildBoundary(
       quotas[key] = v;
     }
   }
+  const quotaBounds: [string, keyof TargetScopeOptions["quotas"], string][] = [
+    ["max_teams", "maxTeams", "max teams"],
+    ["max_vms", "maxVms", "max VMs"],
+    ["max_containers", "maxContainers", "max containers"],
+    ["max_total_vcpu", "maxVcpu", "max vCPU"],
+    ["max_total_memory_mb", "maxMemoryMb", "max memory MB"],
+    ["max_total_disk_gb", "maxDiskGb", "max disk GB"],
+  ];
+  for (const [quotaKey, optionKey, label] of quotaBounds) {
+    const approved = targetOptions.quotas[optionKey];
+    if (approved !== undefined && quotas[quotaKey] !== undefined && quotas[quotaKey] > approved) {
+      errors.push(`${label} must not exceed the target-approved limit of ${approved}.`);
+    }
+  }
 
   if (draft.credentialScope.trim().length === 0) {
     errors.push("A credential-scope label is required (opaque, non-secret).");
@@ -288,12 +414,35 @@ export function buildBoundary(
   // scope). The existing-segment approach makes this explicit; the SECP-managed approach is
   // a durable declaration of intent (activation pending — no network is created here), and
   // the segment must still be within the target's approved segments.
-  if (approvedSegments.length > 0 || segments.length > 0) {
-    const outside = segmentsWithinApproved(segments, approvedSegments);
+  if (targetOptions.nodes.length > 0) {
+    const outside = valuesOutsideApproved(nodes, targetOptions.nodes);
+    if (outside.length > 0) {
+      errors.push(`These nodes are not in the target's approved nodes: ${outside.join(", ")}.`);
+    }
+  }
+
+  if (targetOptions.storage.length > 0) {
+    const outside = valuesOutsideApproved(storage, targetOptions.storage);
+    if (outside.length > 0) {
+      errors.push(
+        `These storage values are not in the target's approved storage: ${outside.join(", ")}.`,
+      );
+    }
+  }
+
+  if (targetOptions.networkSegments.length > 0 || segments.length > 0) {
+    const outside = segmentsWithinApproved(segments, targetOptions.networkSegments);
     if (outside.length > 0) {
       errors.push(
         `These segments are not in the target's approved segments: ${outside.join(", ")}.`,
       );
+    }
+  }
+
+  if (targetOptions.cidrs.length > 0) {
+    const outside = valuesOutsideApproved(cidrs, targetOptions.cidrs);
+    if (outside.length > 0) {
+      errors.push(`These CIDRs are not approved for this target: ${outside.join(", ")}.`);
     }
   }
 
