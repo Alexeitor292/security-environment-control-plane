@@ -30,10 +30,13 @@ FORBIDDEN_IMPORT_SUBSTRINGS = (
     "process_executor",
     "provisioning.adapters",
     "provisioning.rendering",
+    # SECP-002B-1B-0: the onboarding preflight collector is worker-only.
+    "secp_worker.onboarding",
+    "onboarding.preflight",
 )
 
-# Symbols that name a runner / executor / renderer / secret resolver; the API must not
-# import them (SECP-002B-1A adds the real OpenTofu seam symbols).
+# Symbols that name a runner / executor / renderer / secret resolver / preflight collector;
+# the API must not import them.
 FORBIDDEN_IMPORT_NAMES = {
     "ProvisioningRunner",
     "FakeOpenTofuRunner",
@@ -46,6 +49,8 @@ FORBIDDEN_IMPORT_NAMES = {
     "WorkspaceRenderer",
     "EnvSecretResolver",
     "SecretResolver",
+    "FakePreflightCollector",
+    "PreflightCollector",
 }
 
 
@@ -117,8 +122,11 @@ def test_api_provisioning_modules_have_no_shell_or_http():
         "services/provisioning.py",
         "services/toolchain.py",
         "services/approvals.py",
+        "services/onboarding.py",
         "provisioning_scope.py",
         "toolchain_profile.py",
+        "onboarding.py",
+        "routers/onboarding.py",
     ):
         src = (API_PKG / name).read_text(encoding="utf-8")
         for forbidden in ("import subprocess", "os.system(", "import httpx", "subprocess."):

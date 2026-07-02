@@ -18,6 +18,10 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
+from secp_api.effective_boundary import (
+    effective_policy_view,
+    enforce_manifest_within_boundary,
+)
 from secp_api.enums import (
     AuditAction,
     Permission,
@@ -67,6 +71,103 @@ def _refuse(actor: Principal, plan: DeploymentPlan, reason: str) -> NoReturn:
     raise ValidationFailedError(reason)
 
 
+def _resolve_onboarding_binding(session, actor, plan, target) -> dict:
+    """Verify the plan's onboarding bindings match the current single active onboarding.
+
+    Returns the durable binding dict for the manifest. Fails closed on missing/ambiguous
+    onboarding, boundary/evidence-hash drift, verification-level change, or a stale/altered
+    approved preflight (SECP-002B-1B-0, ADR-014).
+    """
+    from secp_api.models import TargetPreflight
+    from secp_api.services.onboarding import (
+        active_onboarding_for_target,
+        onboarding_drift,
+        recompute_evidence_hash,
+    )
+
+    if plan.target_onboarding_id is None:
+        _refuse(actor, plan, "target-bound plan has no onboarding binding; regenerate the plan")
+    try:
+        onboarding = active_onboarding_for_target(session, target.id)
+    except Exception:
+        _refuse(actor, plan, "ambiguous active onboarding for target; fail closed")
+    if onboarding is None:
+        _refuse(actor, plan, "target has no active onboarding; onboard the target first")
+    if onboarding.id != plan.target_onboarding_id:
+        _refuse(actor, plan, "plan onboarding id does not match the active onboarding")
+    if onboarding.approved_boundary_hash != plan.onboarding_boundary_hash:
+        _refuse(actor, plan, "onboarding boundary hash has drifted since plan approval")
+    if str(onboarding.approved_preflight_id) != str(plan.approved_preflight_id):
+        _refuse(actor, plan, "approved preflight id has changed since plan approval")
+    if onboarding.approved_preflight_evidence_hash != plan.approved_preflight_evidence_hash:
+        _refuse(actor, plan, "approved preflight evidence hash has changed since plan approval")
+    if onboarding.approved_verification_level != plan.onboarding_verification_level:
+        _refuse(actor, plan, "onboarding verification level has changed since plan approval")
+    drift = onboarding_drift(onboarding, target)
+    if drift is not None:
+        _refuse(actor, plan, f"onboarding approval invalidated: {drift}")
+    pf = session.get(TargetPreflight, onboarding.approved_preflight_id)
+    if pf is None or recompute_evidence_hash(pf) != onboarding.approved_preflight_evidence_hash:
+        _refuse(actor, plan, "approved preflight evidence is missing or altered")
+    # Toolchain provenance binding (ADR-014 §4): the approved preflight must have been
+    # collected against the current active toolchain profile (which the plan also pins).
+    from secp_api.services.onboarding import preflight_toolchain_matches_active
+
+    tc_reason = preflight_toolchain_matches_active(session, target, pf)
+    if tc_reason is not None:
+        _refuse(actor, plan, f"onboarding toolchain provenance drift: {tc_reason}")
+    plan_toolchain = (
+        str(plan.toolchain_profile_id) if plan.toolchain_profile_id is not None else None,
+        plan.toolchain_profile_hash,
+    )
+    preflight_toolchain = (
+        str(pf.toolchain_profile_id) if pf.toolchain_profile_id is not None else None,
+        pf.toolchain_profile_hash,
+    )
+    for label, binding in (
+        ("plan", plan_toolchain),
+        ("approved preflight", preflight_toolchain),
+    ):
+        if (binding[0] is None) != (binding[1] is None):
+            _refuse(actor, plan, f"{label} toolchain provenance binding is incomplete")
+    if plan_toolchain != preflight_toolchain:
+        _refuse(
+            actor,
+            plan,
+            "approved preflight toolchain provenance disagrees with the plan's pinned profile",
+        )
+    # Effective execution boundary (ADR-014 §2): recompute from the active onboarding +
+    # current target scope and require exact agreement with the plan's bound boundary. Fail
+    # closed if it is empty, absent on the plan, broadened, or otherwise changed.
+    from secp_api.onboarding import (
+        OnboardingBoundarySpec,
+        effective_boundary_hash,
+        effective_boundary_is_empty,
+    )
+    from secp_api.onboarding import effective_boundary as compute_effective_boundary
+
+    spec = OnboardingBoundarySpec.model_validate(onboarding.declared_boundary)
+    eff = compute_effective_boundary(spec, target.scope_policy or {})
+    if effective_boundary_is_empty(eff):
+        _refuse(actor, plan, "effective execution boundary is empty; re-onboard the target")
+    eff_hash = effective_boundary_hash(eff)
+    if plan.effective_boundary != eff:
+        _refuse(actor, plan, "effective execution boundary has drifted since plan approval")
+    if plan.effective_boundary_hash is None:
+        _refuse(actor, plan, "approved plan has no effective-boundary binding; regenerate the plan")
+    if eff_hash != plan.effective_boundary_hash:
+        _refuse(actor, plan, "effective execution boundary has drifted since plan approval")
+    return {
+        "target_onboarding_id": onboarding.id,
+        "onboarding_boundary_hash": onboarding.approved_boundary_hash,
+        "approved_preflight_id": onboarding.approved_preflight_id,
+        "approved_preflight_evidence_hash": onboarding.approved_preflight_evidence_hash,
+        "onboarding_verification_level": onboarding.approved_verification_level,
+        "effective_boundary": eff,
+        "effective_boundary_hash": eff_hash,
+    }
+
+
 def _finalized_reservations(session: Session, plan: DeploymentPlan) -> list[NetworkReservation]:
     return list(
         session.execute(
@@ -97,7 +198,7 @@ def _cidr_in_policy(cidr: str, policy: ProvisioningScopePolicy) -> bool:
 def _build_topology(
     definition, reservations_by_team: dict[str, str], policy: ProvisioningScopePolicy
 ) -> tuple[list[dict], dict[str, int]]:
-    """Build a secret-free desired topology bounded by the scope policy.
+    """Build a secret-free desired topology bounded by the provisioning policy view.
 
     Every node gets a deterministic vmid inside vmid_range and explicit
     vcpu/memory_mb/disk_gb from the approved node_sizing profile.  Missing
@@ -293,6 +394,13 @@ def generate_manifest(
         toolchain_profile_id = toolchain.id
         toolchain_profile_hash = toolchain.content_hash
 
+    # 5d. Onboarding binding (SECP-002B-1B-0, ADR-014). The plan's onboarding bindings must
+    #     exactly match the single active onboarding for the target and its pinned approved
+    #     preflight evidence. Fail closed on any mismatch/ambiguity/drift.
+    onboarding_binding = _resolve_onboarding_binding(session, actor, plan, target)
+    effective_boundary = onboarding_binding["effective_boundary"]
+    effective_policy = effective_policy_view(policy, effective_boundary)
+
     # 6. Valid, finalized, in-policy, same-org reservations.
     version = session.get(EnvironmentVersion, plan.environment_version_id)
     if version is None:
@@ -311,16 +419,20 @@ def generate_manifest(
     for res in reservations:
         if res.organization_id != plan.organization_id:
             _refuse(actor, plan, "reservation belongs to a different organization")
-        if not _cidr_in_policy(res.cidr, policy):
-            _refuse(actor, plan, f"reservation {res.cidr} is outside the scope policy")
+        if not _cidr_in_policy(res.cidr, effective_policy):
+            _refuse(
+                actor,
+                plan,
+                f"reservation {res.cidr} is outside the effective boundary CIDRs",
+            )
         reservations_by_team[res.team_ref] = res.cidr
     missing_team_refs = {f"team{i + 1}" for i in range(teams)} - set(reservations_by_team)
     if missing_team_refs:
         _refuse(actor, plan, f"no finalized reservation for teams {sorted(missing_team_refs)}")
 
     # 7. Build secret-free desired topology and enforce blast-radius limits.
-    topology, totals = _build_topology(definition, reservations_by_team, policy)
-    _enforce_limits(totals, policy)
+    topology, totals = _build_topology(definition, reservations_by_team, effective_policy)
+    _enforce_limits(totals, effective_policy)
 
     content = {
         "manifest_version": MANIFEST_VERSION,
@@ -330,23 +442,54 @@ def generate_manifest(
         "target_scope_policy_hash": current_scope_hash,
         "toolchain_profile_id": str(toolchain_profile_id) if toolchain_profile_id else None,
         "toolchain_profile_hash": toolchain_profile_hash,
+        "onboarding": {
+            "target_onboarding_id": str(onboarding_binding["target_onboarding_id"]),
+            "onboarding_boundary_hash": onboarding_binding["onboarding_boundary_hash"],
+            "approved_preflight_id": str(onboarding_binding["approved_preflight_id"]),
+            "approved_preflight_evidence_hash": onboarding_binding[
+                "approved_preflight_evidence_hash"
+            ],
+            "verification_level": onboarding_binding["onboarding_verification_level"],
+            "effective_boundary": onboarding_binding["effective_boundary"],
+            "effective_boundary_hash": onboarding_binding["effective_boundary_hash"],
+        },
         "plugin_name": target.plugin_name,
         "teams": teams,
-        "scope_policy": policy.model_dump(),
+        "scope_policy": effective_policy.model_dump(mode="json"),
         "resource_limits": {
-            "max_teams": policy.max_teams,
-            "max_vms": policy.max_vms,
-            "max_containers": policy.max_containers,
-            "max_total_vcpu": policy.max_total_vcpu,
-            "max_total_memory_mb": policy.max_total_memory_mb,
-            "max_total_disk_gb": policy.max_total_disk_gb,
+            "max_teams": effective_policy.max_teams,
+            "max_vms": effective_policy.max_vms,
+            "max_containers": effective_policy.max_containers,
+            "max_total_vcpu": effective_policy.max_total_vcpu,
+            "max_total_memory_mb": effective_policy.max_total_memory_mb,
+            "max_total_disk_gb": effective_policy.max_total_disk_gb,
         },
         "reservations": [
             {"team_ref": t, "cidr": c} for t, c in sorted(reservations_by_team.items())
         ],
         "topology": topology,
         "requested_totals": totals,
+        # Automated, declarative deployment contract (SECP-002B-1B-0, ADR-014): SECP
+        # creates the scenario resources automatically inside the declared boundary; no
+        # manual per-scenario guest/network/address/storage creation is required, and no
+        # pre-existing user assets are adopted in standard mode.
+        "deployment": {
+            "mode": "automated",
+            "provisioning_model": "declarative",
+            "scenario_resources_created_by_secp": True,
+            "manual_pre_creation_required": False,
+            "user_provided_preexisting_assets": [],
+            "subject_to_approval": True,
+            "subject_to_scope_policy": True,
+        },
     }
+    violations = enforce_manifest_within_boundary(content, effective_boundary)
+    if violations:
+        _refuse(
+            actor,
+            plan,
+            f"generated manifest action outside the effective execution boundary: {violations[0]}",
+        )
 
     manifest = ProvisioningManifest(
         organization_id=plan.organization_id,
@@ -356,6 +499,13 @@ def generate_manifest(
         target_scope_policy_hash=current_scope_hash,
         toolchain_profile_id=toolchain_profile_id,
         toolchain_profile_hash=toolchain_profile_hash,
+        target_onboarding_id=onboarding_binding["target_onboarding_id"],
+        onboarding_boundary_hash=onboarding_binding["onboarding_boundary_hash"],
+        approved_preflight_id=onboarding_binding["approved_preflight_id"],
+        approved_preflight_evidence_hash=onboarding_binding["approved_preflight_evidence_hash"],
+        onboarding_verification_level=onboarding_binding["onboarding_verification_level"],
+        effective_boundary=onboarding_binding["effective_boundary"],
+        effective_boundary_hash=onboarding_binding["effective_boundary_hash"],
         content=content,
         content_hash=content_hash(content),
         validated_at=_now(),

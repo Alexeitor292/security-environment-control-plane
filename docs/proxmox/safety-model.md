@@ -139,6 +139,39 @@ toolchain hash agreement; an explicit approved dry-run change set; an explicit
 real-provisioning setting; worker-only JIT secret resolution; `deny` external connectivity;
 a validated remote state backend; and **no fallback** to the fake runner.
 
+## SECP-002B-1B-0 controls (target onboarding)
+
+Target onboarding formalizes *how a target becomes eligible* for real provisioning
+(ADR-014). B1-B-0 is design/model/API/fake-only: **no real target is contacted, inspected,
+configured, authenticated to, or mutated.**
+
+### L14 — Two isolation models, explicit + declared
+Physical isolation (dedicated hardware) is a recommended secure preset, **not** a
+requirement. A shared existing environment is allowed **only** with a `logical` isolation
+model behind an explicitly declared, enforceable, auditable, independently verifiable
+boundary (node/storage/network allowlists, CIDR ranges, VM-ID range, quotas,
+deny-by-default external connectivity, opaque least-privilege credential scope). The
+declared boundary is immutable (`boundary_hash`).
+
+### L15 — Redacted, immutable preflight evidence (fake-only in B1-B-0)
+A worker-only `PreflightCollector` seam produces redacted, structured evidence
+(`evidence_hash`, immutable). In B1-B-0 only a `FakePreflightCollector` exists — it inspects
+nothing real. Logical isolation additionally requires a passing `no_route_to_protected`
+check. `apps/api` never imports the collector.
+
+### L16 — Approval-gated, drift-invalidated activation
+A target is cleared for real provisioning only when its onboarding reaches `active`
+(create → preflight → review → **human approval** → activate). Approval pins the target
+config + scope-policy hashes; any drift invalidates the approval at activation and at the
+real-provisioning gate, which now additionally requires an active, non-drifted onboarding.
+
+### L17 — Automated, declarative deployment
+Standard provider-backed deployment is automated: SECP allocates IDs/addresses and creates
+scenario resources inside the declared boundary. Plans/manifests state
+`manual_pre_creation_required=false` and adopt no pre-existing user assets in standard mode;
+import/adoption is a future explicit opt-in workflow. Onboarding and scenario deployment are
+separate lifecycle stages.
+
 ## What a reviewer should verify
 
 - No file contains a real hostname, IP, cluster/node/pool/storage name, VLAN, or

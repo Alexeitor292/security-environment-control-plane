@@ -146,17 +146,9 @@ def _assert_scope_binding(
             "target scope_policy has drifted from the manifest binding; "
             "generate a new manifest and obtain fresh approval before proceeding",
         )
-    # Belt-and-suspenders: exact content comparison against manifest snapshot.
-    current_provisioning_policy = (target.scope_policy or {}).get("provisioning", {})
+    # The content snapshot is the effective provisioning-policy view. The exact effective
+    # snapshot is verified after onboarding/effective-boundary recomputation below.
     manifest_policy_snapshot = manifest.content.get("scope_policy", {})
-    if current_provisioning_policy != manifest_policy_snapshot:
-        _refuse(
-            session,
-            operation,
-            "target scope_policy has drifted from the manifest snapshot; "
-            "generate a new manifest and obtain fresh approval before proceeding",
-        )
-    # External connectivity must remain deny (never permissive).
     if manifest_policy_snapshot.get("external_connectivity", {}).get("policy") != "deny":
         _refuse(
             session,
@@ -445,7 +437,200 @@ def _assert_real_gate(
     _assert_reservation_binding(session, operation, manifest, plan, target)
     # 9. Toolchain profile + isolated-lab classification + hash agreement + remote state.
     profile = _assert_toolchain_and_activation(session, operation, manifest, plan, target)
+    # 10. Target onboarding: exact agreement onboarding → plan → manifest → approved
+    #     preflight evidence, with no config/scope/boundary drift (SECP-002B-1B-0, ADR-014).
+    _assert_target_onboarded(session, operation, manifest, plan, target)
     return plan, target, profile
+
+
+def _assert_target_onboarded(
+    session,
+    operation: ProvisioningOperation,
+    manifest: ProvisioningManifest,
+    plan: DeploymentPlan,
+    target: ExecutionTarget,
+):
+    from secp_api.errors import DomainError
+    from secp_api.models import TargetPreflight
+    from secp_api.services.onboarding import (
+        active_onboarding_for_target,
+        onboarding_drift,
+        recompute_evidence_hash,
+    )
+
+    try:
+        ob = active_onboarding_for_target(session, target.id)
+    except DomainError:
+        _refuse_real(session, operation, "ambiguous active onboarding for target; fail closed")
+    if ob is None:
+        _refuse_real(
+            session,
+            operation,
+            "target has no approved & active onboarding record; real provisioning requires "
+            "an approved target onboarding (SECP-002B-1B, ADR-014)",
+        )
+    drift = onboarding_drift(ob, target)
+    if drift is not None:
+        _refuse_real(
+            session,
+            operation,
+            f"onboarding approval is invalidated: {drift}; re-onboard and obtain fresh approval",
+        )
+    # Exact agreement across onboarding record, plan, manifest columns, AND the immutable
+    # manifest content block. The approved preflight IDENTITY (id) must agree everywhere, not
+    # just the evidence hash (ADR-014 §3 correction pass).
+    ob_pf_id = str(ob.approved_preflight_id)
+    content_ob = manifest.content.get("onboarding", {}) or {}
+    checks = (
+        (plan.target_onboarding_id == ob.id, "plan onboarding id mismatch"),
+        (manifest.target_onboarding_id == ob.id, "manifest onboarding id mismatch"),
+        (content_ob.get("target_onboarding_id") == str(ob.id), "content onboarding id mismatch"),
+        (str(plan.approved_preflight_id) == ob_pf_id, "plan approved preflight id mismatch"),
+        (
+            str(manifest.approved_preflight_id) == ob_pf_id,
+            "manifest approved preflight id mismatch",
+        ),
+        (
+            content_ob.get("approved_preflight_id") == ob_pf_id,
+            "content approved preflight id mismatch",
+        ),
+        (
+            plan.onboarding_boundary_hash == ob.approved_boundary_hash,
+            "plan onboarding boundary hash mismatch",
+        ),
+        (
+            manifest.onboarding_boundary_hash == ob.approved_boundary_hash,
+            "manifest onboarding boundary hash mismatch",
+        ),
+        (
+            content_ob.get("onboarding_boundary_hash") == ob.approved_boundary_hash,
+            "content onboarding boundary hash mismatch",
+        ),
+        (
+            plan.approved_preflight_evidence_hash == ob.approved_preflight_evidence_hash,
+            "plan approved preflight evidence hash mismatch",
+        ),
+        (
+            manifest.approved_preflight_evidence_hash == ob.approved_preflight_evidence_hash,
+            "manifest approved preflight evidence hash mismatch",
+        ),
+        (
+            content_ob.get("approved_preflight_evidence_hash")
+            == ob.approved_preflight_evidence_hash,
+            "content approved preflight evidence hash mismatch",
+        ),
+        (
+            plan.onboarding_verification_level == ob.approved_verification_level,
+            "plan onboarding verification level mismatch",
+        ),
+        (
+            manifest.onboarding_verification_level == ob.approved_verification_level,
+            "manifest onboarding verification level mismatch",
+        ),
+        (
+            content_ob.get("verification_level") == ob.approved_verification_level,
+            "content onboarding verification level mismatch",
+        ),
+    )
+    for ok, reason in checks:
+        if not ok:
+            _refuse_real(session, operation, f"onboarding binding drift: {reason}")
+    # Recompute the approved preflight evidence hash (altered/stale evidence refused).
+    pf = (
+        session.get(TargetPreflight, ob.approved_preflight_id) if ob.approved_preflight_id else None
+    )
+    if pf is None or recompute_evidence_hash(pf) != ob.approved_preflight_evidence_hash:
+        _refuse_real(session, operation, "approved preflight evidence is missing or altered")
+    # Toolchain provenance binding (ADR-014 §4): the approved preflight's toolchain provenance
+    # must equal the plan's pinned profile (already proven == manifest == current active by
+    # _assert_toolchain_and_activation), so pf == plan == manifest == active.
+    if plan.toolchain_profile_id is not None:
+        if str(pf.toolchain_profile_id) != str(plan.toolchain_profile_id) or (
+            pf.toolchain_profile_hash != plan.toolchain_profile_hash
+        ):
+            _refuse_real(
+                session,
+                operation,
+                "approved preflight toolchain provenance disagrees with the pinned profile",
+            )
+    # Effective execution boundary (ADR-014 §2): recompute from the active onboarding +
+    # current target scope, require non-empty and exact agreement with plan, manifest, and
+    # manifest content, then enforce every declared action against it BEFORE rendering,
+    # secret resolution, executor construction, or process calls.
+    _assert_effective_boundary(session, operation, manifest, plan, target, ob)
+    return ob
+
+
+def _assert_effective_boundary(
+    session,
+    operation: ProvisioningOperation,
+    manifest: ProvisioningManifest,
+    plan: DeploymentPlan,
+    target: ExecutionTarget,
+    ob,
+) -> None:
+    from secp_api.effective_boundary import effective_policy_view
+    from secp_api.onboarding import (
+        OnboardingBoundarySpec,
+        effective_boundary_hash,
+        effective_boundary_is_empty,
+    )
+    from secp_api.onboarding import effective_boundary as compute_effective_boundary
+
+    from secp_worker.provisioning.boundary import enforce_manifest_within_boundary
+
+    spec = OnboardingBoundarySpec.model_validate(ob.declared_boundary)
+    eff = compute_effective_boundary(spec, target.scope_policy or {})
+    if effective_boundary_is_empty(eff):
+        _refuse_real(
+            session, operation, "effective execution boundary is empty; re-onboard the target"
+        )
+    eff_hash = effective_boundary_hash(eff)
+    content_ob = manifest.content.get("onboarding", {}) or {}
+    content_eff = content_ob.get("effective_boundary")
+    content_eff_hash = content_ob.get("effective_boundary_hash")
+    boundary_checks = (
+        (plan.effective_boundary == eff, "plan effective boundary mismatch"),
+        (plan.effective_boundary_hash == eff_hash, "plan effective boundary hash mismatch"),
+        (manifest.effective_boundary == eff, "manifest effective boundary mismatch"),
+        (manifest.effective_boundary_hash == eff_hash, "manifest effective boundary hash mismatch"),
+        (content_eff == eff, "manifest content effective boundary mismatch"),
+        (content_eff_hash == eff_hash, "manifest content effective boundary hash mismatch"),
+    )
+    for ok, reason in boundary_checks:
+        if not ok:
+            _refuse_real(session, operation, f"effective boundary drift: {reason}")
+    target_policy = validate_provisioning_scope(target.scope_policy)
+    expected_policy_snapshot = effective_policy_view(target_policy, eff).model_dump(mode="json")
+    if manifest.content.get("scope_policy", {}) != expected_policy_snapshot:
+        _refuse_real(
+            session,
+            operation,
+            "effective provisioning policy snapshot has drifted from the effective boundary",
+        )
+    violations = enforce_manifest_within_boundary(manifest.content, eff)
+    if violations:
+        _refuse_real(
+            session,
+            operation,
+            f"manifest action outside the effective execution boundary: {violations[0]}",
+        )
+
+
+def assert_evidence_sufficient_for_execution(onboarding, *, require_live: bool) -> None:
+    """Structural enforcement (ADR-014 §2): live provisioning requires ``live_verified``
+    evidence. Simulated evidence supports onboarding UX/review but never unlocks live
+    real provisioning. Raises ``ProvisioningRefusedError`` when insufficient."""
+    from secp_api.enums import VerificationLevel
+
+    if (
+        require_live
+        and onboarding.approved_verification_level != VerificationLevel.live_verified.value
+    ):
+        raise ProvisioningRefusedError(
+            "live real provisioning requires live_verified onboarding evidence; simulated "
+            "evidence cannot satisfy live eligibility (SECP-002B-1B, ADR-014)"
+        )
 
 
 def _assert_toolchain_and_activation(
@@ -630,6 +815,18 @@ def run_real_provisioning(
             operation,
             "process executor is not approved for B1-A fake-only execution; a real or "
             "unknown executor cannot be used (the subprocess path is sealed)",
+        )
+
+    # Structural: LIVE execution (a real, non-fake executor) requires live_verified
+    # onboarding evidence. In B1-B-0 the executor is always fake, so simulated evidence is
+    # accepted for the fake/contract path; a would-be live executor is refused above and,
+    # even if reached, would require live_verified evidence here (ADR-014 §2).
+    require_live = not getattr(process_executor, "b1a_fake_only", False)
+    if require_live:  # pragma: no cover - unreachable in B1-B-0 (fake-only)
+        from secp_api.services.onboarding import active_onboarding_for_target
+
+        assert_evidence_sufficient_for_execution(
+            active_onboarding_for_target(session, target.id), require_live=True
         )
 
     secret_env = _resolve_lab_secret_env(session, operation, target, kind, secret_resolver)

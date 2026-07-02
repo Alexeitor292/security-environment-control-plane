@@ -99,6 +99,81 @@ class ChangeSetApprovalStatus(str, Enum):
     consumed = "consumed"
 
 
+class OnboardingMode(str, Enum):
+    """How a target is brought under SECP management (SECP-002B-1B-0, ADR-014).
+
+    ``clean_server`` — the user brings a new/empty eligible server; SECP guides safe
+    setup and then creates scenario infrastructure automatically.
+    ``existing_environment`` — the user selects an existing node/cluster and declares an
+    explicit, enforceable boundary; SECP deploys only inside it.
+    """
+
+    clean_server = "clean_server"
+    existing_environment = "existing_environment"
+
+
+class IsolationModel(str, Enum):
+    """Target isolation model (SECP-002B-1B-0, ADR-014).
+
+    ``physical`` — a dedicated host/cluster (recommended secure preset).
+    ``logical`` — a shared environment with an explicitly declared, enforceable,
+    auditable, independently verifiable logical isolation boundary.
+    """
+
+    physical = "physical"
+    logical = "logical"
+
+
+class OnboardingStatus(str, Enum):
+    """Target onboarding lifecycle (SECP-002B-1B-0, ADR-014).
+
+    A target may only be cleared for real provisioning once its onboarding reaches
+    ``active`` (approved + activated with no config/scope drift).
+    """
+
+    draft = "draft"
+    preflight_pending = "preflight_pending"
+    ready_for_review = "ready_for_review"
+    approved = "approved"
+    active = "active"
+    rejected = "rejected"
+    retired = "retired"
+
+
+class PreflightCheckStatus(str, Enum):
+    """Outcome of a single onboarding preflight check (SECP-002B-1B-0)."""
+
+    passed = "passed"
+    failed = "failed"
+    warning = "warning"
+    skipped = "skipped"
+
+
+class VerificationLevel(str, Enum):
+    """Trust level of preflight evidence (SECP-002B-1B-0, ADR-014).
+
+    ``simulated`` — deterministically derived from the declared boundary; useful for
+    onboarding UX/review but **never** proof of live infrastructure and never sufficient
+    for live real provisioning. ``live_verified`` — collected by a trusted worker-only
+    provider collector against a real (reviewed disposable) target (future B1-B).
+    """
+
+    simulated = "simulated"
+    live_verified = "live_verified"
+
+
+class CollectorKind(str, Enum):
+    """Which collector produced preflight evidence (SECP-002B-1B-0, ADR-014).
+
+    ``fake_declared_boundary`` derives simulated evidence from the declared boundary and
+    inspects nothing real. ``provider_worker`` is the future trusted worker-only collector
+    that produces ``live_verified`` evidence. Arbitrary/caller-supplied kinds are refused.
+    """
+
+    fake_declared_boundary = "fake_declared_boundary"
+    provider_worker = "provider_worker"
+
+
 class ProvisioningApplicationMode(str, Enum):
     """Which provisioning path a request targets (SECP-002B-1A, ADR-013).
 
@@ -146,6 +221,9 @@ class Permission(str, Enum):
     # SECP-002B-1A — sealed OpenTofu runner, toolchain profiles, change-set approval.
     toolchain_manage = "toolchain:manage"
     provisioning_approve = "provisioning:approve"
+    # SECP-002B-1B-0 — target onboarding and automated deployment contract.
+    onboarding_manage = "onboarding:manage"
+    onboarding_approve = "onboarding:approve"
 
 
 class AuditAction(str, Enum):
@@ -207,3 +285,14 @@ class AuditAction(str, Enum):
     change_set_rejected = "provisioning.change_set_rejected"
     real_provisioning_refused = "provisioning.real_refused"
     workspace_rendered = "provisioning.workspace_rendered"
+    # SECP-002B-1B-0 — target onboarding + automated deployment contract.
+    onboarding_created = "onboarding.created"
+    onboarding_boundary_declared = "onboarding.boundary_declared"
+    onboarding_preflight_recorded = "onboarding.preflight_recorded"
+    onboarding_submitted = "onboarding.submitted"
+    onboarding_approved = "onboarding.approved"
+    onboarding_rejected = "onboarding.rejected"
+    onboarding_activated = "onboarding.activated"
+    onboarding_retired = "onboarding.retired"
+    onboarding_refused = "onboarding.refused"
+    onboarding_preflight_requested = "onboarding.preflight_requested"

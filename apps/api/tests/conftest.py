@@ -227,6 +227,8 @@ def build_provisioning_env(
         scope_policy={"provisioning": copy.deepcopy(scope or VALID_PROVISIONING_SCOPE)},
         address_spaces=address_spaces or [{"cidr_block": "10.60.0.0/16", "subnet_prefix": 24}],
     )
+    # A target-bound plan requires an approved & active onboarding (SECP-002B-1B-0).
+    onboard_and_activate(session, principal, target)
     template = catalog.create_template(
         session, principal, name="Prov", slug=f"prov-{uuid.uuid4().hex[:8]}"
     )
@@ -288,13 +290,68 @@ VALID_TOOLCHAIN_PROFILE: dict = {
 }
 
 
+# Clearly-fake, non-routable declared onboarding boundary (SECP-002B-1B-0). Provider-
+# neutral; consistent with VALID_PROVISIONING_SCOPE.
+VALID_ONBOARDING_BOUNDARY: dict = {
+    "nodes": ["pve-node-1", "pve-node-2"],
+    "storage": ["local-lvm"],
+    "network_segments": ["vmbr0"],
+    "cidrs": ["10.60.0.0/16"],
+    "vmid_range": {"start": 9000, "end": 9100},
+    "quotas": {
+        "max_teams": 4,
+        "max_vms": 20,
+        "max_containers": 10,
+        "max_total_vcpu": 64,
+        "max_total_memory_mb": 131072,
+        "max_total_disk_gb": 2048,
+    },
+    "external_connectivity": {"policy": "deny"},
+    "credential_scope": "least_privilege",
+}
+
+
+def onboard_and_activate(session, principal, target, *, isolation_model=None, boundary=None):
+    """Drive a target onboarding to 'active' (create → preflight → submit → approve → activate).
+
+    The declared boundary defaults to one derived from the target scope policy (always
+    within scope). Uses the API-style simulated preflight (no arbitrary caller checks).
+    """
+    import copy
+
+    from secp_api.enums import IsolationModel, OnboardingMode
+    from secp_api.onboarding import boundary_from_scope
+    from secp_api.services import onboarding as onb
+
+    isolation_model = isolation_model or IsolationModel.logical
+    b = (
+        copy.deepcopy(boundary)
+        if boundary is not None
+        else boundary_from_scope(target.scope_policy)
+    )
+    ob = onb.create_onboarding(
+        session,
+        principal,
+        target_id=target.id,
+        onboarding_mode=OnboardingMode.existing_environment,
+        isolation_model=isolation_model,
+        declared_boundary=b,
+    )
+    onb.record_simulated_preflight(session, principal, ob.id)
+    onb.submit_for_review(session, principal, ob.id)
+    onb.approve_onboarding(session, principal, ob.id, "approved for test")
+    onb.activate_onboarding(session, principal, ob.id)
+    return ob
+
+
 class LabEnv:
-    def __init__(self, target, exercise, plan, manifest, toolchain):
+    def __init__(self, target, exercise, plan, manifest, toolchain, onboarding=None):
         self.target = target
         self.exercise = exercise
         self.plan = plan
         self.manifest = manifest
         self.toolchain = toolchain
+        self.onboarding = onboarding
 
 
 def build_lab_env(session, principal, *, toolchain=None, scope=None, approve=True) -> LabEnv:
@@ -334,6 +391,8 @@ def build_lab_env(session, principal, *, toolchain=None, scope=None, approve=Tru
         name="lab-opentofu",
         profile=copy.deepcopy(toolchain or VALID_TOOLCHAIN_PROFILE),
     )
+    # Approve + activate a target onboarding so the real-provisioning gate is satisfied.
+    ob = onboard_and_activate(session, principal, target)
     template = catalog.create_template(
         session, principal, name="Lab", slug=f"lab-{uuid.uuid4().hex[:8]}"
     )
@@ -360,7 +419,7 @@ def build_lab_env(session, principal, *, toolchain=None, scope=None, approve=Tru
     session.commit()
     manifest = manifests.generate_manifest(session, principal, plan.id)
     session.commit()
-    return LabEnv(target, exercise, plan, manifest, tp)
+    return LabEnv(target, exercise, plan, manifest, tp, onboarding=ob)
 
 
 @pytest.fixture

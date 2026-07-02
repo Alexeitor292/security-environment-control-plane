@@ -22,17 +22,22 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from secp_api.enums import (
     ChangeSetApprovalStatus,
+    IsolationModel,
     LifecycleState,
+    OnboardingMode,
+    OnboardingStatus,
     PlanStatus,
     ProvisioningOperationKind,
     ProvisioningStatus,
@@ -274,6 +279,20 @@ class DeploymentPlan(Base, TimestampMixin):
         Uuid, ForeignKey("toolchain_profile.id"), nullable=True
     )
     toolchain_profile_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Enforceable onboarding binding (SECP-002B-1B-0, ADR-014). Null for the Simulator
+    # path; required for target-bound plans (bound to the single active onboarding).
+    target_onboarding_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=True
+    )
+    onboarding_boundary_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_preflight_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_preflight_evidence_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    onboarding_verification_level: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Effective execution boundary = declared onboarding boundary ∩ target scope policy
+    # (SECP-002B-1B-0 correction pass, ADR-014 §2). Immutable; recomputed + required to
+    # agree at manifest generation and the worker gate. Null for the Simulator path.
+    effective_boundary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    effective_boundary_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status: Mapped[PlanStatus] = mapped_column(
         EnumType(PlanStatus), default=PlanStatus.generated, nullable=False
     )
@@ -509,6 +528,116 @@ class ExecutionTarget(Base, TimestampMixin):
     address_spaces: Mapped[list[AddressSpacePolicy]] = relationship(
         back_populates="target", cascade="all, delete-orphan"
     )
+    onboardings: Mapped[list[TargetOnboarding]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
+
+
+# --- Target onboarding + automated deployment contract (SECP-002B-1B-0) -------
+
+
+class TargetOnboarding(Base, TimestampMixin):
+    """Provider-neutral onboarding record for an execution target (ADR-014).
+
+    Captures the onboarding mode (clean vs existing environment), the isolation model
+    (physical vs logical), the immutable declared boundary + its hash, and the human
+    approval. A target is cleared for real provisioning only when an onboarding reaches
+    ``active`` with no config/scope drift since approval. ``declared_boundary``,
+    ``boundary_hash``, ``onboarding_mode``, ``isolation_model``, ``execution_target_id``,
+    and ``organization_id`` are immutable after creation (see
+    :mod:`secp_api.immutability`). Secret-free.
+    """
+
+    __tablename__ = "target_onboarding"
+    # At most ONE active onboarding per execution target (fail-closed ambiguity control).
+    __table_args__ = (
+        Index(
+            "uq_target_onboarding_active",
+            "execution_target_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    onboarding_mode: Mapped[OnboardingMode] = mapped_column(
+        EnumType(OnboardingMode), nullable=False
+    )
+    isolation_model: Mapped[IsolationModel] = mapped_column(
+        EnumType(IsolationModel), nullable=False
+    )
+    status: Mapped[OnboardingStatus] = mapped_column(
+        EnumType(OnboardingStatus, length=40), default=OnboardingStatus.draft, nullable=False
+    )
+    declared_boundary: Mapped[dict] = mapped_column(JSON, nullable=False)
+    boundary_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    # Pinned at approval so config/scope drift invalidates the approval (checked at activation).
+    approved_target_config_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_scope_policy_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # The exact approved preflight evidence package (SECP-002B-1B-0, ADR-014 §3). Pinned at
+    # approval; later preflights cannot silently replace it. Plain Uuid (no DB-level FK) to
+    # avoid a circular FK with target_preflight; integrity is enforced in the service layer.
+    approved_preflight_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_preflight_evidence_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_boundary_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_verification_level: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_reason: Mapped[str] = mapped_column(Text, default="")
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    target: Mapped[ExecutionTarget] = relationship(back_populates="onboardings")
+    preflights: Mapped[list[TargetPreflight]] = relationship(
+        back_populates="onboarding", cascade="all, delete-orphan"
+    )
+
+
+class TargetPreflight(Base, TimestampMixin):
+    """Immutable, redacted, structured onboarding preflight evidence (ADR-014).
+
+    Provider-neutral. ``checks`` holds only redacted, review-safe entries; ``evidence_hash``
+    binds them. ``collector`` names the seam that produced the evidence (``fake`` in
+    SECP-002B-1B-0). No real target is inspected. Append-only: immutable after creation.
+    """
+
+    __tablename__ = "target_preflight"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=False, index=True
+    )
+    collector: Mapped[str] = mapped_column(String(60), default="fake", nullable=False)
+    # Trusted-provenance model (SECP-002B-1B-0, ADR-014 §2): only ``live_verified`` evidence
+    # from the ``provider_worker`` collector can unlock future live provisioning.
+    verification_level: Mapped[str] = mapped_column(String(40), nullable=False, default="simulated")
+    collector_kind: Mapped[str] = mapped_column(
+        String(60), nullable=False, default="fake_declared_boundary"
+    )
+    collector_identity: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    evidence_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Provenance snapshot at collection time (part of the evidence hash).
+    target_config_hash: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    scope_policy_hash: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    boundary_hash: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    toolchain_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    toolchain_profile_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    checks: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    onboarding: Mapped[TargetOnboarding] = relationship(back_populates="preflights")
 
 
 class ProviderInventorySnapshot(Base, TimestampMixin):
@@ -688,6 +817,19 @@ class ProvisioningManifest(Base, TimestampMixin):
         Uuid, ForeignKey("toolchain_profile.id"), nullable=True
     )
     toolchain_profile_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Onboarding binding (SECP-002B-1B-0): copied from the plan, echoed into immutable
+    # ``content`` (and therefore ``content_hash``), and re-verified at generation + gate.
+    target_onboarding_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=True
+    )
+    onboarding_boundary_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_preflight_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_preflight_evidence_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    onboarding_verification_level: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Effective execution boundary (declared boundary ∩ scope): copied from the plan, echoed
+    # into immutable ``content``/``content_hash``, and re-verified at the worker gate.
+    effective_boundary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    effective_boundary_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     content: Mapped[dict] = mapped_column(JSON, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

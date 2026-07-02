@@ -110,6 +110,30 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
             "display_name": target.display_name,
             "config_hash": target.config_hash,
         }
+        # Automated, declarative deployment contract (SECP-002B-1B-0, ADR-014). Standard
+        # provider-backed deployment is automated: SECP allocates IDs/addresses and creates
+        # the scenario resources — the user does NOT manually pre-create VMs, containers,
+        # networks, addresses, or storage. Every action remains subject to plan approval,
+        # the target scope policy, immutable manifests, and worker-only execution.
+        summary["deployment_contract"] = {
+            "mode": "automated",
+            "provisioning_model": "declarative",
+            "target_boundary_source": "target.scope_policy.provisioning + onboarding boundary",
+            "secp_automated_actions": [
+                "allocate_vm_ids",
+                "allocate_addresses",
+                "create_networks",
+                "create_vms",
+                "create_containers",
+                "create_disks",
+                "create_attachments",
+            ],
+            "scenario_resources_created_by_secp": True,
+            "manual_pre_creation_required": False,
+            "user_provided_preexisting_assets": [],  # excluded from standard mode
+            "subject_to_approval": True,
+            "subject_to_scope_policy": True,
+        }
         # Hash scope_policy["provisioning"] so plan approval covers the exact
         # provisioning policy, not just the target config hash (SECP-002B-0).
         scope_hash = provisioning_scope_policy_hash(target.scope_policy)
@@ -133,10 +157,55 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         else:
             toolchain_profile_id = None
             toolchain_profile_hash = None
+        # Enforceable onboarding binding (SECP-002B-1B-0, ADR-014). A target-bound plan
+        # may be generated only when exactly ONE active onboarding exists for the target;
+        # the plan binds that onboarding + its approved preflight evidence.
+        from secp_api.onboarding import (
+            OnboardingBoundarySpec,
+            effective_boundary_hash,
+            effective_boundary_is_empty,
+        )
+        from secp_api.onboarding import effective_boundary as compute_effective_boundary
+        from secp_api.services.onboarding import require_single_active_onboarding
+
+        onboarding = require_single_active_onboarding(session, target.id)
+        onboarding_id = onboarding.id
+        onboarding_boundary_hash = onboarding.approved_boundary_hash
+        approved_preflight_id = onboarding.approved_preflight_id
+        approved_preflight_evidence_hash = onboarding.approved_preflight_evidence_hash
+        onboarding_verification_level = onboarding.approved_verification_level
+        # Effective execution boundary = declared onboarding boundary ∩ target scope policy.
+        # A durable, immutable, hash-bound execution input (not decoration): recomputed and
+        # required to agree at manifest generation and the worker gate. Fail closed if empty.
+        boundary_spec = OnboardingBoundarySpec.model_validate(onboarding.declared_boundary)
+        effective_boundary_value = compute_effective_boundary(
+            boundary_spec, target.scope_policy or {}
+        )
+        if effective_boundary_is_empty(effective_boundary_value):
+            raise DomainError(
+                "effective execution boundary is empty; the onboarding boundary does not "
+                "intersect the target provisioning scope — re-onboard the target"
+            )
+        effective_boundary_hash_value = effective_boundary_hash(effective_boundary_value)
+        summary["onboarding"] = {
+            "id": str(onboarding.id),
+            "isolation_model": onboarding.isolation_model.value,
+            "onboarding_mode": onboarding.onboarding_mode.value,
+            "boundary_hash": onboarding_boundary_hash,
+            "verification_level": onboarding_verification_level,
+            "effective_boundary_hash": effective_boundary_hash_value,
+        }
     else:
         scope_hash = None
         toolchain_profile_id = None
         toolchain_profile_hash = None
+        onboarding_id = None
+        onboarding_boundary_hash = None
+        approved_preflight_id = None
+        approved_preflight_evidence_hash = None
+        onboarding_verification_level = None
+        effective_boundary_value = None
+        effective_boundary_hash_value = None
 
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.planned)
     plan = DeploymentPlan(
@@ -149,6 +218,13 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
         target_scope_policy_hash=scope_hash,
         toolchain_profile_id=toolchain_profile_id,
         toolchain_profile_hash=toolchain_profile_hash,
+        target_onboarding_id=onboarding_id,
+        onboarding_boundary_hash=onboarding_boundary_hash,
+        approved_preflight_id=approved_preflight_id,
+        approved_preflight_evidence_hash=approved_preflight_evidence_hash,
+        onboarding_verification_level=onboarding_verification_level,
+        effective_boundary=effective_boundary_value,
+        effective_boundary_hash=effective_boundary_hash_value,
         status=PlanStatus.generated,
         plan=plugin_plan.model_dump(mode="json"),
         summary=summary,
