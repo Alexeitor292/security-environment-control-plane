@@ -67,15 +67,19 @@ RESTRICTED_MODULES = {
 
 # Full module paths that must never be imported by any API file, including dispatch.py.
 # These are worker-internal collector implementations; the API must only dispatch.
-FULL_MODULE_FORBIDDEN = frozenset({
-    "secp_worker.onboarding.target_evidence",
-})
+FULL_MODULE_FORBIDDEN = frozenset(
+    {
+        "secp_worker.onboarding.target_evidence",
+    }
+)
 
 # Specific names that must never be imported by any API file.
-FORBIDDEN_IMPORT_NAMES = frozenset({
-    "SimulatedTargetEvidenceCollector",
-    "TargetEvidenceCollector",
-})
+FORBIDDEN_IMPORT_NAMES = frozenset(
+    {
+        "SimulatedTargetEvidenceCollector",
+        "TargetEvidenceCollector",
+    }
+)
 
 # Plugin side-effecting capability methods the API must never call directly.
 PLUGIN_SIDE_EFFECT_METHODS = {"apply", "reset", "destroy"}

@@ -120,16 +120,6 @@ class InlineDispatcher:
         )
 
 
-def request_simulated_target_evidence_result(*, declared_boundary: dict) -> dict:
-    """[DEPRECATED — use InlineDispatcher.dispatch_simulated_preflight instead.
-
-    Retained temporarily; will be removed once all callers are migrated."""
-    raise NotImplementedError(
-        "request_simulated_target_evidence_result has been removed; "
-        "use get_dispatcher().dispatch_simulated_preflight() instead"
-    )
-
-
 # --- Temporal path ------------------------------------------------------------
 
 
