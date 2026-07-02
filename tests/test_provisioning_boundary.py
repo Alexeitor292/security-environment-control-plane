@@ -55,8 +55,10 @@ FORBIDDEN_IMPORT_NAMES = {
     "TargetEvidenceCollector",
 }
 
-DISPATCH_WORKER_ONBOARDING_IMPORTS = {
-    "secp_worker.onboarding.target_evidence": {"SimulatedTargetEvidenceCollector"},
+# dispatch.py is the only API file permitted to import the worker's onboarding
+# orchestration entry-point (it dispatches work; it never calls the collector).
+DISPATCH_ALLOWED_WORKER_ONBOARDING_MODULES = {
+    "secp_worker.onboarding.orchestration",
 }
 
 
@@ -78,7 +80,7 @@ def _imports(path: Path):
 
 
 def _is_allowed_dispatch_worker_onboarding_import(path: Path, mod: str) -> bool:
-    return path.name == "dispatch.py" and mod in DISPATCH_WORKER_ONBOARDING_IMPORTS
+    return path.name == "dispatch.py" and mod in DISPATCH_ALLOWED_WORKER_ONBOARDING_MODULES
 
 
 @pytest.mark.parametrize("path", _py_files(), ids=lambda p: p.name)
@@ -91,8 +93,6 @@ def test_api_never_imports_runner_or_iac(path: Path):
         for bad in FORBIDDEN_IMPORT_SUBSTRINGS:
             assert bad not in low, f"{path.name} imports forbidden module '{mod}'"
     bad_names = FORBIDDEN_IMPORT_NAMES & set(names)
-    if path.name == "dispatch.py":
-        bad_names -= set().union(*DISPATCH_WORKER_ONBOARDING_IMPORTS.values())
     assert not bad_names, f"{path.name} imports runner symbol(s) {bad_names}"
 
 
@@ -123,10 +123,8 @@ def test_onboarding_collectors_live_only_in_worker():
     assert (worker / "onboarding" / "target_evidence.py").exists()
     for path in _py_files():
         text = path.read_text(encoding="utf-8")
-        if path.name == "dispatch.py":
-            continue
-        assert "SimulatedTargetEvidenceCollector" not in text
-        assert "TargetEvidenceCollector" not in text
+        assert "SimulatedTargetEvidenceCollector" not in text, f"{path.name} references collector"
+        assert "TargetEvidenceCollector" not in text, f"{path.name} references collector"
 
 
 def test_api_routes_and_services_do_not_collect_target_evidence_directly():
