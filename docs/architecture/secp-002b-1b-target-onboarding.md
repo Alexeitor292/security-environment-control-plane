@@ -146,6 +146,27 @@ Onboarding is not documentation — it is a hash-bound execution input:
 - **Robust redaction.** Preflight detail text carrying a secret/credential/endpoint/inventory/
   private-key/high-entropy value is refused before persistence.
 
+## Onboarding wizard + isolation profiles (SECP-002B-1B-0.1)
+
+An operator-facing React/TypeScript wizard (`apps/web/src/pages/OnboardingWizard.tsx`, with
+framework-free logic in `onboarding-wizard.ts`) drives the whole lifecycle against the existing
+API: select target → onboarding mode → isolation model → lab network approach → isolation
+profile → define & review boundary → simulated lifecycle. Two durable, provider-neutral fields
+are added **inside** the hashed, immutable declared boundary (no new column; pre-0.1 boundaries
+default safely):
+
+- **`network_approach`** (`use_approved_existing_segment` | `secp_managed_dedicated_segment`).
+  Segments must be within the target's approved segments for both approaches; the SECP-managed
+  approach is a declaration only — **no bridge/VNet is created in this release**.
+- **`isolation_profile`** — only `fully_segregated` is enabled; `internet_egress_only`,
+  `controlled_service_access`, and `advanced_custom_policy` are shown as "planned, not available
+  yet" in the UI **and rejected server-side** (`SUPPORTED_ISOLATION_PROFILES`).
+
+The review screen states verbatim that SECP will automatically allocate IDs/addresses and
+create scenario resources inside the boundary, and that manual per-scenario creation is not
+required. The lifecycle UI is explicitly labelled **simulated** and wires only the fake
+preflight → review → human approval → activate path; the B1-B-0 live-evidence seal is unchanged.
+
 ## What this slice intentionally does NOT do
 
 No real Proxmox host/cluster/node/bridge/VLAN/storage/network/credential/endpoint is

@@ -213,3 +213,28 @@ uv run pytest apps/api/tests tests -q
   values (`pve-node-1`, `local-lvm`, `vmbr0`, `10.60.0.0/16`, VM-IDs 9000–9100).
 - Real evidence collection, real provider-specific boundary verification, and the
   pre-existing-asset import/adoption workflow are future work (B1-B and beyond).
+
+## Onboarding wizard + isolation profiles (SECP-002B-1B-0.1)
+
+The operator-facing wizard adds two durable, provider-neutral fields to the hashed declared
+boundary (`network_approach`, `isolation_profile`). Verified **fake-only**; no real server,
+network, bridge, VNet, firewall, provider, OpenTofu binary, Docker socket, or secret manager is
+contacted.
+
+Backend (pytest, `test_onboarding_wizard_fields.py`, 10 tests): the fields persist in the
+declared boundary and surface as computed API fields; `use_approved_existing_segment` /
+`secp_managed_dedicated_segment` are accepted; the roadmap isolation profiles
+(`internet_egress_only`, `controlled_service_access`, `advanced_custom_policy`) are **rejected
+server-side** (HTTP 422, "not available yet"); an unknown network approach is rejected; a
+network segment outside the target's approved segments is refused; a pre-0.1 boundary (no new
+keys) reads back with safe defaults; and a boundary carrying the new fields still computes an
+effective boundary and **cannot** mint live evidence (the B1-B-0 seal is unchanged). The full
+backend suite remains green.
+
+Frontend (Vitest, `onboarding-wizard.test.ts`, plus `client.test.ts`): the default isolation
+profile is `fully_segregated`; only that profile is available (the rest are "planned, not
+available yet"); the review statement contains the mandated automated-creation text; the
+lifecycle steps render draft → simulated preflight → ready for review → human approval →
+active; boundary validation reports missing allowlists, inverted VM-ID ranges, invalid CIDRs,
+unsupported profiles, and segments outside the approved set (for both network approaches).
+`npm run lint`, `npm run typecheck`, `npm run test`, and `npm run build` all pass.

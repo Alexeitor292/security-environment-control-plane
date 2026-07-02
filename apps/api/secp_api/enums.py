@@ -140,6 +140,36 @@ class OnboardingStatus(str, Enum):
     retired = "retired"
 
 
+class NetworkApproach(str, Enum):
+    """How the lab network segment is provided for an onboarding (SECP-002B-1B-0.1).
+
+    ``use_approved_existing_segment`` — the operator constrains the boundary to the target's
+    already-approved network segments (no network is created). ``secp_managed_dedicated_segment``
+    — SECP is *intended* to create a dedicated bridge/VNet later; in this release it is a durable
+    declaration only (activation pending — **no** bridge/VNet is created and nothing real is
+    contacted). Provider-neutral.
+    """
+
+    use_approved_existing_segment = "use_approved_existing_segment"
+    secp_managed_dedicated_segment = "secp_managed_dedicated_segment"
+
+
+class IsolationProfile(str, Enum):
+    """Network isolation posture declared for an onboarding boundary (SECP-002B-1B-0.1).
+
+    Only ``fully_segregated`` is available in this release: no Internet, no default route, and
+    no path to management/home/corporate/storage/public networks. The remaining profiles are
+    declared for the roadmap but are **rejected server-side** (not merely disabled in the UI)
+    until a separately reviewed change enables them. No NAT/gateway/firewall/egress behaviour
+    is introduced here.
+    """
+
+    fully_segregated = "fully_segregated"
+    internet_egress_only = "internet_egress_only"
+    controlled_service_access = "controlled_service_access"
+    advanced_custom_policy = "advanced_custom_policy"
+
+
 class PreflightCheckStatus(str, Enum):
     """Outcome of a single onboarding preflight check (SECP-002B-1B-0)."""
 

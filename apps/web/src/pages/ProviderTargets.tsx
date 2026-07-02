@@ -4,27 +4,44 @@ import { api } from "../api/client";
 import type { ExecutionTarget, InventorySnapshot } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAsync } from "../hooks";
+import {
+  DEFAULT_PROVISIONING_BOUNDARY,
+  buildRegisterTargetPayload,
+  type ProvisioningBoundaryDraft,
+} from "./provider-targets";
 
 function RegisterForm({ onCreated }: { onCreated: () => void }) {
   const [displayName, setDisplayName] = useState("Lab Proxmox (placeholder)");
   const [baseUrl, setBaseUrl] = useState("https://proxmox.example.test:8006/api2/json");
   const [secretRef, setSecretRef] = useState("env:SECP_PROVIDER_SECRET__LAB");
-  const [cidr, setCidr] = useState("10.60.0.0/16");
+  const [boundary, setBoundary] = useState<ProvisioningBoundaryDraft>(
+    DEFAULT_PROVISIONING_BOUNDARY,
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  function setBoundaryField<K extends keyof ProvisioningBoundaryDraft>(
+    key: K,
+    value: ProvisioningBoundaryDraft[K],
+  ) {
+    setBoundary((current) => ({ ...current, [key]: value }));
+  }
 
   async function submit() {
     setBusy(true);
     setError(null);
     try {
-      await api.registerTarget({
-        display_name: displayName,
-        plugin_name: "proxmox",
-        config: { base_url: baseUrl, verify_tls: true },
-        secret_ref: secretRef || null,
-        scope_policy: {},
-        address_spaces: cidr ? [{ cidr_block: cidr, subnet_prefix: 24 }] : [],
+      const payload = buildRegisterTargetPayload({
+        displayName,
+        baseUrl,
+        secretRef,
+        boundary,
       });
+      if (!payload.ok || !payload.value) {
+        setError(payload.errors.join("; "));
+        return;
+      }
+      await api.registerTarget(payload.value);
       onCreated();
     } catch (e: any) {
       setError(`${e.message}${e.details ? " — " + e.details.join("; ") : ""}`);
@@ -52,8 +69,117 @@ function RegisterForm({ onCreated }: { onCreated: () => void }) {
         <div>
           <label>Secret reference (opaque pointer)</label>
           <input type="text" value={secretRef} onChange={(e) => setSecretRef(e.target.value)} />
-          <label>Approved address space (CIDR)</label>
-          <input type="text" value={cidr} onChange={(e) => setCidr(e.target.value)} />
+        </div>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <h3 style={{ marginTop: 0 }}>Allowed provisioning boundary</h3>
+        <p className="muted">
+          Provider-neutral fake lab values only. These approved values define what the
+          onboarding wizard may select; no infrastructure discovery, provider validation,
+          network calls, or provisioning actions are performed here.
+        </p>
+        <div className="grid cols-2">
+          <div>
+            <label>Allowed nodes</label>
+            <input
+              value={boundary.allowedNodes}
+              onChange={(e) => setBoundaryField("allowedNodes", e.target.value)}
+            />
+            <label>Allowed storage</label>
+            <input
+              value={boundary.allowedStorage}
+              onChange={(e) => setBoundaryField("allowedStorage", e.target.value)}
+            />
+            <label>Allowed network segments / bridges</label>
+            <input
+              value={boundary.networkSegments}
+              onChange={(e) => setBoundaryField("networkSegments", e.target.value)}
+            />
+            <p className="muted">
+              A network segment is a bridge, VNet, or VLAN name such as
+              <span className="mono"> lab-isolated-segment</span>, not an IP range.
+            </p>
+            <label>Approved CIDR reservations</label>
+            <input
+              value={boundary.cidrs}
+              onChange={(e) => setBoundaryField("cidrs", e.target.value)}
+            />
+            <p className="muted">
+              CIDRs are lab address ranges, for example
+              <span className="mono"> 10.60.0.0/16</span>.
+            </p>
+            <label>Allowed templates/images</label>
+            <input
+              value={boundary.allowedTemplates}
+              onChange={(e) => setBoundaryField("allowedTemplates", e.target.value)}
+            />
+          </div>
+          <div>
+            <div className="grid cols-2">
+              <div>
+                <label>VM-ID start</label>
+                <input
+                  value={boundary.vmidStart}
+                  onChange={(e) => setBoundaryField("vmidStart", e.target.value)}
+                />
+              </div>
+              <div>
+                <label>VM-ID end</label>
+                <input
+                  value={boundary.vmidEnd}
+                  onChange={(e) => setBoundaryField("vmidEnd", e.target.value)}
+                />
+              </div>
+            </div>
+            <label>Max teams / VMs / containers</label>
+            <div className="grid cols-2">
+              <input
+                value={boundary.maxTeams}
+                onChange={(e) => setBoundaryField("maxTeams", e.target.value)}
+              />
+              <input
+                value={boundary.maxVms}
+                onChange={(e) => setBoundaryField("maxVms", e.target.value)}
+              />
+            </div>
+            <input
+              value={boundary.maxContainers}
+              onChange={(e) => setBoundaryField("maxContainers", e.target.value)}
+            />
+            <label>Max vCPU / memory (MB) / disk (GB)</label>
+            <div className="grid cols-2">
+              <input
+                value={boundary.maxVcpu}
+                onChange={(e) => setBoundaryField("maxVcpu", e.target.value)}
+              />
+              <input
+                value={boundary.maxMemoryMb}
+                onChange={(e) => setBoundaryField("maxMemoryMb", e.target.value)}
+              />
+            </div>
+            <input
+              value={boundary.maxDiskGb}
+              onChange={(e) => setBoundaryField("maxDiskGb", e.target.value)}
+            />
+            <label>Default template sizing: vCPU / memory (MB) / disk (GB)</label>
+            <div className="grid cols-2">
+              <input
+                value={boundary.sizingVcpu}
+                onChange={(e) => setBoundaryField("sizingVcpu", e.target.value)}
+              />
+              <input
+                value={boundary.sizingMemoryMb}
+                onChange={(e) => setBoundaryField("sizingMemoryMb", e.target.value)}
+              />
+            </div>
+            <input
+              value={boundary.sizingDiskGb}
+              onChange={(e) => setBoundaryField("sizingDiskGb", e.target.value)}
+            />
+            <p className="muted mono" style={{ marginTop: 8 }}>
+              external connectivity: deny (fixed)
+            </p>
+          </div>
         </div>
       </div>
       <div className="row" style={{ marginTop: 12 }}>
@@ -67,6 +193,7 @@ function RegisterForm({ onCreated }: { onCreated: () => void }) {
 
 function TargetCard({ target, onChanged }: { target: ExecutionTarget; onChanged: () => void }) {
   const snapshots = useAsync(() => api.listSnapshots(target.id), [target.id]);
+  const provisioning = (target.scope_policy as any)?.provisioning ?? {};
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -115,6 +242,14 @@ function TargetCard({ target, onChanged }: { target: ExecutionTarget; onChanged:
       </div>
       {target.secret_ref && (
         <div className="muted mono">secret_ref: {target.secret_ref} (reference, not a secret)</div>
+      )}
+      {provisioning.allowed_bridges && (
+        <div className="muted mono" style={{ marginTop: 8 }}>
+          approved boundary: nodes={(provisioning.allowed_nodes ?? []).join(", ")} Â· storage=
+          {(provisioning.allowed_storage ?? []).join(", ")} Â· segments=
+          {(provisioning.allowed_bridges ?? []).join(", ")} Â· cidrs=
+          {(provisioning.allowed_cidr_reservations ?? []).join(", ")}
+        </div>
       )}
       {msg && <div className="muted" style={{ marginTop: 8 }}>{msg}</div>}
       {error && (

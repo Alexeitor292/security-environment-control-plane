@@ -89,11 +89,28 @@ textarea {
   border: 1px solid var(--border); border-radius: 6px; padding: 12px;
   font-family: ui-monospace, Menlo, monospace; font-size: 12px;
 }
-input[type="text"] {
+input[type="text"], input:not([type]), select {
   background: #0b0f15; color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 8px 10px; width: 100%;
 }
 label { display: block; color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
+
+/* Onboarding wizard (SECP-002B-1B-0.1) */
+.wizard-steps {
+  list-style: none; display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 0; margin: 12px 0;
+}
+.wizard-steps li {
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  color: var(--muted); font-size: 12px;
+}
+.wizard-steps li.current { border-color: var(--accent); color: var(--text); }
+.wizard-steps li.done { border-color: var(--ok); color: var(--ok); }
+.radio-row {
+  display: flex; gap: 10px; align-items: flex-start; padding: 8px 0;
+  color: var(--text); font-size: 14px;
+}
+.radio-row input { width: auto; margin-top: 3px; }
 
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .muted { color: var(--muted); }

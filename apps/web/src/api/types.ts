@@ -220,3 +220,86 @@ export interface InventoryResource {
   status: string;
   attributes: Record<string, unknown>;
 }
+
+// --- Target Onboarding (SECP-002B-1B-0 / 0.1) ---
+
+export type OnboardingMode = "clean_server" | "existing_environment";
+export type IsolationModelName = "physical" | "logical";
+export type NetworkApproach =
+  | "use_approved_existing_segment"
+  | "secp_managed_dedicated_segment";
+export type IsolationProfile =
+  | "fully_segregated"
+  | "internet_egress_only"
+  | "controlled_service_access"
+  | "advanced_custom_policy";
+export type OnboardingStatus =
+  | "draft"
+  | "preflight_pending"
+  | "ready_for_review"
+  | "approved"
+  | "active"
+  | "rejected"
+  | "retired";
+
+export interface OnboardingBoundary {
+  nodes: string[];
+  storage: string[];
+  network_segments: string[];
+  cidrs: string[];
+  vmid_range: { start: number; end: number };
+  quotas: {
+    max_teams: number;
+    max_vms: number;
+    max_containers: number;
+    max_total_vcpu: number;
+    max_total_memory_mb: number;
+    max_total_disk_gb: number;
+  };
+  external_connectivity: { policy: "deny" };
+  credential_scope: string;
+  network_approach?: NetworkApproach;
+  isolation_profile?: IsolationProfile;
+}
+
+export interface Onboarding {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  onboarding_mode: OnboardingMode;
+  isolation_model: IsolationModelName;
+  status: OnboardingStatus;
+  declared_boundary: OnboardingBoundary;
+  boundary_hash: string;
+  network_approach: NetworkApproach;
+  isolation_profile: IsolationProfile;
+  approved_verification_level: string | null;
+  activated_at: string | null;
+  created_at: string;
+}
+
+export interface PreflightCheck {
+  check: string;
+  status: string;
+  detail: string;
+}
+
+export interface Preflight {
+  id: string;
+  onboarding_id: string;
+  collector: string;
+  verification_level: string;
+  collector_kind: string;
+  collector_identity: string;
+  evidence_version: number;
+  passed: boolean;
+  checks: PreflightCheck[];
+  evidence_hash: string;
+  created_at: string;
+}
+
+export interface OnboardingCreate {
+  onboarding_mode: OnboardingMode;
+  isolation_model: IsolationModelName;
+  declared_boundary: OnboardingBoundary;
+}
