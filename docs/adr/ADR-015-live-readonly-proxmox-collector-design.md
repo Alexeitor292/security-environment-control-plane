@@ -253,3 +253,30 @@ execution. Static documentation guardrail tests
 stay free of real infrastructure values and that no staging activation switch exists in code or
 infrastructure. All prior dormancy, authorization, redaction, and sealed-evidence guarantees are
 unchanged.
+
+## Amendment - isolated staging control-plane topology correction (SECP-002B-1B-8, 2026-07-03)
+
+B1-B8 is a documentation-only correction of the B1-B7 disposable staging design
+(`docs/proxmox/isolated-staging-control-plane-design.md`). The B1-B7 reference topology showed a
+lone "SECP worker" reaching the target across a single isolated segment; read literally as a
+worker with only a target-facing interface, that would strand the worker from the authoritative
+API and database the SECP-002B-1B-6 loader/verifier requires. B1-B8 replaces that concept with a
+self-contained **isolated SECP staging control-plane VM** that contains a staging-only API,
+database, and worker, with API/database/worker communication kept local to the VM over loopback
+or an internal container network, and exactly one target-facing path from the staging worker to
+one disposable nested Proxmox target API. The staging control plane must never use the production
+SECP database or production control-plane services; the future staging authorization is
+authoritative only for the isolated staging environment; and no caller-supplied records may
+substitute for the staging database. B1-B8 also adds an offline bootstrap requirement, corrects
+the nested-on-shared-hypervisor scope language (not equivalent to dedicated-hardware or
+hypervisor-level isolation; no untrusted workloads), and withdraws the earlier claim that
+destruction is without consequence in favour of bounded, reversible staging resources against
+verified production headroom.
+
+B1-B8 adds **no** target registration, real endpoint or host, credential or secret reference,
+certificate data, API/UI/dispatcher/workflow/Compose/runtime wiring, environment variable,
+Proxmox access, live evidence persistence, or collector/transport/resolver/authorization
+execution. Static documentation guardrail tests
+(`apps/api/tests/test_isolated_staging_control_plane_design.py`) enforce the correction and the
+continued absence of real infrastructure values and activation switches. All prior dormancy,
+authorization, redaction, and sealed-evidence guarantees are unchanged.
