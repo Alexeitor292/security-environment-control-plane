@@ -11,11 +11,19 @@ contracts. It does not authorize, enable, configure, or connect to any staging t
 adds no real endpoint, secret backend, API action, UI action, dispatcher wiring, worker workflow,
 feature switch, or live evidence persistence.
 
+SECP-002B-1B-7 adds only the disposable staging target operating design and readiness contract
+(`disposable-staging-target-operating-design.md`). It performs no registration, wiring, access,
+or activation. Its out-of-band eligibility requirements and readiness evidence checklist must be
+complete and independently reviewed before any box in this activation checklist may be checked.
+
 Every box must be **checked and independently human-reviewed**, and an explicit user
 authorization recorded, before the default-disabled live-collection feature gate is enabled for
 a specific approved target. The collector is **read-only**; it never mutates a target.
 
 ## 1. Disposable/staging target approval
+- [ ] The disposable staging target operating design (SECP-002B-1B-7,
+      `disposable-staging-target-operating-design.md`) eligibility requirements and readiness
+      evidence checklist are complete and independently reviewed **out of band**.
 - [ ] A **disposable or staging** Proxmox target reserved for read-only evidence trials — never
       a production, home, or shared production cluster.
 - [ ] The environment is rebuildable and contains no data of value.
