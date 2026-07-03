@@ -1,9 +1,12 @@
-"""Dormant live read-only Proxmox collector (SECP-002B-1B-4).
+"""Dormant live read-only Proxmox collector (SECP-002B-1B-4/1B-5).
 
 Worker/plugin-only and **unreachable outside unit tests**: the sole way to reach it is the
 worker orchestration entry ``run_live_readonly_collection``, which first refuses a
-default-disabled gate and validates an immutable binding before any secret resolution or
-transport construction. This collector contacts nothing real — it drives an **injected**
+default-disabled gate, validates an immutable binding, and requires the binding to match
+authoritative ``ExecutionTarget`` / ``TargetOnboarding`` records — deriving the target config,
+declared boundary, and opaque credential reference solely from those records — before any secret
+resolution or transport construction. This collector contacts nothing real — it drives an
+**injected**
 ``ReadOnlyHttpTransport`` (a fake in tests; the policy-hardened ``HttpxReadOnlyTransport`` in a
 future, separately-authorized activation), issues only closed-allowlist **canonical GET** paths
 (re-checked here via :func:`assert_request_allowed` as defense-in-depth), normalizes with the

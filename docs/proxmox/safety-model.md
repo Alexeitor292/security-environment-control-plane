@@ -209,6 +209,33 @@ unchanged. **No real Proxmox target was contacted, no secret backend exists, and
 database persistence path, or live activation was introduced.** An independent security review
 plus a separately-authorized activation PR are required before any staging activation.
 
+### L20 — Trusted target/onboarding identity binding (SECP-002B-1B-5; still dormant/fake-only)
+
+The dormant live runner no longer accepts an independently-supplied target config, declared
+boundary, or credential reference. `run_live_readonly_collection` now receives only the
+authoritative `ExecutionTarget` and `TargetOnboarding` records and derives, in worker memory
+only, the target config from `ExecutionTarget.config`, the declared boundary from
+`TargetOnboarding.declared_boundary`, and the opaque credential reference from
+`ExecutionTarget.secret_ref`. Before **any** sensitive step (config parsing, connection/boundary
+hashing, authorization, secret resolution, transport construction, collection, or persistence) it
+fails closed unless the binding names the exact records and the two records agree on one identity:
+`binding.execution_target_id`/`onboarding_id` match the records, `onboarding.execution_target_id`
+and `organization_id` match the target, `plugin_name == "proxmox"`, and a non-empty `secret_ref`
+is present. `ExecutionTarget.config` stays secret-free (connection identity only; it must not
+carry a credential reference); the connection hash still covers only `base_url` + `verify_tls`;
+and the credential reference is bound by exact three-way in-memory equality
+(`binding.credential_ref == validated_config.credential_ref == ExecutionTarget.secret_ref`) and is
+never hashed, logged, or echoed in errors. The runner never queries the database; a future,
+separately-authorized activation workflow loads the trusted records before calling it. This PR
+adds no staging activation, secret backend, API/UI/dispatcher path, environment switch, DB
+migration, or real Proxmox access.
+
+**Legacy discovery is separate from target evidence.** The legacy provider discovery path
+(`secp_worker.discovery.run_discovery`) produces an immutable `ProviderInventorySnapshot`
+(inventory). It is a distinct code path that does **not** collect, satisfy, persist, or authorize
+live *target evidence*, and it never invokes the live read-only collector — a regression assertion
+(`test_legacy_discovery_is_separate_from_target_evidence_collection`) enforces this separation.
+
 ## What a reviewer should verify
 
 - No file contains a real hostname, IP, cluster/node/pool/storage name, VLAN, or
