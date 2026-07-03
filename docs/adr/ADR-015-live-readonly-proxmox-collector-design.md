@@ -151,12 +151,12 @@ Two follow-up hardening fixes close remaining contract gaps (still dormant/fake-
 - **Real (recomputed) binding bound to a validated config.** A plugin-owned, immutable
   `ValidatedProxmoxTargetConfig` (`parse_proxmox_target_config`) accepts **exactly** `base_url`,
   `verify_tls`, `credential_ref` and rejects unknown/secret-like/nested/mistyped fields (rejected
-  raw values are never logged/hashed/returned). `run_live_readonly_collection` receives the raw
-  `target_config` + declared boundary and, before authorization/secret-resolution/transport,
-  parses the config, canonical-hashes **only** the validated model's secret-free binding
+  raw values are never logged/hashed/returned). `run_live_readonly_collection` receives
+  authoritative `ExecutionTarget` + `TargetOnboarding` records, derives parser input and boundary
+  only from those records, canonical-hashes **only** the validated model's secret-free binding
   representation (deterministic JSON: sorted keys, compact separators, UTF-8, NaN/inf and
   unsupported types rejected) and compares it to `binding.target_config_hash`, recomputes +
-  compares the boundary hash, binds the supplied opaque `secret_ref` to the validated
+  compares the boundary hash, binds the target's opaque `secret_ref` to the validated
   `credential_ref` by exact in-memory equality (never logged/hashed), and requires a worker-only
   `LiveReadAuthorizationVerifier` (fake-only) to approve. The transport factory receives the
   **validated config** (never a raw dict) + the transient token, so the validated, authorized
@@ -192,3 +192,41 @@ This amendment adds **no** staging activation, secret backend, API route, UI act
 switch, database migration, or real Proxmox access; the simulated collector is unchanged, the
 sealed provider collector stays sealed, `fully_segregated` still cannot pass, and legacy provider
 discovery (`ProviderInventorySnapshot`) remains separate from target evidence collection.
+
+## Amendment - staging activation authorization contract (SECP-002B-1B-6, 2026-07-02)
+
+B1-B6 creates only the durable authorization and worker-owned loader/verifier contracts required
+for a later, separately reviewed single-target staging activation PR. It does **not** authorize,
+enable, configure, or connect to any staging target. No real endpoint, target configuration,
+secret backend, environment switch, dispatcher wiring, API route, UI action, worker workflow,
+transport construction, collector invocation, or live evidence persistence exists after this PR.
+
+- **Durable authorization row.** `LiveReadAuthorization` is provider-neutral and stores only safe
+  binding facts: organization id, execution-target id, onboarding id, connection hash, boundary
+  hash, authorization version/expiry, collector-contract version, endpoint-allowlist version,
+  evidence source, verification level, and state (`draft`, `approved`, `revoked`, `expired`).
+  It never stores endpoint URLs or hosts, raw target config, declared-boundary contents,
+  credential/secret references, tokens, a hash of a credential reference, observations, or
+  evidence payloads. Binding facts are immutable; approval metadata is set once; revocation
+  preserves approval history and records explicit revocation metadata plus audit.
+- **Worker-owned authoritative loader/verifier contract.** A future activation job must call the
+  worker-owned verifier with only pinned ids/version and an injected authoritative repository. The
+  verifier loads `ExecutionTarget`, `TargetOnboarding`, and `LiveReadAuthorization`; enforces
+  organization consistency, target/onboarding relationship, active target, active onboarding,
+  approved and unexpired authorization, non-revocation, current connection hash, boundary hash,
+  evidence source, verification level, collector-contract version, endpoint-allowlist version, and
+  authorization version; and constructs `LiveReadCollectionBinding` only after every check passes.
+  It cannot accept caller-built ORM records as the trust anchor.
+- **Direct-instantiation guard.** The dormant runner now uses an injected collector seam. Non-test
+  live-read modules do not directly instantiate `LiveReadOnlyProxmoxCollector`, construct
+  `HttpxReadOnlyTransport`, or call `run_live_readonly_collection`. The existing legacy inventory
+  discovery path remains separate from target evidence collection and cannot satisfy this
+  authorization contract.
+- **Redaction.** `LiveReadCollectionBinding`, `ValidatedProxmoxTargetConfig`, authorization
+  request/result/refusal objects, and authorization audit payloads do not print or serialize
+  opaque credential or secret references. Credential references remain bound only by exact
+  in-memory equality and are never hashed.
+
+A future PR must explicitly wire exactly one approved target through this authoritative
+loader/verifier, preserve these direct-instantiation and redaction guards, and receive separate
+human authorization before any live read-only collector can be enabled.

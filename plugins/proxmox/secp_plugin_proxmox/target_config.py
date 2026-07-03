@@ -31,13 +31,21 @@ class ProxmoxTargetConfigError(Exception):
     """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ValidatedProxmoxTargetConfig:
     """A validated, immutable, secret-free Proxmox target configuration."""
 
     base_url: str
     verify_tls: bool
     credential_ref: str
+
+    def __repr__(self) -> str:
+        return (
+            "ValidatedProxmoxTargetConfig("
+            "base_url=<redacted>, "
+            f"verify_tls={self.verify_tls!r}, "
+            "credential_ref=<redacted>)"
+        )
 
     def connection_representation(self) -> dict:
         """Deterministic connection identity for hashing — ONLY ``base_url`` + ``verify_tls``.

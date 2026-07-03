@@ -37,6 +37,7 @@ from secp_api.enums import (
     EvidenceStatus,
     IsolationModel,
     LifecycleState,
+    LiveReadAuthorizationStatus,
     OnboardingMode,
     OnboardingStatus,
     PlanStatus,
@@ -532,6 +533,9 @@ class ExecutionTarget(Base, TimestampMixin):
     onboardings: Mapped[list[TargetOnboarding]] = relationship(
         back_populates="target", cascade="all, delete-orphan"
     )
+    live_read_authorizations: Mapped[list[LiveReadAuthorization]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
 
 
 # --- Target onboarding + automated deployment contract (SECP-002B-1B-0) -------
@@ -600,6 +604,9 @@ class TargetOnboarding(Base, TimestampMixin):
         back_populates="onboarding", cascade="all, delete-orphan"
     )
     evidence_records: Mapped[list[TargetEvidenceRecord]] = relationship(back_populates="onboarding")
+    live_read_authorizations: Mapped[list[LiveReadAuthorization]] = relationship(
+        back_populates="onboarding", cascade="all, delete-orphan"
+    )
 
 
 class TargetEvidenceRecord(Base, TimestampMixin):
@@ -682,6 +689,71 @@ class TargetPreflight(Base, TimestampMixin):
 
     onboarding: Mapped[TargetOnboarding] = relationship(back_populates="preflights")
     target_evidence: Mapped[TargetEvidenceRecord | None] = relationship(back_populates="preflights")
+
+
+class LiveReadAuthorization(Base, TimestampMixin):
+    """Secret-free durable authorization contract for future live read-only collection.
+
+    Provider-neutral and dormant: this row records only safe binding facts and lifecycle
+    state. It never stores endpoints, raw target configuration, declared boundary contents,
+    credential/secret references, tokens, observations, or evidence payloads.
+    """
+
+    __tablename__ = "live_read_authorization"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_target_id",
+            "onboarding_id",
+            "authorization_version",
+            name="uq_live_read_authorization_target_onboarding_version",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=False, index=True
+    )
+    connection_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    boundary_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    authorization_expiry: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    collector_contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    endpoint_allowlist_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    evidence_source: Mapped[str] = mapped_column(String(80), nullable=False)
+    verification_level: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[LiveReadAuthorizationStatus] = mapped_column(
+        EnumType(LiveReadAuthorizationStatus, length=40),
+        default=LiveReadAuthorizationStatus.draft,
+        nullable=False,
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason_code: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+
+    target: Mapped[ExecutionTarget] = relationship(back_populates="live_read_authorizations")
+    onboarding: Mapped[TargetOnboarding] = relationship(back_populates="live_read_authorizations")
+
+    def __repr__(self) -> str:
+        return (
+            "LiveReadAuthorization("
+            f"id={self.id!s}, "
+            f"organization_id={self.organization_id!s}, "
+            f"execution_target_id={self.execution_target_id!s}, "
+            f"onboarding_id={self.onboarding_id!s}, "
+            f"authorization_version={self.authorization_version!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            "connection_hash=<sha256>, "
+            "boundary_hash=<sha256>)"
+        )
 
 
 class ProviderInventorySnapshot(Base, TimestampMixin):

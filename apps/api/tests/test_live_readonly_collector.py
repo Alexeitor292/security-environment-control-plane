@@ -146,6 +146,18 @@ class RecordingVerifier:
         return self.approve
 
 
+class RecordingCollector:
+    """Fake collector wrapper that records calls and delegates to the offline collector."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self._delegate = LiveReadOnlyProxmoxCollector()
+
+    def collect(self, transport, *, declared_boundary: dict) -> dict:
+        self.calls.append((transport, declared_boundary))
+        return self._delegate.collect(transport, declared_boundary=declared_boundary)
+
+
 def _recording_factory(responses):
     # Records (validated_config, token, transport) so tests can prove the transport is built
     # from the VALIDATED config supplied to construction, not a separate factory choice.
@@ -191,6 +203,7 @@ def _run(
     binding=None,
     execution_target=None,
     onboarding=None,
+    collector=None,
     now=NOW,
 ):
     return run_live_readonly_collection(
@@ -200,6 +213,7 @@ def _run(
         onboarding=_onboarding() if onboarding is None else onboarding,
         secret_resolver=resolver,
         transport_factory=factory,
+        collector=RecordingCollector() if collector is None else collector,
         authorization_verifier=verifier,
         now=now,
     )
@@ -227,11 +241,19 @@ def test_disabled_gate_refuses_before_verifier_resolver_transport():
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
+    collector = RecordingCollector()
     with pytest.raises(LiveReadCollectionDisabled):
-        _run(gate=LiveReadCollectionGate(), resolver=resolver, factory=factory, verifier=verifier)
+        _run(
+            gate=LiveReadCollectionGate(),
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+            collector=collector,
+        )
     assert verifier.calls == []  # no authorization verification
     assert resolver.calls == []  # no secret resolution
     assert created == []  # no transport construction
+    assert collector.calls == []  # no collection
 
 
 # --- immutable binding validation (before verifier / resolver / transport) --------
@@ -257,6 +279,7 @@ def test_invalid_binding_refuses_before_verifier_resolver_transport(over):
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
+    collector = RecordingCollector()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
@@ -264,10 +287,12 @@ def test_invalid_binding_refuses_before_verifier_resolver_transport(over):
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert verifier.calls == []
     assert resolver.calls == []
     assert created == []
+    assert collector.calls == []
 
 
 # --- recomputed binding hashes + credential-ref binding (before verifier/resolver) --
@@ -290,6 +315,7 @@ def test_hash_mismatch_or_malformed_refused_before_verifier(kwargs):
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
+    collector = RecordingCollector()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
@@ -297,8 +323,10 @@ def test_hash_mismatch_or_malformed_refused_before_verifier(kwargs):
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert verifier.calls == [] and resolver.calls == [] and created == []
+    assert collector.calls == []
 
 
 def test_boundary_canonicalization_failure_refused_before_verifier():
@@ -306,6 +334,7 @@ def test_boundary_canonicalization_failure_refused_before_verifier():
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
+    collector = RecordingCollector()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
@@ -313,8 +342,10 @@ def test_boundary_canonicalization_failure_refused_before_verifier():
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert verifier.calls == [] and resolver.calls == [] and created == []
+    assert collector.calls == []
 
 
 # --- malformed authoritative target config: rejected at parse (before hash/verifier/resolver) ---
@@ -342,6 +373,7 @@ def test_malformed_authoritative_config_refused_before_hash_verifier_resolver_tr
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
+    collector = RecordingCollector()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
@@ -349,8 +381,10 @@ def test_malformed_authoritative_config_refused_before_hash_verifier_resolver_tr
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert verifier.calls == [] and resolver.calls == [] and created == []
+    assert collector.calls == []
 
 
 def test_secret_value_is_never_echoed_by_config_rejection():
@@ -381,6 +415,18 @@ def test_connection_representation_excludes_credential_ref():
     assert SECRET_REF not in canonical_json(rep)
 
 
+def test_live_read_repr_redacts_credential_references():
+    cfg = parse_proxmox_target_config(dict(TARGET_CONFIG))
+    binding = _binding()
+
+    assert cfg.credential_ref == SECRET_REF
+    assert binding.credential_ref == SECRET_REF
+    assert SECRET_REF not in repr(cfg)
+    assert SECRET_REF not in repr(binding)
+    assert "credential_ref=<redacted>" in repr(cfg)
+    assert "credential_ref=<redacted>" in repr(binding)
+
+
 def test_binding_default_config_hash_matches_connection_representation():
     cfg = parse_proxmox_target_config(dict(TARGET_CONFIG))
     assert _binding().target_config_hash == canonical_sha256(cfg.connection_representation())
@@ -394,6 +440,7 @@ def test_changing_only_target_secret_ref_fails_before_verifier_even_though_hash_
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
     et = _execution_target(secret_ref="env:SECP_PROVIDER_SECRET__OTHER")
+    collector = RecordingCollector()
     # Sanity: the connection hash is unchanged by a different derived credential reference.
     assert (
         canonical_sha256(
@@ -410,8 +457,10 @@ def test_changing_only_target_secret_ref_fails_before_verifier_even_though_hash_
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert verifier.calls == [] and resolver.calls == [] and created == []
+    assert collector.calls == []
 
 
 def test_binding_credential_ref_mismatch_fails_before_verifier():
@@ -419,6 +468,7 @@ def test_binding_credential_ref_mismatch_fails_before_verifier():
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
+    collector = RecordingCollector()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
@@ -426,8 +476,10 @@ def test_binding_credential_ref_mismatch_fails_before_verifier():
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert verifier.calls == [] and resolver.calls == [] and created == []
+    assert collector.calls == []
 
 
 def test_credential_reference_never_echoed_in_mismatch_error():
@@ -489,6 +541,7 @@ def test_untrusted_records_refused_before_verifier_resolver_transport(case):
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
+    collector = RecordingCollector()
     with pytest.raises(UntrustedRecordBinding):  # subclass of InvalidLiveReadBinding
         _run(
             gate=LiveReadCollectionGate(enabled=True),
@@ -498,8 +551,10 @@ def test_untrusted_records_refused_before_verifier_resolver_transport(case):
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert verifier.calls == [] and resolver.calls == [] and created == []
+    assert collector.calls == []
 
 
 def test_untrusted_record_error_never_echoes_secret_reference():
@@ -527,6 +582,7 @@ def test_boundary_hash_mismatch_against_onboarding_declared_boundary():
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
+    collector = RecordingCollector()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
@@ -534,8 +590,10 @@ def test_boundary_hash_mismatch_against_onboarding_declared_boundary():
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert verifier.calls == [] and resolver.calls == [] and created == []
+    assert collector.calls == []
 
 
 def test_runner_derives_inputs_only_from_trusted_records_signature():
@@ -564,16 +622,19 @@ def test_authorization_denied_refuses_before_resolver_and_transport():
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier(approve=False)  # verifier is reached, but denies
+    collector = RecordingCollector()
     with pytest.raises(LiveReadAuthorizationDenied):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
             resolver=resolver,
             factory=factory,
             verifier=verifier,
+            collector=collector,
         )
     assert len(verifier.calls) == 1  # verifier consulted
     assert resolver.calls == []  # but no secret resolution
     assert created == []  # and no transport construction
+    assert collector.calls == []
 
 
 # --- explicitly enabled test-only path: derives everything from trusted records ----
@@ -838,6 +899,7 @@ def test_api_package_does_not_import_live_readonly_paths():
 
 def test_new_code_has_no_network_capable_imports():
     import secp_plugin_proxmox.live_collector as lc
+    import secp_worker.onboarding.live_authorization as la
     import secp_worker.onboarding.live_readonly as lr
 
     forbidden = (
@@ -855,10 +917,41 @@ def test_new_code_has_no_network_capable_imports():
         "import urllib.request",
         "import paramiko",
     )
-    for module in (lc, lr):
+    for module in (lc, lr, la):
         src = inspect.getsource(module)
         for token in forbidden:
             assert token not in src, f"{module.__name__} must not use `{token}`"
+
+
+def test_live_read_path_has_no_production_direct_instantiation_or_runner_call():
+    """The dormant live-read worker modules use injected seams, not direct activation calls."""
+    worker_onboarding = (
+        Path(__file__).resolve().parents[2] / "worker" / "secp_worker" / "onboarding"
+    )
+    forbidden_call_names = {
+        "LiveReadOnlyProxmoxCollector",
+        "HttpxReadOnlyTransport",
+        "run_live_readonly_collection",
+    }
+
+    def call_name(node):
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return ""
+
+    import ast
+
+    for path in worker_onboarding.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = call_name(node)
+                assert name not in forbidden_call_names, f"{path.name} directly calls {name}"
 
 
 def test_no_evidence_persistence_in_live_run():
