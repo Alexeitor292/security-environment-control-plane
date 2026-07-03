@@ -33,6 +33,7 @@ EXPECTED_TABLES = {
     "target_onboarding",
     "target_evidence_record",
     "target_preflight",
+    "live_read_authorization",
     "environment_network",
     "environment_node",
     "environment_topology_edge",

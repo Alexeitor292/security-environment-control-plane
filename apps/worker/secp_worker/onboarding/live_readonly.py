@@ -36,7 +36,6 @@ from secp_api.enums import VerificationLevel
 from secp_plugin_proxmox.live_collector import (
     LIVE_READ_COLLECTOR_CONTRACT_VERSION,
     LIVE_READ_EVIDENCE_SOURCE,
-    LiveReadOnlyProxmoxCollector,
 )
 from secp_plugin_proxmox.readonly_policy import PROXMOX_READONLY_POLICY_VERSION
 from secp_plugin_proxmox.target_config import (
@@ -134,6 +133,13 @@ class LiveReadAuthorizationVerifier(Protocol):
     def verify(self, binding: LiveReadCollectionBinding, *, now: datetime) -> bool: ...
 
 
+@runtime_checkable
+class LiveReadTargetCollector(Protocol):
+    """Injected collector seam. Production code must not instantiate collectors directly."""
+
+    def collect(self, transport: ReadOnlyHttpTransport, *, declared_boundary: dict) -> dict: ...
+
+
 def _assert_hash_matches(obj: object, expected: str, label: str) -> None:
     if not isinstance(expected, str) or not _DIGEST_RE.match(expected):
         raise InvalidLiveReadBinding(f"{label} hash is malformed")
@@ -153,7 +159,7 @@ class LiveReadCollectionGate:
     enabled: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class LiveReadCollectionBinding:
     """Immutable live-read collection context. All fields are required; the collector refuses a
     binding that is incomplete, expired, malformed, or internally inconsistent."""
@@ -174,6 +180,23 @@ class LiveReadCollectionBinding:
     verification_level: str
     collector_contract_version: str
     endpoint_allowlist_version: str
+
+    def __repr__(self) -> str:
+        return (
+            "LiveReadCollectionBinding("
+            f"execution_target_id={self.execution_target_id!r}, "
+            f"target_config_hash={self.target_config_hash!r}, "
+            f"onboarding_id={self.onboarding_id!r}, "
+            f"boundary_hash={self.boundary_hash!r}, "
+            f"authorization_id={self.authorization_id!r}, "
+            f"authorization_version={self.authorization_version!r}, "
+            f"authorization_expiry={self.authorization_expiry!r}, "
+            "credential_ref=<redacted>, "
+            f"evidence_source={self.evidence_source!r}, "
+            f"verification_level={self.verification_level!r}, "
+            f"collector_contract_version={self.collector_contract_version!r}, "
+            f"endpoint_allowlist_version={self.endpoint_allowlist_version!r})"
+        )
 
     def assert_valid(self, *, now: datetime) -> None:
         missing = [f for f in _STRING_FIELDS if not str(getattr(self, f, "")).strip()]
@@ -263,6 +286,7 @@ def run_live_readonly_collection(
     onboarding: TargetOnboarding,
     secret_resolver: SecretResolver,
     transport_factory: TransportFactory,
+    collector: LiveReadTargetCollector,
     authorization_verifier: LiveReadAuthorizationVerifier,
     now: datetime | None = None,
 ) -> dict:
@@ -297,7 +321,7 @@ def run_live_readonly_collection(
     j. **secret resolution** — transient credential via the injected resolver, keyed by the
        target's own ``secret_ref``;
     k-l. **transport + collect** — transport built from the VALIDATED config (never a raw dict)
-       + transient token; returns in-memory observed data only.
+       + transient token; an injected collector returns in-memory observed data only.
 
     It never persists evidence, creates a ``TargetEvidenceRecord``, or unseals live evidence.
     """
@@ -348,4 +372,4 @@ def run_live_readonly_collection(
     # k. Build the transport bound to the VALIDATED config (never a raw dict) + transient token.
     transport = transport_factory(validated_config, credential.reveal_secret())
     # l. Run the plugin collector; return in-memory observed data only.
-    return LiveReadOnlyProxmoxCollector().collect(transport, declared_boundary=declared_boundary)
+    return collector.collect(transport, declared_boundary=declared_boundary)

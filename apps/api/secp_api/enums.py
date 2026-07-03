@@ -212,6 +212,19 @@ class EvidenceStatus(str, Enum):
     unverifiable = "unverifiable"
 
 
+class LiveReadAuthorizationStatus(str, Enum):
+    """Durable live-read authorization lifecycle (SECP-002B-1B-6).
+
+    This is an authorization contract only. It does not enable collection, configure a
+    target, or resolve any secret.
+    """
+
+    draft = "draft"
+    approved = "approved"
+    revoked = "revoked"
+    expired = "expired"
+
+
 class ProvisioningApplicationMode(str, Enum):
     """Which provisioning path a request targets (SECP-002B-1A, ADR-013).
 
@@ -336,3 +349,8 @@ class AuditAction(str, Enum):
     onboarding_preflight_requested = "onboarding.preflight_requested"
     target_evidence_collected = "target_evidence.collected"
     target_evidence_compared = "target_evidence.compared"
+    # SECP-002B-1B-6 — dormant live-read authorization contract.
+    live_read_authorization_created = "live_read.authorization_created"
+    live_read_authorization_approved = "live_read.authorization_approved"
+    live_read_authorization_revoked = "live_read.authorization_revoked"
+    live_read_authorization_validation_refused = "live_read.authorization_validation_refused"

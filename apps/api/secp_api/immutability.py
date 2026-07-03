@@ -11,12 +11,14 @@ from __future__ import annotations
 from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
 
+from secp_api.enums import LiveReadAuthorizationStatus
 from secp_api.errors import ImmutableResourceError
 from secp_api.models import (
     AuditEvent,
     DeploymentPlan,
     EnvironmentVersion,
     ExecutionTarget,
+    LiveReadAuthorization,
     ProviderInventorySnapshot,
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
@@ -136,6 +138,33 @@ _TARGET_EVIDENCE_PROTECTED = (
     "collected_at",
     "evidence_hash",
 )
+_LIVE_READ_AUTHORIZATION_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "onboarding_id",
+    "connection_hash",
+    "boundary_hash",
+    "authorization_version",
+    "authorization_expiry",
+    "collector_contract_version",
+    "endpoint_allowlist_version",
+    "evidence_source",
+    "verification_level",
+    "created_by",
+)
+_LIVE_READ_AUTHORIZATION_SET_ONCE = (
+    "approved_by",
+    "approved_at",
+    "revoked_by",
+    "revoked_at",
+    "revocation_reason_code",
+)
+_LIVE_READ_AUTHORIZATION_ALLOWED_TRANSITIONS = {
+    (LiveReadAuthorizationStatus.draft, LiveReadAuthorizationStatus.approved),
+    (LiveReadAuthorizationStatus.draft, LiveReadAuthorizationStatus.expired),
+    (LiveReadAuthorizationStatus.approved, LiveReadAuthorizationStatus.revoked),
+    (LiveReadAuthorizationStatus.approved, LiveReadAuthorizationStatus.expired),
+}
 
 
 def _attr_changed(obj: object, attr: str) -> bool:
@@ -238,11 +267,61 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                     "TargetEvidenceRecord is immutable after recording; "
                     f"attempted to change {changed}"
                 )
+        # LiveReadAuthorization: binding facts are immutable. Approval/revocation metadata may
+        # be set once through explicit lifecycle transitions, preserving approval history.
+        if isinstance(obj, LiveReadAuthorization):
+            changed = [a for a in _LIVE_READ_AUTHORIZATION_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "LiveReadAuthorization binding fields are immutable; "
+                    f"attempted to change {changed}"
+                )
+            repeated = [
+                a
+                for a in _LIVE_READ_AUTHORIZATION_SET_ONCE
+                if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+            ]
+            if repeated:
+                raise ImmutableResourceError(
+                    "LiveReadAuthorization approval/revocation metadata is set-once; "
+                    f"attempted to change {repeated}"
+                )
+            if _attr_changed(obj, "status"):
+                previous = _previous_value(obj, "status")
+                transition = (previous, obj.status)
+                if (
+                    previous is not None
+                    and transition not in _LIVE_READ_AUTHORIZATION_ALLOWED_TRANSITIONS
+                ):
+                    raise ImmutableResourceError(
+                        "LiveReadAuthorization status transition is not allowed: "
+                        f"{getattr(previous, 'value', previous)!r} -> "
+                        f"{getattr(obj.status, 'value', obj.status)!r}"
+                    )
+                if obj.status == LiveReadAuthorizationStatus.approved and (
+                    obj.approved_by is None or obj.approved_at is None
+                ):
+                    raise ImmutableResourceError(
+                        "LiveReadAuthorization approval requires approved_by and approved_at"
+                    )
+                if obj.status == LiveReadAuthorizationStatus.revoked and (
+                    obj.revoked_by is None
+                    or obj.revoked_at is None
+                    or not obj.revocation_reason_code
+                    or obj.approved_by is None
+                    or obj.approved_at is None
+                ):
+                    raise ImmutableResourceError(
+                        "LiveReadAuthorization revocation requires preserved approval and "
+                        "explicit revocation metadata"
+                    )
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
 
     for obj in session.deleted:
+        if isinstance(obj, LiveReadAuthorization):
+            raise ImmutableResourceError("LiveReadAuthorization records cannot be deleted")
         if isinstance(obj, TargetEvidenceRecord):
             raise ImmutableResourceError("TargetEvidenceRecord records cannot be deleted")
         if isinstance(obj, TargetPreflight):

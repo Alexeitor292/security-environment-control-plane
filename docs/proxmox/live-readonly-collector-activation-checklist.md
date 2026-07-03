@@ -6,6 +6,11 @@ add any real value (hostname, IP, URL, cluster/node/storage/bridge/VLAN name, cr
 token, secret, or checksum) to the repository — live configuration lives outside source control
 (secret manager + operator runbook).
 
+SECP-002B-1B-6 adds only a durable authorization model and worker-owned loader/verifier
+contracts. It does not authorize, enable, configure, or connect to any staging target, and it
+adds no real endpoint, secret backend, API action, UI action, dispatcher wiring, worker workflow,
+feature switch, or live evidence persistence.
+
 Every box must be **checked and independently human-reviewed**, and an explicit user
 authorization recorded, before the default-disabled live-collection feature gate is enabled for
 a specific approved target. The collector is **read-only**; it never mutates a target.
@@ -69,8 +74,18 @@ a specific approved target. The collector is **read-only**; it never mutates a t
       normalization, redaction, `unverifiable` semantics) are green **before** live access.
 
 ## 9. Explicit user authorization recorded
+- [ ] A future PR wires exactly one approved target through the authoritative worker-owned
+      loader/verifier; no caller-built target/onboarding/auth records are accepted as the trust
+      anchor.
 - [ ] An explicit, time-bounded human authorization record binds this activation to the exact
-      approved `(execution_target_id, config_hash)`; hash drift fails closed.
+      approved `execution_target_id`, `onboarding_id`, connection hash, boundary hash,
+      authorization version/expiry, evidence source, verification level, collector-contract
+      version, and endpoint-allowlist version; any drift fails closed.
+- [ ] The direct-instantiation guard remains in force: production live-read modules do not
+      directly instantiate the collector, construct the live transport, or invoke the dormant
+      runner outside the reviewed activation seam.
+- [ ] Credential references remain exact in-memory bindings only: never hashed, logged, audited,
+      serialized, or exposed through `repr()`.
 - [ ] Independent security review of the threat model, code, and tests is complete.
 
 Only when **every** box is checked, independently reviewed, and the authorization is recorded
