@@ -16,6 +16,14 @@ SECP-002B-1B-7 adds only the disposable staging target operating design and read
 or activation. Its out-of-band eligibility requirements and readiness evidence checklist must be
 complete and independently reviewed before any box in this activation checklist may be checked.
 
+SECP-002B-1B-8 corrects that design (`isolated-staging-control-plane-design.md`): the future
+staging worker lives inside a self-contained **isolated SECP staging control-plane VM** with its
+own staging-only API and database (kept local to the VM), reaching only one disposable nested
+Proxmox target API. It performs no registration, wiring, access, or activation, and its added
+readiness items (self-contained staging control plane, tested absence of production
+control-plane access, verified offline bootstrap, verified caps/headroom, functional read-only
+scope) must also be complete and independently reviewed out of band.
+
 Every box must be **checked and independently human-reviewed**, and an explicit user
 authorization recorded, before the default-disabled live-collection feature gate is enabled for
 a specific approved target. The collector is **read-only**; it never mutates a target.

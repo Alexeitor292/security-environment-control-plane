@@ -20,6 +20,15 @@ creation, approval, or activation of any `LiveReadAuthorization` record. The def
 gate (SECP-002B-1B-4), the trusted-record binding (SECP-002B-1B-5), and the authorization
 contract (SECP-002B-1B-6, PR #13) are unchanged by this document.
 
+> **Correction notice (SECP-002B-1B-8).** The single-node "SECP worker" shown in the reference
+> topology below is **superseded** by the *isolated SECP staging control-plane VM* defined in
+> `isolated-staging-control-plane-design.md`. A worker with only a target-facing interface would
+> be stranded from the authoritative API and database the SECP-002B-1B-6 loader/verifier
+> requires. The earlier claim in section 1 that destruction is without consequence is likewise
+> **withdrawn** and replaced with the bounded/reversible, verified-headroom language in
+> SECP-002B-1B-8. The
+> readiness evidence in section 5 is **extended** by the SECP-002B-1B-8 readiness checklist.
+
 ## 1. Staging target eligibility
 
 A candidate staging target qualifies **only if every requirement below holds**. Any single
@@ -32,7 +41,9 @@ failure disqualifies the target; there is no compensating-control substitution.
   public networks by default-deny controls in both directions. Any reachability that exists
   is an explicit, documented, removable exception — never an inherited flat network.
 - **No production workload dependency.** Nothing outside the staging environment depends on
-  the target being up, reachable, or intact. Destroying it must be consequence-free.
+  the target being up, reachable, or intact. Destroying it affects only bounded, reversible
+  staging resources and requires verified production headroom on any shared host — it is never
+  asserted to be without consequence (corrected by SECP-002B-1B-8).
 - **No shared credentials.** No credential, token, key, or account on the target is shared
   with any other system, environment, person, or purpose. Every identity used is created for
   this target alone and dies with it.
