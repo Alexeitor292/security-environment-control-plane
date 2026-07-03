@@ -1,23 +1,29 @@
-"""SECP-002B-1B-4 — dormant, default-disabled live read-only Proxmox collector.
+"""SECP-002B-1B-4/1B-5 — dormant, default-disabled live read-only Proxmox collector.
 
 Fakes only. Proves the collector is unreachable unless an explicitly-enabled gate + a valid
-immutable binding + injected fake resolver + injected fake transport are all supplied; that a
-disabled gate or invalid binding fails BEFORE secret resolution or transport construction; that
+immutable binding + authoritative ``ExecutionTarget`` / ``TargetOnboarding`` records + injected
+fake resolver + injected fake transport are all supplied; that a disabled gate, invalid binding,
+or an untrusted/mismatched target/onboarding record fails BEFORE secret resolution or transport
+construction; that the runner derives the target config, declared boundary, and opaque credential
+reference EXCLUSIVELY from the trusted records (a caller cannot supply them independently); that
 the collector issues only canonical allowlisted GETs, never infers isolation, and returns an
-in-memory observed dict; that the hardened HttpxReadOnlyTransport applies the closed policy
-before any client activity and cannot be misused; and that no API/persistence/live-activation
-path was introduced and the sealed collector stays sealed. Nothing real is contacted.
+in-memory observed dict; that the hardened HttpxReadOnlyTransport applies the closed policy before
+any client activity and cannot be misused; and that no API/persistence/live-activation path was
+introduced, legacy discovery stays separate, and the sealed collector stays sealed. Nothing real
+is contacted.
 """
 
 from __future__ import annotations
 
 import inspect
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 import pytest
 from secp_api.enums import EvidenceStatus, VerificationLevel
+from secp_api.models import ExecutionTarget, TargetOnboarding
 from secp_api.target_evidence import (
     CHECK_ISOLATION,
     SIMULATED_EVIDENCE_SOURCE,
@@ -50,6 +56,7 @@ from secp_worker.onboarding.live_readonly import (
     LiveReadCollectionBinding,
     LiveReadCollectionDisabled,
     LiveReadCollectionGate,
+    UntrustedRecordBinding,
     canonical_sha256,
     run_live_readonly_collection,
 )
@@ -59,13 +66,22 @@ NOW = datetime(2026, 7, 2, tzinfo=UTC)
 BOUNDARY = VALID_ONBOARDING_BOUNDARY
 SECRET_REF = "env:SECP_PROVIDER_SECRET__FAKE"
 
-# Redacted, secret-free target configuration: non-secret connection metadata + an OPAQUE
-# credential reference identifier only. Never contains a secret value.
-TARGET_CONFIG = {
+# Authoritative record identities (worker-memory only; no DB session is used).
+ORG_ID = uuid.uuid4()
+TARGET_ID = uuid.uuid4()
+ONBOARDING_ID = uuid.uuid4()
+
+# Secret-free STORED connection config on ExecutionTarget.config: connection identity ONLY
+# (base_url + verify_tls). It carries no credential reference and no secret — the credential
+# reference is derived by the runner from ExecutionTarget.secret_ref.
+STORED_CONFIG = {
     "base_url": "https://proxmox.example.test:8006/api2/json",
     "verify_tls": True,
-    "credential_ref": SECRET_REF,
 }
+
+# Plugin-parser-shaped config (connection identity + opaque credential reference). Used for
+# DIRECT parser-level assertions only — the runner never receives this from a caller.
+TARGET_CONFIG = {**STORED_CONFIG, "credential_ref": SECRET_REF}
 
 FAKE_INV = {
     "/nodes": [
@@ -76,6 +92,34 @@ FAKE_INV = {
     "/nodes/pve-node-1/storage": [{"storage": "local-lvm", "type": "lvmthin"}],
     "/nodes/pve-node-2/storage": [{"storage": "local-lvm"}],
 }
+
+
+def _execution_target(**over) -> ExecutionTarget:
+    """An authoritative, secret-free ExecutionTarget (in-memory only; never flushed)."""
+    fields = dict(
+        id=TARGET_ID,
+        organization_id=ORG_ID,
+        display_name="lab-proxmox",
+        plugin_name="proxmox",
+        config=dict(STORED_CONFIG),
+        config_hash="sha256:" + "0" * 64,
+        secret_ref=SECRET_REF,
+    )
+    fields.update(over)
+    return ExecutionTarget(**fields)
+
+
+def _onboarding(**over) -> TargetOnboarding:
+    """An authoritative TargetOnboarding bound to the ExecutionTarget (in-memory only)."""
+    fields = dict(
+        id=ONBOARDING_ID,
+        organization_id=ORG_ID,
+        execution_target_id=TARGET_ID,
+        declared_boundary=dict(BOUNDARY),
+        boundary_hash="sha256:" + "0" * 64,
+    )
+    fields.update(over)
+    return TargetOnboarding(**fields)
 
 
 class RecordingResolver:
@@ -117,11 +161,13 @@ def _recording_factory(responses):
 
 def _binding(**over) -> LiveReadCollectionBinding:
     base = dict(
-        execution_target_id="t-1",
+        execution_target_id=str(TARGET_ID),
         target_config_hash=canonical_sha256(
-            parse_proxmox_target_config(TARGET_CONFIG).connection_representation()
+            parse_proxmox_target_config(
+                {**STORED_CONFIG, "credential_ref": SECRET_REF}
+            ).connection_representation()
         ),
-        onboarding_id="ob-1",
+        onboarding_id=str(ONBOARDING_ID),
         boundary_hash=canonical_sha256(BOUNDARY),
         authorization_id="auth-1",
         authorization_version=1,
@@ -143,17 +189,15 @@ def _run(
     factory,
     verifier,
     binding=None,
-    target_config=None,
-    declared_boundary=None,
-    secret_ref=SECRET_REF,
+    execution_target=None,
+    onboarding=None,
     now=NOW,
 ):
     return run_live_readonly_collection(
         gate=gate,
         binding=_binding() if binding is None else binding,
-        target_config=dict(TARGET_CONFIG) if target_config is None else target_config,
-        declared_boundary=BOUNDARY if declared_boundary is None else declared_boundary,
-        secret_ref=secret_ref,
+        execution_target=_execution_target() if execution_target is None else execution_target,
+        onboarding=_onboarding() if onboarding is None else onboarding,
         secret_resolver=resolver,
         transport_factory=factory,
         authorization_verifier=verifier,
@@ -258,14 +302,14 @@ def test_hash_mismatch_or_malformed_refused_before_verifier(kwargs):
 
 
 def test_boundary_canonicalization_failure_refused_before_verifier():
-    # A declared boundary carrying a non-finite float cannot be canonicalized -> refused.
+    # An onboarding declared boundary carrying a non-finite float cannot be canonicalized.
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
-            declared_boundary={**BOUNDARY, "nan": float("nan")},
+            onboarding=_onboarding(declared_boundary={**BOUNDARY, "nan": float("nan")}),
             resolver=resolver,
             factory=factory,
             verifier=verifier,
@@ -273,34 +317,35 @@ def test_boundary_canonicalization_failure_refused_before_verifier():
     assert verifier.calls == [] and resolver.calls == [] and created == []
 
 
-# --- invalid target config is rejected at parse (before hashing/verifier/resolver/transport) ---
+# --- malformed authoritative target config: rejected at parse (before hash/verifier/resolver) ---
 
 
 @pytest.mark.parametrize(
     "bad_config",
     [
-        {**TARGET_CONFIG, "token": "raw-secret-value"},  # secret-like unknown key
-        {**TARGET_CONFIG, "password": "raw-secret-value"},  # secret-like unknown key
-        {**TARGET_CONFIG, "headers": {"Authorization": "Bearer x"}},  # headers / nested
-        {**TARGET_CONFIG, "extra": 1},  # unknown key
-        {"base_url": TARGET_CONFIG["base_url"], "verify_tls": True},  # missing credential_ref
-        {"base_url": {"nested": "x"}, "verify_tls": True, "credential_ref": SECRET_REF},  # nested
-        {**TARGET_CONFIG, "verify_tls": False},  # not exactly True
-        {**TARGET_CONFIG, "verify_tls": "true"},  # non-boolean
-        {**TARGET_CONFIG, "credential_ref": ""},  # empty ref
-        {**TARGET_CONFIG, "credential_ref": 123},  # non-string ref
-        {**TARGET_CONFIG, "base_url": "https://proxmox.example.test:8006"},  # not the API root
-        {**TARGET_CONFIG, "base_url": "http://proxmox.example.test:8006/api2/json"},  # not https
+        {**STORED_CONFIG, "token": "raw-secret-value"},  # secret-like unknown key
+        {**STORED_CONFIG, "password": "raw-secret-value"},  # secret-like unknown key
+        {**STORED_CONFIG, "headers": {"Authorization": "Bearer x"}},  # headers / nested
+        {**STORED_CONFIG, "extra": 1},  # unknown key
+        {"verify_tls": True},  # missing base_url
+        {"base_url": {"nested": "x"}, "verify_tls": True},  # nested base_url
+        {**STORED_CONFIG, "verify_tls": False},  # not exactly True
+        {**STORED_CONFIG, "verify_tls": "true"},  # non-boolean
+        {**STORED_CONFIG, "base_url": "https://proxmox.example.test:8006"},  # not the API root
+        {**STORED_CONFIG, "base_url": "http://proxmox.example.test:8006/api2/json"},  # not https
+        {**STORED_CONFIG, "credential_ref": "env:INLINE"},  # config must not carry a cred ref
     ],
 )
-def test_invalid_target_config_refused_before_hash_verifier_resolver_transport(bad_config):
+def test_malformed_authoritative_config_refused_before_hash_verifier_resolver_transport(bad_config):
+    # The config is taken from the authoritative ExecutionTarget.config; a malformed record is
+    # refused before hashing/verifier/resolver/transport.
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
-            target_config=bad_config,
+            execution_target=_execution_target(config=bad_config),
             resolver=resolver,
             factory=factory,
             verifier=verifier,
@@ -341,22 +386,27 @@ def test_binding_default_config_hash_matches_connection_representation():
     assert _binding().target_config_hash == canonical_sha256(cfg.connection_representation())
 
 
-def test_changing_only_credential_ref_fails_before_verifier_even_though_hash_matches():
-    # The connection hash covers only base_url + verify_tls, so a config whose credential_ref
-    # differs still hashes identically — the three-way equality check (not the hash) catches it.
+def test_changing_only_target_secret_ref_fails_before_verifier_even_though_hash_matches():
+    # The connection hash covers only base_url + verify_tls, so changing only the target's
+    # secret_ref leaves the connection hash identical — the three-way credential equality (not
+    # the hash) catches it, before verifier / resolver / transport.
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
-    other_config = {**TARGET_CONFIG, "credential_ref": "env:SECP_PROVIDER_SECRET__OTHER"}
-    # Sanity: the connection hash is unchanged by a different credential_ref.
+    et = _execution_target(secret_ref="env:SECP_PROVIDER_SECRET__OTHER")
+    # Sanity: the connection hash is unchanged by a different derived credential reference.
     assert (
-        canonical_sha256(parse_proxmox_target_config(other_config).connection_representation())
+        canonical_sha256(
+            parse_proxmox_target_config(
+                {**STORED_CONFIG, "credential_ref": et.secret_ref}
+            ).connection_representation()
+        )
         == _binding().target_config_hash
     )
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
-            target_config=other_config,  # binding.credential_ref (SECRET_REF) != config ref
+            execution_target=et,  # binding.credential_ref (SECRET_REF) != target secret_ref
             resolver=resolver,
             factory=factory,
             verifier=verifier,
@@ -365,7 +415,7 @@ def test_changing_only_credential_ref_fails_before_verifier_even_though_hash_mat
 
 
 def test_binding_credential_ref_mismatch_fails_before_verifier():
-    # binding.credential_ref differs from the (matching) config + supplied secret ref.
+    # binding.credential_ref differs from the (matching) derived config ref + target secret_ref.
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
@@ -388,7 +438,8 @@ def test_credential_reference_never_echoed_in_mismatch_error():
     try:
         _run(
             gate=LiveReadCollectionGate(enabled=True),
-            secret_ref=secret_like_ref,  # != binding/config credential_ref
+            # target secret_ref != binding.credential_ref -> three-way equality fails
+            execution_target=_execution_target(secret_ref=secret_like_ref),
             resolver=resolver,
             factory=factory,
             verifier=verifier,
@@ -400,19 +451,110 @@ def test_credential_reference_never_echoed_in_mismatch_error():
         raise AssertionError("expected credential reference mismatch")
 
 
-def test_secret_ref_mismatch_refused_before_verifier():
+# --- trusted-record identity + relationship (before all sensitive steps) ----------
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "binding_execution_target_id_mismatch",
+        "binding_onboarding_id_mismatch",
+        "onboarding_execution_target_id_mismatch",
+        "organization_mismatch",
+        "wrong_plugin_name",
+        "missing_target_secret_ref_none",
+        "missing_target_secret_ref_blank",
+    ],
+)
+def test_untrusted_records_refused_before_verifier_resolver_transport(case):
+    other = uuid.uuid4()
+    binding = None
+    execution_target = None
+    onboarding = None
+    if case == "binding_execution_target_id_mismatch":
+        binding = _binding(execution_target_id=str(other))
+    elif case == "binding_onboarding_id_mismatch":
+        binding = _binding(onboarding_id=str(other))
+    elif case == "onboarding_execution_target_id_mismatch":
+        onboarding = _onboarding(execution_target_id=other)
+    elif case == "organization_mismatch":
+        onboarding = _onboarding(organization_id=other)
+    elif case == "wrong_plugin_name":
+        execution_target = _execution_target(plugin_name="libvirt")
+    elif case == "missing_target_secret_ref_none":
+        execution_target = _execution_target(secret_ref=None)
+    elif case == "missing_target_secret_ref_blank":
+        execution_target = _execution_target(secret_ref="   ")
+
+    resolver = RecordingResolver()
+    factory, created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    with pytest.raises(UntrustedRecordBinding):  # subclass of InvalidLiveReadBinding
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            binding=binding,
+            execution_target=execution_target,
+            onboarding=onboarding,
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+def test_untrusted_record_error_never_echoes_secret_reference():
+    # A wrong-plugin refusal (and any trusted-record refusal) must not leak the credential ref.
+    resolver = RecordingResolver()
+    factory, _created = _recording_factory(FAKE_INV)
+    verifier = RecordingVerifier()
+    try:
+        _run(
+            gate=LiveReadCollectionGate(enabled=True),
+            execution_target=_execution_target(plugin_name="libvirt"),
+            resolver=resolver,
+            factory=factory,
+            verifier=verifier,
+        )
+    except UntrustedRecordBinding as exc:
+        assert SECRET_REF not in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected an untrusted-record refusal")
+
+
+def test_boundary_hash_mismatch_against_onboarding_declared_boundary():
+    # binding.boundary_hash is pinned to BOUNDARY; an onboarding with a different declared
+    # boundary fails the recomputed hash comparison before verifier / resolver / transport.
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier()
     with pytest.raises(InvalidLiveReadBinding):
         _run(
             gate=LiveReadCollectionGate(enabled=True),
-            secret_ref="env:SECP_PROVIDER_SECRET__OTHER",  # != target_config credential_ref
+            onboarding=_onboarding(declared_boundary={**BOUNDARY, "extra_segment": ["x"]}),
             resolver=resolver,
             factory=factory,
             verifier=verifier,
         )
     assert verifier.calls == [] and resolver.calls == [] and created == []
+
+
+def test_runner_derives_inputs_only_from_trusted_records_signature():
+    # The public signature accepts the authoritative records and NO raw target_config /
+    # declared_boundary / secret_ref inputs a caller could supply independently.
+    params = set(inspect.signature(run_live_readonly_collection).parameters)
+    assert {"execution_target", "onboarding"} <= params
+    for removed in ("target_config", "declared_boundary", "secret_ref"):
+        assert removed not in params, f"runner must not accept raw {removed}"
+
+
+def test_stored_target_config_is_secret_free():
+    et = _execution_target()
+    # Stored config is connection identity only — never a secret or a credential reference.
+    assert set(et.config) == {"base_url", "verify_tls"}
+    for forbidden in ("credential_ref", "token", "password", "secret", "cookie", "headers"):
+        assert forbidden not in et.config
+    # The opaque credential reference lives on secret_ref, separate from the hashed config.
+    assert et.secret_ref == SECRET_REF
 
 
 # --- authorization verifier (before secret resolution) ----------------------------
@@ -434,26 +576,34 @@ def test_authorization_denied_refuses_before_resolver_and_transport():
     assert created == []  # and no transport construction
 
 
-# --- explicitly enabled test-only path: all matching -------------------------------
+# --- explicitly enabled test-only path: derives everything from trusted records ----
 
 
-def test_enabled_path_requires_all_matching_returns_observed():
+def test_enabled_path_derives_config_boundary_ref_from_trusted_records():
     resolver = RecordingResolver()
     factory, created = _recording_factory(FAKE_INV)
     verifier = RecordingVerifier(approve=True)
+    et = _execution_target()
+    ob = _onboarding()
     observed = _run(
         gate=LiveReadCollectionGate(enabled=True),  # valid gate
+        execution_target=et,  # authoritative target record
+        onboarding=ob,  # authoritative onboarding record
         resolver=resolver,  # fake resolver
         factory=factory,  # fake transport
         verifier=verifier,  # verified authorization
     )
     assert len(verifier.calls) == 1  # authorization verified
-    assert resolver.calls == [SECRET_REF]  # resolved once, with the bound ref
-    # The transport is built from the VALIDATED config (exact bound destination), not a raw dict.
+    # The resolver is keyed by the TARGET's own secret_ref (derived), not a caller-supplied value.
+    assert resolver.calls == [et.secret_ref]
+    # The transport is built from the VALIDATED config derived from the trusted records: the
+    # connection identity comes from ExecutionTarget.config and the credential reference from
+    # ExecutionTarget.secret_ref — never from an independent caller input.
     cfg, token, _t = created[0]
     assert isinstance(cfg, ValidatedProxmoxTargetConfig)
-    assert cfg.base_url == TARGET_CONFIG["base_url"]
-    assert cfg.verify_tls is True and cfg.credential_ref == SECRET_REF
+    assert cfg.base_url == et.config["base_url"]
+    assert cfg.verify_tls is True
+    assert cfg.credential_ref == et.secret_ref
     assert token == "fake-token"  # transport built with the resolved transient token
     assert observed["nodes"] == ["pve-node-1", "pve-node-2"]
     assert observed["storage"] == ["local-lvm"]
@@ -745,3 +895,24 @@ def test_simulated_collector_unchanged():
     assert (
         SimulatedTargetEvidenceCollector().verification_level == VerificationLevel.simulated.value
     )
+
+
+def test_legacy_discovery_is_separate_from_target_evidence_collection():
+    # SECP-002B-1B-5 §7: legacy provider discovery is a distinct code path that produces an
+    # immutable ProviderInventorySnapshot (inventory) — it does NOT collect, satisfy, persist,
+    # or authorize live *target evidence*, and it never touches the live read-only collector.
+    import secp_worker.discovery as disc
+
+    src = inspect.getsource(disc)
+    assert "ProviderInventorySnapshot" in src  # discovery persists inventory, not evidence
+    for evidence_token in (
+        "TargetEvidenceRecord",
+        "record_target_evidence",
+        "run_live_readonly_collection",
+        "LiveReadOnlyProxmoxCollector",
+        "LIVE_READ_EVIDENCE_SOURCE",
+        "live_readonly",
+    ):
+        assert evidence_token not in src, (
+            f"legacy discovery must stay separate from target evidence ({evidence_token})"
+        )

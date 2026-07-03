@@ -164,3 +164,31 @@ Two follow-up hardening fixes close remaining contract gaps (still dormant/fake-
   Parse failure, hash mismatch, malformed digest, canonicalization failure, secret-ref mismatch,
   a disabled gate, or an invalid binding all fail closed **without** calling the verifier,
   resolver, transport factory, collector, or any persistence code.
+
+## Amendment — trusted target/onboarding identity binding (SECP-002B-1B-5, 2026-07-02)
+
+`run_live_readonly_collection` no longer accepts an independently-supplied `target_config`,
+`declared_boundary`, or `secret_ref`. It now receives only the authoritative `ExecutionTarget`
+and `TargetOnboarding` records and derives, in worker memory, the config from
+`ExecutionTarget.config`, the boundary from `TargetOnboarding.declared_boundary`, and the opaque
+credential reference from `ExecutionTarget.secret_ref` — a caller cannot supply those three values
+independently. The runner does **not** query the database; a future, separately-authorized
+activation workflow (not built here) loads the trusted ORM records before calling it.
+
+After the disabled gate and structural binding validation, and **before** config parsing,
+connection/boundary hashing, authorization, secret resolution, transport construction, collection,
+or any persistence, the runner fails closed unless the binding names the exact records and the two
+records agree on one identity+relationship: `binding.execution_target_id`/`onboarding_id` match
+the record ids, `onboarding.execution_target_id`/`organization_id` match the target,
+`plugin_name == "proxmox"`, and a non-empty `secret_ref` is present. `ExecutionTarget.config`
+remains secret-free (connection identity only and must not itself carry a credential reference);
+the connection hash still covers only `base_url` + `verify_tls`;
+`LiveReadCollectionBinding.target_config_hash` denotes that canonical validated-connection hash,
+**not** the persisted `ExecutionTarget.config_hash` format; and the credential reference stays
+bound by exact three-way in-memory equality (`binding.credential_ref ==
+validated_config.credential_ref == ExecutionTarget.secret_ref`), never hashed/logged/echoed.
+
+This amendment adds **no** staging activation, secret backend, API route, UI action, environment
+switch, database migration, or real Proxmox access; the simulated collector is unchanged, the
+sealed provider collector stays sealed, `fully_segregated` still cannot pass, and legacy provider
+discovery (`ProviderInventorySnapshot`) remains separate from target evidence collection.
