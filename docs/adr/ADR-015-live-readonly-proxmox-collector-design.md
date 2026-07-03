@@ -230,3 +230,26 @@ transport construction, collector invocation, or live evidence persistence exist
 A future PR must explicitly wire exactly one approved target through this authoritative
 loader/verifier, preserve these direct-instantiation and redaction guards, and receive separate
 human authorization before any live read-only collector can be enabled.
+
+## Amendment - disposable staging target operating design (SECP-002B-1B-7, 2026-07-03)
+
+B1-B7 is documentation-only. It defines the out-of-band operating design and readiness contract
+for the first disposable Proxmox staging target
+(`docs/proxmox/disposable-staging-target-operating-design.md`): staging target eligibility,
+a placeholder-only reference topology (default-deny worker egress, single explicit allow rule,
+no DNS-based widening, no proxy inheritance, mandatory TLS verification, redirects disabled,
+management-plane segmentation, break-glass rule removal), least-privilege read-only Proxmox
+identity design, out-of-band certificate trust and target identity verification, a readiness
+evidence checklist completed outside Git, a rollback and kill-switch plan, separation of
+responsibilities across control plane / worker / network operator / target administrator /
+human approver, and explicit entry criteria a future activation PR must meet before it may be
+proposed.
+
+B1-B7 adds **no** target registration, real endpoint or host, credential or secret reference,
+certificate data, API/UI/dispatcher/workflow wiring, environment variable or Compose change,
+Proxmox access, live evidence persistence, or collector/transport/resolver/authorization
+execution. Static documentation guardrail tests
+(`apps/api/tests/test_staging_target_operating_design.py`) enforce that the live-read documents
+stay free of real infrastructure values and that no staging activation switch exists in code or
+infrastructure. All prior dormancy, authorization, redaction, and sealed-evidence guarantees are
+unchanged.
