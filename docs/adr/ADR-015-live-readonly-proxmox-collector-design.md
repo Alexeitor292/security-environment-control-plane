@@ -280,3 +280,30 @@ execution. Static documentation guardrail tests
 (`apps/api/tests/test_isolated_staging_control_plane_design.py`) enforce the correction and the
 continued absence of real infrastructure values and activation switches. All prior dormancy,
 authorization, redaction, and sealed-evidence guarantees are unchanged.
+
+## Amendment - application-owned declarative staging-lab workflow (SECP-002B-1B-9, 2026-07-03)
+
+B1-B9 makes SECP — not a shell runbook — the owner of the disposable staging lab's desired state
+and future provisioning workflow. It adds an application-owned, fake-only capability: a durable
+provider-neutral `StagingLab` desired-state record, a deterministic immutable topology compiler,
+an explicit approval boundary, a worker-owned fake execution seam, and a controlled teardown,
+surfaced through a web UI workflow (create -> plan -> approve -> simulate -> observe -> teardown).
+
+The compiler emits logical resources only: one isolated host-only network with no uplink, no
+gateway, and no DNS; a self-contained staging control plane (staging API + database + worker with
+no production dependency); one disposable nested Proxmox target; exactly one target-facing
+read-only connection policy (staging worker to the nested target API); a known-clean checkpoint +
+rollback intent; and a teardown intent — every resource carrying the lab's immutable ownership
+label. The compiler and the worker seam fail closed on production control-plane reuse, a
+shared/production network, more than one target-facing network or nested target, a missing
+self-contained control plane, a standing/auto-renewing authorization, missing ownership labeling,
+or an unapproved substrate.
+
+B1-B9 is fake-only. It creates no bridge, VM, VNet, target, token, secret, or connection;
+contacts no Proxmox and opens no socket/subprocess; performs no secret resolution and persists no
+live evidence; and adds no runtime switch that can activate provisioning. Approving a staging-lab
+plan authorizes fake simulation only — it is NOT a SECP-002B-1B-6 `LiveReadAuthorization`, which
+remains separately required for any future real read-only collection. The API cannot import
+provider clients, adapters, or workers; simulation runs only through the worker-dispatch seam.
+The SECP-002B-1B-8 self-contained staging control-plane constraint remains mandatory. A later,
+separately reviewed adapter PR is required before any real provisioning can occur.

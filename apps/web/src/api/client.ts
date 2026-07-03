@@ -14,6 +14,8 @@ import type {
   Preflight,
   Principal,
   ProviderCapabilities,
+  StagingLab,
+  StagingLabCreate,
   TargetCreate,
   TargetEvidence,
   TeamTopology,
@@ -166,4 +168,25 @@ export const api = {
     request<Onboarding>("POST", `/api/v1/onboarding/${id}/activate`),
   retireOnboarding: (id: string) =>
     request<Onboarding>("POST", `/api/v1/onboarding/${id}/retire`),
+
+  // Declarative disposable staging lab (SECP-002B-1B-9, fake simulation only).
+  listStagingLabs: () => request<StagingLab[]>("GET", "/api/v1/staging-labs"),
+  createStagingLab: (body: StagingLabCreate) =>
+    request<StagingLab>("POST", "/api/v1/staging-labs", body),
+  getStagingLab: (id: string) => request<StagingLab>("GET", `/api/v1/staging-labs/${id}`),
+  planStagingLab: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/plan`),
+  submitStagingLab: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/submit`),
+  approveStagingLab: (id: string, expectedPlanHash: string, reason: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/approve`, {
+      expected_plan_hash: expectedPlanHash,
+      reason,
+    }),
+  rejectStagingLab: (id: string, reason: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/reject`, { reason }),
+  simulateStagingLab: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/simulate`),
+  teardownStagingLab: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/teardown`),
 };

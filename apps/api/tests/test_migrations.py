@@ -34,6 +34,7 @@ EXPECTED_TABLES = {
     "target_evidence_record",
     "target_preflight",
     "live_read_authorization",
+    "staging_lab",
     "environment_network",
     "environment_node",
     "environment_topology_edge",

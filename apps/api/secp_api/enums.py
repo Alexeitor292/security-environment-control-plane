@@ -225,6 +225,75 @@ class LiveReadAuthorizationStatus(str, Enum):
     expired = "expired"
 
 
+class StagingLabPurpose(str, Enum):
+    """Why a disposable staging lab exists (SECP-002B-1B-9).
+
+    Only ``disposable_readonly_staging`` is available: a bounded, reversible lab used to
+    functionally validate the read-only control plane. It is not for running workloads.
+    """
+
+    disposable_readonly_staging = "disposable_readonly_staging"
+
+
+class StagingLabProfile(str, Enum):
+    """Provider-neutral substrate profile for a staging lab (SECP-002B-1B-9).
+
+    Only ``nested_proxmox`` is available: a disposable nested Proxmox target on an approved
+    substrate. It is a functional test substrate, never a hardware/hypervisor isolation boundary.
+    """
+
+    nested_proxmox = "nested_proxmox"
+
+
+class StagingNetworkIntent(str, Enum):
+    """Logical network intent for a staging lab (SECP-002B-1B-9).
+
+    ``host_only_no_uplink`` is the only accepted intent: an internal, host-only segment with no
+    physical uplink, no gateway, and no DNS. ``shared_or_production`` names a disallowed intent
+    that the compiler rejects fail-closed (it is never emitted into a plan).
+    """
+
+    host_only_no_uplink = "host_only_no_uplink"
+    shared_or_production = "shared_or_production"
+
+
+class StagingResourceClass(str, Enum):
+    """Bounded logical resource class for a staging lab (SECP-002B-1B-9).
+
+    Safe, coarse logical sizes only — never raw host CPU/RAM/disk values. Real sizing against
+    verified host headroom happens out of band; SECP stores only the chosen logical class.
+    """
+
+    small_lab = "small_lab"
+    medium_lab = "medium_lab"
+
+
+class StagingRollbackPolicy(str, Enum):
+    """How a staging lab is returned to a known-clean state (SECP-002B-1B-9)."""
+
+    revert_to_known_clean_checkpoint = "revert_to_known_clean_checkpoint"
+    destroy_and_rebuild = "destroy_and_rebuild"
+
+
+class StagingLabStatus(str, Enum):
+    """Application-owned disposable staging-lab lifecycle (SECP-002B-1B-9).
+
+    Fake-only. Reaching ``simulated_ready`` means a labeled simulation completed; it creates no
+    infrastructure and is never live read-only collection. ``approved`` is permission to enter
+    fake simulation only — it is NOT a :class:`LiveReadAuthorizationStatus` grant.
+    """
+
+    draft = "draft"
+    planned = "planned"
+    awaiting_approval = "awaiting_approval"
+    approved = "approved"
+    simulating = "simulating"
+    simulated_ready = "simulated_ready"
+    failed = "failed"
+    tearing_down = "tearing_down"
+    destroyed = "destroyed"
+
+
 class ProvisioningApplicationMode(str, Enum):
     """Which provisioning path a request targets (SECP-002B-1A, ADR-013).
 
@@ -275,6 +344,9 @@ class Permission(str, Enum):
     # SECP-002B-1B-0 — target onboarding and automated deployment contract.
     onboarding_manage = "onboarding:manage"
     onboarding_approve = "onboarding:approve"
+    # SECP-002B-1B-9 — declarative disposable staging-lab workflow (fake-only).
+    staging_lab_manage = "staging_lab:manage"
+    staging_lab_approve = "staging_lab:approve"
 
 
 class AuditAction(str, Enum):
@@ -354,3 +426,15 @@ class AuditAction(str, Enum):
     live_read_authorization_approved = "live_read.authorization_approved"
     live_read_authorization_revoked = "live_read.authorization_revoked"
     live_read_authorization_validation_refused = "live_read.authorization_validation_refused"
+    # SECP-002B-1B-9 — declarative disposable staging-lab workflow (fake-only).
+    staging_lab_created = "staging_lab.created"
+    staging_lab_planned = "staging_lab.planned"
+    staging_lab_submitted = "staging_lab.submitted"
+    staging_lab_approved = "staging_lab.approved"
+    staging_lab_rejected = "staging_lab.rejected"
+    staging_lab_simulation_started = "staging_lab.simulation_started"
+    staging_lab_simulated_ready = "staging_lab.simulated_ready"
+    staging_lab_simulation_failed = "staging_lab.simulation_failed"
+    staging_lab_teardown_started = "staging_lab.teardown_started"
+    staging_lab_destroyed = "staging_lab.destroyed"
+    staging_lab_refused = "staging_lab.refused"

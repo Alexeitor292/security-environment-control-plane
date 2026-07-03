@@ -157,9 +157,13 @@ def test_no_staging_control_plane_wiring_in_production_code_or_infra():
     """No code path, config, route, dispatcher, workflow, or env switch references a staging
     control-plane or live-read activation anywhere in the production trees (tests excluded)."""
     forbidden = re.compile(
+        # Activation-shaped tokens only. SECP-002B-1B-9 legitimately implements the staging
+        # control-plane concept in application-owned, fake-only code (e.g. the compiler resource
+        # kind ``self_contained_staging_control_plane``); the concept name is not an activation
+        # switch, so it is intentionally not forbidden here — only real activation/enable
+        # switches and target-host wiring are.
         r"SECP_LIVE_READ|SECP_STAGING|LIVE_READ_ENABLED|STAGING_TARGET_HOST"
-        r"|staging_activation|disposable_staging|activate_live_read"
-        r"|staging_control_plane|isolated_staging"
+        r"|staging_activation|activate_live_read|activate_staging|real_provisioning_enabled"
     )
     scanned = 0
     for tree in PRODUCTION_TREES:

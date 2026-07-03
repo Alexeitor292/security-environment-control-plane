@@ -134,3 +134,22 @@ control-plane or production-database dependency; requires offline bootstrap; doe
 isolation (it is not a hardware or hypervisor boundary) or claim that destroying the nested
 design is without consequence; and adds no real infrastructure value or activation code/config.
 The SECP-002B-1B-7 guardrails remain in force.
+
+## 9. Application-owned desired-state workflow (SECP-002B-1B-9)
+
+SECP-002B-1B-9 makes SECP the owner of this design's desired state instead of a manual command
+runbook. It adds an application-owned, **fake-only** workflow — a durable `StagingLab`
+desired-state record, a deterministic immutable topology compiler, an explicit approval boundary,
+a worker-owned fake execution seam, and a controlled teardown — surfaced in the web UI
+(create, plan, approve, simulate, observe, teardown). The compiler emits the logical resources
+described above (self-contained staging control plane, one host-only no-uplink network, one
+disposable nested target, exactly one target-facing read-only connection, checkpoint/rollback,
+teardown), each carrying an immutable ownership label, and fails closed on production reuse,
+shared/production networks, more than one target-facing network or nested target, missing
+self-containment, standing authorizations, missing ownership, or an unapproved substrate.
+
+B1-B9 creates no bridge, VM, VNet, target, token, or connection; contacts no infrastructure; and
+adds no activation switch. A staging-lab plan approval permits fake simulation only and is not a
+live-read authorization. This self-contained staging control-plane constraint remains mandatory
+for any future adapter, which must arrive in a later, separately reviewed PR before real
+provisioning can occur.

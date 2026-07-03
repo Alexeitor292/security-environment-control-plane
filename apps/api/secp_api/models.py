@@ -45,6 +45,12 @@ from secp_api.enums import (
     ProvisioningStatus,
     ReservationStatus,
     SnapshotStatus,
+    StagingLabProfile,
+    StagingLabPurpose,
+    StagingLabStatus,
+    StagingNetworkIntent,
+    StagingResourceClass,
+    StagingRollbackPolicy,
     TargetStatus,
     ToolchainProfileStatus,
     WorkflowKind,
@@ -536,6 +542,9 @@ class ExecutionTarget(Base, TimestampMixin):
     live_read_authorizations: Mapped[list[LiveReadAuthorization]] = relationship(
         back_populates="target", cascade="all, delete-orphan"
     )
+    staging_labs: Mapped[list[StagingLab]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
 
 
 # --- Target onboarding + automated deployment contract (SECP-002B-1B-0) -------
@@ -753,6 +762,99 @@ class LiveReadAuthorization(Base, TimestampMixin):
             f"status={getattr(self.status, 'value', self.status)!r}, "
             "connection_hash=<sha256>, "
             "boundary_hash=<sha256>)"
+        )
+
+
+class StagingLab(Base, TimestampMixin):
+    """Application-owned declarative disposable staging lab (SECP-002B-1B-9).
+
+    Fake-only and provider-neutral. This row is the durable desired-state + lifecycle record for
+    a disposable read-only staging lab. It stores only safe logical intent: purpose, the approved
+    substrate target id, profile, network intent, a bounded logical resource class, an approved
+    bootstrap-artifact *profile id* (never paths/URLs/checksums), rollback policy, an immutable
+    ownership label, lifecycle state, an immutable desired-state plan + its version + hash, an
+    idempotency key, approval metadata, and a fake simulated-observed-state.
+
+    It NEVER stores endpoints, hostnames, IPs, bridge/VNet names, VMIDs, storage ids, certificate
+    data, secrets/tokens/credential references/secret hashes, raw artifact paths/URLs/checksums,
+    or actual provider observations. Reaching ``simulated_ready`` creates no infrastructure and is
+    not live read-only collection. A staging-lab approval is separate from and never substitutes
+    for a :class:`LiveReadAuthorization`.
+    """
+
+    __tablename__ = "staging_lab"
+    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_staging_lab_idempotency_key"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    ownership_label: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    purpose: Mapped[StagingLabPurpose] = mapped_column(
+        EnumType(StagingLabPurpose, length=60),
+        default=StagingLabPurpose.disposable_readonly_staging,
+        nullable=False,
+    )
+    profile: Mapped[StagingLabProfile] = mapped_column(
+        EnumType(StagingLabProfile, length=60),
+        default=StagingLabProfile.nested_proxmox,
+        nullable=False,
+    )
+    network_intent: Mapped[StagingNetworkIntent] = mapped_column(
+        EnumType(StagingNetworkIntent, length=60),
+        default=StagingNetworkIntent.host_only_no_uplink,
+        nullable=False,
+    )
+    resource_class: Mapped[StagingResourceClass] = mapped_column(
+        EnumType(StagingResourceClass, length=40),
+        default=StagingResourceClass.small_lab,
+        nullable=False,
+    )
+    rollback_policy: Mapped[StagingRollbackPolicy] = mapped_column(
+        EnumType(StagingRollbackPolicy, length=60),
+        default=StagingRollbackPolicy.revert_to_known_clean_checkpoint,
+        nullable=False,
+    )
+    # Opaque logical profile id for approved offline bootstrap artifacts — never a path/URL/hash.
+    bootstrap_artifact_profile_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[StagingLabStatus] = mapped_column(
+        EnumType(StagingLabStatus, length=40),
+        default=StagingLabStatus.draft,
+        nullable=False,
+    )
+    # Immutable desired-state plan (logical resources only) + version + hash. Set once at plan
+    # generation; the plan cannot change after approval.
+    plan_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(80), default="", nullable=False, index=True)
+    desired_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Idempotency key pins retry-safe simulation; a fresh plan mints a fresh key.
+    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Fake simulated observed-state (logical only); reconciled idempotently on retry.
+    simulated_observed_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # Approval binding (set once at approval): approver, time, and the exact approved plan.
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_plan_hash: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    approved_plan_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    decision_reason: Mapped[str] = mapped_column(Text, default="")
+
+    target: Mapped[ExecutionTarget] = relationship(back_populates="staging_labs")
+
+    def __repr__(self) -> str:
+        return (
+            "StagingLab("
+            f"id={self.id!s}, "
+            f"organization_id={self.organization_id!s}, "
+            f"execution_target_id={self.execution_target_id!s}, "
+            f"ownership_label={self.ownership_label!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"plan_version={self.plan_version!r}, "
+            f"plan_hash={self.plan_hash!r})"
         )
 
 

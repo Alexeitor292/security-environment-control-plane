@@ -22,6 +22,7 @@ from secp_api.models import (
     ProviderInventorySnapshot,
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
+    StagingLab,
     TargetEvidenceRecord,
     TargetOnboarding,
     TargetPreflight,
@@ -165,6 +166,29 @@ _LIVE_READ_AUTHORIZATION_ALLOWED_TRANSITIONS = {
     (LiveReadAuthorizationStatus.approved, LiveReadAuthorizationStatus.revoked),
     (LiveReadAuthorizationStatus.approved, LiveReadAuthorizationStatus.expired),
 }
+# StagingLab (SECP-002B-1B-9): identity + substrate + the immutable desired-state plan are
+# immutable from creation/plan-generation; approval binding and the plan are set once. The
+# simulated observed-state and lifecycle status are mutable through the service layer.
+_STAGING_LAB_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "ownership_label",
+    "purpose",
+    "profile",
+    "network_intent",
+    "resource_class",
+    "rollback_policy",
+    "bootstrap_artifact_profile_id",
+    "idempotency_key",
+    "created_by",
+)
+_STAGING_LAB_SET_ONCE = (
+    "plan_hash",
+    "desired_state",
+    "approved_by",
+    "approved_at",
+    "approved_plan_hash",
+)
 
 
 def _attr_changed(obj: object, attr: str) -> bool:
@@ -315,11 +339,31 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                         "LiveReadAuthorization revocation requires preserved approval and "
                         "explicit revocation metadata"
                     )
+        # StagingLab (SECP-002B-1B-9): identity/substrate immutable; the desired-state plan and
+        # approval binding are set-once. Lifecycle status + simulated observed-state stay mutable.
+        if isinstance(obj, StagingLab):
+            changed = [a for a in _STAGING_LAB_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "StagingLab identity/substrate fields are immutable after creation; "
+                    f"attempted to change {changed}"
+                )
+            repeated = [
+                a
+                for a in _STAGING_LAB_SET_ONCE
+                if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+            ]
+            if repeated:
+                raise ImmutableResourceError(
+                    f"StagingLab plan/approval fields are set-once; attempted to change {repeated}"
+                )
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
 
     for obj in session.deleted:
+        if isinstance(obj, StagingLab):
+            raise ImmutableResourceError("StagingLab records cannot be deleted")
         if isinstance(obj, LiveReadAuthorization):
             raise ImmutableResourceError("LiveReadAuthorization records cannot be deleted")
         if isinstance(obj, TargetEvidenceRecord):

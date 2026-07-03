@@ -29,6 +29,7 @@ from secp_api.routers import (
 )
 from secp_api.routers import onboarding as onboarding_router
 from secp_api.routers import provisioning as provisioning_router
+from secp_api.routers import staging_labs as staging_labs_router
 
 logger = logging.getLogger("secp.api")
 
@@ -95,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(providers.router)
     app.include_router(provisioning_router.router)
     app.include_router(onboarding_router.router)
+    app.include_router(staging_labs_router.router)
 
     @app.on_event("startup")
     def _startup() -> None:
