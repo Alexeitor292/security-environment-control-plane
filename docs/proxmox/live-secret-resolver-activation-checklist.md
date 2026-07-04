@@ -10,8 +10,14 @@ The shipped default remains the SECP-B2-1 `SealedUnavailableResolver`: every rea
 ends `credential_unavailable`, no transport is constructed, and no collector executes. This
 checklist governs a later implementation PR that would replace that sealed default with a real
 worker-only resolver for exactly one approved staging target. See the design contract in
-`docs/architecture/secp-b2-2-live-secret-resolver-activation.md` and the collector activation
-checklist in `live-readonly-collector-activation-checklist.md` (both must be satisfied).
+`docs/architecture/secp-b2-2-live-secret-resolver-activation.md`.
+
+**This checklist and the collector-activation checklist are cumulative.** This resolver-activation
+checklist (`live-secret-resolver-activation-checklist.md`) and the collector-activation checklist
+(`live-readonly-collector-activation-checklist.md`) must **both** be satisfied in full; satisfying
+one **never substitutes** for the other. Enabling a secret resolver does not authorize collector
+execution, and enabling a collector does not authorize secret resolution — each remains a separate,
+independently reviewed activation.
 
 Every box must be **checked and independently human-reviewed**, and an explicit, time-bound user
 authorization recorded, before the default-disabled resolver may be enabled for one approved target.

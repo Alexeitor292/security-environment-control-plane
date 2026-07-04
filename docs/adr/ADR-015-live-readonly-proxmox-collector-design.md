@@ -469,7 +469,9 @@ SECP-B2-2 is a design/static-contract milestone (no code, no backend, no switch)
 non-negotiable obligations a future resolver-implementation PR must satisfy, resolving the two
 SECP-B2-1 adversarial-review findings. The full contract is
 `docs/architecture/secp-b2-2-live-secret-resolver-activation.md`; the closed evidence gate is
-`docs/proxmox/live-secret-resolver-activation-checklist.md`.
+`docs/proxmox/live-secret-resolver-activation-checklist.md`. The resolver-activation checklist and
+the collector-activation checklist are **cumulative**: both must be satisfied in full and neither
+ever substitutes for the other.
 
 - **A trusted request is not a capability.** Possession of a `TrustedResolutionRequest` or a
   `ResolutionContract` — including one carrying the construction token or forged via
@@ -487,11 +489,18 @@ SECP-B2-1 adversarial-review findings. The full contract is
   resolver request reference. Any mismatch or blank reference fails closed before backend access;
   the reference is never hashed, logged, audited, serialized, or exposed via `repr`.
 - **Replay and single-use resolution lease.** A durable, single-use lease is acquired before
-  backend access, keyed by authorization id + version, target/onboarding, purpose, operation
-  fingerprint, expiry, and authenticated worker identity. Replay of a consumed lease is refused;
-  retries are bounded and only before expiry; a lease never outlives the authorization. Lease and
-  refusal evidence is durable and **secret-free** (records no reference and no material) with closed
-  reason codes.
+  backend access via a transactional **compare-and-swap**. Single-use, replay refusal
+  (`replay_refused`), and the retry budget are **global** per the uniqueness key
+  `(authorization_id, authorization_version, operation_fingerprint)` — it does not include
+  worker identity, so two workers can never each hold a valid pre-success lease for the same
+  operation. Worker identity is required for authenticated issuance, backend authorization, and
+  secret-free audit evidence, but is not part of the uniqueness boundary. The bounded retry limit is
+  **fixed at N = 3**, counted durably per that uniqueness key across every lease and every worker
+  identity; a fresh lease **must not reset or expand** it; a retry is allowed only before
+  authorization expiry and while budget remains; once exhausted, resolution is refused
+  (`retry_bound_exceeded`) until a new `authorization_version` exists. A lease never outlives the
+  authorization. Lease and refusal evidence is durable and **secret-free** (records no reference and
+  no material) with closed reason codes.
 - **Worker identity and backend policy.** The worker authenticates to the backend as an
   independently issued, out-of-band-rotated identity with no API/UI credential or network path; the
   backend policy authorizes only the exact (worker identity, reference, target, purpose) tuple;

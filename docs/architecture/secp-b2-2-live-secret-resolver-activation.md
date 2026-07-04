@@ -84,45 +84,73 @@ forged past the object seal (§2).
 ## 5. Replay, retry, and resolution-lease model
 
 The future resolver must acquire a durable, single-purpose **resolution lease** before contacting
-the backend, and must never resolve twice for the same operation without a fresh lease.
+the backend, and must never resolve twice for the same operation without a fresh authorization.
 
-### 5.1 Lease identity
+### 5.1 Durable uniqueness key vs recorded fields
 
-A lease is keyed by the immutable binding fingerprint of exactly one queued operation:
+The **durable uniqueness key** — the boundary that decides single-use, replay refusal, and the
+retry budget — is exactly:
 
-- `authorization_id` + `authorization_version`;
-- `execution_target_id` + `onboarding_id`;
-- resolution `purpose` (`readonly_staging_preflight` only);
-- `operation_fingerprint` (the secret-free `sha256:` digest of the preflight work item, per B2-1);
-- `authorization_expiry` (canonical UTC);
-- authenticated `worker_identity_id` (§6).
+```
+(authorization_id, authorization_version, operation_fingerprint)
+```
 
-The lease key records **no** `secret_ref`, credential reference, secret material, endpoint, or
-provider response — only identities, versions, the opaque fingerprint, and status.
+This key is **global**: it does not include `worker_identity_id`. Two different worker
+identities resolving the same queued operation share the same key and therefore the same single-use
+state and the same retry budget; they can never each hold a separate valid pre-success lease for
+that operation (see §5.2).
 
-### 5.2 Single-use with bounded retry
+Beyond the uniqueness key, each lease **record** also carries, for binding and audit only (never as
+part of the uniqueness boundary): `execution_target_id` + `onboarding_id`; resolution `purpose`
+(`readonly_staging_preflight` only); `authorization_expiry` (canonical UTC); and the authenticated
+`worker_identity_id` that requested issuance (§6). The `operation_fingerprint` is the secret-free
+`sha256:` digest of the preflight work item (per B2-1). The lease record stores **no** `secret_ref`,
+credential reference, secret material, endpoint, or provider response — only identities, versions,
+the opaque fingerprint, and status.
 
-- A lease is **single-use per successful resolution**. Once a resolution succeeds for an operation
-  fingerprint, the lease is marked **consumed**; any later resolution attempt for the same
-  fingerprint is **refused (replay)** and fails closed.
-- Before success, at most **N bounded retries** (small, e.g. 3) are permitted, and only strictly
-  **before `authorization_expiry`**. Each attempt is durably recorded; exceeding the bound, or any
-  attempt at/after expiry, fails closed.
+### 5.2 Global single-use and transactional issuance
+
+- **Single-use is global per uniqueness key.** Once a resolution **succeeds** for
+  `(authorization_id, authorization_version, operation_fingerprint)`, that key is marked
+  **consumed**; any later resolution attempt for the same key — from **any** worker identity — is
+  **refused (`replay_refused`)** and fails closed. Worker identity is required for authenticated
+  issuance, backend authorization, and secret-free audit evidence, but it is not part of the
+  uniqueness boundary and never permits a separate concurrent lease for the same operation.
+- **Transactional issuance (durable CAS).** Lease issuance must use a durable compare-and-swap (a
+  conditional insert/update on the uniqueness key, e.g. a unique constraint on
+  `(authorization_id, authorization_version, operation_fingerprint)` with an `IntegrityError`
+  fail-closed, or an equivalent `FOR UPDATE`-style guard) so that under concurrency **at most one**
+  worker obtains a valid pre-success lease for a given key. A worker that loses the CAS is refused
+  and fails closed; it never resolves in parallel.
+
+### 5.3 Durable retry budget (fixed N=3)
+
+- The bounded retry limit is **fixed at N = 3** and is counted **durably per
+  `(authorization_id, authorization_version, operation_fingerprint)`**, across **every** lease and
+  **every** worker identity for that key.
+- A fresh lease **must not reset or expand** the retry budget. Acquiring, losing, or re-issuing a
+  lease for the same key draws from the same durable, already-consumed attempt count.
+- A retry may occur **only** while (a) the authorization has **not** expired and (b) the durable
+  per-operation attempt budget remains. Any attempt at/after `authorization_expiry`, or once the
+  budget is exhausted, fails closed.
+- Once the budget is exhausted, resolution is **refused with a closed, secret-free reason code**
+  (`retry_bound_exceeded`) and stays refused **until a new `authorization_version` exists** — a new
+  version is a distinct uniqueness key with its own fresh budget. Expiry alone does not grant new
+  attempts.
 - A lease never outlives the authorization: `lease.expires_at = min(issued_at + short_ttl,
-  authorization_expiry)`. An expired lease is not renewable; a new authorization (new version) is
-  required.
+  authorization_expiry)`. An expired lease is not renewable.
 - Resolved material (§6) is short-lived, never cached, and never reused across leases, operations,
   or targets.
 
-### 5.3 Durable replay/refusal evidence (secret-free)
+### 5.4 Durable replay/refusal evidence (secret-free)
 
-Every lease transition is durably recorded as **audit-safe metadata only**: lease id, the identity
-fields above, `worker_identity_id`, status (`issued` → `consumed` | `refused` | `expired`),
-timestamps, retry count, and a closed **reason code** (e.g. `replay_refused`,
-`retry_bound_exceeded`, `authorization_expired`, `reference_mismatch`, `worker_identity_untrusted`,
-`backend_policy_denied`). The evidence records **no** secret reference and **no** secret material.
-This provides a durable, reviewable trail of what was attempted and refused without ever persisting
-a resolvable value.
+Every lease transition is durably recorded as **audit-safe metadata only**: lease id, the uniqueness
+key fields, `worker_identity_id`, status (`issued` → `consumed` | `refused` | `expired`),
+timestamps, the durable per-operation attempt count, and a closed **reason code** (e.g.
+`replay_refused`, `retry_bound_exceeded`, `authorization_expired`, `reference_mismatch`,
+`worker_identity_untrusted`, `backend_policy_denied`). The evidence records **no** secret reference
+and **no** secret material. This provides a durable, reviewable trail of what was attempted and
+refused without ever persisting a resolvable value.
 
 ## 6. Worker identity and backend access policy
 
@@ -182,6 +210,11 @@ human-reviewed. It requires, at minimum:
 
 The checklist items are a **closed set**: no item may be waived, and no evidence outside the list
 substitutes for a listed item.
+
+This resolver-activation checklist and the collector-activation checklist
+(`docs/proxmox/live-readonly-collector-activation-checklist.md`) are **cumulative**: both must be
+satisfied in full and neither ever substitutes for the other. Enabling a secret resolver does not
+authorize collector execution, and enabling a collector does not authorize secret resolution.
 
 ## 9. Formal activation gates (defense in depth)
 

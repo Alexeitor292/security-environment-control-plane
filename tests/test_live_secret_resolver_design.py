@@ -126,6 +126,49 @@ def test_design_doc_addresses_both_b2_1_review_findings():
     assert "dataclasses.replace" in text
 
 
+def test_durable_retry_budget_is_fixed_at_three_and_per_operation():
+    """The retry budget is fixed N=3, durable per (auth id, auth version, operation fingerprint),
+    across every lease and worker identity; a fresh lease must not reset or expand it; exhaustion
+    refuses with a closed code until a new authorization version exists."""
+    for doc in (DESIGN, ADR):
+        text = _normalized(doc)
+        assert "n = 3" in text or "n=3" in text, f"{doc.name}: retry budget not pinned to N=3"
+        assert "(authorization_id, authorization_version, operation_fingerprint)" in text, (
+            f"{doc.name}: durable retry/uniqueness key not stated"
+        )
+        assert "must not reset or expand" in text, f"{doc.name}: fresh-lease reset not forbidden"
+        assert "retry_bound_exceeded" in text, f"{doc.name}: retry-exhaustion reason code absent"
+        assert "new authorization_version" in text or "new `authorization_version`" in text, (
+            f"{doc.name}: retry refusal-until-new-version not stated"
+        )
+
+
+def test_global_single_use_ignores_worker_identity_and_uses_cas():
+    """Single-use / replay refusal is global per the uniqueness key regardless of worker identity;
+    lease issuance uses a durable compare-and-swap so two workers cannot both hold a valid
+    pre-success lease for the same operation."""
+    for doc in (DESIGN, ADR):
+        text = _normalized(doc)
+        assert "(authorization_id, authorization_version, operation_fingerprint)" in text
+        assert "global" in text, f"{doc.name}: single-use not stated as global"
+        assert "not part of the uniqueness" in text or "not include" in text, (
+            f"{doc.name}: worker identity not excluded from uniqueness boundary"
+        )
+        assert "compare-and-swap" in text, f"{doc.name}: transactional CAS issuance not required"
+        assert "replay_refused" in text, f"{doc.name}: replay reason code absent"
+
+
+def test_checklists_are_cumulative_and_non_substitutable():
+    """The resolver-activation and collector-activation checklists are cumulative; neither
+    substitutes for the other."""
+    for doc in (CHECKLIST, ADR, DESIGN):
+        text = _normalized(doc)
+        assert "cumulative" in text, f"{doc.name}: checklists not described as cumulative"
+    checklist = _normalized(CHECKLIST)
+    assert "never substitutes" in checklist
+    assert "live-readonly-collector-activation-checklist.md" in checklist
+
+
 # --- Docs/tests are secret-free ------------------------------------------------------------------
 
 # A secret-bearing value = a secret WORD immediately followed by ':'/'=' and a value, a private
