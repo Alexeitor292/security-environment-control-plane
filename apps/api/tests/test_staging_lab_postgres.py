@@ -327,19 +327,22 @@ def test_foreign_keys_enforce_organization_association(pg_engine):
     assert ("staging_lab", ("staging_lab_id",)) in referred
 
 
-# Tables introduced by each migration (asserted independently so a future migration inserted
-# between B1 and B2 cannot silently mask the boundary these downgrades must respect).
+# Tables introduced by each migration (asserted independently so an unrelated future migration
+# inserted between these revisions cannot silently mask the boundary each downgrade must respect).
 _B1_STAGING_TABLES = {"staging_lab", "staging_lab_work_item", "staging_substrate_eligibility"}
 _B2_PREFLIGHT_TABLES = {"readonly_staging_preflight"}
+_B2_3_LEASE_TABLES = {"resolution_lease"}
 
 
 def test_downgrade_drops_staging_tables(pg_engine):
-    """B2 downgrade removes only the readonly-preflight table; B1 downgrade removes staging-lab.
+    """Ordered rollback across the current migration chain (head is the B2-3 resolution-lease
+    migration, NOT B2): B2-3 -> B2 -> B1 -> B1's parent.
 
-    The staging-lab migration (B1) is no longer the head: the readonly-preflight migration (B2)
-    sits on top of it. So ``downgrade -1`` from head must remove *only* B2 and leave B1's
-    staging-lab tables intact. We derive B1 (head's parent) and B1's own parent from Alembic's
-    ScriptDirectory rather than hardcoding relative offsets, then step down through B1 explicitly.
+    The resolution-lease migration (B2-3) now sits on top of the readonly-preflight migration (B2),
+    which sits on top of the staging-lab migration (B1). Downgrading one revision from head must
+    remove *only* the B2-3 ``resolution_lease`` table and leave the B2 readonly-preflight table and
+    the B1 staging-lab tables in place. Revisions are derived from Alembic's ScriptDirectory (no
+    hardcoded IDs, no relative ``-1`` assumptions), then stepped down explicitly.
     """
     from alembic import command
     from alembic.config import Config
@@ -350,11 +353,13 @@ def test_downgrade_drops_staging_tables(pg_engine):
     cfg.set_main_option("script_location", str(api_dir / "migrations"))
     cfg.set_main_option("sqlalchemy.url", PG_URL)
 
-    # Derive the authoritative revision graph: head (B2) -> B1 staging-lab -> B1's parent.
+    # Derive the authoritative chain: head (B2-3) -> B2 -> B1 -> B1's parent.
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"expected a single head, got {heads}"
-    b2_rev = heads[0]
+    b2_3_rev = heads[0]
+    b2_rev = script.get_revision(b2_3_rev).down_revision
+    assert isinstance(b2_rev, str) and b2_rev, "B2-3 must have a single string parent (B2)"
     b1_rev = script.get_revision(b2_rev).down_revision
     assert isinstance(b1_rev, str) and b1_rev, "B2 must have a single string parent (B1)"
     b1_parent = script.get_revision(b1_rev).down_revision
@@ -364,21 +369,38 @@ def test_downgrade_drops_staging_tables(pg_engine):
         return set(inspect(pg_engine).get_table_names())
 
     try:
-        # 1. Downgrade exactly one revision (head/B2 -> B1): B2 tables gone, B1 tables remain.
+        # A. At head: B2-3, B2, and B1 tables are all present.
+        at_head = tables()
+        assert _B2_3_LEASE_TABLES <= at_head
+        assert _B2_PREFLIGHT_TABLES <= at_head
+        assert _B1_STAGING_TABLES <= at_head
+
+        # B. Downgrade one revision (head/B2-3 -> B2): only the lease table is removed.
+        command.downgrade(cfg, b2_rev)
+        after_b2_3 = tables()
+        assert _B2_3_LEASE_TABLES.isdisjoint(after_b2_3)
+        assert _B2_PREFLIGHT_TABLES <= after_b2_3
+        assert _B1_STAGING_TABLES <= after_b2_3
+
+        # C. Downgrade B2 -> B1: the readonly-preflight table is removed; staging-lab remains.
         command.downgrade(cfg, b1_rev)
         after_b2 = tables()
         assert _B2_PREFLIGHT_TABLES.isdisjoint(after_b2)
         assert _B1_STAGING_TABLES <= after_b2
+        assert _B2_3_LEASE_TABLES.isdisjoint(after_b2)
 
-        # 2. Downgrade through B1 to its actual parent: staging-lab tables now absent.
+        # D. Downgrade B1 -> B1's parent: the staging-lab tables are removed.
         command.downgrade(cfg, b1_parent)
         after_b1 = tables()
         assert _B1_STAGING_TABLES.isdisjoint(after_b1)
         assert _B2_PREFLIGHT_TABLES.isdisjoint(after_b1)
+        assert _B2_3_LEASE_TABLES.isdisjoint(after_b1)
     finally:
-        # 3. Restore head so the shared module-scoped schema is left in head state.
+        # Restore head so the shared module-scoped schema is left in head state even on failure.
         command.upgrade(cfg, "head")
 
+    # E. Upgrade back to head: all B1, B2, and B2-3 tables are restored.
     restored = tables()
     assert _B1_STAGING_TABLES <= restored
     assert _B2_PREFLIGHT_TABLES <= restored
+    assert _B2_3_LEASE_TABLES <= restored
