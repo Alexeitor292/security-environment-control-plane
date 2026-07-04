@@ -87,7 +87,14 @@ def test_api_never_imports_staging_worker_or_executor():
 
     A docstring cross-reference is not an import; this scans real import statements only.
     """
-    forbidden_symbols = {"FakeStagingLabExecutor", "claim_and_process_one", "process_all_queued"}
+    forbidden_symbols = {
+        "FakeStagingLabExecutor",
+        "claim_and_process_one",
+        "process_all_queued",
+        "run_consumer_loop",
+        "run_forever",
+        "drain_once",
+    }
     for path in _api_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -142,7 +149,7 @@ def _eligible(session, principal) -> ExecutionTarget:
         plugin_name="proxmox",
         config={},
         config_hash="sha256:" + "ab" * 32,
-        secret_ref="env:SECP_PROVIDER_SECRET__FAKE",
+        secret_ref=None,
         status=TargetStatus.active,
         scope_policy={},
         created_by=principal.user_id,
@@ -194,13 +201,43 @@ def test_concurrent_approvals_only_one_wins(session, principal):
     assert _approve() == 0
 
 
-def test_duplicate_active_work_item_is_rejected_by_the_database(session, principal):
+def test_duplicate_work_scope_is_rejected_by_the_database(session, principal):
+    from sqlalchemy.exc import IntegrityError
+
     lab = _awaiting_lab(session, principal)
     staging_labs.approve_staging_lab(session, principal, lab.id, expected_plan_hash=lab.plan_hash)
-    staging_labs.queue_simulation(session, principal, lab.id, idempotency_key="a")
-    # A second active simulate_provision item for the same lab violates the partial-unique index.
-    with pytest.raises(DomainError):
-        staging_labs.queue_simulation(session, principal, lab.id, idempotency_key="b")
+    staging_labs.queue_simulation(session, principal, lab.id)
+    # A second row with the SAME (lab, operation, plan_hash, plan_version) scope but a different
+    # fingerprint must be rejected by the DB scope-unique constraint (not merely by Python).
+    session.add(
+        StagingLabWorkItem(
+            organization_id=lab.organization_id,
+            staging_lab_id=lab.id,
+            operation_kind=StagingWorkOperation.simulate_provision,
+            plan_hash=lab.plan_hash,
+            plan_version=lab.plan_version,
+            operation_fingerprint="fp-different-but-same-scope",
+            status=StagingWorkStatus.queued,
+            revision=0,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.flush()
+    session.rollback()
+
+
+def test_queue_idempotency_returns_original_by_fingerprint(session, principal):
+    lab = _awaiting_lab(session, principal)
+    staging_labs.approve_staging_lab(session, principal, lab.id, expected_plan_hash=lab.plan_hash)
+    staging_labs.queue_simulation(session, principal, lab.id)
+    fp = staging_labs.operation_fingerprint(
+        lab.id, StagingWorkOperation.simulate_provision, lab.plan_hash, lab.plan_version
+    )
+    # Retry of the identical operation+plan resolves to the original single work item.
+    staging_labs.queue_simulation(session, principal, lab.id)
+    items = session.query(StagingLabWorkItem).filter_by(staging_lab_id=lab.id).all()
+    assert len(items) == 1
+    assert items[0].operation_fingerprint == fp
 
 
 def test_stale_completion_is_refused_after_revision_drift(session, principal):
@@ -242,7 +279,7 @@ def test_lab_creator_cannot_grant_substrate_eligibility(session, principal):
         plugin_name="proxmox",
         config={},
         config_hash="sha256:" + "ab" * 32,
-        secret_ref="env:x",
+        secret_ref=None,
         status=TargetStatus.active,
         scope_policy={},
         created_by=principal.user_id,
@@ -306,7 +343,7 @@ def _make_target(session, principal, *, plugin: str) -> ExecutionTarget:
         plugin_name=plugin,
         config={},
         config_hash="sha256:" + "ab" * 32,
-        secret_ref="env:x",
+        secret_ref=None,
         status=TargetStatus.active,
         scope_policy={},
         created_by=principal.user_id,

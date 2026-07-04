@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     temporal_task_queue: str = "secp-orchestration"
 
+    # SECP-002B-1B-9: bounded poll interval (seconds) for the worker-side, fake-only
+    # staging-lab work-item consumer loop. The consumer runs ONLY in the worker process.
+    staging_lab_poll_interval_seconds: float = 2.0
+
     # Auth. The dev fallback principal is ONLY honored when auth_dev_mode is true
     # AND app_env != production (enforced below). Production requires real OIDC.
     auth_dev_mode: bool = True

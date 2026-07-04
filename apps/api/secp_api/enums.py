@@ -306,6 +306,40 @@ class StagingSubstrateEligibilityStatus(str, Enum):
     revoked = "revoked"
 
 
+class StagingLabDecisionCode(str, Enum):
+    """Closed set of staging-lab decision/outcome codes (SECP-002B-1B-9).
+
+    Replaces all free-text approval/rejection reasons. Never caller-supplied arbitrary text.
+    """
+
+    pending = "pending"
+    approved = "approved"
+    rejected_plan_drift = "rejected_plan_drift"
+    rejected_lifecycle = "rejected_lifecycle"
+    rejected_policy = "rejected_policy"
+    refused_ownership = "refused_ownership"
+    refused_concurrency = "refused_concurrency"
+    failed_internal = "failed_internal"
+
+
+class StagingWorkFailureCode(str, Enum):
+    """Closed set of durable work-item failure/refusal codes (SECP-002B-1B-9).
+
+    Never an arbitrary string — every refusal maps to one of these safe codes.
+    """
+
+    lab_missing = "lab_missing"
+    cross_org = "cross_org"
+    plan_drift = "plan_drift"
+    approval_mismatch = "approval_mismatch"
+    ownership_mismatch = "ownership_mismatch"
+    stale_lifecycle = "stale_lifecycle"
+    lifecycle_raced = "lifecycle_raced"
+    blast_radius = "blast_radius"
+    stale_completion = "stale_completion"
+    internal = "internal"
+
+
 class StagingRollbackPolicy(str, Enum):
     """How a staging lab is returned to a known-clean state (SECP-002B-1B-9)."""
 

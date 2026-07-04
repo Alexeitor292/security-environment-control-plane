@@ -20,9 +20,7 @@ from secp_api.schemas_staging_lab import (
     EligibleSubstrateOut,
     StagingLabApprove,
     StagingLabCreate,
-    StagingLabDecision,
     StagingLabOut,
-    StagingLabQueue,
     StagingLabWorkItemOut,
 )
 from secp_api.services import staging_labs
@@ -124,14 +122,10 @@ def approve_staging_lab(
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     """Approve the exact reviewed plan. Grants permission to ENQUEUE fake simulation only —
-    this is not a live-read authorization."""
+    this is not a live-read authorization. Records the closed decision code (no free text)."""
     return StagingLabOut.model_validate(
         staging_labs.approve_staging_lab(
-            session,
-            principal,
-            lab_id,
-            expected_plan_hash=body.expected_plan_hash,
-            reason=body.reason,
+            session, principal, lab_id, expected_plan_hash=body.expected_plan_hash
         )
     )
 
@@ -139,40 +133,31 @@ def approve_staging_lab(
 @router.post("/staging-labs/{lab_id}/reject", response_model=StagingLabOut)
 def reject_staging_lab(
     lab_id: uuid.UUID,
-    body: StagingLabDecision,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
-    return StagingLabOut.model_validate(
-        staging_labs.reject_staging_lab(session, principal, lab_id, body.reason)
-    )
+    """Reject a lab awaiting approval. Records the closed decision code (no free text)."""
+    return StagingLabOut.model_validate(staging_labs.reject_staging_lab(session, principal, lab_id))
 
 
 @router.post("/staging-labs/{lab_id}/simulate", response_model=StagingLabOut)
 def queue_simulation(
     lab_id: uuid.UUID,
-    body: StagingLabQueue | None = None,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     """QUEUE a fake simulation. Simulation only — no infrastructure will be created. The lab
-    enters ``simulation_queued``; a worker records completion later."""
-    key = body.idempotency_key if body else None
-    return StagingLabOut.model_validate(
-        staging_labs.queue_simulation(session, principal, lab_id, idempotency_key=key)
-    )
+    enters ``simulation_queued``; a worker records completion later. The work identity is a
+    server-generated fingerprint (no caller idempotency key)."""
+    return StagingLabOut.model_validate(staging_labs.queue_simulation(session, principal, lab_id))
 
 
 @router.post("/staging-labs/{lab_id}/teardown", response_model=StagingLabOut)
 def queue_teardown(
     lab_id: uuid.UUID,
-    body: StagingLabQueue | None = None,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     """QUEUE a fake teardown. Simulation only — no infrastructure exists to destroy. The lab
     enters ``teardown_queued``; a worker records completion later."""
-    key = body.idempotency_key if body else None
-    return StagingLabOut.model_validate(
-        staging_labs.queue_teardown(session, principal, lab_id, idempotency_key=key)
-    )
+    return StagingLabOut.model_validate(staging_labs.queue_teardown(session, principal, lab_id))

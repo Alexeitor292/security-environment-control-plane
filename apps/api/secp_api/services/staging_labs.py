@@ -29,6 +29,7 @@ from secp_api.enums import (
     AuditAction,
     Permission,
     StagingBootstrapArtifactProfile,
+    StagingLabDecisionCode,
     StagingLabProfile,
     StagingLabStatus,
     StagingNetworkIntent,
@@ -74,13 +75,26 @@ def assert_safe_logical_name(value: str) -> str:
     """
     candidate = (value or "").strip()
     # Strict allowlist — no normalization. Uppercase, spaces, dots, slashes, colons, ports, '@',
-    # '=', '://', and over-length inputs all fail closed here.
+    # '=', '://', and over-length inputs all fail closed here. The error NEVER echoes the rejected
+    # input; it returns only a generic, safe code.
     if not _LOGICAL_NAME_RE.fullmatch(candidate):
         raise ValidationFailedError(
-            "invalid logical name",
-            errors=["logical_name must be a short lowercase kebab-case slug (a-z, 0-9, '-')"],
+            "invalid_staging_lab_input", errors=["invalid_staging_lab_input"]
         )
     return candidate
+
+
+def operation_fingerprint(
+    lab_id: uuid.UUID, operation: StagingWorkOperation, plan_hash: str, plan_version: int
+) -> str:
+    """Deterministic, canonical server-generated work identity.
+
+    A SHA-256 over the canonical immutable tuple ``(lab_id, operation, plan_hash, plan_version)``.
+    It contains no user-provided text, target display text, or infrastructure value, and is stable
+    across processes so an identical operation on an identical plan resolves to the same key.
+    """
+    canonical = f"{lab_id}|{operation.value}|{plan_hash}|{plan_version}"
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _ownership_label(lab_id: uuid.UUID) -> str:
@@ -300,7 +314,6 @@ def create_staging_lab(
         revision=0,
         plan_version=0,
         plan_hash="",
-        idempotency_key=uuid.uuid4().hex,
         created_by=actor.user_id,
     )
     session.add(lab)
@@ -409,13 +422,13 @@ def approve_staging_lab(
     lab_id: uuid.UUID,
     *,
     expected_plan_hash: str,
-    reason: str = "",
 ) -> StagingLab:
     """Approve the exact reviewed plan (awaiting_approval -> approved), concurrency-safe.
 
     Binds lab id, the immutable plan hash/version, the substrate id, lifecycle state, approver,
     and time via a DB compare-and-swap on (status, revision): exactly one competing approval for
-    the same plan can win; the loser fails closed. This is NOT a live-read authorization.
+    the same plan can win; the loser fails closed. Records the closed decision code ``approved``
+    (no free text). This is NOT a live-read authorization.
     """
     actor.require(Permission.staging_lab_approve)
     lab = _get_lab(session, actor, lab_id)
@@ -441,7 +454,7 @@ def approve_staging_lab(
             "approved_at": _utcnow(),
             "approved_plan_hash": lab.plan_hash,
             "approved_plan_version": lab.plan_version,
-            "decision_reason": reason,
+            "decision_code": StagingLabDecisionCode.approved,
         },
     ):
         raise DomainError("a competing approval already changed this lab; approval refused")
@@ -456,7 +469,6 @@ def approve_staging_lab(
             lab,
             approved_plan_hash=lab.approved_plan_hash,
             approved_plan_version=lab.approved_plan_version,
-            reason=reason,
             authorizes="fake_simulation_only",
             live_read_authorization=False,
         ),
@@ -464,9 +476,8 @@ def approve_staging_lab(
     return lab
 
 
-def reject_staging_lab(
-    session: Session, actor: Principal, lab_id: uuid.UUID, reason: str = ""
-) -> StagingLab:
+def reject_staging_lab(session: Session, actor: Principal, lab_id: uuid.UUID) -> StagingLab:
+    """Reject a lab awaiting approval. Records the closed decision code ``rejected_policy``."""
     actor.require(Permission.staging_lab_approve)
     lab = _get_lab(session, actor, lab_id)
     if lab.status != StagingLabStatus.awaiting_approval:
@@ -478,7 +489,7 @@ def reject_staging_lab(
         lab,
         expected_status=StagingLabStatus.awaiting_approval,
         new_status=StagingLabStatus.failed,
-        extra={"decision_reason": reason},
+        extra={"decision_code": StagingLabDecisionCode.rejected_policy},
     ):
         raise DomainError("staging lab changed concurrently; rejection refused")
     audit.record(
@@ -488,7 +499,7 @@ def reject_staging_lab(
         resource_id=lab.id,
         organization_id=lab.organization_id,
         actor=str(actor.user_id),
-        data=_safe_audit(lab, reason=reason),
+        data=_safe_audit(lab),
     )
     return lab
 
@@ -496,23 +507,16 @@ def reject_staging_lab(
 # --- Queueing durable work (API enqueues; worker executes) --------------------
 
 
-def _existing_by_idempotency(
-    session: Session, lab: StagingLab, idempotency_key: str
-) -> StagingLabWorkItem | None:
-    if not idempotency_key:
-        return None
-    item = (
+def _existing_by_fingerprint(session: Session, fingerprint: str) -> StagingLabWorkItem | None:
+    return (
         session.execute(
-            select(StagingLabWorkItem).where(StagingLabWorkItem.idempotency_key == idempotency_key)
+            select(StagingLabWorkItem).where(
+                StagingLabWorkItem.operation_fingerprint == fingerprint
+            )
         )
         .scalars()
         .first()
     )
-    if item is None:
-        return None
-    if item.staging_lab_id != lab.id or item.organization_id != lab.organization_id:
-        raise DomainError("idempotency key belongs to a different lab")
-    return item
 
 
 def _enqueue_work(
@@ -520,7 +524,7 @@ def _enqueue_work(
     lab: StagingLab,
     *,
     operation: StagingWorkOperation,
-    idempotency_key: str,
+    fingerprint: str,
 ) -> StagingLabWorkItem:
     item = StagingLabWorkItem(
         organization_id=lab.organization_id,
@@ -528,7 +532,7 @@ def _enqueue_work(
         operation_kind=operation,
         plan_hash=lab.plan_hash,
         plan_version=lab.plan_version,
-        idempotency_key=idempotency_key,
+        operation_fingerprint=fingerprint,
         status=StagingWorkStatus.queued,
         revision=0,
         created_by=lab.created_by,
@@ -537,51 +541,50 @@ def _enqueue_work(
     try:
         session.flush()
     except IntegrityError as exc:
-        # The partial-unique active index (one active item per lab+operation) or the unique
-        # idempotency key fired: another active work item exists. Fail closed.
+        # The fingerprint/scope unique constraint or the partial-unique active index fired:
+        # an item for this exact (lab, operation, plan) or another active item already exists.
         session.rollback()
         raise DomainError("an active work item already exists for this lab/operation") from exc
     return item
 
 
-def queue_simulation(
+def _queue_operation(
     session: Session,
     actor: Principal,
     lab_id: uuid.UUID,
     *,
-    idempotency_key: str | None = None,
+    operation: StagingWorkOperation,
+    allowed_statuses: tuple[StagingLabStatus, ...],
+    queued_status: StagingLabStatus,
+    audit_action: AuditAction,
 ) -> StagingLab:
-    """Enqueue a durable simulate_provision work item (approved/simulated_ready -> queued).
+    """Shared enqueue path. The API only commits queued work — it never executes it.
 
-    The API only commits queued work — it never executes it. Returns the queued lab. Passing a
-    previously-used idempotency key returns the original queued lab (idempotent replay).
+    Idempotency is by a server-generated fingerprint over (lab, operation, plan_hash,
+    plan_version): a retry for the identical operation and plan resolves to the original work
+    item; a different operation/plan/stale-plan/lifecycle-conflict fails closed.
     """
     actor.require(Permission.staging_lab_manage)
     lab = _get_lab(session, actor, lab_id)
-    key = (idempotency_key or uuid.uuid4().hex).strip()
-    existing = _existing_by_idempotency(session, lab, key)
+    if not lab.plan_hash:
+        raise DomainError(f"staging lab is '{lab.status.value}'; it has no approved plan to queue")
+    fingerprint = operation_fingerprint(lab.id, operation, lab.plan_hash, lab.plan_version)
+    existing = _existing_by_fingerprint(session, fingerprint)
     if existing is not None:
-        return lab  # idempotent replay: the original work item is authoritative
-    if lab.status not in (StagingLabStatus.approved, StagingLabStatus.simulated_ready):
+        # Idempotent replay of the identical operation+plan: return the original, unchanged.
+        return lab
+    if lab.status not in allowed_statuses:
         raise DomainError(
-            f"staging lab is '{lab.status.value}'; only 'approved' or 'simulated_ready' "
-            "can be queued for simulation"
+            f"staging lab is '{lab.status.value}'; it cannot be queued for {operation.value}"
         )
     if lab.approved_plan_hash != lab.plan_hash:
         raise DomainError("approved plan hash does not match the current plan; re-approve")
-    item = _enqueue_work(
-        session, lab, operation=StagingWorkOperation.simulate_provision, idempotency_key=key
-    )
-    if not _cas_transition(
-        session,
-        lab,
-        expected_status=lab.status,
-        new_status=StagingLabStatus.simulation_queued,
-    ):
-        raise DomainError("staging lab changed concurrently; simulation not queued")
+    item = _enqueue_work(session, lab, operation=operation, fingerprint=fingerprint)
+    if not _cas_transition(session, lab, expected_status=lab.status, new_status=queued_status):
+        raise DomainError("staging lab changed concurrently; work not queued")
     audit.record(
         session,
-        action=AuditAction.staging_lab_simulation_queued,
+        action=audit_action,
         resource_type="staging_lab",
         resource_id=lab.id,
         organization_id=lab.organization_id,
@@ -591,42 +594,30 @@ def queue_simulation(
     return lab
 
 
-def queue_teardown(
-    session: Session,
-    actor: Principal,
-    lab_id: uuid.UUID,
-    *,
-    idempotency_key: str | None = None,
-) -> StagingLab:
+def queue_simulation(session: Session, actor: Principal, lab_id: uuid.UUID) -> StagingLab:
+    """Enqueue a durable simulate_provision work item (approved/simulated_ready -> queued)."""
+    return _queue_operation(
+        session,
+        actor,
+        lab_id,
+        operation=StagingWorkOperation.simulate_provision,
+        allowed_statuses=(StagingLabStatus.approved, StagingLabStatus.simulated_ready),
+        queued_status=StagingLabStatus.simulation_queued,
+        audit_action=AuditAction.staging_lab_simulation_queued,
+    )
+
+
+def queue_teardown(session: Session, actor: Principal, lab_id: uuid.UUID) -> StagingLab:
     """Enqueue a durable simulate_teardown work item (-> teardown_queued). Nothing real exists."""
-    actor.require(Permission.staging_lab_manage)
-    lab = _get_lab(session, actor, lab_id)
-    key = (idempotency_key or uuid.uuid4().hex).strip()
-    existing = _existing_by_idempotency(session, lab, key)
-    if existing is not None:
-        return lab
-    if lab.status not in (StagingLabStatus.simulated_ready, StagingLabStatus.approved):
-        raise DomainError(f"staging lab is '{lab.status.value}'; it cannot be queued for teardown")
-    item = _enqueue_work(
-        session, lab, operation=StagingWorkOperation.simulate_teardown, idempotency_key=key
-    )
-    if not _cas_transition(
+    return _queue_operation(
         session,
-        lab,
-        expected_status=lab.status,
-        new_status=StagingLabStatus.teardown_queued,
-    ):
-        raise DomainError("staging lab changed concurrently; teardown not queued")
-    audit.record(
-        session,
-        action=AuditAction.staging_lab_teardown_queued,
-        resource_type="staging_lab",
-        resource_id=lab.id,
-        organization_id=lab.organization_id,
-        actor=str(actor.user_id),
-        data=_safe_audit(lab, work_item_id=str(item.id)),
+        actor,
+        lab_id,
+        operation=StagingWorkOperation.simulate_teardown,
+        allowed_statuses=(StagingLabStatus.simulated_ready, StagingLabStatus.approved),
+        queued_status=StagingLabStatus.teardown_queued,
+        audit_action=AuditAction.staging_lab_teardown_queued,
     )
-    return lab
 
 
 # --- Reads --------------------------------------------------------------------
@@ -661,11 +652,3 @@ def list_work_items(
         .scalars()
         .all()
     )
-
-
-def _idempotency_key_for_plan(lab: StagingLab, operation: StagingWorkOperation) -> str:
-    """Deterministic idempotency key helper (used by callers that want replay-safe queueing)."""
-    digest = hashlib.sha256(
-        f"{lab.id}|{operation.value}|{lab.plan_version}|{lab.plan_hash}".encode()
-    ).hexdigest()
-    return digest[:32]

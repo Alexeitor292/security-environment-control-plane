@@ -257,7 +257,7 @@ function LabDetail({ lab, onChanged }: { lab: StagingLabModel; onChanged: () => 
         </button>
         <button
           disabled={busy || !canApprove(lab)}
-          onClick={() => run(() => api.approveStagingLab(lab.id, lab.plan_hash, "approved via UI"))}
+          onClick={() => run(() => api.approveStagingLab(lab.id, lab.plan_hash))}
         >
           Approve (sim only)
         </button>

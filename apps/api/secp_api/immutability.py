@@ -181,7 +181,6 @@ _STAGING_LAB_PROTECTED = (
     "resource_class",
     "rollback_policy",
     "bootstrap_artifact_profile",
-    "idempotency_key",
     "created_by",
 )
 _STAGING_LAB_SET_ONCE = (
@@ -192,14 +191,14 @@ _STAGING_LAB_SET_ONCE = (
     "approved_plan_hash",
 )
 # StagingLabWorkItem: the work definition (identity + immutable plan binding + operation) is
-# immutable; only lifecycle (status/revision/timestamps/failure_reason) may change.
+# immutable; only lifecycle (status/revision/timestamps/failure_code) may change.
 _STAGING_WORK_PROTECTED = (
     "organization_id",
     "staging_lab_id",
     "operation_kind",
     "plan_hash",
     "plan_version",
-    "idempotency_key",
+    "operation_fingerprint",
     "created_by",
 )
 # StagingSubstrateEligibility: issuance facts immutable; only revocation metadata is set once.
@@ -381,7 +380,7 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                     f"StagingLab plan/approval fields are set-once; attempted to change {repeated}"
                 )
         # StagingLabWorkItem (SECP-002B-1B-9): the work definition is immutable; only lifecycle
-        # (status/revision/timestamps/failure_reason) may change.
+        # (status/revision/timestamps/failure_code) may change.
         if isinstance(obj, StagingLabWorkItem):
             changed = [a for a in _STAGING_WORK_PROTECTED if _attr_changed(obj, a)]
             if changed:

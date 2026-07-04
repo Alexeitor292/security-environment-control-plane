@@ -369,7 +369,7 @@ export interface StagingLab {
   approved_plan_hash: string;
   approved_plan_version: number;
   approved_at: string | null;
-  decision_reason: string;
+  decision_code: string;
   created_at: string;
 }
 

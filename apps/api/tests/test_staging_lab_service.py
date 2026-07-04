@@ -39,7 +39,7 @@ def _target(session, principal, *, status=TargetStatus.active, plugin="proxmox")
         plugin_name=plugin,
         config={},
         config_hash="sha256:" + "ab" * 32,
-        secret_ref="env:SECP_PROVIDER_SECRET__FAKE",
+        secret_ref=None,
         status=status,
         scope_policy={},
         created_by=principal.user_id,
@@ -83,7 +83,7 @@ def _plan_and_approve(session, principal, lab) -> StagingLab:
     staging_labs.generate_plan(session, principal, lab.id)
     staging_labs.submit_for_approval(session, principal, lab.id)
     return staging_labs.approve_staging_lab(
-        session, principal, lab.id, expected_plan_hash=lab.plan_hash, reason="reviewed"
+        session, principal, lab.id, expected_plan_hash=lab.plan_hash
     )
 
 
@@ -101,11 +101,15 @@ def test_full_lifecycle_queue_then_worker_completes(session, principal):
     assert lab.status == StagingLabStatus.approved
 
     # API only QUEUES — the lab is not yet ready and there are no observations.
-    staging_labs.queue_simulation(session, principal, lab.id, idempotency_key="req-1")
+    staging_labs.queue_simulation(session, principal, lab.id)
     assert lab.status == StagingLabStatus.simulation_queued
     assert lab.simulated_observed_state is None
     item = session.query(StagingLabWorkItem).filter_by(staging_lab_id=lab.id).one()
     assert item.status == StagingWorkStatus.queued
+    # Work identity is a server-generated fingerprint over the canonical immutable tuple.
+    assert item.operation_fingerprint == staging_labs.operation_fingerprint(
+        lab.id, item.operation_kind, lab.plan_hash, lab.plan_version
+    )
 
     # The WORKER claims and processes the durable item, then records completion.
     processed = claim_and_process_one(session)
@@ -120,7 +124,7 @@ def test_full_lifecycle_queue_then_worker_completes(session, principal):
     assert all(r["owner"] == lab.ownership_label for r in observed["resources"])
 
     # Teardown: queue then worker completes.
-    staging_labs.queue_teardown(session, principal, lab.id, idempotency_key="req-2")
+    staging_labs.queue_teardown(session, principal, lab.id)
     assert lab.status == StagingLabStatus.teardown_queued
     claim_and_process_one(session)
     session.refresh(lab)
@@ -140,23 +144,27 @@ def test_no_observations_before_worker_completes(session, principal):
     assert lab.simulated_observed_state is None
 
 
-def test_queue_is_idempotent_by_key(session, principal):
+def test_queue_is_idempotent_by_fingerprint(session, principal):
     target = _eligible_substrate(session, principal)
     lab = _create(session, principal, target)
     _plan_and_approve(session, principal, lab)
-    staging_labs.queue_simulation(session, principal, lab.id, idempotency_key="same")
-    staging_labs.queue_simulation(session, principal, lab.id, idempotency_key="same")
+    # No caller idempotency key exists; re-queueing the identical operation+plan resolves to the
+    # original work item (server-generated fingerprint), creating no second item.
+    staging_labs.queue_simulation(session, principal, lab.id)
+    staging_labs.queue_simulation(session, principal, lab.id)
     items = session.query(StagingLabWorkItem).filter_by(staging_lab_id=lab.id).all()
     assert len(items) == 1
 
 
-def test_only_one_active_work_item_per_lab_operation(session, principal):
+def test_conflicting_operation_fails_closed(session, principal):
     target = _eligible_substrate(session, principal)
     lab = _create(session, principal, target)
     _plan_and_approve(session, principal, lab)
-    staging_labs.queue_simulation(session, principal, lab.id, idempotency_key="k1")
+    staging_labs.queue_simulation(session, principal, lab.id)
+    # A different operation (teardown) while a simulation is queued is refused by lifecycle —
+    # never silently resolved to the simulation work item.
     with pytest.raises(DomainError):
-        staging_labs.queue_simulation(session, principal, lab.id, idempotency_key="k2")
+        staging_labs.queue_teardown(session, principal, lab.id)
 
 
 def test_approval_requires_exact_plan_hash_and_rejects_drift(session, principal):
@@ -183,6 +191,7 @@ def test_approval_is_not_a_live_read_authorization(session, principal):
     approved = next(e for e in events if e.action == "staging_lab.approved")
     assert approved.data["authorizes"] == "fake_simulation_only"
     assert approved.data["live_read_authorization"] is False
+    assert "reason" not in approved.data  # no free-text reason is persisted or audited
     assert lab.status.__class__ is not LiveReadAuthorizationStatus
 
 

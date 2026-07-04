@@ -52,16 +52,8 @@ class StagingLabCreate(BaseModel):
 
 
 class StagingLabApprove(BaseModel):
+    # Only the exact reviewed plan hash is accepted — no free-text reason.
     expected_plan_hash: str
-    reason: str = ""
-
-
-class StagingLabDecision(BaseModel):
-    reason: str = ""
-
-
-class StagingLabQueue(BaseModel):
-    idempotency_key: str | None = None
 
 
 class StagingLabOut(ORMModel):
@@ -85,7 +77,7 @@ class StagingLabOut(ORMModel):
     approved_plan_hash: str
     approved_plan_version: int
     approved_at: datetime | None
-    decision_reason: str
+    decision_code: str
     created_at: datetime
 
 
@@ -98,7 +90,7 @@ class StagingLabWorkItemOut(ORMModel):
     plan_version: int
     status: str
     revision: int
-    failure_reason: str
+    failure_code: str | None
     created_at: datetime
 
 

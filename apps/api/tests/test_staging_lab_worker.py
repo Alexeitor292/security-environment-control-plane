@@ -21,6 +21,7 @@ from secp_api.enums import (
     StagingLabStatus,
     StagingNetworkIntent,
     StagingResourceClass,
+    StagingWorkFailureCode,
     StagingWorkOperation,
     StagingWorkStatus,
     TargetStatus,
@@ -127,7 +128,7 @@ def _eligible(session, principal) -> ExecutionTarget:
         plugin_name="proxmox",
         config={},
         config_hash="sha256:" + "ab" * 32,
-        secret_ref="env:SECP_PROVIDER_SECRET__FAKE",
+        secret_ref=None,
         status=TargetStatus.active,
         scope_policy={},
         created_by=principal.user_id,
@@ -209,16 +210,16 @@ def test_consumer_refuses_cross_org_work(session, principal, other_org_principal
             operation_kind=StagingWorkOperation.simulate_provision,
             plan_hash=lab.plan_hash,
             plan_version=lab.plan_version,
-            idempotency_key="x-org",
+            operation_fingerprint="fp-x-org",
             status=StagingWorkStatus.queued,
             revision=0,
         )
     )
     session.flush()
     claim_and_process_one(session)
-    item = session.query(StagingLabWorkItem).filter_by(idempotency_key="x-org").one()
+    item = session.query(StagingLabWorkItem).filter_by(operation_fingerprint="fp-x-org").one()
     assert item.status == StagingWorkStatus.refused
-    assert item.failure_reason == "cross_org"
+    assert item.failure_code == StagingWorkFailureCode.cross_org
 
 
 def test_consumer_refuses_plan_drift(session, principal):
@@ -230,16 +231,16 @@ def test_consumer_refuses_plan_drift(session, principal):
             operation_kind=StagingWorkOperation.simulate_provision,
             plan_hash="sha256:" + "99" * 32,  # does not match the lab's plan
             plan_version=lab.plan_version,
-            idempotency_key="drift",
+            operation_fingerprint="fp-drift",
             status=StagingWorkStatus.queued,
             revision=0,
         )
     )
     session.flush()
     claim_and_process_one(session)
-    item = session.query(StagingLabWorkItem).filter_by(idempotency_key="drift").one()
+    item = session.query(StagingLabWorkItem).filter_by(operation_fingerprint="fp-drift").one()
     assert item.status == StagingWorkStatus.refused
-    assert item.failure_reason == "plan_drift"
+    assert item.failure_code == StagingWorkFailureCode.plan_drift
 
 
 def test_consumer_refuses_stale_lifecycle(session, principal):
@@ -252,16 +253,16 @@ def test_consumer_refuses_stale_lifecycle(session, principal):
             operation_kind=StagingWorkOperation.simulate_provision,
             plan_hash=lab.plan_hash,
             plan_version=lab.plan_version,
-            idempotency_key="stale",
+            operation_fingerprint="fp-stale",
             status=StagingWorkStatus.queued,
             revision=0,
         )
     )
     session.flush()
     claim_and_process_one(session)
-    item = session.query(StagingLabWorkItem).filter_by(idempotency_key="stale").one()
+    item = session.query(StagingLabWorkItem).filter_by(operation_fingerprint="fp-stale").one()
     assert item.status == StagingWorkStatus.refused
-    assert item.failure_reason == "stale_lifecycle"
+    assert item.failure_code == StagingWorkFailureCode.stale_lifecycle
 
 
 # --- Structural: no network/provider/subprocess/secret code -------------------
@@ -330,3 +331,69 @@ def test_full_spec_variants_compile_and_simulate():
         )
         observed = FakeStagingLabExecutor().simulate(plan=plan, prior_observed=None)
         assert observed["ownership_label"] == label
+
+
+# --- Worker runtime loop (HIGH-RISK 1: consumer wired into the worker process) -------
+
+
+def test_queued_work_stays_queued_until_the_worker_runtime_processes_it(session, principal):
+    """Queueing does not execute; only the worker runtime loop drains and completes it."""
+    import threading
+
+    from secp_worker.staging_lab import runtime
+
+    lab = _approved_lab(session, principal)
+    staging_labs.queue_simulation(session, principal, lab.id)
+    session.commit()
+    item = _queued_item(session, lab)
+    assert item.status == StagingWorkStatus.queued
+    assert lab.simulated_observed_state is None
+
+    # The worker runtime drains queued work using the SAME authoritative session (injected).
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _scope():
+        yield session
+
+    processed = runtime.run_consumer_loop(
+        threading.Event(), interval_seconds=0, session_scope=_scope, max_ticks=1
+    )
+    assert processed == 1
+    session.refresh(lab)
+    session.refresh(item)
+    assert lab.status == StagingLabStatus.simulated_ready
+    assert item.status == StagingWorkStatus.completed
+
+
+def test_consumer_loop_stops_gracefully_on_stop_event(session, principal):
+    import threading
+
+    from secp_worker.staging_lab import runtime
+
+    stop = threading.Event()
+    stop.set()  # already requested to stop
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _scope():
+        yield session
+
+    # A pre-set stop event means the loop performs no ticks and returns promptly.
+    assert runtime.run_consumer_loop(stop, interval_seconds=0, session_scope=_scope) == 0
+
+
+def test_worker_main_runs_the_fake_consumer_loop_not_the_api():
+    """The actual worker entrypoint wires the fake consumer loop; the API does not."""
+    import secp_worker.main as worker_main
+
+    src = inspect.getsource(worker_main)
+    assert "staging_lab.runtime" in src
+    assert "run_forever" in src
+    # And the runtime is fake-only: it calls the consumer, never a real adapter/transport.
+    from secp_worker.staging_lab import runtime
+
+    rsrc = inspect.getsource(runtime)
+    assert "process_all_queued" in rsrc
+    for token in ("httpx", "requests", "socket", "subprocess", "SecretResolver", "proxmox"):
+        assert token not in rsrc

@@ -181,13 +181,12 @@ export const api = {
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/plan`),
   submitStagingLab: (id: string) =>
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/submit`),
-  approveStagingLab: (id: string, expectedPlanHash: string, reason: string) =>
+  approveStagingLab: (id: string, expectedPlanHash: string) =>
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/approve`, {
       expected_plan_hash: expectedPlanHash,
-      reason,
     }),
-  rejectStagingLab: (id: string, reason: string) =>
-    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/reject`, { reason }),
+  rejectStagingLab: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/reject`),
   // These QUEUE fake work only; a worker records completion later.
   queueStagingLabSimulation: (id: string) =>
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/simulate`),

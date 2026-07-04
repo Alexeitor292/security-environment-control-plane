@@ -46,6 +46,7 @@ from secp_api.enums import (
     ReservationStatus,
     SnapshotStatus,
     StagingBootstrapArtifactProfile,
+    StagingLabDecisionCode,
     StagingLabProfile,
     StagingLabPurpose,
     StagingLabStatus,
@@ -53,6 +54,7 @@ from secp_api.enums import (
     StagingResourceClass,
     StagingRollbackPolicy,
     StagingSubstrateEligibilityStatus,
+    StagingWorkFailureCode,
     StagingWorkOperation,
     StagingWorkStatus,
     TargetStatus,
@@ -779,8 +781,8 @@ class StagingLab(Base, TimestampMixin):
     a disposable read-only staging lab. It stores only safe logical intent: purpose, the approved
     substrate target id, profile, network intent, a bounded logical resource class, an approved
     bootstrap-artifact *profile id* (never paths/URLs/checksums), rollback policy, an immutable
-    ownership label, lifecycle state, an immutable desired-state plan + its version + hash, an
-    idempotency key, approval metadata, and a fake simulated-observed-state.
+    ownership label, lifecycle state, an immutable desired-state plan + its version + hash,
+    approval metadata, and a fake simulated-observed-state.
 
     It NEVER stores endpoints, hostnames, IPs, bridge/VNet names, VMIDs, storage ids, certificate
     data, secrets/tokens/credential references/secret hashes, raw artifact paths/URLs/checksums,
@@ -790,7 +792,6 @@ class StagingLab(Base, TimestampMixin):
     """
 
     __tablename__ = "staging_lab"
-    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_staging_lab_idempotency_key"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -846,8 +847,6 @@ class StagingLab(Base, TimestampMixin):
     plan_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     plan_hash: Mapped[str] = mapped_column(String(80), default="", nullable=False, index=True)
     desired_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # Idempotency key pins retry-safe simulation; a fresh plan mints a fresh key.
-    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False)
     # Fake simulated observed-state (logical only); reconciled idempotently on retry.
     simulated_observed_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
@@ -856,7 +855,12 @@ class StagingLab(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_plan_hash: Mapped[str] = mapped_column(String(80), default="", nullable=False)
     approved_plan_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    decision_reason: Mapped[str] = mapped_column(Text, default="")
+    # Closed decision/outcome code — never free text.
+    decision_code: Mapped[StagingLabDecisionCode] = mapped_column(
+        EnumType(StagingLabDecisionCode, length=40),
+        default=StagingLabDecisionCode.pending,
+        nullable=False,
+    )
 
     target: Mapped[ExecutionTarget] = relationship(back_populates="staging_labs")
     work_items: Mapped[list[StagingLabWorkItem]] = relationship(
@@ -880,15 +884,28 @@ class StagingLabWorkItem(Base, TimestampMixin):
     """Durable, secret-free staging-lab work item (SECP-002B-1B-9).
 
     The API commits a ``queued`` item and returns; only the worker claims and processes it. It
-    records only safe logical values (ids, immutable plan hash/version, operation kind,
-    idempotency key, lifecycle state, revision, timestamps, and a generic failure reason) and
-    NEVER an endpoint, host, IP, network, VMID, storage, certificate, token, credential, secret
-    ref, artifact path/URL/checksum, or any provider observation.
+    records only safe logical values (ids, immutable plan hash/version, operation kind, a
+    server-generated operation fingerprint, lifecycle state, revision, timestamps, and a closed
+    failure code) and NEVER an endpoint, host, IP, network, VMID, storage, certificate, token,
+    credential, secret ref, artifact path/URL/checksum, or any provider observation.
+
+    The ``operation_fingerprint`` is a deterministic server-generated key over
+    (staging_lab_id, operation_kind, plan_hash, plan_version); it is unique, and the same
+    (lab, operation, plan) scope is additionally enforced by ``uq_staging_work_scope`` so a retry
+    for the identical operation and plan resolves to the original work item.
     """
 
     __tablename__ = "staging_lab_work_item"
     __table_args__ = (
-        UniqueConstraint("idempotency_key", name="uq_staging_work_idempotency_key"),
+        UniqueConstraint("operation_fingerprint", name="uq_staging_work_fingerprint"),
+        # Uniqueness over the full intended scope (lab + operation + immutable plan hash/version).
+        UniqueConstraint(
+            "staging_lab_id",
+            "operation_kind",
+            "plan_hash",
+            "plan_version",
+            name="uq_staging_work_scope",
+        ),
         # At most ONE active (queued or claimed) work item per lab+operation (fail-closed).
         Index(
             "uq_staging_work_active",
@@ -912,14 +929,18 @@ class StagingLabWorkItem(Base, TimestampMixin):
     )
     plan_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Deterministic server-generated key over (lab, operation, plan_hash, plan_version).
+    operation_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
     status: Mapped[StagingWorkStatus] = mapped_column(
         EnumType(StagingWorkStatus, length=40),
         default=StagingWorkStatus.queued,
         nullable=False,
     )
     revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    failure_reason: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    # Closed failure/refusal code — never a free-text string.
+    failure_code: Mapped[StagingWorkFailureCode | None] = mapped_column(
+        EnumType(StagingWorkFailureCode, length=40), nullable=True
+    )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

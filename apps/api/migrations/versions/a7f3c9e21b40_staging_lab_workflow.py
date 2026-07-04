@@ -37,19 +37,17 @@ def upgrade() -> None:
         sa.Column("plan_version", sa.Integer(), nullable=False),
         sa.Column("plan_hash", sa.String(length=80), nullable=False),
         sa.Column("desired_state", sa.JSON(), nullable=True),
-        sa.Column("idempotency_key", sa.String(length=80), nullable=False),
         sa.Column("simulated_observed_state", sa.JSON(), nullable=True),
         sa.Column("created_by", sa.Uuid(), nullable=True),
         sa.Column("approved_by", sa.Uuid(), nullable=True),
         sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("approved_plan_hash", sa.String(length=80), nullable=False),
         sa.Column("approved_plan_version", sa.Integer(), nullable=False),
-        sa.Column("decision_reason", sa.Text(), nullable=False),
+        sa.Column("decision_code", sa.String(length=40), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["execution_target_id"], ["execution_target.id"]),
         sa.ForeignKeyConstraint(["organization_id"], ["organization.id"]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("idempotency_key", name="uq_staging_lab_idempotency_key"),
     )
     with op.batch_alter_table("staging_lab", schema=None) as b:
         b.create_index(b.f("ix_staging_lab_execution_target_id"), ["execution_target_id"])
@@ -65,10 +63,10 @@ def upgrade() -> None:
         sa.Column("operation_kind", sa.String(length=40), nullable=False),
         sa.Column("plan_hash", sa.String(length=80), nullable=False),
         sa.Column("plan_version", sa.Integer(), nullable=False),
-        sa.Column("idempotency_key", sa.String(length=80), nullable=False),
+        sa.Column("operation_fingerprint", sa.String(length=80), nullable=False),
         sa.Column("status", sa.String(length=40), nullable=False),
         sa.Column("revision", sa.Integer(), nullable=False),
-        sa.Column("failure_reason", sa.String(length=200), nullable=False),
+        sa.Column("failure_code", sa.String(length=40), nullable=True),
         sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("failed_at", sa.DateTime(timezone=True), nullable=True),
@@ -77,7 +75,14 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["organization_id"], ["organization.id"]),
         sa.ForeignKeyConstraint(["staging_lab_id"], ["staging_lab.id"]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("idempotency_key", name="uq_staging_work_idempotency_key"),
+        sa.UniqueConstraint("operation_fingerprint", name="uq_staging_work_fingerprint"),
+        sa.UniqueConstraint(
+            "staging_lab_id",
+            "operation_kind",
+            "plan_hash",
+            "plan_version",
+            name="uq_staging_work_scope",
+        ),
     )
     with op.batch_alter_table("staging_lab_work_item", schema=None) as b:
         b.create_index(b.f("ix_staging_lab_work_item_organization_id"), ["organization_id"])

@@ -63,7 +63,7 @@ function lab(over: Partial<StagingLab> = {}): StagingLab {
     approved_plan_hash: "",
     approved_plan_version: 0,
     approved_at: null,
-    decision_reason: "",
+    decision_code: "pending",
     created_at: "2026-07-03T00:00:00Z",
     ...over,
   };
