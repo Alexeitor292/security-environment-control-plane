@@ -16,6 +16,8 @@ and is never reached in this PR because the sealed resolver fails first.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,7 +41,14 @@ from secp_worker.onboarding.live_authorization import (
     VerifiedLiveReadAuthorization,
     load_and_verify_live_read_authorization,
 )
-from secp_worker.secrets import SecretResolutionError, SecretResolver
+from secp_worker.preflight.secret_resolution import (
+    ResolutionPurpose,
+    SecretMaterial,
+    WorkerSecretResolver,
+    build_resolution_contract,
+    build_trusted_resolution_request,
+)
+from secp_worker.secrets import SecretResolutionError
 
 # Verifier reason codes that map to specific authorization terminals; everything else is not_ready.
 _AUTHORIZATION_TERMINALS = {
@@ -90,7 +99,7 @@ class PreflightCollectionRunner(Protocol):
         self,
         *,
         verified: VerifiedLiveReadAuthorization,
-        credential: object,
+        credential: SecretMaterial,
         now: datetime,
     ) -> dict: ...
 
@@ -105,7 +114,7 @@ def run_readonly_preflight(
     session: Session,
     preflight_id: uuid.UUID,
     *,
-    secret_resolver: SecretResolver,
+    secret_resolver: WorkerSecretResolver,
     collection_runner: PreflightCollectionRunner | None = None,
     now: datetime | None = None,
 ) -> PreflightResult:
@@ -150,10 +159,27 @@ def run_readonly_preflight(
         )
         return PreflightResult(outcome)
 
-    # 2. Resolve the opaque credential reference via the INJECTED worker resolver. The sealed
-    #    resolver always fails closed here -> credential_unavailable. No transport is built.
+    # 2. Secret-resolution boundary (SECP-B2-1). The trusted resolution request is constructed
+    #    ONLY here, AFTER the verifier above succeeded — a caller cannot supply it as a trust
+    #    anchor. Building it also runs the pinned policy check (contract + endpoint-policy labels).
+    #    The independently derived authoritative contract is passed alongside so the resolver must
+    #    confirm the request matches the binding before it would ever resolve. The sealed resolver
+    #    always fails closed here -> credential_unavailable. No transport is built.
+    fingerprint = _operation_fingerprint(pf)
     try:
-        credential = secret_resolver.resolve(verified.execution_target.secret_ref or "")
+        resolution_request = build_trusted_resolution_request(
+            verified=verified,
+            purpose=ResolutionPurpose.readonly_staging_preflight,
+            operation_fingerprint=fingerprint,
+            now=now,
+        )
+        expectation = build_resolution_contract(
+            verified=verified,
+            purpose=ResolutionPurpose.readonly_staging_preflight,
+            operation_fingerprint=fingerprint,
+            now=now,
+        )
+        credential = secret_resolver.resolve(resolution_request, expectation=expectation, now=now)
     except SecretResolutionError:
         return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
 
@@ -166,6 +192,24 @@ def run_readonly_preflight(
     except _PolicyOrTlsRefusal:
         return PreflightResult(ReadonlyPreflightOutcome.tls_or_policy_refused)
     return PreflightResult(ReadonlyPreflightOutcome.ready, readiness_facts=_safe_facts(facts))
+
+
+def _operation_fingerprint(pf: object) -> str:
+    """Deterministic, secret-free ``sha256:`` fingerprint of the preflight work item.
+
+    Derived only from durable identity fields (never config, endpoints, credentials, or secret
+    references). Binds a resolution request to the exact queued operation it was issued for.
+    """
+    identity = {
+        "preflight_id": str(getattr(pf, "id", "")),
+        "organization_id": str(getattr(pf, "organization_id", "")),
+        "execution_target_id": str(getattr(pf, "execution_target_id", "")),
+        "onboarding_id": str(getattr(pf, "onboarding_id", "")),
+        "authorization_id": str(getattr(pf, "live_read_authorization_id", "")),
+        "authorization_version": getattr(pf, "authorization_version", None),
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 class _PolicyOrTlsRefusal(Exception):

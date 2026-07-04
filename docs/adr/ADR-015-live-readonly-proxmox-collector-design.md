@@ -404,3 +404,61 @@ upload/download/config).
   the terminal compare-and-swap; the terminal audit is emitted only if that CAS wins. A stale
   worker whose revision drifted writes no facts, emits no terminal audit, and never overwrites a
   newer lifecycle state.
+
+### Sealed worker-only secret-resolution contract (SECP-B2-1)
+
+The final sealed secret-resolution interface lives entirely in the worker
+(`secp_worker.preflight.secret_resolution`). It is the seam a future activation PR binds a real
+secret backend to; nothing in it resolves a secret, reads an environment variable, opens a
+socket/subprocess, imports a provider or secret-manager SDK, or contacts any backend. The API cannot
+import it (architecture boundary test), and the UI has no credential-entry field or
+secret-resolution route.
+
+- **Closed resolution-purpose catalog.** `ResolutionPurpose` has exactly one permitted value in
+  this phase, `readonly_staging_preflight`; `SUPPORTED_PURPOSES` gates it. Any other purpose is
+  refused.
+- **Trusted request built only post-verification.** A `TrustedResolutionRequest` can be built
+  **only** by `build_trusted_resolution_request(...)`, which requires a
+  `VerifiedLiveReadAuthorization` produced by the authoritative binding verifier; its constructor
+  is sealed behind a module-private token, so a caller cannot hand-craft one as a trust anchor.
+  The request carries a redacted `ResolutionContract`: purpose, organization, execution target,
+  onboarding, authorization id + version, authorization expiry, operation fingerprint, expected
+  contract version, expected endpoint-policy version, and an opaque `TrustedCredentialReference`.
+- **Per-field contract gate.** `assert_resolution_authorized(candidate, authoritative)` refuses
+  (with a generic reason code, never a value) on wrong organization / target / onboarding, wrong
+  authorization identity or version, wrong operation fingerprint, wrong contract/endpoint-policy
+  labels (including a pinned check against the app-side constants), blank or mismatched opaque
+  reference, unsupported/mismatched purpose, or an expired authorization.
+- **Opaque secret material.** `SecretMaterial` and `TrustedCredentialReference` are slotted,
+  `__dict__`-free wrappers with redacted `repr`/`str`/`format` and blocked pickling — impossible
+  to persist through ORM/API/audit paths. Production code in this PR never constructs
+  `SecretMaterial`; the sealed default never returns one.
+- **Sealed default, ordering preserved.** `SealedUnavailableResolver` (shipped as
+  `SealedSecretResolver`) runs the contract gate then **always** fails closed
+  (`SecretResolutionUnavailable`). The B2-0 ordering is intact:
+  authorization/binding verification → pinned policy check → secret-resolution boundary → (future)
+  transport factory → (future) collector. Every preflight still ends `credential_unavailable`;
+  no transport is constructed and no collector runs.
+
+**Prerequisites a later activation PR must satisfy before wiring a real `WorkerSecretResolver`:**
+
+1. **Independently authenticated worker identity** — the worker authenticates to the secret
+   backend as itself; the API and UI have no path to the backend or to secret material.
+2. **Approved external secret backend** — a reviewed, production-grade external secret manager,
+   never an environment variable, plaintext DB column, Docker secret file, or local-file
+   fallback.
+3. **Strict reference grammar and access policy** — the opaque `credential_reference` grammar is
+   validated and the backend policy scopes each reference to exactly one target.
+4. **Short-lived, single-purpose resolution** — resolution yields a short-TTL credential bound to
+   the `readonly_staging_preflight` purpose and the exact operation fingerprint; no caching.
+5. **Worker-only network path** — only the worker network namespace may reach the backend.
+6. **Audit-safe metadata only** — audits record identity/version/outcome codes; never a
+   reference value, secret, endpoint, or provider response.
+7. **Revocation and rotation** — a revoked/rotated reference resolves closed; expiry is enforced
+   by the contract gate; rotation does not resurrect an expired authorization.
+8. **Test plan proving no API/UI secret access** — static boundary tests continue to prove the
+   API cannot import the resolver and the UI has no credential-entry field or secret-resolution
+   route, plus redaction/serialization tests for any real material handoff.
+
+All prior dormant live-read, trusted-binding, redaction, closed-error, monotonic-versioning, and
+sealed-evidence guarantees are unchanged.

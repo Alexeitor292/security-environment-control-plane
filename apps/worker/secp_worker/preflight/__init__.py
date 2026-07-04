@@ -10,4 +10,10 @@ is contacted. A later, separately reviewed activation PR must supply a productio
 (and enable collection) before a deliberate live preflight can return ``ready``.
 """
 
-__all__ = ["consumer", "orchestration", "runtime", "sealed_secret_resolver"]
+__all__ = [
+    "consumer",
+    "orchestration",
+    "runtime",
+    "sealed_secret_resolver",
+    "secret_resolution",
+]

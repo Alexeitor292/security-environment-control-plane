@@ -27,7 +27,7 @@ from secp_worker.preflight.orchestration import (
     run_readonly_preflight,
 )
 from secp_worker.preflight.sealed_secret_resolver import SealedSecretResolver
-from secp_worker.secrets import SecretResolver
+from secp_worker.preflight.secret_resolution import WorkerSecretResolver
 
 # Terminal outcomes that count as a completed (vs failed/refused) run for audit routing.
 _REFUSAL_OUTCOMES = {
@@ -118,7 +118,7 @@ def _claim_candidate(session: Session) -> ReadonlyStagingPreflight | None:
 def claim_and_process_one(
     session: Session,
     *,
-    secret_resolver: SecretResolver | None = None,
+    secret_resolver: WorkerSecretResolver | None = None,
     collection_runner: PreflightCollectionRunner | None = None,
 ) -> uuid.UUID | None:
     """Claim and process one queued preflight. Returns its id, or None if none/lost.
