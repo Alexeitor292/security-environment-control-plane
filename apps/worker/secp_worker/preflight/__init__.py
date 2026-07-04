@@ -14,6 +14,7 @@ __all__ = [
     "activation_gate",
     "backends",
     "consumer",
+    "fingerprint",
     "identity",
     "lease",
     "orchestration",

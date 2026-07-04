@@ -236,6 +236,7 @@ def _contract(**over) -> ResolutionContract:
         authorization_id=uuid.UUID(int=4),
         authorization_version=2,
         authorization_expiry="2999-01-01T00:00:00Z",
+        preflight_id=uuid.UUID(int=5),
         operation_fingerprint="sha256:" + "ab" * 32,
         contract_version=LIVE_READ_COLLECTOR_CONTRACT_VERSION,
         endpoint_policy_version=PROXMOX_READONLY_POLICY_VERSION,
@@ -327,10 +328,46 @@ def test_three_way_binding_refuses_before_client_use():
 
 
 def test_valid_request_but_no_client_still_fails_closed():
+    # A valid vault reference preserves the sealed-default behavior: with no client injected, the
+    # adapter fails closed AFTER the gate/three-way/vault checks pass.
     contract = _contract()
     resolver = OpenBaoWorkerSecretResolver(reverifier=_RecordingReverifier(_authority(contract)))
     with pytest.raises(SecretResolutionUnavailable):
         resolver.resolve(_request(contract), expectation=contract, now=_now())
+
+
+def test_matching_env_references_refused_before_client_use():
+    # All three references agree (three-way passes) but are the dev `env:` scheme, not vault -> the
+    # adapter refuses BEFORE the client with a closed, secret-free reason.
+    env_ref = "env:SECP_PROVIDER_SECRET__PF"
+    _SpyClient.called = False
+    contract = _contract(credential_reference=TrustedCredentialReference(env_ref))
+    authority = _authority(contract, target=env_ref, binding=env_ref)
+    client = _SpyClient()
+    resolver = OpenBaoWorkerSecretResolver(
+        reverifier=_RecordingReverifier(authority), http_client=client
+    )
+    with pytest.raises(ResolutionContractViolation) as exc:
+        resolver.resolve(_request(contract), expectation=contract, now=_now())
+    assert exc.value.reason_code == "unsupported_reference_scheme"
+    assert _SpyClient.called is False
+    assert env_ref not in str(exc.value)  # no reference leaks through the error
+
+
+def test_malformed_vault_reference_refused_before_client_use():
+    bad = "vault:secp/../escape"  # a syntactically invalid vault locator (dot-segment traversal)
+    _SpyClient.called = False
+    contract = _contract(credential_reference=TrustedCredentialReference(bad))
+    authority = _authority(contract, target=bad, binding=bad)
+    client = _SpyClient()
+    resolver = OpenBaoWorkerSecretResolver(
+        reverifier=_RecordingReverifier(authority), http_client=client
+    )
+    with pytest.raises(ResolutionContractViolation) as exc:
+        resolver.resolve(_request(contract), expectation=contract, now=_now())
+    assert exc.value.reason_code == "unsupported_reference_scheme"
+    assert _SpyClient.called is False
+    assert bad not in str(exc.value)
 
 
 def test_expired_binding_refused_by_gate_before_client():

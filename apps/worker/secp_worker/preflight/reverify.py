@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
+from secp_api.enums import ReadonlyPreflightStatus
 from secp_api.live_read_contract import (
     LIVE_READ_COLLECTOR_CONTRACT_VERSION,
     LIVE_READ_EVIDENCE_SOURCE,
@@ -23,7 +24,12 @@ from secp_api.live_read_contract import (
     PROXMOX_READONLY_POLICY_VERSION,
     connection_identity_hash,
 )
-from secp_api.models import ExecutionTarget, LiveReadAuthorization, TargetOnboarding
+from secp_api.models import (
+    ExecutionTarget,
+    LiveReadAuthorization,
+    ReadonlyStagingPreflight,
+    TargetOnboarding,
+)
 from sqlalchemy.orm import Session
 
 from secp_worker.onboarding.live_authorization import (
@@ -32,11 +38,23 @@ from secp_worker.onboarding.live_authorization import (
     LiveReadAuthorizationRefused,
     load_and_verify_live_read_authorization,
 )
+from secp_worker.preflight.fingerprint import compute_operation_fingerprint
 from secp_worker.preflight.secret_resolution import (
     ResolutionContract,
+    ResolutionPurpose,
     SecretResolutionUnavailable,
     TrustedCredentialReference,
     build_resolution_contract,
+)
+
+# A read-only-preflight work item is only eligible for secret resolution while it is being
+# processed (queued/claimed/running). A terminal preflight (completed/failed/refused) is refused.
+_ELIGIBLE_PREFLIGHT_STATUSES = frozenset(
+    {
+        ReadonlyPreflightStatus.queued,
+        ReadonlyPreflightStatus.claimed,
+        ReadonlyPreflightStatus.running,
+    }
 )
 
 
@@ -84,24 +102,46 @@ class _ConnectionHashProvider:
 
 
 class DbAuthoritativeReverifier:
-    """Re-loads authoritative records + re-runs the binding verifier at resolution time.
+    """Independently derives the authoritative resolution facts from the durable WORK ITEM.
 
-    Worker-only; constructed with the worker's own DB session (never caller-supplied). It derives
-    the authoritative :class:`ResolutionContract` from the re-verified records + the pinned app-side
-    constants — never from the request or a passed expectation. Any drift/expiry/revocation raises a
-    fail-closed :class:`SecretResolutionUnavailable`.
+    Worker-only; constructed with the worker's own DB session (never caller-supplied). The ONLY
+    candidate-controlled input it trusts is the work-item id (``preflight_id``) — a locator, not a
+    capability. It loads the ``ReadonlyStagingPreflight`` by that id, refuses if it is missing or
+    not eligible, re-runs the SECP-002B-1B-6 verifier using the WORK ITEM's own identity fields,
+    derives the only allowed purpose from the work-item type, recomputes the operation fingerprint
+    from the loaded work item, and builds the authoritative :class:`ResolutionContract` solely from
+    the work item + the re-verified records + the pinned app constants. It trusts no candidate
+    purpose, fingerprint, expiry, version label, or reference. Any drift/expiry/revocation/mismatch
+    raises a fail-closed :class:`SecretResolutionUnavailable`.
     """
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def reverify(self, contract: ResolutionContract, *, now: datetime) -> ReverifiedAuthority:
+    def reverify(self, candidate: ResolutionContract, *, now: datetime) -> ReverifiedAuthority:
+        # 1. Load the durable work item by its id (a locator only). Refuse if missing/ineligible.
+        preflight = self._session.get(ReadonlyStagingPreflight, candidate.preflight_id)
+        if preflight is None or preflight.status not in _ELIGIBLE_PREFLIGHT_STATUSES:
+            raise SecretResolutionUnavailable("work item not found or not eligible")
+
+        # 2. The candidate must name the work item's own identity — otherwise it is not this
+        #    operation and we fail closed before deriving anything from the candidate.
+        if (
+            candidate.organization_id != preflight.organization_id
+            or candidate.execution_target_id != preflight.execution_target_id
+            or candidate.onboarding_id != preflight.onboarding_id
+            or candidate.authorization_id != preflight.live_read_authorization_id
+            or candidate.authorization_version != preflight.authorization_version
+        ):
+            raise SecretResolutionUnavailable("work item identity mismatch")
+
+        # 3. Re-run the authoritative binding verifier using the WORK ITEM's own identity fields.
         load_request = LiveReadAuthorizationLoadRequest(
-            organization_id=contract.organization_id,
-            execution_target_id=contract.execution_target_id,
-            onboarding_id=contract.onboarding_id,
-            authorization_id=contract.authorization_id,
-            authorization_version=contract.authorization_version,
+            organization_id=preflight.organization_id,
+            execution_target_id=preflight.execution_target_id,
+            onboarding_id=preflight.onboarding_id,
+            authorization_id=preflight.live_read_authorization_id,
+            authorization_version=preflight.authorization_version,
         )
         expected_contract = LiveReadAuthorizationContract(
             evidence_source=LIVE_READ_EVIDENCE_SOURCE,
@@ -118,13 +158,20 @@ class DbAuthoritativeReverifier:
                 now=now,
             )
         except LiveReadAuthorizationRefused as exc:
-            # Fail closed with a generic, secret-free reason; the request is not trusted.
             raise SecretResolutionUnavailable("authoritative re-verification refused") from exc
 
+        # 4. Derive the only allowed purpose from the WORK-ITEM TYPE (never the candidate), and
+        #    recompute the operation fingerprint from the loaded work item.
+        purpose = ResolutionPurpose.readonly_staging_preflight
+        fingerprint = compute_operation_fingerprint(preflight)
+
+        # 5. Build the authoritative contract solely from the work item + verified records + pinned
+        #    constants.
         authoritative = build_resolution_contract(
             verified=verified,
-            purpose=contract.purpose,
-            operation_fingerprint=contract.operation_fingerprint,
+            purpose=purpose,
+            operation_fingerprint=fingerprint,
+            preflight_id=preflight.id,
             now=now,
         )
         return ReverifiedAuthority(

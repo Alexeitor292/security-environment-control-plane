@@ -276,10 +276,18 @@ core-domain dependency, adds **no** database column (the opaque `secret_ref` gai
 syntactic `vault:` scheme, API-validated only), and is **not** importable by the API or frontend
 (architecture guardrails enforce this). The adapter:
 
-- re-loads and re-runs the SECP-002B-1B-6 verifier at resolution time (§3) — the
+- re-loads the durable **work item** (`ReadonlyStagingPreflight`) by its id at resolution time and
+  re-runs the SECP-002B-1B-6 verifier using the work item's own identity fields (§3) — the
   `TrustedResolutionRequest` and the passed `expectation` are **never** trusted as authorization
-  proof; authority is re-derived from the database + the pinned app-side constants;
-- enforces the §4 three-way credential-reference binding **before** any client is touched;
+  proof. The work-item id is the only candidate-supplied input trusted, and only as a locator: the
+  reverifier refuses a missing/ineligible work item or one whose identity the candidate mis-states,
+  then derives the authoritative contract (including the **purpose from the work-item type** and the
+  **operation fingerprint recomputed from the loaded work item** via the shared fingerprint helper)
+  solely from the work item + the re-verified records + the pinned app-side constants;
+- enforces the §4 three-way credential-reference binding **before** any client is touched, then
+  requires the authoritative reference to be a valid `vault:` reference (a non-vault, malformed, or
+  blank reference is refused before the client) and uses the **authoritative target reference** for
+  the client call, never the candidate request reference;
 - constructs **no** backend client and contacts nothing under default wiring — it fails closed
   (`SecretResolutionUnavailable`); a client is injected only by tests or a future
   out-of-band-granted activation, so **no successful resolution can occur in shipped runtime**;

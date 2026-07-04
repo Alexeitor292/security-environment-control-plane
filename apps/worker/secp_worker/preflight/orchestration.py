@@ -16,9 +16,7 @@ and is never reached in this PR because the sealed resolver fails first.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
-import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -47,6 +45,7 @@ from secp_worker.preflight.activation_gate import (
     ResolutionActivationGate,
     SealedActivationGate,
 )
+from secp_worker.preflight.fingerprint import compute_operation_fingerprint
 from secp_worker.preflight.identity import (
     DenyingWorkerIdentityVerifier,
     WorkerIdentityUnavailable,
@@ -193,18 +192,20 @@ def run_readonly_preflight(
     #    from the freshly re-verified authoritative records — a caller-supplied "expected contract"
     #    is NEVER used as a trust anchor, and the request object is never proof of authorization.
     #    Building runs the pinned collector-contract + endpoint-policy checks.
-    fingerprint = _operation_fingerprint(pf)
+    fingerprint = compute_operation_fingerprint(pf)
     try:
         resolution_request = build_trusted_resolution_request(
             verified=verified,
             purpose=ResolutionPurpose.readonly_staging_preflight,
             operation_fingerprint=fingerprint,
+            preflight_id=pf.id,
             now=now,
         )
         expectation = build_resolution_contract(
             verified=verified,
             purpose=ResolutionPurpose.readonly_staging_preflight,
             operation_fingerprint=fingerprint,
+            preflight_id=pf.id,
             now=now,
         )
     except SecretResolutionError:
@@ -288,24 +289,6 @@ def _three_way_reference_match(
     match_tb = hmac.compare_digest(target_ref, binding_ref)
     match_br = hmac.compare_digest(binding_ref, request_ref)
     return match_tb and match_br
-
-
-def _operation_fingerprint(pf: object) -> str:
-    """Deterministic, secret-free ``sha256:`` fingerprint of the preflight work item.
-
-    Derived only from durable identity fields (never config, endpoints, credentials, or secret
-    references). Binds a resolution request to the exact queued operation it was issued for.
-    """
-    identity = {
-        "preflight_id": str(getattr(pf, "id", "")),
-        "organization_id": str(getattr(pf, "organization_id", "")),
-        "execution_target_id": str(getattr(pf, "execution_target_id", "")),
-        "onboarding_id": str(getattr(pf, "onboarding_id", "")),
-        "authorization_id": str(getattr(pf, "live_read_authorization_id", "")),
-        "authorization_version": getattr(pf, "authorization_version", None),
-    }
-    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 class _PolicyOrTlsRefusal(Exception):

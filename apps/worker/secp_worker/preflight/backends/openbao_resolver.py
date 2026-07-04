@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from secp_api.secret_refs import InvalidSecretRefError, parse_secret_ref
+
 from secp_worker.preflight.reverify import ReverifiedAuthority
 from secp_worker.preflight.secret_resolution import (
     ResolutionContract,
@@ -99,6 +101,21 @@ def _references_bind_three_ways(
     return hmac.compare_digest(a, b) and hmac.compare_digest(b, c)
 
 
+def _is_supported_vault_reference(reference: str) -> bool:
+    """True only for a syntactically valid ``vault:`` reference. Syntax-only; never resolves.
+
+    Blank/malformed/non-``vault`` references (e.g. the dev ``env:`` scheme) return False. The
+    reference value is never normalized, rewritten, or logged.
+    """
+    if not (isinstance(reference, str) and reference.strip()):
+        return False
+    try:
+        scheme, _locator = parse_secret_ref(reference)
+    except InvalidSecretRefError:
+        return False
+    return scheme == "vault"
+
+
 class OpenBaoWorkerSecretResolver:
     """A ``WorkerSecretResolver`` backed by OpenBao — sealed by default.
 
@@ -157,14 +174,21 @@ class OpenBaoWorkerSecretResolver:
         ):
             raise ResolutionContractViolation("credential_reference_mismatch")
 
-        # 4. Backend-client boundary. No client in shipped/default wiring -> fail closed. This is
+        # 4. Scheme boundary: this OpenBao adapter resolves ONLY `vault:` references. The
+        #    AUTHORITATIVE target reference must be a valid vault reference; a non-vault (e.g. the
+        #    dev `env:` scheme), malformed, or blank reference is refused with a closed, secret-free
+        #    reason code BEFORE the client is invoked. The reference is never normalized or logged.
+        authoritative_reference = authority.target_credential_reference.reveal_reference()
+        if not _is_supported_vault_reference(authoritative_reference):
+            raise ResolutionContractViolation("unsupported_reference_scheme")
+
+        # 5. Backend-client boundary. No client in shipped/default wiring -> fail closed. This is
         #    the only point a real backend would ever be contacted, and only a test / granted
         #    activation injects a client. No successful resolution can occur in shipped runtime.
         if self._client is None:
             raise SecretResolutionUnavailable("openbao client is not configured (sealed)")
 
-        # 5. Resolve just-in-time into opaque, short-lived material (test / granted activation).
-        secret = self._client.read_secret(
-            reference=request.contract.credential_reference.reveal_reference(), now=now
-        )
+        # 6. Resolve just-in-time into opaque, short-lived material (test / granted activation),
+        #    using the AUTHORITATIVE target reference (not the candidate request reference).
+        secret = self._client.read_secret(reference=authoritative_reference, now=now)
         return SecretMaterial(secret)

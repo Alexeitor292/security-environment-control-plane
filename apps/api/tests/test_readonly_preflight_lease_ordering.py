@@ -218,6 +218,7 @@ def _request_for(verified) -> TrustedResolutionRequest:
         verified=verified,
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint="sha256:" + "12" * 32,
+        preflight_id=uuid.uuid4(),
         now=datetime(2026, 7, 4, tzinfo=UTC),
     )
 
