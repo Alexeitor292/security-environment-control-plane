@@ -22,7 +22,7 @@ from secp_api.schemas_readonly_preflight import (
     QueuePreflight,
     ReadonlyPreflightOut,
 )
-from secp_api.services import readonly_preflight, staging_labs
+from secp_api.services import readonly_preflight
 
 router = APIRouter(prefix="/api/v1/readonly-preflight", tags=["readonly-preflight"])
 
@@ -35,7 +35,7 @@ def list_substrates(
     """Eligible Proxmox staging substrates (same-org, active, eligible, onboarded); aliases only."""  # noqa: E501
     return [
         PreflightSubstrateOut(id=row["id"], alias=row["alias"])
-        for row in staging_labs.list_eligible_substrates(session, principal)
+        for row in readonly_preflight.list_substrates(session, principal)
     ]
 
 

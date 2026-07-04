@@ -22,7 +22,11 @@ from secp_api.enums import (
     ReadonlyPreflightStatus,
     TargetStatus,
 )
-from secp_api.errors import AuthorizationError, DomainError, ImmutableResourceError
+from secp_api.errors import (
+    DomainError,
+    ImmutableResourceError,
+    ReadonlyPreflightError,
+)
 from secp_api.live_read_contract import connection_identity_hash
 from secp_api.models import (
     AuditEvent,
@@ -112,6 +116,73 @@ def test_queue_only_then_worker_fails_closed_credential_unavailable(session, pri
     assert pf.status == ReadonlyPreflightStatus.completed
     assert pf.outcome_code == ReadonlyPreflightOutcome.credential_unavailable
     assert pf.readiness_facts is None
+
+
+def test_authorization_version_is_monotonic_and_supports_renewal(session, principal):
+    target = _substrate(session, principal)
+    first = readonly_preflight.create_preflight_authorization(
+        session, principal, execution_target_id=target.id
+    )
+    assert first.authorization_version == 1
+    readonly_preflight.approve_preflight_authorization(session, principal, first.id)
+    readonly_preflight.revoke_preflight_authorization(session, principal, first.id, "operator")
+    # Renewal after the prior authorization is no longer usable: a NEW authorization for the same
+    # target+onboarding gets a monotonically higher version (not blocked by the version unique key).
+    second = readonly_preflight.create_preflight_authorization(
+        session, principal, execution_target_id=target.id
+    )
+    assert second.authorization_version == 2
+    assert second.execution_target_id == first.execution_target_id
+    assert second.onboarding_id == first.onboarding_id
+    # A preflight binds to the exact authorization + version it was created for.
+    readonly_preflight.approve_preflight_authorization(session, principal, second.id)
+    pf = readonly_preflight.queue_preflight(
+        session, principal, live_read_authorization_id=second.id
+    )
+    assert pf.live_read_authorization_id == second.id
+    assert pf.authorization_version == 2
+
+
+def test_stale_worker_terminal_cas_writes_no_facts_or_terminal_audit(session, principal):
+    from secp_api.models import ReadonlyStagingPreflight
+    from sqlalchemy import update
+
+    target = _substrate(session, principal)
+    auth = _approved_authorization(session, principal, target)
+    pf = _queue(session, principal, auth)
+
+    class _DriftingRunner:
+        """Simulates another operation advancing the preflight's revision mid-run."""
+
+        def run(self, *, verified, credential, now):
+            session.execute(
+                update(ReadonlyStagingPreflight)
+                .where(ReadonlyStagingPreflight.id == pf.id)
+                .values(revision=ReadonlyStagingPreflight.revision + 5)
+                .execution_options(synchronize_session=False)
+            )
+            session.flush()
+            return {"api_reachable": True, "node_count": 1}
+
+    claim_and_process_one(
+        session,
+        secret_resolver=FakeSecretResolver({OPAQUE_SECRET_REF: "x"}),
+        collection_runner=_DriftingRunner(),
+    )
+    session.refresh(pf)
+    # The terminal CAS expected the pre-run revision; it drifted -> CAS fails -> fail closed:
+    # no readiness facts, no outcome code, and the state is NOT overwritten to a terminal.
+    assert pf.readiness_facts is None
+    assert pf.outcome_code is None
+    assert pf.status == ReadonlyPreflightStatus.running
+    # And no terminal (completed/refused/failed) audit was emitted after the failed CAS.
+    terminal_actions = {
+        "readonly_preflight.completed",
+        "readonly_preflight.refused",
+        "readonly_preflight.failed",
+    }
+    events = session.query(AuditEvent).all()
+    assert [e for e in events if e.action in terminal_actions] == []
 
 
 def test_expired_authorization_maps_to_expired_outcome(session, principal):
@@ -231,8 +302,9 @@ def test_cross_org_access_refused(session, principal, other_org_principal):
     target = _substrate(session, principal)
     auth = _approved_authorization(session, principal, target)
     pf = _queue(session, principal, auth)
-    with pytest.raises(AuthorizationError):
+    with pytest.raises(ReadonlyPreflightError) as exc:
         readonly_preflight.get_preflight(session, other_org_principal, pf.id)
+    assert exc.value.code == "readonly_preflight_forbidden"
 
 
 def test_manage_permission_required_to_queue(session, principal):
@@ -244,8 +316,9 @@ def test_manage_permission_required_to_queue(session, principal):
     auth = _approved_authorization(session, principal, target)
     # onboarding_approve alone can create/approve authorizations but NOT queue a preflight.
     auth_only = replace(principal, permissions=frozenset({Permission.onboarding_approve}))
-    with pytest.raises(AuthorizationError):
+    with pytest.raises(ReadonlyPreflightError) as exc:
         readonly_preflight.queue_preflight(session, auth_only, live_read_authorization_id=auth.id)
+    assert exc.value.code == "readonly_preflight_forbidden"
 
 
 def test_serialization_and_audit_are_secret_and_endpoint_free(session, principal):

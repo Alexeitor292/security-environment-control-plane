@@ -382,3 +382,25 @@ upload/download/config).
   `ready`. A ready result proves only the collected readiness facts — never host isolation or
   production safety. All prior dormant live-read, trusted-binding, redaction, and sealed-evidence
   guarantees are unchanged.
+
+### Review hardening (SECP-B2-0)
+
+- **Validation redaction.** Request-validation failures on `/api/v1/readonly-preflight` and its
+  child routes (a segment-aware match, not a broad prefix) return exactly
+  `{"error": {"code": "invalid_readonly_preflight_input"}}` — never the rejected input, request
+  body, or Pydantic `input`/`ctx`/`url`/`detail`. Unrelated routes keep FastAPI's default shape.
+- **Closed error codes.** Every read-only-preflight service refusal maps to a closed
+  `ReadonlyPreflightErrorCode` (`not_found`, `forbidden`, `substrate_ineligible`,
+  `authorization_invalid`, `lifecycle_conflict`, `queue_conflict`, `internal_failure`) serialized
+  as `{"error": {"code": ...}}` with **no** free-form backend message. The UI maps each closed
+  code to fixed local text (unknown → a fixed generic message) and never renders a backend
+  message; it also re-applies the readiness-fact allowlist before rendering.
+- **Monotonic authorization version.** The authorization version is server-derived and
+  monotonic per (target, onboarding) — never caller-supplied and never hardcoded — so renewal
+  after a prior authorization expires/revokes proceeds; the unique
+  (target, onboarding, version) constraint prevents duplicates under concurrency (a losing insert
+  retries with a recomputed version).
+- **Terminal CAS/audit consistency.** The worker writes the outcome + safe facts atomically with
+  the terminal compare-and-swap; the terminal audit is emitted only if that CAS wins. A stale
+  worker whose revision drifted writes no facts, emits no terminal audit, and never overwrites a
+  newer lifecycle state.

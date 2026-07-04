@@ -1,20 +1,28 @@
 import { useState } from "react";
 
-import { api } from "../api/client";
+import { ApiClientError, api } from "../api/client";
 import type { PreflightSubstrate, ReadonlyPreflight } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAsync } from "../hooks";
 import {
   AUTHORIZATION_SEPARATION_NOTICE,
+  GENERIC_API_ERROR_TEXT,
   QUEUED_NOTICE,
   READONLY_ONLY_LABEL,
   READY_SCOPE_NOTICE,
+  apiErrorText,
   canQueuePreflight,
   isQueuedOrRunning,
   outcomeLabel,
   readinessFactRows,
   usableAuthorization,
 } from "./readonly-preflight";
+
+/** Map any thrown error to FIXED safe text from the closed error code — never a backend message. */
+function safeErrorText(e: unknown): string {
+  if (e instanceof ApiClientError) return apiErrorText(e.code);
+  return GENERIC_API_ERROR_TEXT;
+}
 
 function SafetyBanner() {
   return (
@@ -40,7 +48,7 @@ function SubstratePanel({ substrate }: { substrate: PreflightSubstrate }) {
       auths.reload();
       preflights.reload();
     } catch (e) {
-      setError((e as Error).message);
+      setError(safeErrorText(e));
     } finally {
       setBusy(false);
     }

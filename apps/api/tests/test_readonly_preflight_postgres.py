@@ -222,3 +222,155 @@ def test_downgrade_drops_preflight_table(pg_engine):
     assert "readonly_staging_preflight" not in set(inspect(pg_engine).get_table_names())
     command.upgrade(cfg, "head")
     assert "readonly_staging_preflight" in set(inspect(pg_engine).get_table_names())
+
+
+def _make_substrate(session, principal):
+    from secp_api.enums import IsolationModel, OnboardingMode, OnboardingStatus, TargetStatus
+    from secp_api.models import ExecutionTarget, TargetOnboarding
+    from secp_api.services import staging_labs
+
+    target = ExecutionTarget(
+        organization_id=principal.organization_id,
+        display_name="substrate",
+        plugin_name="proxmox",
+        config={"base_url": "placeholder", "verify_tls": True},
+        config_hash="sha256:" + "ab" * 32,
+        secret_ref="env:SECP_PROVIDER_SECRET__PF",
+        status=TargetStatus.active,
+        scope_policy={},
+        created_by=principal.user_id,
+    )
+    session.add(target)
+    session.flush()
+    session.add(
+        TargetOnboarding(
+            organization_id=principal.organization_id,
+            execution_target_id=target.id,
+            onboarding_mode=OnboardingMode.existing_environment,
+            isolation_model=IsolationModel.logical,
+            status=OnboardingStatus.active,
+            declared_boundary={},
+            boundary_hash="sha256:" + "cd" * 32,
+            created_by=principal.user_id,
+        )
+    )
+    session.flush()
+    staging_labs.grant_substrate_eligibility(session, principal, execution_target_id=target.id)
+    return target.id
+
+
+def test_renewal_after_prior_authorization_expires_gets_higher_version(pg_engine, pg_sessionmaker):
+    import secp_api.immutability  # noqa: F401
+    from secp_api.services import readonly_preflight
+
+    principal = _principal(_seed_org(pg_engine))
+    with pg_sessionmaker() as s:
+        target_id = _make_substrate(s, principal)
+        first = readonly_preflight.create_preflight_authorization(
+            s, principal, execution_target_id=target_id
+        )
+        assert first.authorization_version == 1
+        s.commit()
+        first_id = first.id
+
+    # Expire the first authorization at the DB layer (protected column; raw UPDATE, not ORM).
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE live_read_authorization SET authorization_expiry = :ts WHERE id = :id"),
+            {"ts": _now() - __import__("datetime").timedelta(days=1), "id": first_id},
+        )
+
+    with pg_sessionmaker() as s:
+        second = readonly_preflight.create_preflight_authorization(
+            s, principal, execution_target_id=target_id
+        )
+        assert second.authorization_version == 2
+        s.commit()
+
+    with pg_engine.begin() as conn:
+        versions = [
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT authorization_version FROM live_read_authorization "
+                    "WHERE execution_target_id = :t ORDER BY authorization_version"
+                ),
+                {"t": target_id},
+            ).all()
+        ]
+    assert versions == [1, 2]  # monotonic, no duplicate
+
+    # And the DB unique constraint forbids a duplicate (target, onboarding, version).
+    onboarding_id = None
+    with pg_engine.begin() as conn:
+        onboarding_id = conn.execute(
+            text("SELECT onboarding_id FROM live_read_authorization WHERE id = :id"),
+            {"id": first_id},
+        ).scalar_one()
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO live_read_authorization "
+                    "(id, organization_id, execution_target_id, onboarding_id, connection_hash, "
+                    " boundary_hash, authorization_version, authorization_expiry, "
+                    " collector_contract_version, endpoint_allowlist_version, evidence_source, "
+                    " verification_level, status, revocation_reason_code, created_at) "
+                    "VALUES (:id, :org, :t, :ob, 'sha256:x', 'sha256:y', 1, :exp, 'c', 'e', 's', "
+                    " 'live_verified', 'draft', '', :ts)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "org": principal.organization_id,
+                    "t": target_id,
+                    "ob": onboarding_id,
+                    "exp": _now(),
+                    "ts": _now(),
+                },
+            )
+
+
+def test_stale_terminal_cas_fails_closed_at_db(pg_engine, pg_sessionmaker):
+    """A stale worker's terminal UPDATE (expecting an old revision) affects zero rows and cannot
+    overwrite a newer state or write facts."""
+    import secp_api.immutability  # noqa: F401
+    from secp_api.enums import ReadonlyPreflightStatus
+
+    principal = _principal(_seed_org(pg_engine))
+    with pg_sessionmaker() as s:
+        pf_id = _queued_preflight(s, principal)
+        s.commit()
+    # Move it to running@rev1, then a competing op advances it to rev6.
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE readonly_staging_preflight SET status='running', revision=1 WHERE id=:id"),
+            {"id": pf_id},
+        )
+        conn.execute(
+            text("UPDATE readonly_staging_preflight SET revision=6 WHERE id=:id"),
+            {"id": pf_id},
+        )
+    # A stale terminal CAS expecting revision=1 affects zero rows.
+    with pg_engine.begin() as conn:
+        rowcount = conn.execute(
+            text(
+                "UPDATE readonly_staging_preflight "
+                "SET status='completed', revision=2, outcome_code='ready', "
+                "    readiness_facts='{\"api_reachable\": true}' "
+                "WHERE id=:id AND status='running' AND revision=1"
+            ),
+            {"id": pf_id},
+        ).rowcount
+        status, outcome, facts = conn.execute(
+            text(
+                "SELECT status, outcome_code, readiness_facts "
+                "FROM readonly_staging_preflight WHERE id=:id"
+            ),
+            {"id": pf_id},
+        ).one()
+    assert rowcount == 0
+    assert status == ReadonlyPreflightStatus.running.value
+    assert outcome is None
+    assert facts is None

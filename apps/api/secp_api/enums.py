@@ -461,6 +461,22 @@ class ReadonlyPreflightOutcome(str, Enum):
     worker_internal_failure = "worker_internal_failure"
 
 
+class ReadonlyPreflightErrorCode(str, Enum):
+    """Closed catalog of read-only preflight API error codes (SECP-B2-0).
+
+    Every read-only-preflight service refusal maps to exactly one of these safe codes. No
+    free-form backend message is ever serialized for this feature.
+    """
+
+    not_found = "readonly_preflight_not_found"
+    forbidden = "readonly_preflight_forbidden"
+    substrate_ineligible = "readonly_preflight_substrate_ineligible"
+    authorization_invalid = "readonly_preflight_authorization_invalid"
+    lifecycle_conflict = "readonly_preflight_lifecycle_conflict"
+    queue_conflict = "readonly_preflight_queue_conflict"
+    internal_failure = "readonly_preflight_internal_failure"
+
+
 class AuditAction(str, Enum):
     organization_created = "organization.created"
     user_created = "user.created"

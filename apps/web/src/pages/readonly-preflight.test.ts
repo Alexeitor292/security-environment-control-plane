@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { PreflightAuthorization, ReadonlyPreflight } from "../api/types";
 import {
+  API_ERROR_TEXT,
   AUTHORIZATION_SEPARATION_NOTICE,
+  GENERIC_API_ERROR_TEXT,
   OUTCOME_LABELS,
   QUEUED_NOTICE,
   READONLY_ONLY_LABEL,
   READY_SCOPE_NOTICE,
+  apiErrorText,
   authorizationIsApprovedAndCurrent,
   canQueuePreflight,
   isQueuedOrRunning,
@@ -88,18 +91,38 @@ describe("Read-only preflight UI logic", () => {
     expect(canQueuePreflight(usableAuthorization([]))).toBe(false);
   });
 
-  it("shows readiness facts only for a ready outcome, and only safe boolean/count values", () => {
+  it("shows readiness facts only for a ready outcome, and drops unknown (non-allowlisted) keys", () => {
     expect(readinessFactRows(pf({ status: "completed", outcome_code: "credential_unavailable" }))).toEqual(
       [],
     );
     const ready = pf({
       status: "completed",
       outcome_code: "ready",
-      readiness_facts: { api_reachable: true, node_count: 3 },
+      // A stray non-allowlisted key must be dropped client-side, matching the worker allowlist.
+      readiness_facts: { api_reachable: true, node_count: 3, endpoint: 1 as unknown as number },
     });
     const rows = readinessFactRows(ready);
     expect(rows).toContainEqual({ key: "api_reachable", value: "yes" });
     expect(rows).toContainEqual({ key: "node_count", value: "3" });
+    expect(rows.find((r) => r.key === "endpoint")).toBeUndefined();
+  });
+
+  it("maps closed error codes to fixed safe text and unknown codes to the generic fallback", () => {
+    for (const code of Object.keys(API_ERROR_TEXT)) {
+      expect(apiErrorText(code).length).toBeGreaterThan(0);
+    }
+    expect(apiErrorText("readonly_preflight_forbidden")).toBe(
+      API_ERROR_TEXT.readonly_preflight_forbidden,
+    );
+    // Unknown code, null, and empty all fall back to the fixed generic text.
+    expect(apiErrorText("some_unknown_backend_code")).toBe(GENERIC_API_ERROR_TEXT);
+    expect(apiErrorText(null)).toBe(GENERIC_API_ERROR_TEXT);
+    expect(apiErrorText("")).toBe(GENERIC_API_ERROR_TEXT);
+    // Error text is fixed and never contains raw backend detail.
+    const allText = Object.values(API_ERROR_TEXT).join(" ").toLowerCase();
+    for (const needle of ["://", "traceback", "sqlalchemy", "secret", "env:"]) {
+      expect(allText.includes(needle)).toBe(false);
+    }
   });
 
   it("exposes no endpoint/secret tokens in its safe-label surface", () => {

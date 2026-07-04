@@ -166,7 +166,10 @@ def claim_and_process_one(
         if is_ready or result.outcome in _REFUSAL_OUTCOMES
         else ReadonlyPreflightStatus.failed
     )
-    _cas(
+    # Write the outcome + safe facts ATOMICALLY with the terminal transition, guarded by CAS. A
+    # stale worker whose lab revision drifted (another operation changed state) loses the CAS: it
+    # writes NO facts/outcome and emits NO terminal audit — it must not overwrite a newer state.
+    terminal_ok = _cas(
         session,
         candidate,
         expected_status=ReadonlyPreflightStatus.running,
@@ -177,6 +180,10 @@ def claim_and_process_one(
             "completed_at": _utcnow(),
         },
     )
+    if not terminal_ok:
+        return candidate.id  # fail closed: no readiness facts, no misleading terminal audit
+    # Only the worker that WON the terminal CAS emits the terminal audit (transactionally
+    # consistent with the committed terminal transition above).
     action = (
         AuditAction.readonly_preflight_failed
         if is_internal

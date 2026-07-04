@@ -47,6 +47,39 @@ export const READY_SCOPE_NOTICE =
   "A ready result proves only the specific readiness facts listed below. It does not claim the " +
   "host is isolated or production-safe.";
 
+// Closed backend error codes (SECP-B2-0) mapped to FIXED safe UI text. The UI NEVER renders a
+// backend `message`; an unknown/absent code maps to the generic fallback.
+export const API_ERROR_TEXT: Record<string, string> = {
+  readonly_preflight_not_found: "That preflight or authorization was not found.",
+  readonly_preflight_forbidden: "You are not permitted to perform this action.",
+  readonly_preflight_substrate_ineligible:
+    "This substrate is not eligible for a read-only preflight.",
+  readonly_preflight_authorization_invalid:
+    "The read-only authorization is not valid for this action.",
+  readonly_preflight_lifecycle_conflict: "The request conflicts with the current state.",
+  readonly_preflight_queue_conflict: "A preflight is already active for this authorization.",
+  readonly_preflight_internal_failure: "The request could not be completed.",
+  invalid_readonly_preflight_input: "The request was rejected as invalid.",
+};
+
+export const GENERIC_API_ERROR_TEXT = "The request could not be completed.";
+
+/** Map a closed error code to fixed safe UI text; unknown/absent -> generic fallback. */
+export function apiErrorText(code: string | null | undefined): string {
+  if (!code) return GENERIC_API_ERROR_TEXT;
+  return API_ERROR_TEXT[code] ?? GENERIC_API_ERROR_TEXT;
+}
+
+// Client-side readiness-fact allowlist — MUST match the worker allowlist. Unknown keys dropped.
+export const SAFE_FACT_KEYS = [
+  "api_reachable",
+  "readonly_policy_enforced",
+  "node_count",
+  "storage_count",
+  "network_segment_count",
+  "tls_verified",
+] as const;
+
 export function isQueuedOrRunning(status: ReadonlyPreflightStatus): boolean {
   return status === "queued" || status === "claimed" || status === "running";
 }
@@ -59,15 +92,19 @@ export function isReady(pf: ReadonlyPreflight | null): boolean {
   return pf?.outcome_code === "ready";
 }
 
-/** Readiness facts (safe booleans/counts) for display; empty until a ready outcome exists. */
+/** Readiness facts (safe booleans/counts) for display; empty until a ready outcome exists.
+ * Client-side allowlist: only SAFE_FACT_KEYS render — an unexpected key is dropped defensively. */
 export function readinessFactRows(
   pf: ReadonlyPreflight | null,
 ): { key: string; value: string }[] {
   if (!pf || pf.outcome_code !== "ready" || !pf.readiness_facts) return [];
-  return Object.entries(pf.readiness_facts).map(([key, value]) => ({
-    key,
-    value: typeof value === "boolean" ? (value ? "yes" : "no") : String(value),
-  }));
+  const allowed = new Set<string>(SAFE_FACT_KEYS);
+  return Object.entries(pf.readiness_facts)
+    .filter(([key]) => allowed.has(key))
+    .map(([key, value]) => ({
+      key,
+      value: typeof value === "boolean" ? (value ? "yes" : "no") : String(value),
+    }));
 }
 
 export function authorizationIsApprovedAndCurrent(
