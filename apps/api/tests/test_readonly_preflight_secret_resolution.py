@@ -40,6 +40,7 @@ from secp_worker.preflight.secret_resolution import (
 
 _FUTURE = "2999-01-01T00:00:00Z"
 _REF = "env:SECP_PROVIDER_SECRET__PREFLIGHT"
+_PREFLIGHT_ID = uuid.UUID(int=5)
 
 
 def _contract(**over) -> ResolutionContract:
@@ -51,6 +52,7 @@ def _contract(**over) -> ResolutionContract:
         authorization_id=uuid.UUID(int=4),
         authorization_version=2,
         authorization_expiry=_FUTURE,
+        preflight_id=uuid.UUID(int=5),
         operation_fingerprint="sha256:" + "ab" * 32,
         contract_version=LIVE_READ_COLLECTOR_CONTRACT_VERSION,
         endpoint_policy_version=PROXMOX_READONLY_POLICY_VERSION,
@@ -192,6 +194,7 @@ def test_build_request_requires_verified_binding_and_matches_independent_expecta
         verified=verified,
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint=fp,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     assert isinstance(request, TrustedResolutionRequest)
@@ -199,6 +202,7 @@ def test_build_request_requires_verified_binding_and_matches_independent_expecta
         verified=verified,
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint=fp,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     # A request built from a verified binding matches an independently derived authoritative
@@ -216,6 +220,7 @@ def test_build_contract_runs_pinned_policy_check_and_rejects_bad_labels():
             verified=bad,
             purpose=ResolutionPurpose.readonly_staging_preflight,
             operation_fingerprint="sha256:" + "12" * 32,
+            preflight_id=_PREFLIGHT_ID,
             now=_now(),
         )
     assert exc.value.reason_code == "unsupported_contract_version"
@@ -228,6 +233,7 @@ def test_build_contract_rejects_expired_binding():
             verified=expired,
             purpose=ResolutionPurpose.readonly_staging_preflight,
             operation_fingerprint="sha256:" + "12" * 32,
+            preflight_id=_PREFLIGHT_ID,
             now=_now(),
         )
     assert exc.value.reason_code == "authorization_expired"
@@ -269,6 +275,7 @@ def test_trusted_resolution_request_is_redacted_and_non_serializable():
         verified=_verified(),
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint="sha256:" + "12" * 32,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     assert repr(request) == "TrustedResolutionRequest(<redacted>)"
@@ -293,12 +300,14 @@ def test_sealed_resolver_runs_gate_then_fails_closed_for_valid_request():
         verified=verified,
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint=fp,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     expectation = build_resolution_contract(
         verified=verified,
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint=fp,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     # Even for a perfectly valid request the sealed resolver returns NO SecretMaterial — it fails
@@ -315,12 +324,14 @@ def test_sealed_resolver_refuses_mismatched_request_before_failing_open():
         verified=verified,
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint="sha256:" + "12" * 32,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     mismatched = build_resolution_contract(
         verified=_verified(),  # a DIFFERENT binding (different ids)
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint="sha256:" + "34" * 32,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     with pytest.raises(ResolutionContractViolation):
@@ -337,6 +348,7 @@ def test_sealed_resolver_never_returns_secret_material_under_any_input():
                 verified=verified,
                 purpose=ResolutionPurpose.readonly_staging_preflight,
                 operation_fingerprint=fp,
+                preflight_id=_PREFLIGHT_ID,
                 now=_now(),
             )
         except ResolutionContractViolation:
@@ -348,6 +360,7 @@ def test_sealed_resolver_never_returns_secret_material_under_any_input():
                     verified=verified,
                     purpose=ResolutionPurpose.readonly_staging_preflight,
                     operation_fingerprint=fp,
+                    preflight_id=_PREFLIGHT_ID,
                     now=_now(),
                 ),
                 now=_now(),
@@ -362,12 +375,14 @@ def test_expiry_used_by_gate_is_the_binding_now(_ignore=None):
         verified=verified,
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint=fp,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     expectation = build_resolution_contract(
         verified=verified,
         purpose=ResolutionPurpose.readonly_staging_preflight,
         operation_fingerprint=fp,
+        preflight_id=_PREFLIGHT_ID,
         now=_now(),
     )
     later = _now() + timedelta(days=2)

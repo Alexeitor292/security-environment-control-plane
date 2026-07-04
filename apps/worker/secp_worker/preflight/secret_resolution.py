@@ -168,6 +168,10 @@ class ResolutionContract:
     authorization_id: uuid.UUID
     authorization_version: int
     authorization_expiry: str  # canonical ISO-8601 UTC, e.g. "2026-07-02T00:00:00Z"
+    # Durable work-item identity (the ReadonlyStagingPreflight id). A worker-only contract field —
+    # NOT a database column. The independent re-verifier loads the work item by this id and derives
+    # every other authoritative fact from it (never from the candidate request).
+    preflight_id: uuid.UUID
     operation_fingerprint: str
     contract_version: str
     endpoint_policy_version: str
@@ -183,6 +187,7 @@ class ResolutionContract:
             f"authorization_id={self.authorization_id!s}, "
             f"authorization_version={self.authorization_version!r}, "
             f"authorization_expiry={self.authorization_expiry!r}, "
+            f"preflight_id={self.preflight_id!s}, "
             f"operation_fingerprint={self.operation_fingerprint!r}, "
             f"contract_version={self.contract_version!r}, "
             f"endpoint_policy_version={self.endpoint_policy_version!r}, "
@@ -237,13 +242,16 @@ def build_resolution_contract(
     verified: VerifiedLiveReadAuthorization,
     purpose: ResolutionPurpose,
     operation_fingerprint: str,
+    preflight_id: uuid.UUID,
     now: datetime,
 ) -> ResolutionContract:
-    """Derive the authoritative :class:`ResolutionContract` from a VERIFIED binding.
+    """Derive the authoritative :class:`ResolutionContract` from a VERIFIED binding + work item.
 
     Runs the pinned policy check (contract + endpoint-policy versions must equal the app-side
     constants) as part of construction, before any secret-resolution boundary is reached. Every
-    identity/label field is taken from the verifier output, never from caller-supplied values.
+    identity/label field is taken from the verifier output + the pinned constants, never from
+    caller-supplied values. ``purpose``, ``operation_fingerprint``, and ``preflight_id`` are the
+    work-item facts the caller must derive from the authoritative work item (see the re-verifier).
     """
     if purpose not in SUPPORTED_PURPOSES:
         raise ResolutionContractViolation("unsupported_purpose")
@@ -274,6 +282,7 @@ def build_resolution_contract(
         authorization_id=uuid.UUID(str(binding.authorization_id)),
         authorization_version=binding.authorization_version,
         authorization_expiry=binding.authorization_expiry,
+        preflight_id=preflight_id,
         operation_fingerprint=operation_fingerprint,
         contract_version=binding.collector_contract_version,
         endpoint_policy_version=binding.endpoint_allowlist_version,
@@ -286,6 +295,7 @@ def build_trusted_resolution_request(
     verified: VerifiedLiveReadAuthorization,
     purpose: ResolutionPurpose,
     operation_fingerprint: str,
+    preflight_id: uuid.UUID,
     now: datetime,
 ) -> TrustedResolutionRequest:
     """Build the ONLY trusted request, from a verified binding, after the verifier has succeeded."""
@@ -293,6 +303,7 @@ def build_trusted_resolution_request(
         verified=verified,
         purpose=purpose,
         operation_fingerprint=operation_fingerprint,
+        preflight_id=preflight_id,
         now=now,
     )
     return TrustedResolutionRequest(contract, token=_CONSTRUCTION_TOKEN)
@@ -327,6 +338,8 @@ def assert_resolution_authorized(
         raise ResolutionContractViolation("wrong_authorization")
     if candidate.authorization_version != authoritative.authorization_version:
         raise ResolutionContractViolation("authorization_version_mismatch")
+    if candidate.preflight_id != authoritative.preflight_id:
+        raise ResolutionContractViolation("preflight_id_mismatch")
     if candidate.operation_fingerprint != authoritative.operation_fingerprint:
         raise ResolutionContractViolation("operation_fingerprint_mismatch")
     if candidate.contract_version != authoritative.contract_version:

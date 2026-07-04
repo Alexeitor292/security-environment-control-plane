@@ -239,28 +239,41 @@ def test_no_production_code_imports_an_external_secret_backend():
 
 
 def test_shipped_default_resolver_remains_sealed_and_constructs_no_material():
-    # The shipped default is still the sealed unavailable resolver; no production code constructs
-    # SecretMaterial (only the class's own redacted repr strings mention it).
+    # The shipped default is still the sealed unavailable resolver. The ONLY production file that
+    # may construct SecretMaterial is the SECP-B2-4 OpenBao adapter, and only behind its
+    # fail-closed client boundary (no client -> no construction); no other production code may.
     from secp_worker.preflight.sealed_secret_resolver import SealedSecretResolver
     from secp_worker.preflight.secret_resolution import SealedUnavailableResolver
 
     assert issubclass(SealedSecretResolver, SealedUnavailableResolver)
 
+    adapter = REPO / "apps/worker/secp_worker/preflight/backends/openbao_resolver.py"
     offenders: list[str] = []
+    adapter_constructs = False
     for path in _py(WORKER_PKG) + _py(API_PKG):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
             if isinstance(node, ast.Call):
                 func = node.func
                 name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
                 if name == "SecretMaterial":
-                    offenders.append(str(path.relative_to(REPO)))
-    assert not offenders, f"production code constructs SecretMaterial: {offenders}"
+                    if path == adapter:
+                        adapter_constructs = True
+                    else:
+                        offenders.append(str(path.relative_to(REPO)))
+    assert not offenders, f"non-adapter production code constructs SecretMaterial: {offenders}"
+    # The adapter's construction sits behind the fail-closed client boundary.
+    adapter_src = adapter.read_text(encoding="utf-8")
+    assert adapter_constructs
+    assert "if self._client is None:" in adapter_src
+    assert "SecretMaterial(secret)" in adapter_src
 
 
 def test_preflight_package_has_no_backend_or_network_client():
     forbidden = (
-        "hvac",
-        "openbao",
+        "import hvac",  # the OpenBao ADAPTER is allowed; a bundled client LIBRARY is not
+        "from hvac",
+        "import openbao",
+        "from openbao",
         "import vault",
         "from vault",
         "boto3",
