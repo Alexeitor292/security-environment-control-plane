@@ -47,6 +47,15 @@ _API_FORBIDDEN_SYMBOLS = {
     "DenyingWorkerIdentityVerifier",
     "ResolutionActivationGate",
     "SealedActivationGate",
+    # SECP-B2-4: the worker-only OpenBao adapter, its client seam, and the reverifier are never
+    # importable by the API.
+    "OpenBaoWorkerSecretResolver",
+    "OpenBaoHttpClient",
+    "ResolverSelfTest",
+    "SealedResolverSelfTest",
+    "AuthoritativeReverifier",
+    "DbAuthoritativeReverifier",
+    "ReverifiedAuthority",
 }
 
 
@@ -118,8 +127,10 @@ def test_worker_secret_resolution_has_no_backend_or_network_client():
     # SECP-B2-1: the sealed secret-resolution contract introduces NO secret-backend/provider/
     # network/subprocess client. It resolves nothing and contacts nothing.
     forbidden = (
-        "hvac",  # HashiCorp Vault client
-        "openbao",
+        "import hvac",  # HashiCorp Vault client library (a bundled backend client is forbidden)
+        "from hvac",
+        "import openbao",  # the OpenBao ADAPTER is allowed; a bundled client LIBRARY is not
+        "from openbao",
         "import vault",
         "from vault",
         "boto3",

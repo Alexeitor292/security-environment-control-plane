@@ -12,10 +12,12 @@ is contacted. A later, separately reviewed activation PR must supply a productio
 
 __all__ = [
     "activation_gate",
+    "backends",
     "consumer",
     "identity",
     "lease",
     "orchestration",
+    "reverify",
     "runtime",
     "sealed_secret_resolver",
     "secret_resolution",

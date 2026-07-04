@@ -268,13 +268,45 @@ resolver, activation switch, or runtime/environment flag exists. B2-3 does **not
 activation evidence in §8; a future implementation PR must still satisfy §8 and §9 in full, and the
 resolver and collector activation checklists remain cumulative.
 
-A later implementation PR (not this one, and not B2-3) may, only after §8 and §9 are satisfied:
+**Implementation status (SECP-B2-4).** A worker-only **OpenBao resolver adapter**
+(`secp_worker.preflight.backends.openbao_resolver`) and an **independent authoritative
+re-verifier** (`secp_worker.preflight.reverify`) now implement the `WorkerSecretResolver` seam,
+**disabled by default**. OpenBao is an implementation detail *behind* the seam — it is **not** a
+core-domain dependency, adds **no** database column (the opaque `secret_ref` gains only the
+syntactic `vault:` scheme, API-validated only), and is **not** importable by the API or frontend
+(architecture guardrails enforce this). The adapter:
 
-- implement a worker-only `WorkerSecretResolver` that performs §3 re-verification, §4 three-way
-  binding, §5 lease acquisition, and §6 backend policy resolution, returning opaque short-lived
-  `SecretMaterial`;
-- inject a production worker-identity verifier and an approved activation gate (replacing the sealed
-  defaults) behind the §9 gates and §8 evidence;
+- re-loads and re-runs the SECP-002B-1B-6 verifier at resolution time (§3) — the
+  `TrustedResolutionRequest` and the passed `expectation` are **never** trusted as authorization
+  proof; authority is re-derived from the database + the pinned app-side constants;
+- enforces the §4 three-way credential-reference binding **before** any client is touched;
+- constructs **no** backend client and contacts nothing under default wiring — it fails closed
+  (`SecretResolutionUnavailable`); a client is injected only by tests or a future
+  out-of-band-granted activation, so **no successful resolution can occur in shipped runtime**;
+- exposes a pinned `RESOLVER_ADAPTER_CONTRACT_VERSION` and a worker-only self-test seam whose
+  shipped default (`SealedResolverSelfTest`) returns a closed, secret-free result and does no I/O.
+
+B2-4 does **not** activate anything and does **not** satisfy any §8 evidence item. It adds no
+OpenBao instance, endpoint, host, port, token, policy, mount, unseal material, worker credential,
+Compose service, Docker config, activation flag, setting, or deployment configuration. The shipped
+defaults remain `DenyingWorkerIdentityVerifier` + `SealedActivationGate`, and every preflight still
+ends `credential_unavailable`.
+
+**Future-deployment network requirement.** A future staging activation must place OpenBao on a
+**dedicated internal backend path reachable only by the worker service identity** — the API and
+frontend services must have neither a credential to it nor a network route to it. The *absence of a
+published/host port is not sufficient proof of isolation*: a positive control (a separate worker-only
+network segment / policy, verified out of band) is required, consistent with the isolated
+staging-control-plane design (SECP-002B-1B-8) and evidence-package item "worker-only network-path
+proof". No such deployment configuration is added in B2-4.
+
+A later implementation PR (not this one, not B2-3, and not B2-4) may, only after §8 and §9 are
+satisfied:
+
+- inject a production OpenBao client + the DB re-verifier + a production worker-identity verifier +
+  an approved activation gate (replacing the sealed defaults) behind the §9 gates and §8 evidence,
+  so the adapter performs §3 re-verification, §4 three-way binding, §5 lease acquisition, and §6
+  backend policy resolution, returning opaque short-lived `SecretMaterial`;
 - wire the injected collection runner behind the resolver (GET-only, canonicalized).
 
 **This PR (B2-2) explicitly does NOT and MUST NOT add:** a real secret backend or client
