@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -33,6 +35,12 @@ from secp_api.routers import staging_labs as staging_labs_router
 
 logger = logging.getLogger("secp.api")
 
+# Staging-lab routes accept one optional caller string (``logical_name``). FastAPI's default
+# RequestValidationError body echoes the rejected ``input`` value; for these routes that could
+# reflect a token-shaped value back to the caller. They therefore return a safe generic code and
+# NEVER echo the submitted value, request body, or raw validation details.
+_STAGING_LAB_PATH_PREFIX = "/api/v1/staging-labs"
+
 
 def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(DomainError)
@@ -41,6 +49,19 @@ def _install_error_handlers(app: FastAPI) -> None:
         if isinstance(exc, ValidationFailedError) and exc.errors:
             payload["error"]["details"] = exc.errors
         return JSONResponse(status_code=exc.http_status, content=payload)
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # Staging-lab routes: return ONLY a safe generic code — no rejected input, ctx, raw
+        # details, request body, or user-supplied text.
+        if request.url.path.startswith(_STAGING_LAB_PATH_PREFIX):
+            return JSONResponse(
+                status_code=422, content={"error": {"code": "invalid_staging_lab_input"}}
+            )
+        # All other routes keep FastAPI's default behavior (backward compatible).
+        return await request_validation_exception_handler(request, exc)
 
 
 def _bootstrap_dev() -> None:

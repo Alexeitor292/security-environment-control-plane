@@ -320,7 +320,10 @@ validation. It was reworked so that:
   ownership and lifecycle state**, refuses stale/mismatched/cross-org/drifted/unowned work, and
   only then runs the fake executor and writes observations + completion. The API imports no
   staging-lab worker/executor code and is **not** routed through the inline dispatcher; only the
-  worker may enter `simulating` / `tearing_down` or complete work.
+  worker may enter `simulating` / `tearing_down` or complete work. This consumer runs **fake-only**
+  inside the worker process (a bounded poll loop in `secp_worker.staging_lab.runtime`, started by
+  the worker entrypoint); the API never runs it. A later, separately reviewed real-adapter PR is
+  required before any provider action.
 - **Strict backend allowlist validation.** All persisted labels are server-generated from the
   immutable lab id (ownership label, display name); resource class, bootstrap-artifact profile,
   profile, network intent, rollback policy, purpose, lifecycle, and work operation are closed
@@ -329,9 +332,18 @@ validation. It was reworked so that:
   kebab-case slug allowlist that structurally excludes URLs, hosts, IPs, paths, ports, and
   secret/credential/token references.
 - **Concurrency-safe lifecycle.** A `revision` column plus transactional compare-and-swap updates
-  make approval, queueing, worker claim, completion, and teardown fail closed under races; a
-  partial-unique index enforces at most one active work item per lab+operation, unique idempotency
-  keys make retries return the original item, and cross-organization association is refused.
+  make approval, queueing, worker claim, completion, and teardown fail closed under races (the
+  worker claim uses `FOR UPDATE SKIP LOCKED` on PostgreSQL with a portable CAS fallback). Work
+  identity is a **server-generated operation fingerprint** over
+  `(lab_id, operation, plan_hash, plan_version)` — never a caller-supplied idempotency key; a
+  unique fingerprint plus a unique `(lab, operation, plan_hash, plan_version)` scope and a
+  partial-unique active index enforce at most one active work item per lab+operation, make a
+  retry of the identical operation+plan resolve to the original item, and refuse
+  cross-organization association.
+- **No caller free text.** Approval/rejection outcomes and work failures use closed decision/
+  failure-code enums (never free-text reasons), and staging-lab validation errors return only a
+  safe generic code (`invalid_staging_lab_input`) — the rejected input is never echoed in the API
+  response, audit trail, or logs.
 - **Explicit substrate eligibility.** A target is a staging substrate only when a target admin
   (permission `staging_substrate:manage`, with no lab-creator endpoint) issues a durable
   `StagingSubstrateEligibility` record binding organization, target, Proxmox plugin type, and the
