@@ -69,6 +69,22 @@ class _FakeWorkerResolver:
         return SecretMaterial("opaque-test-material")
 
 
+class _ApprovedIdentity:
+    """Test-only approved worker identity (never selectable by production runtime)."""
+
+    def verify(self):
+        from secp_worker.preflight.identity import WorkerIdentity
+
+        return WorkerIdentity(worker_identity_id="test-worker")
+
+
+class _ApprovedGate:
+    """Test-only approved activation gate (never selectable by production runtime)."""
+
+    def check(self) -> None:
+        return None
+
+
 def _substrate(session, principal, *, secret_ref=OPAQUE_SECRET_REF):
     target = ExecutionTarget(
         organization_id=principal.organization_id,
@@ -191,6 +207,8 @@ def test_stale_worker_terminal_cas_writes_no_facts_or_terminal_audit(session, pr
         session,
         secret_resolver=_FakeWorkerResolver(),
         collection_runner=_DriftingRunner(),
+        identity_verifier=_ApprovedIdentity(),
+        activation_gate=_ApprovedGate(),
     )
     session.refresh(pf)
     # The terminal CAS expected the pre-run revision; it drifted -> CAS fails -> fail closed:
@@ -247,6 +265,8 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
         pf.id,
         secret_resolver=_FakeWorkerResolver(),
         collection_runner=_ReadyRunner(),
+        identity_verifier=_ApprovedIdentity(),
+        activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.ready
     # Only safe facts survive; the stray 'endpoint' key is dropped.
@@ -256,11 +276,18 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
         def run(self, *, verified, credential, now):
             raise _PolicyOrTlsRefusal("tls refusal")
 
+    # A distinct operation (fresh substrate/auth/preflight): the prior operation already holds a
+    # single-use lease, so the refusal path must run against its own operation key.
+    target2 = _substrate(session, principal)
+    auth2 = _approved_authorization(session, principal, target2)
+    pf2 = _queue(session, principal, auth2)
     result2 = run_readonly_preflight(
         session,
-        pf.id,
+        pf2.id,
         secret_resolver=_FakeWorkerResolver(),
         collection_runner=_RefusingRunner(),
+        identity_verifier=_ApprovedIdentity(),
+        activation_gate=_ApprovedGate(),
     )
     assert result2.outcome == ReadonlyPreflightOutcome.tls_or_policy_refused
 

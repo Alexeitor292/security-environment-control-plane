@@ -21,6 +21,8 @@ from secp_api.models import ReadonlyStagingPreflight
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from secp_worker.preflight.activation_gate import ResolutionActivationGate
+from secp_worker.preflight.identity import WorkerIdentityVerifier
 from secp_worker.preflight.orchestration import (
     PreflightCollectionRunner,
     PreflightResult,
@@ -120,11 +122,16 @@ def claim_and_process_one(
     *,
     secret_resolver: WorkerSecretResolver | None = None,
     collection_runner: PreflightCollectionRunner | None = None,
+    identity_verifier: WorkerIdentityVerifier | None = None,
+    activation_gate: ResolutionActivationGate | None = None,
 ) -> uuid.UUID | None:
     """Claim and process one queued preflight. Returns its id, or None if none/lost.
 
     ``secret_resolver`` defaults to the SEALED resolver (fail-closed ``credential_unavailable``);
-    ``collection_runner`` defaults to None (no real collection is wired in this PR).
+    ``collection_runner`` defaults to None (no real collection is wired in this PR);
+    ``identity_verifier`` / ``activation_gate`` default to the SHIPPED SEALED foundation
+    (deny-by-default identity, disabled activation gate), so shipped runtime fails closed before any
+    durable lease is acquired. All of these are injectable for tests only.
     """
     resolver = secret_resolver or SealedSecretResolver()
     candidate = _claim_candidate(session)
@@ -155,6 +162,8 @@ def claim_and_process_one(
             candidate.id,
             secret_resolver=resolver,
             collection_runner=collection_runner,
+            identity_verifier=identity_verifier,
+            activation_gate=activation_gate,
         )
     except Exception:  # defensive: never surface internals; fail closed
         result = PreflightResult(ReadonlyPreflightOutcome.worker_internal_failure)

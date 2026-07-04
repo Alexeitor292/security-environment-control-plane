@@ -257,12 +257,24 @@ drill must be executed and verified (checklist §8) before activation is approve
 
 ## 11. Future implementation plan and explicit non-goals
 
-A later implementation PR (not this one) may, only after §8 and §9 are satisfied:
+**Implementation status (SECP-B2-3).** The durable, secret-free resolution-lease/refusal evidence
+store (§5), the credential-reference three-way binding (§4), the sealed worker-identity seam and the
+default-disabled activation gate (§6, §9) are now implemented as a **local, fully-sealed
+foundation** in the worker (`secp_worker.preflight.lease`, `.identity`, `.activation_gate`) plus the
+`resolution_lease` table. Nothing is activated: the shipped worker denies identity and disables the
+gate **before** any lease is acquired, so no lease row is created in shipped runtime and every
+preflight still ends `credential_unavailable`. No secret backend, secret-manager client, live
+resolver, activation switch, or runtime/environment flag exists. B2-3 does **not** satisfy any
+activation evidence in §8; a future implementation PR must still satisfy §8 and §9 in full, and the
+resolver and collector activation checklists remain cumulative.
+
+A later implementation PR (not this one, and not B2-3) may, only after §8 and §9 are satisfied:
 
 - implement a worker-only `WorkerSecretResolver` that performs §3 re-verification, §4 three-way
   binding, §5 lease acquisition, and §6 backend policy resolution, returning opaque short-lived
   `SecretMaterial`;
-- add the durable, secret-free resolution-lease/refusal evidence store;
+- inject a production worker-identity verifier and an approved activation gate (replacing the sealed
+  defaults) behind the §9 gates and §8 evidence;
 - wire the injected collection runner behind the resolver (GET-only, canonicalized).
 
 **This PR (B2-2) explicitly does NOT and MUST NOT add:** a real secret backend or client

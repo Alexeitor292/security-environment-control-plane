@@ -46,6 +46,7 @@ from secp_api.enums import (
     ReadonlyPreflightOutcome,
     ReadonlyPreflightStatus,
     ReservationStatus,
+    ResolutionLeaseStatus,
     SnapshotStatus,
     StagingBootstrapArtifactProfile,
     StagingLabDecisionCode,
@@ -1085,6 +1086,74 @@ class ReadonlyStagingPreflight(Base, TimestampMixin):
             f"authorization_version={self.authorization_version!r}, "
             f"status={getattr(self.status, 'value', self.status)!r}, "
             f"outcome_code={getattr(self.outcome_code, 'value', self.outcome_code)!r})"
+        )
+
+
+class ResolutionLease(Base, TimestampMixin):
+    """Durable, secret-free resolution-operation + short-lived lease state (SECP-B2-3).
+
+    One row per **global operation uniqueness key**
+    ``(live_read_authorization_id, authorization_version, operation_fingerprint)``. It carries the
+    durable retry budget (``attempt_count``, fixed cap N=3) that is shared across every lease
+    instance and every worker identity for that key, the current pre-success lease instance, and a
+    closed refusal ``reason_code``. ``worker_identity_id`` is a secret-free identifier recorded for
+    audit/evidence only and is deliberately **not** part of the uniqueness key.
+
+    It NEVER stores a credential value, a credential/secret reference, an endpoint, target
+    configuration, a certificate, a backend response, or a hash of any secret/reference. It contacts
+    nothing and cannot resolve a secret; the shipped worker never creates a row (it fails closed at
+    the sealed worker-identity/activation gate before lease acquisition).
+    """
+
+    __tablename__ = "resolution_lease"
+    __table_args__ = (
+        # Global operation uniqueness boundary — exactly the B2-2 key; NO worker identity.
+        UniqueConstraint(
+            "live_read_authorization_id",
+            "authorization_version",
+            "operation_fingerprint",
+            name="uq_resolution_lease_operation",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    live_read_authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("live_read_authorization.id"), nullable=False, index=True
+    )
+    authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Current lease instance id (rotates on re-acquisition after a lease expires).
+    lease_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, default=_uuid)
+    # Compare-and-swap guard for every durable transition.
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[ResolutionLeaseStatus] = mapped_column(
+        EnumType(ResolutionLeaseStatus, length=40),
+        default=ResolutionLeaseStatus.active,
+        nullable=False,
+    )
+    # Durable attempt budget (cap N=3), preserved across lease instances and worker identities.
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Short lease-instance expiry; always <= the authorization expiry.
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Secret-free worker identity that currently holds / last held the lease (evidence only).
+    worker_identity_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    # Closed refusal reason code on a terminal transition; never free text, never a value.
+    reason_code: Mapped[str] = mapped_column(String(60), default="", nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            "ResolutionLease("
+            f"id={self.id!s}, "
+            f"live_read_authorization_id={self.live_read_authorization_id!s}, "
+            f"authorization_version={self.authorization_version!r}, "
+            f"operation_fingerprint={self.operation_fingerprint!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"attempt_count={self.attempt_count!r}, "
+            f"revision={self.revision!r})"
         )
 
 
