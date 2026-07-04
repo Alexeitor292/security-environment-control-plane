@@ -38,6 +38,15 @@ _API_FORBIDDEN_SYMBOLS = {
     "build_trusted_resolution_request",
     "build_resolution_contract",
     "ResolutionContract",
+    # SECP-B2-3: the worker-only lease/identity/activation-gate internals are never API-importable.
+    "acquire_lease",
+    "begin_attempt",
+    "mark_consumed",
+    "OperationKey",
+    "WorkerIdentityVerifier",
+    "DenyingWorkerIdentityVerifier",
+    "ResolutionActivationGate",
+    "SealedActivationGate",
 }
 
 

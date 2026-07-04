@@ -210,18 +210,72 @@ def test_schema_constraints_and_indexes(pg_engine):
     assert ("live_read_authorization", ("live_read_authorization_id",)) in referred
 
 
-def test_downgrade_drops_preflight_table(pg_engine):
-    from alembic import command
+def _alembic_cfg():
     from alembic.config import Config
 
     api_dir = __import__("pathlib").Path(__file__).resolve().parents[1]
     cfg = Config(str(api_dir / "alembic.ini"))
     cfg.set_main_option("script_location", str(api_dir / "migrations"))
     cfg.set_main_option("sqlalchemy.url", PG_URL)
-    command.downgrade(cfg, "-1")
-    assert "readonly_staging_preflight" not in set(inspect(pg_engine).get_table_names())
-    command.upgrade(cfg, "head")
-    assert "readonly_staging_preflight" in set(inspect(pg_engine).get_table_names())
+    return cfg
+
+
+def test_downgrade_removes_lease_then_preflight_in_order(pg_engine):
+    """The lease migration (B2-3) sits on top of the preflight migration (B2-0). Downgrading one
+    step removes ONLY resolution_lease and leaves readonly_staging_preflight; a further step down
+    removes readonly_staging_preflight. Revisions are derived from the migration graph."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    cfg = _alembic_cfg()
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert len(heads) == 1, f"expected a single head, got {heads}"
+    lease_rev = heads[0]  # B2-3
+    preflight_rev = script.get_revision(lease_rev).down_revision  # B2-0
+    assert isinstance(preflight_rev, str) and preflight_rev
+    preflight_parent = script.get_revision(preflight_rev).down_revision
+    assert isinstance(preflight_parent, str) and preflight_parent
+
+    def tables() -> set[str]:
+        return set(inspect(pg_engine).get_table_names())
+
+    try:
+        command.downgrade(cfg, preflight_rev)  # remove B2-3 only
+        after_lease = tables()
+        assert "resolution_lease" not in after_lease
+        assert "readonly_staging_preflight" in after_lease
+
+        command.downgrade(cfg, preflight_parent)  # remove B2-0 too
+        after_preflight = tables()
+        assert "readonly_staging_preflight" not in after_preflight
+        assert "resolution_lease" not in after_preflight
+    finally:
+        command.upgrade(cfg, "head")
+
+    restored = tables()
+    assert {"readonly_staging_preflight", "resolution_lease"} <= restored
+
+
+def test_resolution_lease_schema_and_constraints(pg_engine):
+    insp = inspect(pg_engine)
+    cols = {c["name"] for c in insp.get_columns("resolution_lease")}
+    # No secret/reference/endpoint columns exist in the live schema.
+    assert not (cols & {"secret_ref", "credential_ref", "secret", "endpoint", "base_url", "token"})
+    uniques = {
+        uc["name"]: tuple(uc["column_names"])
+        for uc in insp.get_unique_constraints("resolution_lease")
+    }
+    assert uniques.get("uq_resolution_lease_operation") == (
+        "live_read_authorization_id",
+        "authorization_version",
+        "operation_fingerprint",
+    )
+    referred = {
+        (fk["referred_table"], tuple(fk["constrained_columns"]))
+        for fk in insp.get_foreign_keys("resolution_lease")
+    }
+    assert ("live_read_authorization", ("live_read_authorization_id",)) in referred
 
 
 def _make_substrate(session, principal):
@@ -374,3 +428,158 @@ def test_stale_terminal_cas_fails_closed_at_db(pg_engine, pg_sessionmaker):
     assert status == ReadonlyPreflightStatus.running.value
     assert outcome is None
     assert facts is None
+
+
+# --- SECP-B2-3: durable resolution-lease behavior under REAL separate transactions ---------------
+
+
+def _seed_authorization(session: Session, principal) -> tuple[uuid.UUID, int, str]:
+    """Seed a substrate + approved authorization; return (auth_id, version, fingerprint)."""
+    from secp_api.services import readonly_preflight
+
+    target_id = _make_substrate(session, principal)
+    auth = readonly_preflight.create_preflight_authorization(
+        session, principal, execution_target_id=target_id
+    )
+    readonly_preflight.approve_preflight_authorization(session, principal, auth.id)
+    return auth.id, auth.authorization_version, "sha256:" + "ab" * 32
+
+
+def test_lease_operation_uniqueness_enforced_at_db(pg_engine, pg_sessionmaker):
+    from secp_worker.preflight.lease import OperationKey, acquire_lease
+
+    principal = _principal(_seed_org(pg_engine))
+    with pg_sessionmaker() as s:
+        auth_id, version, fp = _seed_authorization(s, principal)
+        s.commit()
+        key = OperationKey(auth_id, version, fp)
+        acquire_lease(
+            s,
+            organization_id=principal.organization_id,
+            key=key,
+            worker_identity_id="worker-a",
+            authorization_expiry=_now() + __import__("datetime").timedelta(hours=1),
+            now=_now(),
+        )
+        s.commit()
+
+    # A raw duplicate insert for the same (auth, version, fingerprint) violates the unique key.
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO resolution_lease "
+                    "(id, organization_id, live_read_authorization_id, authorization_version, "
+                    " operation_fingerprint, lease_id, revision, status, attempt_count, "
+                    " lease_expires_at, worker_identity_id, reason_code, created_at) "
+                    "VALUES (:id, :org, :auth, :ver, :fp, :lease, 0, 'active', 0, "
+                    " :exp, 'w', '', :ts)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "org": principal.organization_id,
+                    "auth": auth_id,
+                    "ver": version,
+                    "fp": fp,
+                    "lease": uuid.uuid4(),
+                    "exp": _now(),
+                    "ts": _now(),
+                },
+            )
+
+
+def test_lease_budget_and_replay_are_durable_across_transactions(pg_engine, pg_sessionmaker):
+    from secp_worker.preflight.lease import (
+        RETRY_BUDGET,
+        LeaseRefused,
+        OperationKey,
+        acquire_lease,
+        begin_attempt,
+    )
+
+    principal = _principal(_seed_org(pg_engine))
+    delta = __import__("datetime").timedelta
+    with pg_sessionmaker() as s:
+        auth_id, version, fp = _seed_authorization(s, principal)
+        s.commit()
+        key = OperationKey(auth_id, version, fp)
+        lease = acquire_lease(
+            s,
+            organization_id=principal.organization_id,
+            key=key,
+            worker_identity_id="worker-a",
+            authorization_expiry=_now() + delta(hours=1),
+            now=_now(),
+        )
+        for _ in range(RETRY_BUDGET):
+            begin_attempt(s, lease, now=_now())
+        s.commit()
+
+    # A DIFFERENT committed transaction (different worker identity) is refused: budget is durable.
+    with pg_sessionmaker() as s:
+        with pytest.raises(LeaseRefused) as exc:
+            acquire_lease(
+                s,
+                organization_id=principal.organization_id,
+                key=OperationKey(auth_id, version, fp),
+                worker_identity_id="worker-b",
+                authorization_expiry=_now() + delta(hours=1),
+                now=_now() + delta(minutes=1),
+            )
+        from secp_api.enums import ResolutionLeaseReason
+
+        assert exc.value.reason == ResolutionLeaseReason.retry_bound_exceeded
+
+    # A NEW authorization version is a distinct operation key with a fresh budget.
+    with pg_sessionmaker() as s:
+        fresh = acquire_lease(
+            s,
+            organization_id=principal.organization_id,
+            key=OperationKey(auth_id, version + 1, fp),
+            worker_identity_id="worker-a",
+            authorization_expiry=_now() + delta(hours=1),
+            now=_now(),
+        )
+        assert fresh.attempt_count == 0
+        s.commit()
+
+
+def test_lease_expiry_preserves_budget_across_transactions(pg_engine, pg_sessionmaker):
+    from secp_worker.preflight.lease import OperationKey, acquire_lease, begin_attempt
+
+    principal = _principal(_seed_org(pg_engine))
+    delta = __import__("datetime").timedelta
+    with pg_sessionmaker() as s:
+        auth_id, version, fp = _seed_authorization(s, principal)
+        s.commit()
+        key = OperationKey(auth_id, version, fp)
+        lease = acquire_lease(
+            s,
+            organization_id=principal.organization_id,
+            key=key,
+            worker_identity_id="worker-a",
+            authorization_expiry=_now() + delta(hours=6),
+            now=_now(),
+            lease_ttl_seconds=60,
+        )
+        begin_attempt(s, lease, now=_now())
+        original_lease_id = lease.lease_id
+        s.commit()
+
+    # After the lease instance TTL elapsed, a fresh committed acquire re-issues a new lease id but
+    # PRESERVES the durable attempt budget.
+    with pg_sessionmaker() as s:
+        reacquired = acquire_lease(
+            s,
+            organization_id=principal.organization_id,
+            key=OperationKey(auth_id, version, fp),
+            worker_identity_id="worker-b",
+            authorization_expiry=_now() + delta(hours=6),
+            now=_now() + delta(seconds=120),
+            lease_ttl_seconds=60,
+        )
+        assert reacquired.lease_id != original_lease_id
+        assert reacquired.attempt_count == 1
+        s.commit()

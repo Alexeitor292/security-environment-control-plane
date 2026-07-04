@@ -17,6 +17,7 @@ and is never reached in this PR because the sealed resolver fails first.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import uuid
 from dataclasses import dataclass
@@ -41,9 +42,26 @@ from secp_worker.onboarding.live_authorization import (
     VerifiedLiveReadAuthorization,
     load_and_verify_live_read_authorization,
 )
+from secp_worker.preflight.activation_gate import (
+    ResolutionActivationDisabled,
+    ResolutionActivationGate,
+    SealedActivationGate,
+)
+from secp_worker.preflight.identity import (
+    DenyingWorkerIdentityVerifier,
+    WorkerIdentityUnavailable,
+    WorkerIdentityVerifier,
+)
+from secp_worker.preflight.lease import (
+    LeaseRefused,
+    OperationKey,
+    acquire_lease,
+    begin_attempt,
+)
 from secp_worker.preflight.secret_resolution import (
     ResolutionPurpose,
     SecretMaterial,
+    TrustedResolutionRequest,
     WorkerSecretResolver,
     build_resolution_contract,
     build_trusted_resolution_request,
@@ -116,13 +134,24 @@ def run_readonly_preflight(
     *,
     secret_resolver: WorkerSecretResolver,
     collection_runner: PreflightCollectionRunner | None = None,
+    identity_verifier: WorkerIdentityVerifier | None = None,
+    activation_gate: ResolutionActivationGate | None = None,
     now: datetime | None = None,
 ) -> PreflightResult:
     """Verify + (fail-closed) resolve + optionally collect. Returns a closed outcome + safe facts.
 
     Never raises for expected failures; unexpected errors are mapped to ``worker_internal_failure``
     by the caller. No endpoint/host/config value is ever returned in ``readiness_facts``.
+
+    ``identity_verifier`` and ``activation_gate`` default to the SHIPPED SEALED defaults
+    (:class:`DenyingWorkerIdentityVerifier`, :class:`SealedActivationGate`), which fail closed
+    **before** any durable lease is acquired — so shipped runtime never reaches lease acquisition or
+    begin-attempt, and every preflight still terminates as ``credential_unavailable``. Tests may
+    inject an approved identity + gate to exercise the durable lease transitions; that path still
+    ends at the sealed resolver and produces no secret material, transport, collector, or contact.
     """
+    identity_verifier = identity_verifier or DenyingWorkerIdentityVerifier()
+    activation_gate = activation_gate or SealedActivationGate()
     from secp_api.models import ReadonlyStagingPreflight
 
     now = now or datetime.now(UTC)
@@ -159,12 +188,11 @@ def run_readonly_preflight(
         )
         return PreflightResult(outcome)
 
-    # 2. Secret-resolution boundary (SECP-B2-1). The trusted resolution request is constructed
-    #    ONLY here, AFTER the verifier above succeeded — a caller cannot supply it as a trust
-    #    anchor. Building it also runs the pinned policy check (contract + endpoint-policy labels).
-    #    The independently derived authoritative contract is passed alongside so the resolver must
-    #    confirm the request matches the binding before it would ever resolve. The sealed resolver
-    #    always fails closed here -> credential_unavailable. No transport is built.
+    # 2. Pinned policy check (SECP-B2-1). The trusted resolution request + the independently
+    #    derived authoritative contract are built ONLY here, AFTER the verifier above succeeded,
+    #    from the freshly re-verified authoritative records — a caller-supplied "expected contract"
+    #    is NEVER used as a trust anchor, and the request object is never proof of authorization.
+    #    Building runs the pinned collector-contract + endpoint-policy checks.
     fingerprint = _operation_fingerprint(pf)
     try:
         resolution_request = build_trusted_resolution_request(
@@ -179,6 +207,55 @@ def run_readonly_preflight(
             operation_fingerprint=fingerprint,
             now=now,
         )
+    except SecretResolutionError:
+        return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
+
+    # 3. Credential-reference three-way binding (SECP-B2-3): the authoritative target reference, the
+    #    re-verified live-read binding reference, and the request reference must all be equal
+    #    (constant-time). Any mismatch fails closed BEFORE identity, gate, lease, or resolution. The
+    #    three values are never logged, serialized, persisted, hashed, audited, or rendered.
+    if not _three_way_reference_match(verified, resolution_request):
+        return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
+
+    # 4. Worker-identity verification (SECP-B2-3). The SHIPPED default denies -> fail closed here,
+    #    BEFORE any durable lease is acquired. No environment/host/network/certificate is read.
+    try:
+        identity = identity_verifier.verify()
+    except WorkerIdentityUnavailable:
+        return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
+
+    # 5. Sealed activation gate (SECP-B2-3). The SHIPPED default is disabled -> fail closed here,
+    #    BEFORE any durable lease is acquired. It cannot be enabled by env/config/Compose/flags/DB.
+    try:
+        activation_gate.check()
+    except ResolutionActivationDisabled:
+        return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
+
+    # 6-7. Durable lease acquisition + begin-attempt (SECP-B2-3). Reached ONLY with an approved
+    #      identity + gate (tests/future). begin-attempt is the only transition that consumes the
+    #      fixed N=3 durable budget keyed by (authorization_id, authorization_version,
+    #      operation_fingerprint). Shipped runtime never gets here.
+    key = OperationKey(
+        live_read_authorization_id=pf.live_read_authorization_id,
+        authorization_version=pf.authorization_version,
+        operation_fingerprint=fingerprint,
+    )
+    try:
+        lease = acquire_lease(
+            session,
+            organization_id=pf.organization_id,
+            key=key,
+            worker_identity_id=identity.worker_identity_id,
+            authorization_expiry=verified.authorization.authorization_expiry,
+            now=now,
+        )
+        begin_attempt(session, lease, now=now)
+    except LeaseRefused:
+        return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
+
+    # 8. Secret-resolution boundary (SECP-B2-1, still sealed). The sealed resolver always fails
+    #    closed here -> credential_unavailable. No transport is built and no material is produced.
+    try:
         credential = secret_resolver.resolve(resolution_request, expectation=expectation, now=now)
     except SecretResolutionError:
         return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
@@ -192,6 +269,25 @@ def run_readonly_preflight(
     except _PolicyOrTlsRefusal:
         return PreflightResult(ReadonlyPreflightOutcome.tls_or_policy_refused)
     return PreflightResult(ReadonlyPreflightOutcome.ready, readiness_facts=_safe_facts(facts))
+
+
+def _three_way_reference_match(
+    verified: VerifiedLiveReadAuthorization, request: TrustedResolutionRequest
+) -> bool:
+    """Constant-time three-way equality of the opaque credential reference (SECP-B2-3).
+
+    Compares the authoritative ``ExecutionTarget.secret_ref``, the re-verified live-read binding
+    reference, and the request's ``TrustedCredentialReference``. The values are never logged,
+    serialized, persisted, hashed, audited, or rendered — only compared and discarded.
+    """
+    target_ref = verified.execution_target.secret_ref or ""
+    binding_ref = verified.binding.credential_ref or ""
+    request_ref = request.contract.credential_reference.reveal_reference()
+    if not (target_ref and binding_ref and request_ref):
+        return False
+    match_tb = hmac.compare_digest(target_ref, binding_ref)
+    match_br = hmac.compare_digest(binding_ref, request_ref)
+    return match_tb and match_br
 
 
 def _operation_fingerprint(pf: object) -> str:

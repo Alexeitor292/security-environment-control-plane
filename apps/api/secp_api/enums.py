@@ -582,3 +582,39 @@ class AuditAction(str, Enum):
     readonly_preflight_completed = "readonly_preflight.completed"
     readonly_preflight_refused = "readonly_preflight.refused"
     readonly_preflight_failed = "readonly_preflight.failed"
+    # SECP-B2-3 — durable resolution-lease transitions (worker-only, secret-free).
+    resolution_lease_acquired = "resolution_lease.acquired"
+    resolution_lease_attempt_started = "resolution_lease.attempt_started"
+    resolution_lease_refused = "resolution_lease.refused"
+    resolution_lease_consumed = "resolution_lease.consumed"
+
+
+class ResolutionLeaseStatus(str, Enum):
+    """Durable state of one read-only-preflight resolution operation (SECP-B2-3).
+
+    The row is keyed by the global operation uniqueness boundary
+    ``(authorization_id, authorization_version, operation_fingerprint)`` and persists the durable
+    attempt budget across every lease instance and worker identity. It never stores a credential,
+    reference, endpoint, target configuration, certificate, secret, or hash of any of those.
+    """
+
+    # A currently valid pre-success lease is held (exactly one per operation key at a time).
+    active = "active"
+    # A resolution succeeded for this operation: globally single-use; further attempts are replay.
+    consumed = "consumed"
+    # The durable retry budget (N=3) is exhausted for this operation key; terminal until a new
+    # authorization_version creates a distinct operation key with a fresh budget.
+    exhausted = "exhausted"
+
+
+class ResolutionLeaseReason(str, Enum):
+    """Closed catalog of secret-free resolution-lease refusal/transition codes (SECP-B2-3)."""
+
+    # Fail-closed refusals recorded durably (never free text, never a secret/reference value).
+    replay_refused = "replay_refused"
+    retry_bound_exceeded = "retry_bound_exceeded"
+    lease_held = "lease_held"
+    authorization_expired = "authorization_expired"
+    reference_mismatch = "reference_mismatch"
+    worker_identity_untrusted = "worker_identity_untrusted"
+    resolution_activation_disabled = "resolution_activation_disabled"

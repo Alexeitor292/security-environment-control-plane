@@ -514,3 +514,47 @@ ever substitutes for the other.
 No live resolver, secret backend, secret-manager client, activation switch, or runtime/environment
 flag is introduced by SECP-B2-2; the shipped default remains the sealed
 `SealedUnavailableResolver` and every preflight still ends `credential_unavailable`.
+
+### Durable lease + sealed activation foundation — implementation status (SECP-B2-3)
+
+SECP-B2-3 implements the **local, fully-sealed** durable-lease and activation-gate foundation from
+the B2-2 contract. It adds no secret backend and no live resolver; every preflight still ends
+`credential_unavailable`, no transport is constructed, no collector executes, and nothing real is
+contacted. This PR does **not** satisfy any B2-2 out-of-band activation evidence — a future
+implementation PR must still satisfy every gate in
+`docs/proxmox/live-secret-resolver-activation-checklist.md`, and that checklist remains
+**cumulative** with the collector-activation checklist.
+
+- **Durable lease schema.** A new `resolution_lease` table (migration `c4e9a1f7d2b3`) persists one
+  row per **global operation uniqueness key** `(live_read_authorization_id, authorization_version,
+  operation_fingerprint)` — worker identity is **not** in that key. It stores the durable
+  `attempt_count` (cap N=3), the current lease instance (`lease_id`, `lease_expires_at`), a
+  compare-and-swap `revision`, a closed `status` (`active`/`consumed`/`exhausted`), a secret-free
+  `worker_identity_id`, and a closed `reason_code`. It stores **no** credential, credential/secret
+  reference, endpoint, target configuration, certificate, backend response, or hash of any of those.
+- **Worker-only lease service (portable CAS).** `acquire_lease` / `begin_attempt` / `mark_consumed`
+  implement single-use, replay refusal (`replay_refused`), the durable N=3 budget
+  (`retry_bound_exceeded`), lease-expiry re-acquisition that preserves the budget, and a
+  transactional compare-and-swap (unique-constraint insert + `IntegrityError` fail-closed, plus a
+  `(id, revision)` conditional update) that works identically on SQLite and PostgreSQL. A losing
+  transition changes no state and emits no audit. `begin_attempt` is the only transition that
+  consumes the budget; lease issuance alone never does.
+- **Sealed worker identity + activation gate.** `DenyingWorkerIdentityVerifier` (the shipped
+  identity default) reads no environment, host file, container metadata, network endpoint, or
+  certificate and always denies (`worker_identity_untrusted`); `SealedActivationGate` (the shipped
+  gate) is always disabled (`resolution_activation_disabled`) and cannot be enabled via API, UI,
+  settings, environment, Compose, a database route, feature flags, or Git-tracked config. Test-only
+  approved implementations may be injected to exercise lease transitions but are never selectable by
+  production runtime; even then the flow ends at the sealed resolver.
+- **Preserved ordering.** The worker enforces: authoritative re-load/re-verification (SECP-002B-1B-6
+  verifier) → pinned collector-contract + endpoint-policy check → credential-reference three-way
+  binding (authoritative `ExecutionTarget.secret_ref` == verified binding reference == request
+  reference, constant-time, never logged/persisted/hashed/audited/rendered) → worker-identity
+  verification → sealed activation gate → durable lease acquisition → durable begin-attempt →
+  (sealed) secret-resolution boundary → future transport → future collector. In **shipped runtime**
+  the deny-by-default identity fails closed **before** lease acquisition and begin-attempt, so no
+  lease row is created and no attempt is begun.
+- **Secret-free audit.** Durable lease transitions are audited with safe IDs, state names, revision,
+  operation fingerprint, worker identity id, and closed reason codes only — never a secret,
+  reference, endpoint, target config, backend response, raw exception text, or request body. The
+  B2-0 API/UI closed-error behavior is unchanged.
