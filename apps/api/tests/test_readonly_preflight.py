@@ -41,9 +41,32 @@ from secp_worker.preflight.orchestration import (
     _PolicyOrTlsRefusal,
     run_readonly_preflight,
 )
-from secp_worker.secrets import FakeSecretResolver
+from secp_worker.preflight.secret_resolution import (
+    ResolutionContract,
+    SecretMaterial,
+    TrustedResolutionRequest,
+    assert_resolution_authorized,
+)
 
 OPAQUE_SECRET_REF = "env:SECP_PROVIDER_SECRET__PREFLIGHT"
+
+
+class _FakeWorkerResolver:
+    """Test-only worker resolver: enforces the contract, then returns opaque SecretMaterial.
+
+    Injected in tests ONLY (there is no production resolver). It proves the ready/refused paths
+    downstream of a valid secret-resolution boundary without touching any real backend.
+    """
+
+    def resolve(
+        self,
+        request: TrustedResolutionRequest,
+        *,
+        expectation: ResolutionContract,
+        now: datetime,
+    ) -> SecretMaterial:
+        assert_resolution_authorized(request.contract, expectation, now=now)
+        return SecretMaterial("opaque-test-material")
 
 
 def _substrate(session, principal, *, secret_ref=OPAQUE_SECRET_REF):
@@ -166,7 +189,7 @@ def test_stale_worker_terminal_cas_writes_no_facts_or_terminal_audit(session, pr
 
     claim_and_process_one(
         session,
-        secret_resolver=FakeSecretResolver({OPAQUE_SECRET_REF: "x"}),
+        secret_resolver=_FakeWorkerResolver(),
         collection_runner=_DriftingRunner(),
     )
     session.refresh(pf)
@@ -195,7 +218,7 @@ def test_expired_authorization_maps_to_expired_outcome(session, principal):
     result = run_readonly_preflight(
         session,
         pf.id,
-        secret_resolver=FakeSecretResolver({OPAQUE_SECRET_REF: "x"}),
+        secret_resolver=_FakeWorkerResolver(),
         now=auth.authorization_expiry + timedelta(seconds=1),
     )
     assert result.outcome == ReadonlyPreflightOutcome.authorization_expired
@@ -206,9 +229,7 @@ def test_revoked_authorization_maps_to_revoked_outcome(session, principal):
     auth = _approved_authorization(session, principal, target)
     pf = _queue(session, principal, auth)
     readonly_preflight.revoke_preflight_authorization(session, principal, auth.id, "operator")
-    result = run_readonly_preflight(
-        session, pf.id, secret_resolver=FakeSecretResolver({OPAQUE_SECRET_REF: "x"})
-    )
+    result = run_readonly_preflight(session, pf.id, secret_resolver=_FakeWorkerResolver())
     assert result.outcome == ReadonlyPreflightOutcome.authorization_revoked
 
 
@@ -224,7 +245,7 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
     result = run_readonly_preflight(
         session,
         pf.id,
-        secret_resolver=FakeSecretResolver({OPAQUE_SECRET_REF: "x"}),
+        secret_resolver=_FakeWorkerResolver(),
         collection_runner=_ReadyRunner(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.ready
@@ -238,10 +259,68 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
     result2 = run_readonly_preflight(
         session,
         pf.id,
-        secret_resolver=FakeSecretResolver({OPAQUE_SECRET_REF: "x"}),
+        secret_resolver=_FakeWorkerResolver(),
         collection_runner=_RefusingRunner(),
     )
     assert result2.outcome == ReadonlyPreflightOutcome.tls_or_policy_refused
+
+
+def test_sealed_resolver_fails_closed_before_transport_or_collector(session, principal):
+    """SECP-B2-1 ordering: with the shipped sealed resolver, the secret-resolution boundary fails
+    closed and the (would-be transport) collection runner is NEVER reached."""
+    from secp_worker.preflight.sealed_secret_resolver import SealedSecretResolver
+
+    target = _substrate(session, principal)
+    auth = _approved_authorization(session, principal, target)
+    pf = _queue(session, principal, auth)
+
+    class _TripwireRunner:
+        called = False
+
+        def run(self, *, verified, credential, now):  # pragma: no cover - must never run
+            _TripwireRunner.called = True
+            raise AssertionError("collection runner must not be reached under the sealed resolver")
+
+    result = run_readonly_preflight(
+        session,
+        pf.id,
+        secret_resolver=SealedSecretResolver(),
+        collection_runner=_TripwireRunner(),
+    )
+    assert result.outcome == ReadonlyPreflightOutcome.credential_unavailable
+    assert result.readiness_facts is None
+    assert _TripwireRunner.called is False
+
+
+def test_request_is_not_built_until_verification_succeeds(session, principal):
+    """A failed verification (expired authorization) short-circuits BEFORE the secret-resolution
+    boundary — no trusted resolution request is constructed and the resolver is never invoked."""
+
+    target = _substrate(session, principal)
+    auth = _approved_authorization(session, principal, target)
+    pf = _queue(session, principal, auth)
+
+    class _SpyResolver:
+        invoked = False
+
+        def resolve(
+            self,
+            request: TrustedResolutionRequest,
+            *,
+            expectation: ResolutionContract,
+            now,
+        ) -> SecretMaterial:  # pragma: no cover - must never run
+            _SpyResolver.invoked = True
+            return SecretMaterial("x")
+
+    result = run_readonly_preflight(
+        session,
+        pf.id,
+        secret_resolver=_SpyResolver(),
+        now=auth.authorization_expiry + timedelta(seconds=1),
+    )
+    assert result.outcome == ReadonlyPreflightOutcome.authorization_expired
+    assert _SpyResolver.invoked is False
 
 
 def test_queue_is_idempotent_by_fingerprint(session, principal):

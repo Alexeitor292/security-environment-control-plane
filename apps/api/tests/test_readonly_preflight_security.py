@@ -29,6 +29,15 @@ _API_FORBIDDEN_SYMBOLS = {
     "SealedSecretResolver",
     "LiveReadOnlyProxmoxCollector",
     "HttpxReadOnlyTransport",
+    # SECP-B2-1: the worker-only secret-resolution contract is never importable by the API.
+    "SealedUnavailableResolver",
+    "WorkerSecretResolver",
+    "TrustedResolutionRequest",
+    "SecretMaterial",
+    "TrustedCredentialReference",
+    "build_trusted_resolution_request",
+    "build_resolution_contract",
+    "ResolutionContract",
 }
 
 
@@ -94,6 +103,94 @@ def test_worker_preflight_makes_no_transport_or_subprocess_calls():
                 func = node.func
                 name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
                 assert name not in forbidden_calls, f"{path.name} calls {name}"
+
+
+def test_worker_secret_resolution_has_no_backend_or_network_client():
+    # SECP-B2-1: the sealed secret-resolution contract introduces NO secret-backend/provider/
+    # network/subprocess client. It resolves nothing and contacts nothing.
+    forbidden = (
+        "hvac",  # HashiCorp Vault client
+        "openbao",
+        "import vault",
+        "from vault",
+        "boto3",
+        "botocore",
+        "azure",
+        "googleapiclient",
+        "keyring",
+        "import httpx",
+        "from httpx",
+        "import requests",
+        "import aiohttp",
+        "import socket",
+        "from socket",
+        "import subprocess",
+        "from subprocess",
+        "import ssl",
+        "os.environ",
+        "os.getenv",
+        "getpass",
+        "EnvSecretResolver",
+    )
+    for path in _py(WORKER_PREFLIGHT):
+        src = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in src, f"{path.name} must not reference `{token}`"
+
+
+def test_worker_secret_resolution_defines_no_orm_or_persistence():
+    # No secret material may be storable: the preflight package defines no ORM model / column /
+    # table (secret material lives only in an in-memory, non-serializable wrapper).
+    forbidden = ("mapped_column", "Column(", "Table(", "declarative_base", "__tablename__")
+    for path in _py(WORKER_PREFLIGHT):
+        src = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in src, f"{path.name} must not define persistence (`{token}`)"
+
+
+def test_only_worker_code_constructs_a_trusted_resolution_request():
+    # The trusted request builder + type are referenced ONLY under the worker (and tests) — never
+    # in API application code or the frontend. A caller elsewhere cannot construct a trust anchor.
+    needles = ("build_trusted_resolution_request", "TrustedResolutionRequest(")
+    for path in _py(API_PKG):
+        src = path.read_text(encoding="utf-8")
+        for needle in needles:
+            assert needle not in src, f"API file {path.name} references `{needle}`"
+    web_src = REPO_ROOT / "apps" / "web" / "src"
+    for path in list(web_src.rglob("*.ts")) + list(web_src.rglob("*.tsx")):
+        if ".mypy_cache" in path.parts or "node_modules" in path.parts:
+            continue
+        src = path.read_text(encoding="utf-8")
+        for needle in needles:
+            assert needle not in src, f"frontend file {path.name} references `{needle}`"
+
+
+def test_frontend_has_no_credential_entry_field_or_secret_resolution_route():
+    # SECP-B2-1: the UI must never collect/transmit a literal credential, and must not expose a
+    # secret-resolution route. No password inputs; no credential-entry/secret-resolution endpoints.
+    web_src = REPO_ROOT / "apps" / "web" / "src"
+    forbidden = (
+        'type="password"',
+        "type='password'",
+        "/secrets",
+        "/credentials",
+        "secret-resolution",
+        "resolveSecret",
+        "uploadCredential",
+        "submitCredential",
+        "enterCredential",
+        "SecretMaterial",
+        "reveal_secret",
+    )
+    scanned = 0
+    for path in list(web_src.rglob("*.ts")) + list(web_src.rglob("*.tsx")):
+        if ".mypy_cache" in path.parts or "node_modules" in path.parts:
+            continue
+        scanned += 1
+        src = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in src, f"frontend file {path.name} references `{token}`"
+    assert scanned >= 5  # guard against the scan silently matching nothing
 
 
 def test_no_concrete_infrastructure_values_in_new_sources():
