@@ -303,7 +303,37 @@ B1-B9 is fake-only. It creates no bridge, VM, VNet, target, token, secret, or co
 contacts no Proxmox and opens no socket/subprocess; performs no secret resolution and persists no
 live evidence; and adds no runtime switch that can activate provisioning. Approving a staging-lab
 plan authorizes fake simulation only — it is NOT a SECP-002B-1B-6 `LiveReadAuthorization`, which
-remains separately required for any future real read-only collection. The API cannot import
-provider clients, adapters, or workers; simulation runs only through the worker-dispatch seam.
+remains separately required for any future real read-only collection.
 The SECP-002B-1B-8 self-contained staging control-plane constraint remains mandatory. A later,
 separately reviewed adapter PR is required before any real provisioning can occur.
+
+### Remediation (durable work items, strict validation, concurrency, eligibility)
+
+The initial B1-B9 draft executed simulation inline in the API process and trusted UI-only
+validation. It was reworked so that:
+
+- **The API only enqueues durable, committed work.** `queue_simulation` / `queue_teardown` create
+  a `StagingLabWorkItem` (safe logical values only) and move the lab into an explicit
+  `simulation_queued` / `teardown_queued` state, then return. A separate **worker consumer**
+  (`secp_worker.staging_lab.consumer`) claims exactly one committed queued item with a database
+  compare-and-swap, **reloads the authoritative lab/approval/plan-hash/version/organization/
+  ownership and lifecycle state**, refuses stale/mismatched/cross-org/drifted/unowned work, and
+  only then runs the fake executor and writes observations + completion. The API imports no
+  staging-lab worker/executor code and is **not** routed through the inline dispatcher; only the
+  worker may enter `simulating` / `tearing_down` or complete work.
+- **Strict backend allowlist validation.** All persisted labels are server-generated from the
+  immutable lab id (ownership label, display name); resource class, bootstrap-artifact profile,
+  profile, network intent, rollback policy, purpose, lifecycle, and work operation are closed
+  backend enums; the substrate is referenced only by UUID (the UI receives a server alias, never
+  raw target text); and the single optional caller string is validated against a strict
+  kebab-case slug allowlist that structurally excludes URLs, hosts, IPs, paths, ports, and
+  secret/credential/token references.
+- **Concurrency-safe lifecycle.** A `revision` column plus transactional compare-and-swap updates
+  make approval, queueing, worker claim, completion, and teardown fail closed under races; a
+  partial-unique index enforces at most one active work item per lab+operation, unique idempotency
+  keys make retries return the original item, and cross-organization association is refused.
+- **Explicit substrate eligibility.** A target is a staging substrate only when a target admin
+  (permission `staging_substrate:manage`, with no lab-creator endpoint) issues a durable
+  `StagingSubstrateEligibility` record binding organization, target, Proxmox plugin type, and the
+  `nested_proxmox` profile. The service and the compiler independently require eligibility; UI
+  filtering alone is insufficient.

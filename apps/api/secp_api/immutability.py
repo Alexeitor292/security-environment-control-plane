@@ -23,6 +23,8 @@ from secp_api.models import (
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
     StagingLab,
+    StagingLabWorkItem,
+    StagingSubstrateEligibility,
     TargetEvidenceRecord,
     TargetOnboarding,
     TargetPreflight,
@@ -178,7 +180,7 @@ _STAGING_LAB_PROTECTED = (
     "network_intent",
     "resource_class",
     "rollback_policy",
-    "bootstrap_artifact_profile_id",
+    "bootstrap_artifact_profile",
     "idempotency_key",
     "created_by",
 )
@@ -189,6 +191,27 @@ _STAGING_LAB_SET_ONCE = (
     "approved_at",
     "approved_plan_hash",
 )
+# StagingLabWorkItem: the work definition (identity + immutable plan binding + operation) is
+# immutable; only lifecycle (status/revision/timestamps/failure_reason) may change.
+_STAGING_WORK_PROTECTED = (
+    "organization_id",
+    "staging_lab_id",
+    "operation_kind",
+    "plan_hash",
+    "plan_version",
+    "idempotency_key",
+    "created_by",
+)
+# StagingSubstrateEligibility: issuance facts immutable; only revocation metadata is set once.
+_STAGING_ELIGIBILITY_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "plugin_type",
+    "allowed_profile",
+    "issued_by",
+    "issued_at",
+)
+_STAGING_ELIGIBILITY_SET_ONCE = ("revoked_by", "revoked_at")
 
 
 def _attr_changed(obj: object, attr: str) -> bool:
@@ -357,6 +380,32 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                 raise ImmutableResourceError(
                     f"StagingLab plan/approval fields are set-once; attempted to change {repeated}"
                 )
+        # StagingLabWorkItem (SECP-002B-1B-9): the work definition is immutable; only lifecycle
+        # (status/revision/timestamps/failure_reason) may change.
+        if isinstance(obj, StagingLabWorkItem):
+            changed = [a for a in _STAGING_WORK_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    f"StagingLabWorkItem definition is immutable; attempted to change {changed}"
+                )
+        # StagingSubstrateEligibility (SECP-002B-1B-9): issuance immutable; revocation set-once.
+        if isinstance(obj, StagingSubstrateEligibility):
+            changed = [a for a in _STAGING_ELIGIBILITY_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "StagingSubstrateEligibility issuance fields are immutable; "
+                    f"attempted to change {changed}"
+                )
+            repeated = [
+                a
+                for a in _STAGING_ELIGIBILITY_SET_ONCE
+                if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+            ]
+            if repeated:
+                raise ImmutableResourceError(
+                    "StagingSubstrateEligibility revocation metadata is set-once; "
+                    f"attempted to change {repeated}"
+                )
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
@@ -364,6 +413,10 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
     for obj in session.deleted:
         if isinstance(obj, StagingLab):
             raise ImmutableResourceError("StagingLab records cannot be deleted")
+        if isinstance(obj, StagingLabWorkItem):
+            raise ImmutableResourceError("StagingLabWorkItem records cannot be deleted")
+        if isinstance(obj, StagingSubstrateEligibility):
+            raise ImmutableResourceError("StagingSubstrateEligibility records cannot be deleted")
         if isinstance(obj, LiveReadAuthorization):
             raise ImmutableResourceError("LiveReadAuthorization records cannot be deleted")
         if isinstance(obj, TargetEvidenceRecord):

@@ -1,10 +1,10 @@
 """Declarative disposable staging-lab routes (SECP-002B-1B-9, control plane only, fake-only).
 
-The API creates a staging-lab desired state, compiles an immutable plan, drives approval, runs a
-clearly-labeled fake simulation (worker-dispatched), reports lifecycle state, and requests fake
-teardown. It NEVER imports worker/provider/runner/transport/secret/subprocess code, contacts no
-infrastructure, and creates no real target or live-read authorization. Every execution control is
-simulation-only — no infrastructure is created by this router.
+The API creates a staging-lab desired state, compiles an immutable plan, drives approval, and
+**enqueues durable work items** for simulation/teardown — it never executes them. It NEVER imports
+worker/provider/runner/transport/secret/subprocess code, contacts no infrastructure, and creates
+no real target or live-read authorization. Every execution control queues work only; a worker
+records completion. There is NO endpoint here to grant staging-substrate eligibility.
 """
 
 from __future__ import annotations
@@ -17,17 +17,32 @@ from sqlalchemy.orm import Session
 from secp_api.auth import Principal
 from secp_api.deps import current_principal, db_session
 from secp_api.schemas_staging_lab import (
+    EligibleSubstrateOut,
     StagingLabApprove,
     StagingLabCreate,
     StagingLabDecision,
     StagingLabOut,
+    StagingLabQueue,
+    StagingLabWorkItemOut,
 )
 from secp_api.services import staging_labs
 
 router = APIRouter(prefix="/api/v1", tags=["staging-labs"])
 
-# Every execution control in this PR is simulation-only. Surfaced to clients for display.
+# Every execution control in this PR queues fake work only — no infrastructure is created.
 SIMULATION_ONLY_NOTICE = "Simulation only — no infrastructure will be created."
+
+
+@router.get("/staging-labs/eligible-substrates", response_model=list[EligibleSubstrateOut])
+def list_eligible_substrates(
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> list[EligibleSubstrateOut]:
+    """Substrates the UI may offer: same-org, active, Proxmox, eligible, onboarded (aliases)."""
+    return [
+        EligibleSubstrateOut(id=row["id"], alias=row["alias"])
+        for row in staging_labs.list_eligible_substrates(session, principal)
+    ]
 
 
 @router.post("/staging-labs", response_model=StagingLabOut, status_code=201)
@@ -40,13 +55,10 @@ def create_staging_lab(
         session,
         principal,
         execution_target_id=body.execution_target_id,
-        display_name=body.display_name,
-        ownership_label=body.ownership_label,
-        profile=body.profile,
-        network_intent=body.network_intent,
         resource_class=body.resource_class,
         rollback_policy=body.rollback_policy,
-        bootstrap_artifact_profile_id=body.bootstrap_artifact_profile_id,
+        bootstrap_artifact_profile=body.bootstrap_artifact_profile,
+        logical_name=body.logical_name,
     )
     return StagingLabOut.model_validate(lab)
 
@@ -69,6 +81,18 @@ def get_staging_lab(
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     return StagingLabOut.model_validate(staging_labs.get_staging_lab(session, principal, lab_id))
+
+
+@router.get("/staging-labs/{lab_id}/work-items", response_model=list[StagingLabWorkItemOut])
+def list_work_items(
+    lab_id: uuid.UUID,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> list[StagingLabWorkItemOut]:
+    return [
+        StagingLabWorkItemOut.model_validate(item)
+        for item in staging_labs.list_work_items(session, principal, lab_id)
+    ]
 
 
 @router.post("/staging-labs/{lab_id}/plan", response_model=StagingLabOut)
@@ -99,7 +123,7 @@ def approve_staging_lab(
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
-    """Approve the exact reviewed plan. Grants permission to enter FAKE simulation only —
+    """Approve the exact reviewed plan. Grants permission to ENQUEUE fake simulation only —
     this is not a live-read authorization."""
     return StagingLabOut.model_validate(
         staging_labs.approve_staging_lab(
@@ -125,20 +149,30 @@ def reject_staging_lab(
 
 
 @router.post("/staging-labs/{lab_id}/simulate", response_model=StagingLabOut)
-def simulate_staging_lab(
+def queue_simulation(
     lab_id: uuid.UUID,
+    body: StagingLabQueue | None = None,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
-    """Run the labeled fake simulation. Simulation only — no infrastructure will be created."""
-    return StagingLabOut.model_validate(staging_labs.request_simulation(session, principal, lab_id))
+    """QUEUE a fake simulation. Simulation only — no infrastructure will be created. The lab
+    enters ``simulation_queued``; a worker records completion later."""
+    key = body.idempotency_key if body else None
+    return StagingLabOut.model_validate(
+        staging_labs.queue_simulation(session, principal, lab_id, idempotency_key=key)
+    )
 
 
 @router.post("/staging-labs/{lab_id}/teardown", response_model=StagingLabOut)
-def teardown_staging_lab(
+def queue_teardown(
     lab_id: uuid.UUID,
+    body: StagingLabQueue | None = None,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
-    """Request controlled FAKE teardown. Simulation only — no infrastructure exists to destroy."""
-    return StagingLabOut.model_validate(staging_labs.request_teardown(session, principal, lab_id))
+    """QUEUE a fake teardown. Simulation only — no infrastructure exists to destroy. The lab
+    enters ``teardown_queued``; a worker records completion later."""
+    key = body.idempotency_key if body else None
+    return StagingLabOut.model_validate(
+        staging_labs.queue_teardown(session, principal, lab_id, idempotency_key=key)
+    )

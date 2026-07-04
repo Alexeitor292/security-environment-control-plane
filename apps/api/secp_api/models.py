@@ -45,12 +45,16 @@ from secp_api.enums import (
     ProvisioningStatus,
     ReservationStatus,
     SnapshotStatus,
+    StagingBootstrapArtifactProfile,
     StagingLabProfile,
     StagingLabPurpose,
     StagingLabStatus,
     StagingNetworkIntent,
     StagingResourceClass,
     StagingRollbackPolicy,
+    StagingSubstrateEligibilityStatus,
+    StagingWorkOperation,
+    StagingWorkStatus,
     TargetStatus,
     ToolchainProfileStatus,
     WorkflowKind,
@@ -545,6 +549,9 @@ class ExecutionTarget(Base, TimestampMixin):
     staging_labs: Mapped[list[StagingLab]] = relationship(
         back_populates="target", cascade="all, delete-orphan"
     )
+    staging_substrate_eligibilities: Mapped[list[StagingSubstrateEligibility]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
 
 
 # --- Target onboarding + automated deployment contract (SECP-002B-1B-0) -------
@@ -819,13 +826,21 @@ class StagingLab(Base, TimestampMixin):
         default=StagingRollbackPolicy.revert_to_known_clean_checkpoint,
         nullable=False,
     )
-    # Opaque logical profile id for approved offline bootstrap artifacts — never a path/URL/hash.
-    bootstrap_artifact_profile_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    # Approved offline bootstrap-artifact profile — a closed backend catalog enum, never a
+    # caller-supplied artifact id/path/URL/checksum. Stored as its enum value.
+    bootstrap_artifact_profile: Mapped[StagingBootstrapArtifactProfile] = mapped_column(
+        EnumType(StagingBootstrapArtifactProfile, length=60),
+        default=StagingBootstrapArtifactProfile.nested_proxmox_offline_base,
+        nullable=False,
+    )
     status: Mapped[StagingLabStatus] = mapped_column(
         EnumType(StagingLabStatus, length=40),
         default=StagingLabStatus.draft,
         nullable=False,
     )
+    # Optimistic-concurrency revision. Every lifecycle mutation performs a compare-and-swap on
+    # (status, revision); a stale writer's conditional UPDATE affects zero rows and fails closed.
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Immutable desired-state plan (logical resources only) + version + hash. Set once at plan
     # generation; the plan cannot change after approval.
     plan_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -844,6 +859,9 @@ class StagingLab(Base, TimestampMixin):
     decision_reason: Mapped[str] = mapped_column(Text, default="")
 
     target: Mapped[ExecutionTarget] = relationship(back_populates="staging_labs")
+    work_items: Mapped[list[StagingLabWorkItem]] = relationship(
+        back_populates="staging_lab", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return (
@@ -856,6 +874,111 @@ class StagingLab(Base, TimestampMixin):
             f"plan_version={self.plan_version!r}, "
             f"plan_hash={self.plan_hash!r})"
         )
+
+
+class StagingLabWorkItem(Base, TimestampMixin):
+    """Durable, secret-free staging-lab work item (SECP-002B-1B-9).
+
+    The API commits a ``queued`` item and returns; only the worker claims and processes it. It
+    records only safe logical values (ids, immutable plan hash/version, operation kind,
+    idempotency key, lifecycle state, revision, timestamps, and a generic failure reason) and
+    NEVER an endpoint, host, IP, network, VMID, storage, certificate, token, credential, secret
+    ref, artifact path/URL/checksum, or any provider observation.
+    """
+
+    __tablename__ = "staging_lab_work_item"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_staging_work_idempotency_key"),
+        # At most ONE active (queued or claimed) work item per lab+operation (fail-closed).
+        Index(
+            "uq_staging_work_active",
+            "staging_lab_id",
+            "operation_kind",
+            unique=True,
+            sqlite_where=text("status in ('queued','claimed')"),
+            postgresql_where=text("status in ('queued','claimed')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    staging_lab_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("staging_lab.id"), nullable=False, index=True
+    )
+    operation_kind: Mapped[StagingWorkOperation] = mapped_column(
+        EnumType(StagingWorkOperation, length=40), nullable=False
+    )
+    plan_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[StagingWorkStatus] = mapped_column(
+        EnumType(StagingWorkStatus, length=40),
+        default=StagingWorkStatus.queued,
+        nullable=False,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_reason: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    staging_lab: Mapped[StagingLab] = relationship(back_populates="work_items")
+
+    def __repr__(self) -> str:
+        return (
+            "StagingLabWorkItem("
+            f"id={self.id!s}, staging_lab_id={self.staging_lab_id!s}, "
+            f"operation_kind={getattr(self.operation_kind, 'value', self.operation_kind)!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"plan_version={self.plan_version!r})"
+        )
+
+
+class StagingSubstrateEligibility(Base, TimestampMixin):
+    """Durable marker: a target is approved as a disposable staging substrate (SECP-002B-1B-9).
+
+    A target does NOT become a staging substrate merely by being active with an active onboarding;
+    a target admin must additionally issue this eligibility record. Secret-free.
+    """
+
+    __tablename__ = "staging_substrate_eligibility"
+    __table_args__ = (
+        Index(
+            "uq_staging_substrate_active",
+            "execution_target_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    plugin_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    allowed_profile: Mapped[StagingLabProfile] = mapped_column(
+        EnumType(StagingLabProfile, length=60), nullable=False
+    )
+    status: Mapped[StagingSubstrateEligibilityStatus] = mapped_column(
+        EnumType(StagingSubstrateEligibilityStatus, length=40),
+        default=StagingSubstrateEligibilityStatus.active,
+        nullable=False,
+    )
+    issued_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    target: Mapped[ExecutionTarget] = relationship(back_populates="staging_substrate_eligibilities")
 
 
 class ProviderInventorySnapshot(Base, TimestampMixin):

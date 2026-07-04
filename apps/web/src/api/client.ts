@@ -11,6 +11,7 @@ import type {
   Onboarding,
   OnboardingCreate,
   PluginInfo,
+  EligibleSubstrate,
   Preflight,
   Principal,
   ProviderCapabilities,
@@ -169,7 +170,9 @@ export const api = {
   retireOnboarding: (id: string) =>
     request<Onboarding>("POST", `/api/v1/onboarding/${id}/retire`),
 
-  // Declarative disposable staging lab (SECP-002B-1B-9, fake simulation only).
+  // Declarative disposable staging lab (SECP-002B-1B-9, fake simulation only; queue-only).
+  listEligibleSubstrates: () =>
+    request<EligibleSubstrate[]>("GET", "/api/v1/staging-labs/eligible-substrates"),
   listStagingLabs: () => request<StagingLab[]>("GET", "/api/v1/staging-labs"),
   createStagingLab: (body: StagingLabCreate) =>
     request<StagingLab>("POST", "/api/v1/staging-labs", body),
@@ -185,8 +188,9 @@ export const api = {
     }),
   rejectStagingLab: (id: string, reason: string) =>
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/reject`, { reason }),
-  simulateStagingLab: (id: string) =>
+  // These QUEUE fake work only; a worker records completion later.
+  queueStagingLabSimulation: (id: string) =>
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/simulate`),
-  teardownStagingLab: (id: string) =>
+  queueStagingLabTeardown: (id: string) =>
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/teardown`),
 };

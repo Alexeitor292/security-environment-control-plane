@@ -3,10 +3,11 @@
 // Kept separate from the React component so it is unit-testable and free of DOM concerns.
 // Provider-neutral; contains NO real infrastructure values (no endpoint, host, IP, bridge/VNet
 // name, VMID, storage id, certificate, credential, token, secret ref, or artifact URL/checksum).
-// The server re-validates, re-compiles, and re-hashes everything; this only guides the operator.
+// The server owns all labels, re-validates every input, and only a worker records completion.
 
 import type {
-  ExecutionTarget,
+  EligibleSubstrate,
+  StagingBootstrapArtifactProfile,
   StagingLab,
   StagingLabStatus,
   StagingResourceClass,
@@ -16,6 +17,10 @@ import type {
 /** Mandatory label shown on every execution control in this PR. */
 export const SIMULATION_ONLY_LABEL =
   "Simulation only — no infrastructure will be created.";
+
+/** Shown after queueing: the worker, not the API, performs and completes the simulation. */
+export const QUEUED_NOTICE =
+  "Simulation queued — a worker will process it. No infrastructure will be created.";
 
 /** Fixed safety constraints shown on the review screen (mirrors the server contract). */
 export const SAFETY_CONSTRAINTS: string[] = [
@@ -48,6 +53,15 @@ export const RESOURCE_CLASSES: Option<StagingResourceClass>[] = [
   },
 ];
 
+/** Approved offline bootstrap-artifact profiles — a closed backend catalog, never free text. */
+export const BOOTSTRAP_PROFILES: Option<StagingBootstrapArtifactProfile>[] = [
+  {
+    value: "nested_proxmox_offline_base",
+    label: "Nested Proxmox offline base",
+    help: "Operator-approved, pre-staged offline artifact set. No post-isolation internet.",
+  },
+];
+
 export const ROLLBACK_POLICIES: Option<StagingRollbackPolicy>[] = [
   {
     value: "revert_to_known_clean_checkpoint",
@@ -61,12 +75,13 @@ export const ROLLBACK_POLICIES: Option<StagingRollbackPolicy>[] = [
   },
 ];
 
-/** Ordered lifecycle steps for the progress UI. */
+/** Ordered lifecycle steps for the progress UI (explicit queued states). */
 export const LIFECYCLE_STEPS: { status: StagingLabStatus; label: string }[] = [
   { status: "draft", label: "Draft" },
   { status: "planned", label: "Plan generated" },
   { status: "awaiting_approval", label: "Awaiting approval" },
   { status: "approved", label: "Approved (sim only)" },
+  { status: "simulation_queued", label: "Simulation queued" },
   { status: "simulated_ready", label: "Simulated ready" },
   { status: "destroyed", label: "Torn down" },
 ];
@@ -79,41 +94,48 @@ export function isFailed(status: StagingLabStatus): boolean {
   return status === "failed";
 }
 
+/** True while a worker still owes completion — the UI must not present results as ready. */
+export function isQueuedOrRunning(status: StagingLabStatus): boolean {
+  return (
+    status === "simulation_queued" ||
+    status === "simulating" ||
+    status === "teardown_queued" ||
+    status === "tearing_down"
+  );
+}
+
 export function planHashPrefix(hash: string | null | undefined): string {
   if (!hash) return "pending";
   return hash.replace(/^sha256:/, "").slice(0, 12);
 }
 
-/** Approved substrate targets a lab may be built on (safe display names only). */
-export function substrateOptions(targets: ExecutionTarget[]): { id: string; label: string }[] {
-  return targets
-    .filter((t) => t.status === "active")
-    .map((t) => ({ id: t.id, label: t.display_name }));
+export function substrateOptions(
+  substrates: EligibleSubstrate[],
+): { id: string; label: string }[] {
+  return substrates.map((s) => ({ id: s.id, label: s.alias }));
 }
 
 export interface StagingLabDraft {
   executionTargetId: string;
-  displayName: string;
-  ownershipLabel: string;
+  logicalName: string;
   resourceClass: StagingResourceClass;
+  bootstrapArtifactProfile: StagingBootstrapArtifactProfile;
   rollbackPolicy: StagingRollbackPolicy;
-  bootstrapArtifactProfileId: string;
 }
 
 export function emptyDraft(): StagingLabDraft {
   return {
     executionTargetId: "",
-    displayName: "",
-    ownershipLabel: "",
+    logicalName: "",
     resourceClass: "small_lab",
+    bootstrapArtifactProfile: "nested_proxmox_offline_base",
     rollbackPolicy: "revert_to_known_clean_checkpoint",
-    bootstrapArtifactProfileId: "",
   };
 }
 
-const LABEL_RE = /^[a-z0-9][a-z0-9-]{1,118}[a-z0-9]$/;
-// A bootstrap-artifact PROFILE id is an opaque logical label — never a path/URL/checksum.
-const PROFILE_ID_RE = /^[a-z0-9][a-z0-9-]{1,118}[a-z0-9]$/;
+// The optional logical name is the ONLY free-text field; it must be a strict kebab-case slug.
+// (The server re-validates authoritatively and rejects anything else.)
+const LOGICAL_NAME_RE = /^[a-z0-9]([a-z0-9-]{1,38}[a-z0-9])$/;
 
 export interface DraftValidation {
   ok: boolean;
@@ -122,14 +144,10 @@ export interface DraftValidation {
 
 export function validateDraft(draft: StagingLabDraft): DraftValidation {
   const errors: string[] = [];
-  if (!draft.executionTargetId) errors.push("Select an approved substrate target.");
-  if (draft.displayName.trim().length === 0) errors.push("A display name is required.");
-  if (!LABEL_RE.test(draft.ownershipLabel.trim())) {
-    errors.push("Ownership label must be a lowercase kebab-case identity (e.g. secp-lab-alpha).");
-  }
-  if (!PROFILE_ID_RE.test(draft.bootstrapArtifactProfileId.trim())) {
+  if (!draft.executionTargetId) errors.push("Select an eligible substrate.");
+  if (draft.logicalName.trim().length > 0 && !LOGICAL_NAME_RE.test(draft.logicalName.trim())) {
     errors.push(
-      "Bootstrap artifact profile must be an approved logical id (no path, URL, or checksum).",
+      "Optional name must be a short lowercase kebab-case slug (a-z, 0-9, '-'), or left blank.",
     );
   }
   return { ok: errors.length === 0, errors };
@@ -151,16 +169,12 @@ export function canApprove(lab: StagingLab | null): boolean {
   return lab?.status === "awaiting_approval";
 }
 
-export function canSimulate(lab: StagingLab | null): boolean {
+export function canQueueSimulation(lab: StagingLab | null): boolean {
   return lab?.status === "approved" || lab?.status === "simulated_ready";
 }
 
-export function canTeardown(lab: StagingLab | null): boolean {
-  return (
-    lab?.status === "simulated_ready" ||
-    lab?.status === "approved" ||
-    lab?.status === "failed"
-  );
+export function canQueueTeardown(lab: StagingLab | null): boolean {
+  return lab?.status === "simulated_ready" || lab?.status === "approved";
 }
 
 /** Extract the logical resource kinds from a compiled plan for display (safe strings only). */
@@ -169,12 +183,16 @@ export function planResourceKinds(lab: StagingLab | null): string[] {
   return resources.map((r) => String(r.kind ?? "")).filter((k) => k.length > 0);
 }
 
-/** Simulated observed resources (fake) for display. */
+/**
+ * Simulated observed resources (fake) for display — ONLY when the worker has recorded
+ * completion (status simulated_ready or destroyed). Never presented while queued/running.
+ */
 export function observedResources(
   lab: StagingLab | null,
 ): { kind: string; owner: string; phase: string }[] {
+  if (!lab || (lab.status !== "simulated_ready" && lab.status !== "destroyed")) return [];
   const resources =
-    (lab?.simulated_observed_state?.resources as
+    (lab.simulated_observed_state?.resources as
       | { kind?: string; owner?: string; observed_phase?: string }[]
       | undefined) ?? [];
   return resources.map((r) => ({
@@ -189,8 +207,12 @@ export function rollbackPosture(lab: StagingLab | null): string {
   return lab.rollback_policy;
 }
 
-export function teardownStatusLabel(status: StagingLabStatus): string {
-  if (status === "tearing_down") return "Teardown in progress (simulated)";
+export function statusLabel(status: StagingLabStatus): string {
+  if (status === "simulation_queued") return "Simulation queued (worker will process)";
+  if (status === "simulating") return "Simulating (worker running)";
+  if (status === "teardown_queued") return "Teardown queued (worker will process)";
+  if (status === "tearing_down") return "Teardown in progress (worker running)";
   if (status === "destroyed") return "Torn down (simulated)";
-  return "Not torn down";
+  if (status === "simulated_ready") return "Simulated ready";
+  return status;
 }

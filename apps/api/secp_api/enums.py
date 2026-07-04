@@ -268,6 +268,44 @@ class StagingResourceClass(str, Enum):
     medium_lab = "medium_lab"
 
 
+class StagingBootstrapArtifactProfile(str, Enum):
+    """Backend catalog of approved offline bootstrap-artifact profiles (SECP-002B-1B-9).
+
+    A closed server-owned enum — never a caller-supplied artifact id, path, URL, or checksum.
+    Each value names an operator-approved, pre-staged offline artifact set resolved out of band.
+    """
+
+    nested_proxmox_offline_base = "nested_proxmox_offline_base"
+
+
+class StagingWorkOperation(str, Enum):
+    """Durable staging-lab work-item operation kind (SECP-002B-1B-9, fake-only)."""
+
+    simulate_provision = "simulate_provision"
+    simulate_teardown = "simulate_teardown"
+
+
+class StagingWorkStatus(str, Enum):
+    """Durable staging-lab work-item lifecycle (SECP-002B-1B-9).
+
+    The API may only create ``queued`` items. Only the worker may move an item to ``claimed`` and
+    then ``completed`` / ``failed`` / ``refused``.
+    """
+
+    queued = "queued"
+    claimed = "claimed"
+    completed = "completed"
+    failed = "failed"
+    refused = "refused"
+
+
+class StagingSubstrateEligibilityStatus(str, Enum):
+    """Durable staging-substrate eligibility lifecycle (SECP-002B-1B-9)."""
+
+    active = "active"
+    revoked = "revoked"
+
+
 class StagingRollbackPolicy(str, Enum):
     """How a staging lab is returned to a known-clean state (SECP-002B-1B-9)."""
 
@@ -287,11 +325,13 @@ class StagingLabStatus(str, Enum):
     planned = "planned"
     awaiting_approval = "awaiting_approval"
     approved = "approved"
+    simulation_queued = "simulation_queued"
     simulating = "simulating"
     simulated_ready = "simulated_ready"
-    failed = "failed"
+    teardown_queued = "teardown_queued"
     tearing_down = "tearing_down"
     destroyed = "destroyed"
+    failed = "failed"
 
 
 class ProvisioningApplicationMode(str, Enum):
@@ -347,6 +387,9 @@ class Permission(str, Enum):
     # SECP-002B-1B-9 — declarative disposable staging-lab workflow (fake-only).
     staging_lab_manage = "staging_lab:manage"
     staging_lab_approve = "staging_lab:approve"
+    # Granting a target staging-substrate eligibility is a target-admin action, NOT a
+    # lab-creator action — deliberately separate from staging_lab:manage.
+    staging_substrate_manage = "staging_substrate:manage"
 
 
 class AuditAction(str, Enum):
@@ -432,9 +475,18 @@ class AuditAction(str, Enum):
     staging_lab_submitted = "staging_lab.submitted"
     staging_lab_approved = "staging_lab.approved"
     staging_lab_rejected = "staging_lab.rejected"
+    staging_lab_simulation_queued = "staging_lab.simulation_queued"
     staging_lab_simulation_started = "staging_lab.simulation_started"
     staging_lab_simulated_ready = "staging_lab.simulated_ready"
     staging_lab_simulation_failed = "staging_lab.simulation_failed"
+    staging_lab_teardown_queued = "staging_lab.teardown_queued"
     staging_lab_teardown_started = "staging_lab.teardown_started"
     staging_lab_destroyed = "staging_lab.destroyed"
     staging_lab_refused = "staging_lab.refused"
+    # Durable work items + substrate eligibility (SECP-002B-1B-9).
+    staging_work_claimed = "staging_lab.work_claimed"
+    staging_work_completed = "staging_lab.work_completed"
+    staging_work_failed = "staging_lab.work_failed"
+    staging_work_refused = "staging_lab.work_refused"
+    staging_substrate_eligibility_granted = "staging_lab.substrate_eligibility_granted"
+    staging_substrate_eligibility_revoked = "staging_lab.substrate_eligibility_revoked"

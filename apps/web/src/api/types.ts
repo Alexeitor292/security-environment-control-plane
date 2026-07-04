@@ -332,15 +332,18 @@ export type StagingLabStatus =
   | "planned"
   | "awaiting_approval"
   | "approved"
+  | "simulation_queued"
   | "simulating"
   | "simulated_ready"
-  | "failed"
+  | "teardown_queued"
   | "tearing_down"
-  | "destroyed";
+  | "destroyed"
+  | "failed";
 
 export type StagingLabProfile = "nested_proxmox";
 export type StagingNetworkIntent = "host_only_no_uplink";
 export type StagingResourceClass = "small_lab" | "medium_lab";
+export type StagingBootstrapArtifactProfile = "nested_proxmox_offline_base";
 export type StagingRollbackPolicy =
   | "revert_to_known_clean_checkpoint"
   | "destroy_and_rebuild";
@@ -356,8 +359,9 @@ export interface StagingLab {
   network_intent: string;
   resource_class: string;
   rollback_policy: string;
-  bootstrap_artifact_profile_id: string;
+  bootstrap_artifact_profile: string;
   status: StagingLabStatus;
+  revision: number;
   plan_version: number;
   plan_hash: string;
   desired_state: Record<string, unknown> | null;
@@ -371,11 +375,13 @@ export interface StagingLab {
 
 export interface StagingLabCreate {
   execution_target_id: string;
-  display_name: string;
-  ownership_label: string;
-  profile?: StagingLabProfile;
-  network_intent?: StagingNetworkIntent;
   resource_class?: StagingResourceClass;
+  bootstrap_artifact_profile?: StagingBootstrapArtifactProfile;
   rollback_policy?: StagingRollbackPolicy;
-  bootstrap_artifact_profile_id: string;
+  logical_name?: string | null;
+}
+
+export interface EligibleSubstrate {
+  id: string;
+  alias: string;
 }

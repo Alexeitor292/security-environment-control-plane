@@ -62,14 +62,6 @@ class WorkflowDispatcher(Protocol):
         created_by: uuid.UUID | None,
     ) -> TargetPreflight: ...
 
-    def dispatch_staging_lab_simulation(
-        self, session: Session, staging_lab_id: uuid.UUID, *, created_by: uuid.UUID | None
-    ) -> object: ...
-
-    def dispatch_staging_lab_teardown(
-        self, session: Session, staging_lab_id: uuid.UUID, *, created_by: uuid.UUID | None
-    ) -> object: ...
-
 
 class InlineDispatcher:
     """Runs orchestration synchronously in the caller's session/transaction."""
@@ -126,20 +118,6 @@ class InlineDispatcher:
             collector_identity=collector_identity,
             created_by=created_by,
         )
-
-    def dispatch_staging_lab_simulation(
-        self, session: Session, staging_lab_id: uuid.UUID, *, created_by: uuid.UUID | None
-    ) -> object:
-        from secp_worker.staging_lab.orchestration import run_staging_lab_simulation
-
-        return run_staging_lab_simulation(session, staging_lab_id, created_by=created_by)
-
-    def dispatch_staging_lab_teardown(
-        self, session: Session, staging_lab_id: uuid.UUID, *, created_by: uuid.UUID | None
-    ) -> object:
-        from secp_worker.staging_lab.orchestration import run_staging_lab_teardown
-
-        return run_staging_lab_teardown(session, staging_lab_id, created_by=created_by)
 
 
 # --- Temporal path ------------------------------------------------------------
@@ -358,28 +336,6 @@ class TemporalDispatcher:
             "simulated preflight orchestration is not supported via the Temporal dispatcher "
             "in SECP-002B-1B-1; use the inline dispatcher (SECP_WORKFLOW_DISPATCH_MODE=inline) "
             "for dev/test, or wait for a future durable B1-B implementation"
-        )
-
-    def dispatch_staging_lab_simulation(
-        self, session: Session, staging_lab_id: uuid.UUID, *, created_by: uuid.UUID | None
-    ) -> object:
-        from secp_api.errors import DomainError
-
-        raise DomainError(
-            "staging-lab simulation is not supported via the Temporal dispatcher in "
-            "SECP-002B-1B-9; use the inline dispatcher (SECP_WORKFLOW_DISPATCH_MODE=inline) "
-            "for dev/test"
-        )
-
-    def dispatch_staging_lab_teardown(
-        self, session: Session, staging_lab_id: uuid.UUID, *, created_by: uuid.UUID | None
-    ) -> object:
-        from secp_api.errors import DomainError
-
-        raise DomainError(
-            "staging-lab teardown is not supported via the Temporal dispatcher in "
-            "SECP-002B-1B-9; use the inline dispatcher (SECP_WORKFLOW_DISPATCH_MODE=inline) "
-            "for dev/test"
         )
 
 

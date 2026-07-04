@@ -35,6 +35,8 @@ EXPECTED_TABLES = {
     "target_preflight",
     "live_read_authorization",
     "staging_lab",
+    "staging_lab_work_item",
+    "staging_substrate_eligibility",
     "environment_network",
     "environment_node",
     "environment_topology_edge",

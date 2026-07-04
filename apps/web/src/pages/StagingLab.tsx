@@ -1,10 +1,12 @@
 import { useState } from "react";
 
 import { api } from "../api/client";
-import type { ExecutionTarget, StagingLab as StagingLabModel } from "../api/types";
+import type { EligibleSubstrate, StagingLab as StagingLabModel } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
 import { useAsync } from "../hooks";
 import {
+  BOOTSTRAP_PROFILES,
+  QUEUED_NOTICE,
   RESOURCE_CLASSES,
   ROLLBACK_POLICIES,
   SAFETY_CONSTRAINTS,
@@ -13,16 +15,17 @@ import {
   canApprove,
   canCreate,
   canPlan,
-  canSimulate,
+  canQueueSimulation,
+  canQueueTeardown,
   canSubmit,
-  canTeardown,
   emptyDraft,
+  isQueuedOrRunning,
   observedResources,
   planHashPrefix,
   planResourceKinds,
   rollbackPosture,
+  statusLabel,
   substrateOptions,
-  teardownStatusLabel,
   validateDraft,
 } from "./staging-lab";
 
@@ -35,16 +38,16 @@ function SimulationBanner() {
 }
 
 function CreateForm({
-  targets,
+  substrates,
   onCreated,
 }: {
-  targets: ExecutionTarget[];
+  substrates: EligibleSubstrate[];
   onCreated: (lab: StagingLabModel) => void;
 }) {
   const [draft, setDraft] = useState<StagingLabDraft>(emptyDraft());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const options = substrateOptions(targets);
+  const options = substrateOptions(substrates);
   const validation = validateDraft(draft);
 
   function set<K extends keyof StagingLabDraft>(key: K, value: StagingLabDraft[K]) {
@@ -57,11 +60,10 @@ function CreateForm({
     try {
       const lab = await api.createStagingLab({
         execution_target_id: draft.executionTargetId,
-        display_name: draft.displayName.trim(),
-        ownership_label: draft.ownershipLabel.trim(),
         resource_class: draft.resourceClass,
+        bootstrap_artifact_profile: draft.bootstrapArtifactProfile,
         rollback_policy: draft.rollbackPolicy,
-        bootstrap_artifact_profile_id: draft.bootstrapArtifactProfileId.trim(),
+        logical_name: draft.logicalName.trim() || null,
       });
       onCreated(lab);
       setDraft(emptyDraft());
@@ -77,12 +79,12 @@ function CreateForm({
       <h2>Create Disposable Staging Lab</h2>
       <SimulationBanner />
       <label>
-        Approved substrate target
+        Eligible substrate (server alias)
         <select
           value={draft.executionTargetId}
           onChange={(e) => set("executionTargetId", e.target.value)}
         >
-          <option value="">Select an approved substrate…</option>
+          <option value="">Select an eligible substrate…</option>
           {options.map((o) => (
             <option key={o.id} value={o.id}>
               {o.label}
@@ -91,19 +93,11 @@ function CreateForm({
         </select>
       </label>
       <label>
-        Lab display name
+        Optional logical name (kebab-case; server owns the identity)
         <input
-          value={draft.displayName}
-          onChange={(e) => set("displayName", e.target.value)}
-          placeholder="Alpha staging lab"
-        />
-      </label>
-      <label>
-        Ownership label (immutable lab identity)
-        <input
-          value={draft.ownershipLabel}
-          onChange={(e) => set("ownershipLabel", e.target.value)}
-          placeholder="secp-lab-alpha"
+          value={draft.logicalName}
+          onChange={(e) => set("logicalName", e.target.value)}
+          placeholder="alpha"
         />
       </label>
       <label>
@@ -121,11 +115,21 @@ function CreateForm({
       </label>
       <label>
         Approved bootstrap-artifact profile
-        <input
-          value={draft.bootstrapArtifactProfileId}
-          onChange={(e) => set("bootstrapArtifactProfileId", e.target.value)}
-          placeholder="approved-offline-profile-a"
-        />
+        <select
+          value={draft.bootstrapArtifactProfile}
+          onChange={(e) =>
+            set(
+              "bootstrapArtifactProfile",
+              e.target.value as StagingLabDraft["bootstrapArtifactProfile"],
+            )
+          }
+        >
+          {BOOTSTRAP_PROFILES.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
       </label>
       <label>
         Rollback policy
@@ -184,6 +188,11 @@ function LabDetail({ lab, onChanged }: { lab: StagingLabModel; onChanged: () => 
         <StatusBadge state={lab.status} />
       </header>
       <SimulationBanner />
+      {isQueuedOrRunning(lab.status) && (
+        <div className="dev-banner" role="status">
+          {QUEUED_NOTICE}
+        </div>
+      )}
 
       <dl className="kv">
         <dt>Ownership identity</dt>
@@ -192,10 +201,10 @@ function LabDetail({ lab, onChanged }: { lab: StagingLabModel; onChanged: () => 
         <dd className="mono">{planHashPrefix(lab.plan_hash)}</dd>
         <dt>Plan version</dt>
         <dd>{lab.plan_version}</dd>
+        <dt>Lifecycle</dt>
+        <dd>{statusLabel(lab.status)}</dd>
         <dt>Rollback posture</dt>
         <dd>{rollbackPosture(lab)}</dd>
-        <dt>Teardown status</dt>
-        <dd>{teardownStatusLabel(lab.status)}</dd>
       </dl>
 
       {planKinds.length > 0 && (
@@ -217,9 +226,9 @@ function LabDetail({ lab, onChanged }: { lab: StagingLabModel; onChanged: () => 
         </div>
       )}
 
-      {observed.length > 0 && (
+      {observed.length > 0 ? (
         <div>
-          <h4>Simulated observations (fake)</h4>
+          <h4>Simulated observations (fake — worker-recorded)</h4>
           <ul>
             {observed.map((r) => (
               <li key={r.kind} className="mono">
@@ -228,6 +237,10 @@ function LabDetail({ lab, onChanged }: { lab: StagingLabModel; onChanged: () => 
             ))}
           </ul>
         </div>
+      ) : (
+        isQueuedOrRunning(lab.status) && (
+          <p className="muted">Observations appear once the worker records completion.</p>
+        )
       )}
 
       {error && <div className="error">{error}</div>}
@@ -249,18 +262,18 @@ function LabDetail({ lab, onChanged }: { lab: StagingLabModel; onChanged: () => 
           Approve (sim only)
         </button>
         <button
-          disabled={busy || !canSimulate(lab)}
-          onClick={() => run(() => api.simulateStagingLab(lab.id))}
+          disabled={busy || !canQueueSimulation(lab)}
+          onClick={() => run(() => api.queueStagingLabSimulation(lab.id))}
           title={SIMULATION_ONLY_LABEL}
         >
-          Simulate provisioning
+          Simulate Provisioning (queue)
         </button>
         <button
-          disabled={busy || !canTeardown(lab)}
-          onClick={() => run(() => api.teardownStagingLab(lab.id))}
+          disabled={busy || !canQueueTeardown(lab)}
+          onClick={() => run(() => api.queueStagingLabTeardown(lab.id))}
           title={SIMULATION_ONLY_LABEL}
         >
-          Simulate teardown
+          Simulate Teardown (queue)
         </button>
       </div>
     </section>
@@ -268,7 +281,7 @@ function LabDetail({ lab, onChanged }: { lab: StagingLabModel; onChanged: () => 
 }
 
 export function StagingLab() {
-  const targets = useAsync(() => api.listTargets(), []);
+  const substrates = useAsync(() => api.listEligibleSubstrates(), []);
   const labs = useAsync(() => api.listStagingLabs(), []);
 
   function reloadAll() {
@@ -279,10 +292,10 @@ export function StagingLab() {
     <div className="page">
       <h1>Disposable Staging Labs</h1>
       <p className="muted">
-        Define a disposable read-only staging lab, generate an immutable plan, approve it, and run
-        a labeled fake simulation. {SIMULATION_ONLY_LABEL}
+        Define a disposable read-only staging lab, generate an immutable plan, approve it, and
+        QUEUE a labeled fake simulation for a worker to process. {SIMULATION_ONLY_LABEL}
       </p>
-      <CreateForm targets={targets.data ?? []} onCreated={reloadAll} />
+      <CreateForm substrates={substrates.data ?? []} onCreated={reloadAll} />
       {labs.loading && <div>Loading…</div>}
       {labs.error && <div className="error">{labs.error}</div>}
       {(labs.data ?? []).map((lab) => (

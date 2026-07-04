@@ -1,8 +1,8 @@
 """SECP-002B-1B-9 — provider-neutral staging-lab compiler tests (fake-only, no infrastructure).
 
 Covers every allowed and rejected spec, deterministic immutable plan generation + hashing, the
-required logical resources with ownership labeling, and the absence of any real infrastructure or
-secret value in the compiled plan.
+required logical resources with ownership labeling, independent substrate-eligibility
+enforcement, and the absence of any real infrastructure or secret value in the compiled plan.
 """
 
 from __future__ import annotations
@@ -11,8 +11,7 @@ import json
 
 import pytest
 from secp_api.enums import (
-    StagingLabProfile,
-    StagingLabPurpose,
+    StagingBootstrapArtifactProfile,
     StagingNetworkIntent,
     StagingResourceClass,
     StagingRollbackPolicy,
@@ -35,8 +34,8 @@ from secp_api.staging_lab import (
 def _spec(**over) -> StagingLabSpec:
     fields = dict(
         ownership_label="secp-lab-alpha",
-        bootstrap_artifact_profile_id="approved-offline-profile-a",
         substrate_approved=True,
+        substrate_eligible=True,
     )
     fields.update(over)
     return StagingLabSpec(**fields)
@@ -53,7 +52,6 @@ def test_valid_spec_compiles_to_the_required_logical_resources():
         RESOURCE_CHECKPOINT,
         RESOURCE_TEARDOWN,
     }
-    # Exactly one target-facing network, one nested target, one connection policy.
     counts = {k: sum(1 for r in plan["resources"] if r["kind"] == k) for k in kinds}
     assert counts[RESOURCE_ISOLATED_NETWORK] == 1
     assert counts[RESOURCE_NESTED_TARGET] == 1
@@ -102,6 +100,7 @@ def test_plan_declares_no_infrastructure_and_offline_bootstrap():
     assert plan["simulation_only"] is True
     assert plan["bootstrap"]["post_isolation_internet_dependency"] == "forbidden"
     assert plan["bootstrap"]["source"] == "operator_approved_prestaged_offline_artifacts"
+    assert plan["bootstrap_artifact_profile"] == "nested_proxmox_offline_base"
 
 
 def test_plan_is_deterministic_and_hash_stable():
@@ -113,14 +112,15 @@ def test_plan_is_deterministic_and_hash_stable():
 
 
 def test_different_ownership_label_changes_the_plan_hash():
-    a = compile_staging_plan(_spec(ownership_label="lab-a"))
-    b = compile_staging_plan(_spec(ownership_label="lab-b"))
+    a = compile_staging_plan(_spec(ownership_label="secp-lab-a"))
+    b = compile_staging_plan(_spec(ownership_label="secp-lab-b"))
     assert staging_plan_hash(a) != staging_plan_hash(b)
 
 
 @pytest.mark.parametrize(
     ("over", "reason"),
     [
+        (dict(substrate_eligible=False), "substrate_not_eligible"),
         (dict(substrate_approved=False), "unapproved_substrate"),
         (dict(self_contained_control_plane=False), "production_control_plane_reuse_rejected"),
         (
@@ -135,12 +135,8 @@ def test_different_ownership_label_changes_the_plan_hash():
         (dict(target_facing_connection_count=2), "target_facing_connection_count_invalid"),
         (dict(standing_authorization=True), "standing_authorization_rejected"),
         (dict(ownership_label="  "), "ownership_label_missing"),
-        (dict(bootstrap_artifact_profile_id=""), "bootstrap_artifact_profile_missing"),
-        (
-            dict(bootstrap_artifact_profile_id="https://example/iso"),
-            "bootstrap_artifact_profile_invalid",
-        ),
-        (dict(bootstrap_artifact_profile_id="path/to/iso"), "bootstrap_artifact_profile_invalid"),
+        (dict(ownership_label="Bad Label!"), "ownership_label_invalid"),
+        (dict(ownership_label="secp lab spaces"), "ownership_label_invalid"),
     ],
 )
 def test_rejections_fail_closed_with_reason_code(over, reason):
@@ -153,15 +149,12 @@ def test_plan_contains_no_real_infrastructure_or_secret_tokens():
     plan = compile_staging_plan(
         _spec(
             ownership_label="secp-lab-alpha",
-            bootstrap_artifact_profile_id="approved-offline-profile-a",
             resource_class=StagingResourceClass.medium_lab,
-            profile=StagingLabProfile.nested_proxmox,
-            purpose=StagingLabPurpose.disposable_readonly_staging,
+            bootstrap_artifact_profile=StagingBootstrapArtifactProfile.nested_proxmox_offline_base,
             rollback_policy=StagingRollbackPolicy.destroy_and_rebuild,
         )
     )
-    blob = json.dumps(plan)
-    # No endpoint/URL/port/secret/credential-ish content in a purely logical plan.
+    blob = json.dumps(plan).lower()
     for forbidden in (
         "http://",
         "https://",
@@ -172,4 +165,4 @@ def test_plan_contains_no_real_infrastructure_or_secret_tokens():
         "credential",
         "@pam",
     ):
-        assert forbidden not in blob.lower()
+        assert forbidden not in blob

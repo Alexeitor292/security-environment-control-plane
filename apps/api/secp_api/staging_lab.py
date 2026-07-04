@@ -16,9 +16,11 @@ required for any real provisioning; a staging-lab plan approval is NOT a
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from secp_api.enums import (
+    StagingBootstrapArtifactProfile,
     StagingLabProfile,
     StagingLabPurpose,
     StagingNetworkIntent,
@@ -28,6 +30,10 @@ from secp_api.enums import (
 
 # The plan-shape/contract version. A change here changes every plan hash by construction.
 STAGING_LAB_PLAN_CONTRACT_VERSION = "secp-002b-1b-9/plan/v1"
+
+# Ownership labels are server-generated and must match this strict allowlist (kebab-case slug),
+# never free text. The compiler re-checks it as defense in depth.
+OWNERSHIP_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{1,60}[a-z0-9])$")
 
 # The three mandatory self-contained control-plane components (SECP-002B-1B-8).
 STAGING_CONTROL_PLANE_COMPONENTS = ("staging_api", "staging_database", "staging_worker")
@@ -83,10 +89,14 @@ class StagingLabSpec:
     network_intent: StagingNetworkIntent = StagingNetworkIntent.host_only_no_uplink
     resource_class: StagingResourceClass = StagingResourceClass.small_lab
     rollback_policy: StagingRollbackPolicy = StagingRollbackPolicy.revert_to_known_clean_checkpoint
-    bootstrap_artifact_profile_id: str = ""
+    bootstrap_artifact_profile: StagingBootstrapArtifactProfile = (
+        StagingBootstrapArtifactProfile.nested_proxmox_offline_base
+    )
     # Blast-radius / self-containment intent flags (SECP-002B-1B-8 constraints).
     self_contained_control_plane: bool = True
+    # Substrate gates: active onboarding AND an explicit staging-substrate eligibility record.
     substrate_approved: bool = False
+    substrate_eligible: bool = False
     nested_target_count: int = 1
     target_facing_connection_count: int = 1
     standing_authorization: bool = False
@@ -94,26 +104,36 @@ class StagingLabSpec:
     reuses_production_components: tuple[str, ...] = field(default_factory=tuple)
 
 
-_LABEL_MAX = 120
-_ARTIFACT_PROFILE_MAX = 120
-
-
 def _validate_spec(spec: StagingLabSpec) -> None:
     """Fail closed unless the spec is a safe, self-contained, single-target staging lab."""
     label = (spec.ownership_label or "").strip()
     if not label:
         raise StagingLabPlanError("ownership_label_missing", "an ownership label is required")
-    if len(label) > _LABEL_MAX:
-        raise StagingLabPlanError("ownership_label_invalid", "ownership label is too long")
+    if not OWNERSHIP_LABEL_RE.fullmatch(label):
+        raise StagingLabPlanError(
+            "ownership_label_invalid",
+            "ownership label must be a server-generated kebab-case slug",
+        )
 
     if spec.purpose != StagingLabPurpose.disposable_readonly_staging:
         raise StagingLabPlanError("unsupported_purpose")
     if spec.profile != StagingLabProfile.nested_proxmox:
         raise StagingLabPlanError("unsupported_profile")
 
+    # Independent substrate enforcement (High-risk fix): both an active onboarding AND an explicit
+    # staging-substrate eligibility record are required; the compiler enforces this on its own.
+    if not spec.substrate_eligible:
+        raise StagingLabPlanError(
+            "substrate_not_eligible", "the substrate target has no active staging eligibility"
+        )
     if not spec.substrate_approved:
         raise StagingLabPlanError(
             "unapproved_substrate", "the substrate target is not approved for staging"
+        )
+    if not isinstance(spec.bootstrap_artifact_profile, StagingBootstrapArtifactProfile):
+        raise StagingLabPlanError(
+            "bootstrap_artifact_profile_invalid",
+            "the bootstrap-artifact profile must be an approved catalog value",
         )
     if spec.network_intent != StagingNetworkIntent.host_only_no_uplink:
         raise StagingLabPlanError(
@@ -146,18 +166,6 @@ def _validate_spec(spec: StagingLabSpec) -> None:
         )
     if spec.resource_class not in _RESOURCE_CLASS_BOUNDS:
         raise StagingLabPlanError("resource_class_invalid")
-    artifact = (spec.bootstrap_artifact_profile_id or "").strip()
-    if not artifact:
-        raise StagingLabPlanError(
-            "bootstrap_artifact_profile_missing",
-            "an approved bootstrap-artifact profile id is required",
-        )
-    if len(artifact) > _ARTIFACT_PROFILE_MAX or "://" in artifact or "/" in artifact:
-        # A profile id is an opaque logical label, never a path/URL.
-        raise StagingLabPlanError(
-            "bootstrap_artifact_profile_invalid",
-            "the bootstrap-artifact profile id must be an opaque logical label, not a path/URL",
-        )
 
 
 def _resource(kind: str, ownership_label: str, **attrs: object) -> dict:
@@ -180,7 +188,7 @@ def compile_staging_plan(spec: StagingLabSpec) -> dict:
     """
     _validate_spec(spec)
     label = spec.ownership_label.strip()
-    artifact = spec.bootstrap_artifact_profile_id.strip()
+    artifact = spec.bootstrap_artifact_profile.value
 
     resources = [
         _resource(
@@ -237,7 +245,7 @@ def compile_staging_plan(spec: StagingLabSpec) -> dict:
         "network_intent": spec.network_intent.value,
         "resource_class": spec.resource_class.value,
         "resource_class_bounds": dict(_RESOURCE_CLASS_BOUNDS[spec.resource_class]),
-        "bootstrap_artifact_profile_id": artifact,
+        "bootstrap_artifact_profile": artifact,
         "bootstrap": {
             "source": "operator_approved_prestaged_offline_artifacts",
             "post_isolation_internet_dependency": "forbidden",

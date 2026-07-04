@@ -6,4 +6,4 @@ no subprocess, resolves no secret, and imports no provider/network-capable code.
 separately reviewed adapter PR is required for any real provisioning.
 """
 
-__all__ = ["executor", "orchestration"]
+__all__ = ["consumer", "executor"]
