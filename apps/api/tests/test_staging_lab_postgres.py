@@ -226,6 +226,12 @@ def test_postgres_skip_locked_prevents_competing_worker_completion(pg_engine, pg
     from secp_api.services import staging_labs
     from secp_worker.staging_lab.consumer import claim_and_process_one
 
+    # Keep this proof about one queued row. Earlier PostgreSQL tests intentionally leave an active
+    # work item behind while checking the partial unique index; a real worker may claim that other
+    # row, which is correct behavior but not what this SKIP LOCKED proof is asserting.
+    with pg_engine.begin() as conn:
+        conn.execute(text("DELETE FROM staging_lab_work_item"))
+
     org_id = _seed_org(pg_engine)
     principal = _principal(org_id)
     with pg_sessionmaker() as s0:
