@@ -31,20 +31,32 @@ from secp_api.routers import (
 )
 from secp_api.routers import onboarding as onboarding_router
 from secp_api.routers import provisioning as provisioning_router
+from secp_api.routers import readonly_preflight as readonly_preflight_router
 from secp_api.routers import staging_labs as staging_labs_router
 
 logger = logging.getLogger("secp.api")
 
-# Staging-lab routes accept one optional caller string (``logical_name``). FastAPI's default
-# RequestValidationError body echoes the rejected ``input`` value; for these routes that could
-# reflect a token-shaped value back to the caller. They therefore return a safe generic code and
-# NEVER echo the submitted value, request body, or raw validation details.
-_STAGING_LAB_PATH_PREFIX = "/api/v1/staging-labs"
+# Feature routes that must NEVER echo a rejected caller value in a validation error body.
+# FastAPI's default RequestValidationError body reflects Pydantic's ``input``/``ctx``; for these
+# routes we return only a safe generic code. Keyed by a SEGMENT-AWARE base path (exact base or
+# base + "/") -> the safe code — a broad accidental-prefix match (e.g. "-labsX") never matches.
+_REDACTED_VALIDATION_ROUTES: tuple[tuple[str, str], ...] = (
+    ("/api/v1/staging-labs", "invalid_staging_lab_input"),
+    ("/api/v1/readonly-preflight", "invalid_readonly_preflight_input"),
+)
+
+
+def _path_under(path: str, base: str) -> bool:
+    """Segment-aware match: the path is exactly ``base`` or a child ``base/...`` route."""
+    return path == base or path.startswith(base + "/")
 
 
 def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(DomainError)
     async def _domain_error(_: Request, exc: DomainError) -> JSONResponse:
+        # Redacted errors (e.g. read-only preflight) serialize ONLY the closed code — no message.
+        if getattr(exc, "redacted", False):
+            return JSONResponse(status_code=exc.http_status, content={"error": {"code": exc.code}})
         payload: dict = {"error": {"code": exc.code, "message": exc.message}}
         if isinstance(exc, ValidationFailedError) and exc.errors:
             payload["error"]["details"] = exc.errors
@@ -54,12 +66,11 @@ def _install_error_handlers(app: FastAPI) -> None:
     async def _request_validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        # Staging-lab routes: return ONLY a safe generic code — no rejected input, ctx, raw
-        # details, request body, or user-supplied text.
-        if request.url.path.startswith(_STAGING_LAB_PATH_PREFIX):
-            return JSONResponse(
-                status_code=422, content={"error": {"code": "invalid_staging_lab_input"}}
-            )
+        # Redacted-validation routes: return ONLY a safe generic code — no rejected input, ctx,
+        # url, detail, request body, or user-supplied text.
+        for base, code in _REDACTED_VALIDATION_ROUTES:
+            if _path_under(request.url.path, base):
+                return JSONResponse(status_code=422, content={"error": {"code": code}})
         # All other routes keep FastAPI's default behavior (backward compatible).
         return await request_validation_exception_handler(request, exc)
 
@@ -118,6 +129,7 @@ def create_app() -> FastAPI:
     app.include_router(provisioning_router.router)
     app.include_router(onboarding_router.router)
     app.include_router(staging_labs_router.router)
+    app.include_router(readonly_preflight_router.router)
 
     @app.on_event("startup")
     def _startup() -> None:

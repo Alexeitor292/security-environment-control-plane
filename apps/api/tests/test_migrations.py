@@ -37,6 +37,7 @@ EXPECTED_TABLES = {
     "staging_lab",
     "staging_lab_work_item",
     "staging_substrate_eligibility",
+    "readonly_staging_preflight",
     "environment_network",
     "environment_node",
     "environment_topology_edge",

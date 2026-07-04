@@ -327,20 +327,58 @@ def test_foreign_keys_enforce_organization_association(pg_engine):
     assert ("staging_lab", ("staging_lab_id",)) in referred
 
 
+# Tables introduced by each migration (asserted independently so a future migration inserted
+# between B1 and B2 cannot silently mask the boundary these downgrades must respect).
+_B1_STAGING_TABLES = {"staging_lab", "staging_lab_work_item", "staging_substrate_eligibility"}
+_B2_PREFLIGHT_TABLES = {"readonly_staging_preflight"}
+
+
 def test_downgrade_drops_staging_tables(pg_engine):
+    """B2 downgrade removes only the readonly-preflight table; B1 downgrade removes staging-lab.
+
+    The staging-lab migration (B1) is no longer the head: the readonly-preflight migration (B2)
+    sits on top of it. So ``downgrade -1`` from head must remove *only* B2 and leave B1's
+    staging-lab tables intact. We derive B1 (head's parent) and B1's own parent from Alembic's
+    ScriptDirectory rather than hardcoding relative offsets, then step down through B1 explicitly.
+    """
     from alembic import command
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
     api_dir = __import__("pathlib").Path(__file__).resolve().parents[1]
     cfg = Config(str(api_dir / "alembic.ini"))
     cfg.set_main_option("script_location", str(api_dir / "migrations"))
     cfg.set_main_option("sqlalchemy.url", PG_URL)
-    # Downgrade one step removes the staging tables; upgrade restores them (leave schema at head).
-    command.downgrade(cfg, "-1")
-    tables = set(inspect(pg_engine).get_table_names())
-    assert "staging_lab_work_item" not in tables
-    assert "staging_substrate_eligibility" not in tables
-    assert "staging_lab" not in tables
-    command.upgrade(cfg, "head")
-    tables = set(inspect(pg_engine).get_table_names())
-    assert {"staging_lab", "staging_lab_work_item", "staging_substrate_eligibility"} <= tables
+
+    # Derive the authoritative revision graph: head (B2) -> B1 staging-lab -> B1's parent.
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert len(heads) == 1, f"expected a single head, got {heads}"
+    b2_rev = heads[0]
+    b1_rev = script.get_revision(b2_rev).down_revision
+    assert isinstance(b1_rev, str) and b1_rev, "B2 must have a single string parent (B1)"
+    b1_parent = script.get_revision(b1_rev).down_revision
+    assert isinstance(b1_parent, str) and b1_parent, "B1 must have a single string parent"
+
+    def tables() -> set[str]:
+        return set(inspect(pg_engine).get_table_names())
+
+    try:
+        # 1. Downgrade exactly one revision (head/B2 -> B1): B2 tables gone, B1 tables remain.
+        command.downgrade(cfg, b1_rev)
+        after_b2 = tables()
+        assert _B2_PREFLIGHT_TABLES.isdisjoint(after_b2)
+        assert _B1_STAGING_TABLES <= after_b2
+
+        # 2. Downgrade through B1 to its actual parent: staging-lab tables now absent.
+        command.downgrade(cfg, b1_parent)
+        after_b1 = tables()
+        assert _B1_STAGING_TABLES.isdisjoint(after_b1)
+        assert _B2_PREFLIGHT_TABLES.isdisjoint(after_b1)
+    finally:
+        # 3. Restore head so the shared module-scoped schema is left in head state.
+        command.upgrade(cfg, "head")
+
+    restored = tables()
+    assert _B1_STAGING_TABLES <= restored
+    assert _B2_PREFLIGHT_TABLES <= restored

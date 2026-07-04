@@ -43,6 +43,8 @@ from secp_api.enums import (
     PlanStatus,
     ProvisioningOperationKind,
     ProvisioningStatus,
+    ReadonlyPreflightOutcome,
+    ReadonlyPreflightStatus,
     ReservationStatus,
     SnapshotStatus,
     StagingBootstrapArtifactProfile,
@@ -1000,6 +1002,90 @@ class StagingSubstrateEligibility(Base, TimestampMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     target: Mapped[ExecutionTarget] = relationship(back_populates="staging_substrate_eligibilities")
+
+
+class ReadonlyStagingPreflight(Base, TimestampMixin):
+    """Durable, secret-free app-owned read-only staging-preflight intent (SECP-B2-0).
+
+    The API commits a ``queued`` intent bound immutably to one authoritative
+    (organization, execution target, onboarding, live-read authorization + version) tuple; only
+    the worker claims and processes it, records a closed outcome code, and stores only safe
+    readiness facts (booleans/counts). It NEVER stores endpoints, hosts, IPs, ports, paths,
+    bridge/VNet/VLAN/VMID/storage identifiers, certificate data, tokens, credentials, secret
+    references, target config values, or raw provider observations.
+
+    The ``operation_fingerprint`` is a deterministic server-generated key over
+    (organization, target, onboarding, authorization id, authorization version).
+    """
+
+    __tablename__ = "readonly_staging_preflight"
+    __table_args__ = (
+        UniqueConstraint("operation_fingerprint", name="uq_readonly_preflight_fingerprint"),
+        UniqueConstraint(
+            "execution_target_id",
+            "onboarding_id",
+            "live_read_authorization_id",
+            "authorization_version",
+            name="uq_readonly_preflight_scope",
+        ),
+        # At most ONE active (queued/claimed/running) preflight per target+onboarding+authorization.
+        Index(
+            "uq_readonly_preflight_active",
+            "execution_target_id",
+            "onboarding_id",
+            "live_read_authorization_id",
+            unique=True,
+            sqlite_where=text("status in ('queued','claimed','running')"),
+            postgresql_where=text("status in ('queued','claimed','running')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=False, index=True
+    )
+    live_read_authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("live_read_authorization.id"), nullable=False, index=True
+    )
+    authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Pinned contract labels (immutable) — must match the authorization + worker/plugin.
+    collector_contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    endpoint_allowlist_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    operation_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[ReadonlyPreflightStatus] = mapped_column(
+        EnumType(ReadonlyPreflightStatus, length=40),
+        default=ReadonlyPreflightStatus.queued,
+        nullable=False,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Closed outcome code (set once by the worker at terminal); never free text.
+    outcome_code: Mapped[ReadonlyPreflightOutcome | None] = mapped_column(
+        EnumType(ReadonlyPreflightOutcome, length=40), nullable=True
+    )
+    # Safe readiness facts only (booleans/counts); never endpoints/config/observations.
+    readiness_facts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    target: Mapped[ExecutionTarget] = relationship()
+
+    def __repr__(self) -> str:
+        return (
+            "ReadonlyStagingPreflight("
+            f"id={self.id!s}, execution_target_id={self.execution_target_id!s}, "
+            f"onboarding_id={self.onboarding_id!s}, "
+            f"live_read_authorization_id={self.live_read_authorization_id!s}, "
+            f"authorization_version={self.authorization_version!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"outcome_code={getattr(self.outcome_code, 'value', self.outcome_code)!r})"
+        )
 
 
 class ProviderInventorySnapshot(Base, TimestampMixin):

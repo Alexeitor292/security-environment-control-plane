@@ -10,6 +10,7 @@ const NAV = [
   { to: "/provider-targets", label: "Provider Targets" },
   { to: "/onboarding", label: "Target Onboarding" },
   { to: "/staging-labs", label: "Staging Labs" },
+  { to: "/readonly-preflight", label: "Read-Only Preflight" },
   { to: "/audit", label: "Audit Log" },
 ];
 

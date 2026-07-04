@@ -8,10 +8,42 @@ class DomainError(Exception):
 
     http_status = 400
     code = "domain_error"
+    # When True, the HTTP handler serializes ONLY the closed ``code`` (no free-form message,
+    # details, or rejected input). Existing errors keep their message (redacted=False).
+    redacted = False
 
     def __init__(self, message: str):
         super().__init__(message)
         self.message = message
+
+
+class ReadonlyPreflightError(DomainError):
+    """Closed-code, message-redacted error for the read-only preflight feature (SECP-B2-0).
+
+    The HTTP layer serializes only the closed code (``{"error": {"code": ...}}``); no free-form
+    backend message reaches the API/UI. Constructed from the closed
+    :class:`~secp_api.enums.ReadonlyPreflightErrorCode` catalog.
+    """
+
+    redacted = True
+
+    _STATUS = {
+        "readonly_preflight_not_found": 404,
+        "readonly_preflight_forbidden": 403,
+        "readonly_preflight_substrate_ineligible": 409,
+        "readonly_preflight_authorization_invalid": 409,
+        "readonly_preflight_lifecycle_conflict": 409,
+        "readonly_preflight_queue_conflict": 409,
+        "readonly_preflight_internal_failure": 500,
+    }
+
+    def __init__(self, code: object) -> None:
+        # ``code`` is a ReadonlyPreflightErrorCode (imported lazily to avoid an enums import cycle).
+        code_value = getattr(code, "value", str(code))
+        # The internal message is never serialized (redacted); it aids server-side debugging only.
+        super().__init__(code_value)
+        self.code = code_value
+        self.http_status = self._STATUS.get(code_value, 400)
 
 
 class NotFoundError(DomainError):

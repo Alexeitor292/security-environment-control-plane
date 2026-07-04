@@ -892,6 +892,12 @@ def test_api_package_does_not_import_live_readonly_paths():
     for py in api_pkg.rglob("*.py"):
         if "__pycache__" in py.parts:
             continue
+        # live_read_contract.py is the deliberate PLUGIN-FREE mirror of the live-read contract
+        # labels (SECP-B2-0). It imports no collector/transport/policy code (asserted by
+        # test_readonly_preflight_contract) but must hold the matching evidence-source value
+        # ("live_readonly_proxmox"); exclude only this file.
+        if py.name == "live_read_contract.py":
+            continue
         text = py.read_text(encoding="utf-8")
         for needle in needles:
             assert needle not in text, f"{py.name} references {needle!r}"

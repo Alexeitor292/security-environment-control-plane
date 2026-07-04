@@ -349,3 +349,58 @@ validation. It was reworked so that:
   `StagingSubstrateEligibility` record binding organization, target, Proxmox plugin type, and the
   `nested_proxmox` profile. The service and the compiler independently require eligibility; UI
   filtering alone is insufficient.
+
+## Amendment - app-owned read-only staging preflight (SECP-B2-0, 2026-07-04)
+
+B2-0 adds a real, app-owned, worker-executed **read-only staging preflight** for an already
+eligible nested-Proxmox substrate. It verifies only safe readiness facts required before future
+app-owned provisioning and mutates nothing (no create/alter/delete/start/stop/clone/snapshot/
+upload/download/config).
+
+- **Explicit, short-lived authorization.** An authorized admin creates and approves a short-lived
+  `LiveReadAuthorization` for the substrate (`onboarding:approve`); connection and boundary hashes
+  are derived server-side (the admin supplies no hashes/endpoints/secrets). This is separate from
+  staging-lab approval and is never created automatically from a staging-lab plan or approval.
+- **Durable, queue-only API.** A new `ReadonlyStagingPreflight` record binds one immutable
+  (organization, target, onboarding, authorization + version) tuple with a server-generated
+  operation fingerprint, DB scope-uniqueness, a partial-unique active index, and CAS lifecycle
+  transitions. The API only commits `queued` intent; it imports no plugin/worker/transport/
+  collector/HTTP code and executes no collection.
+- **Worker-only execution, fail-closed.** A worker consumer claims one queued intent
+  (`FOR UPDATE SKIP LOCKED` on PostgreSQL; CAS fallback on SQLite), re-verifies the authoritative
+  binding via the SECP-002B-1B-6 verifier, and only then would resolve the opaque credential and
+  run the sealed GET-only collection path. Only the worker writes outcomes (closed codes:
+  `ready`, `not_ready`, `authorization_expired`, `authorization_revoked`, `authorization_invalid`,
+  `credential_unavailable`, `tls_or_policy_refused`, `worker_internal_failure`) and only safe
+  readiness facts (booleans/counts) — never endpoints/config/observations.
+- **Remaining activation dependencies.** No production secret-manager resolver exists, so a
+  **sealed** injected worker resolver makes every preflight fail closed as
+  `credential_unavailable`: no transport is constructed and nothing real is contacted. A later,
+  separately reviewed activation PR must (1) inject a production-safe worker-only secret resolver
+  and (2) wire the injected collection runner (reconciling the connection-identity hash with the
+  plugin's validated connection representation) before a deliberate live preflight can return
+  `ready`. A ready result proves only the collected readiness facts — never host isolation or
+  production safety. All prior dormant live-read, trusted-binding, redaction, and sealed-evidence
+  guarantees are unchanged.
+
+### Review hardening (SECP-B2-0)
+
+- **Validation redaction.** Request-validation failures on `/api/v1/readonly-preflight` and its
+  child routes (a segment-aware match, not a broad prefix) return exactly
+  `{"error": {"code": "invalid_readonly_preflight_input"}}` — never the rejected input, request
+  body, or Pydantic `input`/`ctx`/`url`/`detail`. Unrelated routes keep FastAPI's default shape.
+- **Closed error codes.** Every read-only-preflight service refusal maps to a closed
+  `ReadonlyPreflightErrorCode` (`not_found`, `forbidden`, `substrate_ineligible`,
+  `authorization_invalid`, `lifecycle_conflict`, `queue_conflict`, `internal_failure`) serialized
+  as `{"error": {"code": ...}}` with **no** free-form backend message. The UI maps each closed
+  code to fixed local text (unknown → a fixed generic message) and never renders a backend
+  message; it also re-applies the readiness-fact allowlist before rendering.
+- **Monotonic authorization version.** The authorization version is server-derived and
+  monotonic per (target, onboarding) — never caller-supplied and never hardcoded — so renewal
+  after a prior authorization expires/revokes proceeds; the unique
+  (target, onboarding, version) constraint prevents duplicates under concurrency (a losing insert
+  retries with a recomputed version).
+- **Terminal CAS/audit consistency.** The worker writes the outcome + safe facts atomically with
+  the terminal compare-and-swap; the terminal audit is emitted only if that CAS wins. A stale
+  worker whose revision drifted writes no facts, emits no terminal audit, and never overwrites a
+  newer lifecycle state.
