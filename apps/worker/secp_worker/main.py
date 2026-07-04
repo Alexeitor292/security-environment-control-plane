@@ -34,6 +34,20 @@ def _start_staging_lab_consumer(stop_event: threading.Event) -> threading.Thread
     return thread
 
 
+def _start_readonly_preflight_consumer(stop_event: threading.Event) -> threading.Thread:
+    """Start the read-only preflight consumer loop in a daemon thread (worker process only).
+
+    Fail-closed in this PR (sealed secret resolver -> credential_unavailable); contacts nothing.
+    """
+    from secp_worker.preflight.runtime import run_forever
+
+    thread = threading.Thread(
+        target=run_forever, args=(stop_event,), name="readonly-preflight-consumer", daemon=True
+    )
+    thread.start()
+    return thread
+
+
 def _install_signal_handlers(stop_event: threading.Event) -> None:  # pragma: no cover - signals
     def _handle(_signum, _frame):
         logger.info("shutdown signal received; stopping worker loops gracefully")
@@ -70,8 +84,9 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
         activities=[deploy_activity, reset_activity, destroy_activity, discover_activity],
     )
     logger.info("Temporal worker started on task queue %s", settings.temporal_task_queue)
-    # The fake staging-lab consumer runs in a daemon thread alongside the Temporal worker.
+    # The fake staging-lab + read-only preflight consumers run in daemon threads alongside Temporal.
     _start_staging_lab_consumer(stop_event)
+    _start_readonly_preflight_consumer(stop_event)
     await asyncio.gather(worker.run(), _run_outbox_publisher_loop())
 
 
@@ -109,10 +124,11 @@ def main() -> None:
 
     logger.info(
         "Worker mode '%s': legacy orchestration runs in-process via the inline dispatcher. "
-        "Running the FAKE-ONLY staging-lab consumer loop in this worker process.",
+        "Running the FAKE-ONLY staging-lab and read-only preflight consumer loops.",
         settings.workflow_dispatch_mode,
     )
-    # Run the fake staging-lab consumer loop as the foreground loop of the worker process.
+    # Read-only preflight consumer in a daemon thread; staging-lab consumer as the foreground loop.
+    _start_readonly_preflight_consumer(stop_event)
     from secp_worker.staging_lab.runtime import run_forever
 
     run_forever(stop_event)  # pragma: no cover - long-running loop

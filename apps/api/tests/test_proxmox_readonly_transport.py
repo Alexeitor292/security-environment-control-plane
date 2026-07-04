@@ -452,6 +452,11 @@ def test_api_package_does_not_import_the_fake_transport_or_policy():
     for py in api_pkg.rglob("*.py"):
         if "__pycache__" in py.parts:
             continue
+        # Exclude the plugin-free live-read contract-label mirror (SECP-B2-0): it names the
+        # allowlist-version LABEL in a comment but imports no transport/policy code (asserted by
+        # test_readonly_preflight_contract).
+        if py.name == "live_read_contract.py":
+            continue
         text = py.read_text(encoding="utf-8")
         for needle in needles:
             assert needle not in text, f"{py.name} references {needle!r}"

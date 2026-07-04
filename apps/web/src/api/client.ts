@@ -13,7 +13,10 @@ import type {
   PluginInfo,
   EligibleSubstrate,
   Preflight,
+  PreflightAuthorization,
+  PreflightSubstrate,
   Principal,
+  ReadonlyPreflight,
   ProviderCapabilities,
   StagingLab,
   StagingLabCreate,
@@ -192,4 +195,35 @@ export const api = {
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/simulate`),
   queueStagingLabTeardown: (id: string) =>
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/teardown`),
+
+  // App-owned read-only staging preflight (SECP-B2-0). API queues only; a worker executes.
+  preflightSubstrates: () =>
+    request<PreflightSubstrate[]>("GET", "/api/v1/readonly-preflight/substrates"),
+  createPreflightAuthorization: (executionTargetId: string, ttlSeconds = 900) =>
+    request<PreflightAuthorization>("POST", "/api/v1/readonly-preflight/authorizations", {
+      execution_target_id: executionTargetId,
+      ttl_seconds: ttlSeconds,
+    }),
+  listPreflightAuthorizations: (executionTargetId: string) =>
+    request<PreflightAuthorization[]>("GET", "/api/v1/readonly-preflight/authorizations", undefined, {
+      execution_target_id: executionTargetId,
+    }),
+  approvePreflightAuthorization: (id: string) =>
+    request<PreflightAuthorization>(
+      "POST",
+      `/api/v1/readonly-preflight/authorizations/${id}/approve`,
+    ),
+  revokePreflightAuthorization: (id: string) =>
+    request<PreflightAuthorization>(
+      "POST",
+      `/api/v1/readonly-preflight/authorizations/${id}/revoke`,
+    ),
+  queueReadonlyPreflight: (authorizationId: string) =>
+    request<ReadonlyPreflight>("POST", "/api/v1/readonly-preflight", {
+      live_read_authorization_id: authorizationId,
+    }),
+  listReadonlyPreflights: (executionTargetId: string) =>
+    request<ReadonlyPreflight[]>("GET", "/api/v1/readonly-preflight", undefined, {
+      execution_target_id: executionTargetId,
+    }),
 };

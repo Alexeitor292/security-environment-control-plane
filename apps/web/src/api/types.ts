@@ -385,3 +385,56 @@ export interface EligibleSubstrate {
   id: string;
   alias: string;
 }
+
+// --- App-owned read-only staging preflight (SECP-B2-0) ---
+
+export type ReadonlyPreflightStatus =
+  | "queued"
+  | "claimed"
+  | "running"
+  | "completed"
+  | "failed"
+  | "refused";
+
+export type ReadonlyPreflightOutcome =
+  | "ready"
+  | "not_ready"
+  | "authorization_expired"
+  | "authorization_revoked"
+  | "authorization_invalid"
+  | "credential_unavailable"
+  | "tls_or_policy_refused"
+  | "worker_internal_failure";
+
+export interface PreflightSubstrate {
+  id: string;
+  alias: string;
+}
+
+export interface PreflightAuthorization {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  authorization_version: number;
+  status: string;
+  authorization_expiry: string;
+  created_at: string;
+  approved_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface ReadonlyPreflight {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  live_read_authorization_id: string;
+  authorization_version: number;
+  status: ReadonlyPreflightStatus;
+  revision: number;
+  outcome_code: ReadonlyPreflightOutcome | null;
+  readiness_facts: Record<string, number | boolean> | null;
+  created_at: string;
+  completed_at: string | null;
+}

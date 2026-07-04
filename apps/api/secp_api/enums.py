@@ -424,6 +424,41 @@ class Permission(str, Enum):
     # Granting a target staging-substrate eligibility is a target-admin action, NOT a
     # lab-creator action — deliberately separate from staging_lab:manage.
     staging_substrate_manage = "staging_substrate:manage"
+    # SECP-B2-0 — app-owned read-only staging preflight (admin action). Requesting a preflight
+    # is deliberately distinct from staging-lab management and from onboarding approval.
+    staging_preflight_manage = "staging_preflight:manage"
+
+
+class ReadonlyPreflightStatus(str, Enum):
+    """App-owned read-only staging-preflight lifecycle (SECP-B2-0).
+
+    The API may only create durable ``queued`` intent. Only the worker may move a preflight to
+    ``claimed`` / ``running`` and then to a terminal state, recording a closed outcome code.
+    """
+
+    queued = "queued"
+    claimed = "claimed"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    refused = "refused"
+
+
+class ReadonlyPreflightOutcome(str, Enum):
+    """Closed set of safe preflight outcome codes (SECP-B2-0).
+
+    Never free text. A successful ``ready`` proves only the specific readiness facts collected —
+    it never asserts the host is isolated or production-safe beyond that evidence.
+    """
+
+    ready = "ready"
+    not_ready = "not_ready"
+    authorization_expired = "authorization_expired"
+    authorization_revoked = "authorization_revoked"
+    authorization_invalid = "authorization_invalid"
+    credential_unavailable = "credential_unavailable"
+    tls_or_policy_refused = "tls_or_policy_refused"
+    worker_internal_failure = "worker_internal_failure"
 
 
 class AuditAction(str, Enum):
@@ -524,3 +559,10 @@ class AuditAction(str, Enum):
     staging_work_refused = "staging_lab.work_refused"
     staging_substrate_eligibility_granted = "staging_lab.substrate_eligibility_granted"
     staging_substrate_eligibility_revoked = "staging_lab.substrate_eligibility_revoked"
+    # SECP-B2-0 — app-owned read-only staging preflight.
+    readonly_preflight_created = "readonly_preflight.created"
+    readonly_preflight_queued = "readonly_preflight.queued"
+    readonly_preflight_claimed = "readonly_preflight.claimed"
+    readonly_preflight_completed = "readonly_preflight.completed"
+    readonly_preflight_refused = "readonly_preflight.refused"
+    readonly_preflight_failed = "readonly_preflight.failed"

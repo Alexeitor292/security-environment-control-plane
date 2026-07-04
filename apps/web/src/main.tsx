@@ -11,6 +11,7 @@ import { Login } from "./pages/Login";
 import { OnboardingWizard } from "./pages/OnboardingWizard";
 import { PlanApproval } from "./pages/PlanApproval";
 import { ProviderTargets } from "./pages/ProviderTargets";
+import { ReadonlyPreflight } from "./pages/ReadonlyPreflight";
 import { StagingLab } from "./pages/StagingLab";
 import { Templates } from "./pages/Templates";
 import { TopologyView } from "./pages/TopologyView";
@@ -32,6 +33,7 @@ const router = createBrowserRouter([
       { path: "provider-targets", element: <ProviderTargets /> },
       { path: "onboarding", element: <OnboardingWizard /> },
       { path: "staging-labs", element: <StagingLab /> },
+      { path: "readonly-preflight", element: <ReadonlyPreflight /> },
       { path: "audit", element: <AuditLog /> },
     ],
   },

@@ -22,6 +22,7 @@ from secp_api.models import (
     ProviderInventorySnapshot,
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
+    ReadonlyStagingPreflight,
     StagingLab,
     StagingLabWorkItem,
     StagingSubstrateEligibility,
@@ -211,6 +212,19 @@ _STAGING_ELIGIBILITY_PROTECTED = (
     "issued_at",
 )
 _STAGING_ELIGIBILITY_SET_ONCE = ("revoked_by", "revoked_at")
+# ReadonlyStagingPreflight (SECP-B2-0): the immutable binding is fixed at creation; only lifecycle
+# (status/revision/outcome/facts/timestamps) may change (worker-only, via the service/consumer).
+_READONLY_PREFLIGHT_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "onboarding_id",
+    "live_read_authorization_id",
+    "authorization_version",
+    "collector_contract_version",
+    "endpoint_allowlist_version",
+    "operation_fingerprint",
+    "created_by",
+)
 
 
 def _attr_changed(obj: object, attr: str) -> bool:
@@ -405,6 +419,13 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                     "StagingSubstrateEligibility revocation metadata is set-once; "
                     f"attempted to change {repeated}"
                 )
+        # ReadonlyStagingPreflight (SECP-B2-0): the binding is immutable; lifecycle stays mutable.
+        if isinstance(obj, ReadonlyStagingPreflight):
+            changed = [a for a in _READONLY_PREFLIGHT_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    f"ReadonlyStagingPreflight binding is immutable; attempted to change {changed}"
+                )
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
@@ -416,6 +437,8 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             raise ImmutableResourceError("StagingLabWorkItem records cannot be deleted")
         if isinstance(obj, StagingSubstrateEligibility):
             raise ImmutableResourceError("StagingSubstrateEligibility records cannot be deleted")
+        if isinstance(obj, ReadonlyStagingPreflight):
+            raise ImmutableResourceError("ReadonlyStagingPreflight records cannot be deleted")
         if isinstance(obj, LiveReadAuthorization):
             raise ImmutableResourceError("LiveReadAuthorization records cannot be deleted")
         if isinstance(obj, TargetEvidenceRecord):

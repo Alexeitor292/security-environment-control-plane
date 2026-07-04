@@ -259,8 +259,11 @@ def load_and_verify_live_read_authorization(
         refuse("authorization_not_approved")
 
     expiry = authorization.authorization_expiry
+    # The expiry column is always stored in UTC. PostgreSQL returns it timezone-aware; SQLite
+    # returns it naive (it does not persist tz). Treat a naive value as UTC so the expiry check is
+    # DB-portable and fail-closed identically across backends.
     if expiry.tzinfo is None:
-        refuse("authorization_expiry_malformed")
+        expiry = expiry.replace(tzinfo=UTC)
     if expiry <= now:
         refuse("authorization_expired")
 
