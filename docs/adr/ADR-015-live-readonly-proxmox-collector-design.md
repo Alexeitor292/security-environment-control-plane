@@ -462,3 +462,55 @@ secret-resolution route.
 
 All prior dormant live-read, trusted-binding, redaction, closed-error, monotonic-versioning, and
 sealed-evidence guarantees are unchanged.
+
+### Live secret-resolver activation obligations (SECP-B2-2)
+
+SECP-B2-2 is a design/static-contract milestone (no code, no backend, no switch). It records the
+non-negotiable obligations a future resolver-implementation PR must satisfy, resolving the two
+SECP-B2-1 adversarial-review findings. The full contract is
+`docs/architecture/secp-b2-2-live-secret-resolver-activation.md`; the closed evidence gate is
+`docs/proxmox/live-secret-resolver-activation-checklist.md`. The resolver-activation checklist and
+the collector-activation checklist are **cumulative**: both must be satisfied in full and neither
+ever substitutes for the other.
+
+- **A trusted request is not a capability.** Possession of a `TrustedResolutionRequest` or a
+  `ResolutionContract` — including one carrying the construction token or forged via
+  `__new__`/`dataclasses.replace` — is never proof of authorization. The future resolver treats
+  every request as untrusted input and independently re-verifies authorization at resolution time.
+  The object seal is best-effort; static AST guardrails plus worker-only execution are the defense.
+- **No self-referential trust anchor.** The B2-1 orchestration derives the request and the
+  "expected contract" from the same `VerifiedLiveReadAuthorization`, so their comparison is
+  self-referential and only re-checks pinned labels/expiry. The future resolver must derive its
+  authoritative expectation from an **independent source of truth** — re-loaded authoritative
+  records re-verified through the SECP-002B-1B-6 verifier, the app-side pinned constants, and the
+  external backend's own policy — never from a caller-built expected contract.
+- **Credential-reference three-way binding.** Exact, constant-time equality is required between the
+  authoritative `ExecutionTarget.secret_ref`, the re-verified live-read binding reference, and the
+  resolver request reference. Any mismatch or blank reference fails closed before backend access;
+  the reference is never hashed, logged, audited, serialized, or exposed via `repr`.
+- **Replay and single-use resolution lease.** A durable, single-use lease is acquired before
+  backend access via a transactional **compare-and-swap**. Single-use, replay refusal
+  (`replay_refused`), and the retry budget are **global** per the uniqueness key
+  `(authorization_id, authorization_version, operation_fingerprint)` — it does not include
+  worker identity, so two workers can never each hold a valid pre-success lease for the same
+  operation. Worker identity is required for authenticated issuance, backend authorization, and
+  secret-free audit evidence, but is not part of the uniqueness boundary. The bounded retry limit is
+  **fixed at N = 3**, counted durably per that uniqueness key across every lease and every worker
+  identity; a fresh lease **must not reset or expand** it; a retry is allowed only before
+  authorization expiry and while budget remains; once exhausted, resolution is refused
+  (`retry_bound_exceeded`) until a new `authorization_version` exists. A lease never outlives the
+  authorization. Lease and refusal evidence is durable and **secret-free** (records no reference and
+  no material) with closed reason codes.
+- **Worker identity and backend policy.** The worker authenticates to the backend as an
+  independently issued, out-of-band-rotated identity with no API/UI credential or network path; the
+  backend policy authorizes only the exact (worker identity, reference, target, purpose) tuple;
+  resolution is short-lived with no caching or reusable credentials; rotation/revocation and a
+  fail-closed response mapping are enforced.
+- **Formal activation gates (all required, none alone sufficient).** Code review; a separate durable
+  approval record; activation configuration outside Git; staging-only target eligibility; time-bound
+  versioned authorization; a resolver health/self-test that reveals no secret; and a tested
+  revocation/rollback/kill-switch path. Removing or failing any one gate fails closed.
+
+No live resolver, secret backend, secret-manager client, activation switch, or runtime/environment
+flag is introduced by SECP-B2-2; the shipped default remains the sealed
+`SealedUnavailableResolver` and every preflight still ends `credential_unavailable`.
