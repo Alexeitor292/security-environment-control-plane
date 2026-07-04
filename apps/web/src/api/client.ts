@@ -17,6 +17,7 @@ import type {
   PreflightSubstrate,
   Principal,
   ReadonlyPreflight,
+  ResolverActivation,
   ProviderCapabilities,
   StagingLab,
   StagingLabCreate,
@@ -226,4 +227,36 @@ export const api = {
     request<ReadonlyPreflight[]>("GET", "/api/v1/readonly-preflight", undefined, {
       execution_target_id: executionTargetId,
     }),
+  // SECP-B2-4.1 — resolver-activation authorization admin lifecycle (no secret/backend fields).
+  listResolverActivations: (executionTargetId: string) =>
+    request<ResolverActivation[]>("GET", "/api/v1/resolver-activation/authorizations", undefined, {
+      execution_target_id: executionTargetId,
+    }),
+  createResolverActivation: (preflightId: string, ttlSeconds = 3600) =>
+    request<ResolverActivation>("POST", "/api/v1/resolver-activation/authorizations", {
+      preflight_id: preflightId,
+      ttl_seconds: ttlSeconds,
+    }),
+  recordResolverActivationEvidence: (
+    id: string,
+    kind: string,
+    status: string,
+    proofId: string,
+    issuer: string,
+  ) =>
+    request<ResolverActivation>(
+      "POST",
+      `/api/v1/resolver-activation/authorizations/${id}/evidence`,
+      { kind, status, proof_id: proofId, issuer },
+    ),
+  approveResolverActivation: (id: string) =>
+    request<ResolverActivation>(
+      "POST",
+      `/api/v1/resolver-activation/authorizations/${id}/approve`,
+    ),
+  revokeResolverActivation: (id: string) =>
+    request<ResolverActivation>(
+      "POST",
+      `/api/v1/resolver-activation/authorizations/${id}/revoke`,
+    ),
 };

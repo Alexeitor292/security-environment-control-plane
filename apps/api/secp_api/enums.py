@@ -427,6 +427,11 @@ class Permission(str, Enum):
     # SECP-B2-0 — app-owned read-only staging preflight (admin action). Requesting a preflight
     # is deliberately distinct from staging-lab management and from onboarding approval.
     staging_preflight_manage = "staging_preflight:manage"
+    # SECP-B2-4.1 — durable resolver-activation authorization. Creating/revoking is an admin action;
+    # APPROVING is a DELIBERATELY SEPARATE permission that cannot be inferred from any other
+    # (onboarding, staging-lab, live-read). It never grants infrastructure execution or resolution.
+    resolver_activation_manage = "resolver_activation:manage"
+    resolver_activation_approve = "resolver_activation:approve"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -475,6 +480,60 @@ class ReadonlyPreflightErrorCode(str, Enum):
     lifecycle_conflict = "readonly_preflight_lifecycle_conflict"
     queue_conflict = "readonly_preflight_queue_conflict"
     internal_failure = "readonly_preflight_internal_failure"
+
+
+class ResolverActivationStatus(str, Enum):
+    """Closed lifecycle of a durable resolver-activation authorization (SECP-B2-4.1).
+
+    ``draft`` — created, gathering evidence; ``approved`` — separately approved against a complete
+    evidence fingerprint; ``revoked`` — terminated immediately (approval facts preserved);
+    ``expired`` — past its canonical UTC expiry. Only the worker verifier consumes an ``approved``,
+    unexpired, unrevoked record — and even then produces no resolution in shipped runtime.
+    """
+
+    draft = "draft"
+    approved = "approved"
+    revoked = "revoked"
+    expired = "expired"
+
+
+class ResolverActivationEvidenceKind(str, Enum):
+    """Closed set of provider-neutral, secret-free activation-evidence items (B2-4.1 / B2-2).
+
+    Each item is proof METADATA only — never an endpoint, backend config, vault path, reference,
+    worker credential, token, policy, or secret. Approval requires every kind present + verified.
+    """
+
+    isolated_staging_identity = "isolated_staging_identity"
+    worker_only_network_path = "worker_only_network_path"
+    backend_access_policy_review = "backend_access_policy_review"
+    reference_grammar_review = "reference_grammar_review"
+    redaction_log_audit_verification = "redaction_log_audit_verification"
+    transport_get_only_canonical = "transport_get_only_canonical"
+    no_production_or_shared_target = "no_production_or_shared_target"
+    rollback_kill_switch_drill = "rollback_kill_switch_drill"
+    independent_adversarial_review = "independent_adversarial_review"
+
+
+class ResolverActivationEvidenceStatus(str, Enum):
+    """Closed status of one evidence item. Only ``verified`` counts toward approval completeness."""
+
+    pending = "pending"
+    verified = "verified"
+    failed = "failed"
+
+
+class ResolverActivationErrorCode(str, Enum):
+    """Closed catalog of resolver-activation API error codes (SECP-B2-4.1). No free-form message."""
+
+    not_found = "resolver_activation_not_found"
+    forbidden = "resolver_activation_forbidden"
+    invalid_state = "resolver_activation_invalid_state"
+    substrate_ineligible = "resolver_activation_substrate_ineligible"
+    evidence_incomplete = "resolver_activation_evidence_incomplete"
+    evidence_invalid = "resolver_activation_evidence_invalid"
+    lifecycle_conflict = "resolver_activation_lifecycle_conflict"
+    internal_failure = "resolver_activation_internal_failure"
 
 
 class AuditAction(str, Enum):
@@ -587,6 +646,12 @@ class AuditAction(str, Enum):
     resolution_lease_attempt_started = "resolution_lease.attempt_started"
     resolution_lease_refused = "resolution_lease.refused"
     resolution_lease_consumed = "resolution_lease.consumed"
+    # SECP-B2-4.1 — durable resolver-activation authorization lifecycle (secret-free).
+    resolver_activation_created = "resolver_activation.created"
+    resolver_activation_evidence_recorded = "resolver_activation.evidence_recorded"
+    resolver_activation_approved = "resolver_activation.approved"
+    resolver_activation_revoked = "resolver_activation.revoked"
+    resolver_activation_activation_refused = "resolver_activation.activation_refused"
 
 
 class ResolutionLeaseStatus(str, Enum):

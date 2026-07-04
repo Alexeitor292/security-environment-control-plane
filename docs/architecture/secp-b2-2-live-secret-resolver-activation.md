@@ -308,6 +308,30 @@ network segment / policy, verified out of band) is required, consistent with the
 staging-control-plane design (SECP-002B-1B-8) and evidence-package item "worker-only network-path
 proof". No such deployment configuration is added in B2-4.
 
+**Implementation status (SECP-B2-4.1).** The app-owned durable **resolver-activation authorization**
++ **evidence boundary** now exists (`resolver_activation_authorization` / `resolver_activation_evidence`
+tables; `secp_api.services.resolver_activation`; `secp_api.resolver_activation_contract`). It is the
+SEPARATE, explicit, time-bounded, audited, revocable authorization required before a future
+activation can be *considered* — it makes activation impossible merely because code merged, an
+environment value/Compose file exists, a database row was edited, or a `LiveReadAuthorization` /
+staging-lab approval exists. Approval requires a **dedicated** `resolver_activation:approve`
+permission (never inferred from any other approval) bound to a **complete, closed evidence
+fingerprint**; the record binds org, execution target, onboarding, live-read authorization id +
+version, resolver-adapter contract version, purpose, work-item id, operation fingerprint, canonical
+expiry, evidence fingerprint, closed lifecycle (draft → approved → revoked/expired), and a
+server-derived monotonic authorization version. It stores **no** endpoint, host, port, token, policy,
+vault path, reference, worker credential, backend config, or secret; the evidence is a closed set of
+proof metadata (kind/status/opaque proof id/issuer), never a free-form field. A worker-only sealed
+verifier (`secp_worker.preflight.activation_authorization.load_and_verify_activation_capability`)
+re-loads the authorization + evidence and independently re-validates every bound fact + the
+recomputed evidence fingerprint before producing a redacted, non-serializable, token-guarded
+capability. This PR does **not** deploy OpenBao, configure a backend, contact anything, resolve a
+secret, or wire the verifier into shipped runtime: the shipped defaults remain
+`DenyingWorkerIdentityVerifier` + `SealedActivationGate`, `OpenBaoWorkerSecretResolver` stays unwired,
+and every preflight still ends `credential_unavailable`. B2-4.1 does **not** claim any real
+network-path, worker-identity, or backend-authentication evidence has been obtained, and it does
+**not** satisfy any §8 evidence item or substitute for the B2-5 collector or B2-6 OpenTofu gates.
+
 A later implementation PR (not this one, not B2-3, and not B2-4) may, only after §8 and §9 are
 satisfied:
 

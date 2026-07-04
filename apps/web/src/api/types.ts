@@ -438,3 +438,34 @@ export interface ReadonlyPreflight {
   created_at: string;
   completed_at: string | null;
 }
+
+// SECP-B2-4.1 — resolver-activation authorization (secret-free; closed states + safe hashes only).
+export interface ResolverActivationEvidence {
+  kind: string;
+  status: string;
+  proof_id: string;
+  issuer: string;
+  verified_at: string | null;
+}
+
+export interface ResolverActivation {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  live_read_authorization_id: string;
+  live_read_authorization_version: number;
+  preflight_id: string;
+  operation_fingerprint: string;
+  resolver_adapter_contract_version: string;
+  purpose: string;
+  authorization_expiry: string;
+  evidence_fingerprint: string;
+  status: string;
+  authorization_version: number;
+  revision: number;
+  approved_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  evidence: ResolverActivationEvidence[];
+}

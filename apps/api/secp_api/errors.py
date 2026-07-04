@@ -46,6 +46,33 @@ class ReadonlyPreflightError(DomainError):
         self.http_status = self._STATUS.get(code_value, 400)
 
 
+class ResolverActivationError(DomainError):
+    """Closed-code, message-redacted error for resolver-activation authorization (SECP-B2-4.1).
+
+    The HTTP layer serializes only the closed code (``{"error": {"code": ...}}``); no free-form
+    backend message, evidence value, or reference reaches the API/UI.
+    """
+
+    redacted = True
+
+    _STATUS = {
+        "resolver_activation_not_found": 404,
+        "resolver_activation_forbidden": 403,
+        "resolver_activation_invalid_state": 409,
+        "resolver_activation_substrate_ineligible": 409,
+        "resolver_activation_evidence_incomplete": 409,
+        "resolver_activation_evidence_invalid": 422,
+        "resolver_activation_lifecycle_conflict": 409,
+        "resolver_activation_internal_failure": 500,
+    }
+
+    def __init__(self, code: object) -> None:
+        code_value = getattr(code, "value", str(code))
+        super().__init__(code_value)
+        self.code = code_value
+        self.http_status = self._STATUS.get(code_value, 400)
+
+
 class NotFoundError(DomainError):
     http_status = 404
     code = "not_found"

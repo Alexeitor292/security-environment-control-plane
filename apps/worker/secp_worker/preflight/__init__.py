@@ -11,6 +11,7 @@ is contacted. A later, separately reviewed activation PR must supply a productio
 """
 
 __all__ = [
+    "activation_authorization",
     "activation_gate",
     "backends",
     "consumer",
