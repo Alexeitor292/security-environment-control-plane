@@ -9,6 +9,7 @@ const NAV = [
   { to: "/templates/new", label: "Definition Editor" },
   { to: "/provider-targets", label: "Provider Targets" },
   { to: "/onboarding", label: "Target Onboarding" },
+  { to: "/staging-labs", label: "Staging Labs" },
   { to: "/audit", label: "Audit Log" },
 ];
 

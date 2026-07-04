@@ -11,9 +11,12 @@ import type {
   Onboarding,
   OnboardingCreate,
   PluginInfo,
+  EligibleSubstrate,
   Preflight,
   Principal,
   ProviderCapabilities,
+  StagingLab,
+  StagingLabCreate,
   TargetCreate,
   TargetEvidence,
   TeamTopology,
@@ -166,4 +169,27 @@ export const api = {
     request<Onboarding>("POST", `/api/v1/onboarding/${id}/activate`),
   retireOnboarding: (id: string) =>
     request<Onboarding>("POST", `/api/v1/onboarding/${id}/retire`),
+
+  // Declarative disposable staging lab (SECP-002B-1B-9, fake simulation only; queue-only).
+  listEligibleSubstrates: () =>
+    request<EligibleSubstrate[]>("GET", "/api/v1/staging-labs/eligible-substrates"),
+  listStagingLabs: () => request<StagingLab[]>("GET", "/api/v1/staging-labs"),
+  createStagingLab: (body: StagingLabCreate) =>
+    request<StagingLab>("POST", "/api/v1/staging-labs", body),
+  getStagingLab: (id: string) => request<StagingLab>("GET", `/api/v1/staging-labs/${id}`),
+  planStagingLab: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/plan`),
+  submitStagingLab: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/submit`),
+  approveStagingLab: (id: string, expectedPlanHash: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/approve`, {
+      expected_plan_hash: expectedPlanHash,
+    }),
+  rejectStagingLab: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/reject`),
+  // These QUEUE fake work only; a worker records completion later.
+  queueStagingLabSimulation: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/simulate`),
+  queueStagingLabTeardown: (id: string) =>
+    request<StagingLab>("POST", `/api/v1/staging-labs/${id}/teardown`),
 };

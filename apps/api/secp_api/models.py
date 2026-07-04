@@ -45,6 +45,18 @@ from secp_api.enums import (
     ProvisioningStatus,
     ReservationStatus,
     SnapshotStatus,
+    StagingBootstrapArtifactProfile,
+    StagingLabDecisionCode,
+    StagingLabProfile,
+    StagingLabPurpose,
+    StagingLabStatus,
+    StagingNetworkIntent,
+    StagingResourceClass,
+    StagingRollbackPolicy,
+    StagingSubstrateEligibilityStatus,
+    StagingWorkFailureCode,
+    StagingWorkOperation,
+    StagingWorkStatus,
     TargetStatus,
     ToolchainProfileStatus,
     WorkflowKind,
@@ -536,6 +548,12 @@ class ExecutionTarget(Base, TimestampMixin):
     live_read_authorizations: Mapped[list[LiveReadAuthorization]] = relationship(
         back_populates="target", cascade="all, delete-orphan"
     )
+    staging_labs: Mapped[list[StagingLab]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
+    staging_substrate_eligibilities: Mapped[list[StagingSubstrateEligibility]] = relationship(
+        back_populates="target", cascade="all, delete-orphan"
+    )
 
 
 # --- Target onboarding + automated deployment contract (SECP-002B-1B-0) -------
@@ -754,6 +772,234 @@ class LiveReadAuthorization(Base, TimestampMixin):
             "connection_hash=<sha256>, "
             "boundary_hash=<sha256>)"
         )
+
+
+class StagingLab(Base, TimestampMixin):
+    """Application-owned declarative disposable staging lab (SECP-002B-1B-9).
+
+    Fake-only and provider-neutral. This row is the durable desired-state + lifecycle record for
+    a disposable read-only staging lab. It stores only safe logical intent: purpose, the approved
+    substrate target id, profile, network intent, a bounded logical resource class, an approved
+    bootstrap-artifact *profile id* (never paths/URLs/checksums), rollback policy, an immutable
+    ownership label, lifecycle state, an immutable desired-state plan + its version + hash,
+    approval metadata, and a fake simulated-observed-state.
+
+    It NEVER stores endpoints, hostnames, IPs, bridge/VNet names, VMIDs, storage ids, certificate
+    data, secrets/tokens/credential references/secret hashes, raw artifact paths/URLs/checksums,
+    or actual provider observations. Reaching ``simulated_ready`` creates no infrastructure and is
+    not live read-only collection. A staging-lab approval is separate from and never substitutes
+    for a :class:`LiveReadAuthorization`.
+    """
+
+    __tablename__ = "staging_lab"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    ownership_label: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    purpose: Mapped[StagingLabPurpose] = mapped_column(
+        EnumType(StagingLabPurpose, length=60),
+        default=StagingLabPurpose.disposable_readonly_staging,
+        nullable=False,
+    )
+    profile: Mapped[StagingLabProfile] = mapped_column(
+        EnumType(StagingLabProfile, length=60),
+        default=StagingLabProfile.nested_proxmox,
+        nullable=False,
+    )
+    network_intent: Mapped[StagingNetworkIntent] = mapped_column(
+        EnumType(StagingNetworkIntent, length=60),
+        default=StagingNetworkIntent.host_only_no_uplink,
+        nullable=False,
+    )
+    resource_class: Mapped[StagingResourceClass] = mapped_column(
+        EnumType(StagingResourceClass, length=40),
+        default=StagingResourceClass.small_lab,
+        nullable=False,
+    )
+    rollback_policy: Mapped[StagingRollbackPolicy] = mapped_column(
+        EnumType(StagingRollbackPolicy, length=60),
+        default=StagingRollbackPolicy.revert_to_known_clean_checkpoint,
+        nullable=False,
+    )
+    # Approved offline bootstrap-artifact profile — a closed backend catalog enum, never a
+    # caller-supplied artifact id/path/URL/checksum. Stored as its enum value.
+    bootstrap_artifact_profile: Mapped[StagingBootstrapArtifactProfile] = mapped_column(
+        EnumType(StagingBootstrapArtifactProfile, length=60),
+        default=StagingBootstrapArtifactProfile.nested_proxmox_offline_base,
+        nullable=False,
+    )
+    status: Mapped[StagingLabStatus] = mapped_column(
+        EnumType(StagingLabStatus, length=40),
+        default=StagingLabStatus.draft,
+        nullable=False,
+    )
+    # Optimistic-concurrency revision. Every lifecycle mutation performs a compare-and-swap on
+    # (status, revision); a stale writer's conditional UPDATE affects zero rows and fails closed.
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Immutable desired-state plan (logical resources only) + version + hash. Set once at plan
+    # generation; the plan cannot change after approval.
+    plan_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(80), default="", nullable=False, index=True)
+    desired_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Fake simulated observed-state (logical only); reconciled idempotently on retry.
+    simulated_observed_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # Approval binding (set once at approval): approver, time, and the exact approved plan.
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_plan_hash: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    approved_plan_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Closed decision/outcome code — never free text.
+    decision_code: Mapped[StagingLabDecisionCode] = mapped_column(
+        EnumType(StagingLabDecisionCode, length=40),
+        default=StagingLabDecisionCode.pending,
+        nullable=False,
+    )
+
+    target: Mapped[ExecutionTarget] = relationship(back_populates="staging_labs")
+    work_items: Mapped[list[StagingLabWorkItem]] = relationship(
+        back_populates="staging_lab", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            "StagingLab("
+            f"id={self.id!s}, "
+            f"organization_id={self.organization_id!s}, "
+            f"execution_target_id={self.execution_target_id!s}, "
+            f"ownership_label={self.ownership_label!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"plan_version={self.plan_version!r}, "
+            f"plan_hash={self.plan_hash!r})"
+        )
+
+
+class StagingLabWorkItem(Base, TimestampMixin):
+    """Durable, secret-free staging-lab work item (SECP-002B-1B-9).
+
+    The API commits a ``queued`` item and returns; only the worker claims and processes it. It
+    records only safe logical values (ids, immutable plan hash/version, operation kind, a
+    server-generated operation fingerprint, lifecycle state, revision, timestamps, and a closed
+    failure code) and NEVER an endpoint, host, IP, network, VMID, storage, certificate, token,
+    credential, secret ref, artifact path/URL/checksum, or any provider observation.
+
+    The ``operation_fingerprint`` is a deterministic server-generated key over
+    (staging_lab_id, operation_kind, plan_hash, plan_version); it is unique, and the same
+    (lab, operation, plan) scope is additionally enforced by ``uq_staging_work_scope`` so a retry
+    for the identical operation and plan resolves to the original work item.
+    """
+
+    __tablename__ = "staging_lab_work_item"
+    __table_args__ = (
+        UniqueConstraint("operation_fingerprint", name="uq_staging_work_fingerprint"),
+        # Uniqueness over the full intended scope (lab + operation + immutable plan hash/version).
+        UniqueConstraint(
+            "staging_lab_id",
+            "operation_kind",
+            "plan_hash",
+            "plan_version",
+            name="uq_staging_work_scope",
+        ),
+        # At most ONE active (queued or claimed) work item per lab+operation (fail-closed).
+        Index(
+            "uq_staging_work_active",
+            "staging_lab_id",
+            "operation_kind",
+            unique=True,
+            sqlite_where=text("status in ('queued','claimed')"),
+            postgresql_where=text("status in ('queued','claimed')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    staging_lab_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("staging_lab.id"), nullable=False, index=True
+    )
+    operation_kind: Mapped[StagingWorkOperation] = mapped_column(
+        EnumType(StagingWorkOperation, length=40), nullable=False
+    )
+    plan_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Deterministic server-generated key over (lab, operation, plan_hash, plan_version).
+    operation_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[StagingWorkStatus] = mapped_column(
+        EnumType(StagingWorkStatus, length=40),
+        default=StagingWorkStatus.queued,
+        nullable=False,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Closed failure/refusal code — never a free-text string.
+    failure_code: Mapped[StagingWorkFailureCode | None] = mapped_column(
+        EnumType(StagingWorkFailureCode, length=40), nullable=True
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    staging_lab: Mapped[StagingLab] = relationship(back_populates="work_items")
+
+    def __repr__(self) -> str:
+        return (
+            "StagingLabWorkItem("
+            f"id={self.id!s}, staging_lab_id={self.staging_lab_id!s}, "
+            f"operation_kind={getattr(self.operation_kind, 'value', self.operation_kind)!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"plan_version={self.plan_version!r})"
+        )
+
+
+class StagingSubstrateEligibility(Base, TimestampMixin):
+    """Durable marker: a target is approved as a disposable staging substrate (SECP-002B-1B-9).
+
+    A target does NOT become a staging substrate merely by being active with an active onboarding;
+    a target admin must additionally issue this eligibility record. Secret-free.
+    """
+
+    __tablename__ = "staging_substrate_eligibility"
+    __table_args__ = (
+        Index(
+            "uq_staging_substrate_active",
+            "execution_target_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    plugin_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    allowed_profile: Mapped[StagingLabProfile] = mapped_column(
+        EnumType(StagingLabProfile, length=60), nullable=False
+    )
+    status: Mapped[StagingSubstrateEligibilityStatus] = mapped_column(
+        EnumType(StagingSubstrateEligibilityStatus, length=40),
+        default=StagingSubstrateEligibilityStatus.active,
+        nullable=False,
+    )
+    issued_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    target: Mapped[ExecutionTarget] = relationship(back_populates="staging_substrate_eligibilities")
 
 
 class ProviderInventorySnapshot(Base, TimestampMixin):

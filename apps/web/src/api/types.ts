@@ -324,3 +324,64 @@ export interface OnboardingCreate {
   isolation_model: IsolationModelName;
   declared_boundary: OnboardingBoundary;
 }
+
+// --- Declarative Disposable Staging Lab (SECP-002B-1B-9, fake-only) ---
+
+export type StagingLabStatus =
+  | "draft"
+  | "planned"
+  | "awaiting_approval"
+  | "approved"
+  | "simulation_queued"
+  | "simulating"
+  | "simulated_ready"
+  | "teardown_queued"
+  | "tearing_down"
+  | "destroyed"
+  | "failed";
+
+export type StagingLabProfile = "nested_proxmox";
+export type StagingNetworkIntent = "host_only_no_uplink";
+export type StagingResourceClass = "small_lab" | "medium_lab";
+export type StagingBootstrapArtifactProfile = "nested_proxmox_offline_base";
+export type StagingRollbackPolicy =
+  | "revert_to_known_clean_checkpoint"
+  | "destroy_and_rebuild";
+
+export interface StagingLab {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  display_name: string;
+  ownership_label: string;
+  purpose: string;
+  profile: string;
+  network_intent: string;
+  resource_class: string;
+  rollback_policy: string;
+  bootstrap_artifact_profile: string;
+  status: StagingLabStatus;
+  revision: number;
+  plan_version: number;
+  plan_hash: string;
+  desired_state: Record<string, unknown> | null;
+  simulated_observed_state: Record<string, unknown> | null;
+  approved_plan_hash: string;
+  approved_plan_version: number;
+  approved_at: string | null;
+  decision_code: string;
+  created_at: string;
+}
+
+export interface StagingLabCreate {
+  execution_target_id: string;
+  resource_class?: StagingResourceClass;
+  bootstrap_artifact_profile?: StagingBootstrapArtifactProfile;
+  rollback_policy?: StagingRollbackPolicy;
+  logical_name?: string | null;
+}
+
+export interface EligibleSubstrate {
+  id: string;
+  alias: string;
+}

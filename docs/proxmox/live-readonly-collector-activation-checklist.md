@@ -24,6 +24,14 @@ readiness items (self-contained staging control plane, tested absence of product
 control-plane access, verified offline bootstrap, verified caps/headroom, functional read-only
 scope) must also be complete and independently reviewed out of band.
 
+SECP-002B-1B-9 adds the application-owned, **fake-only** desired-state / plan / approval /
+simulation / teardown workflow (SECP owns the desired state, not a shell runbook). It creates no
+bridge, VM, VNet, target, token, or connection, contacts no infrastructure, and adds no
+activation switch. A staging-lab plan approval permits fake simulation only and is separate from
+the live-read authorization required below. The self-contained staging control-plane constraint
+remains mandatory, and a later separately reviewed adapter PR is required before any real
+provisioning.
+
 Every box must be **checked and independently human-reviewed**, and an explicit user
 authorization recorded, before the default-disabled live-collection feature gate is enabled for
 a specific approved target. The collector is **read-only**; it never mutates a target.

@@ -280,3 +280,72 @@ execution. Static documentation guardrail tests
 (`apps/api/tests/test_isolated_staging_control_plane_design.py`) enforce the correction and the
 continued absence of real infrastructure values and activation switches. All prior dormancy,
 authorization, redaction, and sealed-evidence guarantees are unchanged.
+
+## Amendment - application-owned declarative staging-lab workflow (SECP-002B-1B-9, 2026-07-03)
+
+B1-B9 makes SECP — not a shell runbook — the owner of the disposable staging lab's desired state
+and future provisioning workflow. It adds an application-owned, fake-only capability: a durable
+provider-neutral `StagingLab` desired-state record, a deterministic immutable topology compiler,
+an explicit approval boundary, a worker-owned fake execution seam, and a controlled teardown,
+surfaced through a web UI workflow (create -> plan -> approve -> simulate -> observe -> teardown).
+
+The compiler emits logical resources only: one isolated host-only network with no uplink, no
+gateway, and no DNS; a self-contained staging control plane (staging API + database + worker with
+no production dependency); one disposable nested Proxmox target; exactly one target-facing
+read-only connection policy (staging worker to the nested target API); a known-clean checkpoint +
+rollback intent; and a teardown intent — every resource carrying the lab's immutable ownership
+label. The compiler and the worker seam fail closed on production control-plane reuse, a
+shared/production network, more than one target-facing network or nested target, a missing
+self-contained control plane, a standing/auto-renewing authorization, missing ownership labeling,
+or an unapproved substrate.
+
+B1-B9 is fake-only. It creates no bridge, VM, VNet, target, token, secret, or connection;
+contacts no Proxmox and opens no socket/subprocess; performs no secret resolution and persists no
+live evidence; and adds no runtime switch that can activate provisioning. Approving a staging-lab
+plan authorizes fake simulation only — it is NOT a SECP-002B-1B-6 `LiveReadAuthorization`, which
+remains separately required for any future real read-only collection.
+The SECP-002B-1B-8 self-contained staging control-plane constraint remains mandatory. A later,
+separately reviewed adapter PR is required before any real provisioning can occur.
+
+### Remediation (durable work items, strict validation, concurrency, eligibility)
+
+The initial B1-B9 draft executed simulation inline in the API process and trusted UI-only
+validation. It was reworked so that:
+
+- **The API only enqueues durable, committed work.** `queue_simulation` / `queue_teardown` create
+  a `StagingLabWorkItem` (safe logical values only) and move the lab into an explicit
+  `simulation_queued` / `teardown_queued` state, then return. A separate **worker consumer**
+  (`secp_worker.staging_lab.consumer`) claims exactly one committed queued item with a database
+  compare-and-swap, **reloads the authoritative lab/approval/plan-hash/version/organization/
+  ownership and lifecycle state**, refuses stale/mismatched/cross-org/drifted/unowned work, and
+  only then runs the fake executor and writes observations + completion. The API imports no
+  staging-lab worker/executor code and is **not** routed through the inline dispatcher; only the
+  worker may enter `simulating` / `tearing_down` or complete work. This consumer runs **fake-only**
+  inside the worker process (a bounded poll loop in `secp_worker.staging_lab.runtime`, started by
+  the worker entrypoint); the API never runs it. A later, separately reviewed real-adapter PR is
+  required before any provider action.
+- **Strict backend allowlist validation.** All persisted labels are server-generated from the
+  immutable lab id (ownership label, display name); resource class, bootstrap-artifact profile,
+  profile, network intent, rollback policy, purpose, lifecycle, and work operation are closed
+  backend enums; the substrate is referenced only by UUID (the UI receives a server alias, never
+  raw target text); and the single optional caller string is validated against a strict
+  kebab-case slug allowlist that structurally excludes URLs, hosts, IPs, paths, ports, and
+  secret/credential/token references.
+- **Concurrency-safe lifecycle.** A `revision` column plus transactional compare-and-swap updates
+  make approval, queueing, worker claim, completion, and teardown fail closed under races (the
+  worker claim uses `FOR UPDATE SKIP LOCKED` on PostgreSQL with a portable CAS fallback). Work
+  identity is a **server-generated operation fingerprint** over
+  `(lab_id, operation, plan_hash, plan_version)` — never a caller-supplied idempotency key; a
+  unique fingerprint plus a unique `(lab, operation, plan_hash, plan_version)` scope and a
+  partial-unique active index enforce at most one active work item per lab+operation, make a
+  retry of the identical operation+plan resolve to the original item, and refuse
+  cross-organization association.
+- **No caller free text.** Approval/rejection outcomes and work failures use closed decision/
+  failure-code enums (never free-text reasons), and staging-lab validation errors return only a
+  safe generic code (`invalid_staging_lab_input`) — the rejected input is never echoed in the API
+  response, audit trail, or logs.
+- **Explicit substrate eligibility.** A target is a staging substrate only when a target admin
+  (permission `staging_substrate:manage`, with no lab-creator endpoint) issues a durable
+  `StagingSubstrateEligibility` record binding organization, target, Proxmox plugin type, and the
+  `nested_proxmox` profile. The service and the compiler independently require eligibility; UI
+  filtering alone is insufficient.

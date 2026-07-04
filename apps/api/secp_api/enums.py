@@ -225,6 +225,149 @@ class LiveReadAuthorizationStatus(str, Enum):
     expired = "expired"
 
 
+class StagingLabPurpose(str, Enum):
+    """Why a disposable staging lab exists (SECP-002B-1B-9).
+
+    Only ``disposable_readonly_staging`` is available: a bounded, reversible lab used to
+    functionally validate the read-only control plane. It is not for running workloads.
+    """
+
+    disposable_readonly_staging = "disposable_readonly_staging"
+
+
+class StagingLabProfile(str, Enum):
+    """Provider-neutral substrate profile for a staging lab (SECP-002B-1B-9).
+
+    Only ``nested_proxmox`` is available: a disposable nested Proxmox target on an approved
+    substrate. It is a functional test substrate, never a hardware/hypervisor isolation boundary.
+    """
+
+    nested_proxmox = "nested_proxmox"
+
+
+class StagingNetworkIntent(str, Enum):
+    """Logical network intent for a staging lab (SECP-002B-1B-9).
+
+    ``host_only_no_uplink`` is the only accepted intent: an internal, host-only segment with no
+    physical uplink, no gateway, and no DNS. ``shared_or_production`` names a disallowed intent
+    that the compiler rejects fail-closed (it is never emitted into a plan).
+    """
+
+    host_only_no_uplink = "host_only_no_uplink"
+    shared_or_production = "shared_or_production"
+
+
+class StagingResourceClass(str, Enum):
+    """Bounded logical resource class for a staging lab (SECP-002B-1B-9).
+
+    Safe, coarse logical sizes only — never raw host CPU/RAM/disk values. Real sizing against
+    verified host headroom happens out of band; SECP stores only the chosen logical class.
+    """
+
+    small_lab = "small_lab"
+    medium_lab = "medium_lab"
+
+
+class StagingBootstrapArtifactProfile(str, Enum):
+    """Backend catalog of approved offline bootstrap-artifact profiles (SECP-002B-1B-9).
+
+    A closed server-owned enum — never a caller-supplied artifact id, path, URL, or checksum.
+    Each value names an operator-approved, pre-staged offline artifact set resolved out of band.
+    """
+
+    nested_proxmox_offline_base = "nested_proxmox_offline_base"
+
+
+class StagingWorkOperation(str, Enum):
+    """Durable staging-lab work-item operation kind (SECP-002B-1B-9, fake-only)."""
+
+    simulate_provision = "simulate_provision"
+    simulate_teardown = "simulate_teardown"
+
+
+class StagingWorkStatus(str, Enum):
+    """Durable staging-lab work-item lifecycle (SECP-002B-1B-9).
+
+    The API may only create ``queued`` items. Only the worker may move an item to ``claimed`` and
+    then ``completed`` / ``failed`` / ``refused``.
+    """
+
+    queued = "queued"
+    claimed = "claimed"
+    completed = "completed"
+    failed = "failed"
+    refused = "refused"
+
+
+class StagingSubstrateEligibilityStatus(str, Enum):
+    """Durable staging-substrate eligibility lifecycle (SECP-002B-1B-9)."""
+
+    active = "active"
+    revoked = "revoked"
+
+
+class StagingLabDecisionCode(str, Enum):
+    """Closed set of staging-lab decision/outcome codes (SECP-002B-1B-9).
+
+    Replaces all free-text approval/rejection reasons. Never caller-supplied arbitrary text.
+    """
+
+    pending = "pending"
+    approved = "approved"
+    rejected_plan_drift = "rejected_plan_drift"
+    rejected_lifecycle = "rejected_lifecycle"
+    rejected_policy = "rejected_policy"
+    refused_ownership = "refused_ownership"
+    refused_concurrency = "refused_concurrency"
+    failed_internal = "failed_internal"
+
+
+class StagingWorkFailureCode(str, Enum):
+    """Closed set of durable work-item failure/refusal codes (SECP-002B-1B-9).
+
+    Never an arbitrary string — every refusal maps to one of these safe codes.
+    """
+
+    lab_missing = "lab_missing"
+    cross_org = "cross_org"
+    plan_drift = "plan_drift"
+    approval_mismatch = "approval_mismatch"
+    ownership_mismatch = "ownership_mismatch"
+    stale_lifecycle = "stale_lifecycle"
+    lifecycle_raced = "lifecycle_raced"
+    blast_radius = "blast_radius"
+    stale_completion = "stale_completion"
+    internal = "internal"
+
+
+class StagingRollbackPolicy(str, Enum):
+    """How a staging lab is returned to a known-clean state (SECP-002B-1B-9)."""
+
+    revert_to_known_clean_checkpoint = "revert_to_known_clean_checkpoint"
+    destroy_and_rebuild = "destroy_and_rebuild"
+
+
+class StagingLabStatus(str, Enum):
+    """Application-owned disposable staging-lab lifecycle (SECP-002B-1B-9).
+
+    Fake-only. Reaching ``simulated_ready`` means a labeled simulation completed; it creates no
+    infrastructure and is never live read-only collection. ``approved`` is permission to enter
+    fake simulation only — it is NOT a :class:`LiveReadAuthorizationStatus` grant.
+    """
+
+    draft = "draft"
+    planned = "planned"
+    awaiting_approval = "awaiting_approval"
+    approved = "approved"
+    simulation_queued = "simulation_queued"
+    simulating = "simulating"
+    simulated_ready = "simulated_ready"
+    teardown_queued = "teardown_queued"
+    tearing_down = "tearing_down"
+    destroyed = "destroyed"
+    failed = "failed"
+
+
 class ProvisioningApplicationMode(str, Enum):
     """Which provisioning path a request targets (SECP-002B-1A, ADR-013).
 
@@ -275,6 +418,12 @@ class Permission(str, Enum):
     # SECP-002B-1B-0 — target onboarding and automated deployment contract.
     onboarding_manage = "onboarding:manage"
     onboarding_approve = "onboarding:approve"
+    # SECP-002B-1B-9 — declarative disposable staging-lab workflow (fake-only).
+    staging_lab_manage = "staging_lab:manage"
+    staging_lab_approve = "staging_lab:approve"
+    # Granting a target staging-substrate eligibility is a target-admin action, NOT a
+    # lab-creator action — deliberately separate from staging_lab:manage.
+    staging_substrate_manage = "staging_substrate:manage"
 
 
 class AuditAction(str, Enum):
@@ -354,3 +503,24 @@ class AuditAction(str, Enum):
     live_read_authorization_approved = "live_read.authorization_approved"
     live_read_authorization_revoked = "live_read.authorization_revoked"
     live_read_authorization_validation_refused = "live_read.authorization_validation_refused"
+    # SECP-002B-1B-9 — declarative disposable staging-lab workflow (fake-only).
+    staging_lab_created = "staging_lab.created"
+    staging_lab_planned = "staging_lab.planned"
+    staging_lab_submitted = "staging_lab.submitted"
+    staging_lab_approved = "staging_lab.approved"
+    staging_lab_rejected = "staging_lab.rejected"
+    staging_lab_simulation_queued = "staging_lab.simulation_queued"
+    staging_lab_simulation_started = "staging_lab.simulation_started"
+    staging_lab_simulated_ready = "staging_lab.simulated_ready"
+    staging_lab_simulation_failed = "staging_lab.simulation_failed"
+    staging_lab_teardown_queued = "staging_lab.teardown_queued"
+    staging_lab_teardown_started = "staging_lab.teardown_started"
+    staging_lab_destroyed = "staging_lab.destroyed"
+    staging_lab_refused = "staging_lab.refused"
+    # Durable work items + substrate eligibility (SECP-002B-1B-9).
+    staging_work_claimed = "staging_lab.work_claimed"
+    staging_work_completed = "staging_lab.work_completed"
+    staging_work_failed = "staging_lab.work_failed"
+    staging_work_refused = "staging_lab.work_refused"
+    staging_substrate_eligibility_granted = "staging_lab.substrate_eligibility_granted"
+    staging_substrate_eligibility_revoked = "staging_lab.substrate_eligibility_revoked"

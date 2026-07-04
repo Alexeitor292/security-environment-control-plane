@@ -36,7 +36,9 @@ failure disqualifies the target; there is no compensating-control substitution.
 
 - **Disposable or recoverable from a known-clean state.** The entire target can be destroyed
   and rebuilt from documented automation, or reverted to a verified known-clean snapshot,
-  at any time and without loss of anything of value.
+  at any time; it holds only bounded, reversible staging resources and its destruction is
+  validated against verified production headroom (SECP-002B-1B-8), never assumed to be without
+  consequence.
 - **Isolated by default.** The target is segregated from home, corporate, management, and
   public networks by default-deny controls in both directions. Any reachability that exists
   is an explicit, documented, removable exception — never an inherited flat network.
