@@ -37,7 +37,12 @@ def test_valid_env_reference_parses():
         "env:PATH",
         "vault:/leading-slash",  # vault locators are opaque relative paths only
         "vault:has space",
-        "vault:../traversal",
+        # Dot-segment traversal: any segment exactly '.' or '..' is rejected (not normalized).
+        "vault:secp/./target",
+        "vault:secp/../target",
+        "vault:secp/target/..",
+        "vault:.",
+        "vault:..",
         "aws-sm:whatever",  # still an unsupported scheme
         "",
     ],
@@ -54,6 +59,9 @@ def test_vault_scheme_is_supported_syntax_only():
     assert scheme == "vault"
     assert locator == "secret/data/x"
     validate_secret_ref_syntax("vault:secp/proxmox/target-1")  # no raise
+    # Dotted names WITHIN a segment remain valid and are never normalized/rewritten.
+    assert parse_secret_ref("vault:v1.2/service.prod") == ("vault", "v1.2/service.prod")
+    assert parse_secret_ref("vault:a.b.c") == ("vault", "a.b.c")
 
 
 def test_plaintext_detection():

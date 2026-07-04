@@ -23,10 +23,22 @@ SUPPORTED_SCHEMES = {"env", "vault"}
 ENV_LOCATOR_PATTERN = re.compile(r"^SECP_PROVIDER_SECRET__[A-Za-z0-9_]+$")
 
 # The 'vault' scheme locator is an OPAQUE, structural logical path only: slash-delimited segments
-# of safe characters, no leading slash, no dot-segment traversal, no host/scheme/port/query, no
-# whitespace. It names *where* a secret lives, never a secret, endpoint, host, port, or token, and
-# is resolved only in the worker behind the out-of-band-granted OpenBao adapter.
+# of safe characters (letters, digits, ``.``, ``_``, ``-``), no leading slash, no empty segment, no
+# host/scheme/port/query, and no whitespace. In addition, NO segment may be exactly ``.`` or ``..``
+# (dot-segment traversal): opaque references must have a single, non-normalized representation
+# because exact reference equality is part of the three-way binding contract. Dotted names WITHIN a
+# segment (e.g. ``v1.2`` or ``service.prod``) remain valid. It names *where* a secret lives, never a
+# secret, endpoint, host, port, or token, and is resolved only in the worker behind the
+# out-of-band-granted OpenBao adapter. This validator rejects; it never normalizes/rewrites input.
 VAULT_LOCATOR_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9._-]+)*$")
+_VAULT_DOT_SEGMENTS = frozenset({".", ".."})
+
+
+def _is_valid_vault_locator(locator: str) -> bool:
+    """Structural charset/shape check + explicit rejection of any ``.``/``..`` path segment."""
+    if not VAULT_LOCATOR_PATTERN.match(locator):
+        return False
+    return all(segment not in _VAULT_DOT_SEGMENTS for segment in locator.split("/"))
 
 
 class InvalidSecretRefError(ValueError):
@@ -54,10 +66,10 @@ def parse_secret_ref(secret_ref: str) -> tuple[str, str]:
         raise InvalidSecretRefError(
             "the 'env' scheme requires a namespaced locator matching SECP_PROVIDER_SECRET__<NAME>"
         )
-    if scheme == "vault" and not VAULT_LOCATOR_PATTERN.match(locator):
+    if scheme == "vault" and not _is_valid_vault_locator(locator):
         raise InvalidSecretRefError(
             "the 'vault' scheme requires an opaque slash-delimited logical path "
-            "(no leading slash, host, scheme, port, query, whitespace, or dot-segment traversal)"
+            "(no leading slash, host, scheme, port, query, whitespace, or '.'/'..' path segment)"
         )
     return scheme, locator
 

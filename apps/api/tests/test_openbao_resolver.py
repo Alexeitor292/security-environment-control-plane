@@ -68,15 +68,39 @@ def test_vault_scheme_accepts_opaque_locator_without_resolving():
 
 
 @pytest.mark.parametrize(
+    "good",
+    [
+        "vault:secp/proxmox/target-1",
+        "vault:v1.2/service.prod",  # dotted names WITHIN a segment stay valid
+        "vault:a.b.c",
+        "vault:secp/v1.2.3/tok",
+    ],
+)
+def test_vault_scheme_preserves_valid_dotted_segment_names(good):
+    scheme, locator = parse_secret_ref(good)
+    assert scheme == "vault"
+    assert locator == good.split(":", 1)[1]  # never normalized/rewritten
+
+
+@pytest.mark.parametrize(
     "bad",
     [
         "vault:/leading-slash",
         "vault:has space",
         "vault:https://host/path",  # no scheme/host
-        "vault:../traversal",
         "vault:a//b",  # no empty segment
         "vault:",  # empty locator
         "vault:end/",  # trailing slash / empty segment
+        # Dot-segment traversal — any segment that is exactly '.' or '..' is rejected (not
+        # normalized): opaque references must have one unambiguous representation.
+        "vault:secp/./target",
+        "vault:secp/../target",
+        "vault:secp/target/..",
+        "vault:secp/target/.",
+        "vault:.",
+        "vault:..",
+        "vault:a/./b/c",
+        "vault:a/b/../c",
     ],
 )
 def test_vault_scheme_rejects_non_opaque_or_unsafe_locators(bad):
