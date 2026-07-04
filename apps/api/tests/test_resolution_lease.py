@@ -420,3 +420,174 @@ def test_lease_row_and_audit_store_no_secret_or_reference(session):
     blob = " ".join(str(e.data) for e in events).lower()
     for forbidden in ("secret", "credential", "token", "endpoint", "base_url", "://", "@pam"):
         assert forbidden not in blob
+
+
+# --- SECP-B2-3.1: duplicate-insert recovery + legal mark_consumed transition ---------------------
+
+
+def _lease_count_for(session, key: OperationKey) -> int:
+    return (
+        session.query(ResolutionLease)
+        .filter(
+            ResolutionLease.live_read_authorization_id == key.live_read_authorization_id,
+            ResolutionLease.authorization_version == key.authorization_version,
+            ResolutionLease.operation_fingerprint == key.operation_fingerprint,
+        )
+        .count()
+    )
+
+
+def test_duplicate_insert_recovery_is_savepoint_contained(session, monkeypatch):
+    """Reach the REAL conflict-recovery branch: the caller's initial load misses, its insert hits
+    the unique constraint, the nested savepoint absorbs the IntegrityError, the outer session stays
+    usable, the winner is reloaded, and the caller is refused lease_held with no loser-side row or
+    audit. (A normal sequential acquire never reaches this branch — its load already sees the row.)
+    """
+    import secp_worker.preflight.lease as lease_mod
+
+    org = _org(session)
+    now = _now()
+    exp = _expiry(now)
+    key = _key(session, org)
+
+    # The WINNER row is created + flushed first (present in the transaction's unique index).
+    winner = acquire_lease(
+        session,
+        organization_id=org,
+        key=key,
+        worker_identity_id=WORKER_A,
+        authorization_expiry=exp,
+        now=now,
+    )
+    session.flush()
+    winner_id, winner_rev, winner_lease_id = winner.id, winner.revision, winner.lease_id
+
+    # Force ONLY the caller's first _load to miss (simulating the winner not yet visible), so the
+    # caller takes the insert path and hits a genuine duplicate-key conflict. The recovery reload
+    # (second call, unpatched) then finds the winner.
+    real_load = lease_mod._load
+    calls = {"n": 0}
+
+    def flaky_load(sess, k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return real_load(sess, k)
+
+    monkeypatch.setattr(lease_mod, "_load", flaky_load)
+
+    with pytest.raises(LeaseRefused) as exc:
+        acquire_lease(
+            session,
+            organization_id=org,
+            key=key,
+            worker_identity_id=WORKER_B,
+            authorization_expiry=exp,
+            now=now,
+        )
+    assert exc.value.reason == ResolutionLeaseReason.lease_held
+    assert calls["n"] >= 2, "recovery reload must run (conflict-recovery path reached)"
+
+    # The outer session is still usable (no PendingRollbackError) and exactly one row exists.
+    session.flush()
+    assert _lease_count_for(session, key) == 1
+    # The winner is unchanged: no loser-side state update.
+    session.refresh(winner)
+    assert (winner.id, winner.revision, winner.lease_id) == (winner_id, winner_rev, winner_lease_id)
+    assert winner.worker_identity_id == WORKER_A
+    # Exactly one acquired audit for this operation — the loser emitted none.
+    acquired = [
+        e
+        for e in session.query(AuditEvent).all()
+        if e.action == AuditAction.resolution_lease_acquired.value
+        and e.resource_id == str(winner_id)
+    ]
+    assert len(acquired) == 1
+
+
+def test_mark_consumed_refuses_exhausted_lease_without_state_change_or_audit(session):
+    org = _org(session)
+    now = _now()
+    exp = _expiry(now)
+    lease = acquire_lease(
+        session,
+        organization_id=org,
+        key=_key(session, org),
+        worker_identity_id=WORKER_A,
+        authorization_expiry=exp,
+        now=now,
+    )
+    for _ in range(RETRY_BUDGET):
+        begin_attempt(session, lease, now=now)
+    with pytest.raises(LeaseRefused):
+        begin_attempt(session, lease, now=now)  # exhausts
+    session.refresh(lease)
+    assert lease.status == ResolutionLeaseStatus.exhausted
+    snapshot = (
+        lease.status,
+        lease.revision,
+        lease.attempt_count,
+        lease.lease_id,
+        lease.reason_code,
+    )
+    session.flush()
+    audit_before = session.query(AuditEvent).count()
+
+    # Only active -> consumed is legal; an exhausted lease fails closed with no write.
+    with pytest.raises(LeaseRefused) as exc:
+        mark_consumed(session, lease, now=now)
+    assert exc.value.reason == ResolutionLeaseReason.retry_bound_exceeded
+
+    session.refresh(lease)
+    assert (
+        lease.status,
+        lease.revision,
+        lease.attempt_count,
+        lease.lease_id,
+        lease.reason_code,
+    ) == snapshot
+    session.flush()
+    assert session.query(AuditEvent).count() == audit_before  # no new audit event
+    consumed = [
+        e
+        for e in session.query(AuditEvent).all()
+        if e.action == AuditAction.resolution_lease_consumed.value
+    ]
+    assert consumed == []  # never transitioned to consumed
+
+
+def test_mark_consumed_refuses_already_consumed_lease_without_new_audit(session):
+    org = _org(session)
+    now = _now()
+    exp = _expiry(now)
+    lease = acquire_lease(
+        session,
+        organization_id=org,
+        key=_key(session, org),
+        worker_identity_id=WORKER_A,
+        authorization_expiry=exp,
+        now=now,
+    )
+    begin_attempt(session, lease, now=now)
+    mark_consumed(session, lease, now=now)  # legal active -> consumed
+    session.refresh(lease)
+    assert lease.status == ResolutionLeaseStatus.consumed
+    snapshot = (lease.status, lease.revision, lease.attempt_count, lease.lease_id)
+    session.flush()
+    audit_before = session.query(AuditEvent).count()
+
+    # A second mark_consumed on an already-consumed lease fails closed with no state change/audit.
+    with pytest.raises(LeaseRefused) as exc:
+        mark_consumed(session, lease, now=now)
+    assert exc.value.reason == ResolutionLeaseReason.replay_refused
+
+    session.refresh(lease)
+    assert (lease.status, lease.revision, lease.attempt_count, lease.lease_id) == snapshot
+    session.flush()
+    assert session.query(AuditEvent).count() == audit_before  # no second consumed audit
+    consumed = [
+        e
+        for e in session.query(AuditEvent).all()
+        if e.action == AuditAction.resolution_lease_consumed.value
+    ]
+    assert len(consumed) == 1  # exactly one consumed audit remains

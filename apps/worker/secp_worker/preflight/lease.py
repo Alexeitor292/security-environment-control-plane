@@ -182,9 +182,11 @@ def acquire_lease(
             worker_identity_id=worker_identity_id,
             reason_code="",
         )
-        session.add(row)
         try:
-            with session.begin_nested():  # SAVEPOINT: only this insert rolls back on a race
+            # SAVEPOINT: add + flush INSIDE the nested transaction so a duplicate-insert conflict is
+            # contained by the savepoint and the outer session stays usable for the recovery reload.
+            with session.begin_nested():
+                session.add(row)
                 session.flush()
         except IntegrityError:
             # Lost the insert race for this uniqueness key: another worker created the row.
@@ -261,8 +263,17 @@ def begin_attempt(session: Session, row: ResolutionLease, *, now: datetime) -> R
 def mark_consumed(session: Session, row: ResolutionLease, *, now: datetime) -> ResolutionLease:
     """Mark the operation globally single-use after a successful resolution (future path only).
 
+    Only ``active -> consumed`` is legal. An already-consumed or exhausted lease fails closed with
+    NO state change (status, revision, attempt_count, lease_id preserved) and NO new audit event.
     Never reached in this PR's shipped or sealed-test flow (the sealed resolver never succeeds).
     """
+    if row.status != ResolutionLeaseStatus.active:
+        # Invalid source state: refuse before any CAS/audit so nothing is written.
+        raise LeaseRefused(
+            ResolutionLeaseReason.replay_refused
+            if row.status == ResolutionLeaseStatus.consumed
+            else ResolutionLeaseReason.retry_bound_exceeded
+        )
     if not _cas(
         session,
         row,
