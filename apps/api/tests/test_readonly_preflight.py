@@ -20,6 +20,8 @@ from secp_api.enums import (
     OnboardingStatus,
     ReadonlyPreflightOutcome,
     ReadonlyPreflightStatus,
+    ResolverActivationEvidenceKind,
+    ResolverActivationEvidenceStatus,
     TargetStatus,
 )
 from secp_api.errors import (
@@ -35,7 +37,7 @@ from secp_api.models import (
     ReadonlyStagingPreflight,
     TargetOnboarding,
 )
-from secp_api.services import readonly_preflight, staging_labs
+from secp_api.services import readonly_preflight, resolver_activation, staging_labs
 from secp_worker.preflight.consumer import claim_and_process_one
 from secp_worker.preflight.orchestration import (
     _PolicyOrTlsRefusal,
@@ -129,6 +131,27 @@ def _queue(session, principal, auth) -> ReadonlyStagingPreflight:
     )
 
 
+def _approve_activation(session, principal, pf) -> None:
+    """Create + fully-evidence + approve the durable resolver-activation authorization for a queued
+    preflight, so the worker's MANDATORY pre-lease activation check (SECP-B2-4.2) passes. This is
+    the authoritative durable-record setup the worker verifier reads — never an injected capability.
+    """
+    row = resolver_activation.create_activation_authorization(
+        session, principal, preflight_id=pf.id
+    )
+    for kind in ResolverActivationEvidenceKind:
+        resolver_activation.record_evidence(
+            session,
+            principal,
+            row.id,
+            kind=kind,
+            status=ResolverActivationEvidenceStatus.verified,
+            proof_id="TKT-1",
+            issuer="reviewer",
+        )
+    resolver_activation.approve_activation_authorization(session, principal, row.id)
+
+
 def test_authorization_hashes_are_server_derived(session, principal):
     target = _substrate(session, principal)
     auth = readonly_preflight.create_preflight_authorization(
@@ -189,11 +212,12 @@ def test_stale_worker_terminal_cas_writes_no_facts_or_terminal_audit(session, pr
     target = _substrate(session, principal)
     auth = _approved_authorization(session, principal, target)
     pf = _queue(session, principal, auth)
+    _approve_activation(session, principal, pf)  # SECP-B2-4.2 mandatory pre-lease gate
 
     class _DriftingRunner:
         """Simulates another operation advancing the preflight's revision mid-run."""
 
-        def run(self, *, verified, credential, now):
+        def run(self, *, verified, credential, capability, now):
             session.execute(
                 update(ReadonlyStagingPreflight)
                 .where(ReadonlyStagingPreflight.id == pf.id)
@@ -255,9 +279,10 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
     target = _substrate(session, principal)
     auth = _approved_authorization(session, principal, target)
     pf = _queue(session, principal, auth)
+    _approve_activation(session, principal, pf)  # SECP-B2-4.2 mandatory pre-lease gate
 
     class _ReadyRunner:
-        def run(self, *, verified, credential, now):
+        def run(self, *, verified, credential, capability, now):
             return {"api_reachable": True, "node_count": 3, "endpoint": "SHOULD_BE_DROPPED"}
 
     result = run_readonly_preflight(
@@ -273,7 +298,7 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
     assert result.readiness_facts == {"api_reachable": True, "node_count": 3}
 
     class _RefusingRunner:
-        def run(self, *, verified, credential, now):
+        def run(self, *, verified, credential, capability, now):
             raise _PolicyOrTlsRefusal("tls refusal")
 
     # A distinct operation (fresh substrate/auth/preflight): the prior operation already holds a
@@ -281,6 +306,7 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
     target2 = _substrate(session, principal)
     auth2 = _approved_authorization(session, principal, target2)
     pf2 = _queue(session, principal, auth2)
+    _approve_activation(session, principal, pf2)  # SECP-B2-4.2 mandatory pre-lease gate
     result2 = run_readonly_preflight(
         session,
         pf2.id,
@@ -304,7 +330,7 @@ def test_sealed_resolver_fails_closed_before_transport_or_collector(session, pri
     class _TripwireRunner:
         called = False
 
-        def run(self, *, verified, credential, now):  # pragma: no cover - must never run
+        def run(self, *, verified, credential, capability, now):  # pragma: no cover - never runs
             _TripwireRunner.called = True
             raise AssertionError("collection runner must not be reached under the sealed resolver")
 

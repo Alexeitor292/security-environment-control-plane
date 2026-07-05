@@ -23,4 +23,5 @@ __all__ = [
     "runtime",
     "sealed_secret_resolver",
     "secret_resolution",
+    "self_test",
 ]

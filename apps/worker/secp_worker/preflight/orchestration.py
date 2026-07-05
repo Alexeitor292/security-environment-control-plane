@@ -1,17 +1,25 @@
-"""Worker-owned read-only staging-preflight orchestration (SECP-B2-0).
+"""Worker-owned read-only staging-preflight orchestration (SECP-B2-0 / B2-4.2).
 
 Given one authoritative preflight record, this:
 
 1. re-verifies the authoritative (target, onboarding, live-read authorization) binding via the
    existing SECP-002B-1B-6 verifier (fail-closed on stale/drifted/expired/revoked/invalid);
-2. resolves the target's opaque credential reference via an INJECTED worker resolver (a sealed
-   resolver in this PR — always fails closed as ``credential_unavailable``);
-3. only if a credential is available AND a collection runner is injected, runs the sealed GET-only
-   collection path and derives ONLY safe readiness facts (booleans/counts).
+2. verifies worker identity + the sealed activation gate (shipped defaults deny/disable), then
+   independently re-verifies the durable app-owned resolver-activation authorization + its complete
+   evidence (SECP-B2-4.1) — MANDATORY and load-bearing BEFORE any durable lease is acquired
+   (SECP-B2-4.2); any missing/invalid/expired/mismatched activation fails closed as
+   ``credential_unavailable``;
+3. resolves the target's opaque credential reference via an INJECTED worker resolver (the sealed
+   resolver in shipped runtime — always fails closed as ``credential_unavailable``);
+4. only if a credential is available AND a collection runner is injected, runs the sealed GET-only
+   collection path (the single governed handoff, passed the verified activation capability) and
+   derives ONLY safe readiness facts (booleans/counts).
 
-It contacts nothing by itself, constructs no transport, and imports no HTTP/socket/subprocess
-code. The collection runner (the sole path that could touch a real transport) is worker-injected
-and is never reached in this PR because the sealed resolver fails first.
+It contacts nothing by itself, constructs no transport, and imports no HTTP/socket/subprocess/
+OpenBao/Proxmox client code. The shipped runtime stops at the deny-by-default worker identity
+(step 4 below) BEFORE the activation check, the lease, the resolver, or the collector — every
+preflight still terminates as ``credential_unavailable`` with no lease row, no attempt, no secret
+material, and no contact.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ from secp_api.live_read_contract import (
     connection_identity_hash,
 )
 from secp_api.models import ExecutionTarget, LiveReadAuthorization, TargetOnboarding
+from secp_api.resolver_activation_contract import RESOLVER_ADAPTER_CONTRACT_VERSION
 from sqlalchemy.orm import Session
 
 from secp_worker.onboarding.live_authorization import (
@@ -39,6 +48,11 @@ from secp_worker.onboarding.live_authorization import (
     LiveReadAuthorizationRefused,
     VerifiedLiveReadAuthorization,
     load_and_verify_live_read_authorization,
+)
+from secp_worker.preflight.activation_authorization import (
+    ActivationAuthorizationRefused,
+    ResolverActivationCapability,
+    load_and_verify_activation_capability,
 )
 from secp_worker.preflight.activation_gate import (
     ResolutionActivationDisabled,
@@ -108,8 +122,11 @@ class _ConnectionHashProvider:
 class PreflightCollectionRunner(Protocol):
     """Worker-injected seam that runs the sealed GET-only collection and returns safe facts.
 
-    Only reached when a credential is available (never in this PR — the sealed resolver fails
-    first). A real implementation lives in a future activation PR and returns ONLY booleans/counts.
+    Only reached when a credential is available (never in shipped runtime — the sealed resolver
+    fails first). The governed orchestration OWNS this single handoff and passes the independently
+    re-verified ``ResolverActivationCapability`` into it, so no collector can run without a durable,
+    approved, evidence-complete activation authorization (SECP-B2-4.2). A real implementation lives
+    in a future activation PR and returns ONLY booleans/counts.
     """
 
     def run(
@@ -117,6 +134,7 @@ class PreflightCollectionRunner(Protocol):
         *,
         verified: VerifiedLiveReadAuthorization,
         credential: SecretMaterial,
+        capability: ResolverActivationCapability,
         now: datetime,
     ) -> dict: ...
 
@@ -232,10 +250,31 @@ def run_readonly_preflight(
     except ResolutionActivationDisabled:
         return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
 
+    # 5b. MANDATORY durable resolver-activation authorization (SECP-B2-4.1/B2-4.2). Independently
+    #     re-load + re-verify the app-owned activation authorization + its complete evidence from
+    #     the authoritative records, BEFORE any durable lease is acquired or attempt consumed. The
+    #     verifier binds org, execution target, onboarding, live-read authorization id + version,
+    #     preflight id, purpose, operation fingerprint, and resolver-adapter contract version, and
+    #     recomputes the evidence fingerprint. A missing/draft/revoked/expired/incomplete/mismatched
+    #     authorization fails closed with the SAME safe outcome as the sealed chain
+    #     (``credential_unavailable``) — the closed refusal reason is never surfaced, so no
+    #     activation/evidence/reference/backend detail leaks. The returned capability is redacted,
+    #     non-serializable, and worker-constructed only; it cannot be forged by API/UI/config/DB.
+    #     The shipped runtime never reaches this step (identity denies at step 4).
+    try:
+        capability = load_and_verify_activation_capability(
+            session,
+            preflight=pf,
+            resolver_contract_version=RESOLVER_ADAPTER_CONTRACT_VERSION,
+            now=now,
+        )
+    except ActivationAuthorizationRefused:
+        return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
+
     # 6-7. Durable lease acquisition + begin-attempt (SECP-B2-3). Reached ONLY with an approved
-    #      identity + gate (tests/future). begin-attempt is the only transition that consumes the
-    #      fixed N=3 durable budget keyed by (authorization_id, authorization_version,
-    #      operation_fingerprint). Shipped runtime never gets here.
+    #      identity + gate + a verified activation capability (tests/future). begin-attempt is the
+    #      only transition that consumes the fixed N=3 durable budget keyed by (authorization_id,
+    #      authorization_version, operation_fingerprint). Shipped runtime never gets here.
     key = OperationKey(
         live_read_authorization_id=pf.live_read_authorization_id,
         authorization_version=pf.authorization_version,
@@ -261,12 +300,18 @@ def run_readonly_preflight(
     except SecretResolutionError:
         return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
 
-    # 3. Collection is worker-only and injected; unreachable in this PR (sealed resolver above).
+    # 9. Collection is worker-only, injected, and OWNED by this governed orchestration; it is
+    #    unreachable in shipped runtime (the sealed resolver fails above). The verified activation
+    #    capability is passed into the single handoff so no collector can run without a durable,
+    #    approved, evidence-complete activation authorization — there is no separate bypassable
+    #    collection track.
     if collection_runner is None:
         # A credential was resolvable but no collection runner is wired: activation-incomplete.
         return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
     try:
-        facts = collection_runner.run(verified=verified, credential=credential, now=now)
+        facts = collection_runner.run(
+            verified=verified, credential=credential, capability=capability, now=now
+        )
     except _PolicyOrTlsRefusal:
         return PreflightResult(ReadonlyPreflightOutcome.tls_or_policy_refused)
     return PreflightResult(ReadonlyPreflightOutcome.ready, readiness_facts=_safe_facts(facts))

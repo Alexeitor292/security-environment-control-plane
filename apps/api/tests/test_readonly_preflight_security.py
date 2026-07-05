@@ -56,6 +56,13 @@ _API_FORBIDDEN_SYMBOLS = {
     "AuthoritativeReverifier",
     "DbAuthoritativeReverifier",
     "ReverifiedAuthority",
+    # SECP-B2-4.2: the worker-only activation-capability verifier (now wired into the sealed
+    # preflight chain) and the offline preflight wiring self-test are never API-importable.
+    "load_and_verify_activation_capability",
+    "ResolverActivationCapability",
+    "ActivationAuthorizationRefused",
+    "run_preflight_wiring_self_test",
+    "PreflightSelfTestResult",
 }
 
 
