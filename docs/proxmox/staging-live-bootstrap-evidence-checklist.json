@@ -1,0 +1,134 @@
+{
+  "schema": "secp-b2-5-pre/staging-live-bootstrap-evidence/v1",
+  "description": "Machine-checkable, SECRET-FREE readiness expectations for the one-time out-of-Git staging-live bootstrap. Every item names a required trust root and the secret-free attestation SECP expects. No item may carry a concrete value: only closed booleans and descriptive requirement/evidence text. Concrete endpoints, hostnames, IPs, ports, certificates, keys, tokens, secret references, CA names, and credentials live ONLY on the isolated staging control plane and are NEVER committed.",
+  "secret_free": true,
+  "records_no_values": true,
+  "items": [
+    {
+      "id": "isolated_staging_control_plane_vm",
+      "requirement": "A self-contained staging control-plane VM hosts the staging API, database, and worker.",
+      "evidence": "Attestation that the staging control plane runs isolated from production and public networks.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "isolated_staging_database",
+      "requirement": "Authoritative records load only from the isolated staging database, never the production SECP database.",
+      "evidence": "Attestation that the staging database is authoritative solely for this isolated environment.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "isolated_staging_api",
+      "requirement": "A staging-only API serves the staging control plane and never proxies to production.",
+      "evidence": "Attestation that the staging API is self-contained and production-independent.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "isolated_staging_worker",
+      "requirement": "A staging-only worker runs the sealed staging-live composition on the isolated plane.",
+      "evidence": "Attestation that the worker is deployment-local and imports no production runtime wiring.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "disposable_nested_proxmox_target",
+      "requirement": "The target is a disposable, nested Proxmox instance holding only synthetic bounded resources.",
+      "evidence": "Attestation that the target can be destroyed and rebuilt and runs no untrusted workloads.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "no_home_corp_prod_public_route",
+      "requirement": "No route exists to any home, corporate, production-control-plane, LAN, WAN, or public network.",
+      "evidence": "Attestation that the only reachable peers are the staging target and staging OpenBao.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "no_default_gateway_on_target_plane",
+      "requirement": "The target-facing plane has no default gateway.",
+      "evidence": "Attestation that no default route is configured on the isolated plane.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "no_dns_on_target_plane",
+      "requirement": "The target-facing plane has no DNS resolver.",
+      "evidence": "Attestation that name resolution is unavailable on the isolated plane.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "private_staging_ca",
+      "requirement": "A private staging certificate authority, created only for this environment, is the sole trust anchor.",
+      "evidence": "The CA trust-root FINGERPRINT (a hash) is recorded; the certificate content is not.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "deployment_local_worker_key",
+      "requirement": "The worker private key material is deployment-local and injected, never in Git or an env var.",
+      "evidence": "Attestation that private material is provided only via an injected deployment-local provider.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "short_lived_worker_certificate",
+      "requirement": "The worker holds a short-lived certificate issued by the private staging CA.",
+      "evidence": "Attestation of certificate validity bounds; the certificate content is not recorded.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "openbao_mtls_authentication",
+      "requirement": "The worker authenticates to staging OpenBao using mutual TLS bound to the private staging CA.",
+      "evidence": "The readiness canary proves authentication succeeds without reading any secret.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "openbao_least_privilege_policy",
+      "requirement": "OpenBao policy permits reading only the single synthetic staging credential path.",
+      "evidence": "Attestation of the least-privilege policy scope; the policy path value is not recorded.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "synthetic_canary_secret",
+      "requirement": "A synthetic canary secret proves resolution wiring without exposing the real read credential.",
+      "evidence": "Attestation that the canary secret is synthetic and disposable.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "least_privilege_staging_read_credential",
+      "requirement": "The only resolvable credential is a least-privilege, staging-only Proxmox read credential.",
+      "evidence": "Attestation that the credential grants read-only inventory access and nothing else.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "default_deny_egress",
+      "requirement": "Egress is default-deny; only the approved staging read and OpenBao auth flows are permitted.",
+      "evidence": "Attestation that any other connection attempt fails closed.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "revocation_kill_switch_drill",
+      "requirement": "Immediate revocation of certificate, OpenBao role, activation authorization, and NIC is rehearsed.",
+      "evidence": "Attestation that each revocation independently causes the next operation to fail closed.",
+      "secret_free": true,
+      "records_value": false
+    },
+    {
+      "id": "trust_root_evidence_recorded",
+      "requirement": "Every trust root is attested to staging SECP as secret-free evidence before any canary.",
+      "evidence": "Only identifiers, versions, pinned labels, closed status codes, and hashes are recorded.",
+      "secret_free": true,
+      "records_value": false
+    }
+  ]
+}
