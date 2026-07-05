@@ -221,9 +221,16 @@ def _alembic_cfg():
 
 
 def test_downgrade_removes_lease_then_preflight_in_order(pg_engine):
-    """The lease migration (B2-3) sits on top of the preflight migration (B2-0). Downgrading one
-    step removes ONLY resolution_lease and leaves readonly_staging_preflight; a further step down
-    removes readonly_staging_preflight. Revisions are derived from the migration graph."""
+    """Ordered rollback: the lease migration (B2-3) sits on top of the preflight migration (B2-0),
+    so ``resolution_lease`` must be dropped strictly before ``readonly_staging_preflight``, and both
+    must be restorable.
+
+    The head is NOT assumed to be the lease migration (later work — e.g. the B2-4.1 resolver-
+    activation migration — stacks additional revisions above it). The authoritative linear chain is
+    walked from head to base and stepped down one revision at a time, recording the exact step at
+    which each tracked table set becomes fully absent. This is robust to any number of migrations
+    above the lease migration and never hardcodes a revision id.
+    """
     from alembic import command
     from alembic.script import ScriptDirectory
 
@@ -231,25 +238,38 @@ def test_downgrade_removes_lease_then_preflight_in_order(pg_engine):
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"expected a single head, got {heads}"
-    lease_rev = heads[0]  # B2-3
-    preflight_rev = script.get_revision(lease_rev).down_revision  # B2-0
-    assert isinstance(preflight_rev, str) and preflight_rev
-    preflight_parent = script.get_revision(preflight_rev).down_revision
-    assert isinstance(preflight_parent, str) and preflight_parent
+
+    chain: list[str] = []
+    rev: str | None = heads[0]
+    while rev is not None:
+        chain.append(rev)
+        down = script.get_revision(rev).down_revision
+        assert down is None or isinstance(down, str), "migration chain must be linear"
+        rev = down
 
     def tables() -> set[str]:
         return set(inspect(pg_engine).get_table_names())
 
+    tracked = {"lease": "resolution_lease", "preflight": "readonly_staging_preflight"}
+    removed_step: dict[str, int] = {}
     try:
-        command.downgrade(cfg, preflight_rev)  # remove B2-3 only
-        after_lease = tables()
-        assert "resolution_lease" not in after_lease
-        assert "readonly_staging_preflight" in after_lease
-
-        command.downgrade(cfg, preflight_parent)  # remove B2-0 too
-        after_preflight = tables()
-        assert "readonly_staging_preflight" not in after_preflight
-        assert "resolution_lease" not in after_preflight
+        prev = tables()
+        for name in tracked.values():
+            assert name in prev, f"{name} must exist at head"
+        for step, cur_rev in enumerate(chain):
+            command.downgrade(cfg, script.get_revision(cur_rev).down_revision or "base")
+            now = tables()
+            for label, name in tracked.items():
+                if label in removed_step:
+                    assert name not in now, f"{name} reappeared after removal"
+                elif name in prev and name not in now:
+                    removed_step[label] = step
+            prev = now
+            if removed_step.keys() == tracked.keys():
+                break
+        assert removed_step.keys() == tracked.keys(), f"tables never removed: {removed_step}"
+        # resolution_lease (B2-3) is dropped strictly before readonly_staging_preflight (B2-0).
+        assert removed_step["lease"] < removed_step["preflight"]
     finally:
         command.upgrade(cfg, "head")
 

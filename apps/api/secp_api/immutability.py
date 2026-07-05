@@ -11,7 +11,7 @@ from __future__ import annotations
 from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
 
-from secp_api.enums import LiveReadAuthorizationStatus
+from secp_api.enums import LiveReadAuthorizationStatus, ResolverActivationStatus
 from secp_api.errors import ImmutableResourceError
 from secp_api.models import (
     AuditEvent,
@@ -23,6 +23,8 @@ from secp_api.models import (
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
     ReadonlyStagingPreflight,
+    ResolverActivationAuthorization,
+    ResolverActivationEvidence,
     StagingLab,
     StagingLabWorkItem,
     StagingSubstrateEligibility,
@@ -225,6 +227,62 @@ _READONLY_PREFLIGHT_PROTECTED = (
     "operation_fingerprint",
     "created_by",
 )
+# ResolverActivationAuthorization (SECP-B2-4.1): binding facts are immutable after creation; the
+# approval/revocation metadata + evidence fingerprint are set-once; and only the closed lifecycle
+# transitions are allowed. The service mutates via Core CAS (which bypasses this ORM guard), so the
+# amended migration installs a PostgreSQL trigger for the raw/Core path — this guard is the portable
+# (SQLite + PostgreSQL) ORM-path layer + defense in depth.
+_RESOLVER_ACTIVATION_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "onboarding_id",
+    "live_read_authorization_id",
+    "live_read_authorization_version",
+    "preflight_id",
+    "operation_fingerprint",
+    "resolver_adapter_contract_version",
+    "purpose",
+    "authorization_expiry",
+    "authorization_version",
+    "created_by",
+    "created_at",
+)
+_RESOLVER_ACTIVATION_SET_ONCE = (
+    "evidence_fingerprint",
+    "approved_by",
+    "approved_at",
+    "revoked_by",
+    "revoked_at",
+    "revocation_reason_code",
+)
+_RESOLVER_ACTIVATION_ALLOWED_TRANSITIONS = {
+    (ResolverActivationStatus.draft, ResolverActivationStatus.approved),
+    (ResolverActivationStatus.draft, ResolverActivationStatus.revoked),
+    (ResolverActivationStatus.draft, ResolverActivationStatus.expired),
+    (ResolverActivationStatus.approved, ResolverActivationStatus.revoked),
+    (ResolverActivationStatus.approved, ResolverActivationStatus.expired),
+}
+
+
+def _resolver_activation_parent_status(
+    session: Session, evidence: ResolverActivationEvidence
+) -> ResolverActivationStatus | None:
+    """The lifecycle status of an evidence row's parent authorization (identity-map first)."""
+    parent = session.get(ResolverActivationAuthorization, evidence.authorization_id)
+    if parent is None:
+        parent = evidence.authorization  # fall back to the relationship (unflushed insert)
+    return None if parent is None else parent.status
+
+
+def _guard_resolver_evidence(
+    session: Session, evidence: ResolverActivationEvidence, verb: str
+) -> None:
+    status = _resolver_activation_parent_status(session, evidence)
+    if status is not None and status != ResolverActivationStatus.draft:
+        raise ImmutableResourceError(
+            f"ResolverActivationEvidence may not be {verb} once the authorization is "
+            f"{getattr(status, 'value', status)!r}; evidence is managed only while draft"
+        )
 
 
 def _attr_changed(obj: object, attr: str) -> bool:
@@ -426,9 +484,47 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                 raise ImmutableResourceError(
                     f"ReadonlyStagingPreflight binding is immutable; attempted to change {changed}"
                 )
+        # ResolverActivationAuthorization (SECP-B2-4.1): binding facts immutable; approval /
+        # revocation facts + evidence fingerprint set-once; only closed transitions allowed.
+        if isinstance(obj, ResolverActivationAuthorization):
+            changed = [a for a in _RESOLVER_ACTIVATION_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "ResolverActivationAuthorization binding facts are immutable after creation; "
+                    f"attempted to change {changed}"
+                )
+            repeated = [
+                a
+                for a in _RESOLVER_ACTIVATION_SET_ONCE
+                if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+            ]
+            if repeated:
+                raise ImmutableResourceError(
+                    "ResolverActivationAuthorization approval/revocation facts are set-once; "
+                    f"attempted to change {repeated}"
+                )
+            if _attr_changed(obj, "status"):
+                previous = _previous_value(obj, "status")
+                if (
+                    previous is not None
+                    and (previous, obj.status) not in _RESOLVER_ACTIVATION_ALLOWED_TRANSITIONS
+                ):
+                    raise ImmutableResourceError(
+                        "ResolverActivationAuthorization status transition is not allowed: "
+                        f"{getattr(previous, 'value', previous)!r} -> "
+                        f"{getattr(obj.status, 'value', obj.status)!r}"
+                    )
+        # ResolverActivationEvidence: managed (changed) only while the authorization is draft.
+        if isinstance(obj, ResolverActivationEvidence):
+            _guard_resolver_evidence(session, obj, "changed")
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
+
+    for obj in session.new:
+        # ResolverActivationEvidence: cannot be inserted once the authorization leaves draft.
+        if isinstance(obj, ResolverActivationEvidence):
+            _guard_resolver_evidence(session, obj, "inserted")
 
     for obj in session.deleted:
         if isinstance(obj, StagingLab):
@@ -445,6 +541,12 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             raise ImmutableResourceError("TargetEvidenceRecord records cannot be deleted")
         if isinstance(obj, TargetPreflight):
             raise ImmutableResourceError("TargetPreflight records cannot be deleted")
+        if isinstance(obj, ResolverActivationAuthorization):
+            raise ImmutableResourceError(
+                "ResolverActivationAuthorization records cannot be deleted"
+            )
+        if isinstance(obj, ResolverActivationEvidence):
+            _guard_resolver_evidence(session, obj, "deleted")
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records cannot be deleted")
 

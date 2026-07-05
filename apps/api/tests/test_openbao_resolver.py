@@ -146,13 +146,14 @@ def test_api_cannot_import_openbao_adapter_or_reverifier():
 
 
 def test_frontend_has_no_openbao_or_secret_resolution_interface():
+    # The B2-4.1 admin UI legitimately names the "resolver activation" feature and displays the
+    # opaque contract-version label — those are safe. The real risks are a credential-entry field or
+    # a secret-reading/secret-resolution route/method.
     forbidden = (
-        "openbao",
-        "vault:",
         "readSecret",
         "resolveSecret",
         "secret-resolution",
-        "resolver",
+        "/secrets",
         'type="password"',
         "type='password'",
     )

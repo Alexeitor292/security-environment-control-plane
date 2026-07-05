@@ -89,8 +89,17 @@ def test_migration_upgrade_downgrade_roundtrip_sqlite():
         cfg.set_main_option("script_location", str(api_dir / "migrations"))
         cfg.set_main_option("sqlalchemy.url", url)
         script = ScriptDirectory.from_config(cfg)
-        lease_rev = script.get_heads()[0]
-        preflight_rev = script.get_revision(lease_rev).down_revision
+        # Derive the revision that CREATES readonly_staging_preflight (robust to migrations added
+        # above it, e.g. the lease + resolver-activation migrations). Downgrading to it removes
+        # everything above (incl. resolution_lease) while keeping readonly_staging_preflight.
+        import re
+
+        preflight_rev = None
+        for rev in script.walk_revisions():
+            src = Path(rev.module.__file__).read_text(encoding="utf-8")
+            if re.search(r'create_table\(\s*"readonly_staging_preflight"', src):
+                preflight_rev = rev.revision
+                break
         assert isinstance(preflight_rev, str)
         preflight_parent = script.get_revision(preflight_rev).down_revision
         assert isinstance(preflight_parent, str)

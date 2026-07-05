@@ -47,6 +47,9 @@ from secp_api.enums import (
     ReadonlyPreflightStatus,
     ReservationStatus,
     ResolutionLeaseStatus,
+    ResolverActivationEvidenceKind,
+    ResolverActivationEvidenceStatus,
+    ResolverActivationStatus,
     SnapshotStatus,
     StagingBootstrapArtifactProfile,
     StagingLabDecisionCode,
@@ -1154,6 +1157,141 @@ class ResolutionLease(Base, TimestampMixin):
             f"status={getattr(self.status, 'value', self.status)!r}, "
             f"attempt_count={self.attempt_count!r}, "
             f"revision={self.revision!r})"
+        )
+
+
+class ResolverActivationAuthorization(Base, TimestampMixin):
+    """Durable, provider-neutral, secret-free authorization to *consider* resolver activation
+    exact operation context (SECP-B2-4.1).
+
+    This app-owned control-plane record is the SEPARATE, explicit, time-bounded, audited, revocable
+    authorization that must exist (and be independently re-verified by the worker) before any future
+    isolated-staging OpenBao activation can be considered. It grants **no** infrastructure
+    performs **no** resolution, and is **never** auto-created from a ``LiveReadAuthorization`` or a
+    staging-lab approval. It stores ONLY safe binding facts + hashes + lifecycle state — never an
+    endpoint, hostname, port, token, policy, mount, unseal material, credential, backend
+    configuration, vault path, or plaintext reference.
+    """
+
+    __tablename__ = "resolver_activation_authorization"
+    __table_args__ = (
+        # Server-derived monotonic version per (target, onboarding) — no caller-supplied version.
+        UniqueConstraint(
+            "execution_target_id",
+            "onboarding_id",
+            "authorization_version",
+            name="uq_resolver_activation_target_onboarding_version",
+        ),
+        # At most ONE non-terminal (draft/approved) authorization per bound operation (work item).
+        Index(
+            "uq_resolver_activation_active_operation",
+            "preflight_id",
+            unique=True,
+            sqlite_where=text("status in ('draft','approved')"),
+            postgresql_where=text("status in ('draft','approved')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=False, index=True
+    )
+    live_read_authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("live_read_authorization.id"), nullable=False, index=True
+    )
+    live_read_authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Work-item identity + operation fingerprint the activation is bound to (secret-free).
+    preflight_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("readonly_staging_preflight.id"), nullable=False, index=True
+    )
+    operation_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Pinned resolver-adapter contract version + closed purpose (labels only, no backend detail).
+    resolver_adapter_contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(60), nullable=False)
+    authorization_expiry: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Secret-free fingerprint over the complete evidence set; bound at approval time. Empty until
+    # approved. NEVER an evidence value — only a sha256 over closed metadata.
+    evidence_fingerprint: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    status: Mapped[ResolverActivationStatus] = mapped_column(
+        EnumType(ResolverActivationStatus, length=40),
+        default=ResolverActivationStatus.draft,
+        nullable=False,
+    )
+    authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason_code: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+
+    evidence: Mapped[list[ResolverActivationEvidence]] = relationship(
+        back_populates="authorization",
+        cascade="all, delete-orphan",
+        order_by="ResolverActivationEvidence.kind",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            "ResolverActivationAuthorization("
+            f"id={self.id!s}, "
+            f"execution_target_id={self.execution_target_id!s}, "
+            f"onboarding_id={self.onboarding_id!s}, "
+            f"live_read_authorization_id={self.live_read_authorization_id!s}, "
+            f"authorization_version={self.authorization_version!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"revision={self.revision!r}, "
+            "evidence_fingerprint=<sha256>)"
+        )
+
+
+class ResolverActivationEvidence(Base, TimestampMixin):
+    """One provider-neutral, secret-free activation-evidence item (SECP-B2-4.1 / B2-2 §8).
+
+    Records proof METADATA only: a closed ``kind``, a closed ``status``, an opaque non-sensitive
+    ``proof_id``, an issuer label, and a verification timestamp. It NEVER stores an endpoint,
+    config, vault path, reference, worker credential, token, policy, or secret, and it is NOT a
+    free-form operator text field (the service validates every value against a safe closed shape).
+    """
+
+    __tablename__ = "resolver_activation_evidence"
+    __table_args__ = (
+        UniqueConstraint("authorization_id", "kind", name="uq_resolver_activation_evidence_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("resolver_activation_authorization.id"), nullable=False, index=True
+    )
+    kind: Mapped[ResolverActivationEvidenceKind] = mapped_column(
+        EnumType(ResolverActivationEvidenceKind, length=60), nullable=False
+    )
+    status: Mapped[ResolverActivationEvidenceStatus] = mapped_column(
+        EnumType(ResolverActivationEvidenceStatus, length=20),
+        default=ResolverActivationEvidenceStatus.pending,
+        nullable=False,
+    )
+    # Opaque, non-sensitive proof identifier (e.g. a review ticket id). Validated to a safe pattern.
+    proof_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    issuer: Mapped[str] = mapped_column(String(120), nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    authorization: Mapped[ResolverActivationAuthorization] = relationship(back_populates="evidence")
+
+    def __repr__(self) -> str:
+        return (
+            "ResolverActivationEvidence("
+            f"authorization_id={self.authorization_id!s}, "
+            f"kind={getattr(self.kind, 'value', self.kind)!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"proof_id={self.proof_id!r})"
         )
 
 
