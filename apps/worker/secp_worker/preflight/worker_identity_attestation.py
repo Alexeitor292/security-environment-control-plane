@@ -27,9 +27,14 @@ from typing import NoReturn, Protocol, runtime_checkable
 
 from secp_api import audit
 from secp_api.enums import AuditAction, WorkerIdentityStatus
-from secp_api.models import WorkerIdentityEvidence, WorkerIdentityRegistration
+from secp_api.models import (
+    ReadonlyStagingPreflight,
+    WorkerIdentityEvidence,
+    WorkerIdentityRegistration,
+)
 from secp_api.worker_identity_contract import (
     WORKER_IDENTITY_CONTRACT_VERSION,
+    compute_deployment_binding_fingerprint,
     compute_verification_anchor_fingerprint,
     compute_worker_identity_evidence_fingerprint,
     worker_identity_evidence_is_complete,
@@ -37,7 +42,7 @@ from secp_api.worker_identity_contract import (
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from secp_worker.preflight.identity import WorkerIdentity
+from secp_worker.preflight.identity import VerifiedWorkerIdentity, WorkerIdentityUnavailable
 
 # ``WORKER_IDENTITY_CONTRACT_VERSION`` is the single pinned label defined in the shared app/worker
 # contract module and imported above; it is re-used here (no separate worker copy can drift).
@@ -51,13 +56,15 @@ class WorkerIdentityAttestationUnavailable(Exception):
         self.reason_code = reason_code
 
 
-class WorkerIdentityVerificationRefused(Exception):
+class WorkerIdentityVerificationRefused(WorkerIdentityUnavailable):
     """Fail-closed refusal carrying only a closed, secret-free reason code (no value leakage).
 
-    ``registration_id`` / ``organization_id``, when present, are sourced ONLY from the AUTHORITATIVE
-    durable registration that was loaded — never from the claim. They are ``None`` when no
-    authoritative registration exists (e.g. an unknown/unapproved identity). The exception text
-    carries only the closed reason code, never a claim value.
+    A subclass of :class:`WorkerIdentityUnavailable` so the orchestration's single fail-closed
+    handler covers both the shipped denying default and this durable verifier. ``registration_id`` /
+    ``organization_id``, when present, are sourced ONLY from the AUTHORITATIVE durable registration
+    that was loaded — never from the claim. They are ``None`` when no authoritative registration
+    exists (e.g. an unknown/unapproved/foreign-org identity). The exception text carries only the
+    closed reason code, never a claim value.
     """
 
     def __init__(
@@ -92,9 +99,16 @@ class WorkerIdentityClaim:
 
 @runtime_checkable
 class WorkerIdentityAttestationSource(Protocol):
-    """Narrow worker-only seam. ``attest`` returns a :class:`WorkerIdentityClaim` or fails."""
+    """Narrow worker-only seam. ``attest`` returns a :class:`WorkerIdentityClaim` or fails.
 
-    def attest(self, *, now: datetime) -> WorkerIdentityClaim: ...
+    It receives the AUTHORITATIVE preflight so a future proof-of-possession source can bind proof
+    to the current operation; the claim it returns is a carrier of claims to be re-verified, never
+    proof of authorization.
+    """
+
+    def attest(
+        self, *, preflight: ReadonlyStagingPreflight, now: datetime
+    ) -> WorkerIdentityClaim: ...
 
 
 class SealedWorkerIdentityAttestationSource:
@@ -105,7 +119,7 @@ class SealedWorkerIdentityAttestationSource:
     a worker fails closed before any identity is produced.
     """
 
-    def attest(self, *, now: datetime) -> WorkerIdentityClaim:
+    def attest(self, *, preflight: ReadonlyStagingPreflight, now: datetime) -> WorkerIdentityClaim:
         raise WorkerIdentityAttestationUnavailable("no worker identity attestation is configured")
 
 
@@ -117,33 +131,47 @@ class RegisteredWorkerIdentityVerifier:
     """Verifies an injected attestation claim against the durable registry. NOT a runtime default.
 
     Construct with an attestation source (a fake in tests; a real mTLS source only in a future,
-    separately-reviewed activation). ``verify`` fails closed on a sealed/failing source and on any
-    missing/draft/revoked/expired/wrong-mechanism/label/deployment/anchor/version/evidence mismatch.
-    Only on full success does it return a safe :class:`WorkerIdentity` (the opaque identity label).
+    separately-reviewed activation). ``verify`` is given the AUTHORITATIVE preflight and binds the
+    durable-registration lookup to the preflight organization — never a caller-supplied one. Fails
+    closed on a sealed/failing source, any missing/draft/revoked/expired/wrong-mechanism/label/
+    deployment/anchor/version/evidence or CROSS-ORG mismatch. Only on full success does it return a
+    safe :class:`VerifiedWorkerIdentity` sourced solely from the durable registration.
     """
 
     def __init__(self, attestation_source: WorkerIdentityAttestationSource) -> None:
         self._source = attestation_source
 
-    def verify(self, session: Session, *, now: datetime) -> WorkerIdentity:
+    def verify(
+        self, session: Session, *, preflight: ReadonlyStagingPreflight, now: datetime
+    ) -> VerifiedWorkerIdentity:
         try:
-            claim = self._source.attest(now=now)
+            claim = self._source.attest(preflight=preflight, now=now)
         except WorkerIdentityAttestationUnavailable as exc:
             # No re-verifiable claim exists; fail closed. There is no durable record to attribute an
             # audit to, so none is recorded here.
             raise WorkerIdentityVerificationRefused(exc.reason_code) from exc
         try:
-            return self._verify_claim(session, claim, now=now)
+            return self._verify_claim(session, claim, preflight=preflight, now=now)
         except WorkerIdentityVerificationRefused as refused:
             _record_refusal(session, refused)
             raise
 
     def _verify_claim(
-        self, session: Session, claim: WorkerIdentityClaim, *, now: datetime
-    ) -> WorkerIdentity:
+        self,
+        session: Session,
+        claim: WorkerIdentityClaim,
+        *,
+        preflight: ReadonlyStagingPreflight,
+        now: datetime,
+    ) -> VerifiedWorkerIdentity:
+        # Cross-org, fail closed: the claim MUST assert the AUTHORITATIVE preflight org. The
+        # durable lookup is bound to the preflight org (never the claim), so a foreign-org claim
+        # never even selects a registration — it is refused context-free.
+        if claim.organization_id != preflight.organization_id:
+            raise WorkerIdentityVerificationRefused("cross_org_mismatch")
         row = session.execute(
             select(WorkerIdentityRegistration).where(
-                WorkerIdentityRegistration.organization_id == claim.organization_id,
+                WorkerIdentityRegistration.organization_id == preflight.organization_id,
                 WorkerIdentityRegistration.identity_label == claim.identity_label,
                 WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
             )
@@ -182,8 +210,19 @@ class RegisteredWorkerIdentityVerifier:
         if row.evidence_fingerprint != compute_worker_identity_evidence_fingerprint(evidence):
             _refuse("evidence_fingerprint_mismatch")
 
-        # Success: return only the opaque, safe identity label (never the anchor/deployment secret).
-        return WorkerIdentity(worker_identity_id=row.identity_label)
+        # Success: return ONLY safe, authoritative facts sourced from the durable registration. The
+        # org tri-equality (preflight == registration == result) holds by construction: the lookup
+        # was bound to ``preflight.organization_id`` and ``row.organization_id`` is returned here.
+        return VerifiedWorkerIdentity(
+            worker_identity_id=row.identity_label,
+            registration_id=row.id,
+            organization_id=row.organization_id,
+            identity_version=row.identity_version,
+            mechanism=str(getattr(row.mechanism, "value", row.mechanism)),
+            deployment_binding_fingerprint=compute_deployment_binding_fingerprint(
+                row.deployment_binding
+            ),
+        )
 
 
 def _evidence_rows(session: Session, registration_id: uuid.UUID) -> list[WorkerIdentityEvidence]:

@@ -22,6 +22,7 @@ from secp_api.models import (
     DeploymentPlan,
     EnvironmentVersion,
     ExecutionTarget,
+    LivePreflightEvidence,
     LiveReadAuthorization,
     ProviderInventorySnapshot,
     ProvisioningChangeSetApproval,
@@ -610,6 +611,9 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # WorkerIdentityEvidence: managed (changed) only while the registration is draft.
         if isinstance(obj, WorkerIdentityEvidence):
             _guard_worker_identity_evidence(session, obj, "changed")
+        # LivePreflightEvidence (SECP-B2-4.5): fully immutable after insert — no field may change.
+        if isinstance(obj, LivePreflightEvidence):
+            raise ImmutableResourceError("LivePreflightEvidence records are immutable after insert")
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
@@ -647,6 +651,8 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             raise ImmutableResourceError("WorkerIdentityRegistration records cannot be deleted")
         if isinstance(obj, WorkerIdentityEvidence):
             _guard_worker_identity_evidence(session, obj, "deleted")
+        if isinstance(obj, LivePreflightEvidence):
+            raise ImmutableResourceError("LivePreflightEvidence records cannot be deleted")
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records cannot be deleted")
 

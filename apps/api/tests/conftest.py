@@ -124,6 +124,68 @@ def other_org_principal(session, principal) -> Principal:
     )
 
 
+# SECP-B2-4.4 — a test-only, load-bearing durable worker-identity verifier. It creates a REAL,
+# approved ``WorkerIdentityRegistration`` in the principal's organization + a test-only attestation
+# claim source, and returns a ``RegisteredWorkerIdentityVerifier``. A preflight in that org will
+# verify against this durable registration (never a simplistic hand-built identity). It is never
+# selectable by production runtime (the shipped default is ``DenyingWorkerIdentityVerifier``).
+_WI_LABEL = "staging-worker-a"
+_WI_ANCHOR = "test-public-anchor-v1"
+_WI_BINDING = "deploy-01"
+
+
+@pytest.fixture
+def worker_identity_verifier(session, principal):
+    def _make(*, label: str = _WI_LABEL, anchor: str = _WI_ANCHOR, binding: str = _WI_BINDING):
+        from secp_api.enums import (
+            WorkerIdentityEvidenceKind,
+            WorkerIdentityEvidenceStatus,
+            WorkerIdentityMechanism,
+        )
+        from secp_api.services import worker_identity as wi
+        from secp_api.worker_identity_contract import compute_verification_anchor_fingerprint
+        from secp_worker.preflight.worker_identity_attestation import (
+            RegisteredWorkerIdentityVerifier,
+            WorkerIdentityClaim,
+        )
+
+        mechanism = WorkerIdentityMechanism.mtls_workload_identity
+        row = wi.register_worker_identity(
+            session,
+            principal,
+            mechanism=mechanism,
+            identity_label=label,
+            deployment_binding=binding,
+            verification_anchor_fingerprint=compute_verification_anchor_fingerprint(anchor),
+        )
+        for kind in WorkerIdentityEvidenceKind:
+            wi.record_evidence(
+                session,
+                principal,
+                row.id,
+                kind=kind,
+                status=WorkerIdentityEvidenceStatus.verified,
+                proof_id="TKT-1",
+                issuer="rev",
+            )
+        wi.approve_worker_identity(session, principal, row.id)
+
+        class _FakeAttestationSource:
+            def attest(self, *, preflight, now):
+                return WorkerIdentityClaim(
+                    organization_id=preflight.organization_id,
+                    mechanism=mechanism.value,
+                    identity_label=label,
+                    deployment_binding=binding,
+                    identity_version=row.identity_version,
+                    public_anchor=anchor,
+                )
+
+        return RegisteredWorkerIdentityVerifier(_FakeAttestationSource())
+
+    return _make
+
+
 @pytest.fixture
 def valid_definition() -> dict:
     import copy

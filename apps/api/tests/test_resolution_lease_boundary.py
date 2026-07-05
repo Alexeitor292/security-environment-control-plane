@@ -159,12 +159,12 @@ def _worker_identity_calls(tree: ast.AST) -> list[ast.Call]:
     return [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _call_name(node) == "WorkerIdentity"
+        if isinstance(node, ast.Call) and _call_name(node) == "VerifiedWorkerIdentity"
     ]
 
 
 def _blessed_return_call_ids(tree: ast.AST) -> set[int]:
-    """ids of ``WorkerIdentity(...)`` calls that are the value of a ``return`` inside
+    """ids of ``VerifiedWorkerIdentity(...)`` calls that are the value of a ``return`` inside
     ``RegisteredWorkerIdentityVerifier._verify_claim`` — the sole reviewed success path."""
     blessed: set[int] = set()
     for cls in ast.walk(tree):
@@ -177,14 +177,14 @@ def _blessed_return_call_ids(tree: ast.AST) -> set[int]:
                 if (
                     isinstance(node, ast.Return)
                     and isinstance(node.value, ast.Call)
-                    and _call_name(node.value) == "WorkerIdentity"
+                    and _call_name(node.value) == "VerifiedWorkerIdentity"
                 ):
                     blessed.add(id(node.value))
     return blessed
 
 
 def _check_worker_identity_construction(filename: str, source: str) -> int:
-    """Structural guard: a ``WorkerIdentity(...)`` construction is permitted ONLY in
+    """Structural guard: a ``VerifiedWorkerIdentity(...)`` construction is permitted ONLY in
     ``worker_identity_attestation.py`` and ONLY as the value returned from the reviewed
     ``RegisteredWorkerIdentityVerifier._verify_claim`` success path. Any construction elsewhere — in
     another worker module, or unconditional/extra/non-return construction in the attestation
@@ -194,12 +194,12 @@ def _check_worker_identity_construction(filename: str, source: str) -> int:
     if not calls:
         return 0
     assert filename == "worker_identity_attestation.py", (
-        f"{filename} constructs a WorkerIdentity outside the reviewed verifier module"
+        f"{filename} constructs a VerifiedWorkerIdentity outside the reviewed verifier module"
     )
     blessed = _blessed_return_call_ids(tree)
     for call in calls:
         assert id(call) in blessed, (
-            f"{filename} constructs a WorkerIdentity outside the reviewed "
+            f"{filename} constructs a VerifiedWorkerIdentity outside the reviewed "
             "RegisteredWorkerIdentityVerifier._verify_claim success return path"
         )
     return len(calls)
@@ -213,7 +213,9 @@ def test_production_worker_only_constructs_identity_in_the_reviewed_verifier_ret
     total = 0
     for path in _py(WORKER_PKG):
         total += _check_worker_identity_construction(path.name, path.read_text(encoding="utf-8"))
-    assert total == 1, f"expected exactly one reviewed WorkerIdentity construction, found {total}"
+    assert total == 1, (
+        f"expected exactly one reviewed VerifiedWorkerIdentity construction, found {total}"
+    )
 
 
 def test_worker_identity_construction_guard_rejects_unsafe_additions():
@@ -223,18 +225,19 @@ def test_worker_identity_construction_guard_rejects_unsafe_additions():
     # ...but rejects an EXTRA construction added in an unrelated function of the attestation module,
     poisoned_helper = (
         attest
-        + "\n\ndef _forged_identity():\n    return WorkerIdentity(worker_identity_id='forged')\n"
+        + "\n\ndef _forged_identity():\n"
+        + "    return VerifiedWorkerIdentity(worker_identity_id='forged')\n"
     )
     with pytest.raises(AssertionError):
         _check_worker_identity_construction("worker_identity_attestation.py", poisoned_helper)
     # ...an UNCONDITIONAL module-level construction,
-    poisoned_module = attest + "\n_FORGED = WorkerIdentity(worker_identity_id='forged')\n"
+    poisoned_module = attest + "\n_FORGED = VerifiedWorkerIdentity(worker_identity_id='forged')\n"
     with pytest.raises(AssertionError):
         _check_worker_identity_construction("worker_identity_attestation.py", poisoned_module)
     # ...and ANY construction in a different worker module.
     other_module = (
         "from secp_worker.preflight.identity import WorkerIdentity\n"
-        "def sneak():\n    return WorkerIdentity(worker_identity_id='forged')\n"
+        "def sneak():\n    return VerifiedWorkerIdentity(worker_identity_id='forged')\n"
     )
     with pytest.raises(AssertionError):
         _check_worker_identity_construction("consumer.py", other_module)

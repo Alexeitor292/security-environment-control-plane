@@ -236,11 +236,20 @@ def run_readonly_preflight(
     if not _three_way_reference_match(verified, resolution_request):
         return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
 
-    # 4. Worker-identity verification (SECP-B2-3). The SHIPPED default denies -> fail closed here,
-    #    BEFORE any durable lease is acquired. No environment/host/network/certificate is read.
+    # 4. MANDATORY durable registered worker-identity verification (SECP-B2-3 / B2-4.4). The
+    #    is given the AUTHORITATIVE preflight and binds the durable-registration lookup to the
+    #    preflight organization (never a caller-supplied org), verified BEFORE the activation
+    #    capability and any durable lease. The SHIPPED default denies -> fail closed here. No
+    #    environment/host/network/certificate is read in shipped runtime. Any missing/draft/revoked/
+    #    expired/stale-version/wrong-mechanism/label/deployment/anchor/evidence/CROSS-ORG mismatch
+    #    raises WorkerIdentityUnavailable (WorkerIdentityVerificationRefused is a subclass).
     try:
-        identity = identity_verifier.verify()
+        identity = identity_verifier.verify(session, preflight=pf, now=now)
     except WorkerIdentityUnavailable:
+        return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
+    # Cross-org tri-equality, fail closed BEFORE the activation capability: the verified durable
+    # identity MUST be bound to the preflight's organization.
+    if identity.organization_id != pf.organization_id:
         return PreflightResult(ReadonlyPreflightOutcome.credential_unavailable)
 
     # 5. Sealed activation gate (SECP-B2-3). The SHIPPED default is disabled -> fail closed here,

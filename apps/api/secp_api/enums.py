@@ -599,6 +599,59 @@ class WorkerIdentityErrorCode(str, Enum):
     internal_failure = "worker_identity_internal_failure"
 
 
+class LivePreflightEvidenceStatus(str, Enum):
+    """Closed outcome of a durable live-preflight evidence record (SECP-B2-4.5).
+
+    ``passed`` proves only the specific safe facts collected; ``unverifiable`` blocks approval;
+    ``failed`` is an explicit failure. There is no ``ready``/free-text status.
+    """
+
+    passed = "passed"
+    unverifiable = "unverifiable"
+    failed = "failed"
+
+
+class LivePreflightFactCode(str, Enum):
+    """Closed set of safe live-preflight fact keys (SECP-B2-4.5). Booleans or bounded counts only —
+    never an endpoint, node/storage/network name, credential, or raw provider value."""
+
+    api_reachable = "api_reachable"
+    readonly_policy_enforced = "readonly_policy_enforced"
+    tls_verified = "tls_verified"
+    node_count = "node_count"
+    storage_count = "storage_count"
+    network_segment_count = "network_segment_count"
+
+
+class LivePreflightCheckCode(str, Enum):
+    """Closed set of live-preflight check/finding codes (SECP-B2-4.5). A code + a closed status
+    only — never a description, target identifier, or network value."""
+
+    api_reachable = "api_reachable"
+    readonly_policy_enforced = "readonly_policy_enforced"
+    tls_verified = "tls_verified"
+    get_only_enforced = "get_only_enforced"
+    no_redirect_followed = "no_redirect_followed"
+    fully_segregated_isolation = "fully_segregated_isolation"
+
+
+class LivePreflightFindingStatus(str, Enum):
+    """Closed status of one live-preflight check (SECP-B2-4.5)."""
+
+    passed = "passed"
+    unverifiable = "unverifiable"
+    failed = "failed"
+
+
+class LivePreflightEvidenceErrorCode(str, Enum):
+    """Closed catalog of live-preflight-evidence error codes (SECP-B2-4.5). No free-form message."""
+
+    refused = "live_preflight_evidence_refused"
+    invalid_payload = "live_preflight_evidence_invalid_payload"
+    lifecycle_conflict = "live_preflight_evidence_lifecycle_conflict"
+    internal_failure = "live_preflight_evidence_internal_failure"
+
+
 class AuditAction(str, Enum):
     organization_created = "organization.created"
     user_created = "user.created"
@@ -723,6 +776,9 @@ class AuditAction(str, Enum):
     worker_identity_revoked = "worker_identity.revoked"
     worker_identity_expired = "worker_identity.expired"
     worker_identity_verification_refused = "worker_identity.verification_refused"
+    # SECP-B2-4.5 — durable immutable live-preflight evidence (worker-only, secret-free).
+    live_preflight_evidence_written = "live_preflight_evidence.written"
+    live_preflight_evidence_write_refused = "live_preflight_evidence.write_refused"
 
 
 class ResolutionLeaseStatus(str, Enum):

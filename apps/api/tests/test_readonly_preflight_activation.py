@@ -39,15 +39,6 @@ from secp_worker.preflight.self_test import (
 OPAQUE_REF = "env:SECP_PROVIDER_SECRET__PREFLIGHT"
 
 
-class _ApprovedIdentity:
-    """Test-only approved worker identity (never selectable by production runtime)."""
-
-    def verify(self):
-        from secp_worker.preflight.identity import WorkerIdentity
-
-        return WorkerIdentity(worker_identity_id="test-worker")
-
-
 class _ApprovedGate:
     """Test-only approved activation gate (never selectable by production runtime)."""
 
@@ -140,7 +131,9 @@ def _no_lease(session) -> bool:
 # --- 1. Activation verification is MANDATORY before lease acquisition -----------------------------
 
 
-def test_missing_activation_authorization_fails_closed_before_lease(session, principal):
+def test_missing_activation_authorization_fails_closed_before_lease(
+    session, principal, worker_identity_verifier
+):
     # Approved identity + gate (test-only), but NO durable activation authorization exists: the
     # mandatory pre-lease activation check fails closed with the safe outcome and no lease appears.
     pf = _queued(session, principal)
@@ -148,7 +141,7 @@ def test_missing_activation_authorization_fails_closed_before_lease(session, pri
         session,
         pf.id,
         secret_resolver=SealedSecretResolver(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.credential_unavailable
@@ -156,7 +149,9 @@ def test_missing_activation_authorization_fails_closed_before_lease(session, pri
     assert _no_lease(session)
 
 
-def test_valid_activation_reaches_sealed_resolver_but_no_credential_or_contact(session, principal):
+def test_valid_activation_reaches_sealed_resolver_but_no_credential_or_contact(
+    session, principal, worker_identity_verifier
+):
     # The EXACT valid setup (approved+evidenced activation + approved identity + gate) passes the
     # activation gate and acquires the durable lease, then the SEALED resolver still fails closed:
     # no SecretMaterial, no transport, no contact. Reaching the lease proves the activation gate
@@ -170,20 +165,22 @@ def test_valid_activation_reaches_sealed_resolver_but_no_credential_or_contact(s
         session,
         pf.id,
         secret_resolver=SealedSecretResolver(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.credential_unavailable
     assert result.readiness_facts is None
     lease = session.query(ResolutionLease).one()  # reached the lease (activation passed)
     assert lease.attempt_count == 1
-    assert lease.worker_identity_id == "test-worker"
+    assert lease.worker_identity_id == "staging-worker-a"  # the durable registration's label
     session.flush()
     actions = {e.action for e in session.query(AuditEvent).all()}
     assert AuditAction.resolution_lease_acquired.value in actions
 
 
-def test_valid_activation_gates_the_collection_handoff(session, principal):
+def test_valid_activation_gates_the_collection_handoff(
+    session, principal, worker_identity_verifier
+):
     # With a test resolver that returns material, the collection runner IS reached — and it receives
     # the verified, redacted, non-serializable capability (the governed handoff is bound to it).
     pf = _queued(session, principal)
@@ -201,7 +198,7 @@ def test_valid_activation_gates_the_collection_handoff(session, principal):
         pf.id,
         secret_resolver=_CredentialReturningResolver(),
         collection_runner=_CapturingRunner(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.ready
@@ -213,7 +210,7 @@ def test_valid_activation_gates_the_collection_handoff(session, principal):
 # --- 2. Each invalid activation state fails closed (safe outcome, no lease) -----------------------
 
 
-def test_draft_activation_fails_closed_before_lease(session, principal):
+def test_draft_activation_fails_closed_before_lease(session, principal, worker_identity_verifier):
     pf = _queued(session, principal)
     row = resolver_activation.create_activation_authorization(
         session, principal, preflight_id=pf.id
@@ -223,14 +220,14 @@ def test_draft_activation_fails_closed_before_lease(session, principal):
         session,
         pf.id,
         secret_resolver=SealedSecretResolver(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.credential_unavailable
     assert _no_lease(session)
 
 
-def test_revoked_activation_fails_closed_before_lease(session, principal):
+def test_revoked_activation_fails_closed_before_lease(session, principal, worker_identity_verifier):
     pf = _queued(session, principal)
     row = _approved_activation(session, principal, pf)
     resolver_activation.revoke_activation_authorization(session, principal, row.id, "operator")
@@ -238,14 +235,14 @@ def test_revoked_activation_fails_closed_before_lease(session, principal):
         session,
         pf.id,
         secret_resolver=SealedSecretResolver(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.credential_unavailable
     assert _no_lease(session)
 
 
-def test_expired_activation_fails_closed_before_lease(session, principal):
+def test_expired_activation_fails_closed_before_lease(session, principal, worker_identity_verifier):
     # A SHORT-lived (60s) activation is expired at a later `now` chosen to sit strictly BETWEEN the
     # activation expiry and the (longer-lived) live-read authorization expiry, so verification gets
     # past the live-read step and fails specifically at the activation check, before any lease.
@@ -263,7 +260,7 @@ def test_expired_activation_fails_closed_before_lease(session, principal):
         session,
         pf.id,
         secret_resolver=SealedSecretResolver(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
         now=later,
     )
@@ -271,7 +268,9 @@ def test_expired_activation_fails_closed_before_lease(session, principal):
     assert _no_lease(session)
 
 
-def test_activation_for_a_different_preflight_does_not_authorize_this_one(session, principal):
+def test_activation_for_a_different_preflight_does_not_authorize_this_one(
+    session, principal, worker_identity_verifier
+):
     # A valid activation bound to operation A never authorizes operation B: the verifier finds no
     # approved activation for B's preflight id and fails closed.
     pf_a = _queued(session, principal)
@@ -281,7 +280,7 @@ def test_activation_for_a_different_preflight_does_not_authorize_this_one(sessio
         session,
         pf_b.id,
         secret_resolver=SealedSecretResolver(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.credential_unavailable
