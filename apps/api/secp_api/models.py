@@ -37,6 +37,7 @@ from secp_api.enums import (
     EvidenceStatus,
     IsolationModel,
     LifecycleState,
+    LivePreflightEvidenceStatus,
     LiveReadAuthorizationStatus,
     OnboardingMode,
     OnboardingStatus,
@@ -1418,6 +1419,81 @@ class WorkerIdentityEvidence(Base, TimestampMixin):
             f"kind={getattr(self.kind, 'value', self.kind)!r}, "
             f"status={getattr(self.status, 'value', self.status)!r}, "
             f"proof_id={self.proof_id!r})"
+        )
+
+
+class LivePreflightEvidence(Base, TimestampMixin):
+    """Durable, immutable, secret-free evidence of a completed live read-only staging preflight
+    (SECP-B2-4.5). Worker-only: written ONLY by the sealed ``LivePreflightEvidenceWriter`` seam
+    behind the governed collection handoff — never by the API/UI and never in shipped runtime.
+
+    It binds the COMPLETE authoritative operation context (org, preflight, target, onboarding,
+    live-read auth id+version, resolver-activation auth id+version, worker-identity registration
+    id+version, lease identity, pinned contract/allowlist/schema versions, operation fingerprint)
+    stores a strict closed ``payload`` (closed status, safe booleans, bounded counts, closed check/
+    finding codes, approved labels) plus a deterministic ``evidence_hash``. It NEVER stores an
+    endpoint, host, IP, port, node/storage/network name, raw provider response/error, certificate,
+    credential, token, secret reference, or free text. It is immutable after insert (no update, no
+    delete) and exact-once per completed preflight operation.
+    """
+
+    __tablename__ = "live_preflight_evidence"
+    __table_args__ = (
+        # Exact-once per completed preflight operation (idempotency boundary).
+        UniqueConstraint(
+            "preflight_id", "operation_fingerprint", name="uq_live_preflight_evidence_operation"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    preflight_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("readonly_staging_preflight.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=False, index=True
+    )
+    live_read_authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("live_read_authorization.id"), nullable=False, index=True
+    )
+    live_read_authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolver_activation_authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("resolver_activation_authorization.id"), nullable=False, index=True
+    )
+    resolver_activation_authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    worker_identity_registration_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("worker_identity_registration.id"), nullable=False, index=True
+    )
+    worker_identity_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolution_lease_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("resolution_lease.id"), nullable=False, index=True
+    )
+    operation_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
+    collector_contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    endpoint_allowlist_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    resolver_contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    evidence_schema_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[LivePreflightEvidenceStatus] = mapped_column(
+        EnumType(LivePreflightEvidenceStatus, length=40), nullable=False
+    )
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    # A strict, closed, secret-free canonical payload (validated by the live-evidence schema).
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            "LivePreflightEvidence("
+            f"id={self.id!s}, "
+            f"preflight_id={self.preflight_id!s}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            "evidence_hash=<sha256>)"
         )
 
 

@@ -441,6 +441,8 @@ def test_capabilities_and_health_unchanged():
 
 
 def test_api_package_does_not_import_the_fake_transport_or_policy():
+    import re
+
     api_pkg = Path(__file__).resolve().parents[1] / "secp_api"
     needles = (
         "readonly_transport",
@@ -459,7 +461,11 @@ def test_api_package_does_not_import_the_fake_transport_or_policy():
             continue
         text = py.read_text(encoding="utf-8")
         for needle in needles:
-            assert needle not in text, f"{py.name} references {needle!r}"
+            # Word-boundary match: catches a MODULE reference (e.g. ``.readonly_policy import``) but
+            # not a longer safe identifier like the closed fact code ``readonly_policy_enforced``.
+            assert re.search(rf"\b{re.escape(needle)}\b", text) is None, (
+                f"{py.name} references {needle!r}"
+            )
 
 
 def test_live_evidence_seal_is_unchanged():

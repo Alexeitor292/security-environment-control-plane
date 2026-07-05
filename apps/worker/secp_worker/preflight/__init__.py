@@ -18,6 +18,7 @@ __all__ = [
     "fingerprint",
     "identity",
     "lease",
+    "live_evidence_writer",
     "orchestration",
     "reverify",
     "runtime",
