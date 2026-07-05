@@ -24,4 +24,5 @@ __all__ = [
     "sealed_secret_resolver",
     "secret_resolution",
     "self_test",
+    "worker_identity_attestation",
 ]

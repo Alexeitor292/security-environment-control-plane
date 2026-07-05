@@ -11,7 +11,11 @@ from __future__ import annotations
 from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
 
-from secp_api.enums import LiveReadAuthorizationStatus, ResolverActivationStatus
+from secp_api.enums import (
+    LiveReadAuthorizationStatus,
+    ResolverActivationStatus,
+    WorkerIdentityStatus,
+)
 from secp_api.errors import ImmutableResourceError
 from secp_api.models import (
     AuditEvent,
@@ -32,6 +36,8 @@ from secp_api.models import (
     TargetOnboarding,
     TargetPreflight,
     ToolchainProfile,
+    WorkerIdentityEvidence,
+    WorkerIdentityRegistration,
 )
 
 _VERSION_PROTECTED = ("spec", "content_hash", "version_number", "api_version")
@@ -285,6 +291,60 @@ def _guard_resolver_evidence(
         )
 
 
+# WorkerIdentityRegistration (SECP-B2-4.3): binding facts immutable after creation; approval /
+# revocation metadata + evidence fingerprint set-once; only the closed lifecycle transitions are
+# allowed. The service mutates via Core CAS (which bypasses this ORM guard), so the migration
+# installs a PostgreSQL trigger for the raw/Core path — this guard is the portable (SQLite +
+# PostgreSQL) ORM-path layer + defense in depth.
+_WORKER_IDENTITY_PROTECTED = (
+    "organization_id",
+    "mechanism",
+    "identity_label",
+    "deployment_binding",
+    "verification_anchor_fingerprint",
+    "identity_version",
+    "expiry",
+    "created_by",
+    "created_at",
+)
+_WORKER_IDENTITY_SET_ONCE = (
+    "evidence_fingerprint",
+    "approved_by",
+    "approved_at",
+    "revoked_by",
+    "revoked_at",
+    "revocation_reason_code",
+)
+_WORKER_IDENTITY_ALLOWED_TRANSITIONS = {
+    (WorkerIdentityStatus.draft, WorkerIdentityStatus.approved),
+    (WorkerIdentityStatus.draft, WorkerIdentityStatus.revoked),
+    (WorkerIdentityStatus.draft, WorkerIdentityStatus.expired),
+    (WorkerIdentityStatus.approved, WorkerIdentityStatus.revoked),
+    (WorkerIdentityStatus.approved, WorkerIdentityStatus.expired),
+}
+
+
+def _worker_identity_parent_status(
+    session: Session, evidence: WorkerIdentityEvidence
+) -> WorkerIdentityStatus | None:
+    """The lifecycle status of an evidence row's parent registration (identity-map first)."""
+    parent = session.get(WorkerIdentityRegistration, evidence.registration_id)
+    if parent is None:
+        parent = evidence.registration  # fall back to the relationship (unflushed insert)
+    return None if parent is None else parent.status
+
+
+def _guard_worker_identity_evidence(
+    session: Session, evidence: WorkerIdentityEvidence, verb: str
+) -> None:
+    status = _worker_identity_parent_status(session, evidence)
+    if status is not None and status != WorkerIdentityStatus.draft:
+        raise ImmutableResourceError(
+            f"WorkerIdentityEvidence may not be {verb} once the registration is "
+            f"{getattr(status, 'value', status)!r}; evidence is managed only while draft"
+        )
+
+
 def _attr_changed(obj: object, attr: str) -> bool:
     state = inspect(obj)
     assert state is not None  # ORM-mapped instances always have inspection state
@@ -517,6 +577,39 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # ResolverActivationEvidence: managed (changed) only while the authorization is draft.
         if isinstance(obj, ResolverActivationEvidence):
             _guard_resolver_evidence(session, obj, "changed")
+        # WorkerIdentityRegistration (SECP-B2-4.3): binding facts immutable; approval / revocation
+        # facts + evidence fingerprint set-once; only closed transitions allowed.
+        if isinstance(obj, WorkerIdentityRegistration):
+            changed = [a for a in _WORKER_IDENTITY_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "WorkerIdentityRegistration binding facts are immutable after creation; "
+                    f"attempted to change {changed}"
+                )
+            repeated = [
+                a
+                for a in _WORKER_IDENTITY_SET_ONCE
+                if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+            ]
+            if repeated:
+                raise ImmutableResourceError(
+                    "WorkerIdentityRegistration approval/revocation facts are set-once; "
+                    f"attempted to change {repeated}"
+                )
+            if _attr_changed(obj, "status"):
+                previous = _previous_value(obj, "status")
+                if (
+                    previous is not None
+                    and (previous, obj.status) not in _WORKER_IDENTITY_ALLOWED_TRANSITIONS
+                ):
+                    raise ImmutableResourceError(
+                        "WorkerIdentityRegistration status transition is not allowed: "
+                        f"{getattr(previous, 'value', previous)!r} -> "
+                        f"{getattr(obj.status, 'value', obj.status)!r}"
+                    )
+        # WorkerIdentityEvidence: managed (changed) only while the registration is draft.
+        if isinstance(obj, WorkerIdentityEvidence):
+            _guard_worker_identity_evidence(session, obj, "changed")
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
@@ -525,6 +618,9 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # ResolverActivationEvidence: cannot be inserted once the authorization leaves draft.
         if isinstance(obj, ResolverActivationEvidence):
             _guard_resolver_evidence(session, obj, "inserted")
+        # WorkerIdentityEvidence: cannot be inserted once the registration leaves draft.
+        if isinstance(obj, WorkerIdentityEvidence):
+            _guard_worker_identity_evidence(session, obj, "inserted")
 
     for obj in session.deleted:
         if isinstance(obj, StagingLab):
@@ -547,6 +643,10 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             )
         if isinstance(obj, ResolverActivationEvidence):
             _guard_resolver_evidence(session, obj, "deleted")
+        if isinstance(obj, WorkerIdentityRegistration):
+            raise ImmutableResourceError("WorkerIdentityRegistration records cannot be deleted")
+        if isinstance(obj, WorkerIdentityEvidence):
+            _guard_worker_identity_evidence(session, obj, "deleted")
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records cannot be deleted")
 

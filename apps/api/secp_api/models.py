@@ -65,6 +65,10 @@ from secp_api.enums import (
     StagingWorkStatus,
     TargetStatus,
     ToolchainProfileStatus,
+    WorkerIdentityEvidenceKind,
+    WorkerIdentityEvidenceStatus,
+    WorkerIdentityMechanism,
+    WorkerIdentityStatus,
     WorkflowKind,
     WorkflowStatus,
 )
@@ -1289,6 +1293,128 @@ class ResolverActivationEvidence(Base, TimestampMixin):
         return (
             "ResolverActivationEvidence("
             f"authorization_id={self.authorization_id!s}, "
+            f"kind={getattr(self.kind, 'value', self.kind)!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"proof_id={self.proof_id!r})"
+        )
+
+
+class WorkerIdentityRegistration(Base, TimestampMixin):
+    """Durable, secret-free trust anchor for an approved isolated-staging worker identity (B2-4.3).
+
+    This app-owned control-plane record is the SEPARATE, explicit, time-bounded, audited, revocable
+    registration that must exist (and be independently re-verified by a worker) before a future
+    isolated staging worker can be trusted. It authenticates NO worker, performs NO mTLS, and stores
+    ONLY safe metadata: an opaque identity label, an opaque deployment binding, and the sha256
+    FINGERPRINT of a PUBLIC verification anchor. It NEVER stores a certificate, key, CSR, CA name,
+    hostname, endpoint, port, token, secret reference, backend configuration, or free-form text.
+    """
+
+    __tablename__ = "worker_identity_registration"
+    __table_args__ = (
+        # Server-derived monotonic version per (org, identity label) — no caller-supplied version.
+        UniqueConstraint(
+            "organization_id",
+            "identity_label",
+            "identity_version",
+            name="uq_worker_identity_org_label_version",
+        ),
+        # At most ONE non-terminal (draft/approved) registration per (org, identity label).
+        Index(
+            "uq_worker_identity_active",
+            "organization_id",
+            "identity_label",
+            unique=True,
+            sqlite_where=text("status in ('draft','approved')"),
+            postgresql_where=text("status in ('draft','approved')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    mechanism: Mapped[WorkerIdentityMechanism] = mapped_column(
+        EnumType(WorkerIdentityMechanism, length=40), nullable=False
+    )
+    # Opaque, grammar-validated identity label + deployment binding (secret-free).
+    identity_label: Mapped[str] = mapped_column(String(120), nullable=False)
+    deployment_binding: Mapped[str] = mapped_column(String(120), nullable=False)
+    # sha256:<hex> fingerprint of the PUBLIC verification anchor — never the anchor material itself.
+    verification_anchor_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
+    identity_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    expiry: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Secret-free fingerprint over the complete evidence set; bound at approval time. Empty until
+    # approved. NEVER an evidence value — only a sha256 over closed metadata.
+    evidence_fingerprint: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    status: Mapped[WorkerIdentityStatus] = mapped_column(
+        EnumType(WorkerIdentityStatus, length=40),
+        default=WorkerIdentityStatus.draft,
+        nullable=False,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason_code: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+
+    evidence: Mapped[list[WorkerIdentityEvidence]] = relationship(
+        back_populates="registration",
+        cascade="all, delete-orphan",
+        order_by="WorkerIdentityEvidence.kind",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            "WorkerIdentityRegistration("
+            f"id={self.id!s}, "
+            f"organization_id={self.organization_id!s}, "
+            f"identity_label={self.identity_label!r}, "
+            f"identity_version={self.identity_version!r}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"revision={self.revision!r}, "
+            "verification_anchor_fingerprint=<sha256>, "
+            "evidence_fingerprint=<sha256>)"
+        )
+
+
+class WorkerIdentityEvidence(Base, TimestampMixin):
+    """One secret-free worker-identity evidence item (SECP-B2-4.3).
+
+    Records proof METADATA only: a closed ``kind``, a closed ``status``, an opaque non-sensitive
+    ``proof_id``, an issuer label, and a verification timestamp. It NEVER stores a certificate, key,
+    CSR, CA, endpoint, token, reference, or secret, and is NOT a free-form text field.
+    """
+
+    __tablename__ = "worker_identity_evidence"
+    __table_args__ = (
+        UniqueConstraint("registration_id", "kind", name="uq_worker_identity_evidence_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    registration_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("worker_identity_registration.id"), nullable=False, index=True
+    )
+    kind: Mapped[WorkerIdentityEvidenceKind] = mapped_column(
+        EnumType(WorkerIdentityEvidenceKind, length=60), nullable=False
+    )
+    status: Mapped[WorkerIdentityEvidenceStatus] = mapped_column(
+        EnumType(WorkerIdentityEvidenceStatus, length=20),
+        default=WorkerIdentityEvidenceStatus.pending,
+        nullable=False,
+    )
+    proof_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    issuer: Mapped[str] = mapped_column(String(120), nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    registration: Mapped[WorkerIdentityRegistration] = relationship(back_populates="evidence")
+
+    def __repr__(self) -> str:
+        return (
+            "WorkerIdentityEvidence("
+            f"registration_id={self.registration_id!s}, "
             f"kind={getattr(self.kind, 'value', self.kind)!r}, "
             f"status={getattr(self.status, 'value', self.status)!r}, "
             f"proof_id={self.proof_id!r})"

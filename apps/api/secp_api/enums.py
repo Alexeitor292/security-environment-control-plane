@@ -432,6 +432,11 @@ class Permission(str, Enum):
     # (onboarding, staging-lab, live-read). It never grants infrastructure execution or resolution.
     resolver_activation_manage = "resolver_activation:manage"
     resolver_activation_approve = "resolver_activation:approve"
+    # SECP-B2-4.3 — durable worker-identity trust anchor. Registering/revoking is an admin action;
+    # APPROVING is a DELIBERATELY SEPARATE permission that can never be inferred from
+    # worker_identity:manage (or any other approval). It authenticates no worker, enables nothing.
+    worker_identity_manage = "worker_identity:manage"
+    worker_identity_approve = "worker_identity:approve"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -534,6 +539,64 @@ class ResolverActivationErrorCode(str, Enum):
     evidence_invalid = "resolver_activation_evidence_invalid"
     lifecycle_conflict = "resolver_activation_lifecycle_conflict"
     internal_failure = "resolver_activation_internal_failure"
+
+
+class WorkerIdentityMechanism(str, Enum):
+    """Closed set of worker-identity mechanisms (SECP-B2-4.3). Initially only mTLS workload id.
+
+    A label only — it stores/authorizes no certificate, key, CSR, CA, endpoint, or secret. This PR
+    performs NO real mTLS and constructs no attestation; it records only which mechanism a future
+    isolated staging worker will use.
+    """
+
+    mtls_workload_identity = "mtls_workload_identity"
+
+
+class WorkerIdentityStatus(str, Enum):
+    """Closed lifecycle of a durable worker-identity registration (SECP-B2-4.3).
+
+    ``draft`` — registered, gathering evidence; ``approved`` — separately approved against complete
+    evidence fingerprint; ``revoked`` — terminated immediately (approval facts preserved);
+    ``expired`` — past its canonical UTC expiry. An ``approved``, unexpired, unrevoked record is the
+    ONLY one a worker verifier may consult — and even then it authenticates no real worker.
+    """
+
+    draft = "draft"
+    approved = "approved"
+    revoked = "revoked"
+    expired = "expired"
+
+
+class WorkerIdentityEvidenceKind(str, Enum):
+    """Closed set of secret-free worker-identity evidence items (SECP-B2-4.3).
+
+    Each item is proof METADATA only — never a certificate, key, CSR, CA name, endpoint, token, or
+    secret. Approval requires every kind present + verified.
+    """
+
+    deployment_binding_review = "deployment_binding_review"
+    verification_anchor_review = "verification_anchor_review"
+    rotation_revocation_review = "rotation_revocation_review"
+
+
+class WorkerIdentityEvidenceStatus(str, Enum):
+    """Closed status of one worker-identity evidence item. Only ``verified`` counts for approval."""
+
+    pending = "pending"
+    verified = "verified"
+    failed = "failed"
+
+
+class WorkerIdentityErrorCode(str, Enum):
+    """Closed catalog of worker-identity API error codes (SECP-B2-4.3). No free-form message."""
+
+    not_found = "worker_identity_not_found"
+    forbidden = "worker_identity_forbidden"
+    invalid_state = "worker_identity_invalid_state"
+    invalid_metadata = "worker_identity_invalid_metadata"
+    evidence_incomplete = "worker_identity_evidence_incomplete"
+    lifecycle_conflict = "worker_identity_lifecycle_conflict"
+    internal_failure = "worker_identity_internal_failure"
 
 
 class AuditAction(str, Enum):
@@ -653,6 +716,13 @@ class AuditAction(str, Enum):
     resolver_activation_revoked = "resolver_activation.revoked"
     resolver_activation_expired = "resolver_activation.expired"
     resolver_activation_activation_refused = "resolver_activation.activation_refused"
+    # SECP-B2-4.3 — durable worker-identity trust anchor lifecycle (secret-free).
+    worker_identity_registered = "worker_identity.registered"
+    worker_identity_evidence_recorded = "worker_identity.evidence_recorded"
+    worker_identity_approved = "worker_identity.approved"
+    worker_identity_revoked = "worker_identity.revoked"
+    worker_identity_expired = "worker_identity.expired"
+    worker_identity_verification_refused = "worker_identity.verification_refused"
 
 
 class ResolutionLeaseStatus(str, Enum):
