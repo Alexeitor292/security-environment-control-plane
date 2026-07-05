@@ -292,6 +292,9 @@ def test_db_triggers_permit_legitimate_service_lifecycle(pg_engine, pg_sessionma
 
 
 def test_downgrade_removes_worker_identity_tables(pg_engine):
+    import re
+    from pathlib import Path
+
     from alembic import command
     from alembic.config import Config
     from alembic.script import ScriptDirectory
@@ -301,8 +304,16 @@ def test_downgrade_removes_worker_identity_tables(pg_engine):
     cfg.set_main_option("script_location", str(api_dir / "migrations"))
     cfg.set_main_option("sqlalchemy.url", PG_URL)
     script = ScriptDirectory.from_config(cfg)
-    head = script.get_heads()[0]
-    parent = script.get_revision(head).down_revision
+    # Derive THIS feature's migration from the graph (robust to newer migrations stacked above it);
+    # downgrading to its parent removes the worker-identity tables (and anything above them).
+    rev = None
+    for candidate in script.walk_revisions():
+        src = Path(candidate.module.__file__).read_text(encoding="utf-8")
+        if re.search(r'create_table\(\s*"worker_identity_registration"', src):
+            rev = candidate.revision
+            break
+    assert isinstance(rev, str)
+    parent = script.get_revision(rev).down_revision
     assert isinstance(parent, str)
 
     def tables() -> set[str]:
