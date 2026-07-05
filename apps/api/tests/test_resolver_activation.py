@@ -463,3 +463,166 @@ def test_worker_fails_closed_on_evidence_deletion(session, principal):
             now=_now(),
         )
     assert exc.value.reason_code in ("evidence_incomplete", "evidence_fingerprint_mismatch")
+
+
+# --- expiry: fail-closed materialization + revision-safe replacement (audit-once) ----------------
+
+
+def _force_expiry_past(session, authorization_id):
+    """Simulate wall-clock expiry: push ``authorization_expiry`` into the past WITHOUT touching
+    ``status`` (models an expired row whose cleanup transition has not yet been materialized)."""
+    session.execute(
+        update(ResolverActivationAuthorization)
+        .where(ResolverActivationAuthorization.id == authorization_id)
+        .values(authorization_expiry=_now() - timedelta(seconds=1))
+    )
+    session.flush()
+    session.expire_all()
+
+
+def _expiration_events(session, authorization_id):
+    return [
+        e
+        for e in session.query(AuditEvent).all()
+        if e.action == "resolver_activation.expired" and e.resource_id == str(authorization_id)
+    ]
+
+
+def test_expired_approved_is_materialized_once_and_allows_replacement(session, principal):
+    org = principal.organization_id
+    pf, row = _approved(session, org)
+    old_id, old_version = row.id, row.authorization_version
+    old_fp, old_by, old_at = row.evidence_fingerprint, row.approved_by, row.approved_at
+    session.commit()
+
+    # The approved authorization passes its canonical UTC expiry but is still 'approved' in the DB.
+    _force_expiry_past(session, old_id)
+
+    # Creating a replacement for the SAME work item first materializes the stale approved row as
+    # expired, then creates a new draft with the next monotonic version in the freed active slot.
+    replacement = ra.create_activation_authorization(
+        session, _principal(org, MANAGE), preflight_id=pf.id
+    )
+    session.flush()
+
+    old = session.get(ResolverActivationAuthorization, old_id)
+    assert old.status == ResolverActivationStatus.expired
+    assert replacement.id != old_id
+    assert replacement.status == ResolverActivationStatus.draft
+    assert replacement.preflight_id == pf.id
+    assert replacement.authorization_version == old_version + 1
+
+    # Exactly ONE expiration audit event for the old authorization, and it is secret-free.
+    events = _expiration_events(session, old_id)
+    assert len(events) == 1
+    blob = str(events[0].data).lower()
+    for forbidden in ("vault:", "env:", "://", "secret", "token", "endpoint", "@pam"):
+        assert forbidden not in blob
+
+    # The old approved row's approval facts + evidence fingerprint are never revived/mutated.
+    assert old.evidence_fingerprint == old_fp
+    assert old.approved_by == old_by
+    assert old.approved_at == old_at
+
+
+def test_expired_draft_allows_replacement_with_higher_version(session, principal):
+    org = principal.organization_id
+    _t, _ob, _auth, pf = _work_item(session, org)
+    draft = ra.create_activation_authorization(session, _principal(org, MANAGE), preflight_id=pf.id)
+    old_id, old_version = draft.id, draft.authorization_version
+    session.flush()
+
+    _force_expiry_past(session, old_id)
+    replacement = ra.create_activation_authorization(
+        session, _principal(org, MANAGE), preflight_id=pf.id
+    )
+    session.flush()
+
+    old = session.get(ResolverActivationAuthorization, old_id)
+    assert old.status == ResolverActivationStatus.expired
+    assert replacement.status == ResolverActivationStatus.draft
+    assert replacement.authorization_version == old_version + 1
+    assert len(_expiration_events(session, old_id)) == 1
+
+
+def test_approve_fails_closed_and_materializes_once_when_expired(session, principal):
+    org = principal.organization_id
+    _t, _ob, _auth, pf = _work_item(session, org)
+    row = ra.create_activation_authorization(session, _principal(org, MANAGE), preflight_id=pf.id)
+    _all_evidence(session, _principal(org, MANAGE), row.id)
+    _force_expiry_past(session, row.id)
+
+    with pytest.raises(ResolverActivationError) as exc:
+        ra.approve_activation_authorization(session, _principal(org, APPROVE), row.id)
+    assert exc.value.code == "resolver_activation_invalid_state"
+    session.flush()
+
+    refreshed = session.get(ResolverActivationAuthorization, row.id)
+    assert refreshed.status == ResolverActivationStatus.expired
+    # Approval was never bound: no approver, no approval time, no evidence fingerprint.
+    assert refreshed.approved_by is None
+    assert refreshed.approved_at is None
+    assert refreshed.evidence_fingerprint == ""
+    assert len(_expiration_events(session, row.id)) == 1
+
+
+def test_worker_refuses_expired_authorization_before_materialization(session, principal):
+    org = principal.organization_id
+    pf, row = _approved(session, org)
+    # The row is still 'approved' (cleanup NOT materialized) but its canonical UTC expiry passed.
+    _force_expiry_past(session, row.id)
+    assert (
+        session.get(ResolverActivationAuthorization, row.id).status
+        == ResolverActivationStatus.approved
+    )
+    with pytest.raises(ActivationAuthorizationRefused) as exc:
+        load_and_verify_activation_capability(
+            session,
+            preflight=pf,
+            resolver_contract_version=RESOLVER_ADAPTER_CONTRACT_VERSION,
+            now=_now(),
+        )
+    assert exc.value.reason_code == "authorization_expired"
+
+
+def test_expired_row_preserves_approval_facts_and_audit_history(session, principal):
+    org = principal.organization_id
+    pf, row = _approved(session, org)
+    old_id = row.id
+    facts = (
+        row.approved_by,
+        row.approved_at,
+        row.evidence_fingerprint,
+        row.operation_fingerprint,
+        row.authorization_version,
+    )
+    evidence_before = {
+        (e.kind, e.status, e.proof_id, e.issuer)
+        for e in session.query(ResolverActivationEvidence).filter_by(authorization_id=old_id)
+    }
+    session.commit()
+
+    _force_expiry_past(session, old_id)
+    ra.create_activation_authorization(session, _principal(org, MANAGE), preflight_id=pf.id)
+    session.flush()
+
+    old = session.get(ResolverActivationAuthorization, old_id)
+    assert old.status == ResolverActivationStatus.expired
+    assert (
+        old.approved_by,
+        old.approved_at,
+        old.evidence_fingerprint,
+        old.operation_fingerprint,
+        old.authorization_version,
+    ) == facts
+    evidence_after = {
+        (e.kind, e.status, e.proof_id, e.issuer)
+        for e in session.query(ResolverActivationEvidence).filter_by(authorization_id=old_id)
+    }
+    assert evidence_after == evidence_before
+    # Prior create/approve audit events remain (append-only); the ONLY new event for this row is the
+    # single expiration event.
+    actions = [e.action for e in session.query(AuditEvent).all() if e.resource_id == str(old_id)]
+    assert actions.count("resolver_activation.expired") == 1
+    assert "resolver_activation.created" in actions
+    assert "resolver_activation.approved" in actions

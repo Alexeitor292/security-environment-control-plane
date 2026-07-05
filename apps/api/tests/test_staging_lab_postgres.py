@@ -335,14 +335,16 @@ _B2_3_LEASE_TABLES = {"resolution_lease"}
 
 
 def test_downgrade_drops_staging_tables(pg_engine):
-    """Ordered rollback across the current migration chain (head is the B2-3 resolution-lease
-    migration, NOT B2): B2-3 -> B2 -> B1 -> B1's parent.
+    """Ordered rollback across the migration chain: the B2-3 ``resolution_lease`` table must be
+    dropped strictly before the B2 readonly-preflight table, which must be dropped strictly before
+    the B1 staging-lab tables, and every set must be restorable at head.
 
-    The resolution-lease migration (B2-3) now sits on top of the readonly-preflight migration (B2),
-    which sits on top of the staging-lab migration (B1). Downgrading one revision from head must
-    remove *only* the B2-3 ``resolution_lease`` table and leave the B2 readonly-preflight table and
-    the B1 staging-lab tables in place. Revisions are derived from Alembic's ScriptDirectory (no
-    hardcoded IDs, no relative ``-1`` assumptions), then stepped down explicitly.
+    The head is NOT assumed to be any particular migration (later work — e.g. the B2-4.1 resolver-
+    activation migration — stacks additional revisions above the lease migration). The authoritative
+    linear chain is derived from Alembic's ScriptDirectory (no hardcoded IDs, no relative ``-1``
+    assumptions) and stepped down one revision at a time, recording the exact step at which each
+    tracked table set becomes fully absent. Each set is asserted to be removed exactly once, never
+    to reappear, and in strict B2-3 -> B2 -> B1 dependency order.
     """
     from alembic import command
     from alembic.config import Config
@@ -353,53 +355,53 @@ def test_downgrade_drops_staging_tables(pg_engine):
     cfg.set_main_option("script_location", str(api_dir / "migrations"))
     cfg.set_main_option("sqlalchemy.url", PG_URL)
 
-    # Derive the authoritative chain: head (B2-3) -> B2 -> B1 -> B1's parent.
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"expected a single head, got {heads}"
-    b2_3_rev = heads[0]
-    b2_rev = script.get_revision(b2_3_rev).down_revision
-    assert isinstance(b2_rev, str) and b2_rev, "B2-3 must have a single string parent (B2)"
-    b1_rev = script.get_revision(b2_rev).down_revision
-    assert isinstance(b1_rev, str) and b1_rev, "B2 must have a single string parent (B1)"
-    b1_parent = script.get_revision(b1_rev).down_revision
-    assert isinstance(b1_parent, str) and b1_parent, "B1 must have a single string parent"
+
+    # Authoritative linear downgrade path: head -> ... -> base.
+    chain: list[str] = []
+    rev: str | None = heads[0]
+    while rev is not None:
+        chain.append(rev)
+        down = script.get_revision(rev).down_revision
+        assert down is None or isinstance(down, str), "migration chain must be linear"
+        rev = down
 
     def tables() -> set[str]:
         return set(inspect(pg_engine).get_table_names())
 
+    tracked = {
+        "lease": _B2_3_LEASE_TABLES,
+        "preflight": _B2_PREFLIGHT_TABLES,
+        "staging": _B1_STAGING_TABLES,
+    }
+    removed_step: dict[str, int] = {}
     try:
-        # A. At head: B2-3, B2, and B1 tables are all present.
-        at_head = tables()
-        assert _B2_3_LEASE_TABLES <= at_head
-        assert _B2_PREFLIGHT_TABLES <= at_head
-        assert _B1_STAGING_TABLES <= at_head
+        prev = tables()
+        for label, tset in tracked.items():
+            assert tset <= prev, f"{label} tables must exist at head"
 
-        # B. Downgrade one revision (head/B2-3 -> B2): only the lease table is removed.
-        command.downgrade(cfg, b2_rev)
-        after_b2_3 = tables()
-        assert _B2_3_LEASE_TABLES.isdisjoint(after_b2_3)
-        assert _B2_PREFLIGHT_TABLES <= after_b2_3
-        assert _B1_STAGING_TABLES <= after_b2_3
+        for step, cur_rev in enumerate(chain):
+            command.downgrade(cfg, script.get_revision(cur_rev).down_revision or "base")
+            now = tables()
+            for label, tset in tracked.items():
+                if label in removed_step:
+                    assert tset.isdisjoint(now), f"{label} tables reappeared after removal"
+                elif tset <= prev and tset.isdisjoint(now):
+                    removed_step[label] = step
+            prev = now
+            if removed_step.keys() == tracked.keys():
+                break
 
-        # C. Downgrade B2 -> B1: the readonly-preflight table is removed; staging-lab remains.
-        command.downgrade(cfg, b1_rev)
-        after_b2 = tables()
-        assert _B2_PREFLIGHT_TABLES.isdisjoint(after_b2)
-        assert _B1_STAGING_TABLES <= after_b2
-        assert _B2_3_LEASE_TABLES.isdisjoint(after_b2)
-
-        # D. Downgrade B1 -> B1's parent: the staging-lab tables are removed.
-        command.downgrade(cfg, b1_parent)
-        after_b1 = tables()
-        assert _B1_STAGING_TABLES.isdisjoint(after_b1)
-        assert _B2_PREFLIGHT_TABLES.isdisjoint(after_b1)
-        assert _B2_3_LEASE_TABLES.isdisjoint(after_b1)
+        assert removed_step.keys() == tracked.keys(), f"tables never removed: {removed_step}"
+        # Strict order: resolution_lease (B2-3) -> readonly-preflight (B2) -> staging-lab (B1).
+        assert removed_step["lease"] < removed_step["preflight"] < removed_step["staging"]
     finally:
         # Restore head so the shared module-scoped schema is left in head state even on failure.
         command.upgrade(cfg, "head")
 
-    # E. Upgrade back to head: all B1, B2, and B2-3 tables are restored.
+    # Upgrade back to head: all B1, B2, and B2-3 tables are restored.
     restored = tables()
     assert _B1_STAGING_TABLES <= restored
     assert _B2_PREFLIGHT_TABLES <= restored

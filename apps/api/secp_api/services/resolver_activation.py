@@ -153,6 +153,12 @@ def create_activation_authorization(
     """
     actor.require(Permission.resolver_activation_manage)
     pf, authorization = _load_eligible_work_item(session, actor, preflight_id)
+    # Fail closed on a stale slot: any active (draft/approved) authorization for this exact work
+    # item whose canonical UTC expiry is at/before now must be materialized as ``expired`` (audited
+    # once) BEFORE a replacement draft can occupy the single active-preflight slot. Without this, an
+    # expired-but-still-``approved`` row keeps occupying the partial-unique slot and every
+    # replacement draft would conflict and end as ``lifecycle_conflict``.
+    _expire_active_if_due(session, actor, pf.id)
     ttl = max(1, min(int(ttl_seconds), _MAX_TTL_SECONDS))
     fingerprint = compute_operation_fingerprint(pf)
     for _attempt in range(5):
@@ -264,7 +270,8 @@ def approve_activation_authorization(
     if row.status != ResolverActivationStatus.draft:
         raise ResolverActivationError(_Code.invalid_state)
     if _is_expired(row):
-        _mark_expired(session, row)
+        # Approve fails closed once expired; the transition is materialized + audited (once).
+        _mark_expired(session, row, actor)
         raise ResolverActivationError(_Code.invalid_state)
     evidence = _evidence_rows(session, row.id)
     if not evidence_is_complete(evidence):
@@ -400,13 +407,57 @@ def _is_expired(row: ResolverActivationAuthorization) -> bool:
     return expiry <= _utcnow()
 
 
-def _mark_expired(session: Session, row: ResolverActivationAuthorization) -> None:
-    _cas(
+def _mark_expired(
+    session: Session,
+    row: ResolverActivationAuthorization,
+    actor: Principal | None = None,
+) -> bool:
+    """Materialize an expired draft/approved authorization as ``expired`` (revision-safe CAS).
+
+    Returns ``True`` iff *this* caller won the transition. Only ``status`` moves to ``expired``; the
+    approval facts, evidence fingerprint, approver, revocation facts, and audit history are never
+    revived, reused, overwritten, or mutated. Exactly one immutable, secret-free expiration audit
+    event is recorded, and ONLY by the CAS winner, so a concurrent loser (whose CAS matches zero
+    rows) can never emit a duplicate.
+    """
+    if not _cas(
         session,
         row,
         expected_revision=row.revision,
         values={"status": ResolverActivationStatus.expired},
+    ):
+        return False
+    audit.record(
+        session,
+        action=AuditAction.resolver_activation_expired,
+        resource_type="resolver_activation_authorization",
+        resource_id=row.id,
+        organization_id=row.organization_id,
+        actor=str(actor.user_id) if actor is not None else "system",
+        outcome="expired",
+        data=_safe_audit(row),
     )
+    return True
+
+
+def _expire_active_if_due(session: Session, actor: Principal, preflight_id: uuid.UUID) -> None:
+    """Atomically identify and materialize any active (draft/approved) authorization for one work
+    item whose canonical UTC expiry is at/before now.
+
+    The partial unique index ``uq_resolver_activation_active_operation`` guarantees at most one
+    active authorization per work item, so at most one row is transitioned. A still-valid active
+    authorization is left untouched (a genuine replacement conflict is still surfaced downstream).
+    """
+    row = session.execute(
+        select(ResolverActivationAuthorization).where(
+            ResolverActivationAuthorization.preflight_id == preflight_id,
+            ResolverActivationAuthorization.status.in_(
+                (ResolverActivationStatus.draft, ResolverActivationStatus.approved)
+            ),
+        )
+    ).scalar_one_or_none()
+    if row is not None and _is_expired(row):
+        _mark_expired(session, row, actor)
 
 
 def _safe_reason_code(reason_code: str) -> str:

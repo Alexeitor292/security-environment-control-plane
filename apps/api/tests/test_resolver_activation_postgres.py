@@ -131,7 +131,10 @@ def _seed_work_item(session: Session):
         authorization_version=1,
         collector_contract_version=LIVE_READ_COLLECTOR_CONTRACT_VERSION,
         endpoint_allowlist_version=PROXMOX_READONLY_POLICY_VERSION,
-        operation_fingerprint="sha256:" + "ef" * 32,
+        # A globally-unique fingerprint per work item: ``operation_fingerprint`` is unique-
+        # constrained on ``readonly_staging_preflight`` and the module-scoped schema persists rows
+        # across tests, so a shared literal would collide on ``uq_readonly_preflight_fingerprint``.
+        operation_fingerprint="sha256:" + uuid.uuid4().hex + uuid.uuid4().hex,
         status=ReadonlyPreflightStatus.running,
         revision=0,
     )
@@ -279,3 +282,99 @@ def test_downgrade_removes_resolver_activation_tables(pg_engine):
     finally:
         command.upgrade(cfg, "head")
     assert both <= tables()
+
+
+def test_concurrent_expiration_and_create_no_double_active_or_double_audit(
+    pg_engine, pg_sessionmaker
+):
+    """Two racing creates against a work item whose single active (approved) authorization has
+    expired: under REAL separate PostgreSQL transactions exactly one materializes it as ``expired``
+    and creates the replacement draft; the loser fails closed (``lifecycle_conflict``). No second
+    active row is created and the expiration audit event is emitted exactly once."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    import secp_api.immutability  # noqa: F401
+    from secp_api.enums import (
+        ResolverActivationEvidenceKind,
+        ResolverActivationEvidenceStatus,
+        ResolverActivationStatus,
+    )
+    from secp_api.errors import ResolverActivationError
+    from secp_api.models import ResolverActivationAuthorization
+    from secp_api.services import resolver_activation as ra
+    from sqlalchemy import select
+
+    with pg_sessionmaker() as s:
+        org_id, pf = _seed_work_item(s)
+        row = ra.create_activation_authorization(s, _principal(org_id), preflight_id=pf.id)
+        for k in ResolverActivationEvidenceKind:
+            ra.record_evidence(
+                s,
+                _principal(org_id),
+                row.id,
+                kind=k,
+                status=ResolverActivationEvidenceStatus.verified,
+                proof_id="TKT-1",
+                issuer="rev",
+            )
+        s.commit()
+        ra.approve_activation_authorization(s, _principal(org_id), row.id)
+        s.commit()
+        old_id, pf_id = row.id, pf.id
+        # Push expiry into the past; the row stays 'approved' (cleanup not yet materialized).
+        s.execute(
+            text(
+                "UPDATE resolver_activation_authorization SET authorization_expiry = :past "
+                "WHERE id = :id"
+            ),
+            {"past": _now() - timedelta(seconds=1), "id": old_id},
+        )
+        s.commit()
+
+    barrier = Barrier(2)
+
+    def _create(_i: int):
+        with pg_sessionmaker() as s:
+            barrier.wait(timeout=10)
+            try:
+                created = ra.create_activation_authorization(
+                    s, _principal(org_id), preflight_id=pf_id
+                )
+                s.commit()
+                return ("ok", created.authorization_version)
+            except ResolverActivationError as exc:
+                s.rollback()
+                return ("err", exc.code)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(_create, [0, 1]))
+
+    oks = [r for r in results if r[0] == "ok"]
+    errs = [r for r in results if r[0] == "err"]
+    assert len(oks) == 1, results
+    assert len(errs) == 1 and errs[0][1] == "resolver_activation_lifecycle_conflict", results
+
+    with pg_sessionmaker() as s:
+        active = (
+            s.execute(
+                select(ResolverActivationAuthorization).where(
+                    ResolverActivationAuthorization.preflight_id == pf_id,
+                    ResolverActivationAuthorization.status.in_(
+                        (ResolverActivationStatus.draft, ResolverActivationStatus.approved)
+                    ),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(active) == 1
+        assert active[0].status == ResolverActivationStatus.draft
+        assert s.get(ResolverActivationAuthorization, old_id).status == (
+            ResolverActivationStatus.expired
+        )
+        expired_count = s.execute(
+            text("SELECT count(*) FROM audit_event WHERE action = :a AND resource_id = :r"),
+            {"a": "resolver_activation.expired", "r": str(old_id)},
+        ).scalar_one()
+        assert expired_count == 1

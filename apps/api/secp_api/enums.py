@@ -651,6 +651,7 @@ class AuditAction(str, Enum):
     resolver_activation_evidence_recorded = "resolver_activation.evidence_recorded"
     resolver_activation_approved = "resolver_activation.approved"
     resolver_activation_revoked = "resolver_activation.revoked"
+    resolver_activation_expired = "resolver_activation.expired"
     resolver_activation_activation_refused = "resolver_activation.activation_refused"
 
 
