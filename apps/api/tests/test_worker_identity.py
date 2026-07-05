@@ -489,19 +489,108 @@ def test_verifier_fails_closed_on_evidence_deletion(session, principal):
     assert exc.value.reason_code in ("evidence_incomplete", "evidence_fingerprint_mismatch")
 
 
-def test_verification_refusal_records_secret_free_audit(session, principal):
-    org = principal.organization_id
-    _approved(session, org)
-    verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org, binding="other-deploy")))
-    with pytest.raises(WorkerIdentityVerificationRefused):
-        verifier.verify(session, now=_now())
+def _refusal_events(session):
     session.flush()
-    refused = [
+    return [
         e
         for e in session.query(AuditEvent).all()
         if e.action == "worker_identity.verification_refused"
     ]
-    assert len(refused) == 1
-    assert refused[0].data["reason_code"] == "deployment_binding_mismatch"
-    blob = str(refused[0].data).lower()
-    assert "secret" not in blob and ANCHOR not in blob
+
+
+def _event_haystack(ev) -> str:
+    # Everything that persists for one AuditEvent — the refusal must leak no claim value into any.
+    return " ".join(
+        str(x)
+        for x in (
+            ev.data,
+            ev.resource_id,
+            ev.resource_type,
+            ev.actor,
+            ev.outcome,
+            ev.organization_id,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("claim_over", "reason", "poison"),
+    [
+        ({"mechanism": "POISON-MECH"}, "wrong_mechanism", "POISON-MECH"),
+        ({"binding": "POISON-BIND"}, "deployment_binding_mismatch", "POISON-BIND"),
+        ({"version": 987654}, "identity_version_mismatch", "987654"),
+        ({"anchor": "POISON-ANCHOR"}, "verification_anchor_mismatch", "POISON-ANCHOR"),
+    ],
+)
+def test_refusal_audit_never_persists_a_poisoned_claim_field(
+    session, principal, claim_over, reason, poison
+):
+    # An approved identity exists (matching org + label); the claim carries a POISONED field. The
+    # refusal must be attributed ONLY to the authoritative durable registration and must persist
+    # NEITHER the poison value NOR any other claim field.
+    org = principal.organization_id
+    row = _approved(session, org)
+    verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org, **claim_over)))
+    with pytest.raises(WorkerIdentityVerificationRefused) as exc:
+        verifier.verify(session, now=_now())
+    # The poison never appears in the raised refusal (exception text / args).
+    assert poison not in str(exc.value)
+    assert all(poison not in str(a) for a in exc.value.args)
+    assert exc.value.reason_code == reason
+
+    events = _refusal_events(session)
+    assert len(events) == 1
+    ev = events[0]
+    # Attributed ONLY to the authoritative durable registration (server ids), never the claim.
+    assert ev.resource_id == str(row.id)
+    assert ev.organization_id == org
+    # The persisted data is exactly the closed reason + pinned contract version — no claim field.
+    assert set(ev.data.keys()) == {"reason_code", "worker_identity_contract_version"}
+    assert ev.data["reason_code"] == reason
+    # The poison (and the raw anchor / deployment binding) appear NOWHERE in the persisted event.
+    haystack = _event_haystack(ev)
+    for banned in (poison, "POISON", ANCHOR, "deploy-01"):
+        assert banned not in haystack
+
+
+def test_refusal_audit_is_context_free_when_no_authoritative_registration(session, principal):
+    # A poisoned claim (poison org, label, mechanism, binding, anchor, version) that matches NO
+    # registration yields ``identity_not_approved`` and a CONTEXT-FREE audit: no org, no resource
+    # id, and only the closed reason + contract version — never any claim-supplied value.
+    _approved(
+        session, principal.organization_id
+    )  # a real identity exists for a different (org,label)
+    poison_org = uuid.uuid4()
+    poisons = {
+        "org": str(poison_org),
+        "label": "POISON-LABEL",
+        "mech": "POISON-MECH",
+        "bind": "POISON-BIND",
+        "anchor": "POISON-ANCHOR",
+        "ver": "424242",
+    }
+    claim = WorkerIdentityClaim(
+        organization_id=poison_org,
+        mechanism="POISON-MECH",
+        identity_label="POISON-LABEL",
+        deployment_binding="POISON-BIND",
+        identity_version=424242,
+        public_anchor="POISON-ANCHOR",
+    )
+    verifier = RegisteredWorkerIdentityVerifier(_FakeSource(claim))
+    with pytest.raises(WorkerIdentityVerificationRefused) as exc:
+        verifier.verify(session, now=_now())
+    assert exc.value.reason_code == "identity_not_approved"
+    for value in poisons.values():
+        assert value not in str(exc.value)
+
+    events = _refusal_events(session)
+    assert len(events) == 1
+    ev = events[0]
+    # No authoritative registration -> no org, no resource id; only the closed data.
+    assert ev.resource_id is None
+    assert ev.organization_id is None
+    assert set(ev.data.keys()) == {"reason_code", "worker_identity_contract_version"}
+    haystack = _event_haystack(ev)
+    for value in poisons.values():
+        assert value not in haystack

@@ -132,3 +132,111 @@ def test_full_lifecycle_over_http_is_secret_free(client):
     # No secret/backend/certificate field anywhere in the response.
     for banned in ("certificate", "private", "secret", "token", "endpoint", "://", "public_key"):
         assert banned not in approved.text.lower()
+
+
+# --- expired approval over HTTP: closed 409 + durable expiry transition + audit-once ------------
+
+
+def _seed_expired_draft_registration() -> uuid.UUID:
+    """Seed a fully-evidenced DRAFT worker-identity registration in the dev org, then back-date its
+    expiry via a raw Core update (SQLite has no immutability trigger and Core bypasses the ORM
+    guard, standing in for wall-clock expiry). Returns the registration id."""
+    from datetime import UTC, datetime, timedelta
+
+    from secp_api.auth import Principal, dev_principal
+    from secp_api.db import session_scope
+    from secp_api.enums import (
+        Permission,
+        WorkerIdentityEvidenceKind,
+        WorkerIdentityEvidenceStatus,
+        WorkerIdentityMechanism,
+    )
+    from secp_api.models import WorkerIdentityRegistration
+    from secp_api.services import worker_identity as wi
+    from secp_api.worker_identity_contract import compute_verification_anchor_fingerprint
+    from sqlalchemy import update
+
+    now = datetime.now(UTC)
+    with session_scope() as s:
+        org_id = dev_principal(s).organization_id
+        actor = Principal(
+            user_id=uuid.uuid4(),
+            organization_id=org_id,
+            email="a@b",
+            permissions=frozenset(Permission),
+        )
+        row = wi.register_worker_identity(
+            s,
+            actor,
+            mechanism=WorkerIdentityMechanism.mtls_workload_identity,
+            identity_label="staging-worker-a",
+            deployment_binding="deploy-01",
+            verification_anchor_fingerprint=compute_verification_anchor_fingerprint("anchor-v1"),
+        )
+        for kind in WorkerIdentityEvidenceKind:
+            wi.record_evidence(
+                s,
+                actor,
+                row.id,
+                kind=kind,
+                status=WorkerIdentityEvidenceStatus.verified,
+                proof_id="TKT-1",
+                issuer="rev",
+            )
+        s.flush()
+        s.execute(
+            update(WorkerIdentityRegistration)
+            .where(WorkerIdentityRegistration.id == row.id)
+            .values(expiry=now - timedelta(seconds=1))
+        )
+        reg_id = row.id
+        s.commit()
+    return reg_id
+
+
+def _count_expiration_audits(reg_id: uuid.UUID) -> int:
+    from secp_api.db import session_scope
+    from secp_api.models import AuditEvent
+
+    with session_scope() as s:
+        return (
+            s.query(AuditEvent)
+            .filter_by(action="worker_identity.expired", resource_id=str(reg_id))
+            .count()
+        )
+
+
+def _status_of(reg_id: uuid.UUID) -> str:
+    from secp_api.db import session_scope
+    from secp_api.models import WorkerIdentityRegistration
+
+    with session_scope() as s:
+        return s.get(WorkerIdentityRegistration, reg_id).status.value
+
+
+def test_expired_approve_returns_closed_409_and_persists_expiry_and_one_audit(client):
+    reg_id = _seed_expired_draft_registration()
+
+    resp = client.post(f"/api/v1/worker-identity/registrations/{reg_id}/approve")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": {"code": "worker_identity_invalid_state"}}
+    assert "message" not in resp.text and "detail" not in resp.text
+
+    # The terminal ``expired`` transition + its single expiration audit COMMITTED despite the 409 —
+    # the router commits the durable transition before re-raising, so ``db_session``'s rollback
+    # (which normally undoes an errored request) does NOT undo it.
+    assert _status_of(reg_id) == "expired"
+    assert _count_expiration_audits(reg_id) == 1
+
+
+def test_no_approval_succeeds_after_expiration_and_no_duplicate_audit(client):
+    reg_id = _seed_expired_draft_registration()
+    first = client.post(f"/api/v1/worker-identity/registrations/{reg_id}/approve")
+    assert first.status_code == 409
+
+    # A second approve on the now-expired (terminal) row stays a closed 409 and emits NO new audit.
+    second = client.post(f"/api/v1/worker-identity/registrations/{reg_id}/approve")
+    assert second.status_code == 409
+    assert second.json() == {"error": {"code": "worker_identity_invalid_state"}}
+    assert _status_of(reg_id) == "expired"
+    assert _count_expiration_audits(reg_id) == 1

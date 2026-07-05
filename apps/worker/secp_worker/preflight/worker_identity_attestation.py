@@ -23,7 +23,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import NoReturn, Protocol, runtime_checkable
 
 from secp_api import audit
 from secp_api.enums import AuditAction, WorkerIdentityStatus
@@ -52,11 +52,25 @@ class WorkerIdentityAttestationUnavailable(Exception):
 
 
 class WorkerIdentityVerificationRefused(Exception):
-    """Fail-closed refusal carrying only a closed, secret-free reason code (no value leakage)."""
+    """Fail-closed refusal carrying only a closed, secret-free reason code (no value leakage).
 
-    def __init__(self, reason_code: str) -> None:
+    ``registration_id`` / ``organization_id``, when present, are sourced ONLY from the AUTHORITATIVE
+    durable registration that was loaded — never from the claim. They are ``None`` when no
+    authoritative registration exists (e.g. an unknown/unapproved identity). The exception text
+    carries only the closed reason code, never a claim value.
+    """
+
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        registration_id: uuid.UUID | None = None,
+        organization_id: uuid.UUID | None = None,
+    ) -> None:
         super().__init__(f"worker identity refused: {reason_code}")
         self.reason_code = reason_code
+        self.registration_id = registration_id
+        self.organization_id = organization_id
 
 
 @dataclass(frozen=True)
@@ -121,7 +135,7 @@ class RegisteredWorkerIdentityVerifier:
         try:
             return self._verify_claim(session, claim, now=now)
         except WorkerIdentityVerificationRefused as refused:
-            _record_refusal(session, claim, refused.reason_code)
+            _record_refusal(session, refused)
             raise
 
     def _verify_claim(
@@ -135,29 +149,38 @@ class RegisteredWorkerIdentityVerifier:
             )
         ).scalar_one_or_none()
         if row is None:
+            # No authoritative registration exists to attribute an audit to.
             raise WorkerIdentityVerificationRefused("identity_not_approved")
+
+        def _refuse(reason: str) -> NoReturn:
+            # Attribute the refusal ONLY to the AUTHORITATIVE durable registration (its
+            # server-generated id + org), never to any claim-supplied value.
+            raise WorkerIdentityVerificationRefused(
+                reason, registration_id=row.id, organization_id=row.organization_id
+            )
+
         if row.status != WorkerIdentityStatus.approved:
-            raise WorkerIdentityVerificationRefused("identity_not_approved")
+            _refuse("identity_not_approved")
         if _as_utc(row.expiry) <= now:
-            raise WorkerIdentityVerificationRefused("identity_expired")
+            _refuse("identity_expired")
         if getattr(row.mechanism, "value", row.mechanism) != claim.mechanism:
-            raise WorkerIdentityVerificationRefused("wrong_mechanism")
+            _refuse("wrong_mechanism")
         if row.identity_label != claim.identity_label:
-            raise WorkerIdentityVerificationRefused("identity_label_mismatch")
+            _refuse("identity_label_mismatch")
         if row.deployment_binding != claim.deployment_binding:
-            raise WorkerIdentityVerificationRefused("deployment_binding_mismatch")
+            _refuse("deployment_binding_mismatch")
         if row.identity_version != claim.identity_version:
-            raise WorkerIdentityVerificationRefused("identity_version_mismatch")
+            _refuse("identity_version_mismatch")
         if row.verification_anchor_fingerprint != compute_verification_anchor_fingerprint(
             claim.public_anchor
         ):
-            raise WorkerIdentityVerificationRefused("verification_anchor_mismatch")
+            _refuse("verification_anchor_mismatch")
 
         evidence = _evidence_rows(session, row.id)
         if not worker_identity_evidence_is_complete(evidence):
-            raise WorkerIdentityVerificationRefused("evidence_incomplete")
+            _refuse("evidence_incomplete")
         if row.evidence_fingerprint != compute_worker_identity_evidence_fingerprint(evidence):
-            raise WorkerIdentityVerificationRefused("evidence_fingerprint_mismatch")
+            _refuse("evidence_fingerprint_mismatch")
 
         # Success: return only the opaque, safe identity label (never the anchor/deployment secret).
         return WorkerIdentity(worker_identity_id=row.identity_label)
@@ -175,22 +198,26 @@ def _evidence_rows(session: Session, registration_id: uuid.UUID) -> list[WorkerI
     )
 
 
-def _record_refusal(session: Session, claim: WorkerIdentityClaim, reason_code: str) -> None:
-    """Record a secret-free ``worker_identity.verification_refused`` audit (closed reason + opaque
-    label only). Never persists the anchor, deployment binding value beyond its opaque label, or any
-    secret."""
+def _record_refusal(session: Session, refused: WorkerIdentityVerificationRefused) -> None:
+    """Record a secret-free ``worker_identity.verification_refused`` audit.
+
+    Persists ONLY the closed, verifier-generated reason code + the pinned contract version, and
+    attributes the event to the AUTHORITATIVE durable registration (its server-generated id + org)
+    when one was loaded. NO ``WorkerIdentityClaim`` field — organization, identity label, mechanism,
+    deployment binding, identity version, public anchor, or any value derived from them — is ever
+    written to the audit. When no authoritative registration exists, a context-free refusal (no org,
+    no resource id) is recorded.
+    """
     audit.record(
         session,
         action=AuditAction.worker_identity_verification_refused,
         resource_type="worker_identity_registration",
-        resource_id=None,
-        organization_id=claim.organization_id,
+        resource_id=refused.registration_id,
+        organization_id=refused.organization_id,
         actor="worker",
         outcome="refused",
         data={
-            "reason_code": reason_code,
-            "identity_label": claim.identity_label,
-            "mechanism": claim.mechanism,
+            "reason_code": refused.reason_code,
             "worker_identity_contract_version": WORKER_IDENTITY_CONTRACT_VERSION,
         },
     )

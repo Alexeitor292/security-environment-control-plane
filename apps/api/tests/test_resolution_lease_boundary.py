@@ -14,6 +14,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 API_PKG = REPO_ROOT / "apps" / "api" / "secp_api"
 WORKER_PKG = REPO_ROOT / "apps" / "worker" / "secp_worker"
@@ -148,23 +150,94 @@ def test_api_cannot_import_worker_lease_identity_or_gate():
                     )
 
 
-def test_production_worker_never_constructs_an_approved_identity():
-    # The shipped default identity verifier denies and constructs nothing. The ONLY production
-    # worker file permitted to construct a WorkerIdentity is the SECP-B2-4.3 registered verifier
-    # (``worker_identity_attestation.py``), and even then only after full independent
-    # re-verification against the durable approved registry — and it is NOT wired into the shipped
-    # runtime default (a separate guard asserts that). Every other worker file must construct none.
-    allowed = {"worker_identity_attestation.py"}
-    for path in _py(WORKER_PKG):
-        if path.name in allowed:
+def _call_name(node: ast.Call) -> str:
+    fn = node.func
+    return fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+
+
+def _worker_identity_calls(tree: ast.AST) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_name(node) == "WorkerIdentity"
+    ]
+
+
+def _blessed_return_call_ids(tree: ast.AST) -> set[int]:
+    """ids of ``WorkerIdentity(...)`` calls that are the value of a ``return`` inside
+    ``RegisteredWorkerIdentityVerifier._verify_claim`` — the sole reviewed success path."""
+    blessed: set[int] = set()
+    for cls in ast.walk(tree):
+        if not (isinstance(cls, ast.ClassDef) and cls.name == "RegisteredWorkerIdentityVerifier"):
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-                assert name != "WorkerIdentity", (
-                    f"{path.name} constructs an approved WorkerIdentity"
-                )
+        for method in ast.walk(cls):
+            if not (isinstance(method, ast.FunctionDef) and method.name == "_verify_claim"):
+                continue
+            for node in ast.walk(method):
+                if (
+                    isinstance(node, ast.Return)
+                    and isinstance(node.value, ast.Call)
+                    and _call_name(node.value) == "WorkerIdentity"
+                ):
+                    blessed.add(id(node.value))
+    return blessed
+
+
+def _check_worker_identity_construction(filename: str, source: str) -> int:
+    """Structural guard: a ``WorkerIdentity(...)`` construction is permitted ONLY in
+    ``worker_identity_attestation.py`` and ONLY as the value returned from the reviewed
+    ``RegisteredWorkerIdentityVerifier._verify_claim`` success path. Any construction elsewhere — in
+    another worker module, or unconditional/extra/non-return construction in the attestation
+    module — raises ``AssertionError``. Returns the number of (blessed) constructions in source."""
+    tree = ast.parse(source, filename=filename)
+    calls = _worker_identity_calls(tree)
+    if not calls:
+        return 0
+    assert filename == "worker_identity_attestation.py", (
+        f"{filename} constructs a WorkerIdentity outside the reviewed verifier module"
+    )
+    blessed = _blessed_return_call_ids(tree)
+    for call in calls:
+        assert id(call) in blessed, (
+            f"{filename} constructs a WorkerIdentity outside the reviewed "
+            "RegisteredWorkerIdentityVerifier._verify_claim success return path"
+        )
+    return len(calls)
+
+
+def test_production_worker_only_constructs_identity_in_the_reviewed_verifier_return():
+    # The shipped default identity verifier denies and constructs nothing. Across the whole worker
+    # package there must be EXACTLY ONE ``WorkerIdentity(...)`` construction, and it must be the
+    # value returned from ``RegisteredWorkerIdentityVerifier._verify_claim`` after all durable
+    # checks pass (that verifier is not wired into shipped runtime — a separate guard asserts that).
+    total = 0
+    for path in _py(WORKER_PKG):
+        total += _check_worker_identity_construction(path.name, path.read_text(encoding="utf-8"))
+    assert total == 1, f"expected exactly one reviewed WorkerIdentity construction, found {total}"
+
+
+def test_worker_identity_construction_guard_rejects_unsafe_additions():
+    # The guard passes on the real, reviewed source...
+    attest = (PREFLIGHT_PKG / "worker_identity_attestation.py").read_text(encoding="utf-8")
+    assert _check_worker_identity_construction("worker_identity_attestation.py", attest) == 1
+    # ...but rejects an EXTRA construction added in an unrelated function of the attestation module,
+    poisoned_helper = (
+        attest
+        + "\n\ndef _forged_identity():\n    return WorkerIdentity(worker_identity_id='forged')\n"
+    )
+    with pytest.raises(AssertionError):
+        _check_worker_identity_construction("worker_identity_attestation.py", poisoned_helper)
+    # ...an UNCONDITIONAL module-level construction,
+    poisoned_module = attest + "\n_FORGED = WorkerIdentity(worker_identity_id='forged')\n"
+    with pytest.raises(AssertionError):
+        _check_worker_identity_construction("worker_identity_attestation.py", poisoned_module)
+    # ...and ANY construction in a different worker module.
+    other_module = (
+        "from secp_worker.preflight.identity import WorkerIdentity\n"
+        "def sneak():\n    return WorkerIdentity(worker_identity_id='forged')\n"
+    )
+    with pytest.raises(AssertionError):
+        _check_worker_identity_construction("consumer.py", other_module)
 
 
 def test_orchestration_defaults_to_sealed_identity_and_disabled_gate():
