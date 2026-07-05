@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pickle
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from secp_api.auth import Principal
@@ -27,7 +27,7 @@ from secp_api.enums import (
     ResolverActivationStatus,
     TargetStatus,
 )
-from secp_api.errors import ResolverActivationError
+from secp_api.errors import ImmutableResourceError, ResolverActivationError
 from secp_api.live_read_contract import (
     LIVE_READ_COLLECTOR_CONTRACT_VERSION,
     LIVE_READ_EVIDENCE_SOURCE,
@@ -117,7 +117,9 @@ def _work_item(session, org_id):
         authorization_version=1,
         collector_contract_version=LIVE_READ_COLLECTOR_CONTRACT_VERSION,
         endpoint_allowlist_version=PROXMOX_READONLY_POLICY_VERSION,
-        operation_fingerprint="sha256:" + "ef" * 32,
+        # Unique per work item: ``operation_fingerprint`` is globally unique-constrained on
+        # ``readonly_staging_preflight``, so a fixed literal collides when a test seeds two items.
+        operation_fingerprint="sha256:" + uuid.uuid4().hex + uuid.uuid4().hex,
         status=ReadonlyPreflightStatus.running,
         revision=0,
     )
@@ -449,11 +451,17 @@ def test_worker_fails_closed_on_expiry_and_contract_arg(session, principal):
 
 
 def test_worker_fails_closed_on_evidence_deletion(session, principal):
+    from sqlalchemy import delete
+
     pf, row = _approved(session, principal.organization_id)
-    # Remove one evidence row -> incomplete -> refused (fingerprint would also change).
+    # Simulate an OUT-OF-BAND evidence deletion after approval. Post-approval evidence is now
+    # immutable (the ORM guard blocks a session.delete(); PostgreSQL additionally blocks it at the
+    # DB), so we issue a raw Core delete that bypasses the ORM before_flush guard to prove the
+    # worker STILL fails closed if a row nonetheless vanishes -> incomplete/fingerprint mismatch.
     one = session.query(ResolverActivationEvidence).filter_by(authorization_id=row.id).first()
-    session.delete(one)
-    session.flush()
+    session.execute(
+        delete(ResolverActivationEvidence).where(ResolverActivationEvidence.id == one.id)
+    )
     session.expire_all()
     with pytest.raises(ActivationAuthorizationRefused) as exc:
         load_and_verify_activation_capability(
@@ -463,6 +471,197 @@ def test_worker_fails_closed_on_evidence_deletion(session, principal):
             now=_now(),
         )
     assert exc.value.reason_code in ("evidence_incomplete", "evidence_fingerprint_mismatch")
+
+
+# --- FIX 1: cross-time-zone evidence-fingerprint canonicalization --------------------------------
+
+
+class _Ev:
+    """A minimal secret-free evidence stand-in for fingerprint canonicalization tests."""
+
+    def __init__(self, kind, verified_at):
+        self.kind = kind
+        self.status = ResolverActivationEvidenceStatus.verified
+        self.proof_id = "TKT-1"
+        self.issuer = "rev"
+        self.verified_at = verified_at
+
+
+def test_verified_at_is_canonicalized_to_utc():
+    from secp_api.resolver_activation_contract import _canonical_verified_at
+
+    # A +05:30 offset is converted to UTC; the wall time shifts and the suffix is +00:00.
+    aware = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    assert _canonical_verified_at(aware) == "2026-07-04T06:30:00+00:00"
+    # A naive timestamp is treated as UTC (consistent with the project's timezone handling).
+    assert _canonical_verified_at(datetime(2026, 7, 4, 12, 0, 0)) == "2026-07-04T12:00:00+00:00"
+    assert _canonical_verified_at(None) == ""
+
+
+def test_evidence_fingerprint_identical_across_equivalent_timezones():
+    from secp_api.resolver_activation_contract import compute_evidence_fingerprint
+
+    kinds = list(ResolverActivationEvidenceKind)
+    instant_utc = datetime(2026, 7, 4, 12, 0, 0, tzinfo=UTC)
+    # The SAME instant expressed three ways: UTC-aware, a +05:30 offset, and naive-as-UTC.
+    reps = (
+        instant_utc,
+        instant_utc.astimezone(timezone(timedelta(hours=5, minutes=30))),
+        instant_utc.replace(tzinfo=None),
+    )
+    fingerprints = {compute_evidence_fingerprint([_Ev(k, rep) for k in kinds]) for rep in reps}
+    # Deterministic regardless of the offset representation or the process-local timezone: the API
+    # (binding at approval) and a worker in a different local timezone recompute the same value.
+    assert len(fingerprints) == 1
+
+
+def test_api_and_worker_bind_the_same_fingerprint_from_offset_evidence():
+    # The API service and the worker verifier import the SAME canonicalization, so an offset-aware
+    # verified_at yields one fingerprint for both sides (no cross-process-timezone divergence).
+    from secp_api.resolver_activation_contract import compute_evidence_fingerprint as api_fp
+    from secp_worker.preflight.activation_authorization import (
+        compute_evidence_fingerprint as worker_fp,
+    )
+
+    kinds = list(ResolverActivationEvidenceKind)
+    instant = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    rows = [_Ev(k, instant) for k in kinds]
+    assert api_fp(rows) == worker_fp(rows)
+
+
+# --- FIX 2: durable immutability of binding/approval/terminal facts (ORM-path guard) -------------
+
+
+def test_binding_facts_are_immutable_via_orm(session, principal):
+    org = principal.organization_id
+    pf, row = _approved(session, org)
+    session.commit()
+    for field, value in (
+        ("operation_fingerprint", "sha256:" + "00" * 32),
+        ("authorization_expiry", _now() + timedelta(days=365)),
+        ("authorization_version", 99),
+        ("purpose", "something_else"),
+        ("live_read_authorization_version", 42),
+        ("resolver_adapter_contract_version", "other/v9"),
+    ):
+        setattr(row, field, value)
+        with pytest.raises(ImmutableResourceError):
+            session.flush()
+        session.rollback()
+
+
+def test_approval_and_revocation_facts_are_set_once_via_orm(session, principal):
+    org = principal.organization_id
+    pf, row = _approved(session, org)
+    session.commit()
+    for field, value in (
+        ("approved_by", uuid.uuid4()),
+        ("approved_at", _now() + timedelta(minutes=1)),
+        ("evidence_fingerprint", "sha256:tampered"),
+    ):
+        session.refresh(row)  # operate on a loaded object (as the service always does)
+        setattr(row, field, value)
+        with pytest.raises(ImmutableResourceError):
+            session.flush()
+        session.rollback()
+
+
+def test_terminal_state_cannot_be_revived_via_orm(session, principal):
+    org = principal.organization_id
+    pf, row = _approved(session, org)
+    ra.revoke_activation_authorization(session, _principal(org, MANAGE), row.id)
+    session.commit()
+    # revoked -> draft / approved is refused (closed lifecycle; terminal is final).
+    for revived in (ResolverActivationStatus.draft, ResolverActivationStatus.approved):
+        session.refresh(row)  # operate on a loaded object (as the service always does)
+        row.status = revived
+        with pytest.raises(ImmutableResourceError):
+            session.flush()
+        session.rollback()
+
+
+def test_authorization_cannot_be_deleted_via_orm(session, principal):
+    org = principal.organization_id
+    pf, row = _approved(session, org)
+    session.commit()
+    session.delete(row)
+    with pytest.raises(ImmutableResourceError):
+        session.flush()
+    session.rollback()
+
+
+def test_evidence_is_immutable_after_approval_via_orm(session, principal):
+    org = principal.organization_id
+    pf, row = _approved(session, org)
+    session.commit()
+    ev = session.query(ResolverActivationEvidence).filter_by(authorization_id=row.id).first()
+
+    # change refused
+    ev.proof_id = "TKT-CHANGED"
+    with pytest.raises(ImmutableResourceError):
+        session.flush()
+    session.rollback()
+
+    # delete refused
+    ev = session.query(ResolverActivationEvidence).filter_by(authorization_id=row.id).first()
+    session.delete(ev)
+    with pytest.raises(ImmutableResourceError):
+        session.flush()
+    session.rollback()
+
+    # insert refused
+    session.add(
+        ResolverActivationEvidence(
+            authorization_id=row.id,
+            kind=ResolverActivationEvidenceKind.independent_adversarial_review,
+            status=ResolverActivationEvidenceStatus.verified,
+            proof_id="TKT-NEW",
+            issuer="rev",
+            verified_at=_now(),
+        )
+    )
+    with pytest.raises(ImmutableResourceError):
+        session.flush()
+    session.rollback()
+
+
+def test_draft_evidence_remains_manageable_and_transitions_still_work(session, principal):
+    org = principal.organization_id
+    _t, _ob, _auth, pf = _work_item(session, org)
+    draft = ra.create_activation_authorization(session, _principal(org, MANAGE), preflight_id=pf.id)
+    # While draft, evidence may be recorded and re-recorded (managed).
+    _all_evidence(session, _principal(org, MANAGE), draft.id)
+    ra.record_evidence(
+        session,
+        _principal(org, MANAGE),
+        draft.id,
+        kind=ResolverActivationEvidenceKind.isolated_staging_identity,
+        status=ResolverActivationEvidenceStatus.verified,
+        proof_id="TKT-RE",
+        issuer="rev-2",
+    )
+    # draft -> approved
+    approved = ra.approve_activation_authorization(session, _principal(org, APPROVE), draft.id)
+    assert approved.status == ResolverActivationStatus.approved
+    session.commit()
+    # approved -> revoked
+    revoked = ra.revoke_activation_authorization(session, _principal(org, MANAGE), draft.id)
+    assert revoked.status == ResolverActivationStatus.revoked
+    # approval facts preserved through revocation.
+    assert revoked.approved_by is not None and revoked.approved_at is not None
+    session.commit()
+
+    # A separate work item proves draft -> expired is permitted (via the replacement path).
+    _t2, _ob2, _auth2, pf2 = _work_item(session, org)
+    d2 = ra.create_activation_authorization(session, _principal(org, MANAGE), preflight_id=pf2.id)
+    session.commit()
+    _force_expiry_past(session, d2.id)
+    ra.create_activation_authorization(session, _principal(org, MANAGE), preflight_id=pf2.id)
+    session.flush()
+    assert (
+        session.get(ResolverActivationAuthorization, d2.id).status
+        == ResolverActivationStatus.expired
+    )
 
 
 # --- expiry: fail-closed materialization + revision-safe replacement (audit-once) ----------------

@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
 from secp_api.enums import ResolverActivationEvidenceKind, ResolverActivationEvidenceStatus
@@ -75,18 +76,34 @@ def compute_evidence_fingerprint(items: Iterable[Any]) -> str:
     """
     canonical = []
     for item in sorted(items, key=lambda e: _kind_value(e.kind)):
-        verified_at = getattr(item, "verified_at", None)
         canonical.append(
             {
                 "kind": _kind_value(item.kind),
                 "status": _status_value(item.status),
                 "proof_id": item.proof_id,
                 "issuer": item.issuer,
-                "verified_at": verified_at.astimezone().isoformat() if verified_at else "",
+                "verified_at": _canonical_verified_at(getattr(item, "verified_at", None)),
             }
         )
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_verified_at(value: datetime | None) -> str:
+    """Canonicalize a verified-at timestamp to UTC ISO-8601 so the fingerprint is deterministic
+    across processes and databases.
+
+    A timezone-aware value is converted to UTC; a naive value is treated as UTC (consistent with the
+    project's timezone handling, e.g. ``_is_expired``/``_as_utc``). Without this, ``astimezone()``
+    with no argument would serialize in the *process-local* timezone, so the API (binding the
+    fingerprint) and a worker in a different local timezone would recompute different fingerprints
+    from the same rows and fail a legitimate authorization closed.
+    """
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
 
 
 def evidence_is_complete(items: Iterable[Any]) -> bool:

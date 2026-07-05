@@ -270,9 +270,14 @@ def approve_activation_authorization(
     if row.status != ResolverActivationStatus.draft:
         raise ResolverActivationError(_Code.invalid_state)
     if _is_expired(row):
-        # Approve fails closed once expired; the transition is materialized + audited (once).
-        _mark_expired(session, row, actor)
-        raise ResolverActivationError(_Code.invalid_state)
+        # Approve fails closed once expired; the transition is materialized + audited (once). Flag
+        # the refusal as carrying a durable transition so the HTTP layer commits it (only when THIS
+        # caller won the CAS) instead of rolling it back. A concurrent loser wins no CAS, emits no
+        # audit, and signals no durable transition.
+        won = _mark_expired(session, row, actor)
+        err = ResolverActivationError(_Code.invalid_state)
+        err.durable_transition = won
+        raise err
     evidence = _evidence_rows(session, row.id)
     if not evidence_is_complete(evidence):
         raise ResolverActivationError(_Code.evidence_incomplete)

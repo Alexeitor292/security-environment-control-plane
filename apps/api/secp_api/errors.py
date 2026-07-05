@@ -54,6 +54,11 @@ class ResolverActivationError(DomainError):
     """
 
     redacted = True
+    # True when this fail-closed refusal ALSO materialized a durable, revision-safe state transition
+    # (e.g. expiring a stale authorization + its single expiration audit) that MUST be committed
+    # even though the request errors. The router commits before re-raising so the transition
+    # survives the request while the caller still receives the closed refusal.
+    durable_transition: bool = False
 
     _STATUS = {
         "resolver_activation_not_found": 404,

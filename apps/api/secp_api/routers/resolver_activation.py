@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
 from secp_api.deps import current_principal, db_session
+from secp_api.errors import ResolverActivationError
 from secp_api.schemas_resolver_activation import (
     CreateResolverActivation,
     RecordResolverActivationEvidence,
@@ -91,9 +92,20 @@ def approve_authorization(
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> ResolverActivationOut:
-    return ResolverActivationOut.model_validate(
-        resolver_activation.approve_activation_authorization(session, principal, authorization_id)
-    )
+    try:
+        return ResolverActivationOut.model_validate(
+            resolver_activation.approve_activation_authorization(
+                session, principal, authorization_id
+            )
+        )
+    except ResolverActivationError as exc:
+        # A fail-closed approve on an EXPIRED authorization also materializes the terminal
+        # ``expired`` transition + its single expiration audit. Commit that durable transition here
+        # (only when it actually won its CAS) so it survives the request; ``db_session`` would
+        # otherwise roll it back. Then re-raise so the caller still gets the redacted 409.
+        if exc.durable_transition:
+            session.commit()
+        raise
 
 
 @router.post("/authorizations/{authorization_id}/revoke", response_model=ResolverActivationOut)
