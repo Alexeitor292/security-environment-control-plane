@@ -149,11 +149,11 @@ def test_api_cannot_import_worker_lease_identity_or_gate():
 
 
 def test_production_worker_never_constructs_an_approved_identity():
-    # The shipped default identity verifier denies and constructs nothing. The ONLY production worker
-    # file permitted to construct a WorkerIdentity is the SECP-B2-4.3 registered verifier
-    # (``worker_identity_attestation.py``), and even then only after full independent re-verification
-    # against the durable approved registry — and it is NOT wired into the shipped runtime default
-    # (a separate guard asserts that). Every other worker file must construct none.
+    # The shipped default identity verifier denies and constructs nothing. The ONLY production
+    # worker file permitted to construct a WorkerIdentity is the SECP-B2-4.3 registered verifier
+    # (``worker_identity_attestation.py``), and even then only after full independent
+    # re-verification against the durable approved registry — and it is NOT wired into the shipped
+    # runtime default (a separate guard asserts that). Every other worker file must construct none.
     allowed = {"worker_identity_attestation.py"}
     for path in _py(WORKER_PKG):
         if path.name in allowed:
