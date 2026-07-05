@@ -142,8 +142,8 @@ def test_contract_version_and_fingerprint_do_not_drift_from_the_worker():
 
 def test_shipped_worker_defaults_still_stop_before_lease_acquisition():
     # The shipped consumer default resolver is still the sealed resolver; the orchestration defaults
-    # to the denying identity + sealed gate BEFORE lease acquisition. This PR wires nothing new into
-    # the shipped resolution path.
+    # to the denying identity + sealed gate, which fail closed BEFORE lease acquisition. SECP-B2-4.2
+    # makes the activation-capability verifier mandatory (below) but changes NO shipped default.
     consumer = (REPO_ROOT / "apps/worker/secp_worker/preflight/consumer.py").read_text(
         encoding="utf-8"
     )
@@ -153,12 +153,26 @@ def test_shipped_worker_defaults_still_stop_before_lease_acquisition():
     )
     assert "identity_verifier or DenyingWorkerIdentityVerifier()" in orch
     assert "activation_gate or SealedActivationGate()" in orch
-    # The activation-capability verifier is NOT wired into the orchestration/consumer default path.
-    for name in ("orchestration.py", "consumer.py"):
-        src = (REPO_ROOT / "apps/worker/secp_worker/preflight" / name).read_text(encoding="utf-8")
-        assert "load_and_verify_activation_capability" not in src, (
-            f"{name} must not wire the activation verifier into shipped runtime"
-        )
+
+
+def test_activation_capability_verifier_is_mandatory_before_lease_acquisition():
+    # SECP-B2-4.2: the durable resolver-activation capability verifier is now WIRED and load-bearing
+    # in the orchestration, and it runs BEFORE any durable lease is acquired. The consumer still
+    # only delegates to the orchestration — it never verifies or leases itself.
+    orch = (REPO_ROOT / "apps/worker/secp_worker/preflight/orchestration.py").read_text(
+        encoding="utf-8"
+    )
+    consumer = (REPO_ROOT / "apps/worker/secp_worker/preflight/consumer.py").read_text(
+        encoding="utf-8"
+    )
+    # The verifier is invoked in the orchestration.
+    assert "load_and_verify_activation_capability(" in orch
+    # It is invoked strictly BEFORE the durable lease is acquired.
+    assert orch.index("load_and_verify_activation_capability(") < orch.index("acquire_lease("), (
+        "activation capability must be verified before lease acquisition"
+    )
+    # The consumer does not itself call the verifier (it delegates to the orchestration).
+    assert "load_and_verify_activation_capability(" not in consumer
 
 
 def test_frontend_has_no_secret_backend_or_activation_toggle_field():

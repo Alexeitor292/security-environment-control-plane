@@ -18,6 +18,8 @@ from secp_api.enums import (
     OnboardingMode,
     OnboardingStatus,
     ReadonlyPreflightOutcome,
+    ResolverActivationEvidenceKind,
+    ResolverActivationEvidenceStatus,
     TargetStatus,
 )
 from secp_api.live_read_contract import (
@@ -33,7 +35,7 @@ from secp_api.models import (
     ResolutionLease,
     TargetOnboarding,
 )
-from secp_api.services import readonly_preflight, staging_labs
+from secp_api.services import readonly_preflight, resolver_activation, staging_labs
 from secp_worker.preflight.orchestration import (
     _three_way_reference_match,
     run_readonly_preflight,
@@ -111,6 +113,26 @@ def _queued(session, principal):
     )
 
 
+def _approve_activation(session, principal, pf) -> None:
+    """Create + fully-evidence + approve the durable resolver-activation authorization for a queued
+    preflight so the SECP-B2-4.2 mandatory pre-lease activation check passes (authoritative durable
+    records — never an injected capability)."""
+    row = resolver_activation.create_activation_authorization(
+        session, principal, preflight_id=pf.id
+    )
+    for kind in ResolverActivationEvidenceKind:
+        resolver_activation.record_evidence(
+            session,
+            principal,
+            row.id,
+            kind=kind,
+            status=ResolverActivationEvidenceStatus.verified,
+            proof_id="TKT-1",
+            issuer="reviewer",
+        )
+    resolver_activation.approve_activation_authorization(session, principal, row.id)
+
+
 def _lease_audit_actions() -> set[str]:
     return {
         AuditAction.resolution_lease_acquired.value,
@@ -161,6 +183,7 @@ def test_approved_identity_and_gate_reach_lease_begin_attempt_then_sealed_resolv
     from secp_worker.preflight.sealed_secret_resolver import SealedSecretResolver
 
     pf = _queued(session, principal)
+    _approve_activation(session, principal, pf)  # SECP-B2-4.2 mandatory pre-lease activation gate
     result = run_readonly_preflight(
         session,
         pf.id,
