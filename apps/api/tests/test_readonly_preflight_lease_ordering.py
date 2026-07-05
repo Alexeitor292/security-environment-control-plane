@@ -51,13 +51,6 @@ from secp_worker.preflight.secret_resolution import (
 OPAQUE_REF = "env:SECP_PROVIDER_SECRET__PREFLIGHT"
 
 
-class _ApprovedIdentity:
-    def verify(self):
-        from secp_worker.preflight.identity import WorkerIdentity
-
-        return WorkerIdentity(worker_identity_id="test-worker")
-
-
 class _ApprovedGate:
     def check(self) -> None:
         return None
@@ -158,7 +151,9 @@ def test_shipped_default_stops_before_lease_and_begin_attempt(session, principal
     assert lease_events == []
 
 
-def test_disabled_gate_with_approved_identity_still_stops_before_lease(session, principal):
+def test_disabled_gate_with_approved_identity_still_stops_before_lease(
+    session, principal, worker_identity_verifier
+):
     pf = _queued(session, principal)
     from secp_worker.preflight.activation_gate import SealedActivationGate
 
@@ -167,7 +162,7 @@ def test_disabled_gate_with_approved_identity_still_stops_before_lease(session, 
         session,
         pf.id,
         secret_resolver=resolver,
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=SealedActivationGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.credential_unavailable
@@ -176,7 +171,7 @@ def test_disabled_gate_with_approved_identity_still_stops_before_lease(session, 
 
 
 def test_approved_identity_and_gate_reach_lease_begin_attempt_then_sealed_resolver(
-    session, principal
+    session, principal, worker_identity_verifier
 ):
     """With approved identity + gate (test-only), the durable lease + begin-attempt run, then the
     SEALED resolver still fails closed -> credential_unavailable. One attempt is consumed."""
@@ -188,7 +183,7 @@ def test_approved_identity_and_gate_reach_lease_begin_attempt_then_sealed_resolv
         session,
         pf.id,
         secret_resolver=SealedSecretResolver(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.credential_unavailable
@@ -196,7 +191,7 @@ def test_approved_identity_and_gate_reach_lease_begin_attempt_then_sealed_resolv
     assert lease.live_read_authorization_id == pf.live_read_authorization_id
     assert lease.authorization_version == pf.authorization_version
     assert lease.attempt_count == 1  # begin-attempt ran exactly once before the sealed boundary
-    assert lease.worker_identity_id == "test-worker"
+    assert lease.worker_identity_id == "staging-worker-a"  # durable registration label
     # Both an acquire and an attempt_started audit were emitted (secret-free).
     session.flush()  # session is autoflush=False; make pending audit rows queryable
     actions = {e.action for e in session.query(AuditEvent).all()}

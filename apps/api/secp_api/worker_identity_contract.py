@@ -73,6 +73,16 @@ def validate_evidence_metadata(*, proof_id: str, issuer: str) -> None:
             raise WorkerIdentityMetadataError("evidence metadata must be a safe opaque identifier")
 
 
+def compute_deployment_binding_fingerprint(deployment_binding: str) -> str:
+    """Canonical ``sha256:`` fingerprint of the opaque (non-secret) deployment binding.
+
+    Used to carry a non-secret binding identifier on the verified-identity result without echoing
+    raw binding value. It hashes an already-opaque grammar-validated string — no certificate/key/
+    endpoint/secret is involved.
+    """
+    return "sha256:" + hashlib.sha256(str(deployment_binding).encode("utf-8")).hexdigest()
+
+
 def compute_verification_anchor_fingerprint(public_anchor: str) -> str:
     """Canonical ``sha256:`` fingerprint of a PUBLIC verification anchor (e.g. a public-key value).
 

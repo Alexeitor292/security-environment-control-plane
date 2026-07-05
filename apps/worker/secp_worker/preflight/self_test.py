@@ -29,14 +29,20 @@ class PreflightSelfTestResult:
 
 
 def _identity_denies_by_default() -> bool:
-    """The shipped worker identity verifier denies fail-closed (constructs no identity)."""
+    """The shipped worker identity verifier denies fail-closed (constructs no identity).
+
+    The denying default raises before touching its arguments, so this stays fully offline: no DB
+    session, no preflight, and no I/O are needed (placeholder args are ignored and never read).
+    """
+    from datetime import UTC, datetime
+
     from secp_worker.preflight.identity import (
         DenyingWorkerIdentityVerifier,
         WorkerIdentityUnavailable,
     )
 
     try:
-        DenyingWorkerIdentityVerifier().verify()
+        DenyingWorkerIdentityVerifier().verify(None, preflight=None, now=datetime.now(UTC))  # type: ignore[arg-type]
     except WorkerIdentityUnavailable:
         return True
     return False

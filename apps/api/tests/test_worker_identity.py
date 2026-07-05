@@ -26,7 +26,7 @@ from secp_api.errors import ImmutableResourceError, WorkerIdentityError
 from secp_api.models import AuditEvent, WorkerIdentityEvidence, WorkerIdentityRegistration
 from secp_api.services import worker_identity as wi
 from secp_api.worker_identity_contract import compute_verification_anchor_fingerprint
-from secp_worker.preflight.identity import WorkerIdentity
+from secp_worker.preflight.identity import VerifiedWorkerIdentity
 from secp_worker.preflight.worker_identity_attestation import (
     RegisteredWorkerIdentityVerifier,
     SealedWorkerIdentityAttestationSource,
@@ -100,8 +100,19 @@ class _FakeSource:
     def __init__(self, claim: WorkerIdentityClaim) -> None:
         self._claim = claim
 
-    def attest(self, *, now):
+    def attest(self, *, preflight, now):
         return self._claim
+
+
+class _Preflight:
+    """A minimal authoritative-preflight stand-in: the verifier reads only ``organization_id``."""
+
+    def __init__(self, organization_id):
+        self.organization_id = organization_id
+
+
+def _preflight(org_id):
+    return _Preflight(org_id)
 
 
 def _force_expiry(session, registration_id):
@@ -397,19 +408,48 @@ def test_expired_registration_allows_higher_version_replacement(session, princip
 # --- worker verifier: independent re-validation, fail closed on drift ----------------------------
 
 
-def test_verifier_returns_identity_on_valid_claim(session, principal):
+def test_verifier_returns_verified_identity_with_only_safe_facts(session, principal):
+    from secp_api.worker_identity_contract import compute_deployment_binding_fingerprint
+
     org = principal.organization_id
-    _approved(session, org)
+    row = _approved(session, org)
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org)))
-    identity = verifier.verify(session, now=_now())
-    assert isinstance(identity, WorkerIdentity)
+    identity = verifier.verify(session, preflight=_preflight(org), now=_now())
+    assert isinstance(identity, VerifiedWorkerIdentity)
+    # Only safe, authoritative facts sourced from the durable registration.
     assert identity.worker_identity_id == LABEL
+    assert identity.registration_id == row.id
+    assert identity.organization_id == org
+    assert identity.identity_version == 1
+    assert identity.mechanism == MTLS.value
+    assert identity.deployment_binding_fingerprint == compute_deployment_binding_fingerprint(
+        "deploy-01"
+    )
+    # Redacted repr carries no value.
+    assert repr(identity) == "VerifiedWorkerIdentity(<redacted>)"
+
+
+def test_verifier_refuses_cross_org_claim(session, principal, other_org_principal):
+    # The durable lookup is bound to the AUTHORITATIVE preflight org; a claim asserting a DIFFERENT
+    # org is refused (cross_org_mismatch) — and a registration in the claim's org is never selected.
+    org = principal.organization_id
+    _approved(session, org)  # a valid registration exists in the preflight's org
+    foreign = other_org_principal.organization_id
+    verifier = RegisteredWorkerIdentityVerifier(
+        _FakeSource(_claim(foreign))
+    )  # claim asserts foreign
+    with pytest.raises(WorkerIdentityVerificationRefused) as exc:
+        verifier.verify(session, preflight=_preflight(org), now=_now())
+    assert exc.value.reason_code == "cross_org_mismatch"
+    # Context-free: no authoritative registration was selected for a foreign-org claim.
+    assert exc.value.registration_id is None
+    assert exc.value.organization_id is None
 
 
 def test_verifier_refuses_sealed_source(session, principal):
     verifier = RegisteredWorkerIdentityVerifier(SealedWorkerIdentityAttestationSource())
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_now())
+        verifier.verify(session, preflight=_preflight(principal.organization_id), now=_now())
     assert exc.value.reason_code == "no worker identity attestation is configured"
 
 
@@ -418,7 +458,7 @@ def test_verifier_refuses_when_only_a_draft_exists(session, principal):
     _register(session, org)  # draft, not approved
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org)))
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_now())
+        verifier.verify(session, preflight=_preflight(org), now=_now())
     assert exc.value.reason_code == "identity_not_approved"
 
 
@@ -428,7 +468,7 @@ def test_verifier_refuses_revoked(session, principal):
     wi.revoke_worker_identity(session, _principal(org, MANAGE), row.id)
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org)))
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_now())
+        verifier.verify(session, preflight=_preflight(org), now=_now())
     assert exc.value.reason_code == "identity_not_approved"
 
 
@@ -437,7 +477,7 @@ def test_verifier_refuses_expired(session, principal):
     row = _approved(session, org)
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org)))
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_as_far_future(row))
+        verifier.verify(session, preflight=_preflight(org), now=_as_far_future(row))
     assert exc.value.reason_code == "identity_expired"
 
 
@@ -462,7 +502,7 @@ def test_verifier_fails_closed_on_each_claim_drift(session, principal, claim_ove
     _approved(session, org)
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org, **claim_over)))
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_now())
+        verifier.verify(session, preflight=_preflight(org), now=_now())
     assert exc.value.reason_code == reason
 
 
@@ -471,7 +511,7 @@ def test_verifier_refuses_wrong_label_with_no_registration(session, principal):
     _approved(session, org)
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org, label="unknown-label")))
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_now())
+        verifier.verify(session, preflight=_preflight(org), now=_now())
     assert exc.value.reason_code == "identity_not_approved"
 
 
@@ -485,7 +525,7 @@ def test_verifier_fails_closed_on_evidence_deletion(session, principal):
     session.expire_all()
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org)))
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_now())
+        verifier.verify(session, preflight=_preflight(org), now=_now())
     assert exc.value.reason_code in ("evidence_incomplete", "evidence_fingerprint_mismatch")
 
 
@@ -532,7 +572,7 @@ def test_refusal_audit_never_persists_a_poisoned_claim_field(
     row = _approved(session, org)
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(_claim(org, **claim_over)))
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_now())
+        verifier.verify(session, preflight=_preflight(org), now=_now())
     # The poison never appears in the raised refusal (exception text / args).
     assert poison not in str(exc.value)
     assert all(poison not in str(a) for a in exc.value.args)
@@ -578,8 +618,10 @@ def test_refusal_audit_is_context_free_when_no_authoritative_registration(sessio
         public_anchor="POISON-ANCHOR",
     )
     verifier = RegisteredWorkerIdentityVerifier(_FakeSource(claim))
+    # The preflight org EQUALS the claim's (poison) org, so this exercises the no-registration path
+    # (not cross_org): an unknown (org, label) yields identity_not_approved + a context-free audit.
     with pytest.raises(WorkerIdentityVerificationRefused) as exc:
-        verifier.verify(session, now=_now())
+        verifier.verify(session, preflight=_preflight(poison_org), now=_now())
     assert exc.value.reason_code == "identity_not_approved"
     for value in poisons.values():
         assert value not in str(exc.value)

@@ -71,15 +71,6 @@ class _FakeWorkerResolver:
         return SecretMaterial("opaque-test-material")
 
 
-class _ApprovedIdentity:
-    """Test-only approved worker identity (never selectable by production runtime)."""
-
-    def verify(self):
-        from secp_worker.preflight.identity import WorkerIdentity
-
-        return WorkerIdentity(worker_identity_id="test-worker")
-
-
 class _ApprovedGate:
     """Test-only approved activation gate (never selectable by production runtime)."""
 
@@ -205,7 +196,9 @@ def test_authorization_version_is_monotonic_and_supports_renewal(session, princi
     assert pf.authorization_version == 2
 
 
-def test_stale_worker_terminal_cas_writes_no_facts_or_terminal_audit(session, principal):
+def test_stale_worker_terminal_cas_writes_no_facts_or_terminal_audit(
+    session, principal, worker_identity_verifier
+):
     from secp_api.models import ReadonlyStagingPreflight
     from sqlalchemy import update
 
@@ -231,7 +224,7 @@ def test_stale_worker_terminal_cas_writes_no_facts_or_terminal_audit(session, pr
         session,
         secret_resolver=_FakeWorkerResolver(),
         collection_runner=_DriftingRunner(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
     )
     session.refresh(pf)
@@ -275,7 +268,10 @@ def test_revoked_authorization_maps_to_revoked_outcome(session, principal):
     assert result.outcome == ReadonlyPreflightOutcome.authorization_revoked
 
 
-def test_ready_and_policy_refusal_via_injected_collection_runner(session, principal):
+def test_ready_and_policy_refusal_via_injected_collection_runner(
+    session, principal, worker_identity_verifier
+):
+    identity = worker_identity_verifier()  # one durable registration reused across both operations
     target = _substrate(session, principal)
     auth = _approved_authorization(session, principal, target)
     pf = _queue(session, principal, auth)
@@ -290,7 +286,7 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
         pf.id,
         secret_resolver=_FakeWorkerResolver(),
         collection_runner=_ReadyRunner(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=identity,
         activation_gate=_ApprovedGate(),
     )
     assert result.outcome == ReadonlyPreflightOutcome.ready
@@ -312,7 +308,7 @@ def test_ready_and_policy_refusal_via_injected_collection_runner(session, princi
         pf2.id,
         secret_resolver=_FakeWorkerResolver(),
         collection_runner=_RefusingRunner(),
-        identity_verifier=_ApprovedIdentity(),
+        identity_verifier=identity,
         activation_gate=_ApprovedGate(),
     )
     assert result2.outcome == ReadonlyPreflightOutcome.tls_or_policy_refused
