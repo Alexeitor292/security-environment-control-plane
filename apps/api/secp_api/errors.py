@@ -78,6 +78,36 @@ class ResolverActivationError(DomainError):
         self.http_status = self._STATUS.get(code_value, 400)
 
 
+class WorkerIdentityError(DomainError):
+    """Closed-code, message-redacted error for worker-identity registration (SECP-B2-4.3).
+
+    The HTTP layer serializes only the closed code (``{"error": {"code": ...}}``); no free-form
+    message, identity value, anchor, deployment binding, or evidence value reaches the API/UI.
+    """
+
+    redacted = True
+    # True when a fail-closed refusal ALSO materialized a durable, revision-safe transition (e.g.
+    # expiring a stale registration + its single expiration audit) that MUST be committed even when
+    # the request errors. The router commits before re-raising so the transition survives the call.
+    durable_transition: bool = False
+
+    _STATUS = {
+        "worker_identity_not_found": 404,
+        "worker_identity_forbidden": 403,
+        "worker_identity_invalid_state": 409,
+        "worker_identity_invalid_metadata": 422,
+        "worker_identity_evidence_incomplete": 409,
+        "worker_identity_lifecycle_conflict": 409,
+        "worker_identity_internal_failure": 500,
+    }
+
+    def __init__(self, code: object) -> None:
+        code_value = getattr(code, "value", str(code))
+        super().__init__(code_value)
+        self.code = code_value
+        self.http_status = self._STATUS.get(code_value, 400)
+
+
 class NotFoundError(DomainError):
     http_status = 404
     code = "not_found"
