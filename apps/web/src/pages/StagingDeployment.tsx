@@ -206,7 +206,7 @@ function DeploymentDetail({
 
       {planKinds.length > 0 && (
         <div>
-          <h4>Planned resources (the app creates all of these)</h4>
+          <h4>Planned resources (the app will create all of these once execution is enabled)</h4>
           <ul>
             {planKinds.map((k) => (
               <li key={k} className="mono">
@@ -275,7 +275,9 @@ export function StagingDeployment() {
       <h1>Isolated Staging Lab Deployments</h1>
       <p className="muted">
         Create a deployment, compile an immutable content-addressed plan, approve the exact plan,
-        and enqueue a worker-executed apply. {CONTROL_PLANE_ONLY_LABEL}
+        and enqueue a durable worker job. Execution is a sealed, fail-closed worker contract — real
+        host action is not yet enabled and requires the integration-validated seams on the isolated
+        worker. {CONTROL_PLANE_ONLY_LABEL}
       </p>
       <CreateForm substrates={substrates.data ?? []} onCreated={reloadAll} />
       {deployments.loading && <div>Loading…</div>}

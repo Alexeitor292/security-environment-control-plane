@@ -77,14 +77,14 @@ describe("Staging deployment UI logic", () => {
     expect(DEPLOY_ENQUEUED_NOTICE.toLowerCase()).toContain("worker");
   });
 
-  it("states the app-creates-everything and owned-only rollback safety constraints", () => {
+  it("states durable-orchestration + sealed-execution + observed-ownership constraints honestly", () => {
     const joined = SAFETY_CONSTRAINTS.join(" ").toLowerCase();
-    expect(joined).toContain("the app creates every resource");
-    expect(joined).toContain("no uplink");
-    expect(joined).toContain("offline artifacts");
+    expect(joined).toContain("durable app-owned orchestration");
+    expect(joined).toContain("sealed, fail-closed worker contract");
+    expect(joined).toContain("not yet enabled");
+    expect(joined).toContain("fresh observed-ownership proof");
     expect(joined).toContain("exact plan hash");
     expect(joined).toContain("worker-local");
-    expect(joined).toContain("only resources proven owned by this exact lab");
   });
 
   it("validates a good draft and rejects unsafe logical names", () => {

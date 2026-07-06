@@ -14,22 +14,22 @@ import type {
   StagingDeploymentStatus,
 } from "../api/types";
 
-/** Mandatory notice: the API never contacts infrastructure; a worker executes an approved plan. */
+/** Mandatory notice: the API never contacts infrastructure; the worker holds sealed execution. */
 export const CONTROL_PLANE_ONLY_LABEL =
-  "Control plane only — the app enqueues durable work and contacts no infrastructure.";
+  "Control plane only — the app durably orchestrates plan/approval and enqueues work; it contacts no infrastructure.";
 
 /** Shown after deploy is enqueued. */
 export const DEPLOY_ENQUEUED_NOTICE =
-  "Apply enqueued — a worker will execute the exact approved plan after re-verifying it.";
+  "Apply enqueued — the worker claims it, re-verifies every binding, and refuses at the sealed execution boundary until the real integration seams are supplied on the isolated worker.";
 
 /** Fixed safety constraints shown on the review screen (mirrors the server contract). */
 export const SAFETY_CONSTRAINTS: string[] = [
-  "The app creates every resource: SECP-owned bridge, default-deny firewall, control-plane VM, nested target VM, artifact stage, scoped credential, and service identity.",
-  "One isolated host-only network with no uplink, no gateway, and no DNS.",
-  "Offline artifacts only: integrity-verified and staged before isolation; no post-isolation internet.",
+  "Durable app-owned orchestration: the app owns the immutable plan, exact-plan approval, and the durable worker job — it never executes them.",
+  "Execution is a sealed, fail-closed worker contract. Real host action requires merged code, a mounted worker-local bootstrap bundle, and integration-validated provider/host/OpenBao seams (not yet enabled).",
+  "When enabled, the app (not the operator) creates every resource: SECP-owned bridge, default-deny firewall, control-plane VM, nested target VM, artifact stage, scoped credential, and service identity.",
+  "Every mutation is gated by a fresh observed-ownership proof of the exact provider object; foreign/uncertain resources are never touched.",
   "Approval binds ONE exact plan hash plus every drift anchor; later drift fails closed before any mutation.",
   "The one-time SSH bootstrap authority is worker-local and deployment-mounted — never entered here.",
-  "Rollback and teardown remove ONLY resources proven owned by this exact lab.",
 ];
 
 export interface Option<T> {
