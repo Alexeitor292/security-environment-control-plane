@@ -50,3 +50,15 @@ class SingleGetCanaryCollector:
     @property
     def methods(self) -> set[str]:
         return {method for method, _ in self.requests}
+
+
+class SingleGetCanaryCollectorFactory:
+    """Produces a FRESH, empty :class:`SingleGetCanaryCollector` for each canary run.
+
+    The composition owns this factory (validated nominally) instead of a shared collector instance,
+    so every transport-canary run counts its own requests from zero — a repeated run on the same
+    composition still observes exactly one GET for that run, never an accumulated total.
+    """
+
+    def __call__(self) -> SingleGetCanaryCollector:
+        return SingleGetCanaryCollector()

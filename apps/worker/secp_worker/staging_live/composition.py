@@ -23,7 +23,7 @@ from secp_worker.preflight.live_evidence_writer import (
 from secp_worker.preflight.sealed_secret_resolver import SealedSecretResolver
 from secp_worker.preflight.worker_identity_attestation import RegisteredWorkerIdentityVerifier
 from secp_worker.staging_live.hardened_transport import ApprovedHardenedTransportFactory
-from secp_worker.staging_live.single_get_canary import SingleGetCanaryCollector
+from secp_worker.staging_live.single_get_canary import SingleGetCanaryCollectorFactory
 
 
 class StagingLiveCompositionError(Exception):
@@ -44,7 +44,7 @@ class StagingLiveComposition:
     activation_gate: ResolutionActivationGate
     secret_resolver: OpenBaoWorkerSecretResolver
     transport_factory: ApprovedHardenedTransportFactory
-    collector: SingleGetCanaryCollector
+    collector_factory: SingleGetCanaryCollectorFactory
     evidence_writer: LivePreflightEvidenceWriter
 
 
@@ -54,7 +54,7 @@ def build_staging_live_composition(
     activation_gate: ResolutionActivationGate,
     secret_resolver: OpenBaoWorkerSecretResolver,
     transport_factory: ApprovedHardenedTransportFactory,
-    collector: SingleGetCanaryCollector,
+    collector_factory: SingleGetCanaryCollectorFactory,
     evidence_writer: LivePreflightEvidenceWriter,
 ) -> StagingLiveComposition:
     """Build the composition. Every argument is REQUIRED; a missing (``None``) or shipped
@@ -66,7 +66,7 @@ def build_staging_live_composition(
         "activation_gate": activation_gate,
         "secret_resolver": secret_resolver,
         "transport_factory": transport_factory,
-        "collector": collector,
+        "collector_factory": collector_factory,
         "evidence_writer": evidence_writer,
     }
     for name, dep in required.items():
@@ -84,19 +84,19 @@ def build_staging_live_composition(
         raise StagingLiveCompositionError("secret_resolver_is_sealed_default")
     if isinstance(evidence_writer, SealedLivePreflightEvidenceWriter):
         raise StagingLiveCompositionError("evidence_writer_is_sealed_default")
-    # Condition B: reject loose/foreign transport + collector. The canary path is trusted only with
-    # an APPROVED hardened transport factory and the DEDICATED single-GET canary collector — a
-    # duck-typed or multi-GET collector cannot masquerade as the approved canary surface.
+    # Condition B: reject loose/foreign transport + collector factory. The canary path is trusted
+    # only with an APPROVED hardened transport factory and the DEDICATED single-GET canary collector
+    # factory: a duck-typed or multi-GET collector cannot masquerade as the approved surface.
     if not isinstance(transport_factory, ApprovedHardenedTransportFactory):
         raise StagingLiveCompositionError("transport_factory_not_approved")
-    if not isinstance(collector, SingleGetCanaryCollector):
-        raise StagingLiveCompositionError("collector_not_single_get_canary")
+    if not isinstance(collector_factory, SingleGetCanaryCollectorFactory):
+        raise StagingLiveCompositionError("collector_factory_not_single_get_canary")
 
     return StagingLiveComposition(
         identity_verifier=identity_verifier,
         activation_gate=activation_gate,
         secret_resolver=secret_resolver,
         transport_factory=transport_factory,
-        collector=collector,
+        collector_factory=collector_factory,
         evidence_writer=evidence_writer,
     )

@@ -65,6 +65,7 @@ from secp_worker.staging_live.hardened_transport import (
 from secp_worker.staging_live.single_get_canary import (
     CANARY_GET_METHOD,
     SingleGetCanaryCollector,
+    SingleGetCanaryCollectorFactory,
 )
 
 
@@ -110,11 +111,11 @@ class _SingleGetCollectionRunner:
         self,
         *,
         transport_factory: ApprovedHardenedTransportFactory,
-        collector: SingleGetCanaryCollector,
+        collector_factory: SingleGetCanaryCollectorFactory,
         declared_boundary: dict,
     ) -> None:
         self._transport_factory = transport_factory
-        self._collector = collector
+        self._collector_factory = collector_factory
         self._declared_boundary = declared_boundary
         # Verification state read by the canary AFTER the governed run.
         self.transport_hardened = False
@@ -136,10 +137,16 @@ class _SingleGetCollectionRunner:
             # A non-approved / non-enforcing transport must NEVER yield passed transport-policy
             # evidence: leave verification false and return no facts (the canary fails closed).
             return {}
+        # A FRESH collector per run: request counting starts at zero, so a repeated run on the
+        # same composition still observes exactly one GET for that run (no accumulation).
+        collector = self._collector_factory()
+        if not isinstance(collector, SingleGetCanaryCollector):
+            # The factory must yield the dedicated single-GET collector; anything else fails closed.
+            return {}
         self.transport_hardened = manifest.all_enforced()
-        observed = self._collector.collect(transport, declared_boundary=self._declared_boundary)
+        observed = collector.collect(transport, declared_boundary=self._declared_boundary)
         # Proof, not assertion: exactly one request was issued and it was a GET.
-        self.single_get_verified = self._collector.get_count == 1 and self._collector.methods == {
+        self.single_get_verified = collector.get_count == 1 and collector.methods == {
             CANARY_GET_METHOD
         }
         body = observed.get("observed", observed) if isinstance(observed, dict) else {}
@@ -196,7 +203,7 @@ def run_proxmox_transport_canary(
     now = now or datetime.now(UTC)
     runner = _SingleGetCollectionRunner(
         transport_factory=composition.transport_factory,
-        collector=composition.collector,
+        collector_factory=composition.collector_factory,
         declared_boundary=declared_boundary,
     )
     result: PreflightResult = run_readonly_preflight(

@@ -13,6 +13,7 @@ seam supplied out of band on the isolated worker. Nothing here performs I/O.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from secp_worker.staging_live.bootstrap.ownership import SecpOwnershipNamespace
 
@@ -21,11 +22,14 @@ class HostOperationError(ValueError):
     """Raised for an out-of-contract or unsafe host operation. Never echoes a raw value."""
 
 
+# ``operation_code`` is a ``ClassVar`` on every operation, NOT an ``__init__`` field: it is a fixed
+# per-type discriminator that a caller can never pass or override at construction, so it cannot be
+# spoofed to mislead a future executor that dispatches on it.
 @dataclass(frozen=True)
 class ProbeNestedVirtualization:
     """Read-only probe of host nested-virtualization support. Takes no caller argument."""
 
-    operation_code: str = "probe_nested_virtualization"
+    operation_code: ClassVar[str] = "probe_nested_virtualization"
 
 
 @dataclass(frozen=True)
@@ -34,14 +38,14 @@ class CreateIsolatedBridge:
     and a bounded index — never caller-supplied. No physical port, host IP, gateway, or DNS."""
 
     bridge_index: int
-    operation_code: str = "create_isolated_bridge"
+    operation_code: ClassVar[str] = "create_isolated_bridge"
 
 
 @dataclass(frozen=True)
 class ApplyDefaultDenyFirewall:
     """Apply a default-deny firewall chain scoped to the lab's ownership namespace."""
 
-    operation_code: str = "apply_default_deny_firewall"
+    operation_code: ClassVar[str] = "apply_default_deny_firewall"
 
 
 @dataclass(frozen=True)
@@ -49,7 +53,7 @@ class RemoveOwnedBridge:
     """Teardown inverse of :class:`CreateIsolatedBridge`: remove ONLY the owned generated bridge."""
 
     bridge_index: int
-    operation_code: str = "remove_owned_bridge"
+    operation_code: ClassVar[str] = "remove_owned_bridge"
 
 
 HostBootstrapOperation = (

@@ -64,7 +64,10 @@ from secp_worker.staging_live.openbao_client import (
     SealedOpenBaoBackendTransport,
     validate_openbao_base_url,
 )
-from secp_worker.staging_live.single_get_canary import SingleGetCanaryCollector
+from secp_worker.staging_live.single_get_canary import (
+    SingleGetCanaryCollector,
+    SingleGetCanaryCollectorFactory,
+)
 
 VAULT_REF = "vault:secp/proxmox/target-1"
 _CANARY_NODES = [{"node": "node-alpha"}, {"node": "node-bravo"}]
@@ -148,6 +151,19 @@ class _LooseFactory(ApprovedHardenedTransportFactory):
         return _LooseTransport()  # type: ignore[return-value]
 
 
+class _RecordingCollectorFactory(SingleGetCanaryCollectorFactory):
+    """A single-GET collector factory that RETAINS each fresh collector it produces, so a test can
+    assert a fresh collector is built per canary run and count that run's requests independently."""
+
+    def __init__(self) -> None:
+        self.created: list[SingleGetCanaryCollector] = []
+
+    def __call__(self) -> SingleGetCanaryCollector:
+        collector = SingleGetCanaryCollector()
+        self.created.append(collector)
+        return collector
+
+
 # --- Durable substrate builders (approved preflight with a vault: reference) ----------------------
 
 
@@ -219,7 +235,7 @@ def _composition(
     principal,
     worker_identity_verifier,
     backend,
-    collector=None,
+    collector_factory=None,
     *,
     transport_factory=None,
 ):
@@ -228,7 +244,7 @@ def _composition(
         activation_gate=_ApprovedGate(),
         secret_resolver=_build_resolver(session, backend),
         transport_factory=transport_factory or _FakeApprovedFactory(),
-        collector=collector or SingleGetCanaryCollector(),
+        collector_factory=collector_factory or SingleGetCanaryCollectorFactory(),
         evidence_writer=DurableLivePreflightEvidenceWriter(),
     )
 
@@ -243,7 +259,7 @@ def test_composition_rejects_sealed_and_deny_defaults(session, principal, worker
         activation_gate=_ApprovedGate(),
         secret_resolver=_build_resolver(session, backend),
         transport_factory=_FakeApprovedFactory(),
-        collector=SingleGetCanaryCollector(),
+        collector_factory=SingleGetCanaryCollectorFactory(),
         evidence_writer=DurableLivePreflightEvidenceWriter(),
     )
     # A fully-injected composition builds.
@@ -267,11 +283,11 @@ def test_composition_rejects_missing_dependency(session, principal, worker_ident
         activation_gate=_ApprovedGate(),
         secret_resolver=_build_resolver(session, backend),
         transport_factory=_FakeApprovedFactory(),
-        collector=SingleGetCanaryCollector(),
+        collector_factory=SingleGetCanaryCollectorFactory(),
         evidence_writer=DurableLivePreflightEvidenceWriter(),
     )
     with pytest.raises(StagingLiveCompositionError):
-        build_staging_live_composition(**{**good, "collector": None})
+        build_staging_live_composition(**{**good, "collector_factory": None})
 
 
 # --- 2. OpenBao readiness canary: full chain + auth, NO secret, NO Proxmox ------------------------
@@ -283,8 +299,8 @@ def test_openbao_readiness_canary_authenticates_without_resolving_or_contacting_
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend(auth_ok=True)
-    collector = SingleGetCanaryCollector()
-    comp = _composition(session, principal, worker_identity_verifier, backend, collector)
+    factory = _RecordingCollectorFactory()
+    comp = _composition(session, principal, worker_identity_verifier, backend, factory)
 
     result = run_openbao_readiness_canary(session, preflight_id=pf.id, composition=comp)
 
@@ -292,7 +308,7 @@ def test_openbao_readiness_canary_authenticates_without_resolving_or_contacting_
     assert result.reason_code == "authenticated"
     assert backend.authenticated == 1  # OpenBao auth WAS exercised (full chain reached resolver)
     assert backend.reads == []  # no secret resolved
-    assert collector.get_count == 0  # Proxmox never contacted
+    assert factory.created == []  # no collector built → Proxmox never contacted
     assert session.query(LivePreflightEvidence).count() == 0  # readiness writes no evidence
 
 
@@ -302,9 +318,7 @@ def test_openbao_readiness_canary_reports_backend_auth_failure_closed(
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend(auth_ok=False)
-    comp = _composition(
-        session, principal, worker_identity_verifier, backend, SingleGetCanaryCollector()
-    )
+    comp = _composition(session, principal, worker_identity_verifier, backend)
 
     result = run_openbao_readiness_canary(session, preflight_id=pf.id, composition=comp)
 
@@ -320,9 +334,7 @@ def test_readiness_canary_fails_closed_before_openbao_when_activation_missing(
     # never contacted and the canary reports a closed preflight outcome (not an auth result).
     pf = _queued(session, principal)
     backend = _FakeOpenBaoBackend()
-    comp = _composition(
-        session, principal, worker_identity_verifier, backend, SingleGetCanaryCollector()
-    )
+    comp = _composition(session, principal, worker_identity_verifier, backend)
 
     result = run_openbao_readiness_canary(session, preflight_id=pf.id, composition=comp)
 
@@ -340,8 +352,8 @@ def test_proxmox_transport_canary_single_get_and_safe_evidence(
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend()
-    collector = SingleGetCanaryCollector()
-    comp = _composition(session, principal, worker_identity_verifier, backend, collector)
+    factory = _RecordingCollectorFactory()
+    comp = _composition(session, principal, worker_identity_verifier, backend, factory)
 
     result = run_proxmox_transport_canary(
         session, preflight_id=pf.id, composition=comp, declared_boundary={}
@@ -352,7 +364,9 @@ def test_proxmox_transport_canary_single_get_and_safe_evidence(
     # OpenBao was contacted (credential resolved) BEFORE the single Proxmox GET. The backend sees
     # only the OPAQUE locator (the `vault:` scheme is stripped and never forwarded).
     assert backend.reads == ["secp/proxmox/target-1"]
-    assert collector.get_count == 1  # EXACTLY one allowlisted GET
+    # A fresh collector was built for this run and observed EXACTLY one allowlisted GET.
+    assert len(factory.created) == 1
+    assert factory.created[0].get_count == 1
     # Exactly one immutable evidence row, secret-free, with only safe bounded facts.
     row = session.query(LivePreflightEvidence).one()
     assert row.status == LivePreflightEvidenceStatus.passed
@@ -373,8 +387,8 @@ def test_proxmox_transport_canary_fails_closed_when_chain_broken(
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend()
-    collector = SingleGetCanaryCollector()
-    comp = _composition(session, principal, worker_identity_verifier, backend, collector)
+    factory = _RecordingCollectorFactory()
+    comp = _composition(session, principal, worker_identity_verifier, backend, factory)
 
     readonly_preflight.revoke_preflight_authorization(
         session, principal, pf.live_read_authorization_id, "operator"
@@ -384,27 +398,74 @@ def test_proxmox_transport_canary_fails_closed_when_chain_broken(
     )
     assert result.ok is False
     assert backend.reads == []
-    assert collector.get_count == 0
+    assert factory.created == []  # collection never reached → no collector built, no GET
     assert session.query(LivePreflightEvidence).count() == 0
 
 
-def test_proxmox_transport_canary_idempotent_evidence(session, principal, worker_identity_verifier):
+def test_proxmox_transport_canary_exact_once_evidence_via_durable_lease(
+    session, principal, worker_identity_verifier
+):
+    # First run writes exactly one evidence row. A second run for the SAME operation is refused by
+    # the durable lease (exactly-once at the operation boundary) BEFORE any collection; no second
+    # collector is even built, and the outcome is asserted explicitly (a lease refusal, NOT a masked
+    # transport-verification failure). Exactly one evidence row persists.
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend()
-    comp = _composition(
-        session, principal, worker_identity_verifier, backend, SingleGetCanaryCollector()
-    )
+    factory = _RecordingCollectorFactory()
+    comp = _composition(session, principal, worker_identity_verifier, backend, factory)
 
     first = run_proxmox_transport_canary(
         session, preflight_id=pf.id, composition=comp, declared_boundary={}
     )
-    # Re-running the same durable operation writes NO second evidence row (exact-once idempotency),
-    # regardless of whether the lease grants another attempt or replay-refuses.
-    run_proxmox_transport_canary(
+    second = run_proxmox_transport_canary(
         session, preflight_id=pf.id, composition=comp, declared_boundary={}
     )
     assert first.ok is True
+    assert first.evidence_id is not None
+    assert len(factory.created) == 1 and factory.created[0].get_count == 1
+    assert second.ok is False
+    assert second.reason_code == ReadonlyPreflightOutcome.credential_unavailable.value
+    assert len(factory.created) == 1  # no second collector built (refused before collection)
+    assert session.query(LivePreflightEvidence).count() == 1
+
+
+def test_durable_evidence_writer_dedups_same_operation(
+    session, principal, worker_identity_verifier
+):
+    # Reach the durable writer's EXACT-ONCE dedup path directly: after the canary writes the row, a
+    # second write with the SAME operation context returns the SAME row (no new insert),
+    # proving exact-once persistence at the writer/dedup layer.
+    from secp_worker.staging_live import canaries
+
+    pf = _queued(session, principal)
+    _approve_activation(session, principal, pf)
+    backend = _FakeOpenBaoBackend()
+    comp = _composition(
+        session, principal, worker_identity_verifier, backend, _RecordingCollectorFactory()
+    )
+    first = run_proxmox_transport_canary(
+        session, preflight_id=pf.id, composition=comp, declared_boundary={}
+    )
+    assert first.ok is True
+
+    context = canaries._build_evidence_context(session, pf.id, comp, datetime.now(UTC))
+    assert context is not None
+    row_again = comp.evidence_writer.write(
+        session,
+        context=context,
+        status=LivePreflightEvidenceStatus.passed,
+        facts={
+            "api_reachable": True,
+            "readonly_policy_enforced": True,
+            "node_count": 2,
+            "storage_count": 0,
+            "network_segment_count": 0,
+        },
+        checks=[],
+        now=datetime.now(UTC),
+    )
+    assert str(row_again.id) == str(first.evidence_id)  # dedup returned the SAME durable row
     assert session.query(LivePreflightEvidence).count() == 1
 
 
@@ -431,7 +492,7 @@ def test_composition_rejects_loose_transport_factory_and_foreign_collector(
         activation_gate=_ApprovedGate(),
         secret_resolver=_build_resolver(session, backend),
         transport_factory=_FakeApprovedFactory(),
-        collector=SingleGetCanaryCollector(),
+        collector_factory=SingleGetCanaryCollectorFactory(),
         evidence_writer=DurableLivePreflightEvidenceWriter(),
     )
     build_staging_live_composition(**good)
@@ -440,13 +501,14 @@ def test_composition_rejects_loose_transport_factory_and_foreign_collector(
     with pytest.raises(StagingLiveCompositionError):
         build_staging_live_composition(**{**good, "transport_factory": lambda v, s: object()})
 
-    # A foreign / multi-GET-shaped collector is rejected: only the dedicated single-GET collector.
-    class _ForeignCollector:
-        def collect(self, transport, *, declared_boundary):
-            return {}
+    # A foreign collector factory is rejected: only the dedicated single-GET collector factory
+    # (nominal) is admitted, so a duck-typed factory returning any collector cannot masquerade.
+    class _ForeignCollectorFactory:
+        def __call__(self):
+            return SingleGetCanaryCollector()
 
     with pytest.raises(StagingLiveCompositionError):
-        build_staging_live_composition(**{**good, "collector": _ForeignCollector()})
+        build_staging_live_composition(**{**good, "collector_factory": _ForeignCollectorFactory()})
 
 
 def test_transport_canary_fails_closed_when_transport_not_hardened(
@@ -462,7 +524,6 @@ def test_transport_canary_fails_closed_when_transport_not_hardened(
         principal,
         worker_identity_verifier,
         backend,
-        SingleGetCanaryCollector(),
         transport_factory=_LooseFactory(),
     )
     result = run_proxmox_transport_canary(
@@ -485,7 +546,6 @@ def test_transport_canary_fails_closed_when_hardening_not_enforced(
         principal,
         worker_identity_verifier,
         backend,
-        SingleGetCanaryCollector(),
         transport_factory=_FakeApprovedFactory(enforced=False),
     )
     result = run_proxmox_transport_canary(
@@ -509,7 +569,7 @@ def test_readiness_canary_with_sealed_resolver_composition_never_authenticates(
             activation_gate=_ApprovedGate(),
             secret_resolver=SealedSecretResolver(),
             transport_factory=_FakeApprovedFactory(),
-            collector=SingleGetCanaryCollector(),
+            collector_factory=SingleGetCanaryCollectorFactory(),
             evidence_writer=DurableLivePreflightEvidenceWriter(),
         )
 

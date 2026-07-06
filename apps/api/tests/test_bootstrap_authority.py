@@ -93,12 +93,28 @@ def test_bridge_operations_are_ownership_bound_and_isolated():
 
 
 def test_operations_expose_no_free_form_string_field():
-    # The typed operations carry ONLY a bounded int index (or nothing) + a closed operation_code —
-    # never a caller-supplied bridge name, path, command, username, or argument string.
-    for op in (CreateIsolatedBridge(bridge_index=0), RemoveOwnedBridge(bridge_index=0)):
-        caller_fields = {k: v for k, v in vars(op).items() if k != "operation_code"}
-        assert set(caller_fields) == {"bridge_index"}
-        assert isinstance(caller_fields["bridge_index"], int)
+    # The typed operations carry ONLY a bounded int index (or nothing) — never a
+    # caller-supplied bridge name, path, command, username, argument string, or operation_code.
+    assert set(vars(CreateIsolatedBridge(bridge_index=0))) == {"bridge_index"}
+    assert set(vars(RemoveOwnedBridge(bridge_index=0))) == {"bridge_index"}
+    assert set(vars(ProbeNestedVirtualization())) == set()
+    assert set(vars(ApplyDefaultDenyFirewall())) == set()
+
+
+def test_operation_code_cannot_be_spoofed_by_construction():
+    # operation_code is a ClassVar discriminator, not an __init__ field: a caller cannot pass or
+    # override it at construction, and its value is fixed per operation type.
+    with pytest.raises(TypeError):
+        CreateIsolatedBridge(bridge_index=0, operation_code="spoofed")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        ProbeNestedVirtualization(operation_code="spoofed")  # type: ignore[call-arg]
+    assert CreateIsolatedBridge(bridge_index=0).operation_code == "create_isolated_bridge"
+    assert ProbeNestedVirtualization().operation_code == "probe_nested_virtualization"
+    # The rendered command still carries the fixed code and discrete, shell-safe tokens.
+    ns = ownership_namespace("staging-lab-01")
+    cmd = render_host_command(CreateIsolatedBridge(bridge_index=0), ns)
+    assert cmd.operation_code == "create_isolated_bridge"
+    assert all(not (_SHELL_METACHARACTERS & set(t)) for t in cmd.argv)
 
 
 # --- deployment-local bootstrap credential -------------------------------------------------------

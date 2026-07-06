@@ -9,11 +9,23 @@ registration (never one the signer merely asserts). Proof is bound to a fresh, b
 operation-specific challenge, so replay, a wrong key, a wrong identity, a stale challenge, and a
 cross-org proof all fail closed.
 
-Signature scheme: a hash-based one-time signature (Lamport over SHA-256). It is genuinely asymmetric
-in the property that matters here — verification uses ONLY the public anchor + the signature and
-never the private key — and it is standard-library-only (no third-party crypto dependency, no
-network, no CA). The asymmetric alternative (Ed25519) is an injectable :class:`PoPSignatureScheme`
-seam for when a vetted asymmetric dependency is added; the verifier is agnostic to the scheme.
+SCOPE — LOCAL possession self-check ONLY, NOT a remote authentication primitive. The shipped scheme
+is :class:`LocalHashBasedPoPScheme`, a Lamport-style hash-based signature (standard-library-only, no
+third-party dependency, no network, no CA). It is a genuine ONE-TIME signature: it is sound for a
+single signature per key, and this module uses it in-process only, where the worker verifies its own
+deployment-local material before emitting a claim. It is emphatically NOT safe as a many-time remote
+authentication mechanism: a fresh per-operation challenge does NOT make a one-time key safe to reuse
+across operations — reused Lamport signatures leak private preimages and become forgeable. The
+challenge is also prover-issued (in-process), not verifier-issued, so it cannot establish freshness
+to a remote verifier. Accordingly :class:`LocalHashBasedPoPScheme` declares
+``remote_authentication_eligible = False`` and :func:`assert_remote_authentication_eligible` refuses
+it, so a future remote-authentication path cannot wire it by mistake.
+
+The injectable asymmetric :class:`PoPSignatureScheme` seam is preserved for a future Ed25519-backed
+implementation (a many-time primitive) that would declare itself remote-eligible and be paired
+with a verifier-issued challenge; the verifier here is agnostic to the scheme. Adding that primitive
+(and any dependency it needs) is out of scope for this module — remote mTLS authentication is NOT
+solved here.
 
 Nothing here logs or persists a private key, anchor, challenge, signature, or raw error; only
 closed reason codes and pass/fail. No certificate/CSR/key/PEM is parsed and no I/O is performed.
@@ -53,12 +65,38 @@ class DeploymentSignerUnavailable(Exception):
         self.reason_code = reason_code
 
 
+class RemoteAuthenticationIneligible(Exception):
+    """Raised when a scheme not approved for REMOTE authentication is used where remote-eligibility
+    is required. Fail closed so the local hash-based possession check can never back remote auth."""
+
+    def __init__(self, reason_code: str = "scheme_not_remote_authentication_eligible") -> None:
+        super().__init__(f"remote authentication ineligible: {reason_code}")
+        self.reason_code = reason_code
+
+
 @runtime_checkable
 class PoPSignatureScheme(Protocol):
     """A verification-only view of a signature scheme. ``verify`` uses ONLY the public anchor + the
-    signature — never the private key — so a separate verifier can validate a signer's proof."""
+    signature — never the private key — so a separate verifier can validate a signer's proof.
+
+    ``remote_authentication_eligible`` is the gate a remote-authentication path MUST check
+    (via :func:`assert_remote_authentication_eligible`): only a many-time asymmetric primitive
+    paired with a verifier-issued challenge may declare ``True``. The local hash-based scheme is
+    ``False``.
+    """
+
+    @property
+    def remote_authentication_eligible(self) -> bool: ...
 
     def verify(self, *, public_anchor: str, message: bytes, signature: str) -> bool: ...
+
+
+def assert_remote_authentication_eligible(scheme: PoPSignatureScheme) -> None:
+    """Fail closed unless ``scheme`` declares itself eligible for REMOTE authentication. The local
+    hash-based possession scheme declares ``False``, so this refuses it — a structural guard that
+    prevents a future remote-auth path from wiring the in-process placeholder by mistake."""
+    if not getattr(scheme, "remote_authentication_eligible", False):
+        raise RemoteAuthenticationIneligible
 
 
 @runtime_checkable
@@ -85,14 +123,19 @@ def _bit(digest: bytes, index: int) -> int:
     return (digest[index // 8] >> (index % 8)) & 1
 
 
-class HashBasedPoPScheme:
-    """A Lamport one-time signature over SHA-256 (standard-library-only, public-verifiable).
+class LocalHashBasedPoPScheme:
+    """A Lamport-style ONE-TIME hash signature over SHA-256 — a LOCAL, in-process possession check.
 
-    The public anchor is hashed leaves; a signature reveals one preimage per message-digest
-    bit; verification hashes each revealed preimage and compares to the anchor — using only public
-    data. Reuse of a key would leak; each PoP uses a FRESH per-operation challenge, so
-    every signature covers a distinct message and a one-time key is sufficient and safe.
+    Verification uses only public data (the public anchor + the signature), never the private key.
+    Its security is one-time: a key is sound for a SINGLE signature. Signing two different messages
+    with one key leaks private preimages and enables forgery, so this scheme is NOT safe as a
+    many-time remote authentication mechanism; a fresh challenge does not change that.
+    It is used here only in-process (the worker checking its own deployment-local material), and it
+    declares ``remote_authentication_eligible = False`` so it can never back a remote-auth path.
     """
+
+    # Structural marker: this local placeholder is NOT eligible for remote authentication.
+    remote_authentication_eligible: bool = False
 
     def generate_signer(self) -> InMemoryHashBasedSigner:
         """Generate a fresh deployment-local signer (private leaves + derived public anchor)."""
@@ -137,7 +180,7 @@ class InMemoryHashBasedSigner:
     on the isolated worker (real material injected out of band) and in tests.
     """
 
-    scheme: HashBasedPoPScheme
+    scheme: LocalHashBasedPoPScheme
     private: list[list[bytes]]
     public_anchor_hex: str
 
@@ -262,8 +305,8 @@ class MtlsIdentityDescriptor:
 
 
 class PoPVerifiedAttestationSource:
-    """A ``WorkerIdentityAttestationSource`` that emits a claim ONLY after an INDEPENDENT
-    proof-of-possession verification succeeds.
+    """A ``WorkerIdentityAttestationSource`` that emits a claim ONLY after an INDEPENDENT, LOCAL
+    proof-of-possession self-check succeeds.
 
     Construction requires a deployment-local ``signer`` (private material), a SEPARATE
     ``IndependentPoPVerifier``, the ``descriptor``, and the anchor fingerprint pinned in the
@@ -271,6 +314,12 @@ class PoPVerifiedAttestationSource:
     signature independently against the pinned anchor before returning the claim; the object that
     signs never validates its own proof. Any failure raises a closed
     ``WorkerIdentityAttestationUnavailable``; no key/anchor/challenge/signature is logged.
+
+    This is an IN-PROCESS possession self-check (the worker confirming its own deployment-local
+    material), NOT a remote authentication handshake; with this scheme the challenge
+    is prover-issued and the one-time key is reused. Real remote authentication requires
+    a remote-eligible asymmetric scheme (see :func:`assert_remote_authentication_eligible`) with a
+    verifier-issued challenge; it is out of scope here.
     """
 
     def __init__(
