@@ -27,6 +27,11 @@ import type {
   StagingDeploymentResourceRecord,
   StagingDeploymentVerificationRecord,
   BootstrapAvailability,
+  DiscoveryEnrollment,
+  DiscoveryRequest,
+  DiscoveryEvidence,
+  DiscoveryCandidatePlan,
+  DiscoveryApplyNotice,
   TargetCreate,
   TargetEvidence,
   TeamTopology,
@@ -242,6 +247,34 @@ export const api = {
     request<StagingDeployment>("POST", `/api/v1/staging-deployments/${id}/deploy`),
   teardownStagingDeployment: (id: string) =>
     request<StagingDeployment>("POST", `/api/v1/staging-deployments/${id}/teardown`),
+
+  // Worker-owned read-only target discovery (SECP-B5). The API enqueues a durable read-only
+  // discovery job; a worker runs the probes. Live deployment apply remains sealed.
+  listDiscoveryEnrollments: () =>
+    request<DiscoveryEnrollment[]>("GET", "/api/v1/target-discovery"),
+  requestTargetDiscovery: (body: DiscoveryRequest) =>
+    request<DiscoveryEnrollment>("POST", "/api/v1/target-discovery", body),
+  getDiscoveryEnrollment: (id: string) =>
+    request<DiscoveryEnrollment>("GET", `/api/v1/target-discovery/${id}`),
+  getDiscoveryEvidence: (id: string) =>
+    request<DiscoveryEvidence>("GET", `/api/v1/target-discovery/${id}/evidence`),
+  getDiscoveryCandidatePlan: (id: string) =>
+    request<DiscoveryCandidatePlan>("GET", `/api/v1/target-discovery/${id}/candidate-plan`),
+  getDiscoveryApplyStatus: (id: string) =>
+    request<DiscoveryApplyNotice>("GET", `/api/v1/target-discovery/${id}/apply-status`),
+  getDiscoveryBootstrapAvailability: (id: string) =>
+    request<BootstrapAvailability>(
+      "GET",
+      `/api/v1/target-discovery/${id}/bootstrap-availability`,
+    ),
+  rerunDiscovery: (id: string) =>
+    request<DiscoveryEnrollment>("POST", `/api/v1/target-discovery/${id}/rerun`),
+  approveDiscoveryPlan: (id: string, expectedPlanHash: string) =>
+    request<DiscoveryEnrollment>("POST", `/api/v1/target-discovery/${id}/approve`, {
+      expected_plan_hash: expectedPlanHash,
+    }),
+  rejectDiscoveryPlan: (id: string) =>
+    request<DiscoveryEnrollment>("POST", `/api/v1/target-discovery/${id}/reject`),
 
   // App-owned read-only staging preflight (SECP-B2-0). API queues only; a worker executes.
   preflightSubstrates: () =>

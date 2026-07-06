@@ -15,6 +15,7 @@ import { ReadonlyPreflight } from "./pages/ReadonlyPreflight";
 import { ResolverActivation } from "./pages/ResolverActivation";
 import { StagingDeployment } from "./pages/StagingDeployment";
 import { StagingLab } from "./pages/StagingLab";
+import { TargetDiscovery } from "./pages/TargetDiscovery";
 import { Templates } from "./pages/Templates";
 import { TopologyView } from "./pages/TopologyView";
 import "./styles.css";
@@ -36,6 +37,7 @@ const router = createBrowserRouter([
       { path: "onboarding", element: <OnboardingWizard /> },
       { path: "staging-labs", element: <StagingLab /> },
       { path: "staging-deployments", element: <StagingDeployment /> },
+      { path: "target-discovery", element: <TargetDiscovery /> },
       { path: "readonly-preflight", element: <ReadonlyPreflight /> },
       { path: "resolver-activation", element: <ResolverActivation /> },
       { path: "audit", element: <AuditLog /> },

@@ -468,6 +468,93 @@ export interface BootstrapAvailability {
   reason_code: string;
 }
 
+// --- Worker-owned read-only target enrollment + discovery (SECP-B5) ---
+//
+// The control plane owns every label; this surface accepts only a substrate id, a closed resource
+// profile, and one optional strict logical name. It NEVER carries an SSH host/account/port/key path/
+// known_hosts/fingerprint, Proxmox endpoint/token, raw output, node/storage/VMID entry, or command.
+
+export type TargetDiscoveryStatus =
+  | "requested"
+  | "discovering"
+  | "discovered"
+  | "plan_ready"
+  | "approved"
+  | "failed";
+
+export type DiscoveryResourceProfile = "small_lab" | "medium_lab";
+
+export interface DiscoveryEnrollment {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  display_name: string;
+  ownership_label: string;
+  resource_profile: string;
+  status: TargetDiscoveryStatus;
+  decision_code: string;
+  enrollment_version: number;
+  revision: number;
+  active_plan_hash: string;
+  approved_plan_hash: string;
+  approved_at: string | null;
+  failure_code: string | null;
+  created_at: string;
+}
+
+export interface DiscoveryRequest {
+  execution_target_id: string;
+  resource_profile?: DiscoveryResourceProfile;
+  logical_name?: string | null;
+}
+
+export interface DiscoveryCandidatePlanResource {
+  kind: string;
+  resource_ref: string;
+  ownership_marker: string;
+}
+
+export interface DiscoveryCandidatePlan {
+  plan_version: number;
+  plan_hash: string;
+  ownership_tag: string;
+  resource_profile: string;
+  node: string;
+  storage: string;
+  capacity_snapshot_hash: string;
+  evidence_hash: string;
+  enrollment_version: number;
+  expires_at: string;
+  executable: boolean;
+  status: string;
+  resources: DiscoveryCandidatePlanResource[];
+}
+
+export interface DiscoveryEvidence {
+  eligibility: string;
+  reason_code: string | null;
+  version_major: number | null;
+  version_minor: number | null;
+  is_clustered: boolean | null;
+  node: string | null;
+  node_count: number | null;
+  cpu_total: number | null;
+  mem_total_mb: number | null;
+  mem_free_mb: number | null;
+  nested_available: boolean | null;
+  selected_storage: string | null;
+  storage_count: number;
+  candidate_vmids: number[];
+  evidence_hash: string;
+  bundle_available: boolean;
+  created_at: string;
+}
+
+export interface DiscoveryApplyNotice {
+  live_apply_sealed: boolean;
+  message: string;
+}
+
 // --- App-owned read-only staging preflight (SECP-B2-0) ---
 
 export type ReadonlyPreflightStatus =
