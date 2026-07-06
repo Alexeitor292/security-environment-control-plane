@@ -25,6 +25,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 API_PKG = REPO_ROOT / "apps" / "api" / "secp_api"
 WORKER_PKG = REPO_ROOT / "apps" / "worker" / "secp_worker"
 STAGING_LIVE = WORKER_PKG / "staging_live"
+# The SECP-B4 deployment engine is a PEER sealed, worker-only, unwired layer (not normal runtime);
+# it legitimately builds on the staging-live primitives, so it is excluded here exactly like
+# staging_live itself. Its own guard test asserts normal runtime never imports IT.
+DEPLOYMENT = WORKER_PKG / "deployment"
 
 
 def _py(pkg: Path) -> list[Path]:
@@ -32,10 +36,10 @@ def _py(pkg: Path) -> list[Path]:
 
 
 def _normal_runtime_sources() -> list[Path]:
-    """Every worker + API source EXCEPT the staging-live package itself (and caches)."""
+    """Every worker + API source EXCEPT the sealed staging-live/deployment layers (and caches)."""
     out: list[Path] = []
     for p in _py(WORKER_PKG):
-        if STAGING_LIVE in p.parents:
+        if STAGING_LIVE in p.parents or DEPLOYMENT in p.parents:
             continue
         out.append(p)
     out.extend(_py(API_PKG))

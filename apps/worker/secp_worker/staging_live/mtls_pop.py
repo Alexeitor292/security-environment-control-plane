@@ -123,6 +123,63 @@ def _bit(digest: bytes, index: int) -> int:
     return (digest[index // 8] >> (index % 8)) & 1
 
 
+class Ed25519PoPScheme:
+    """A REAL, remote-eligible asymmetric proof-of-possession scheme (Ed25519 via ``cryptography``).
+
+    Verification uses ONLY the registered public key (the anchor) and the signature — never the
+    private key — and Ed25519 is a genuine MANY-TIME primitive, so it is sound for the deployed
+    remote-authentication path (unlike the local hash placeholder). The public anchor is the raw
+    32-byte Ed25519 public key encoded as hex; a signature is the raw 64-byte signature as hex.
+
+    It declares ``remote_authentication_eligible = True`` (see
+    :func:`assert_remote_authentication_eligible`); it is paired with a VERIFIER-issued challenge in
+    the remote PoP protocol. No private key is logged, persisted, or exposed; verification never
+    raises a raw crypto error (a malformed anchor/signature or a bad proof simply returns
+    """
+
+    remote_authentication_eligible: bool = True
+
+    def generate_keypair(self) -> tuple[str, str]:
+        """Generate a fresh (private-key-hex, public-anchor-hex) pair. The private hex is used ONLY
+        a deployment-local signer/tests and is never persisted or logged."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        private = Ed25519PrivateKey.generate()
+        raw_private = private.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+        raw_public = private.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+        return raw_private.hex(), raw_public.hex()
+
+    def sign(self, *, private_key_hex: str, message: bytes) -> str:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        private = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_key_hex))
+        return private.sign(message).hex()
+
+    def verify(self, *, public_anchor: str, message: bytes, signature: str) -> bool:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        try:
+            anchor = bytes.fromhex(public_anchor)
+            sig = bytes.fromhex(signature)
+        except ValueError:
+            return False
+        if len(anchor) != 32 or len(sig) != 64:
+            return False
+        try:
+            Ed25519PublicKey.from_public_bytes(anchor).verify(sig, message)
+        except (InvalidSignature, ValueError):
+            return False
+        return True
+
+
 class LocalHashBasedPoPScheme:
     """A Lamport-style ONE-TIME hash signature over SHA-256 — a LOCAL, in-process possession check.
 
