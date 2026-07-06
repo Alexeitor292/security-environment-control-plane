@@ -12,7 +12,6 @@ consumer/runtime/main must never construct or import this factory.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
 
 from secp_worker.preflight.activation_gate import ResolutionActivationGate, SealedActivationGate
 from secp_worker.preflight.backends.openbao_resolver import OpenBaoWorkerSecretResolver
@@ -23,23 +22,8 @@ from secp_worker.preflight.live_evidence_writer import (
 )
 from secp_worker.preflight.sealed_secret_resolver import SealedSecretResolver
 from secp_worker.preflight.worker_identity_attestation import RegisteredWorkerIdentityVerifier
-
-
-@runtime_checkable
-class HardenedTransportFactory(Protocol):
-    """Builds a hardened, GET-only read-only transport from the re-verified authorization + the
-    just-resolved opaque credential. A real implementation returns a ``HttpxReadOnlyTransport``
-    (TLS-verified, ``trust_env=False``, no redirects, bounded timeout, ``/api2/json`` base only)."""
-
-    def __call__(self, verified: object, secret: str) -> object: ...
-
-
-@runtime_checkable
-class ReadOnlyCollector(Protocol):
-    """Runs the governed GET-only collection and returns ONLY safe observed inventory (never a
-    raw response). A real implementation is the existing ``LiveReadOnlyProxmoxCollector``."""
-
-    def collect(self, transport: object, *, declared_boundary: dict) -> dict: ...
+from secp_worker.staging_live.hardened_transport import ApprovedHardenedTransportFactory
+from secp_worker.staging_live.single_get_canary import SingleGetCanaryCollectorFactory
 
 
 class StagingLiveCompositionError(Exception):
@@ -59,8 +43,8 @@ class StagingLiveComposition:
     identity_verifier: RegisteredWorkerIdentityVerifier
     activation_gate: ResolutionActivationGate
     secret_resolver: OpenBaoWorkerSecretResolver
-    transport_factory: HardenedTransportFactory
-    collector: ReadOnlyCollector
+    transport_factory: ApprovedHardenedTransportFactory
+    collector_factory: SingleGetCanaryCollectorFactory
     evidence_writer: LivePreflightEvidenceWriter
 
 
@@ -69,8 +53,8 @@ def build_staging_live_composition(
     identity_verifier: RegisteredWorkerIdentityVerifier,
     activation_gate: ResolutionActivationGate,
     secret_resolver: OpenBaoWorkerSecretResolver,
-    transport_factory: HardenedTransportFactory,
-    collector: ReadOnlyCollector,
+    transport_factory: ApprovedHardenedTransportFactory,
+    collector_factory: SingleGetCanaryCollectorFactory,
     evidence_writer: LivePreflightEvidenceWriter,
 ) -> StagingLiveComposition:
     """Build the composition. Every argument is REQUIRED; a missing (``None``) or shipped
@@ -82,7 +66,7 @@ def build_staging_live_composition(
         "activation_gate": activation_gate,
         "secret_resolver": secret_resolver,
         "transport_factory": transport_factory,
-        "collector": collector,
+        "collector_factory": collector_factory,
         "evidence_writer": evidence_writer,
     }
     for name, dep in required.items():
@@ -100,12 +84,19 @@ def build_staging_live_composition(
         raise StagingLiveCompositionError("secret_resolver_is_sealed_default")
     if isinstance(evidence_writer, SealedLivePreflightEvidenceWriter):
         raise StagingLiveCompositionError("evidence_writer_is_sealed_default")
+    # Condition B: reject loose/foreign transport + collector factory. The canary path is trusted
+    # only with an APPROVED hardened transport factory and the DEDICATED single-GET canary collector
+    # factory: a duck-typed or multi-GET collector cannot masquerade as the approved surface.
+    if not isinstance(transport_factory, ApprovedHardenedTransportFactory):
+        raise StagingLiveCompositionError("transport_factory_not_approved")
+    if not isinstance(collector_factory, SingleGetCanaryCollectorFactory):
+        raise StagingLiveCompositionError("collector_factory_not_single_get_canary")
 
     return StagingLiveComposition(
         identity_verifier=identity_verifier,
         activation_gate=activation_gate,
         secret_resolver=secret_resolver,
         transport_factory=transport_factory,
-        collector=collector,
+        collector_factory=collector_factory,
         evidence_writer=evidence_writer,
     )
