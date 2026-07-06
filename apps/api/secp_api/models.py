@@ -1798,3 +1798,12 @@ from secp_api.deployment_models import (  # noqa: E402,F401
     StagingDeploymentResource,
     StagingDeploymentVerification,
 )
+
+# SECP-B5 worker-owned read-only target discovery models (dedicated module for a focused diff).
+from secp_api.discovery_models import (  # noqa: E402,F401
+    DiscoveryCandidatePlan,
+    DiscoveryCandidatePlanApproval,
+    DiscoveryJob,
+    DiscoverySnapshot,
+    TargetDiscoveryEnrollment,
+)
