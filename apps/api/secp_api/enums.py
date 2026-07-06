@@ -779,6 +779,23 @@ class AuditAction(str, Enum):
     # SECP-B2-4.5 — durable immutable live-preflight evidence (worker-only, secret-free).
     live_preflight_evidence_written = "live_preflight_evidence.written"
     live_preflight_evidence_write_refused = "live_preflight_evidence.write_refused"
+    # SECP-B4 — real staging-lab deployment engine.
+    staging_deployment_created = "staging_deployment.created"
+    staging_deployment_planned = "staging_deployment.planned"
+    staging_deployment_submitted = "staging_deployment.submitted"
+    staging_deployment_approved = "staging_deployment.approved"
+    staging_deployment_rejected = "staging_deployment.rejected"
+    staging_deployment_apply_started = "staging_deployment.apply_started"
+    staging_deployment_resource_created = "staging_deployment.resource_created"
+    staging_deployment_verified = "staging_deployment.verified"
+    staging_deployment_ready = "staging_deployment.ready"
+    staging_deployment_failed = "staging_deployment.failed"
+    staging_deployment_rollback_required = "staging_deployment.rollback_required"
+    staging_deployment_rolled_back = "staging_deployment.rolled_back"
+    staging_deployment_teardown_requested = "staging_deployment.teardown_requested"
+    staging_deployment_destroyed = "staging_deployment.destroyed"
+    staging_deployment_maintenance_required = "staging_deployment.maintenance_required"
+    staging_deployment_operation_refused = "staging_deployment.operation_refused"
 
 
 class ResolutionLeaseStatus(str, Enum):
@@ -810,3 +827,142 @@ class ResolutionLeaseReason(str, Enum):
     reference_mismatch = "reference_mismatch"
     worker_identity_untrusted = "worker_identity_untrusted"
     resolution_activation_disabled = "resolution_activation_disabled"
+
+
+# --- SECP-B4: real app-owned isolated staging-lab deployment engine -------------------------------
+
+
+class StagingDeploymentStatus(str, Enum):
+    """Durable lifecycle of a REAL staging-lab deployment (SECP-B4).
+
+    Shipped defaults are sealed: no transition past ``approved`` performs a real host action
+    unless a worker-local bootstrap bundle is injected AND an exact plan is explicitly approved.
+    explicitly approved. The engine fails closed on any drift before mutation.
+    """
+
+    draft = "draft"
+    planned = "planned"
+    awaiting_approval = "awaiting_approval"
+    approved = "approved"
+    bootstrap_pending = "bootstrap_pending"
+    applying = "applying"
+    verifying = "verifying"
+    ready = "ready"
+    failed = "failed"
+    rollback_required = "rollback_required"
+    rolling_back = "rolling_back"
+    rolled_back = "rolled_back"
+    teardown_requested = "teardown_requested"
+    tearing_down = "tearing_down"
+    destroyed = "destroyed"
+
+
+class StagingDeploymentDecisionCode(str, Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected_policy = "rejected_policy"
+    drift_refused = "drift_refused"
+    maintenance_required = "maintenance_required"
+
+
+class DeploymentOperationKind(str, Enum):
+    apply = "apply"
+    verify = "verify"
+    rollback = "rollback"
+    teardown = "teardown"
+
+
+class DeploymentOperationStatus(str, Enum):
+    queued = "queued"
+    claimed = "claimed"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    refused = "refused"
+
+
+class DeploymentResourceKind(str, Enum):
+    """Closed set of resource CATEGORIES the engine may create (ownership-bound generated names)."""
+
+    proxmox_service_identity = "proxmox_service_identity"
+    host_bootstrap_helper = "host_bootstrap_helper"
+    isolated_bridge = "isolated_bridge"
+    host_firewall_boundary = "host_firewall_boundary"
+    artifact_stage = "artifact_stage"
+    control_plane_vm = "control_plane_vm"
+    nested_target_vm = "nested_target_vm"
+    openbao_scoped_credential = "openbao_scoped_credential"
+
+
+class DeploymentResourceState(str, Enum):
+    created = "created"
+    verified = "verified"
+    rollback_pending = "rollback_pending"
+    removed = "removed"
+
+
+class DeploymentInverseOp(str, Enum):
+    """Typed inverse (rollback) operation bound to each created resource category."""
+
+    revoke_service_identity = "revoke_service_identity"
+    remove_host_helper = "remove_host_helper"
+    remove_owned_bridge = "remove_owned_bridge"
+    remove_owned_firewall = "remove_owned_firewall"
+    remove_owned_artifacts = "remove_owned_artifacts"
+    destroy_owned_guest = "destroy_owned_guest"
+    revoke_openbao_credential = "revoke_openbao_credential"
+
+
+class DeploymentVerificationCode(str, Enum):
+    only_secp_owned_resources = "only_secp_owned_resources"
+    bridge_no_uplink_no_host_ip = "bridge_no_uplink_no_host_ip"
+    control_plane_no_external_route = "control_plane_no_external_route"
+    nested_target_no_external_route = "nested_target_no_external_route"
+    only_approved_target_flow = "only_approved_target_flow"
+    control_plane_healthy = "control_plane_healthy"
+    openbao_ready = "openbao_ready"
+    worker_identity_verified = "worker_identity_verified"
+    remote_pop_verified = "remote_pop_verified"
+    openbao_scoped_resolution = "openbao_scoped_resolution"
+    proxmox_single_get = "proxmox_single_get"
+    transport_enforced = "transport_enforced"
+
+
+class DeploymentVerificationStatus(str, Enum):
+    passed = "passed"
+    failed = "failed"
+    unverifiable = "unverifiable"
+
+
+class DeploymentFailureCode(str, Enum):
+    """Closed, secret-free failure reasons. Never an endpoint/host/credential value."""
+
+    plan_drift = "plan_drift"
+    stale_approval = "stale_approval"
+    ownership_conflict = "ownership_conflict"
+    target_inventory_changed = "target_inventory_changed"
+    activation_expired = "activation_expired"
+    worker_identity_revoked = "worker_identity_revoked"
+    lease_expired = "lease_expired"
+    bootstrap_unavailable = "bootstrap_unavailable"
+    bootstrap_host_key_mismatch = "bootstrap_host_key_mismatch"
+    bootstrap_timeout = "bootstrap_timeout"
+    bootstrap_operation_refused = "bootstrap_operation_refused"
+    artifact_integrity_failed = "artifact_integrity_failed"
+    nested_virtualization_unavailable = "nested_virtualization_unavailable"
+    maintenance_required = "maintenance_required"
+    capacity_insufficient = "capacity_insufficient"
+    transport_not_hardened = "transport_not_hardened"
+    resource_not_secp_owned = "resource_not_secp_owned"
+    remote_pop_failed = "remote_pop_failed"
+    openbao_handoff_failed = "openbao_handoff_failed"
+    verification_failed = "verification_failed"
+    provider_unavailable = "provider_unavailable"
+    internal_error = "internal_error"
+
+
+class MaintenanceOperationStatus(str, Enum):
+    required = "required"
+    approved = "approved"
+    completed = "completed"
+    cancelled = "cancelled"

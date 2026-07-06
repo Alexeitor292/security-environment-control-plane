@@ -1786,3 +1786,14 @@ class ProvisioningChangeSetApproval(Base, TimestampMixin):
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     manifest: Mapped[ProvisioningManifest] = relationship(back_populates="change_set_approvals")
+
+
+# SECP-B4 deployment engine models (kept in a dedicated module for a focused diff).
+from secp_api.deployment_models import (  # noqa: E402,F401
+    StagingDeployment,
+    StagingDeploymentApproval,
+    StagingDeploymentOperation,
+    StagingDeploymentPlan,
+    StagingDeploymentResource,
+    StagingDeploymentVerification,
+)
