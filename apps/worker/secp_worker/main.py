@@ -64,6 +64,22 @@ def _start_deployment_consumer(stop_event: threading.Event) -> threading.Thread:
     return thread
 
 
+def _start_discovery_consumer(stop_event: threading.Event) -> threading.Thread:
+    """Start the read-only target-discovery consumer loop in a daemon thread (worker process only).
+
+    SEALED composition in this PR: it claims queued discovery jobs and invokes the READ-ONLY engine,
+    but contacts nothing (the sealed probe source refuses). Contacts no infrastructure; cannot
+    mutate.
+    """
+    from secp_worker.target_discovery.runtime import run_forever
+
+    thread = threading.Thread(
+        target=run_forever, args=(stop_event,), name="discovery-consumer", daemon=True
+    )
+    thread.start()
+    return thread
+
+
 def _install_signal_handlers(stop_event: threading.Event) -> None:  # pragma: no cover - signals
     def _handle(_signum, _frame):
         logger.info("shutdown signal received; stopping worker loops gracefully")
@@ -104,6 +120,7 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
     _start_staging_lab_consumer(stop_event)
     _start_readonly_preflight_consumer(stop_event)
     _start_deployment_consumer(stop_event)
+    _start_discovery_consumer(stop_event)
     await asyncio.gather(worker.run(), _run_outbox_publisher_loop())
 
 
@@ -148,6 +165,7 @@ def main() -> None:
     # loop.
     _start_readonly_preflight_consumer(stop_event)
     _start_deployment_consumer(stop_event)
+    _start_discovery_consumer(stop_event)
     from secp_worker.staging_lab.runtime import run_forever
 
     run_forever(stop_event)  # pragma: no cover - long-running loop
