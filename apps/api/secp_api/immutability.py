@@ -30,6 +30,9 @@ from secp_api.models import (
     ReadonlyStagingPreflight,
     ResolverActivationAuthorization,
     ResolverActivationEvidence,
+    StagingDeploymentApproval,
+    StagingDeploymentPlan,
+    StagingDeploymentVerification,
     StagingLab,
     StagingLabWorkItem,
     StagingSubstrateEligibility,
@@ -614,6 +617,12 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # LivePreflightEvidence (SECP-B2-4.5): fully immutable after insert — no field may change.
         if isinstance(obj, LivePreflightEvidence):
             raise ImmutableResourceError("LivePreflightEvidence records are immutable after insert")
+        # SECP-B4: content-addressed plans, approvals, and verification results are immutable.
+        if isinstance(
+            obj,
+            StagingDeploymentPlan | StagingDeploymentApproval | StagingDeploymentVerification,
+        ):
+            raise ImmutableResourceError(f"{type(obj).__name__} records are immutable after insert")
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
@@ -653,6 +662,13 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             _guard_worker_identity_evidence(session, obj, "deleted")
         if isinstance(obj, LivePreflightEvidence):
             raise ImmutableResourceError("LivePreflightEvidence records cannot be deleted")
+        # SECP-B4: content-addressed plans, approvals, and verification results cannot be deleted
+        # outside an explicit governed archival path (none exists yet), preserving the audit chain.
+        if isinstance(
+            obj,
+            StagingDeploymentPlan | StagingDeploymentApproval | StagingDeploymentVerification,
+        ):
+            raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records cannot be deleted")
 

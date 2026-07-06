@@ -48,6 +48,22 @@ def _start_readonly_preflight_consumer(stop_event: threading.Event) -> threading
     return thread
 
 
+def _start_deployment_consumer(stop_event: threading.Event) -> threading.Thread:
+    """Start the deployment-operation consumer loop in a daemon thread (worker process only).
+
+    SEALED composition in this PR: it claims queued deployment operations and invokes the engine,
+    but
+    fails closed at the bootstrap boundary before any network/SSH/host action. Contacts nothing.
+    """
+    from secp_worker.deployment.runtime import run_forever
+
+    thread = threading.Thread(
+        target=run_forever, args=(stop_event,), name="deployment-consumer", daemon=True
+    )
+    thread.start()
+    return thread
+
+
 def _install_signal_handlers(stop_event: threading.Event) -> None:  # pragma: no cover - signals
     def _handle(_signum, _frame):
         logger.info("shutdown signal received; stopping worker loops gracefully")
@@ -84,9 +100,10 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
         activities=[deploy_activity, reset_activity, destroy_activity, discover_activity],
     )
     logger.info("Temporal worker started on task queue %s", settings.temporal_task_queue)
-    # The fake staging-lab + read-only preflight consumers run in daemon threads alongside Temporal.
+    # The fake staging-lab + read-only preflight + deployment consumers run in daemon threads.
     _start_staging_lab_consumer(stop_event)
     _start_readonly_preflight_consumer(stop_event)
+    _start_deployment_consumer(stop_event)
     await asyncio.gather(worker.run(), _run_outbox_publisher_loop())
 
 
@@ -127,8 +144,10 @@ def main() -> None:
         "Running the FAKE-ONLY staging-lab and read-only preflight consumer loops.",
         settings.workflow_dispatch_mode,
     )
-    # Read-only preflight consumer in a daemon thread; staging-lab consumer as the foreground loop.
+    # Read-only preflight + deployment consumers in daemon threads; staging-lab is the foreground
+    # loop.
     _start_readonly_preflight_consumer(stop_event)
+    _start_deployment_consumer(stop_event)
     from secp_worker.staging_lab.runtime import run_forever
 
     run_forever(stop_event)  # pragma: no cover - long-running loop
