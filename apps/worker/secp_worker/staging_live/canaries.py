@@ -10,10 +10,11 @@ budget/lease -> begin-attempt) before any secret is resolved or any transport is
 * The OpenBao readiness canary drives the chain with a probe resolver that, ONLY once the chain has
   reached the resolver boundary, proves OpenBao authentication via a self-test and then FAILS CLOSED
   without resolving a secret. No Proxmox credential is resolved and no Proxmox is contacted.
-* The Proxmox transport canary drives the chain with the concrete OpenBao resolver AND a single-GET
-  collection runner, so it runs ONLY after a valid identity, activation, and a RESOLVED staging-only
-  credential; it performs exactly ONE allowlisted GET through the existing hardened transport,
-  persists NO raw response, and records ONLY safe facts via the immutable live-evidence boundary.
+* The Proxmox transport canary drives the chain with the concrete OpenBao resolver AND a runner that
+  (a) PROVES its transport is an approved hardened transport, then (b) runs the DEDICATED single-GET
+  canary collector, which issues exactly ONE allowlisted GET. It runs only after a valid identity,
+  activation, and a RESOLVED staging-only credential; it persists NO raw response; and it records
+  transport-policy evidence as passed ONLY after that proof (never a hardcoded flag).
 
 Because the Proxmox credential is resolved THROUGH OpenBao, no Proxmox contact can structurally
 occur before OpenBao authentication. The intended operational order is nonetheless explicit: run the
@@ -55,10 +56,15 @@ from secp_worker.preflight.secret_resolution import (
     TrustedResolutionRequest,
 )
 from secp_worker.preflight.worker_identity_attestation import RegisteredWorkerIdentityVerifier
-from secp_worker.staging_live.composition import (
-    HardenedTransportFactory,
-    ReadOnlyCollector,
-    StagingLiveComposition,
+from secp_worker.staging_live.composition import StagingLiveComposition
+from secp_worker.staging_live.hardened_transport import (
+    ApprovedHardenedTransportFactory,
+    TransportHardeningError,
+    assert_approved_hardened_transport,
+)
+from secp_worker.staging_live.single_get_canary import (
+    CANARY_GET_METHOD,
+    SingleGetCanaryCollector,
 )
 
 
@@ -95,19 +101,25 @@ class _OpenBaoReadinessProbe:
 
 
 class _SingleGetCollectionRunner:
-    """A ``PreflightCollectionRunner`` that performs exactly ONE allowlisted GET via the injected
-    hardened transport and returns ONLY safe facts. Persists no raw response."""
+    """A ``PreflightCollectionRunner`` that PROVES its transport is an approved hardened transport,
+    then runs the dedicated single-GET canary collector. It records the hardening manifest and the
+    exact request count so the canary can derive transport-policy evidence from PROOF (never a
+    hardcoded flag). Persists no raw response."""
 
     def __init__(
         self,
         *,
-        transport_factory: HardenedTransportFactory,
-        collector: ReadOnlyCollector,
+        transport_factory: ApprovedHardenedTransportFactory,
+        collector: SingleGetCanaryCollector,
         declared_boundary: dict,
     ) -> None:
         self._transport_factory = transport_factory
         self._collector = collector
         self._declared_boundary = declared_boundary
+        # Verification state read by the canary AFTER the governed run.
+        self.transport_hardened = False
+        self.single_get_verified = False
+        self.node_count = 0
 
     def run(
         self,
@@ -118,25 +130,30 @@ class _SingleGetCollectionRunner:
         now: datetime,
     ) -> dict:
         transport = self._transport_factory(verified, credential.reveal_secret())
+        try:
+            manifest = assert_approved_hardened_transport(transport)
+        except TransportHardeningError:
+            # A non-approved / non-enforcing transport must NEVER yield passed transport-policy
+            # evidence: leave verification false and return no facts (the canary fails closed).
+            return {}
+        self.transport_hardened = manifest.all_enforced()
         observed = self._collector.collect(transport, declared_boundary=self._declared_boundary)
-        # Return ONLY safe booleans + bounded counts derived from the observed inventory. The raw
-        # inventory (node/storage/network names) is discarded here and never leaves this method.
-        return _safe_readiness_facts(observed if isinstance(observed, dict) else {})
-
-
-def _safe_readiness_facts(observed: dict) -> dict:
-    """Reduce an observed inventory to ONLY safe booleans + bounded counts (never a name/value)."""
-    body = observed.get("observed", observed) if isinstance(observed, dict) else {}
-    nodes = body.get("nodes") if isinstance(body, dict) else None
-    storage = body.get("storage") if isinstance(body, dict) else None
-    segments = body.get("network_segments") if isinstance(body, dict) else None
-    return {
-        "api_reachable": True,
-        "readonly_policy_enforced": True,
-        "node_count": len(nodes) if isinstance(nodes, list) else 0,
-        "storage_count": len(storage) if isinstance(storage, list) else 0,
-        "network_segment_count": len(segments) if isinstance(segments, list) else 0,
-    }
+        # Proof, not assertion: exactly one request was issued and it was a GET.
+        self.single_get_verified = self._collector.get_count == 1 and self._collector.methods == {
+            CANARY_GET_METHOD
+        }
+        body = observed.get("observed", observed) if isinstance(observed, dict) else {}
+        nodes = body.get("nodes") if isinstance(body, dict) else None
+        self.node_count = len(nodes) if isinstance(nodes, list) else 0
+        # Return ONLY booleans + a bounded node count. A single GET observes nodes only; storage
+        # and network-segment counts are deliberately not claimed (they were never requested).
+        return {
+            "api_reachable": True,
+            "readonly_policy_enforced": self.transport_hardened and self.single_get_verified,
+            "node_count": self.node_count,
+            "storage_count": 0,
+            "network_segment_count": 0,
+        }
 
 
 def run_openbao_readiness_canary(
@@ -194,6 +211,11 @@ def run_proxmox_transport_canary(
     if result.outcome.value != "ready":
         # Chain/resolution/collection failed closed; no evidence is written for a non-ready outcome.
         return CanaryResult(ok=False, reason_code=result.outcome.value)
+    # Condition B: record transport-policy evidence ONLY after PROVING the approved hardened
+    # transport was built and exactly one GET was issued. A non-approved transport or a non-single
+    # GET fails closed here and writes NO passed evidence.
+    if not (runner.transport_hardened and runner.single_get_verified):
+        return CanaryResult(ok=False, reason_code="transport_policy_unverified")
     context = _build_evidence_context(session, preflight_id, composition, now)
     if context is None:
         # The governed run succeeded but an authoritative binding record could not be re-loaded.

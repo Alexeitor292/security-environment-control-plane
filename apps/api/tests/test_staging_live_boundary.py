@@ -127,9 +127,9 @@ def test_staging_live_package_does_not_import_legacy_discovery_or_temporal():
 
 def test_sealed_defaults_refuse_offline_and_construct_nothing():
     # Constructing + invoking the shipped sealed defaults contacts nothing and fails closed.
-    from secp_worker.staging_live.mtls_attestation import (
-        MtlsMaterialUnavailable,
-        SealedMtlsWorkloadMaterial,
+    from secp_worker.staging_live.mtls_pop import (
+        DeploymentSignerUnavailable,
+        SealedDeploymentLocalSigner,
     )
     from secp_worker.staging_live.openbao_client import (
         OpenBaoClientError,
@@ -143,10 +143,12 @@ def test_sealed_defaults_refuse_offline_and_construct_nothing():
     with pytest.raises(OpenBaoClientError):
         sealed_bao.read(locator="x", now=now)
 
-    sealed_mtls = SealedMtlsWorkloadMaterial()
-    with pytest.raises(MtlsMaterialUnavailable):
-        sealed_mtls.public_anchor()
-    assert sealed_mtls.verify_signature(b"c", b"s") is False
+    # The sealed deployment-local signer refuses to expose an anchor or sign — no material, no I/O.
+    sealed_signer = SealedDeploymentLocalSigner()
+    with pytest.raises(DeploymentSignerUnavailable):
+        sealed_signer.public_anchor()
+    with pytest.raises(DeploymentSignerUnavailable):
+        sealed_signer.sign(b"challenge")
 
 
 def test_composition_and_canaries_import_without_touching_infrastructure():

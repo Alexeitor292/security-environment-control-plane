@@ -10,9 +10,12 @@ OpenBao, or Proxmox is ever contacted. The tests prove:
   activation, and a RESOLVED staging credential, then persists ONLY safe facts through the immutable
   live-evidence boundary (no raw response);
 * each broken link in the chain fails the canary closed BEFORE the next privileged boundary;
-* the concrete mTLS attestation source and OpenBao client obey proof-of-possession, TLS/redaction,
-  and closed-error contracts;
+* the dedicated single-GET canary collector issues exactly one allowlisted GET, and transport-policy
+  evidence is recorded as passed ONLY after proving an approved hardened transport was built;
+* the OpenBao client obeys TLS/redaction/closed-error contracts;
 * the first real contact is structurally OpenBao (the Proxmox credential is resolved THROUGH it).
+
+Independent mTLS proof-of-possession is covered in test_staging_live_mtls_pop.py.
 """
 
 from __future__ import annotations
@@ -49,11 +52,10 @@ from secp_worker.staging_live.composition import (
     StagingLiveCompositionError,
     build_staging_live_composition,
 )
-from secp_worker.staging_live.mtls_attestation import (
-    MtlsIdentityDescriptor,
-    MtlsWorkloadIdentitySource,
-    SealedMtlsWorkloadMaterial,
-    build_operation_challenge,
+from secp_worker.staging_live.hardened_transport import (
+    ApprovedHardenedTransport,
+    ApprovedHardenedTransportFactory,
+    HardeningManifest,
 )
 from secp_worker.staging_live.openbao_client import (
     ConcreteOpenBaoClient,
@@ -62,9 +64,10 @@ from secp_worker.staging_live.openbao_client import (
     SealedOpenBaoBackendTransport,
     validate_openbao_base_url,
 )
+from secp_worker.staging_live.single_get_canary import SingleGetCanaryCollector
 
 VAULT_REF = "vault:secp/proxmox/target-1"
-_OBSERVED = {"nodes": ["a", "b"], "storage": ["s1"], "network_segments": ["vmbr0", "vmbr1"]}
+_CANARY_NODES = [{"node": "node-alpha"}, {"node": "node-bravo"}]
 
 
 # --- Fakes (injected only; never contact anything) -----------------------------------------------
@@ -95,20 +98,54 @@ class _FakeOpenBaoBackend:
         return {"value": self._secret}
 
 
-class _FakeCollector:
-    def __init__(self, observed: dict) -> None:
-        self._observed = observed
-        self.transports: list[object] = []
+class _FakeApprovedTransport(ApprovedHardenedTransport):
+    """A fake APPROVED hardened transport: reports a fully-enforced manifest and returns the canned
+    node list from a single GET. Never touches a network."""
 
-    def collect(self, transport: object, *, declared_boundary: dict) -> dict:
-        self.transports.append(transport)
-        return self._observed
+    def __init__(self, *, nodes: list[dict], enforced: bool = True) -> None:
+        self._nodes = nodes
+        self._enforced = enforced
+        self.gets: list[str] = []
+
+    def get(self, path: str) -> object:
+        self.gets.append(path)
+        return self._nodes
+
+    def hardening_manifest(self) -> HardeningManifest:
+        e = self._enforced
+        return HardeningManifest(
+            tls_verified=e,
+            redirects_disabled=e,
+            trust_env_disabled=e,
+            get_only=e,
+            timeout_bounded=e,
+        )
 
 
-def _transport_factory(verified: object, secret: str) -> object:
-    # A real factory builds a hardened HttpxReadOnlyTransport; here we return an opaque marker and
-    # deliberately never touch the secret beyond receiving it.
-    return object()
+class _FakeApprovedFactory(ApprovedHardenedTransportFactory):
+    def __init__(self, *, nodes: list[dict] | None = None, enforced: bool = True) -> None:
+        self._nodes = _CANARY_NODES if nodes is None else nodes
+        self._enforced = enforced
+
+    def __call__(self, verified: object, secret: str) -> ApprovedHardenedTransport:
+        return _FakeApprovedTransport(nodes=self._nodes, enforced=self._enforced)
+
+
+class _LooseTransport:
+    """A foreign transport that is NOT an ApprovedHardenedTransport (duck-typed only)."""
+
+    def get(self, path: str) -> object:
+        return []
+
+    def hardening_manifest(self) -> HardeningManifest:
+        return HardeningManifest(True, True, True, True, True)
+
+
+class _LooseFactory(ApprovedHardenedTransportFactory):
+    """An approved factory that (wrongly) returns a non-approved transport."""
+
+    def __call__(self, verified: object, secret: str) -> ApprovedHardenedTransport:
+        return _LooseTransport()  # type: ignore[return-value]
 
 
 # --- Durable substrate builders (approved preflight with a vault: reference) ----------------------
@@ -177,13 +214,21 @@ def _build_resolver(session, backend: _FakeOpenBaoBackend) -> OpenBaoWorkerSecre
     )
 
 
-def _composition(session, principal, worker_identity_verifier, backend, collector):
+def _composition(
+    session,
+    principal,
+    worker_identity_verifier,
+    backend,
+    collector=None,
+    *,
+    transport_factory=None,
+):
     return build_staging_live_composition(
         identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
         secret_resolver=_build_resolver(session, backend),
-        transport_factory=_transport_factory,
-        collector=collector,
+        transport_factory=transport_factory or _FakeApprovedFactory(),
+        collector=collector or SingleGetCanaryCollector(),
         evidence_writer=DurableLivePreflightEvidenceWriter(),
     )
 
@@ -197,8 +242,8 @@ def test_composition_rejects_sealed_and_deny_defaults(session, principal, worker
         identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
         secret_resolver=_build_resolver(session, backend),
-        transport_factory=_transport_factory,
-        collector=_FakeCollector(_OBSERVED),
+        transport_factory=_FakeApprovedFactory(),
+        collector=SingleGetCanaryCollector(),
         evidence_writer=DurableLivePreflightEvidenceWriter(),
     )
     # A fully-injected composition builds.
@@ -221,8 +266,8 @@ def test_composition_rejects_missing_dependency(session, principal, worker_ident
         identity_verifier=worker_identity_verifier(),
         activation_gate=_ApprovedGate(),
         secret_resolver=_build_resolver(session, backend),
-        transport_factory=_transport_factory,
-        collector=_FakeCollector(_OBSERVED),
+        transport_factory=_FakeApprovedFactory(),
+        collector=SingleGetCanaryCollector(),
         evidence_writer=DurableLivePreflightEvidenceWriter(),
     )
     with pytest.raises(StagingLiveCompositionError):
@@ -238,7 +283,7 @@ def test_openbao_readiness_canary_authenticates_without_resolving_or_contacting_
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend(auth_ok=True)
-    collector = _FakeCollector(_OBSERVED)
+    collector = SingleGetCanaryCollector()
     comp = _composition(session, principal, worker_identity_verifier, backend, collector)
 
     result = run_openbao_readiness_canary(session, preflight_id=pf.id, composition=comp)
@@ -247,7 +292,7 @@ def test_openbao_readiness_canary_authenticates_without_resolving_or_contacting_
     assert result.reason_code == "authenticated"
     assert backend.authenticated == 1  # OpenBao auth WAS exercised (full chain reached resolver)
     assert backend.reads == []  # no secret resolved
-    assert collector.transports == []  # Proxmox never contacted
+    assert collector.get_count == 0  # Proxmox never contacted
     assert session.query(LivePreflightEvidence).count() == 0  # readiness writes no evidence
 
 
@@ -257,7 +302,9 @@ def test_openbao_readiness_canary_reports_backend_auth_failure_closed(
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend(auth_ok=False)
-    comp = _composition(session, principal, worker_identity_verifier, backend, _FakeCollector({}))
+    comp = _composition(
+        session, principal, worker_identity_verifier, backend, SingleGetCanaryCollector()
+    )
 
     result = run_openbao_readiness_canary(session, preflight_id=pf.id, composition=comp)
 
@@ -273,7 +320,9 @@ def test_readiness_canary_fails_closed_before_openbao_when_activation_missing(
     # never contacted and the canary reports a closed preflight outcome (not an auth result).
     pf = _queued(session, principal)
     backend = _FakeOpenBaoBackend()
-    comp = _composition(session, principal, worker_identity_verifier, backend, _FakeCollector({}))
+    comp = _composition(
+        session, principal, worker_identity_verifier, backend, SingleGetCanaryCollector()
+    )
 
     result = run_openbao_readiness_canary(session, preflight_id=pf.id, composition=comp)
 
@@ -291,7 +340,7 @@ def test_proxmox_transport_canary_single_get_and_safe_evidence(
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend()
-    collector = _FakeCollector(_OBSERVED)
+    collector = SingleGetCanaryCollector()
     comp = _composition(session, principal, worker_identity_verifier, backend, collector)
 
     result = run_proxmox_transport_canary(
@@ -303,15 +352,16 @@ def test_proxmox_transport_canary_single_get_and_safe_evidence(
     # OpenBao was contacted (credential resolved) BEFORE the single Proxmox GET. The backend sees
     # only the OPAQUE locator (the `vault:` scheme is stripped and never forwarded).
     assert backend.reads == ["secp/proxmox/target-1"]
-    assert len(collector.transports) == 1  # exactly ONE governed collection
+    assert collector.get_count == 1  # EXACTLY one allowlisted GET
     # Exactly one immutable evidence row, secret-free, with only safe bounded facts.
     row = session.query(LivePreflightEvidence).one()
     assert row.status == LivePreflightEvidenceStatus.passed
     assert row.payload["facts"]["node_count"] == 2
-    assert row.payload["facts"]["storage_count"] == 1
-    assert row.payload["facts"]["network_segment_count"] == 2
+    # A single GET observes nodes only; storage/segment counts are not claimed.
+    assert row.payload["facts"]["storage_count"] == 0
+    assert row.payload["facts"]["network_segment_count"] == 0
     blob = str(row.payload)
-    for leak in ("opaque-staging-cred", VAULT_REF, "vmbr0", "nodes"):
+    for leak in ("opaque-staging-cred", VAULT_REF, "node-alpha", "node-bravo"):
         assert leak not in blob
 
 
@@ -323,7 +373,7 @@ def test_proxmox_transport_canary_fails_closed_when_chain_broken(
     pf = _queued(session, principal)
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend()
-    collector = _FakeCollector(_OBSERVED)
+    collector = SingleGetCanaryCollector()
     comp = _composition(session, principal, worker_identity_verifier, backend, collector)
 
     readonly_preflight.revoke_preflight_authorization(
@@ -334,7 +384,7 @@ def test_proxmox_transport_canary_fails_closed_when_chain_broken(
     )
     assert result.ok is False
     assert backend.reads == []
-    assert collector.transports == []
+    assert collector.get_count == 0
     assert session.query(LivePreflightEvidence).count() == 0
 
 
@@ -343,7 +393,7 @@ def test_proxmox_transport_canary_idempotent_evidence(session, principal, worker
     _approve_activation(session, principal, pf)
     backend = _FakeOpenBaoBackend()
     comp = _composition(
-        session, principal, worker_identity_verifier, backend, _FakeCollector(_OBSERVED)
+        session, principal, worker_identity_verifier, backend, SingleGetCanaryCollector()
     )
 
     first = run_proxmox_transport_canary(
@@ -358,6 +408,94 @@ def test_proxmox_transport_canary_idempotent_evidence(session, principal, worker
     assert session.query(LivePreflightEvidence).count() == 1
 
 
+# --- 3b. Single-GET collector (8A) + hardened-transport proof (8B) --------------------------------
+
+
+def test_single_get_collector_issues_exactly_one_get():
+    collector = SingleGetCanaryCollector()
+    transport = _FakeApprovedTransport(nodes=_CANARY_NODES)
+    observed = collector.collect(transport, declared_boundary={})
+    assert collector.get_count == 1  # EXACTLY one GET (not the multi-GET inventory collector)
+    assert collector.methods == {"GET"}
+    assert collector.requests == [("GET", "/nodes")]
+    assert transport.gets == ["/nodes"]
+    assert observed == {"observed": {"nodes": _CANARY_NODES}}
+
+
+def test_composition_rejects_loose_transport_factory_and_foreign_collector(
+    session, principal, worker_identity_verifier
+):
+    backend = _FakeOpenBaoBackend()
+    good = dict(
+        identity_verifier=worker_identity_verifier(),
+        activation_gate=_ApprovedGate(),
+        secret_resolver=_build_resolver(session, backend),
+        transport_factory=_FakeApprovedFactory(),
+        collector=SingleGetCanaryCollector(),
+        evidence_writer=DurableLivePreflightEvidenceWriter(),
+    )
+    build_staging_live_composition(**good)
+
+    # A non-approved factory (a plain callable) is rejected — approval is nominal, not duck-typed.
+    with pytest.raises(StagingLiveCompositionError):
+        build_staging_live_composition(**{**good, "transport_factory": lambda v, s: object()})
+
+    # A foreign / multi-GET-shaped collector is rejected: only the dedicated single-GET collector.
+    class _ForeignCollector:
+        def collect(self, transport, *, declared_boundary):
+            return {}
+
+    with pytest.raises(StagingLiveCompositionError):
+        build_staging_live_composition(**{**good, "collector": _ForeignCollector()})
+
+
+def test_transport_canary_fails_closed_when_transport_not_hardened(
+    session, principal, worker_identity_verifier
+):
+    # The factory is an approved factory but returns a NON-approved transport: the runner refuses to
+    # record transport-policy evidence as passed and writes NO evidence.
+    pf = _queued(session, principal)
+    _approve_activation(session, principal, pf)
+    backend = _FakeOpenBaoBackend()
+    comp = _composition(
+        session,
+        principal,
+        worker_identity_verifier,
+        backend,
+        SingleGetCanaryCollector(),
+        transport_factory=_LooseFactory(),
+    )
+    result = run_proxmox_transport_canary(
+        session, preflight_id=pf.id, composition=comp, declared_boundary={}
+    )
+    assert result.ok is False
+    assert result.reason_code == "transport_policy_unverified"
+    assert session.query(LivePreflightEvidence).count() == 0
+
+
+def test_transport_canary_fails_closed_when_hardening_not_enforced(
+    session, principal, worker_identity_verifier
+):
+    # An approved transport whose manifest is not enforced fails the proof: no passed evidence.
+    pf = _queued(session, principal)
+    _approve_activation(session, principal, pf)
+    backend = _FakeOpenBaoBackend()
+    comp = _composition(
+        session,
+        principal,
+        worker_identity_verifier,
+        backend,
+        SingleGetCanaryCollector(),
+        transport_factory=_FakeApprovedFactory(enforced=False),
+    )
+    result = run_proxmox_transport_canary(
+        session, preflight_id=pf.id, composition=comp, declared_boundary={}
+    )
+    assert result.ok is False
+    assert result.reason_code == "transport_policy_unverified"
+    assert session.query(LivePreflightEvidence).count() == 0
+
+
 # --- 4. Shipped-default composition never resolves ------------------------------------------------
 
 
@@ -370,86 +508,14 @@ def test_readiness_canary_with_sealed_resolver_composition_never_authenticates(
             identity_verifier=worker_identity_verifier(),
             activation_gate=_ApprovedGate(),
             secret_resolver=SealedSecretResolver(),
-            transport_factory=_transport_factory,
-            collector=_FakeCollector({}),
+            transport_factory=_FakeApprovedFactory(),
+            collector=SingleGetCanaryCollector(),
             evidence_writer=DurableLivePreflightEvidenceWriter(),
         )
 
 
-# --- 5. mTLS proof-of-possession attestation source ----------------------------------------------
-
-
-class _FakeMaterial:
-    """A fake mTLS material with an in-memory keypair-substitute. Never a real key."""
-
-    def __init__(self, *, anchor: str = "test-public-anchor-v1", honest: bool = True) -> None:
-        self._anchor = anchor
-        self._honest = honest
-
-    def public_anchor(self) -> str:
-        return self._anchor
-
-    def sign_challenge(self, challenge: bytes) -> bytes:
-        return b"sig:" + challenge if self._honest else b"forged"
-
-    def verify_signature(self, challenge: bytes, signature: bytes) -> bool:
-        return signature == b"sig:" + challenge
-
-
-def _descriptor(principal):
-    return MtlsIdentityDescriptor(
-        organization_id=principal.organization_id,
-        mechanism="mtls_workload_identity",
-        identity_label="staging-worker-a",
-        deployment_binding="deploy-01",
-        identity_version=1,
-    )
-
-
-def test_mtls_source_emits_claim_on_valid_proof_of_possession(session, principal):
-    pf = _queued(session, principal)
-    source = MtlsWorkloadIdentitySource(material=_FakeMaterial(), descriptor=_descriptor(principal))
-    claim = source.attest(preflight=pf, now=datetime.now(UTC))
-    assert claim.organization_id == principal.organization_id
-    assert claim.public_anchor == "test-public-anchor-v1"
-
-
-def test_mtls_source_fails_closed_on_bad_proof(session, principal):
-    from secp_worker.preflight.worker_identity_attestation import (
-        WorkerIdentityAttestationUnavailable,
-    )
-
-    pf = _queued(session, principal)
-    source = MtlsWorkloadIdentitySource(
-        material=_FakeMaterial(honest=False), descriptor=_descriptor(principal)
-    )
-    with pytest.raises(WorkerIdentityAttestationUnavailable):
-        source.attest(preflight=pf, now=datetime.now(UTC))
-
-
-def test_sealed_mtls_material_refuses(session, principal):
-    from secp_worker.preflight.worker_identity_attestation import (
-        WorkerIdentityAttestationUnavailable,
-    )
-
-    pf = _queued(session, principal)
-    source = MtlsWorkloadIdentitySource(
-        material=SealedMtlsWorkloadMaterial(), descriptor=_descriptor(principal)
-    )
-    with pytest.raises(WorkerIdentityAttestationUnavailable):
-        source.attest(preflight=pf, now=datetime.now(UTC))
-
-
-def test_operation_challenge_is_fresh_and_bound(session, principal):
-    pf = _queued(session, principal)
-    now = datetime.now(UTC)
-    a = build_operation_challenge(pf, now)
-    b = build_operation_challenge(pf, now)
-    assert a != b  # fresh nonce each time → non-replayable
-    assert len(a) == 32  # fixed-length sha256 digest, carries no secret
-
-
-# --- 6. Concrete OpenBao client: TLS + redaction + closed errors ----------------------------------
+# --- 5. Concrete OpenBao client: TLS + redaction + closed errors ----------------------------------
+# (Independent mTLS proof-of-possession is covered in test_staging_live_mtls_pop.py.)
 
 
 def test_openbao_client_reads_only_valid_vault_reference(session):
