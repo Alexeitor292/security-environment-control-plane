@@ -39,7 +39,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol, runtime_checkable
+from typing import NoReturn, Protocol, runtime_checkable
 
 from secp_api.models import ReadonlyStagingPreflight
 from secp_api.worker_identity_contract import compute_verification_anchor_fingerprint
@@ -172,26 +172,70 @@ class LocalHashBasedPoPScheme:
         return bool(ok)
 
 
-@dataclass(frozen=True)
+class SignerNotSerializable(TypeError):
+    """Raised if the deployment-local signer is serialized or copied. The private one-time key must
+    never leave the process — no pickle/copy/deepcopy/asdict path may reveal or rebuild it.
+    """
+
+
 class InMemoryHashBasedSigner:
     """A deployment-local :class:`DeploymentLocalSigner` backed by an in-memory one-time key.
 
-    The private leaves live only in this object and are never serialized, logged, or persisted. Used
-    on the isolated worker (real material injected out of band) and in tests.
+    The private leaves live ONLY in this object and can never leave the process. It is deliberately
+    NOT a dataclass (so ``dataclasses.asdict`` cannot walk it) and uses ``__slots__`` (no dict
+    for ``vars()``); pickle, ``copy``, and ``deepcopy`` all refuse; ``repr`` is redacted; and it is
+    immutable after construction. In-process signing (and local verification via the scheme's public
+    anchor) are unaffected. Used on the isolated worker (real material injected out of band).
     """
 
-    scheme: LocalHashBasedPoPScheme
-    private: list[list[bytes]]
-    public_anchor_hex: str
+    __slots__ = ("_scheme", "_private", "_public_anchor_hex")
+
+    # Annotation-only (no values): declares the slot attribute types without shadowing the slots.
+    _scheme: LocalHashBasedPoPScheme
+    _private: list[list[bytes]]
+    _public_anchor_hex: str
+
+    def __init__(
+        self,
+        *,
+        scheme: LocalHashBasedPoPScheme,
+        private: list[list[bytes]],
+        public_anchor_hex: str,
+    ) -> None:
+        object.__setattr__(self, "_scheme", scheme)
+        object.__setattr__(self, "_private", private)
+        object.__setattr__(self, "_public_anchor_hex", public_anchor_hex)
 
     def public_anchor(self) -> str:
-        return self.public_anchor_hex
+        return self._public_anchor_hex
 
     def sign(self, message: bytes) -> str:
-        return self.scheme.sign(private=self.private, message=message)
+        return self._scheme.sign(private=self._private, message=message)
 
     def __repr__(self) -> str:  # never expose private leaves
         return "InMemoryHashBasedSigner(<redacted>)"
+
+    def __setattr__(self, name: str, value: object) -> NoReturn:  # immutable after construction
+        raise AttributeError("InMemoryHashBasedSigner is immutable")
+
+    def __delattr__(self, name: str) -> NoReturn:
+        raise AttributeError("InMemoryHashBasedSigner is immutable")
+
+    # The private one-time key must never leave the process: refuse every serialization/copy path.
+    def __reduce__(self) -> NoReturn:
+        raise SignerNotSerializable("InMemoryHashBasedSigner is not serializable")
+
+    def __reduce_ex__(self, protocol: object) -> NoReturn:
+        raise SignerNotSerializable("InMemoryHashBasedSigner is not serializable")
+
+    def __getstate__(self) -> NoReturn:
+        raise SignerNotSerializable("InMemoryHashBasedSigner is not serializable")
+
+    def __copy__(self) -> NoReturn:
+        raise SignerNotSerializable("InMemoryHashBasedSigner cannot be copied")
+
+    def __deepcopy__(self, memo: object) -> NoReturn:
+        raise SignerNotSerializable("InMemoryHashBasedSigner cannot be copied")
 
 
 @dataclass(frozen=True)

@@ -10,6 +10,9 @@ closed — with no key/anchor/challenge/signature value leaking through results 
 
 from __future__ import annotations
 
+import copy
+import dataclasses
+import pickle
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -34,6 +37,7 @@ from secp_worker.staging_live.mtls_pop import (
     PoPVerifiedAttestationSource,
     RemoteAuthenticationIneligible,
     SealedDeploymentLocalSigner,
+    SignerNotSerializable,
     assert_remote_authentication_eligible,
     issue_operation_challenge,
 )
@@ -125,6 +129,64 @@ def test_signer_never_exposes_private_material():
     assert repr(signer) == "InMemoryHashBasedSigner(<redacted>)"
     # The public anchor is hex and carries no private leaf (private lives only on the signer).
     assert all(c in "0123456789abcdef" for c in signer.public_anchor())
+
+
+# --- 1b. The signer's private one-time key can never leave the process ----------------------------
+
+
+def test_signer_cannot_be_pickled():
+    signer = LocalHashBasedPoPScheme().generate_signer()
+    with pytest.raises(SignerNotSerializable):
+        pickle.dumps(signer)
+    # Every pickle protocol is refused (each dispatches through the guarded reducers).
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        with pytest.raises(SignerNotSerializable):
+            pickle.dumps(signer, protocol=protocol)
+
+
+def test_signer_cannot_be_copied_or_deepcopied():
+    signer = LocalHashBasedPoPScheme().generate_signer()
+    with pytest.raises(SignerNotSerializable):
+        copy.copy(signer)
+    with pytest.raises(SignerNotSerializable):
+        copy.deepcopy(signer)
+
+
+def test_signer_private_material_not_exposed_by_generic_conversion():
+    signer = LocalHashBasedPoPScheme().generate_signer()
+    # It is deliberately NOT a dataclass, so asdict cannot walk it and reveal the private leaves.
+    assert dataclasses.is_dataclass(signer) is False
+    with pytest.raises(TypeError):
+        dataclasses.asdict(signer)  # type: ignore[call-overload]
+    # __slots__ means there is no instance __dict__ for vars()/attribute enumeration to read.
+    with pytest.raises(TypeError):
+        vars(signer)
+    assert not hasattr(signer, "__dict__")
+    # __getstate__ (used by copy/pickle protocol) also refuses.
+    with pytest.raises(SignerNotSerializable):
+        signer.__getstate__()
+
+
+def test_signer_is_immutable_and_repr_redacted():
+    signer = LocalHashBasedPoPScheme().generate_signer()
+    assert repr(signer) == "InMemoryHashBasedSigner(<redacted>)"
+    with pytest.raises(AttributeError):
+        signer._private = []  # type: ignore[attr-defined]
+
+
+def test_signing_and_local_verification_still_work_after_hardening():
+    scheme = LocalHashBasedPoPScheme()
+    signer = scheme.generate_signer()
+    message = b"local-possession-message"
+    signature = signer.sign(message)
+    # Local in-process verification against the signer's public anchor still succeeds; a tampered
+    # signature or wrong key still fails — the hardening changed only serialization behavior.
+    assert scheme.verify(public_anchor=signer.public_anchor(), message=message, signature=signature)
+    assert not scheme.verify(
+        public_anchor=scheme.generate_signer().public_anchor(),
+        message=message,
+        signature=signature,
+    )
 
 
 # --- 2. Independent verifier: valid proof + every fail-closed path --------------------------------
