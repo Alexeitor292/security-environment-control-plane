@@ -959,6 +959,13 @@ class DeploymentFailureCode(str, Enum):
     verification_failed = "verification_failed"
     provider_unavailable = "provider_unavailable"
     internal_error = "internal_error"
+    # SECP-B4 corrective: fail-closed reasons for the observed-ownership + sealed-seam contracts.
+    discovery_required = "discovery_required"
+    ownership_unproven = "ownership_unproven"
+    locator_occupied = "locator_occupied"
+    host_key_binding_unverified = "host_key_binding_unverified"
+    unknown_resource_operation = "unknown_resource_operation"
+    ownership_observation_unavailable = "ownership_observation_unavailable"
 
 
 class MaintenanceOperationStatus(str, Enum):

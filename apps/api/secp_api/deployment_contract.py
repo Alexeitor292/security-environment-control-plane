@@ -74,6 +74,11 @@ def build_plan_document(
         "capacity_assessment_hash": capacity_assessment_hash,
         "artifact_manifest_id": artifact_manifest_id,
         "resources": resources,
+        # The plan pins ownership-bound resource CATEGORIES + generated refs derived only from
+        # persisted enrollment evidence. It fabricates NO node/storage/VMID value; exact provider
+        # locators are resolved by worker-only read-only discovery at apply time (a sealed, fail-
+        # closed seam until integration), so the plan is not executable while discovery is sealed.
+        "locator_binding": "discovered_at_apply",
     }
 
 

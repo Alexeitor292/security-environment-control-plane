@@ -1,16 +1,24 @@
-"""Concrete hardened Proxmox mutation transport (SECP-B4 §4).
+"""Concrete hardened Proxmox mutation transport (SECP-B4 §4, corrective).
 
 The ONLY place a real Proxmox create/update/delete request is issued, and only from the isolated
-worker with a scoped SECP-owned credential. It constructs its own ``httpx.Client`` with: strict TLS
-verification against a PINNED deployment-local CA bundle (verification cannot be disabled), ambient
-proxy env ignored (``trust_env=False``), redirects disabled + explicitly refused, and bounded
-connect/read/write/pool timeouts. It accepts ONLY a closed set of typed mutations mapped to
-methods + endpoint templates — never an arbitrary URL, path, method, header, body, or retry.
+worker with a scoped SECP-owned credential. It ALWAYS constructs its OWN ``httpx.Client`` (there is
+no injectable client to trust in production) with: strict TLS verification against a PINNED
+deployment-local CA bundle loaded eagerly at construction (a missing/invalid CA fails closed
+immediately, and verification cannot be disabled), ambient proxy env ignored (``trust_env=False``),
+redirects disabled + explicitly refused, and bounded connect/read/write/pool timeouts. It accepts
+ONLY a closed set of canonical mutation routes (method + path template) — never an arbitrary URL,
+path, method, header, body, or retry.
 
-Hardening evidence is derived from the ACTUAL constructed client configuration (verify target,
-trust_env, follow_redirects, timeout, https base) — NOT a self-reported manifest. The scoped token
-used only to build the auth header at request time and is never logged. An ``httpx.Client`` may be
-injected for offline tests; no real endpoint is contacted during implementation.
+Hardening evidence is derived from the ACTUAL constructed client (its real ``trust_env`` /
+``follow_redirects`` / ``timeout`` attributes) plus the fact that the client was built by this
+transport with a pinned CA that loaded successfully — not a self-reported flag and not an injected
+client's claims. Because httpx consumes ``verify`` into the transport SSL context (it is not a
+readable client attribute), TLS/CA evidence is taken from this transport having built the client
+with
+a pinned CA that eagerly loaded. The scoped token builds the auth header at request time and is
+never
+logged. No real endpoint is contacted during implementation (routes are only issued from a real
+worker against the disposable staging target during the controlled integration phase).
 """
 
 from __future__ import annotations
@@ -28,19 +36,23 @@ _READ_TIMEOUT = 30.0
 _WRITE_TIMEOUT = 30.0
 _POOL_TIMEOUT = 5.0
 
-# Closed canonical mutation endpoint templates. ``{node}`` / ``{ref}`` accept only a safe token
-# (letters/digits/dot/underscore/hyphen); nothing else is permitted, so no path can be smuggled.
-_SAFE_TOKEN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+# Closed canonical mutation route templates. ``{token}`` accepts only a safe token
+# (letters/digits/dot/underscore/hyphen); ``{userid}`` additionally allows a single ``@realm``.
+# Nothing else is permitted, so no path can be smuggled. These mirror the typed mutation ops.
+_SAFE = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+_USERID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9._-]{0,31}"
 _MUTATION_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("POST", re.compile(r"^/access/users$")),
-    ("POST", re.compile(rf"^/access/token/{_SAFE_TOKEN}/{_SAFE_TOKEN}$")),
-    ("DELETE", re.compile(rf"^/access/token/{_SAFE_TOKEN}/{_SAFE_TOKEN}$")),
-    ("POST", re.compile(rf"^/nodes/{_SAFE_TOKEN}/network$")),
-    ("PUT", re.compile(rf"^/nodes/{_SAFE_TOKEN}/network$")),
-    ("DELETE", re.compile(rf"^/nodes/{_SAFE_TOKEN}/network/{_SAFE_TOKEN}$")),
+    ("DELETE", re.compile(rf"^/access/users/{_USERID}$")),
+    ("POST", re.compile(rf"^/access/users/{_USERID}/token/{_SAFE}$")),
+    ("DELETE", re.compile(rf"^/access/users/{_USERID}/token/{_SAFE}$")),
+    ("POST", re.compile(rf"^/nodes/{_SAFE}/network$")),
+    ("PUT", re.compile(rf"^/nodes/{_SAFE}/network$")),
+    ("DELETE", re.compile(rf"^/nodes/{_SAFE}/network/{_SAFE}$")),
     ("POST", re.compile(r"^/cluster/firewall/groups$")),
-    ("POST", re.compile(rf"^/nodes/{_SAFE_TOKEN}/qemu$")),
-    ("DELETE", re.compile(rf"^/nodes/{_SAFE_TOKEN}/qemu/{_SAFE_TOKEN}$")),
+    ("DELETE", re.compile(rf"^/cluster/firewall/groups/{_SAFE}$")),
+    ("POST", re.compile(rf"^/nodes/{_SAFE}/qemu$")),
+    ("DELETE", re.compile(rf"^/nodes/{_SAFE}/qemu/{_SAFE}$")),
 )
 
 
@@ -54,7 +66,7 @@ class MutationRequestRefused(Exception):
 
 @dataclass(frozen=True)
 class HardeningManifest:
-    """Hardening posture DERIVED FROM the actual client configuration (never self-asserted)."""
+    """Hardening posture DERIVED FROM the actual constructed client + pinned-CA construction."""
 
     tls_verified: bool
     ca_pinned: bool
@@ -90,32 +102,33 @@ def _validate_https_base(base_url: str) -> None:
         raise MutationRequestRefused("base_url_unsafe_path")
 
 
-class HardenedProxmoxMutationTransport:
-    """Issues ONLY closed, canonical Proxmox mutations over a hardened, CA-pinned HTTPS client."""
+def _timeout_bounded(timeout: object) -> bool:
+    """A bounded httpx.Timeout has all four phases set to finite positive numbers."""
+    phases = [getattr(timeout, p, None) for p in ("connect", "read", "write", "pool")]
+    return all(isinstance(v, (int, float)) and v and v > 0 for v in phases)
 
-    def __init__(
-        self,
-        base_url: str,
-        token: str,
-        *,
-        ca_bundle_path: str,
-        client: Any | None = None,
-    ) -> None:
+
+class HardenedProxmoxMutationTransport:
+    """Issues ONLY closed, canonical Proxmox mutations over a hardened, CA-pinned HTTPS client it
+    constructs itself. There is no injectable client — production trusts only the client it
+    builds."""
+
+    def __init__(self, base_url: str, token: str, *, ca_bundle_path: str) -> None:
         _validate_https_base(base_url)
         if not (isinstance(ca_bundle_path, str) and ca_bundle_path):
             raise MutationRequestRefused("ca_bundle_required")
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._ca_bundle_path = ca_bundle_path
-        self._injected = client
-        # Build the real client eagerly so the manifest reflects its ACTUAL configuration.
-        self._client = client if client is not None else self._build_client()
+        # Build the real client eagerly: verify=<ca> is loaded now, so a missing/invalid CA fails
+        # closed at construction, and the manifest reflects the ACTUAL constructed client.
+        self._client = self._build_client()
 
     def _build_client(self) -> Any:
         import httpx  # local import: provider HTTP client stays out of apps/api
 
         return httpx.Client(
-            verify=self._ca_bundle_path,  # pinned CA bundle; verification cannot be disabled
+            verify=self._ca_bundle_path,  # pinned CA bundle; eagerly loaded; cannot be disabled
             trust_env=False,
             follow_redirects=False,
             timeout=httpx.Timeout(
@@ -127,21 +140,20 @@ class HardenedProxmoxMutationTransport:
         )
 
     def hardening_manifest(self) -> HardeningManifest:
-        """Derive the hardening posture from the client's ACTUAL configuration attributes."""
+        """Derive hardening from the ACTUAL constructed client + pinned-CA construction."""
         client = self._client
-        verify = getattr(client, "_verify_target", getattr(client, "_verify", None))
-        # httpx stores the constructed config on private attrs; read them directly (real config).
-        trust_env = bool(getattr(client, "trust_env", getattr(client, "_trust_env", False)))
-        follow = bool(
-            getattr(client, "follow_redirects", getattr(client, "_follow_redirects", True))
-        )
-        timeout = getattr(client, "timeout", getattr(client, "_timeout", None))
+        trust_env = bool(getattr(client, "trust_env", True))
+        follow = bool(getattr(client, "follow_redirects", True))
+        timeout = getattr(client, "timeout", None)
+        # TLS/CA: this transport built the client with verify=<ca_bundle_path>, which httpx loads
+        # eagerly at construction — reaching this point means the pinned CA loaded successfully.
+        ca_pinned = bool(self._ca_bundle_path)
         return HardeningManifest(
-            tls_verified=verify not in (False, None, "") and verify is not False,
-            ca_pinned=bool(self._ca_bundle_path),
+            tls_verified=ca_pinned,
+            ca_pinned=ca_pinned,
             trust_env_disabled=trust_env is False,
             redirects_disabled=follow is False,
-            timeouts_bounded=timeout is not None,
+            timeouts_bounded=_timeout_bounded(timeout),
             https_base=self._base_url.startswith("https://"),
             mutation_methods_closed=True,
         )
@@ -167,5 +179,5 @@ class HardenedProxmoxMutationTransport:
         return payload.get("data") if isinstance(payload, dict) else payload
 
     def close(self) -> None:
-        if self._injected is None and hasattr(self._client, "close"):
+        if hasattr(self._client, "close"):
             self._client.close()

@@ -81,5 +81,19 @@ def owns(ownership_tag_of_this_lab: str, resource_tag: object) -> bool:
     """True ONLY if ``resource_tag`` is exactly this lab's ownership tag (constant-time equality).
 
     An untagged resource, a differently-tagged (other-lab) resource, or a non-string is NOT owned.
+
+    NOTE (SECP-B4 corrective): this proves only that a *tag string* equals this lab's tag. It is NOT
+    sufficient as a mutation-authorization gate — a mutation must additionally prove, via a FRESH
+    observation of the exact provider object, that the object at the target locator carries this
+    lab's per-resource marker (see the deployment engine's observed-ownership evidence contract).
     """
     return isinstance(resource_tag, str) and resource_tag == ownership_tag_of_this_lab
+
+
+def compute_resource_marker(label: str, kind: str, index: int) -> str:
+    """A unique, per-resource, deployment-bound ownership marker to STAMP into a provider-visible
+    field on create and read back on a fresh observation before any mutation. It binds the lab's
+    ownership tag to the exact generated resource reference, so a foreign or differently-owned
+    object
+    can never match it."""
+    return f"{compute_ownership_tag(label)}#{compute_resource_ref(label, kind, index)}"
