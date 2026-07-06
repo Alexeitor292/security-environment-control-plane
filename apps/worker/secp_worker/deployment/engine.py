@@ -147,8 +147,8 @@ def reverify_no_drift(session: Session, dep: StagingDeployment) -> str | None:
             WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
         )
     ).scalar_one_or_none()
-    # Match the service's binding convention: "no approved identity" is version 0 on both sides, so a
-    # later revocation (bound version N -> current 0) is detected as drift.
+    # Match the service's binding convention: "no approved identity" is version 0 on both sides, so
+    # a later revocation (bound version N -> current 0) is detected as drift.
     approved_version = identity.identity_version if identity is not None else 0
     if approved_version != approval.worker_identity_version:
         return DeploymentFailureCode.worker_identity_revoked.value

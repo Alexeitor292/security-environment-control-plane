@@ -21,6 +21,12 @@ import type {
   ProviderCapabilities,
   StagingLab,
   StagingLabCreate,
+  StagingDeployment,
+  StagingDeploymentCreate,
+  StagingDeploymentPlan,
+  StagingDeploymentResourceRecord,
+  StagingDeploymentVerificationRecord,
+  BootstrapAvailability,
   TargetCreate,
   TargetEvidence,
   TeamTopology,
@@ -196,6 +202,46 @@ export const api = {
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/simulate`),
   queueStagingLabTeardown: (id: string) =>
     request<StagingLab>("POST", `/api/v1/staging-labs/${id}/teardown`),
+
+  // Real app-owned isolated staging-lab deployment (SECP-B4). The API enqueues durable work only;
+  // it contacts no infrastructure. A worker executes an approved plan after re-verifying it.
+  listStagingDeployments: () =>
+    request<StagingDeployment[]>("GET", "/api/v1/staging-deployments"),
+  createStagingDeployment: (body: StagingDeploymentCreate) =>
+    request<StagingDeployment>("POST", "/api/v1/staging-deployments", body),
+  getStagingDeployment: (id: string) =>
+    request<StagingDeployment>("GET", `/api/v1/staging-deployments/${id}`),
+  getStagingDeploymentPlan: (id: string) =>
+    request<StagingDeploymentPlan>("GET", `/api/v1/staging-deployments/${id}/plan`),
+  listStagingDeploymentResources: (id: string) =>
+    request<StagingDeploymentResourceRecord[]>(
+      "GET",
+      `/api/v1/staging-deployments/${id}/resources`,
+    ),
+  listStagingDeploymentVerifications: (id: string) =>
+    request<StagingDeploymentVerificationRecord[]>(
+      "GET",
+      `/api/v1/staging-deployments/${id}/verifications`,
+    ),
+  getStagingDeploymentBootstrapAvailability: (id: string) =>
+    request<BootstrapAvailability>(
+      "GET",
+      `/api/v1/staging-deployments/${id}/bootstrap-availability`,
+    ),
+  planStagingDeployment: (id: string) =>
+    request<StagingDeployment>("POST", `/api/v1/staging-deployments/${id}/plan`),
+  submitStagingDeployment: (id: string) =>
+    request<StagingDeployment>("POST", `/api/v1/staging-deployments/${id}/submit`),
+  approveStagingDeployment: (id: string, expectedPlanHash: string) =>
+    request<StagingDeployment>("POST", `/api/v1/staging-deployments/${id}/approve`, {
+      expected_plan_hash: expectedPlanHash,
+    }),
+  rejectStagingDeployment: (id: string) =>
+    request<StagingDeployment>("POST", `/api/v1/staging-deployments/${id}/reject`),
+  deployStagingDeployment: (id: string) =>
+    request<StagingDeployment>("POST", `/api/v1/staging-deployments/${id}/deploy`),
+  teardownStagingDeployment: (id: string) =>
+    request<StagingDeployment>("POST", `/api/v1/staging-deployments/${id}/teardown`),
 
   // App-owned read-only staging preflight (SECP-B2-0). API queues only; a worker executes.
   preflightSubstrates: () =>

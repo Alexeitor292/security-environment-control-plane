@@ -386,6 +386,88 @@ export interface EligibleSubstrate {
   alias: string;
 }
 
+// --- Real App-Owned Isolated Staging Lab Deployment (SECP-B4) ---
+//
+// The control plane owns every label; this surface accepts only a substrate id, a closed resource
+// profile, and one optional strict logical name. It NEVER carries an SSH key, API token, host,
+// endpoint, command, bridge/storage name, VMID, network range, path, or provider option.
+
+export type StagingDeploymentStatus =
+  | "draft"
+  | "planned"
+  | "awaiting_approval"
+  | "approved"
+  | "bootstrap_pending"
+  | "applying"
+  | "verifying"
+  | "ready"
+  | "failed"
+  | "rollback_required"
+  | "rolling_back"
+  | "rolled_back"
+  | "teardown_requested"
+  | "tearing_down"
+  | "destroyed";
+
+export type DeploymentResourceProfile = "small_lab" | "medium_lab";
+
+export interface StagingDeployment {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  display_name: string;
+  ownership_label: string;
+  resource_profile: string;
+  status: StagingDeploymentStatus;
+  decision_code: string;
+  revision: number;
+  plan_version: number;
+  plan_hash: string;
+  approved_plan_hash: string;
+  approved_at: string | null;
+  failure_code: string | null;
+  created_at: string;
+}
+
+export interface StagingDeploymentCreate {
+  execution_target_id: string;
+  resource_profile?: DeploymentResourceProfile;
+  logical_name?: string | null;
+}
+
+export interface PlannedResource {
+  kind: string;
+  count: number;
+  resource_ref: string;
+}
+
+export interface StagingDeploymentPlan {
+  plan_version: number;
+  plan_hash: string;
+  ownership_tag: string;
+  capacity_assessment_hash: string;
+  artifact_manifest_id: string;
+  resources: PlannedResource[];
+}
+
+export interface StagingDeploymentResourceRecord {
+  resource_kind: string;
+  ownership_tag: string;
+  resource_ref: string;
+  inverse_op: string;
+  state: string;
+}
+
+export interface StagingDeploymentVerificationRecord {
+  check_code: string;
+  status: string;
+}
+
+export interface BootstrapAvailability {
+  available: boolean;
+  reason_code: string;
+}
+
 // --- App-owned read-only staging preflight (SECP-B2-0) ---
 
 export type ReadonlyPreflightStatus =

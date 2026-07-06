@@ -45,10 +45,13 @@ from secp_api.models import (
     StagingDeploymentApproval,
     StagingDeploymentOperation,
     StagingDeploymentPlan,
+    StagingDeploymentResource,
+    StagingDeploymentVerification,
     TargetOnboarding,
     WorkerIdentityRegistration,
 )
 from secp_api.ownership_contract import compute_ownership_tag
+from secp_api.services.staging_labs import assert_safe_logical_name
 
 # App-owned bounded resource profiles (never a caller free value).
 _PROFILES = frozenset({"small_lab", "medium_lab"})
@@ -148,6 +151,9 @@ def create_deployment(
     actor.require(Permission.staging_lab_manage)
     if resource_profile not in _PROFILES:
         raise DomainError("unknown resource profile")
+    if logical_name is not None and logical_name != "":
+        # Re-enforce the strict allowlist server-side (defense in depth; never trust the boundary).
+        logical_name = assert_safe_logical_name(logical_name)
     target = session.get(ExecutionTarget, execution_target_id)
     if target is None:
         raise NotFoundError(f"execution target {execution_target_id} not found")
@@ -481,6 +487,54 @@ def list_deployments(session: Session, actor: Principal) -> list[StagingDeployme
             select(StagingDeployment)
             .where(StagingDeployment.organization_id == actor.organization_id)
             .order_by(StagingDeployment.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+def get_active_plan(
+    session: Session, actor: Principal, deployment_id: uuid.UUID
+) -> StagingDeploymentPlan:
+    """The immutable content-addressed plan record pinned by the deployment's current plan hash."""
+    dep = _get(session, actor, deployment_id)
+    plan = session.execute(
+        select(StagingDeploymentPlan).where(
+            StagingDeploymentPlan.deployment_id == dep.id,
+            StagingDeploymentPlan.plan_hash == dep.plan_hash,
+        )
+    ).scalar_one_or_none()
+    if plan is None:
+        raise NotFoundError("no plan has been compiled for this deployment")
+    return plan
+
+
+def list_resources(
+    session: Session, actor: Principal, deployment_id: uuid.UUID
+) -> list[StagingDeploymentResource]:
+    """The durable record of resources this deployment created (safe categories/refs/state only)."""
+    dep = _get(session, actor, deployment_id)
+    return list(
+        session.execute(
+            select(StagingDeploymentResource)
+            .where(StagingDeploymentResource.deployment_id == dep.id)
+            .order_by(StagingDeploymentResource.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+def list_verifications(
+    session: Session, actor: Principal, deployment_id: uuid.UUID
+) -> list[StagingDeploymentVerification]:
+    """The durable record of post-apply verification checks (closed check codes + status only)."""
+    dep = _get(session, actor, deployment_id)
+    return list(
+        session.execute(
+            select(StagingDeploymentVerification)
+            .where(StagingDeploymentVerification.deployment_id == dep.id)
+            .order_by(StagingDeploymentVerification.created_at.asc())
         )
         .scalars()
         .all()

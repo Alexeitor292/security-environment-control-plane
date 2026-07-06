@@ -33,6 +33,7 @@ from secp_api.routers import onboarding as onboarding_router
 from secp_api.routers import provisioning as provisioning_router
 from secp_api.routers import readonly_preflight as readonly_preflight_router
 from secp_api.routers import resolver_activation as resolver_activation_router
+from secp_api.routers import staging_deployments as staging_deployments_router
 from secp_api.routers import staging_labs as staging_labs_router
 from secp_api.routers import worker_identity as worker_identity_router
 
@@ -44,6 +45,7 @@ logger = logging.getLogger("secp.api")
 # base + "/") -> the safe code — a broad accidental-prefix match (e.g. "-labsX") never matches.
 _REDACTED_VALIDATION_ROUTES: tuple[tuple[str, str], ...] = (
     ("/api/v1/staging-labs", "invalid_staging_lab_input"),
+    ("/api/v1/staging-deployments", "invalid_staging_deployment_input"),
     ("/api/v1/readonly-preflight", "invalid_readonly_preflight_input"),
     ("/api/v1/resolver-activation", "invalid_resolver_activation_input"),
     ("/api/v1/worker-identity", "invalid_worker_identity_input"),
@@ -133,6 +135,7 @@ def create_app() -> FastAPI:
     app.include_router(provisioning_router.router)
     app.include_router(onboarding_router.router)
     app.include_router(staging_labs_router.router)
+    app.include_router(staging_deployments_router.router)
     app.include_router(readonly_preflight_router.router)
     app.include_router(resolver_activation_router.router)
     app.include_router(worker_identity_router.router)
