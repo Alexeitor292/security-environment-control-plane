@@ -20,6 +20,9 @@ from secp_api.errors import ImmutableResourceError
 from secp_api.models import (
     AuditEvent,
     DeploymentPlan,
+    DiscoveryCandidatePlan,
+    DiscoveryCandidatePlanApproval,
+    DiscoverySnapshot,
     EnvironmentVersion,
     ExecutionTarget,
     LivePreflightEvidence,
@@ -623,6 +626,12 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             StagingDeploymentPlan | StagingDeploymentApproval | StagingDeploymentVerification,
         ):
             raise ImmutableResourceError(f"{type(obj).__name__} records are immutable after insert")
+        # SECP-B5: discovery evidence snapshots, candidate plans, and approvals are immutable.
+        if isinstance(
+            obj,
+            DiscoverySnapshot | DiscoveryCandidatePlan | DiscoveryCandidatePlanApproval,
+        ):
+            raise ImmutableResourceError(f"{type(obj).__name__} records are immutable after insert")
         # AuditEvent: append-only.
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records are immutable")
@@ -667,6 +676,14 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         if isinstance(
             obj,
             StagingDeploymentPlan | StagingDeploymentApproval | StagingDeploymentVerification,
+        ):
+            raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
+        # SECP-B5: discovery snapshots/candidate plans/approvals cannot be deleted outside a
+        # governed
+        # archival path (none exists yet), preserving the discovery evidence + approval chain.
+        if isinstance(
+            obj,
+            DiscoverySnapshot | DiscoveryCandidatePlan | DiscoveryCandidatePlanApproval,
         ):
             raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
         if isinstance(obj, AuditEvent):

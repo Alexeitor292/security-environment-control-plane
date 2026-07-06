@@ -437,6 +437,13 @@ class Permission(str, Enum):
     # worker_identity:manage (or any other approval). It authenticates no worker, enables nothing.
     worker_identity_manage = "worker_identity:manage"
     worker_identity_approve = "worker_identity:approve"
+    # SECP-B5 — worker-owned read-only target enrollment + discovery. Requesting discovery is an
+    # admin
+    # action; APPROVING the discovery-derived candidate plan is a DELIBERATELY SEPARATE permission.
+    # It
+    # grants NO infrastructure execution — live apply remains sealed pending controlled integration.
+    target_discovery_manage = "target_discovery:manage"
+    target_discovery_approve = "target_discovery:approve"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -796,6 +803,15 @@ class AuditAction(str, Enum):
     staging_deployment_destroyed = "staging_deployment.destroyed"
     staging_deployment_maintenance_required = "staging_deployment.maintenance_required"
     staging_deployment_operation_refused = "staging_deployment.operation_refused"
+    # SECP-B5 — worker-owned read-only target enrollment + discovery.
+    target_discovery_requested = "target_discovery.requested"
+    target_discovery_claimed = "target_discovery.claimed"
+    target_discovery_completed = "target_discovery.completed"
+    target_discovery_failed = "target_discovery.failed"
+    target_discovery_refused = "target_discovery.refused"
+    discovery_plan_generated = "discovery_plan.generated"
+    discovery_plan_approved = "discovery_plan.approved"
+    discovery_plan_rejected = "discovery_plan.rejected"
 
 
 class ResolutionLeaseStatus(str, Enum):
@@ -973,3 +989,90 @@ class MaintenanceOperationStatus(str, Enum):
     approved = "approved"
     completed = "completed"
     cancelled = "cancelled"
+
+
+# --- SECP-B5: worker-owned live target enrollment + read-only discovery ---------------------------
+
+
+class TargetDiscoveryStatus(str, Enum):
+    """Lifecycle of a target-discovery enrollment (the app-owned record the operator drives)."""
+
+    requested = "requested"
+    discovering = "discovering"
+    discovered = "discovered"
+    plan_ready = "plan_ready"
+    approved = "approved"
+    failed = "failed"
+
+
+class DiscoveryJobStatus(str, Enum):
+    """Durable, resumable state of ONE read-only discovery operation (worker claim/lease)."""
+
+    queued = "queued"
+    claimed = "claimed"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    refused = "refused"
+
+
+class DiscoveryProbeCode(str, Enum):
+    """Closed set of read-only probe operation codes (each renders a FIXED read-only argv)."""
+
+    version = "version"
+    cluster_status = "cluster_status"
+    node_identity = "node_identity"
+    node_capacity = "node_capacity"
+    storage = "storage"
+    vmid_availability = "vmid_availability"
+    nested_virtualization = "nested_virtualization"
+    candidate_locator_presence = "candidate_locator_presence"
+
+
+class DiscoveryEligibility(str, Enum):
+    eligible = "eligible"
+    ineligible = "ineligible"
+    unverifiable = "unverifiable"
+
+
+class DiscoveryCandidatePlanStatus(str, Enum):
+    draft = "draft"
+    approved = "approved"
+    rejected = "rejected"
+    expired = "expired"
+    superseded = "superseded"
+
+
+class DiscoveryDecisionCode(str, Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected_policy = "rejected_policy"
+    invalidated_drift = "invalidated_drift"
+    expired = "expired"
+
+
+class DiscoveryFailureCode(str, Enum):
+    """Closed, secret-free discovery failure reasons. Never an endpoint/host/credential value."""
+
+    probe_source_sealed = "probe_source_sealed"
+    bootstrap_unavailable = "bootstrap_unavailable"
+    host_key_binding_unverified = "host_key_binding_unverified"
+    probe_timeout = "probe_timeout"
+    probe_refused = "probe_refused"
+    malformed_probe_output = "malformed_probe_output"
+    unsupported_probe = "unsupported_probe"
+    target_is_clustered = "target_is_clustered"
+    ambiguous_node_selection = "ambiguous_node_selection"
+    unsupported_proxmox_version = "unsupported_proxmox_version"
+    nested_virtualization_unavailable = "nested_virtualization_unavailable"
+    insufficient_capacity = "insufficient_capacity"
+    no_storage_available = "no_storage_available"
+    candidate_vmid_unavailable = "candidate_vmid_unavailable"
+    candidate_locator_occupied = "candidate_locator_occupied"
+    foreign_ownership_conflict = "foreign_ownership_conflict"
+    enrollment_changed = "enrollment_changed"
+    worker_identity_revoked = "worker_identity_revoked"
+    bundle_unavailable_state = "bundle_unavailable_state"
+    stale_evidence = "stale_evidence"
+    plan_expired = "plan_expired"
+    internal_error = "internal_error"
