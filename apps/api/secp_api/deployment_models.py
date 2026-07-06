@@ -18,6 +18,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -228,6 +229,16 @@ class StagingDeploymentResource(Base, TimestampMixin):
     )
     ownership_tag: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     resource_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    # The EXACT observed provider locator (typed, with a discriminator) captured after a fresh read
+    # confirmed our marker. Rollback/teardown fresh-reads THIS locator before deleting — it is never
+    # a
+    # generic generated label. Null only for a record created before any observation (never
+    # mutated).
+    observed_locator: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # The unique per-resource ownership marker stamped into the provider-visible field and re-read
+    # to
+    # prove ownership before any mutation/inverse.
+    ownership_marker: Mapped[str | None] = mapped_column(String(200), nullable=True)
     inverse_op: Mapped[DeploymentInverseOp] = mapped_column(
         EnumType(DeploymentInverseOp, length=40), nullable=False
     )
@@ -275,3 +286,33 @@ class StagingDeploymentVerification(Base, TimestampMixin):
             f"check={getattr(self.check_code, 'value', self.check_code)!r}, "
             f"status={getattr(self.status, 'value', self.status)!r})"
         )
+
+
+class StagingDeploymentPoPChallenge(Base, TimestampMixin):
+    """Durable, atomic, single-use remote-PoP challenge nonce (SECP-B4 corrective).
+
+    The verifier issues a nonce and persists it here; consumption is an atomic conditional UPDATE
+    (``consumed`` False -> True), so a replayed nonce is refused even across a worker/verifier
+    restart. Bindings are stored for audit/defense; forgery is additionally prevented by the Ed25519
+    signature over the full binding. Stores no key, anchor, or signature.
+    """
+
+    __tablename__ = "staging_deployment_pop_challenge"
+    __table_args__ = (UniqueConstraint("nonce", name="uq_staging_deploy_pop_nonce"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    nonce: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    # Binding evidence (indexed for lookup/scoping). This is an operational single-use nonce ledger;
+    # its integrity is the unique nonce + atomic consume, and the bindings are additionally enforced
+    # cryptographically by the Ed25519 signature — so these are plain UUID columns, not FK children.
+    deployment_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    operation_fingerprint: Mapped[str] = mapped_column(String(90), nullable=False)
+    worker_registration_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    worker_identity_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    consumed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"StagingDeploymentPoPChallenge(consumed={self.consumed})"

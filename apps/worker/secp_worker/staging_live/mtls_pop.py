@@ -180,6 +180,32 @@ class Ed25519PoPScheme:
         return True
 
 
+class Ed25519DeploymentSigner:
+    """A worker-only deployment-local Ed25519 signer (SECP-B4). Holds the private key hex (mounted
+    from the deployment-local bootstrap bundle on the isolated worker); exposes the public anchor
+    and
+    signs a message. Never reveals, logs, or serializes the private key. The shipped default remains
+    :class:`SealedDeploymentLocalSigner` (refuses); this is constructed only on the isolated
+    worker."""
+
+    def __init__(self, *, private_key_hex: str, public_anchor_hex: str) -> None:
+        self._private_key_hex = private_key_hex
+        self._public_anchor_hex = public_anchor_hex
+        self._scheme = Ed25519PoPScheme()
+
+    def public_anchor(self) -> str:
+        return self._public_anchor_hex
+
+    def sign(self, message: bytes) -> str:
+        return self._scheme.sign(private_key_hex=self._private_key_hex, message=message)
+
+    def __repr__(self) -> str:  # never expose the private key
+        return "Ed25519DeploymentSigner(<redacted>)"
+
+    def __reduce__(self) -> NoReturn:  # the private key must never leave the process
+        raise SignerNotSerializable("Ed25519DeploymentSigner is not serializable")
+
+
 class LocalHashBasedPoPScheme:
     """A Lamport-style ONE-TIME hash signature over SHA-256 — a LOCAL, in-process possession check.
 

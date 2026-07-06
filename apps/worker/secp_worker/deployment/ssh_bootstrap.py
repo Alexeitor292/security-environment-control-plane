@@ -1,29 +1,37 @@
-"""Real worker-only SSH bootstrap executor via the system OpenSSH client (SECP-B4 §3).
+"""Real worker-only SSH bootstrap executor via the system OpenSSH client (SECP-B4 §3, corrective).
 
-This is the ONLY place a real host is touched during bootstrap, and only from the isolated worker
-after a deployment-local bootstrap bundle is mounted. It runs the system ``ssh``/``scp`` binaries
-with FIXED executable paths and a FIXED, discrete-token argv — never ``sh -c``, never a shell
-never caller-provided argv. Every remote action is one of the finite, typed
-:class:`HostBootstrapOperation` values rendered to a discrete-token argv by the reviewed
-:func:`render_host_command`; the executor appends that argv as separate exec arguments (no shell).
+The ONLY place a real host is touched during bootstrap, and only from the isolated worker after a
+deployment-local bootstrap bundle is mounted. It runs the system ``ssh``/``scp`` binaries with FIXED
+executable paths and a FIXED, discrete-token argv — never ``sh -c``, never a shell, never caller-
+provided argv. Every remote action is one of the finite, typed :class:`HostBootstrapOperation`
+values
+rendered to a discrete-token argv by the reviewed :func:`render_host_command`.
 
 Hardening enforced on every connection: strict pinned host keys (a deployment-local ``known_hosts``
-+ ``StrictHostKeyChecking=yes`` + ``UserKnownHostsFile`` + ``GlobalKnownHostsFile=/dev/null``),
-``BatchMode=yes`` (no interactive/TTY), publickey-only with password + keyboard-interactive auth
-disabled, no agent/X11 forwarding, no proxy discovery (``ProxyCommand=none``), and bounded connect +
-overall timeouts. The bundle (host/port/account/key path/known_hosts path/host-key fingerprint) is
-worker-only and deployment-local; none of it enters the API/UI/database/audit/logs/exceptions/repo,
-and it is disposed after bootstrap completes or fails. Failures return ONLY a closed reason code.
++
+``StrictHostKeyChecking=yes`` + ``UserKnownHostsFile`` + ``GlobalKnownHostsFile=/dev/null``),
+``BatchMode=yes``, publickey-only with password + keyboard-interactive disabled, no agent/X11
+forwarding, no proxy discovery (``ProxyCommand=none``), and bounded connect + overall timeouts.
 
-Nothing here is a shipped default: the bundle source defaults to sealed (refuses). Fully testable
-with an injected fake command runner + fake bundle source; no real ssh/host is contacted in tests.
+Corrective hardening:
+- Before invoking ssh, an injected :class:`KnownHostsBindingVerifier` must PROVE the mounted
+  ``known_hosts`` binds the exact target host + port to the bundle's expected host-key fingerprint
+  (the fingerprint is enforced, not merely carried). The shipped default refuses (sealed).
+- The returned :class:`BootstrapExecutionResult` carries ONLY a closed ``ok``/``operation_code``/
+  ``reason_code`` — never argv, host, account, port, key path, known_hosts path, fingerprint,
+  stdout,
+  or stderr. Nothing sensitive can reach a caller/result/event/log/DB.
+- The bundle is disposed on EVERY path, including an unexpected failure during ``acquire``.
+
+The bundle source defaults to sealed (refuses). Fully testable with injected fakes; no real ssh/host
+is contacted in tests.
 """
 
 from __future__ import annotations
 
 import subprocess  # noqa: S404 - fixed-argv, shell=False, closed operation set only
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from secp_worker.staging_live.bootstrap.host_operations import (
@@ -82,9 +90,9 @@ class BootstrapBundleUnavailable(SshBootstrapError):
 
 @dataclass(frozen=True)
 class SshBootstrapBundle:
-    """A typed, deployment-local bootstrap bundle. Holds only mounted deployment-local FILE PATHS
-    the private key + pinned ``known_hosts`` (the material stays in the mount, not in memory) plus
-    host/port/account/host-key fingerprint. Redacted repr; not serializable; disposed after use."""
+    """A typed, deployment-local bootstrap bundle. Holds only mounted deployment-local FILE PATHS to
+    the private key + pinned ``known_hosts`` plus host/port/account/host-key fingerprint. Redacted
+    repr; not serializable; disposed after use."""
 
     ssh_host: str
     ssh_port: int
@@ -123,10 +131,37 @@ class SealedWorkerBootstrapBundleSource:
         return None
 
 
+@runtime_checkable
+class KnownHostsBindingVerifier(Protocol):
+    """Proves the mounted ``known_hosts`` binds the exact target host + port to the bundle's
+    expected
+    host-key fingerprint BEFORE ssh is invoked. A real implementation parses the deployment-local
+    ``known_hosts`` file (local mount read; contacts no host). The shipped default refuses."""
+
+    def verify(self, bundle: SshBootstrapBundle) -> bool: ...
+
+
+class SealedKnownHostsBindingVerifier:
+    """The shipped default: cannot prove the binding — refuses (fail closed)."""
+
+    def verify(self, bundle: SshBootstrapBundle) -> bool:
+        return False
+
+
+class RefusingHostCommandRunner:
+    """A runner that must never execute (used in the sealed composition, where acquire refuses
+    first).
+    If it is ever reached, it fails closed rather than run anything."""
+
+    def run(self, argv: Sequence[str], *, timeout: float) -> CommandResult:
+        raise SshBootstrapError("host_command_runner_sealed")
+
+
 @dataclass(frozen=True)
 class CommandResult:
     exit_code: int
-    # stdout/stderr are captured for closed-code classification only; never logged/persisted raw.
+    # stdout/stderr are captured for closed-code classification only; never
+    # logged/persisted/returned.
     stdout: bytes = b""
     stderr: bytes = b""
     timed_out: bool = False
@@ -134,14 +169,14 @@ class CommandResult:
 
 @runtime_checkable
 class HostCommandRunner(Protocol):
-    """Runs a discrete-token argv with ``shell=False`` and a bounded timeout. The real
-    is :class:`SubprocessHostCommandRunner`; tests inject a fake that records argv and never"""
+    """Runs a discrete-token argv with ``shell=False`` and a bounded timeout."""
 
     def run(self, argv: Sequence[str], *, timeout: float) -> CommandResult: ...
 
 
 class SubprocessHostCommandRunner:
     """The real runner: ``subprocess.run`` with ``shell=False`` (no shell, no interpolation), a
+    fixed
     argv, captured output, and a hard timeout. Never runs a shell or a caller-provided string."""
 
     def run(self, argv: Sequence[str], *, timeout: float) -> CommandResult:
@@ -164,14 +199,12 @@ class SubprocessHostCommandRunner:
 
 @dataclass(frozen=True)
 class BootstrapExecutionResult:
-    """A closed, redacted bootstrap outcome. ``reason_code`` is a closed code; never a"""
+    """A closed, redacted bootstrap outcome. Carries ONLY a closed status + code — never argv, host,
+    account, port, key path, known_hosts path, fingerprint, stdout, or stderr."""
 
     ok: bool
     operation_code: str
     reason_code: str
-    # The exact discrete-token argv issued (fixed ssh path + hardening + generated op tokens). Safe:
-    # it contains no secret, only the pinned option set + the account@host + generated resource
-    argv: tuple[str, ...] = field(default_factory=tuple)
 
 
 # ssh host-key mismatch is reported by OpenSSH on stderr with these stable markers.
@@ -180,17 +213,19 @@ _HOST_KEY_MARKERS = (b"host key verification failed", b"remote host identificati
 
 class SshBootstrapExecutor:
     """Executes ONE finite host-bootstrap operation over hardened SSH. Constructed only with an
-    injected bundle source (sealed default refuses) + command runner; never a shipped default."""
+    injected bundle source (sealed default refuses) + command runner + host-key binding verifier."""
 
     def __init__(
         self,
         *,
         bundle_source: WorkerBootstrapBundleSource,
         runner: HostCommandRunner,
+        host_key_verifier: KnownHostsBindingVerifier | None = None,
         overall_timeout_seconds: float = _OVERALL_TIMEOUT_SECONDS,
     ) -> None:
         self._bundle_source = bundle_source
         self._runner = runner
+        self._host_key_verifier = host_key_verifier or SealedKnownHostsBindingVerifier()
         self._timeout = overall_timeout_seconds
 
     def _ssh_argv(self, bundle: SshBootstrapBundle, remote_argv: Sequence[str]) -> tuple[str, ...]:
@@ -211,31 +246,32 @@ class SshBootstrapExecutor:
     def execute(
         self, operation: HostBootstrapOperation, namespace: SecpOwnershipNamespace
     ) -> BootstrapExecutionResult:
-        """Render the typed operation to a discrete-token remote argv, run it over hardened SSH, and
-        return a closed result. Disposes the bundle on completion OR failure."""
+        """Render the typed operation to a discrete-token remote argv, verify the pinned host-key
+        binding, run it over hardened SSH, and return a CLOSED result. Disposes the bundle on EVERY
+        path (including an unexpected failure during acquire)."""
         code = operation.operation_code
         rendered = render_host_command(operation, namespace)
+        bundle: SshBootstrapBundle | None = None
         try:
-            bundle = self._bundle_source.acquire()
-        except BootstrapBundleUnavailable:
-            return BootstrapExecutionResult(False, code, "bootstrap_unavailable")
-        try:
+            try:
+                bundle = self._bundle_source.acquire()
+            except BootstrapBundleUnavailable:
+                return BootstrapExecutionResult(False, code, "bootstrap_unavailable")
             if int(bundle.ssh_port) <= 0 or int(bundle.ssh_port) > 65535:
                 return BootstrapExecutionResult(False, code, "bootstrap_operation_refused")
+            # Enforce the pinned host-key binding BEFORE any ssh invocation (fail closed if
+            # unproven).
+            if not self._host_key_verifier.verify(bundle):
+                return BootstrapExecutionResult(False, code, "host_key_binding_unverified")
             argv = self._ssh_argv(bundle, rendered.argv)
             result = self._runner.run(argv, timeout=self._timeout)
             if result.timed_out:
-                return BootstrapExecutionResult(False, code, "bootstrap_timeout", argv=argv)
-            low = result.stderr.lower()
-            if any(marker in low for marker in _HOST_KEY_MARKERS):
-                return BootstrapExecutionResult(
-                    False, code, "bootstrap_host_key_mismatch", argv=argv
-                )
+                return BootstrapExecutionResult(False, code, "bootstrap_timeout")
+            if any(marker in result.stderr.lower() for marker in _HOST_KEY_MARKERS):
+                return BootstrapExecutionResult(False, code, "bootstrap_host_key_mismatch")
             if result.exit_code != 0:
-                return BootstrapExecutionResult(
-                    False, code, "bootstrap_operation_refused", argv=argv
-                )
-            return BootstrapExecutionResult(True, code, "completed", argv=argv)
+                return BootstrapExecutionResult(False, code, "bootstrap_operation_refused")
+            return BootstrapExecutionResult(True, code, "completed")
         finally:
-            # Dispose the bundle whether bootstrap succeeded or failed — it must not linger.
+            # Dispose the bundle whether bootstrap succeeded, failed, or acquire raised.
             self._bundle_source.dispose()

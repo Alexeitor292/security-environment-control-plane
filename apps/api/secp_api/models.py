@@ -1794,6 +1794,7 @@ from secp_api.deployment_models import (  # noqa: E402,F401
     StagingDeploymentApproval,
     StagingDeploymentOperation,
     StagingDeploymentPlan,
+    StagingDeploymentPoPChallenge,
     StagingDeploymentResource,
     StagingDeploymentVerification,
 )
