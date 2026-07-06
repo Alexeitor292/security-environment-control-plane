@@ -47,9 +47,13 @@ _CONCRETE_LIVE_SYMBOLS = frozenset(
         "build_staging_live_composition",
         "StagingLiveComposition",
         "ConcreteOpenBaoClient",
-        "MtlsWorkloadIdentitySource",
+        "PoPVerifiedAttestationSource",
         "run_openbao_readiness_canary",
         "run_proxmox_transport_canary",
+        "LiveProxmoxProvider",
+        "render_host_command",
+        "ownership_namespace",
+        "EphemeralBootstrapCredential",
     }
 )
 
