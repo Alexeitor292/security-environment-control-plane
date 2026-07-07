@@ -33,6 +33,11 @@ _CONNECT_TIMEOUT_SECONDS = 15
 _OVERALL_TIMEOUT_SECONDS = 120
 # The closed, hardened SSH option set applied to EVERY connection.
 _SSH_HARDENING = (
+    # Ignore any worker-local ssh_config / agent / identity so ONLY the pinned bundle material and
+    # the fixed options below govern the connection (no inherited host aliases, ProxyCommand,
+    # IdentityFile, SetEnv, or agent keys).
+    "-F",
+    "none",
     "-o",
     "BatchMode=yes",
     "-o",
@@ -47,6 +52,13 @@ _SSH_HARDENING = (
     "PreferredAuthentications=publickey",
     "-o",
     "PubkeyAuthentication=yes",
+    # Use ONLY the pinned -i identity; never an agent key or a config IdentityFile.
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "IdentityAgent=none",
+    "-o",
+    "AddKeysToAgent=no",
     "-o",
     "ForwardAgent=no",
     "-o",
@@ -55,6 +67,12 @@ _SSH_HARDENING = (
     "ProxyCommand=none",
     "-o",
     "ClearAllForwardings=yes",
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    "RequestTTY=no",
     "-o",
     f"ConnectTimeout={_CONNECT_TIMEOUT_SECONDS}",
 )

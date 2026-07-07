@@ -27,7 +27,6 @@ from secp_worker.target_discovery.engine import (
     DiscoveryComposition,
     DiscoveryOutcome,
     run_discovery,
-    sealed_discovery_composition,
 )
 
 # Lease TTL: a claimed/running job older than this is reclaimable (restart recovery).
@@ -121,11 +120,15 @@ def claim_and_process_one(
 ) -> uuid.UUID | None:
     """Claim and process one discovery job. Returns its id, or None if none/lost.
 
-    ``composition`` defaults to the SHIPPED SEALED composition, so the normal runtime invokes the
-    read-only engine but contacts nothing (the sealed probe source refuses). Injectable for
-    tests."""
+    ``composition`` defaults to :func:`build_discovery_composition`, which is SEALED unless the
+    deployment-local controlled-integration profile is enabled AND a valid worker-local bundle is
+    mounted (SECP-B6). With the profile disabled (the shipped default) it contacts nothing.
+    Injectable for tests."""
     now = now or _utcnow()
-    composition = composition or sealed_discovery_composition()
+    if composition is None:
+        from secp_worker.target_discovery.composition import build_discovery_composition
+
+        composition = build_discovery_composition()
     job = _claim_candidate(session, now)
     if job is None:
         return None
@@ -140,7 +143,16 @@ def claim_and_process_one(
     try:
         outcome = run_discovery(session, job, composition=composition, now=now)
     except Exception:  # never leak a raw engine/host error onto the job record
-        outcome = DiscoveryOutcome(False, DiscoveryFailureCode.internal_error.value)
+        # SECP-B6 F-AUDIT: do NOT fall back to the "sealed"/no-contact defaults — an uncaught error
+        # AFTER a live host contact must never be audited as sealed. On the live composition a
+        # contact may already have happened, so report it conservatively.
+        live = composition.bundle_binding is not None
+        outcome = DiscoveryOutcome(
+            False,
+            DiscoveryFailureCode.internal_error.value,
+            bundle_available=live,
+            contact_state="internal_error",
+        )
 
     terminal = DiscoveryJobStatus.completed if outcome.ok else DiscoveryJobStatus.failed
     _cas(
@@ -171,7 +183,11 @@ def claim_and_process_one(
             data={
                 "status": enrollment.status.value,
                 "reason_code": outcome.reason_code,
-                "bundle_available": False,
+                # SECP-B6 F-AUDIT: the TRUTHFUL per-run execution signals (never a hardcoded value)
+                # so a security operator can tell sealed vs. real read-only host contact apart. No
+                # host/account/key/fingerprint/endpoint/output ever appears here.
+                "bundle_available": outcome.bundle_available,
+                "contact_state": outcome.contact_state,
             },
         )
     return job.id

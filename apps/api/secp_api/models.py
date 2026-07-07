@@ -66,6 +66,7 @@ from secp_api.enums import (
     StagingWorkStatus,
     TargetStatus,
     ToolchainProfileStatus,
+    WorkerDiscoveryAdmissionStatus,
     WorkerIdentityEvidenceKind,
     WorkerIdentityEvidenceStatus,
     WorkerIdentityMechanism,
@@ -750,6 +751,10 @@ class LiveReadAuthorization(Base, TimestampMixin):
     )
     connection_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     boundary_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    # SECP-B6 MB-2: immutable, secret-free SHA-256 digest binding the approved target host to the
+    # exact SSH endpoint (host+port+host-key fingerprint). NULL for the preflight track; set for a
+    # controlled-discovery authorization. Stores ONLY the opaque digest — never a raw SSH value.
+    endpoint_binding_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
     authorization_expiry: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     collector_contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -782,6 +787,70 @@ class LiveReadAuthorization(Base, TimestampMixin):
             f"status={getattr(self.status, 'value', self.status)!r}, "
             "connection_hash=<sha256>, "
             "boundary_hash=<sha256>)"
+        )
+
+
+class WorkerDiscoveryAdmission(Base, TimestampMixin):
+    """Durable, one-time, control-plane-verified worker admission for live B6 discovery (MB-1).
+
+    Secret-free: it records ONLY safe control-plane IDs, the closed lifecycle status, a
+    server-issued single-use nonce, and issued/expiry/consumed timestamps. It NEVER stores a
+    certificate, key, public anchor, signature, challenge bytes, endpoint, host, port, or
+    credential. The control-plane admission service issues the nonce and verifies the worker's
+    Ed25519 signature against the
+    approved registration's pinned anchor fingerprint; only then does the row become ``admitted``.
+    The discovery engine consumes it exactly once (``admitted`` → ``consumed``) before persisting a
+    plan — a replayed/expired/foreign-job admission fails closed.
+    """
+
+    __tablename__ = "worker_discovery_admission"
+    __table_args__ = (UniqueConstraint("nonce", name="uq_worker_discovery_admission_nonce"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    worker_registration_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("worker_identity_registration.id"), nullable=False, index=True
+    )
+    identity_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    discovery_job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("discovery_job.id"), nullable=False, index=True
+    )
+    enrollment_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_discovery_enrollment.id"), nullable=False, index=True
+    )
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("target_onboarding.id"), nullable=False
+    )
+    live_read_authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("live_read_authorization.id"), nullable=False
+    )
+    authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    endpoint_binding_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(60), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    status: Mapped[WorkerDiscoveryAdmissionStatus] = mapped_column(
+        EnumType(WorkerDiscoveryAdmissionStatus, length=20),
+        default=WorkerDiscoveryAdmissionStatus.challenged,
+        nullable=False,
+    )
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    admitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            "WorkerDiscoveryAdmission("
+            f"id={self.id!s}, "
+            f"organization_id={self.organization_id!s}, "
+            f"discovery_job_id={self.discovery_job_id!s}, "
+            f"worker_registration_id={self.worker_registration_id!s}, "
+            f"status={getattr(self.status, 'value', self.status)!r})"
         )
 
 

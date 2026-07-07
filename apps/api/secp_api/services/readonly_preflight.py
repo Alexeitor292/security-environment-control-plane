@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import re
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -59,6 +60,9 @@ from secp_api.services import live_authorizations
 # Short-lived by construction: an admin-requested preflight authorization is time-bounded.
 _DEFAULT_TTL_SECONDS = 900
 _MAX_TTL_SECONDS = 3600
+# SECP-B6 MB-2: an accepted SSH endpoint-binding digest is a canonical ``sha256:<hex>`` (never a raw
+# host/port/fingerprint). The operator's secret-free bundle-prep tool produces it.
+_ENDPOINT_BINDING_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 _Code = ReadonlyPreflightErrorCode
 _F = TypeVar("_F", bound=Callable[..., object])
@@ -168,6 +172,7 @@ def create_preflight_authorization(
     *,
     execution_target_id: uuid.UUID,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+    endpoint_binding_hash: str | None = None,
 ) -> LiveReadAuthorization:
     """Create a DRAFT short-lived live-read authorization for an eligible substrate.
 
@@ -176,8 +181,18 @@ def create_preflight_authorization(
     server-derived monotonic issuance number (never caller-supplied), so a renewal after a prior
     authorization expires/revokes proceeds. Requires ``onboarding:approve`` — deliberately
     separate from ``staging_preflight:manage`` and ``staging_lab:approve``.
+
+    ``endpoint_binding_hash`` (SECP-B6 MB-2) is an OPTIONAL opaque ``sha256:`` digest binding the
+    approved target host to the exact SSH endpoint (host+port+host-key fingerprint) that a
+    controlled-discovery bundle must present. It is created by an operator-side, secret-free
+    bundle-preparation tool; the API accepts ONLY the digest (never raw host/port/fingerprint), and
+    it is stored as an immutable authorization binding fact.
     """
     actor.require(Permission.onboarding_approve)
+    if endpoint_binding_hash is not None and not (
+        isinstance(endpoint_binding_hash, str) and _ENDPOINT_BINDING_RE.match(endpoint_binding_hash)
+    ):
+        raise ReadonlyPreflightError(_Code.authorization_invalid)
     target, onboarding = _eligible_substrate(session, actor, execution_target_id)
     ttl = max(1, min(int(ttl_seconds), _MAX_TTL_SECONDS))
     connection_hash = connection_identity_hash(target.config or {})
@@ -195,6 +210,7 @@ def create_preflight_authorization(
                 onboarding_id=onboarding_id,
                 connection_hash=connection_hash,
                 boundary_hash=boundary_hash,
+                endpoint_binding_hash=endpoint_binding_hash,
                 authorization_version=version,
                 authorization_expiry=_utcnow() + timedelta(seconds=ttl),
                 collector_contract_version=LIVE_READ_COLLECTOR_CONTRACT_VERSION,

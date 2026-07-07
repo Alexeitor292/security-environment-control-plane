@@ -40,6 +40,33 @@ class Settings(BaseSettings):
     # staging-lab work-item consumer loop. The consumer runs ONLY in the worker process.
     staging_lab_poll_interval_seconds: float = 2.0
 
+    # SECP-B6: worker-local, deployment-controlled read-only discovery enablement. Both are
+    # DEPLOYMENT-LOCAL only (set in the worker container's deploy manifest) — never API/UI/DB
+    # controlled, and they carry NO SSH/credential material. When the profile is disabled OR the
+    # mount is absent/invalid, discovery stays sealed (the shipped default). The bundle FIELDS
+    # (host/account/port/key/known_hosts/fingerprint) NEVER come from config/env — only from the
+    # fixed mounted bundle directory below. These are read ONLY by the worker discovery composition.
+    discovery_controlled_integration_enabled: bool = False
+    discovery_bootstrap_mount: str = "/var/run/secp/discovery-bundle"
+
+    # SECP-B6 MB-1: worker discovery ADMISSION over the internal control-plane endpoint. These are
+    # DEPLOYMENT-LOCAL worker settings (an internal HTTPS URL + file paths) — never API/UI/DB
+    # controlled. Worker AUTHENTICATION is the Ed25519 signed-nonce proof-of-possession handshake
+    # (NOT X.509 client-certificate mTLS): the worker signs the server-issued nonce with its
+    # deployment-local Ed25519 PRIVATE key, and the control plane verifies the signature against the
+    # PUBLIC anchor whose fingerprint is pinned in the approved worker registration. The TLS layer
+    # the endpoint is validated against ``discovery_admission_ca`` (server-cert validation, never
+    # disabled). No secret material lives in config: the Ed25519 private key + public anchor live
+    # ONLY on the worker's deployment-local filesystem at the paths below. When the endpoint or the
+    # identity material is unset/invalid/unreachable, live discovery fails closed (sealed).
+    discovery_admission_endpoint: str = ""
+    # Path to the worker's deployment-local Ed25519 identity PRIVATE key (hex). Signs the nonce.
+    discovery_worker_identity_key: str = ""
+    # Path to the worker's deployment-local Ed25519 PUBLIC anchor (hex). Presented + pinned by fp.
+    discovery_worker_identity_anchor: str = ""
+    # Path to the CA bundle that validates the internal admission endpoint's server TLS certificate.
+    discovery_admission_ca: str = ""
+
     # Auth. The dev fallback principal is ONLY honored when auth_dev_mode is true
     # AND app_env != production (enforced below). Production requires real OIDC.
     auth_dev_mode: bool = True

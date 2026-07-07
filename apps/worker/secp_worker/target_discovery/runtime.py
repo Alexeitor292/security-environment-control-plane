@@ -53,9 +53,19 @@ def run_forever(stop_event: threading.Event | None = None) -> None:  # pragma: n
 
     settings = get_settings()
     stop_event = stop_event or threading.Event()
+    # SECP-B6 F-AUDIT: describe the ACTUAL configured mode. When the controlled-integration profile
+    # is enabled the loop can perform strictly read-only host contact (bundle-, identity-, and
+    # authorization-gated); it is false to claim "no infrastructure" in that mode.
+    live = bool(getattr(settings, "discovery_controlled_integration_enabled", False))
+    mode = (
+        "CONTROLLED LIVE read-only discovery ENABLED (bundle/identity/authorization-gated)"
+        if live
+        else "SEALED (no infrastructure contact)"
+    )
     logger.info(
-        "read-only discovery consumer loop started (interval=%ss, SEALED, no infrastructure)",
+        "read-only discovery consumer loop started (interval=%ss, mode=%s)",
         settings.staging_lab_poll_interval_seconds,
+        mode,
     )
     run_consumer_loop(stop_event, interval_seconds=settings.staging_lab_poll_interval_seconds)
     logger.info("read-only discovery consumer loop stopped")

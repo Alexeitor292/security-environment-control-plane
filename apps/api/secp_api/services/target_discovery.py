@@ -79,14 +79,23 @@ def _active_onboarding(session: Session, target_id: uuid.UUID) -> TargetOnboardi
     ).scalar_one_or_none()
 
 
-def _approved_identity_version(session: Session, org_id: uuid.UUID) -> int:
-    row = session.execute(
-        select(WorkerIdentityRegistration).where(
-            WorkerIdentityRegistration.organization_id == org_id,
-            WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
+def _single_approved_registration(
+    session: Session, org_id: uuid.UUID
+) -> WorkerIdentityRegistration | None:
+    """The ONE approved worker identity for the org, or None when there is no approved identity OR
+    the identity is ambiguous (>1). Fails closed on both (SECP-B6 F-IDENTITY): a plan can only be
+    approved against exactly one current approved worker identity."""
+    rows = list(
+        session.execute(
+            select(WorkerIdentityRegistration).where(
+                WorkerIdentityRegistration.organization_id == org_id,
+                WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
+            )
         )
-    ).scalar_one_or_none()
-    return int(row.identity_version) if row is not None else 0
+        .scalars()
+        .all()
+    )
+    return rows[0] if len(rows) == 1 else None
 
 
 def _cas(
@@ -256,7 +265,21 @@ def approve_candidate_plan(
         raise DomainError("candidate plan has expired; re-run discovery")
     if plan.enrollment_version != row.enrollment_version:
         raise DomainError("candidate plan is stale (enrollment changed); re-run discovery")
-    if _approved_identity_version(session, row.organization_id) != plan.worker_identity_version:
+    # SECP-B6 F-IDENTITY: a plan is approvable ONLY against exactly one current approved worker
+    # identity that is the SAME registration (id) AND version the plan was minted against. A
+    # version-0 (identity-less) plan is never approvable; a missing/ambiguous approved identity
+    # fails closed; and binding by registration id (not merely the per-label integer version)
+    # prevents a rotation to a different, same-versioned identity from approving an old plan.
+    if plan.worker_identity_version == 0:
+        raise DomainError("candidate plan has no bound worker identity; re-run discovery")
+    approved = _single_approved_registration(session, row.organization_id)
+    if approved is None:
+        raise DomainError("no single approved worker identity; re-run discovery")
+    plan_registration_id = str(plan.plan_document.get("worker_registration_id") or "")
+    if (
+        str(approved.id) != plan_registration_id
+        or approved.identity_version != plan.worker_identity_version
+    ):
         raise DomainError("worker identity changed since discovery; re-run discovery")
     onboarding = _active_onboarding(session, row.execution_target_id)
     if onboarding is None or onboarding.id != row.onboarding_id:
