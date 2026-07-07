@@ -574,6 +574,20 @@ class WorkerIdentityStatus(str, Enum):
     expired = "expired"
 
 
+class WorkerDiscoveryAdmissionStatus(str, Enum):
+    """Closed lifecycle of a one-time control-plane-verified worker discovery admission (SECP-B6
+    MB-1). ``challenged`` — a single-use nonce was issued for a signed proof; ``admitted`` — the
+    worker's Ed25519 signature over the nonce verified against the registered anchor; ``consumed`` —
+    the discovery engine used the one-time admission (cannot be reused); ``refused`` — verification
+    failed; ``expired`` — past its short TTL."""
+
+    challenged = "challenged"
+    admitted = "admitted"
+    consumed = "consumed"
+    refused = "refused"
+    expired = "expired"
+
+
 class WorkerIdentityEvidenceKind(str, Enum):
     """Closed set of secret-free worker-identity evidence items (SECP-B2-4.3).
 
@@ -812,6 +826,10 @@ class AuditAction(str, Enum):
     discovery_plan_generated = "discovery_plan.generated"
     discovery_plan_approved = "discovery_plan.approved"
     discovery_plan_rejected = "discovery_plan.rejected"
+    # SECP-B6 MB-1 — control-plane-verified worker discovery admission.
+    worker_discovery_admission_issued = "worker_discovery_admission.issued"
+    worker_discovery_admission_refused = "worker_discovery_admission.refused"
+    worker_discovery_admission_consumed = "worker_discovery_admission.consumed"
 
 
 class ResolutionLeaseStatus(str, Enum):
@@ -1075,6 +1093,8 @@ class DiscoveryFailureCode(str, Enum):
     worker_identity_unapproved = "worker_identity_unapproved"
     worker_identity_ambiguous = "worker_identity_ambiguous"
     worker_identity_changed = "worker_identity_changed"
+    worker_admission_required = "worker_admission_required"
+    worker_admission_unverified = "worker_admission_unverified"
     bundle_unavailable_state = "bundle_unavailable_state"
     stale_evidence = "stale_evidence"
     plan_expired = "plan_expired"

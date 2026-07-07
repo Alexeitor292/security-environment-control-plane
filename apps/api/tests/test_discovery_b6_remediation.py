@@ -103,7 +103,52 @@ class _FakeProbe:
 # --- authoritative-record helpers -------------------------------------------
 
 
+_BASE_URL = "https://pve-a.internal:8006"
+_HOST = "pve-a.internal"
+_FP = "SHA256:" + "A" * 43
+
+
+def _endpoint_hash(*, ssh_host=_HOST, ssh_port=22, fingerprint=_FP) -> str:
+    from secp_api.live_read_contract import normalize_target_host, ssh_endpoint_binding_hash
+
+    return ssh_endpoint_binding_hash(
+        normalized_target_host=normalize_target_host({"base_url": _BASE_URL}),
+        ssh_host=ssh_host,
+        ssh_port=ssh_port,
+        host_key_fingerprint=fingerprint,
+    )
+
+
+def _ed_worker(session, principal, *, label: str = "staging-worker-a") -> tuple[str, str]:
+    """Register + approve a worker identity whose anchor is a real Ed25519 public key. Returns
+    (private_key_hex, public_anchor_hex) so a SignedWorkerAdmissionClient can prove possession."""
+    from secp_api.worker_admission_contract import generate_ed25519_keypair
+
+    priv, pub = generate_ed25519_keypair()
+    row = wi.register_worker_identity(
+        session,
+        principal,
+        mechanism=WorkerIdentityMechanism.mtls_workload_identity,
+        identity_label=label,
+        deployment_binding=f"deploy-{label}",
+        verification_anchor_fingerprint=compute_verification_anchor_fingerprint(pub),
+    )
+    for kind in WorkerIdentityEvidenceKind:
+        wi.record_evidence(
+            session,
+            principal,
+            row.id,
+            kind=kind,
+            status=WorkerIdentityEvidenceStatus.verified,
+            proof_id="TKT-1",
+            issuer="rev",
+        )
+    wi.approve_worker_identity(session, principal, row.id)
+    return priv, pub
+
+
 def _approve_worker_identity(session, principal, *, label: str = "staging-worker-a"):
+    """A worker identity with a non-key anchor (for tests that never run the admission)."""
     fingerprint = compute_verification_anchor_fingerprint(f"anchor-{label}")
     row = wi.register_worker_identity(
         session,
@@ -127,13 +172,14 @@ def _approve_worker_identity(session, principal, *, label: str = "staging-worker
 
 
 def _target_with_auth(
-    session, principal
+    session, principal, *, endpoint_binding_hash=None
 ) -> tuple[ExecutionTarget, TargetOnboarding, LiveReadAuthorization]:
+    ebh = endpoint_binding_hash if endpoint_binding_hash is not None else _endpoint_hash()
     target = ExecutionTarget(
         organization_id=principal.organization_id,
         display_name="substrate",
         plugin_name="proxmox",
-        config={"base_url": "placeholder", "verify_tls": True},
+        config={"base_url": _BASE_URL, "verify_tls": True},
         config_hash="sha256:" + "ab" * 32,
         secret_ref="vault:secp/proxmox/target-1",
         status=TargetStatus.active,
@@ -156,7 +202,7 @@ def _target_with_auth(
     session.flush()
     staging_labs.grant_substrate_eligibility(session, principal, execution_target_id=target.id)
     auth = readonly_preflight.create_preflight_authorization(
-        session, principal, execution_target_id=target.id
+        session, principal, execution_target_id=target.id, endpoint_binding_hash=ebh
     )
     auth = readonly_preflight.approve_preflight_authorization(session, principal, auth.id)
     return target, onboarding, auth
@@ -168,7 +214,9 @@ def _enroll(session, principal, target) -> tuple[object, DiscoveryJob]:
     return enrollment, job
 
 
-def _anchor(*, org, target, onboarding, enrollment, auth_id, auth_version) -> dict:
+def _anchor(
+    *, org, target, onboarding, enrollment, auth_id, auth_version, endpoint_binding_hash=None
+) -> dict:
     return {
         "organization_id": str(org),
         "execution_target_id": str(target),
@@ -176,101 +224,47 @@ def _anchor(*, org, target, onboarding, enrollment, auth_id, auth_version) -> di
         "enrollment_id": str(enrollment),
         "authorization_id": str(auth_id),
         "authorization_version": auth_version,
+        "endpoint_binding_hash": endpoint_binding_hash or _endpoint_hash(),
     }
 
 
-def _binding_mount(tmp_path, anchor: dict) -> str:
+def _full_mount(tmp_path, anchor: dict, *, ssh_host=_HOST, account="secp", fingerprint=_FP) -> str:
     mount = tmp_path / "bundle"
     mount.mkdir()
+    (mount / "manifest.json").write_text(
+        json.dumps(
+            {
+                "ssh_host": ssh_host,
+                "ssh_port": 22,
+                "account": account,
+                "host_key_fingerprint": fingerprint,
+            }
+        )
+    )
+    (mount / "id_key").write_bytes(b"PRIVATE-KEY-BYTES")
+    (mount / "known_hosts").write_bytes(f"{ssh_host} ssh-ed25519 AAAA\n".encode())
     (mount / "binding.json").write_text(json.dumps(anchor))
     if _POSIX:
         os.chmod(mount, 0o700)
-        os.chmod(mount / "binding.json", 0o600)
+        for f in ("manifest.json", "id_key", "known_hosts", "binding.json"):
+            os.chmod(mount / f, 0o600)
     return str(mount)
 
 
-def _live_comp(mount: str, probe: _FakeProbe) -> DiscoveryComposition:
-    # bundle_binding present => the engine enforces the identity + binding gates before probing.
+def _live_comp(mount: str, probe: _FakeProbe, priv: str, pub: str) -> DiscoveryComposition:
+    from secp_worker.target_discovery.admission_client import SignedWorkerAdmissionClient
+
+    # bundle_binding + admission_client present => the engine enforces the control-plane admission,
+    # bundle-to-job binding, and endpoint binding gates before probing.
     return DiscoveryComposition(
-        probe_source=probe, bundle_binding=MountedWorkerBootstrapBundleSource(mount)
+        probe_source=probe,
+        bundle_binding=MountedWorkerBootstrapBundleSource(mount),
+        admission_client=SignedWorkerAdmissionClient(private_key_hex=priv, public_anchor_hex=pub),
     )
 
 
 def _run(session, comp, job) -> object:
     return run_discovery(session, job, composition=comp, now=datetime.now(UTC))
-
-
-# --- F-BIND ------------------------------------------------------------------
-
-
-def test_bind_bundle_for_other_target_same_org_fails_closed(session, principal, tmp_path):
-    _approve_worker_identity(session, principal)
-    target_a, onb_a, auth_a = _target_with_auth(session, principal)
-    target_b, onb_b, auth_b = _target_with_auth(session, principal)
-    enroll_a, _ = _enroll(session, principal, target_a)
-    enroll_b, job_b = _enroll(session, principal, target_b)
-    # A bundle honestly minted for target A, used while processing target B's job.
-    mount = _binding_mount(
-        tmp_path,
-        _anchor(
-            org=principal.organization_id,
-            target=target_a.id,
-            onboarding=onb_a.id,
-            enrollment=enroll_a.id,
-            auth_id=auth_a.id,
-            auth_version=auth_a.authorization_version,
-        ),
-    )
-    probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job_b)
-    assert outcome.ok is False and outcome.reason_code == "bundle_target_mismatch"
-    assert probe.calls == 0  # zero ssh
-    assert session.query(DiscoverySnapshot).filter_by(enrollment_id=enroll_b.id).count() == 0
-    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enroll_b.id).count() == 0
-
-
-def test_bind_bundle_for_other_org_fails_closed(session, principal, tmp_path):
-    _approve_worker_identity(session, principal)
-    target, onb, auth = _target_with_auth(session, principal)
-    enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(
-        tmp_path,
-        _anchor(
-            org=uuid.uuid4(),
-            target=target.id,
-            onboarding=onb.id,
-            enrollment=enrollment.id,
-            auth_id=auth.id,
-            auth_version=auth.authorization_version,
-        ),
-    )
-    probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job)
-    assert outcome.ok is False and outcome.reason_code == "bundle_organization_mismatch"
-    assert probe.calls == 0
-    assert session.query(DiscoverySnapshot).filter_by(enrollment_id=enrollment.id).count() == 0
-
-
-def test_bind_valid_matching_bundle_proceeds_to_probe(session, principal, tmp_path):
-    _approve_worker_identity(session, principal)
-    target, onb, auth = _target_with_auth(session, principal)
-    enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(
-        tmp_path,
-        _anchor(
-            org=principal.organization_id,
-            target=target.id,
-            onboarding=onb.id,
-            enrollment=enrollment.id,
-            auth_id=auth.id,
-            auth_version=auth.authorization_version,
-        ),
-    )
-    probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job)
-    assert outcome.ok is True and outcome.reason_code == "plan_ready"
-    assert probe.inventory_calls >= 1  # the read-only path ran through the fake probe
-    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 1
 
 
 def _valid_anchor(principal, target, onb, enrollment, auth) -> dict:
@@ -284,54 +278,180 @@ def _valid_anchor(principal, target, onb, enrollment, auth) -> dict:
     )
 
 
-def test_bind_revoked_authorization_fails_closed(session, principal, tmp_path):
-    _approve_worker_identity(session, principal)
-    target, onb, auth = _target_with_auth(session, principal)
-    enrollment, job = _enroll(session, principal, target)
-    readonly_preflight.revoke_preflight_authorization(session, principal, auth.id)
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+def _dummy_keypair() -> tuple[str, str]:
+    from secp_api.worker_admission_contract import generate_ed25519_keypair
+
+    return generate_ed25519_keypair()
+
+
+# --- F-BIND: a bundle for org/target A cannot process a job for B (zero SSH) --
+
+
+def test_bind_bundle_for_other_target_same_org_fails_closed(session, principal, tmp_path):
+    # Admission passes (job B's real authorization), but the prepared-bundle anchor names target A.
+    priv, pub = _ed_worker(session, principal)
+    target_a, _onb_a, _auth_a = _target_with_auth(session, principal)
+    target_b, onb_b, auth_b = _target_with_auth(session, principal)
+    enroll_b, job_b = _enroll(session, principal, target_b)
+    anchor = _valid_anchor(principal, target_b, onb_b, enroll_b, auth_b)
+    anchor["execution_target_id"] = str(target_a.id)  # bundle claims a different target
+    mount = _full_mount(tmp_path, anchor)
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job)
-    assert outcome.ok is False and outcome.reason_code == "live_read_authorization_revoked"
-    assert probe.calls == 0
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job_b)
+    assert outcome.ok is False and outcome.reason_code == "bundle_target_mismatch"
+    assert probe.calls == 0  # zero ssh
+    assert session.query(DiscoverySnapshot).filter_by(enrollment_id=enroll_b.id).count() == 0
+    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enroll_b.id).count() == 0
 
 
-def test_bind_wrong_authorization_version_fails_closed(session, principal, tmp_path):
-    _approve_worker_identity(session, principal)
+def test_bind_bundle_for_other_org_fails_closed(session, principal, tmp_path):
+    priv, pub = _ed_worker(session, principal)
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
     anchor = _valid_anchor(principal, target, onb, enrollment, auth)
-    anchor["authorization_version"] = auth.authorization_version + 1
-    mount = _binding_mount(tmp_path, anchor)
+    anchor["organization_id"] = str(uuid.uuid4())  # bundle claims a different organization
+    mount = _full_mount(tmp_path, anchor)
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job)
-    assert outcome.ok is False and outcome.reason_code == "live_read_authorization_version_drift"
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    assert outcome.ok is False and outcome.reason_code == "bundle_organization_mismatch"
     assert probe.calls == 0
+    assert session.query(DiscoverySnapshot).filter_by(enrollment_id=enrollment.id).count() == 0
 
 
-def test_bind_missing_authorization_fails_closed(session, principal, tmp_path):
-    _approve_worker_identity(session, principal)
+def test_bind_valid_matching_bundle_proceeds_to_probe(session, principal, tmp_path):
+    priv, pub = _ed_worker(session, principal)
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
-    anchor = _valid_anchor(principal, target, onb, enrollment, auth)
-    anchor["authorization_id"] = str(uuid.uuid4())  # a live-read authorization that does not exist
-    mount = _binding_mount(tmp_path, anchor)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job)
-    assert outcome.ok is False and outcome.reason_code == "live_read_authorization_missing"
-    assert probe.calls == 0
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    assert outcome.ok is True and outcome.reason_code == "plan_ready"
+    assert probe.inventory_calls >= 1  # the read-only path ran after all gates passed
+    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 1
 
 
 def test_bind_disabled_target_fails_closed(session, principal, tmp_path):
-    _approve_worker_identity(session, principal)
+    # The admission passes (authorization approved) but the bundle live-read binding catches the
+    # inactive target — proving the binding gate independently of the admission.
+    priv, pub = _ed_worker(session, principal)
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
     target.status = TargetStatus.disabled
     session.flush()
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job)
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "live_read_target_not_active"
+    assert probe.calls == 0
+
+
+# --- MB-2: SSH endpoint bound to the authoritative target authorization -------
+
+
+def test_endpoint_manifest_host_mismatch_fails_closed(session, principal, tmp_path):
+    priv, pub = _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    # The bundle's ssh_host is NOT the authoritative target host.
+    other_hash = _endpoint_hash(ssh_host="attacker.example")
+    anchor = _valid_anchor(principal, target, onb, enrollment, auth)
+    anchor["endpoint_binding_hash"] = other_hash
+    mount = _full_mount(tmp_path, anchor, ssh_host="attacker.example")
+    probe = _FakeProbe()
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    assert outcome.ok is False
+    # A non-target ssh_host yields a digest the approved authorization never stored, so the
+    # admission (endpoint-hash bound) or the binding's host check rejects it — either way, zero SSH.
+    assert outcome.reason_code in (
+        "worker_admission_unverified",
+        "bundle_target_endpoint_mismatch",
+    )
+    assert probe.calls == 0
+
+
+def test_endpoint_changed_port_fails_closed(session, principal, tmp_path):
+    priv, pub = _ed_worker(session, principal)
+    # Authorization is bound to port 22; the mounted manifest uses port 22 but binding.json claims a
+    # digest for a different port, so the recomputed digest cannot match both.
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    anchor = _valid_anchor(principal, target, onb, enrollment, auth)
+    anchor["endpoint_binding_hash"] = _endpoint_hash(ssh_port=2222)  # digest for a different port
+    mount = _full_mount(tmp_path, anchor)  # manifest still uses port 22
+    probe = _FakeProbe()
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    assert outcome.ok is False
+    # The admission binds the (wrong) hash to the authorization (which stores the port-22 hash).
+    assert outcome.reason_code in (
+        "worker_admission_unverified",
+        "endpoint_binding_manifest_mismatch",
+    )
+    assert probe.calls == 0
+
+
+def test_endpoint_changed_fingerprint_fails_closed(session, principal, tmp_path):
+    priv, pub = _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    other_fp = "SHA256:" + "B" * 43
+    anchor = _valid_anchor(principal, target, onb, enrollment, auth)
+    anchor["endpoint_binding_hash"] = _endpoint_hash(fingerprint=other_fp)
+    mount = _full_mount(tmp_path, anchor, fingerprint=other_fp)  # manifest fp != authorized fp
+    probe = _FakeProbe()
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    assert outcome.ok is False
+    assert outcome.reason_code in (
+        "worker_admission_unverified",
+        "endpoint_binding_unauthorized",
+    )
+    assert probe.calls == 0
+
+
+# --- MB-1: control-plane-verified worker admission before SSH ----------------
+
+
+def test_admission_required_no_client_material_fails_closed(session, principal, tmp_path):
+    # A live composition whose admission client is SEALED (no key material) cannot obtain admission.
+    from secp_worker.target_discovery.admission_client import SealedWorkerAdmissionClient
+
+    _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    probe = _FakeProbe()
+    comp = DiscoveryComposition(
+        probe_source=probe,
+        bundle_binding=MountedWorkerBootstrapBundleSource(mount),
+        admission_client=SealedWorkerAdmissionClient(),
+    )
+    outcome = _run(session, comp, job)
+    assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
+    assert probe.calls == 0
+    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0
+
+
+def test_admission_wrong_worker_key_fails_closed(session, principal, tmp_path):
+    # A registered worker exists, but the admission client signs with a different unregistered key.
+    _ed_worker(session, principal)
+    wrong_priv, wrong_pub = _dummy_keypair()
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    probe = _FakeProbe()
+    outcome = _run(session, _live_comp(mount, probe, wrong_priv, wrong_pub), job)
+    assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
+    assert probe.calls == 0
+
+
+def test_admission_revoked_authorization_fails_closed(session, principal, tmp_path):
+    priv, pub = _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    readonly_preflight.revoke_preflight_authorization(session, principal, auth.id)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    probe = _FakeProbe()
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
     assert probe.calls == 0
 
 
@@ -339,12 +459,13 @@ def test_bind_disabled_target_fails_closed(session, principal, tmp_path):
 
 
 def test_identity_no_approved_registration_fails_closed(session, principal, tmp_path):
-    # No worker identity is approved.
+    # No worker identity is approved: the pre-probe identity gate fails closed before admission.
+    priv, pub = _dummy_keypair()
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job)
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_identity_unapproved"
     assert probe.calls == 0
     assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0
@@ -353,28 +474,32 @@ def test_identity_no_approved_registration_fails_closed(session, principal, tmp_
 def test_identity_ambiguous_registration_fails_closed(session, principal, tmp_path):
     _approve_worker_identity(session, principal, label="worker-a")
     _approve_worker_identity(session, principal, label="worker-b")
+    priv, pub = _dummy_keypair()
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe), job)
+    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_identity_ambiguous"
     assert probe.calls == 0
 
 
 def test_identity_revoked_mid_run_blocks_plan(session, principal, tmp_path):
-    reg = _approve_worker_identity(session, principal)
+    from secp_api.models import WorkerIdentityRegistration
+
+    priv, pub = _ed_worker(session, principal)
+    reg = session.query(WorkerIdentityRegistration).one()
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
 
     class _RevokingProbe(_FakeProbe):
         def read_inventory(self_inner):
-            # Revoke the worker identity DURING probing; the post-probe recheck must catch it.
+            # Revoke the worker identity DURING probing; the post-probe consume must catch it.
             wi.revoke_worker_identity(session, principal, reg.id, reason_code="compromise")
             return super().read_inventory()
 
-    outcome = _run(session, _live_comp(mount, _RevokingProbe()), job)
+    outcome = _run(session, _live_comp(mount, _RevokingProbe(), priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_identity_changed"
     assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0
 
@@ -404,13 +529,14 @@ def test_identity_version_zero_plan_is_unapprovable(session, principal):
 
 
 def test_e2e_live_discovery_through_consumer_then_approve(session, principal, tmp_path):
-    """API request → queued job → claim → identity+binding gates → probe → plan → approve."""
-    _approve_worker_identity(session, principal)
+    """API request → queued job → claim → admission + bundle/endpoint binding → probe → plan →
+    approve. The full control-plane-verified live path end to end (fake runner only)."""
+    priv, pub = _ed_worker(session, principal)
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     jid = claim_and_process_one(
-        session, composition=_live_comp(mount, _FakeProbe()), now=datetime.now(UTC)
+        session, composition=_live_comp(mount, _FakeProbe(), priv, pub), now=datetime.now(UTC)
     )
     assert jid == job.id
     session.refresh(enrollment)
@@ -459,17 +585,17 @@ def test_audit_live_error_after_contact_is_not_recorded_sealed(
 ):
     # A live run that contacts the host and then hits an UNCAUGHT error must not be audited as
     # sealed/no-contact (SECP-B6 F-AUDIT).
-    _approve_worker_identity(session, principal)
+    priv, pub = _ed_worker(session, principal)
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
 
     class _ContactThenCrashProbe(_FakeProbe):
         def probe_candidate_presence(self_inner, locators):
             raise RuntimeError("post-contact boom")  # not a ProbeSourceUnavailable
 
     data = _capture_completion_audit(
-        session, monkeypatch, _live_comp(mount, _ContactThenCrashProbe()), job
+        session, monkeypatch, _live_comp(mount, _ContactThenCrashProbe(), priv, pub), job
     )
     assert data.get("reason_code") == "internal_error"
     assert data.get("contact_state") == "internal_error"  # NOT "sealed"
@@ -492,11 +618,13 @@ def _capture_completion_audit(session, monkeypatch, comp, job) -> dict:
 
 
 def test_audit_live_success_is_truthful(session, principal, tmp_path, monkeypatch):
-    _approve_worker_identity(session, principal)
+    priv, pub = _ed_worker(session, principal)
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
-    data = _capture_completion_audit(session, monkeypatch, _live_comp(mount, _FakeProbe()), job)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    data = _capture_completion_audit(
+        session, monkeypatch, _live_comp(mount, _FakeProbe(), priv, pub), job
+    )
     assert data.get("bundle_available") is True
     assert data.get("contact_state") == "contacted"
     snap = session.query(DiscoverySnapshot).filter_by(enrollment_id=enrollment.id).one()
@@ -518,12 +646,12 @@ def test_audit_sealed_run_reports_no_contact(session, principal, monkeypatch):
 
 
 def test_audit_host_key_refusal_is_truthful(session, principal, tmp_path, monkeypatch):
-    _approve_worker_identity(session, principal)
+    priv, pub = _ed_worker(session, principal)
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
-    mount = _binding_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe(raises="host_key_binding_unverified")
-    data = _capture_completion_audit(session, monkeypatch, _live_comp(mount, probe), job)
+    data = _capture_completion_audit(session, monkeypatch, _live_comp(mount, probe, priv, pub), job)
     assert data.get("reason_code") == "host_key_binding_unverified"
     assert data.get("contact_state") == "host_key_refused"
     assert data.get("bundle_available") is True  # a bundle WAS acquired before the host-key check

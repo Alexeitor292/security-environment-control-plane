@@ -14,6 +14,7 @@ remains sealed). Fail-closed throughout; fully testable with an injected fake pr
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -42,6 +43,11 @@ from secp_api.models import (
     WorkerIdentityRegistration,
 )
 from secp_api.ownership_contract import compute_resource_marker
+from secp_api.services.worker_admission import (
+    WorkerAdmissionRefused,
+    assert_discovery_admission_valid,
+    consume_discovery_admission,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -52,10 +58,16 @@ from secp_worker.deployment.locators import (
     ResourceLocator,
     ServiceIdentityLocator,
 )
+from secp_worker.mounted_bundle import PreparedDiscoveryBundle
+from secp_worker.ssh_channel import BootstrapBundleUnavailable
+from secp_worker.target_discovery.admission_client import (
+    WorkerAdmissionClient,
+    WorkerAdmissionUnavailable,
+)
 from secp_worker.target_discovery.binding import (
-    BundleAnchorSource,
     DiscoveryBindingRefused,
-    authorize_discovery_bundle,
+    DiscoveryBundlePreparer,
+    authorize_prepared_discovery_bundle,
 )
 from secp_worker.target_discovery.seams import (
     HostProbeSource,
@@ -97,18 +109,22 @@ class DiscoveryComposition:
     network/SSH contact. Constructed only out of band on the isolated worker with a bundle
     mounted.
 
-    ``bundle_binding`` is present ONLY on the live controlled-integration composition; when set, the
-    engine enforces the mandatory approved-worker-identity gate and the bundle-to-job authorization
-    binding BEFORE any host contact. A sealed/test composition leaves it ``None`` and contacts
-    nothing."""
+    ``bundle_binding`` (a single-snapshot preparer) and ``admission_client`` are present ONLY on the
+    live controlled-integration composition; when set, the engine — BEFORE any host contact —
+    prepares one validated bundle snapshot, obtains + verifies a control-plane worker admission
+    (SECP-B6 MB-1), and binds the SSH endpoint to the authoritative target authorization (MB-2). A
+    sealed/test composition leaves both ``None`` and contacts nothing."""
 
     probe_source: HostProbeSource
-    bundle_binding: BundleAnchorSource | None = None
+    bundle_binding: DiscoveryBundlePreparer | None = None
+    admission_client: WorkerAdmissionClient | None = None
 
 
 def sealed_discovery_composition() -> DiscoveryComposition:
     """The shipped, sealed composition: the probe source refuses. Nothing is contacted."""
-    return DiscoveryComposition(probe_source=SealedHostProbeSource(), bundle_binding=None)
+    return DiscoveryComposition(
+        probe_source=SealedHostProbeSource(), bundle_binding=None, admission_client=None
+    )
 
 
 @dataclass(frozen=True)
@@ -311,8 +327,10 @@ def run_discovery(
     composition: DiscoveryComposition,
     now: datetime,
 ) -> DiscoveryOutcome:
-    """Fail-at-first read-only discovery: reverify → probe (sealed refuses) → assess eligibility →
-    presence-check candidates → persist immutable evidence + candidate plan. No mutation, ever."""
+    """Fail-at-first read-only discovery: reverify → admit → bind → probe → persist. No mutation.
+
+    Thin wrapper that guarantees the single prepared bundle snapshot (SECP-B6 Phase C) is disposed
+    on every path — success, refusal, and exception."""
     enrollment = session.get(TargetDiscoveryEnrollment, job.enrollment_id)
     if enrollment is None:
         return DiscoveryOutcome(
@@ -321,10 +339,33 @@ def run_discovery(
             bundle_available=False,
             contact_state="internal_error",
         )
+    prepared_holder: list[PreparedDiscoveryBundle] = []
+    try:
+        return _run_discovery_body(
+            session,
+            job,
+            enrollment,
+            composition=composition,
+            now=now,
+            prepared_holder=prepared_holder,
+        )
+    finally:
+        for prepared in prepared_holder:
+            prepared.dispose()
 
+
+def _run_discovery_body(
+    session: Session,
+    job,
+    enrollment: TargetDiscoveryEnrollment,
+    *,
+    composition: DiscoveryComposition,
+    now: datetime,
+    prepared_holder: list[PreparedDiscoveryBundle],
+) -> DiscoveryOutcome:
     # ``live`` == the controlled-integration composition that can contact a host. The mandatory
-    # worker-identity gate and the bundle-to-job binding gate below are enforced ONLY on this path;
-    # the sealed/test compositions contact nothing, so they need neither.
+    # worker-admission + bundle/endpoint binding gates below are enforced ONLY on this path; the
+    # sealed/test compositions contact nothing, so they need neither.
     live = composition.bundle_binding is not None
 
     # SECP-B6 F-IDENTITY: an approved worker identity is MANDATORY before any live host contact.
@@ -372,17 +413,69 @@ def run_discovery(
             contact_state="drift",
         )
 
-    # SECP-B6 F-BIND: the mounted bundle must be authorized for THIS exact job (organization /
-    # target / onboarding / enrollment + a current approved live-read authorization) BEFORE any SSH.
-    # A bundle mounted for another org/target can never be used here, and no snapshot is written.
+    # SECP-B6 MB-1/MB-2/F-BIND: on the live path, prepare ONE validated bundle snapshot, obtain a
+    # control-plane-verified worker admission, and bind the SSH endpoint to the authoritative target
+    # authorization — ALL before any host contact. No snapshot/plan is written on any refusal.
+    admission_id: uuid.UUID | None = None
+    endpoint_binding_hash: str | None = None
     if live:
         assert composition.bundle_binding is not None
+        assert composition.admission_client is not None
         try:
-            authorize_discovery_bundle(session, enrollment, composition.bundle_binding, now=now)
+            prepared = composition.bundle_binding.prepare_for_discovery()
+        except BootstrapBundleUnavailable as exc:
+            return _refuse_pre_probe(
+                session,
+                enrollment,
+                reason=getattr(exc, "reason_code", "bootstrap_unavailable"),
+                contact_state="bundle_unavailable",
+            )
+        prepared_holder.append(prepared)
+        endpoint_binding_hash = prepared.anchor.endpoint_binding_hash
+
+        # MB-1: the worker proves possession of its registered identity key to the control-plane
+        # admission verifier BEFORE any host contact. A missing/invalid proof fails closed.
+        try:
+            admission_id = composition.admission_client.admit(
+                session,
+                discovery_job_id=job.id,
+                authorization_id=prepared.anchor.authorization_id,
+                authorization_version=prepared.anchor.authorization_version,
+                endpoint_binding_hash=endpoint_binding_hash,
+                now=now,
+            )
+        except WorkerAdmissionUnavailable:
+            return _refuse_pre_probe(
+                session,
+                enrollment,
+                reason=DiscoveryFailureCode.worker_admission_unverified.value,
+                contact_state="admission_refused",
+            )
+        # F-BIND + MB-2: the prepared snapshot must match the claimed job AND bind the SSH endpoint.
+        try:
+            authorize_prepared_discovery_bundle(session, enrollment, prepared, now=now)
         except DiscoveryBindingRefused as exc:
             return _refuse_pre_probe(
                 session, enrollment, reason=exc.reason_code, contact_state="binding_refused"
             )
+        # The admission must itself be bound to THIS exact job + endpoint (defence in depth).
+        try:
+            admission = assert_discovery_admission_valid(
+                session,
+                admission_id=admission_id,
+                enrollment=enrollment,
+                endpoint_binding_hash=endpoint_binding_hash,
+                now=now,
+            )
+        except WorkerAdmissionRefused:
+            return _refuse_pre_probe(
+                session,
+                enrollment,
+                reason=DiscoveryFailureCode.worker_admission_unverified.value,
+                contact_state="admission_refused",
+            )
+        worker_registration_id = admission.registration_id
+        worker_identity_version = admission.identity_version
 
     enrollment.status = TargetDiscoveryStatus.discovering
     enrollment.revision = enrollment.revision + 1
@@ -523,15 +616,22 @@ def run_discovery(
         marker = compute_resource_marker(enrollment.ownership_label, spec["kind"], 0)
         assert marker == spec["ownership_marker"]  # contract self-check
 
-    # SECP-B6 F-IDENTITY: re-verify the approved worker identity did not change DURING probing.
-    # A revocation or identity-version bump mid-discovery must not mint an approvable plan.
+    # SECP-B6 MB-1: post-probe, CONSUME the one-time admission (a replay fails closed) and re-verify
+    # the worker identity did not change DURING probing. A revocation / identity-version bump / a
+    # reused admission mid-discovery must not mint an approvable plan.
     if live:
-        current = _approved_registrations(session, enrollment.organization_id)
-        if (
-            len(current) != 1
-            or current[0].id != worker_registration_id
-            or current[0].identity_version != worker_identity_version
-        ):
+        assert admission_id is not None and endpoint_binding_hash is not None
+        try:
+            consumed = consume_discovery_admission(
+                session,
+                admission_id=admission_id,
+                enrollment=enrollment,
+                endpoint_binding_hash=endpoint_binding_hash,
+                now=now,
+            )
+            worker_registration_id = consumed.registration_id
+            worker_identity_version = consumed.identity_version
+        except WorkerAdmissionRefused:
             evidence = _evidence_dict(
                 facts,
                 selected_storage=storage,

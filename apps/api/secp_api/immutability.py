@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from secp_api.enums import (
     LiveReadAuthorizationStatus,
     ResolverActivationStatus,
+    WorkerDiscoveryAdmissionStatus,
     WorkerIdentityStatus,
 )
 from secp_api.errors import ImmutableResourceError
@@ -43,6 +44,7 @@ from secp_api.models import (
     TargetOnboarding,
     TargetPreflight,
     ToolchainProfile,
+    WorkerDiscoveryAdmission,
     WorkerIdentityEvidence,
     WorkerIdentityRegistration,
 )
@@ -163,6 +165,7 @@ _LIVE_READ_AUTHORIZATION_PROTECTED = (
     "onboarding_id",
     "connection_hash",
     "boundary_hash",
+    "endpoint_binding_hash",  # SECP-B6 MB-2: immutable SSH endpoint binding digest
     "authorization_version",
     "authorization_expiry",
     "collector_contract_version",
@@ -183,6 +186,33 @@ _LIVE_READ_AUTHORIZATION_ALLOWED_TRANSITIONS = {
     (LiveReadAuthorizationStatus.draft, LiveReadAuthorizationStatus.expired),
     (LiveReadAuthorizationStatus.approved, LiveReadAuthorizationStatus.revoked),
     (LiveReadAuthorizationStatus.approved, LiveReadAuthorizationStatus.expired),
+}
+# WorkerDiscoveryAdmission (SECP-B6 MB-1): every binding fact is immutable; the admitted/consumed
+# timestamps are set once; status only advances along the one-time admission lifecycle.
+_WORKER_DISCOVERY_ADMISSION_PROTECTED = (
+    "organization_id",
+    "worker_registration_id",
+    "identity_version",
+    "discovery_job_id",
+    "enrollment_id",
+    "execution_target_id",
+    "onboarding_id",
+    "live_read_authorization_id",
+    "authorization_version",
+    "endpoint_binding_hash",
+    "purpose",
+    "nonce",
+    "issued_at",
+    "expires_at",
+)
+_WORKER_DISCOVERY_ADMISSION_SET_ONCE = ("admitted_at", "consumed_at")
+_WORKER_DISCOVERY_ADMISSION_ALLOWED_TRANSITIONS = {
+    (WorkerDiscoveryAdmissionStatus.challenged, WorkerDiscoveryAdmissionStatus.admitted),
+    (WorkerDiscoveryAdmissionStatus.challenged, WorkerDiscoveryAdmissionStatus.refused),
+    (WorkerDiscoveryAdmissionStatus.challenged, WorkerDiscoveryAdmissionStatus.expired),
+    (WorkerDiscoveryAdmissionStatus.admitted, WorkerDiscoveryAdmissionStatus.consumed),
+    (WorkerDiscoveryAdmissionStatus.admitted, WorkerDiscoveryAdmissionStatus.refused),
+    (WorkerDiscoveryAdmissionStatus.admitted, WorkerDiscoveryAdmissionStatus.expired),
 }
 # StagingLab (SECP-002B-1B-9): identity + substrate + the immutable desired-state plan are
 # immutable from creation/plan-generation; approval binding and the plan are set once. The
@@ -500,6 +530,37 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                         "LiveReadAuthorization revocation requires preserved approval and "
                         "explicit revocation metadata"
                     )
+        # WorkerDiscoveryAdmission (SECP-B6 MB-1): binding facts immutable; admitted/consumed
+        # timestamps set once; status advances only along the one-time admission lifecycle.
+        if isinstance(obj, WorkerDiscoveryAdmission):
+            changed = [a for a in _WORKER_DISCOVERY_ADMISSION_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "WorkerDiscoveryAdmission binding fields are immutable; "
+                    f"attempted to change {changed}"
+                )
+            repeated = [
+                a
+                for a in _WORKER_DISCOVERY_ADMISSION_SET_ONCE
+                if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+            ]
+            if repeated:
+                raise ImmutableResourceError(
+                    "WorkerDiscoveryAdmission admitted/consumed timestamps are set-once; "
+                    f"attempted to change {repeated}"
+                )
+            if _attr_changed(obj, "status"):
+                previous = _previous_value(obj, "status")
+                admission_transition = (previous, obj.status)
+                if (
+                    previous is not None
+                    and admission_transition not in _WORKER_DISCOVERY_ADMISSION_ALLOWED_TRANSITIONS
+                ):
+                    raise ImmutableResourceError(
+                        "WorkerDiscoveryAdmission status transition is not allowed: "
+                        f"{getattr(previous, 'value', previous)!r} -> "
+                        f"{getattr(obj.status, 'value', obj.status)!r}"
+                    )
         # StagingLab (SECP-002B-1B-9): identity/substrate immutable; the desired-state plan and
         # approval binding are set-once. Lifecycle status + simulated observed-state stay mutable.
         if isinstance(obj, StagingLab):
@@ -667,6 +728,8 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             _guard_resolver_evidence(session, obj, "deleted")
         if isinstance(obj, WorkerIdentityRegistration):
             raise ImmutableResourceError("WorkerIdentityRegistration records cannot be deleted")
+        if isinstance(obj, WorkerDiscoveryAdmission):
+            raise ImmutableResourceError("WorkerDiscoveryAdmission records cannot be deleted")
         if isinstance(obj, WorkerIdentityEvidence):
             _guard_worker_identity_evidence(session, obj, "deleted")
         if isinstance(obj, LivePreflightEvidence):

@@ -70,6 +70,7 @@ def create_live_read_authorization(
     endpoint_allowlist_version: str,
     evidence_source: str,
     verification_level: str,
+    endpoint_binding_hash: str | None = None,
 ) -> LiveReadAuthorization:
     """Create a draft authorization contract bound to existing authoritative records."""
     actor.require(Permission.onboarding_approve)
@@ -94,6 +95,7 @@ def create_live_read_authorization(
         onboarding_id=onboarding.id,
         connection_hash=connection_hash,
         boundary_hash=boundary_hash,
+        endpoint_binding_hash=endpoint_binding_hash,
         authorization_version=authorization_version,
         authorization_expiry=authorization_expiry,
         collector_contract_version=collector_contract_version,

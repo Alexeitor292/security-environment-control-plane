@@ -41,3 +41,49 @@ def connection_identity_hash(config: dict) -> str:
     if "credential_ref" in config or "secret_ref" in config:
         raise ValueError("connection config must not carry a credential/secret reference")
     return content_hash(config)
+
+
+# SECP-B6 MB-2: the canonical SSH endpoint-binding schema. The control plane stores ONLY this
+# opaque SHA-256 digest (never the raw SSH host/port/fingerprint) as immutable approved
+# authorization metadata; the worker recomputes it from the validated bundle manifest + the
+# authoritative target host and requires equality before any host contact.
+SSH_ENDPOINT_BINDING_SCHEMA = "secp-b6/ssh-endpoint-binding/v1"
+
+
+def normalize_target_host(config: dict) -> str:
+    """Strictly derive the canonical lower-cased host from an authoritative target's ``base_url``.
+
+    Provider-neutral + secret-free. Fails closed (ValueError) on a config with no parseable host, so
+    a target that cannot be normalized can never authorize an SSH endpoint binding.
+    """
+    from urllib.parse import urlsplit
+
+    if not isinstance(config, dict):
+        raise ValueError("connection config must be an object")
+    base_url = config.get("base_url")
+    if not (isinstance(base_url, str) and base_url.strip()):
+        raise ValueError("target config has no base_url")
+    parts = urlsplit(base_url)
+    # Require a real absolute URL (scheme + host) — a bare/placeholder string cannot authorize an
+    # SSH endpoint binding and fails closed.
+    if parts.scheme not in ("https", "http") or not parts.hostname:
+        raise ValueError("target base_url must be an absolute http(s) URL with a host")
+    return parts.hostname.lower()
+
+
+def ssh_endpoint_binding_hash(
+    *, normalized_target_host: str, ssh_host: str, ssh_port: int, host_key_fingerprint: str
+) -> str:
+    """Deterministic ``sha256:`` digest binding the approved target host to the exact SSH endpoint
+    (host + port + host-key fingerprint). Secret-free: contains no key/credential material."""
+    from secp_scenario_schema import content_hash
+
+    return content_hash(
+        {
+            "schema_version": SSH_ENDPOINT_BINDING_SCHEMA,
+            "normalized_target_host": normalized_target_host,
+            "ssh_host": ssh_host,
+            "ssh_port": int(ssh_port),
+            "host_key_fingerprint": host_key_fingerprint,
+        }
+    )

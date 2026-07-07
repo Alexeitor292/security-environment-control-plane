@@ -26,6 +26,8 @@ from secp_api.live_read_contract import (
     LIVE_VERIFIED_LEVEL,
     PROXMOX_READONLY_POLICY_VERSION,
     connection_identity_hash,
+    normalize_target_host,
+    ssh_endpoint_binding_hash,
 )
 from secp_api.models import (
     ExecutionTarget,
@@ -35,14 +37,13 @@ from secp_api.models import (
 )
 from sqlalchemy.orm import Session
 
-from secp_worker.mounted_bundle import BundleBindingAnchor
+from secp_worker.mounted_bundle import PreparedDiscoveryBundle
 from secp_worker.onboarding.live_authorization import (
     LiveReadAuthorizationContract,
     LiveReadAuthorizationLoadRequest,
     LiveReadAuthorizationRefused,
     load_and_verify_live_read_authorization,
 )
-from secp_worker.ssh_channel import BootstrapBundleUnavailable
 
 # The pinned, app-owned expected live-read contract (identical to the preflight re-verifier's).
 _EXPECTED_CONTRACT = LiveReadAuthorizationContract(
@@ -54,10 +55,10 @@ _EXPECTED_CONTRACT = LiveReadAuthorizationContract(
 
 
 @runtime_checkable
-class BundleAnchorSource(Protocol):
-    """Deployment-local seam yielding the mounted bundle's non-secret authorization anchor."""
+class DiscoveryBundlePreparer(Protocol):
+    """Deployment-local seam yielding ONE strictly-validated discovery bundle snapshot."""
 
-    def load_anchor(self) -> BundleBindingAnchor: ...
+    def prepare_for_discovery(self) -> PreparedDiscoveryBundle: ...
 
     def dispose(self) -> None: ...
 
@@ -95,58 +96,74 @@ class _ConnectionHashProvider:
         return connection_identity_hash(execution_target.config or {})
 
 
-def authorize_discovery_bundle(
+def authorize_prepared_discovery_bundle(
     session: Session,
     enrollment: TargetDiscoveryEnrollment,
-    anchor_source: BundleAnchorSource,
+    prepared: PreparedDiscoveryBundle,
     *,
     now: datetime,
 ) -> None:
-    """Prove the mounted bundle is authorized for this exact job, else raise a binding refusal.
+    """Prove the ALREADY-PREPARED bundle snapshot is authorized for this exact job, else refuse.
 
-    Reads the bundle's non-secret anchor (local file read; no host contact), requires it to name the
-    claimed enrollment's exact organization/target/onboarding/enrollment, then re-runs the
-    authoritative live-read authorization verifier. Disposes the anchor source on every path.
+    Enforces (all BEFORE any host contact, no host contact here):
+      F-BIND — the anchor names the claimed enrollment's exact org/target/onboarding/enrollment, and
+               an approved, unexpired, version-valid, connection/boundary-hash-matching live-read
+               authorization exists (SECP-002B-1B-6 verifier);
+      MB-2   — the manifest ``ssh_host`` equals the authoritative target host, and the SSH
+               endpoint-binding digest recomputed from the validated manifest equals BOTH the
+               bundle's ``binding.json`` digest AND the approved authorization's stored digest.
+    Does not dispose (the engine owns the prepared snapshot's lifecycle).
     """
+    anchor = prepared.anchor
+    ssh = prepared.ssh_bundle
+
+    # Structural identity binding: the anchor must name THIS claimed job.
+    if anchor.organization_id != enrollment.organization_id:
+        raise DiscoveryBindingRefused("bundle_organization_mismatch")
+    if anchor.execution_target_id != enrollment.execution_target_id:
+        raise DiscoveryBindingRefused("bundle_target_mismatch")
+    if anchor.onboarding_id != enrollment.onboarding_id:
+        raise DiscoveryBindingRefused("bundle_onboarding_mismatch")
+    if anchor.enrollment_id != enrollment.id:
+        raise DiscoveryBindingRefused("bundle_enrollment_mismatch")
+
+    # Authoritative live-read authorization re-verification.
+    request = LiveReadAuthorizationLoadRequest(
+        organization_id=anchor.organization_id,
+        execution_target_id=anchor.execution_target_id,
+        onboarding_id=anchor.onboarding_id,
+        authorization_id=anchor.authorization_id,
+        authorization_version=anchor.authorization_version,
+    )
     try:
-        try:
-            anchor = anchor_source.load_anchor()
-        except BootstrapBundleUnavailable as exc:
-            raise DiscoveryBindingRefused(
-                getattr(exc, "reason_code", "bootstrap_unavailable")
-            ) from None
-
-        # Structural identity binding: the anchor must name THIS claimed job. A bundle minted for
-        # another organization/target/onboarding/enrollment can never be used here.
-        if anchor.organization_id != enrollment.organization_id:
-            raise DiscoveryBindingRefused("bundle_organization_mismatch")
-        if anchor.execution_target_id != enrollment.execution_target_id:
-            raise DiscoveryBindingRefused("bundle_target_mismatch")
-        if anchor.onboarding_id != enrollment.onboarding_id:
-            raise DiscoveryBindingRefused("bundle_onboarding_mismatch")
-        if anchor.enrollment_id != enrollment.id:
-            raise DiscoveryBindingRefused("bundle_enrollment_mismatch")
-
-        # Authoritative re-verification: an approved, unexpired, version-valid, connection- and
-        # boundary-hash-matching live-read authorization for this target/onboarding must exist.
-        request = LiveReadAuthorizationLoadRequest(
-            organization_id=anchor.organization_id,
-            execution_target_id=anchor.execution_target_id,
-            onboarding_id=anchor.onboarding_id,
-            authorization_id=anchor.authorization_id,
-            authorization_version=anchor.authorization_version,
+        load_and_verify_live_read_authorization(
+            request=request,
+            repository=_SessionRepository(session),
+            connection_hash_provider=_ConnectionHashProvider(),
+            expected_contract=_EXPECTED_CONTRACT,
+            now=now,
         )
-        try:
-            load_and_verify_live_read_authorization(
-                request=request,
-                repository=_SessionRepository(session),
-                connection_hash_provider=_ConnectionHashProvider(),
-                expected_contract=_EXPECTED_CONTRACT,
-                now=now,
-            )
-        except LiveReadAuthorizationRefused as exc:
-            # Preserve the closed sub-reason (authorization_missing / _revoked / _expired /
-            # version drift / connection_hash_drift / boundary_hash_drift / ...).
-            raise DiscoveryBindingRefused(f"live_read_{exc.reason_code}") from None
-    finally:
-        anchor_source.dispose()
+    except LiveReadAuthorizationRefused as exc:
+        raise DiscoveryBindingRefused(f"live_read_{exc.reason_code}") from None
+
+    # MB-2: bind the SSH destination to the authoritative target authorization.
+    target = session.get(ExecutionTarget, enrollment.execution_target_id)
+    if target is None:
+        raise DiscoveryBindingRefused("execution_target_missing")
+    try:
+        normalized = normalize_target_host(target.config or {})
+    except ValueError:
+        raise DiscoveryBindingRefused("target_host_unresolvable") from None
+    if ssh.ssh_host.lower() != normalized:
+        raise DiscoveryBindingRefused("bundle_target_endpoint_mismatch")
+    computed = ssh_endpoint_binding_hash(
+        normalized_target_host=normalized,
+        ssh_host=ssh.ssh_host,
+        ssh_port=int(ssh.ssh_port),
+        host_key_fingerprint=ssh.host_key_fingerprint,
+    )
+    if computed != anchor.endpoint_binding_hash:
+        raise DiscoveryBindingRefused("endpoint_binding_manifest_mismatch")
+    auth = session.get(LiveReadAuthorization, anchor.authorization_id)
+    if auth is None or auth.endpoint_binding_hash != computed:
+        raise DiscoveryBindingRefused("endpoint_binding_unauthorized")

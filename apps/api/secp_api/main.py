@@ -36,6 +36,7 @@ from secp_api.routers import resolver_activation as resolver_activation_router
 from secp_api.routers import staging_deployments as staging_deployments_router
 from secp_api.routers import staging_labs as staging_labs_router
 from secp_api.routers import target_discovery as target_discovery_router
+from secp_api.routers import worker_admission as worker_admission_router
 from secp_api.routers import worker_identity as worker_identity_router
 
 logger = logging.getLogger("secp.api")
@@ -142,6 +143,9 @@ def create_app() -> FastAPI:
     app.include_router(readonly_preflight_router.router)
     app.include_router(resolver_activation_router.router)
     app.include_router(worker_identity_router.router)
+    # Internal worker-only admission route (SECP-B6 MB-1) — NOT under /api/v1; inert unless the
+    # deployment-local controlled-integration profile is enabled; reached only over internal mTLS.
+    app.include_router(worker_admission_router.router)
 
     @app.on_event("startup")
     def _startup() -> None:

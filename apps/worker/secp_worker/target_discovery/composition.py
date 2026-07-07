@@ -23,6 +23,11 @@ from __future__ import annotations
 from secp_worker.known_hosts import FileKnownHostsBindingVerifier
 from secp_worker.mounted_bundle import MountedWorkerBootstrapBundleSource
 from secp_worker.ssh_channel import SubprocessHostCommandRunner
+from secp_worker.target_discovery.admission_client import (
+    SealedWorkerAdmissionClient,
+    SignedWorkerAdmissionClient,
+    WorkerAdmissionClient,
+)
 from secp_worker.target_discovery.engine import (
     DiscoveryComposition,
     sealed_discovery_composition,
@@ -44,15 +49,40 @@ def build_discovery_composition(settings=None) -> DiscoveryComposition:
 
     mount_path = getattr(settings, "discovery_bootstrap_mount", "")
     # One mounted-bundle source serves BOTH roles: the read-only probe executor's SSH bundle source
-    # AND the engine's pre-SSH bundle-to-job authorization anchor (SECP-B6 F-BIND). Because the live
-    # composition always carries ``bundle_binding``, the engine's mandatory approved-worker-identity
-    # gate and the bundle-to-job binding gate are ALWAYS enforced before any host contact.
-    # strict=True selects the hardened descriptor-based validation + read-only-mount requirement +
-    # worker-private inode-pinned copy for ssh (SECP-B6 F-FS).
+    # AND the engine's single prepared-snapshot preparer (Phase C / F-BIND). The live composition
+    # always carries ``bundle_binding`` + ``admission_client``, so the engine's mandatory
+    # control-plane worker-admission and endpoint-binding gates are ALWAYS enforced before any host
+    # contact. strict=True selects the hardened descriptor-based validation + read-only-mount
+    # requirement + worker-private inode-pinned copy for ssh (SECP-B6 F-FS).
     bundle_source = MountedWorkerBootstrapBundleSource(mount_path, strict=True)
     probe_source = ReadOnlyProbeExecutor(
         bundle_source=bundle_source,
         runner=SubprocessHostCommandRunner(),
         host_key_verifier=FileKnownHostsBindingVerifier(),
     )
-    return DiscoveryComposition(probe_source=probe_source, bundle_binding=bundle_source)
+    return DiscoveryComposition(
+        probe_source=probe_source,
+        bundle_binding=bundle_source,
+        admission_client=_build_admission_client(settings),
+    )
+
+
+def _build_admission_client(settings) -> WorkerAdmissionClient:
+    """Build the worker admission client from deployment-local Ed25519 identity material. When the
+    material is absent/unreadable the client is SEALED (refuses), so live discovery fails closed."""
+    key_path = getattr(settings, "discovery_worker_mtls_key", "")
+    cert_path = getattr(settings, "discovery_worker_mtls_cert", "")
+    if not (key_path and cert_path):
+        return SealedWorkerAdmissionClient()
+    try:
+        with open(key_path, encoding="utf-8") as fh:
+            private_key_hex = fh.read().strip()
+        with open(cert_path, encoding="utf-8") as fh:
+            public_anchor_hex = fh.read().strip()
+    except OSError:
+        return SealedWorkerAdmissionClient()
+    if not (private_key_hex and public_anchor_hex):
+        return SealedWorkerAdmissionClient()
+    return SignedWorkerAdmissionClient(
+        private_key_hex=private_key_hex, public_anchor_hex=public_anchor_hex
+    )

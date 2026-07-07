@@ -40,7 +40,14 @@ The mount is a **read-only** directory containing exactly four files:
 | `manifest.json` | JSON with exactly `{ssh_host, ssh_port, account, host_key_fingerprint}` — safe tokens, bounded int port, `SHA256:` fingerprint. `account` must be a **scoped, minimally-privileged, read-only** service account — `root` and other privileged accounts are **refused** | owner-only writable (not group/other-writable) |
 | `id_key` | the OpenSSH **private key** file (referenced by path; never read into the app, never logged). The server-side key **MUST** be constrained to the minimum read-only access needed for the B6 probes (e.g. a forced-command / restricted PVE role) — client-side command restrictions are **not** a substitute for server-side least privilege | owner-only, no group/other access (`0600`/`0400`) |
 | `known_hosts` | the pinned `known_hosts` file used to verify the host-key fingerprint | owner-only writable |
-| `binding.json` | JSON with exactly `{organization_id, execution_target_id, onboarding_id, enrollment_id, authorization_id, authorization_version}` — the **non-secret** authorization anchor (no host/account/key/endpoint). Binds this bundle to the exact job it may process | owner-only writable |
+| `binding.json` | JSON with exactly `{organization_id, execution_target_id, onboarding_id, enrollment_id, authorization_id, authorization_version, endpoint_binding_hash}` — the **non-secret** authorization anchor (no host/account/key). `endpoint_binding_hash` is the opaque `sha256:` SSH-endpoint digest (MB-2). Binds this bundle to the exact job **and** endpoint it may use | owner-only writable |
+
+Additionally, on the **worker** container (not the mount), deployment-local settings provide the
+worker's control-plane admission identity material (MB-1): `SECP_DISCOVERY_WORKER_MTLS_KEY` (path to
+the worker's Ed25519 private key hex) and `SECP_DISCOVERY_WORKER_MTLS_CERT` (path to its public
+anchor hex), plus `SECP_DISCOVERY_ADMISSION_ENDPOINT` / `SECP_DISCOVERY_ADMISSION_CA` for the mTLS
+channel to the internal admission route. When any is absent the admission client is **sealed** and
+live discovery fails closed. The private key never leaves the worker and is never logged/serialized.
 
 The mount directory and every file must be:
 
@@ -71,12 +78,39 @@ the **exact** claimed job, or refuses fail-closed with no snapshot/plan:
   verifier): approved, unexpired, version-valid, connection-hash and boundary-hash matching, target and
   onboarding active (`live_read_authorization_*`).
 
-## Mandatory worker identity (before any SSH)
+## MB-1 — Control-plane-verified worker admission (before any SSH)
 
-Live discovery requires **exactly one approved worker-identity registration** for the organization,
-checked **before** host contact and **re-checked after probing** (a revocation or version bump
-mid-discovery fails closed and mints no plan). A candidate plan that binds worker-identity version `0`
-is **never approvable**.
+An **approved DB registration is not proof** that the running worker holds the registered identity.
+Before host contact the worker must prove possession of its deployment-local Ed25519 identity key to
+the **control-plane** admission verifier (`secp_api/services/worker_admission.py`, reached in
+deployment via the internal mTLS route `POST /internal/worker-discovery-admission/{begin,complete}`):
+
+1. the verifier issues a durable, **single-use nonce** bound to the job / organization / registration
+   / identity-version / endpoint digest;
+2. the worker signs it with its private key; the control plane **verifies the Ed25519 signature
+   against the registration's pinned public-anchor fingerprint** (never a self-asserted key) and marks
+   a one-time `WorkerDiscoveryAdmission` `admitted`;
+3. the discovery engine binds that admission to the **exact** claimed job and **consumes it once**
+   before persisting a plan.
+
+A missing/invalid/expired/replayed/wrong-key/wrong-worker/cross-job/cross-org admission fails closed
+with **zero SSH**. Exactly one approved worker-identity registration must exist; a revocation or
+identity-version bump between admission and plan persistence fails closed and mints no plan. A
+candidate plan is bound to the exact registration **id + version** and is **never approvable** at
+version `0` or against a rotated/different identity. Nothing but a closed reason code / safe ID is
+persisted or audited — never a certificate, key, anchor, signature, or challenge byte.
+
+## MB-2 — SSH endpoint bound to the approved target authorization (before any SSH)
+
+The SSH destination is cryptographically bound to the authoritative target authorization. The control
+plane stores **only** an opaque `sha256:` **endpoint-binding digest** over `(normalized target host,
+ssh_host, ssh_port, host-key fingerprint)` — never a raw host/port/fingerprint — as an **immutable**
+authorization binding fact, produced by an operator-side, secret-free bundle-preparation tool. Before
+probing, the worker requires the manifest `ssh_host` to equal the authoritative target host and the
+digest recomputed from the validated manifest to equal **both** the bundle's `binding.json` digest
+**and** the approved authorization's stored digest (`bundle_target_endpoint_mismatch` /
+`endpoint_binding_manifest_mismatch` / `endpoint_binding_unauthorized`). A changed host / port /
+fingerprint fails closed and **requires a new live-read authorization** (the digest is immutable).
 
 ## Host-key binding (before any SSH)
 
@@ -132,23 +166,38 @@ No `pvesh` write verb (`create`/`set`/`delete`/`push`), no HTTP client, Proxmox 
 manager, host helper, artifact pipeline, mutation transport, deployment-apply path, or OpenBao code is
 importable or reachable from discovery (proven by `tests/test_discovery_boundary.py`).
 
+## Live B6 remains disabled unless ALL of these pass (before any host contact)
+
+1. strict **read-only** descriptor-validated mount (owner-only, no symlink/hardlink, RO filesystem);
+2. `binding.json` anchor matches the claimed job's org/target/onboarding/enrollment;
+3. the recomputed **SSH endpoint-binding digest** equals the bundle's `binding.json` digest **and**
+   the approved authorization's stored digest (MB-2), and the manifest `ssh_host` is the target host;
+4. a valid, approved, current **live-read authorization** (SECP-002B-1B-6 re-verification);
+5. a valid **control-plane-verified worker admission** — the worker's Ed25519 signature over a
+   server-issued single-use nonce, verified against the pinned registration anchor (MB-1);
+6. the pinned **host-key binding** holds;
+7. the closed **read-only command policy** (`assert_read_only`).
+
+If any fails, discovery refuses with **zero SSH**, no snapshot, and no plan.
+
 ## First controlled live read-only discovery run (after merge)
 
 1. Merge this PR.
-2. In SECP (normal API), for the exact target: register + approve **one worker identity** for the org,
-   and create + approve a **live-read authorization** for the target/onboarding.
-3. Supply the worker-local bundle out of band (SSH `manifest.json`/`id_key`/`known_hosts` for a
-   **scoped read-only** account + the `binding.json` naming the org/target/onboarding/enrollment +
-   approved authorization), and mount it **read-only** into the **worker** container at the fixed path;
-   set `SECP_DISCOVERY_CONTROLLED_INTEGRATION_ENABLED=true` on the worker.
+2. In SECP (normal API), for the exact target: register + approve **one worker identity** for the org
+   (its verification anchor is the worker's Ed25519 public key), and create + approve a **live-read
+   authorization** for the target/onboarding, supplying the operator-computed **endpoint-binding
+   digest** for the exact SSH host/port/host-key.
+3. Provision the worker's deployment-local **admission identity material** (Ed25519 key/anchor +
+   internal-admission-endpoint/CA settings). Supply the worker-local bundle out of band (SSH
+   `manifest.json`/`id_key`/`known_hosts` for a **scoped read-only** account + `binding.json` naming
+   the org/target/onboarding/enrollment/authorization + the endpoint digest), and mount it
+   **read-only** into the **worker** container; set `SECP_DISCOVERY_CONTROLLED_INTEGRATION_ENABLED=true`.
 4. In SECP, the operator requests target discovery for that enrolled, active target (creating the
    enrollment named in `binding.json`).
-5. The worker claims the durable discovery job and, **before any SSH**, proves: exactly one approved
-   worker identity; the bundle's anchor matches the claimed job; the live-read authorization is
-   approved/current; the mounted bundle validates (descriptor checks, read-only mount); and the pinned
-   host-key binding holds. Only then does it run the closed read-only probe set.
+5. The worker claims the durable discovery job and satisfies **all** of the seven gates above —
+   including a control-plane-verified admission and the SSH endpoint binding — **before any SSH**.
 6. Typed, bounded, secret-free evidence persists (with truthful `bundle_available`/`contact_state`);
-   SECP generates the exact **non-executable** candidate plan bound to the approved worker identity; the
-   operator reviews and approves the exact plan.
+   SECP generates the exact **non-executable** candidate plan bound to the exact approved worker
+   identity (registration id + version); the operator reviews and approves the exact plan.
 7. **No mutation occurs.** Live deployment apply remains sealed pending a later controlled
    deployment-enablement phase.

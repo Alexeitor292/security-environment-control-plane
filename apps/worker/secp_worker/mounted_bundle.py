@@ -55,6 +55,33 @@ class BundleBindingAnchor:
     enrollment_id: uuid.UUID
     authorization_id: uuid.UUID
     authorization_version: int
+    # SECP-B6 MB-2: the opaque ``sha256:`` SSH endpoint-binding digest the operator's bundle-prep
+    # tool computed. The engine re-derives it from the validated manifest + the authoritative target
+    # host and requires equality with this value AND the approved authorization's stored digest.
+    endpoint_binding_hash: str
+
+
+@dataclass
+class PreparedDiscoveryBundle:
+    """A single strictly-validated discovery bundle snapshot (SECP-B6 MB-1/MB-2 Phase C).
+
+    Produced by one descriptor-pinned acquisition so the authorization gates AND the probe executor
+    consume the SAME validated bytes — a post-validation mount swap cannot change what ssh reads.
+    Non-serializable; the SSH bundle has a redacted repr; ``dispose`` removes the private copy.
+    """
+
+    ssh_bundle: SshBootstrapBundle
+    anchor: BundleBindingAnchor
+    _source: MountedWorkerBootstrapBundleSource
+
+    def dispose(self) -> None:
+        self._source._finalize_private_dir()
+
+    def __repr__(self) -> str:
+        return "PreparedDiscoveryBundle(<redacted>)"
+
+    def __reduce__(self):  # the prepared bundle must never leave the process
+        raise TypeError("PreparedDiscoveryBundle is not serializable")
 
 
 # Fixed bundle layout inside the mount directory. Names are constants (no traversal is possible).
@@ -87,8 +114,10 @@ _BINDING_KEYS = frozenset(
         "enrollment_id",
         "authorization_id",
         "authorization_version",
+        "endpoint_binding_hash",
     }
 )
+_ENDPOINT_BINDING_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # SECP-B6 F-BLAST: privileged / reserved SSH accounts are refused. The server-side key MUST be a
 # minimally-privileged, read-only-scoped service account (see docs); client-side command
 # restrictions are NOT a substitute for server-side least privilege.
@@ -194,7 +223,7 @@ class MountedWorkerBootstrapBundleSource:
     """The real worker-only bundle source. Constructed with the FIXED deployment-local mount path;
     validates + reads the bundle on each ``acquire``, failing closed on any problem.
 
-    ``strict`` selects the hardened live-profile path (SECP-B6 F-FS): on POSIX it validates every
+    ``strict`` selects the hardened live-profile path (SECP-B6 F-FS): on POSIX it validates
     file by DESCRIPTOR (``openat``/``fstat``: type, owner, perms, size, ``st_nlink == 1``, same
     device, ``O_NOFOLLOW``), requires a read-only filesystem, and copies the validated ``id_key`` +
     ``known_hosts`` bytes into a fresh worker-private temp dir so the known-hosts verifier and ssh
@@ -206,8 +235,24 @@ class MountedWorkerBootstrapBundleSource:
         self._mount_path = mount_path
         self._strict = strict
         self._private_dir: str | None = None
+        self._prepared: PreparedDiscoveryBundle | None = None
+
+    def prepare_for_discovery(self) -> PreparedDiscoveryBundle:
+        """Acquire the SSH bundle AND the binding anchor as ONE strictly-validated snapshot (SECP-B6
+        MB-1/MB-2 Phase C). The anchor and the SSH material come from the same acquisition, and both
+        the authorization gates and the probe executor consume this cached snapshot — a mount swap
+        after preparation cannot change what ssh reads. Caches the snapshot so a subsequent
+        ``acquire``/``load_anchor`` (e.g. the executor's own ``acquire``) returns the SAME bytes."""
+        ssh_bundle = self.acquire()
+        anchor = self._load_anchor_uncached()
+        prepared = PreparedDiscoveryBundle(ssh_bundle=ssh_bundle, anchor=anchor, _source=self)
+        self._prepared = prepared
+        return prepared
 
     def acquire(self) -> SshBootstrapBundle:
+        # Return the already-validated snapshot so the executor never re-reads the mount by name.
+        if self._prepared is not None:
+            return self._prepared.ssh_bundle
         if self._strict:
             if not _IS_POSIX:
                 _reject("mount_non_posix_unsupported")
@@ -359,6 +404,12 @@ class MountedWorkerBootstrapBundleSource:
         return data
 
     def load_anchor(self) -> BundleBindingAnchor:
+        """Return the binding anchor — from the prepared snapshot if present, else a fresh read."""
+        if self._prepared is not None:
+            return self._prepared.anchor
+        return self._load_anchor_uncached()
+
+    def _load_anchor_uncached(self) -> BundleBindingAnchor:
         """Read + validate the non-secret authorization anchor (``binding.json``) from the mount.
 
         Contacts no host and reads no SSH material — a local file read of control-plane IDs only.
@@ -389,6 +440,9 @@ class MountedWorkerBootstrapBundleSource:
         version = data["authorization_version"]
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             _reject("binding_version_invalid")
+        ebh = data["endpoint_binding_hash"]
+        if not (isinstance(ebh, str) and _ENDPOINT_BINDING_RE.match(ebh)):
+            _reject("binding_endpoint_hash_invalid")
         try:
             return BundleBindingAnchor(
                 organization_id=uuid.UUID(str(data["organization_id"])),
@@ -397,6 +451,7 @@ class MountedWorkerBootstrapBundleSource:
                 enrollment_id=uuid.UUID(str(data["enrollment_id"])),
                 authorization_id=uuid.UUID(str(data["authorization_id"])),
                 authorization_version=version,
+                endpoint_binding_hash=ebh,
             )
         except (ValueError, AttributeError, TypeError):
             _reject("binding_id_invalid")
@@ -424,8 +479,17 @@ class MountedWorkerBootstrapBundleSource:
             raise  # unreachable
 
     def dispose(self) -> None:
+        # When a prepared snapshot is active the ENGINE owns its lifecycle (via
+        # PreparedDiscoveryBundle.dispose); a per-probe-session dispose is a NO-OP — otherwise the
+        # first probe session would delete the worker-private copy the next session still needs.
+        if self._prepared is not None:
+            return
+        self._finalize_private_dir()
+
+    def _finalize_private_dir(self) -> None:
         # Remove the worker-private copy of the validated key/known_hosts (strict path). The mount
         # itself persists and is read-only; nothing else sensitive is held in memory.
+        self._prepared = None
         private_dir = self._private_dir
         self._private_dir = None
         if private_dir is not None:

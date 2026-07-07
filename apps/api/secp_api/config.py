@@ -49,6 +49,17 @@ class Settings(BaseSettings):
     discovery_controlled_integration_enabled: bool = False
     discovery_bootstrap_mount: str = "/var/run/secp/discovery-bundle"
 
+    # SECP-B6 MB-1: worker discovery ADMISSION over mutual TLS. These are DEPLOYMENT-LOCAL worker
+    # settings (paths + an internal endpoint URL) — never API/UI/DB controlled. They carry NO
+    # secret material in config: the client certificate + private key live ONLY on the worker's
+    # deployment-local filesystem, and the admission endpoint verifies the presented client
+    # certificate's public-key fingerprint against the approved worker registration. When any of
+    # these is unset/invalid/unreachable, live discovery fails closed (sealed).
+    discovery_admission_endpoint: str = ""
+    discovery_worker_mtls_cert: str = ""
+    discovery_worker_mtls_key: str = ""
+    discovery_admission_ca: str = ""
+
     # Auth. The dev fallback principal is ONLY honored when auth_dev_mode is true
     # AND app_env != production (enforced below). Production requires real OIDC.
     auth_dev_mode: bool = True
