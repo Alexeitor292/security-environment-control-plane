@@ -129,7 +129,9 @@ def test_strict_prepare_reads_no_key_bytes_then_finalize_copies(tmp_path, monkey
     # The pinned descriptor is closed once the key material is read.
     assert src._dir_fd is None
 
-    src.dispose()
+    # The engine owns the prepared snapshot's lifecycle, so the source-level dispose() is a no-op
+    # while a snapshot is prepared; the private copy is removed via the prepared bundle's dispose().
+    prepared.dispose()
     assert not os.path.exists(prepared.ssh_bundle.private_key_path)
 
 

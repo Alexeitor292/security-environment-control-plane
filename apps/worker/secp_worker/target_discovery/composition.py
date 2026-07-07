@@ -12,20 +12,20 @@ refuses otherwise) BEFORE any ssh invocation. So a disabled profile OR a missing
 leaves
 discovery sealed.
 
-This module lives inside the discovery package and imports NO mutation/transport/apply/artifact/
-OpenBao code — only the shared read-only SSH channel runner, the mounted bundle source, the
-known-hosts
-verifier, and the read-only probe executor.
+This module lives inside the discovery package and imports NO mutation/apply/artifact/OpenBao code —
+only the shared read-only SSH channel runner, the mounted bundle source, the known-hosts verifier,
+the read-only probe executor, and the control-plane admission HTTP transport (the sole permitted
+transport, which lives OUTSIDE the discovery package so the package itself stays ``httpx``-free).
 """
 
 from __future__ import annotations
 
+from secp_worker.admission_http_transport import HttpxAdmissionTransport
 from secp_worker.known_hosts import FileKnownHostsBindingVerifier
 from secp_worker.mounted_bundle import MountedWorkerBootstrapBundleSource
 from secp_worker.ssh_channel import SubprocessHostCommandRunner
 from secp_worker.target_discovery.admission_client import (
     HttpWorkerAdmissionClient,
-    HttpxAdmissionTransport,
     SealedWorkerAdmissionClient,
     WorkerAdmissionClient,
 )

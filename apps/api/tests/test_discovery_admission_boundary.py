@@ -94,19 +94,18 @@ def test_live_composition_uses_http_admission_client_over_endpoint(tmp_path) -> 
     # The CONFIGURED live runtime (endpoint + Ed25519 material present) must build the real HTTP
     # client pointed at the internal admission endpoint — not a sealed or in-process client.
     from secp_api.config import Settings
-    from secp_worker.target_discovery.admission_client import (
-        HttpWorkerAdmissionClient,
-        HttpxAdmissionTransport,
-    )
+    from secp_worker.admission_http_transport import HttpxAdmissionTransport
+    from secp_worker.target_discovery.admission_client import HttpWorkerAdmissionClient
     from secp_worker.target_discovery.composition import _build_admission_client
 
     key = tmp_path / "id.key"
     anchor = tmp_path / "id.anchor"
     key.write_text("aa" * 32)
     anchor.write_text("bb" * 32)
+    endpoint = "https://control-plane.example:8443"  # .example placeholder (no-real-endpoints)
     settings = Settings(
         discovery_controlled_integration_enabled=True,
-        discovery_admission_endpoint="https://control-plane.internal:8443",
+        discovery_admission_endpoint=endpoint,
         discovery_worker_identity_key=str(key),
         discovery_worker_identity_anchor=str(anchor),
         discovery_admission_ca=str(tmp_path / "ca.pem"),
@@ -115,7 +114,7 @@ def test_live_composition_uses_http_admission_client_over_endpoint(tmp_path) -> 
     assert isinstance(client, HttpWorkerAdmissionClient)
     transport = client._transport
     assert isinstance(transport, HttpxAdmissionTransport)
-    assert transport.base_url == "https://control-plane.internal:8443"
+    assert transport.base_url == endpoint
 
 
 def test_live_composition_sealed_without_endpoint_or_material(tmp_path) -> None:
@@ -126,7 +125,7 @@ def test_live_composition_sealed_without_endpoint_or_material(tmp_path) -> None:
     # Endpoint set but no identity material → sealed (fails closed).
     s1 = Settings(
         discovery_controlled_integration_enabled=True,
-        discovery_admission_endpoint="https://control-plane.internal:8443",
+        discovery_admission_endpoint="https://control-plane.example:8443",
     )
     assert isinstance(_build_admission_client(s1), SealedWorkerAdmissionClient)
     # Material present but no endpoint → sealed.
