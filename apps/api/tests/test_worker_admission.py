@@ -150,6 +150,33 @@ def _sign_and_complete(session, admission, priv, pub, *, now):
     )
 
 
+def test_admission_bound_to_exact_job(session, principal):
+    # An admission issued for one job cannot be asserted/consumed for a different job id.
+    import uuid
+
+    now = datetime.now(UTC)
+    priv, pub, ebh, auth, enrollment, job = _full_setup(session, principal)
+    admission = adm.issue_discovery_admission_challenge(
+        session,
+        discovery_job_id=job.id,
+        authorization_id=auth.id,
+        authorization_version=auth.authorization_version,
+        endpoint_binding_hash=ebh,
+        now=now,
+    )
+    _sign_and_complete(session, admission, priv, pub, now=now)
+    with pytest.raises(adm.WorkerAdmissionRefused) as exc:
+        adm.assert_discovery_admission_valid(
+            session,
+            admission_id=admission.id,
+            enrollment=enrollment,
+            discovery_job_id=uuid.uuid4(),  # a different job
+            endpoint_binding_hash=ebh,
+            now=now,
+        )
+    assert exc.value.reason_code == "admission_job_mismatch"
+
+
 def test_admission_happy_path_issue_sign_complete_consume(session, principal):
     now = datetime.now(UTC)
     priv, pub, ebh, auth, enrollment, job = _full_setup(session, principal)
@@ -168,6 +195,7 @@ def test_admission_happy_path_issue_sign_complete_consume(session, principal):
         session,
         admission_id=admission.id,
         enrollment=enrollment,
+        discovery_job_id=job.id,
         endpoint_binding_hash=ebh,
         now=now,
     )
@@ -176,6 +204,7 @@ def test_admission_happy_path_issue_sign_complete_consume(session, principal):
         session,
         admission_id=admission.id,
         enrollment=enrollment,
+        discovery_job_id=job.id,
         endpoint_binding_hash=ebh,
         now=now,
     )
@@ -188,6 +217,7 @@ def test_admission_happy_path_issue_sign_complete_consume(session, principal):
             session,
             admission_id=admission.id,
             enrollment=enrollment,
+            discovery_job_id=job.id,
             endpoint_binding_hash=ebh,
             now=now,
         )
@@ -305,6 +335,7 @@ def test_admission_revoked_worker_before_consume_refused(session, principal):
             session,
             admission_id=admission.id,
             enrollment=enrollment,
+            discovery_job_id=job.id,
             endpoint_binding_hash=ebh,
             now=now,
         )

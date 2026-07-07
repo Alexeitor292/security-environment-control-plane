@@ -464,6 +464,7 @@ def _run_discovery_body(
                 session,
                 admission_id=admission_id,
                 enrollment=enrollment,
+                discovery_job_id=job.id,
                 endpoint_binding_hash=endpoint_binding_hash,
                 now=now,
             )
@@ -626,6 +627,7 @@ def _run_discovery_body(
                 session,
                 admission_id=admission_id,
                 enrollment=enrollment,
+                discovery_job_id=job.id,
                 endpoint_binding_hash=endpoint_binding_hash,
                 now=now,
             )

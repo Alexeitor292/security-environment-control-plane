@@ -267,6 +267,7 @@ def assert_discovery_admission_valid(
     *,
     admission_id: uuid.UUID,
     enrollment: TargetDiscoveryEnrollment,
+    discovery_job_id: uuid.UUID,
     endpoint_binding_hash: str,
     now: datetime,
 ) -> AdmissionResult:
@@ -283,6 +284,7 @@ def assert_discovery_admission_valid(
     if (
         admission.organization_id != enrollment.organization_id
         or admission.enrollment_id != enrollment.id
+        or admission.discovery_job_id != discovery_job_id
         or admission.execution_target_id != enrollment.execution_target_id
         or admission.onboarding_id != enrollment.onboarding_id
     ):
@@ -302,6 +304,7 @@ def consume_discovery_admission(
     *,
     admission_id: uuid.UUID,
     enrollment: TargetDiscoveryEnrollment,
+    discovery_job_id: uuid.UUID,
     endpoint_binding_hash: str,
     now: datetime,
 ) -> AdmissionResult:
@@ -312,6 +315,7 @@ def consume_discovery_admission(
         session,
         admission_id=admission_id,
         enrollment=enrollment,
+        discovery_job_id=discovery_job_id,
         endpoint_binding_hash=endpoint_binding_hash,
         now=now,
     )
