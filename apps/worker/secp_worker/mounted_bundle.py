@@ -85,10 +85,18 @@ def _check_owner_and_perms(
             _reject(missing_reason + "_bad_permissions")
 
 
-def _require_regular_file(path: str, *, max_bytes: int, world_perm_mask: int, reason: str) -> None:
+def _require_regular_file(
+    mount: str, path: str, *, max_bytes: int, world_perm_mask: int, reason: str
+) -> None:
     st = _lstat(path)
+    # Reject a symlink FIRST with a specific reason: ``_within`` follows the final symlink via
+    # ``realpath`` and would otherwise mask a symlinked bundle file as a generic path escape.
     if stat.S_ISLNK(st.st_mode):
         _reject(reason + "_symlink")
+    # Containment (defense-in-depth): the file must be the fixed-name entry directly inside the real
+    # mount — never a traversal or an entry resolving elsewhere.
+    if not _within(mount, path):
+        _reject(reason + "_path_escape")
     if not stat.S_ISREG(st.st_mode):
         _reject(reason + "_not_regular_file")
     if st.st_size <= 0 or st.st_size > max_bytes:
@@ -123,20 +131,24 @@ class MountedWorkerBootstrapBundleSource:
         manifest_path = os.path.join(mount, _MANIFEST_NAME)
         key_path = os.path.join(mount, _KEY_NAME)
         known_hosts_path = os.path.join(mount, _KNOWN_HOSTS_NAME)
-        for p in (manifest_path, key_path, known_hosts_path):
-            if not _within(mount, p):
-                _reject("bundle_path_escape")
 
+        # Each bundle file: rejected as a symlink first (specific reason), then contained within the
+        # real mount, then required to be a bounded, owner-only regular file.
         # Manifest: regular file, not group/other-writable, bounded, well-formed, exact safe keys.
         _require_regular_file(
-            manifest_path, max_bytes=_MAX_MANIFEST_BYTES, world_perm_mask=0o022, reason="manifest"
+            mount,
+            manifest_path,
+            max_bytes=_MAX_MANIFEST_BYTES,
+            world_perm_mask=0o022,
+            reason="manifest",
         )
         # Private key: regular file, NO group/other access at all (0o077), bounded.
         _require_regular_file(
-            key_path, max_bytes=_MAX_KEY_BYTES, world_perm_mask=0o077, reason="key"
+            mount, key_path, max_bytes=_MAX_KEY_BYTES, world_perm_mask=0o077, reason="key"
         )
         # known_hosts: regular file, not group/other-writable, bounded.
         _require_regular_file(
+            mount,
             known_hosts_path,
             max_bytes=_MAX_KNOWN_HOSTS_BYTES,
             world_perm_mask=0o022,
