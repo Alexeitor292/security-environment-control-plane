@@ -326,6 +326,7 @@ class _InProcAdmissionTransport:
                 )
                 return 200, {
                     "status": "valid" if rel == "/assert" else "consumed",
+                    "admission_id": payload["admission_id"],
                     "registration_id": str(result.registration_id),
                     "identity_version": result.identity_version,
                 }
@@ -953,3 +954,169 @@ def test_item4_successful_admission_reads_key_material_after(session, principal,
     outcome = run_discovery(session, job, composition=comp, now=datetime.now(UTC))
     assert outcome.ok is True and outcome.reason_code == "plan_ready"
     assert spy.prepare_calls == 1 and spy.finalize_calls == 1  # key read once, post-admission
+
+
+# --- SECP-B6 item-1 hardening: a rogue admission server cannot cause SSH ------
+
+
+def _write_identity_files(tmp_path, priv, pub):
+    (tmp_path / "id.key").write_text(priv)
+    (tmp_path / "id.anchor").write_text(pub)
+    return str(tmp_path / "id.key"), str(tmp_path / "id.anchor")
+
+
+def _admit_anything_responder():
+    # A MALICIOUS control plane that would 'admit' any worker for any job. It must never be able to
+    # push the worker to SSH: the transport rejects plain HTTP / an untrusted CA before trusting it.
+    import secrets as _secrets
+    from datetime import UTC, datetime, timedelta
+
+    aid = str(uuid.uuid4())
+    reg = str(uuid.uuid4())
+
+    def responder(path, body):
+        now = datetime.now(UTC)
+        if path.endswith("/begin"):
+            return 200, {
+                "admission_id": aid,
+                "nonce": _secrets.token_hex(16),
+                "organization_id": str(uuid.uuid4()),
+                "discovery_job_id": str(body.get("discovery_job_id")),
+                "worker_registration_id": reg,
+                "identity_version": 9,
+                "endpoint_binding_hash": body.get("endpoint_binding_hash"),
+                "expires_at": (now + timedelta(seconds=90)).isoformat(),
+            }
+        if path.endswith("/complete"):
+            return 200, {"status": "admitted", "admission_id": body.get("admission_id")}
+        if path.endswith(("/assert", "/consume")):
+            return 200, {
+                "status": "valid" if path.endswith("/assert") else "consumed",
+                "admission_id": body.get("admission_id"),
+                "registration_id": reg,
+                "identity_version": 9,
+            }
+        return 404, {}
+
+    return responder
+
+
+def _live_http_comp(settings, probe, spy):
+    from secp_worker.target_discovery.composition import _build_admission_client
+
+    return DiscoveryComposition(
+        probe_source=probe, bundle_binding=spy, admission_client=_build_admission_client(settings)
+    )
+
+
+def test_plain_http_rogue_server_cannot_cause_ssh(session, principal, tmp_path):
+    # A rogue admission server served over PLAIN HTTP: the worker's transport refuses http:// before
+    # any request, so the server is never contacted and no SSH/key-read occurs.
+    from _admission_tls_util import FakeAdmissionServer, write_ca_only
+    from secp_api.config import Settings
+
+    priv, pub = _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    key_path, anchor_path = _write_identity_files(tmp_path, priv, pub)
+    ca_path = write_ca_only(tmp_path)  # a valid CA — the endpoint SCHEME (http) is the disqualifier
+
+    with FakeAdmissionServer(responder=_admit_anything_responder()) as server:  # plain HTTP
+        settings = Settings(
+            discovery_controlled_integration_enabled=True,
+            discovery_admission_endpoint=server.base_url,  # http://localhost:PORT
+            discovery_worker_identity_key=key_path,
+            discovery_worker_identity_anchor=anchor_path,
+            discovery_admission_ca=ca_path,
+        )
+        spy = _FinalizeSpyBundle(MountedWorkerBootstrapBundleSource(mount))
+        probe = _FakeProbe()
+        outcome = run_discovery(
+            session, job, composition=_live_http_comp(settings, probe, spy), now=datetime.now(UTC)
+        )
+        assert server.request_count == 0  # the rogue HTTP server was NEVER contacted
+    assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
+    assert spy.finalize_calls == 0  # no private key read
+    assert probe.calls == 0  # zero SSH
+    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0
+
+
+def test_wrong_ca_rogue_tls_server_cannot_cause_ssh(session, principal, tmp_path):
+    # A rogue admission server over HTTPS with a cert the worker's configured CA does NOT trust: the
+    # TLS handshake fails, the admission fails closed, and no SSH/key-read occurs.
+    from _admission_tls_util import FakeAdmissionServer, IssuedTls, write_ca_only
+    from secp_api.config import Settings
+
+    priv, pub = _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    key_path, anchor_path = _write_identity_files(tmp_path, priv, pub)
+    server_tls = IssuedTls(tmp_path, label="rogue")  # server cert signed by the rogue CA
+    trusted_ca = write_ca_only(tmp_path, label="trusted")  # worker trusts a DIFFERENT CA
+
+    with FakeAdmissionServer(
+        responder=_admit_anything_responder(),
+        certfile=server_tls.server_cert_path,
+        keyfile=server_tls.server_key_path,
+    ) as server:
+        settings = Settings(
+            discovery_controlled_integration_enabled=True,
+            discovery_admission_endpoint=server.base_url,  # https://localhost:PORT
+            discovery_worker_identity_key=key_path,
+            discovery_worker_identity_anchor=anchor_path,
+            discovery_admission_ca=trusted_ca,  # does NOT sign the rogue server cert
+        )
+        spy = _FinalizeSpyBundle(MountedWorkerBootstrapBundleSource(mount))
+        probe = _FakeProbe()
+        outcome = run_discovery(
+            session, job, composition=_live_http_comp(settings, probe, spy), now=datetime.now(UTC)
+        )
+    assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
+    assert spy.finalize_calls == 0  # no private key read despite a would-admit server
+    assert probe.calls == 0  # zero SSH
+    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0
+
+
+def test_trusted_ca_but_malformed_admission_cannot_cause_ssh(session, principal, tmp_path):
+    # A server the worker's CA DOES trust (TLS succeeds) but which returns a bogus admission body
+    # (a generic 200 whose /complete is not exactly "admitted") must still fail closed: strict
+    # response validation refuses it before any key read or SSH.
+    from _admission_tls_util import FakeAdmissionServer, IssuedTls
+    from secp_api.config import Settings
+
+    priv, pub = _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    key_path, anchor_path = _write_identity_files(tmp_path, priv, pub)
+    tls = IssuedTls(tmp_path, label="trusted")  # worker will trust THIS CA (TLS handshake succeeds)
+
+    base = _admit_anything_responder()
+
+    def malformed(path, body):
+        status, resp = base(path, body)
+        if path.endswith("/complete"):
+            resp = {**resp, "status": "ok"}  # not the exact required "admitted"
+        return status, resp
+
+    with FakeAdmissionServer(
+        responder=malformed, certfile=tls.server_cert_path, keyfile=tls.server_key_path
+    ) as server:
+        settings = Settings(
+            discovery_controlled_integration_enabled=True,
+            discovery_admission_endpoint=server.base_url,
+            discovery_worker_identity_key=key_path,
+            discovery_worker_identity_anchor=anchor_path,
+            discovery_admission_ca=tls.ca_path,  # trusts the server cert → TLS ok, content is bogus
+        )
+        spy = _FinalizeSpyBundle(MountedWorkerBootstrapBundleSource(mount))
+        probe = _FakeProbe()
+        outcome = run_discovery(
+            session, job, composition=_live_http_comp(settings, probe, spy), now=datetime.now(UTC)
+        )
+    assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
+    assert spy.finalize_calls == 0  # no private key read
+    assert probe.calls == 0  # zero SSH
+    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0

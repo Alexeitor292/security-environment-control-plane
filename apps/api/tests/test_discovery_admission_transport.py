@@ -1,0 +1,396 @@
+"""SECP-B6 MB-1 item-1 — admission-transport hardening (strict HTTPS + CA pin + strict responses).
+
+The live worker may trust ONLY a control-plane admission endpoint that is (a) reached over HTTPS,
+(b) verified against an explicit deployment-local CA (never system trust, never ambient proxy/env),
+and (c) returns an exactly-shaped response for the requested admission id + lifecycle phase.
+Everything else fails closed before any request, key-material read, or SSH. These tests exercise the
+real ``HttpxAdmissionTransport`` + ``HttpWorkerAdmissionClient`` against a threaded fake server.
+"""
+
+from __future__ import annotations
+
+import secrets
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from _admission_tls_util import FakeAdmissionServer, IssuedTls, write_ca_only
+from secp_api.config import Settings
+from secp_api.worker_admission_contract import generate_ed25519_keypair
+from secp_worker.admission_http_transport import AdmissionTransportError, HttpxAdmissionTransport
+from secp_worker.target_discovery.admission_client import (
+    HttpWorkerAdmissionClient,
+    SealedWorkerAdmissionClient,
+    WorkerAdmissionUnavailable,
+)
+from secp_worker.target_discovery.composition import _build_admission_client
+
+_EBH = "sha256:" + "ab" * 32
+
+
+@pytest.fixture(scope="module")
+def shared_tls(tmp_path_factory):
+    # One CA + server cert generated ONCE per module (EC keygen is the dominant cost).
+    return IssuedTls(tmp_path_factory.mktemp("admission-tls"))
+
+
+# --- 1 + 2: strict URL validation at construction (before any request) -------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://control-plane.example:8443",  # plain HTTP
+        "http://control-plane.example",  # plain HTTP, no port
+        "file:///etc/passwd",  # file scheme
+        "unix:///var/run/admit.sock",  # unix socket url
+        "ftp://control-plane.example",  # other scheme
+        "//control-plane.example",  # scheme-relative
+        "https://user:pass@control-plane.example",  # userinfo
+        "https://control-plane.example?x=1",  # query string
+        "https://control-plane.example#frag",  # fragment
+        "https://control-plane.example/admit",  # non-root path
+        "https://control-plane.example/",  # accepted (root path) — sanity handled separately
+        "https://control-plane.example:99999",  # malformed/out-of-range port
+        "https://control-plane.example:notaport",  # non-numeric port
+        "https://:8443",  # missing host
+        "https:// space.example",  # whitespace in host
+        "",  # empty
+        "   ",  # blank
+    ],
+)
+def test_transport_rejects_non_strict_endpoints(url):
+    # URL validation happens at construction BEFORE the CA is read, so a non-empty dummy CA is fine.
+    ca = "dummy-ca-path"
+    if url == "https://control-plane.example/":
+        # Root path is the one allowed form — it must NOT raise (normalized, path dropped).
+        t = HttpxAdmissionTransport(base_url=url, ca_path=ca)
+        assert t.base_url == "https://control-plane.example"
+        return
+    with pytest.raises(AdmissionTransportError) as exc:
+        HttpxAdmissionTransport(base_url=url, ca_path=ca)
+    # The closed reason code never leaks the raw URL (skip the trivially-empty cases).
+    if url.strip():
+        assert url.strip() not in str(exc.value)
+
+
+def test_transport_requires_ca(tmp_path):
+    with pytest.raises(AdmissionTransportError) as exc:
+        HttpxAdmissionTransport(base_url="https://control-plane.example:8443", ca_path="")
+    assert exc.value.reason_code == "admission_ca_required"
+
+
+def test_transport_repr_and_error_do_not_leak_endpoint():
+    ca = "dummy-ca-path"
+    t = HttpxAdmissionTransport(base_url="https://secret-cp.example:8443", ca_path=ca)
+    assert "secret-cp" not in repr(t)
+    assert repr(t) == "HttpxAdmissionTransport(<redacted>)"
+    with pytest.raises(AdmissionTransportError) as exc:
+        HttpxAdmissionTransport(base_url="http://secret-cp.example:8443", ca_path=ca)
+    assert "secret-cp" not in str(exc.value)
+
+
+# --- 3: composition requires an explicit, usable CA bundle -------------------
+
+
+def _live_settings(*, endpoint, key, anchor, ca):
+    return Settings(
+        discovery_controlled_integration_enabled=True,
+        discovery_admission_endpoint=endpoint,
+        discovery_worker_identity_key=key,
+        discovery_worker_identity_anchor=anchor,
+        discovery_admission_ca=ca,
+    )
+
+
+def _write_identity(tmp_path):
+    priv, pub = generate_ed25519_keypair()
+    (tmp_path / "id.key").write_text(priv)
+    (tmp_path / "id.anchor").write_text(pub)
+    return str(tmp_path / "id.key"), str(tmp_path / "id.anchor")
+
+
+def test_composition_valid_ca_and_https_builds_http_client(tmp_path):
+    key, anchor = _write_identity(tmp_path)
+    ca = write_ca_only(tmp_path)
+    settings = _live_settings(
+        endpoint="https://control-plane.example:8443", key=key, anchor=anchor, ca=ca
+    )
+    client = _build_admission_client(settings)
+    assert isinstance(client, HttpWorkerAdmissionClient)
+
+
+@pytest.mark.parametrize("ca_kind", ["missing_setting", "nonexistent", "empty", "malformed", "dir"])
+def test_composition_seals_on_bad_ca(ca_kind, tmp_path):
+    key, anchor = _write_identity(tmp_path)
+    if ca_kind == "missing_setting":
+        ca = ""
+    elif ca_kind == "nonexistent":
+        ca = str(tmp_path / "nope.pem")
+    elif ca_kind == "empty":
+        (tmp_path / "empty.pem").write_text("")
+        ca = str(tmp_path / "empty.pem")
+    elif ca_kind == "malformed":
+        (tmp_path / "bad.pem").write_text("-----BEGIN CERTIFICATE-----\nnot base64\n----END----\n")
+        ca = str(tmp_path / "bad.pem")
+    else:  # a directory, not a file
+        ca = str(tmp_path)
+    settings = _live_settings(
+        endpoint="https://control-plane.example:8443", key=key, anchor=anchor, ca=ca
+    )
+    assert isinstance(_build_admission_client(settings), SealedWorkerAdmissionClient)
+
+
+def test_composition_seals_on_http_endpoint_even_with_valid_ca(tmp_path):
+    key, anchor = _write_identity(tmp_path)
+    ca = write_ca_only(tmp_path)
+    settings = _live_settings(
+        endpoint="http://control-plane.example:8443", key=key, anchor=anchor, ca=ca
+    )
+    assert isinstance(_build_admission_client(settings), SealedWorkerAdmissionClient)
+
+
+def test_composition_seals_without_ca_setting(tmp_path):
+    key, anchor = _write_identity(tmp_path)
+    settings = _live_settings(
+        endpoint="https://control-plane.example:8443", key=key, anchor=anchor, ca=""
+    )
+    assert isinstance(_build_admission_client(settings), SealedWorkerAdmissionClient)
+
+
+# --- valid + adversarial handshakes over a real fake TLS admission server ----
+
+
+def _valid_responder(
+    *, job_id, ebh, admission_id=None, reg_id=None, identity_version=2, ttl=90, override=None
+):
+    admission_id = admission_id or str(uuid.uuid4())
+    reg_id = reg_id or str(uuid.uuid4())
+    org_id = str(uuid.uuid4())
+
+    def responder(path, body):
+        now = datetime.now(UTC)
+        if path.endswith("/begin"):
+            resp = {
+                "admission_id": admission_id,
+                "nonce": secrets.token_hex(16),
+                "organization_id": org_id,
+                "discovery_job_id": str(job_id),
+                "worker_registration_id": reg_id,
+                "identity_version": identity_version,
+                "endpoint_binding_hash": ebh,
+                "expires_at": (now + timedelta(seconds=ttl)).isoformat(),
+            }
+            phase = "begin"
+        elif path.endswith("/complete"):
+            resp = {"status": "admitted", "admission_id": body.get("admission_id")}
+            phase = "complete"
+        elif path.endswith("/assert"):
+            resp = {
+                "status": "valid",
+                "admission_id": body.get("admission_id"),
+                "registration_id": reg_id,
+                "identity_version": identity_version,
+            }
+            phase = "assert"
+        elif path.endswith("/consume"):
+            resp = {
+                "status": "consumed",
+                "admission_id": body.get("admission_id"),
+                "registration_id": reg_id,
+                "identity_version": identity_version,
+            }
+            phase = "consume"
+        else:
+            return 404, {}
+        status = 200
+        if override is not None:
+            status, resp = override(phase, status, resp)
+        return status, resp
+
+    return responder
+
+
+def _client(server, ca_path):
+    priv, pub = generate_ed25519_keypair()
+    transport = HttpxAdmissionTransport(base_url=server.base_url, ca_path=ca_path)
+    return HttpWorkerAdmissionClient(
+        transport=transport, private_key_hex=priv, public_anchor_hex=pub
+    )
+
+
+class _StubTransport:
+    """An in-memory transport (no TLS/network) for exercising the CLIENT's strict response
+    validation — the malformed-response cases are transport-agnostic and need no real handshake."""
+
+    def __init__(self, responder):
+        self._responder = responder
+
+    def post(self, path, payload):
+        return self._responder(path, payload)
+
+
+def _stub_client(responder):
+    priv, pub = generate_ed25519_keypair()
+    return HttpWorkerAdmissionClient(
+        transport=_StubTransport(responder), private_key_hex=priv, public_anchor_hex=pub
+    )
+
+
+def test_full_valid_handshake_over_real_tls(shared_tls):
+    tls = shared_tls
+    job_id = uuid.uuid4()
+    responder = _valid_responder(job_id=job_id, ebh=_EBH)
+    with FakeAdmissionServer(
+        responder=responder, certfile=tls.server_cert_path, keyfile=tls.server_key_path
+    ) as server:
+        client = _client(server, tls.ca_path)
+        admission_id = client.admit(
+            discovery_job_id=job_id,
+            authorization_id=uuid.uuid4(),
+            authorization_version=1,
+            endpoint_binding_hash=_EBH,
+        )
+        grant = client.assert_valid(
+            admission_id=admission_id, discovery_job_id=job_id, endpoint_binding_hash=_EBH
+        )
+        consumed = client.consume(
+            admission_id=admission_id, discovery_job_id=job_id, endpoint_binding_hash=_EBH
+        )
+    assert grant.identity_version == 2
+    assert consumed.registration_id == grant.registration_id
+
+
+def test_wrong_ca_tls_fails_closed(tmp_path):
+    tls_a = IssuedTls(tmp_path, label="a")  # server cert signed by CA-A
+    tls_b = IssuedTls(tmp_path, label="b")  # worker trusts CA-B (does NOT sign the server cert)
+    job_id = uuid.uuid4()
+    with FakeAdmissionServer(
+        responder=_valid_responder(job_id=job_id, ebh=_EBH),
+        certfile=tls_a.server_cert_path,
+        keyfile=tls_a.server_key_path,
+    ) as server:
+        client = _client(server, tls_b.ca_path)  # wrong trust anchor
+        with pytest.raises(WorkerAdmissionUnavailable) as exc:
+            client.admit(
+                discovery_job_id=job_id,
+                authorization_id=uuid.uuid4(),
+                authorization_version=1,
+                endpoint_binding_hash=_EBH,
+            )
+    assert exc.value.reason_code == "admission_endpoint_unreachable"
+
+
+def test_proxy_env_cannot_alter_routing(shared_tls, monkeypatch):
+    # With trust_env=False, an ambient HTTPS proxy env var is ignored: the request still reaches the
+    # fake TLS server directly. If the proxy were honored it would route to a dead address and fail.
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
+    tls = shared_tls
+    job_id = uuid.uuid4()
+    with FakeAdmissionServer(
+        responder=_valid_responder(job_id=job_id, ebh=_EBH),
+        certfile=tls.server_cert_path,
+        keyfile=tls.server_key_path,
+    ) as server:
+        client = _client(server, tls.ca_path)
+        admission_id = client.admit(
+            discovery_job_id=job_id,
+            authorization_id=uuid.uuid4(),
+            authorization_version=1,
+            endpoint_binding_hash=_EBH,
+        )
+    assert isinstance(admission_id, uuid.UUID)
+
+
+def test_redirect_is_refused_not_followed(shared_tls):
+    tls = shared_tls
+    job_id = uuid.uuid4()
+
+    def override(phase, status, resp):
+        if phase == "begin":
+            return 302, {}  # would-redirect to a 'would-admit' Location
+        return status, resp
+
+    responder = _valid_responder(job_id=job_id, ebh=_EBH, override=override)
+    with FakeAdmissionServer(
+        responder=responder, certfile=tls.server_cert_path, keyfile=tls.server_key_path
+    ) as server:
+        client = _client(server, tls.ca_path)
+        with pytest.raises(WorkerAdmissionUnavailable):
+            client.admit(
+                discovery_job_id=job_id,
+                authorization_id=uuid.uuid4(),
+                authorization_version=1,
+                endpoint_binding_hash=_EBH,
+            )
+        # The 302 was received once and NOT followed (no second request to the redirect target).
+        assert server.request_count == 1
+
+
+# --- 7: a generic 200 with wrong/missing/inconsistent content fails closed ---
+
+_MALFORMED_CASES = {
+    "begin_missing_admission_id": ("begin", lambda r: {**r, "admission_id": None}),
+    "begin_bad_admission_id": ("begin", lambda r: {**r, "admission_id": "not-a-uuid"}),
+    "begin_wrong_job_echo": ("begin", lambda r: {**r, "discovery_job_id": str(uuid.uuid4())}),
+    "begin_wrong_ebh_echo": (
+        "begin",
+        lambda r: {**r, "endpoint_binding_hash": "sha256:" + "cd" * 32},
+    ),
+    "begin_zero_version": ("begin", lambda r: {**r, "identity_version": 0}),
+    "begin_negative_version": ("begin", lambda r: {**r, "identity_version": -1}),
+    "begin_bool_version": ("begin", lambda r: {**r, "identity_version": True}),
+    "begin_missing_nonce": ("begin", lambda r: {k: v for k, v in r.items() if k != "nonce"}),
+    "begin_past_expiry": (
+        "begin",
+        lambda r: {**r, "expires_at": (datetime.now(UTC) - timedelta(seconds=5)).isoformat()},
+    ),
+    "begin_malformed_expiry": ("begin", lambda r: {**r, "expires_at": "not-a-date"}),
+    "complete_wrong_status": ("complete", lambda r: {**r, "status": "ok"}),
+    "complete_missing_status": (
+        "complete",
+        lambda r: {k: v for k, v in r.items() if k != "status"},
+    ),
+    "complete_wrong_admission_id": ("complete", lambda r: {**r, "admission_id": str(uuid.uuid4())}),
+    "assert_wrong_status": ("assert", lambda r: {**r, "status": "consumed"}),
+    "assert_wrong_admission_id": ("assert", lambda r: {**r, "admission_id": str(uuid.uuid4())}),
+    "assert_zero_version": ("assert", lambda r: {**r, "identity_version": 0}),
+    "assert_bad_registration": ("assert", lambda r: {**r, "registration_id": "nope"}),
+    "consume_wrong_status": ("consume", lambda r: {**r, "status": "valid"}),
+    "consume_wrong_admission_id": ("consume", lambda r: {**r, "admission_id": str(uuid.uuid4())}),
+}
+
+
+@pytest.mark.parametrize("case", list(_MALFORMED_CASES))
+def test_generic_200_with_bad_content_fails_closed(case):
+    # Client-side strict validation is transport-agnostic — exercised over an in-memory stub (fast).
+    target_phase, mutate = _MALFORMED_CASES[case]
+    job_id = uuid.uuid4()
+
+    def override(phase, status, resp):
+        if phase == target_phase:
+            return 200, mutate(resp)
+        return status, resp
+
+    client = _stub_client(_valid_responder(job_id=job_id, ebh=_EBH, override=override))
+    with pytest.raises(WorkerAdmissionUnavailable) as exc:
+        admission_id = client.admit(
+            discovery_job_id=job_id,
+            authorization_id=uuid.uuid4(),
+            authorization_version=1,
+            endpoint_binding_hash=_EBH,
+        )
+        # assert/consume phases only reached if begin+complete validated:
+        client.assert_valid(
+            admission_id=admission_id, discovery_job_id=job_id, endpoint_binding_hash=_EBH
+        )
+        client.consume(
+            admission_id=admission_id, discovery_job_id=job_id, endpoint_binding_hash=_EBH
+        )
+    assert exc.value.reason_code == "admission_response_malformed"
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__, "-q"])

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 _ADMISSION_BASE_PATH = "/internal/worker-discovery-admission"
@@ -32,6 +32,63 @@ class WorkerAdmissionUnavailable(Exception):
     def __init__(self, reason_code: str = "worker_admission_unavailable") -> None:
         super().__init__(f"worker discovery admission unavailable: {reason_code}")
         self.reason_code = reason_code
+
+
+# --- strict admission-response validators ------------------------------------
+# A generic HTTP 200 is NOT sufficient: every field is validated for presence, type, consistency
+# with the request, and the exact lifecycle status. Any deviation fails closed as
+# ``admission_response_malformed`` — the worker never trusts a self-asserted or mismatched grant.
+
+
+def _malformed() -> WorkerAdmissionUnavailable:
+    return WorkerAdmissionUnavailable("admission_response_malformed")
+
+
+def _req_uuid(body: dict, key: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(body[key]))
+    except (KeyError, ValueError, TypeError, AttributeError):
+        raise _malformed() from None
+
+
+def _req_nonempty_str(body: dict, key: str) -> str:
+    value = body.get(key)
+    if not isinstance(value, str) or not value:
+        raise _malformed()
+    return value
+
+
+def _req_positive_int(body: dict, key: str) -> int:
+    value = body.get(key)
+    # bool is an int subclass — reject it explicitly; require a strictly positive integer.
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise _malformed()
+    return value
+
+
+def _req_status(body: dict, expected: str) -> None:
+    if body.get("status") != expected:
+        raise _malformed()
+
+
+def _req_echo(body: dict, key: str, expected: str) -> None:
+    value = body.get(key)
+    if not isinstance(value, str) or value != expected:
+        raise _malformed()
+
+
+def _req_future_datetime(body: dict, key: str) -> datetime:
+    value = body.get(key)
+    if not isinstance(value, str) or not value:
+        raise _malformed()
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise _malformed() from None
+    aware = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    if aware <= datetime.now(UTC):
+        raise _malformed()  # stale / already-expired admission
+    return aware
 
 
 @dataclass(frozen=True)
@@ -170,21 +227,31 @@ class HttpWorkerAdmissionClient:
                 "endpoint_binding_hash": endpoint_binding_hash,
             },
         )
-        try:
-            message = admission_signing_message(
-                nonce=str(begin["nonce"]),
-                organization_id=str(begin["organization_id"]),
-                discovery_job_id=str(begin["discovery_job_id"]),
-                worker_registration_id=str(begin["worker_registration_id"]),
-                identity_version=int(begin["identity_version"]),
-                endpoint_binding_hash=str(begin["endpoint_binding_hash"]),
-                expires_at=datetime.fromisoformat(str(begin["expires_at"])),
-            )
-            admission_id = uuid.UUID(str(begin["admission_id"]))
-        except (KeyError, ValueError, TypeError) as exc:
-            raise WorkerAdmissionUnavailable("admission_response_malformed") from exc
+        # Strict /begin validation: every field present + correctly typed, echoed consistently with
+        # the request (job id + endpoint digest), a strictly-positive identity version, and a
+        # genuinely FUTURE expiry. A generic 200 with missing/mismatched fields fails closed here —
+        # before the private key ever signs anything.
+        admission_id = _req_uuid(begin, "admission_id")
+        nonce = _req_nonempty_str(begin, "nonce")
+        organization_id = _req_uuid(begin, "organization_id")
+        worker_registration_id = _req_uuid(begin, "worker_registration_id")
+        identity_version = _req_positive_int(begin, "identity_version")
+        if _req_uuid(begin, "discovery_job_id") != discovery_job_id:
+            raise _malformed()  # response is for a different job than requested
+        _req_echo(begin, "endpoint_binding_hash", endpoint_binding_hash)
+        expires_at = _req_future_datetime(begin, "expires_at")
+
+        message = admission_signing_message(
+            nonce=nonce,
+            organization_id=str(organization_id),
+            discovery_job_id=str(discovery_job_id),
+            worker_registration_id=str(worker_registration_id),
+            identity_version=identity_version,
+            endpoint_binding_hash=endpoint_binding_hash,
+            expires_at=expires_at,
+        )
         signature = ed25519_sign(private_key_hex=self._private_key_hex, message=message)
-        self._post(
+        complete = self._post(
             "/complete",
             {
                 "admission_id": str(admission_id),
@@ -192,6 +259,9 @@ class HttpWorkerAdmissionClient:
                 "signature": signature,
             },
         )
+        # /complete must be EXACTLY ``admitted`` for THIS admission id — nothing else counts.
+        _req_status(complete, "admitted")
+        _req_echo(complete, "admission_id", str(admission_id))
         return admission_id
 
     def assert_valid(
@@ -209,6 +279,9 @@ class HttpWorkerAdmissionClient:
                 "endpoint_binding_hash": endpoint_binding_hash,
             },
         )
+        # Exact phase (``valid``) for THIS admission id, then a validated grant.
+        _req_status(body, "valid")
+        _req_echo(body, "admission_id", str(admission_id))
         return self._grant(body)
 
     def consume(
@@ -226,17 +299,19 @@ class HttpWorkerAdmissionClient:
                 "endpoint_binding_hash": endpoint_binding_hash,
             },
         )
+        # Exact phase (``consumed``) for THIS admission id, then a validated grant.
+        _req_status(body, "consumed")
+        _req_echo(body, "admission_id", str(admission_id))
         return self._grant(body)
 
     @staticmethod
     def _grant(body: dict) -> AdmissionGrant:
-        try:
-            return AdmissionGrant(
-                registration_id=uuid.UUID(str(body["registration_id"])),
-                identity_version=int(body["identity_version"]),
-            )
-        except (KeyError, ValueError, TypeError) as exc:
-            raise WorkerAdmissionUnavailable("admission_response_malformed") from exc
+        # The authoritative registration id + a strictly-positive identity version. A zero/negative
+        # version (an unapprovable identity) or a malformed id fails closed.
+        return AdmissionGrant(
+            registration_id=_req_uuid(body, "registration_id"),
+            identity_version=_req_positive_int(body, "identity_version"),
+        )
 
 
 # The shipped production transport (CA-validated HTTPS) lives in

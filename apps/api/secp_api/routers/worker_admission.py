@@ -153,6 +153,7 @@ def assert_admission(
         raise _refused(exc.reason_code) from None
     return {
         "status": "valid",
+        "admission_id": str(payload.admission_id),
         "registration_id": str(result.registration_id),
         "identity_version": result.identity_version,
     }
@@ -183,6 +184,7 @@ def consume_admission(
         raise _refused(exc.reason_code) from None
     return {
         "status": "consumed",
+        "admission_id": str(payload.admission_id),
         "registration_id": str(result.registration_id),
         "identity_version": result.identity_version,
     }

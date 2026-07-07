@@ -45,20 +45,35 @@ The mount is a **read-only** directory containing exactly four files:
 Additionally, on the **worker** container (not the mount), deployment-local settings provide the
 worker's control-plane admission identity material (MB-1):
 
-- `SECP_DISCOVERY_ADMISSION_ENDPOINT` — the internal HTTPS URL of the control-plane admission
-  endpoint the worker calls (it does **not** import the admission service in-process);
+- `SECP_DISCOVERY_ADMISSION_ENDPOINT` — the internal admission endpoint the worker calls (it does
+  **not** import the admission service in-process). It is strictly validated: **`https` only**, a
+  plain host[:port], with **no** userinfo / query / fragment / non-root path / malformed port. A
+  plain-`http://`, `file://`, unix-socket, or `user@`-style trick URL fails closed at construction —
+  before any request, key read, or SSH;
 - `SECP_DISCOVERY_WORKER_IDENTITY_KEY` — path to the worker's **Ed25519 private key** (hex) that
   signs the server-issued nonce;
 - `SECP_DISCOVERY_WORKER_IDENTITY_ANCHOR` — path to the worker's **Ed25519 public anchor** (hex),
   presented and pinned by fingerprint;
-- `SECP_DISCOVERY_ADMISSION_CA` — CA bundle validating the endpoint's **server** TLS certificate.
+- `SECP_DISCOVERY_ADMISSION_CA` — **required** deployment-local CA bundle. Server TLS is verified
+  against this **exact** bundle (a worker-local trust anchor for the internal control plane) — never
+  the public/system trust store and never disabled. The transport sets `trust_env=False` (ambient
+  `*_PROXY` / `SSL_CERT_*` env cannot alter routing or trust) and refuses redirects.
 
 Worker authentication is the **Ed25519 signed-nonce proof-of-possession** carried in the request
-bodies — **not** X.509 client-certificate mTLS (the transport is CA-validated server TLS; the
-identity proof is the signature). When the endpoint or the identity material is absent/unreadable the
-admission client is **sealed** and live discovery fails closed. The private key never leaves the
-worker and is never logged/serialized. (These settings were previously mis-named `*_MTLS_*`; they were
-renamed to describe the Ed25519 material honestly since no X.509 client-cert verification is done.)
+bodies — **not** X.509 client-certificate mTLS (the transport is CA-pinned server TLS; the identity
+proof is the signature). A generic HTTP `200` is **not** trusted: each phase response is validated
+for the exact lifecycle status (`admitted` / `valid` / `consumed`), an admission-id + job + endpoint
+echo matching the request, a strictly-positive identity version, and a genuinely future expiry —
+anything else fails closed. When the endpoint, the identity material, **or the CA bundle** is
+absent / unreadable / malformed / invalid — or the endpoint is not strict HTTPS — the admission
+client is **sealed** and live discovery fails closed **without reading the SSH `id_key` /
+`known_hosts`**. The private key never leaves the worker and is never logged/serialized, and the raw
+endpoint / CA path is never placed in `repr`, exceptions, audit, events, plans, or logs. (These
+settings were previously mis-named `*_MTLS_*`; renamed to describe the Ed25519 material honestly
+since no X.509 client-cert verification is done.)
+
+**Deployment requirement:** the CA bundle must be provisioned on the worker (out of band) and must
+sign the control-plane admission endpoint's server certificate; without it the profile stays sealed.
 
 The mount directory and every file must be:
 

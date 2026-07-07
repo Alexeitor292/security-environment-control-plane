@@ -20,7 +20,10 @@ transport, which lives OUTSIDE the discovery package so the package itself stays
 
 from __future__ import annotations
 
-from secp_worker.admission_http_transport import HttpxAdmissionTransport
+from secp_worker.admission_http_transport import (
+    AdmissionTransportError,
+    HttpxAdmissionTransport,
+)
 from secp_worker.known_hosts import FileKnownHostsBindingVerifier
 from secp_worker.mounted_bundle import MountedWorkerBootstrapBundleSource
 from secp_worker.ssh_channel import SubprocessHostCommandRunner
@@ -68,17 +71,38 @@ def build_discovery_composition(settings=None) -> DiscoveryComposition:
     )
 
 
+def _ca_bundle_usable(ca_path: str) -> bool:
+    """The deployment-local CA bundle must be present, readable, and a PARSEABLE trust anchor with
+    at least one certificate. Missing / unreadable / empty / malformed material fails closed. It is
+    a worker-local trust anchor for the internal control plane — never the public/system trust."""
+    import ssl
+
+    if not (isinstance(ca_path, str) and ca_path.strip()):
+        return False
+    try:
+        context = ssl.create_default_context(cafile=ca_path)
+    except (OSError, ssl.SSLError, ValueError):
+        return False
+    # A file that loaded but contained no usable CA certificate is not a trust anchor.
+    return bool(context.get_ca_certs())
+
+
 def _build_admission_client(settings) -> WorkerAdmissionClient:
     """Build the real HTTP worker admission client from the deployment-local internal endpoint +
-    Ed25519 identity material. The client crosses the control-plane admission BOUNDARY (CA-validated
-    HTTPS) — it never imports the admission service and never touches a DB session. If the endpoint
-    or the identity material is absent/unreadable the client is SEALED (refuses), so live discovery
-    fails closed."""
+    Ed25519 identity material + EXPLICIT CA bundle. The client crosses the control-plane admission
+    BOUNDARY over HTTPS verified against that exact CA (never the system trust store) — it never
+    imports the admission service and never touches a DB session. If the endpoint, the identity
+    material, OR the CA bundle is absent/unreadable/invalid, the client is SEALED (refuses), so live
+    discovery fails closed and never reads the SSH id_key / known_hosts."""
     endpoint = getattr(settings, "discovery_admission_endpoint", "")
     key_path = getattr(settings, "discovery_worker_identity_key", "")
     anchor_path = getattr(settings, "discovery_worker_identity_anchor", "")
     ca_path = getattr(settings, "discovery_admission_ca", "")
-    if not (endpoint and key_path and anchor_path):
+    # ALL FOUR are required: the privileged internal endpoint must be CA-pinned (no system trust).
+    if not (endpoint and key_path and anchor_path and ca_path):
+        return SealedWorkerAdmissionClient()
+    # The CA bundle must be a readable, parseable trust anchor BEFORE we build the live client.
+    if not _ca_bundle_usable(ca_path):
         return SealedWorkerAdmissionClient()
     try:
         with open(key_path, encoding="utf-8") as fh:
@@ -89,7 +113,11 @@ def _build_admission_client(settings) -> WorkerAdmissionClient:
         return SealedWorkerAdmissionClient()
     if not (private_key_hex and public_anchor_hex):
         return SealedWorkerAdmissionClient()
-    transport = HttpxAdmissionTransport(base_url=endpoint, ca_path=ca_path)
+    try:
+        transport = HttpxAdmissionTransport(base_url=endpoint, ca_path=ca_path)
+    except AdmissionTransportError:
+        # A non-HTTPS / malformed / trick endpoint fails closed (no request, no key read).
+        return SealedWorkerAdmissionClient()
     return HttpWorkerAdmissionClient(
         transport=transport,
         private_key_hex=private_key_hex,

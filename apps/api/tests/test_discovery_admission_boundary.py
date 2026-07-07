@@ -91,8 +91,9 @@ def test_admission_client_methods_take_no_session() -> None:
 
 
 def test_live_composition_uses_http_admission_client_over_endpoint(tmp_path) -> None:
-    # The CONFIGURED live runtime (endpoint + Ed25519 material present) must build the real HTTP
-    # client pointed at the internal admission endpoint — not a sealed or in-process client.
+    # The CONFIGURED live runtime (HTTPS endpoint + Ed25519 material + valid CA present) must build
+    # the real HTTP client pointed at the internal admission endpoint — not a sealed/in-process one.
+    from _admission_tls_util import write_ca_only
     from secp_api.config import Settings
     from secp_worker.admission_http_transport import HttpxAdmissionTransport
     from secp_worker.target_discovery.admission_client import HttpWorkerAdmissionClient
@@ -108,7 +109,7 @@ def test_live_composition_uses_http_admission_client_over_endpoint(tmp_path) -> 
         discovery_admission_endpoint=endpoint,
         discovery_worker_identity_key=str(key),
         discovery_worker_identity_anchor=str(anchor),
-        discovery_admission_ca=str(tmp_path / "ca.pem"),
+        discovery_admission_ca=write_ca_only(tmp_path),  # a real, usable trust anchor
     )
     client = _build_admission_client(settings)
     assert isinstance(client, HttpWorkerAdmissionClient)
