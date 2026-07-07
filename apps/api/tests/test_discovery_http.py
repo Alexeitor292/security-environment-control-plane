@@ -118,6 +118,9 @@ def _seed_and_discover(engine) -> str:
             )
         )
         s.flush()
+        # SECP-B6 F-IDENTITY: a candidate plan is only approvable when it binds a real approved
+        # worker identity (version > 0), so register + approve one before discovery.
+        _approve_worker_identity(s, _P())
         enrollment = svc.request_discovery(s, _P(), execution_target_id=target.id)
         job = s.query(DiscoveryJob).filter(DiscoveryJob.enrollment_id == enrollment.id).one()
         run_discovery(
@@ -125,6 +128,37 @@ def _seed_and_discover(engine) -> str:
         )
         s.commit()
         return str(enrollment.id)
+
+
+def _approve_worker_identity(session, principal) -> None:
+    """Register + evidence + approve one worker identity for the principal's org (SECP-B6)."""
+    from secp_api.enums import (
+        WorkerIdentityEvidenceKind,
+        WorkerIdentityEvidenceStatus,
+        WorkerIdentityMechanism,
+    )
+    from secp_api.services import worker_identity as wi
+    from secp_api.worker_identity_contract import compute_verification_anchor_fingerprint
+
+    row = wi.register_worker_identity(
+        session,
+        principal,
+        mechanism=WorkerIdentityMechanism.mtls_workload_identity,
+        identity_label="staging-worker-a",
+        deployment_binding="deploy-01",
+        verification_anchor_fingerprint=compute_verification_anchor_fingerprint("anchor-v1"),
+    )
+    for kind in WorkerIdentityEvidenceKind:
+        wi.record_evidence(
+            session,
+            principal,
+            row.id,
+            kind=kind,
+            status=WorkerIdentityEvidenceStatus.verified,
+            proof_id="TKT-1",
+            issuer="rev",
+        )
+    wi.approve_worker_identity(session, principal, row.id)
 
 
 def test_validation_422_never_echoes_input(client, engine):

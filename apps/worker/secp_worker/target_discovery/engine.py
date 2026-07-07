@@ -52,12 +52,29 @@ from secp_worker.deployment.locators import (
     ResourceLocator,
     ServiceIdentityLocator,
 )
+from secp_worker.target_discovery.binding import (
+    BundleAnchorSource,
+    DiscoveryBindingRefused,
+    authorize_discovery_bundle,
+)
 from secp_worker.target_discovery.seams import (
     HostProbeSource,
     InventoryFacts,
     ProbeSourceUnavailable,
     SealedHostProbeSource,
 )
+
+# Closed mapping from a ``read_inventory`` refusal reason to a truthful, secret-free execution
+# contact-state signal (SECP-B6 F-AUDIT). ``bundle_available`` is True only once a live bundle was
+# actually acquired (host-key stage or later).
+_PROBE_CONTACT_STATE: dict[str, tuple[str, bool]] = {
+    "probe_source_sealed": ("sealed", False),
+    "bootstrap_unavailable": ("bundle_unavailable", False),
+    "host_key_binding_unverified": ("host_key_refused", True),
+    "probe_timeout": ("contacted", True),
+    "probe_refused": ("contacted", True),
+    "malformed_probe_output": ("contacted", True),
+}
 
 # App-owned bounded policy (NOT host values): supported version floor, capacity requirements per
 # profile, candidate VMID allocation pool, and candidate-plan validity window.
@@ -78,14 +95,20 @@ class DiscoveryComposition:
     :func:`sealed_discovery_composition`) uses a sealed probe source, so discovery refuses before
     any
     network/SSH contact. Constructed only out of band on the isolated worker with a bundle
-    mounted."""
+    mounted.
+
+    ``bundle_binding`` is present ONLY on the live controlled-integration composition; when set, the
+    engine enforces the mandatory approved-worker-identity gate and the bundle-to-job authorization
+    binding BEFORE any host contact. A sealed/test composition leaves it ``None`` and contacts
+    nothing."""
 
     probe_source: HostProbeSource
+    bundle_binding: BundleAnchorSource | None = None
 
 
 def sealed_discovery_composition() -> DiscoveryComposition:
     """The shipped, sealed composition: the probe source refuses. Nothing is contacted."""
-    return DiscoveryComposition(probe_source=SealedHostProbeSource())
+    return DiscoveryComposition(probe_source=SealedHostProbeSource(), bundle_binding=None)
 
 
 @dataclass(frozen=True)
@@ -93,15 +116,24 @@ class DiscoveryOutcome:
     ok: bool
     reason_code: str
     plan_hash: str | None = None
+    # SECP-B6 F-AUDIT: truthful, secret-free execution signals threaded into the completion audit.
+    bundle_available: bool = False
+    contact_state: str = "sealed"
 
 
-def _approved_registration(session: Session, org_id: object) -> WorkerIdentityRegistration | None:
-    return session.execute(
-        select(WorkerIdentityRegistration).where(
-            WorkerIdentityRegistration.organization_id == org_id,
-            WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
+def _approved_registrations(session: Session, org_id: object) -> list[WorkerIdentityRegistration]:
+    """All approved worker-identity registrations for the org (0, 1, or ambiguous >1). Never raises
+    on multiplicity — the caller decides fail-closed policy (SECP-B6 F-IDENTITY)."""
+    return list(
+        session.execute(
+            select(WorkerIdentityRegistration).where(
+                WorkerIdentityRegistration.organization_id == org_id,
+                WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
+            )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .all()
+    )
 
 
 def _active_onboarding(session: Session, target_id: object) -> TargetOnboarding | None:
@@ -201,6 +233,7 @@ def _fail(
     worker_identity_version: int,
     bundle_available: bool,
     now: datetime,
+    contact_state: str = "unverifiable",
 ) -> DiscoveryOutcome:
     """Persist an (immutable) snapshot capturing the fail-closed outcome and mark the enrollment
     failed. The snapshot records eligibility=ineligible/unverifiable with a closed reason."""
@@ -227,7 +260,26 @@ def _fail(
     enrollment.failure_code = reason
     enrollment.revision = enrollment.revision + 1
     session.flush()
-    return DiscoveryOutcome(False, reason)
+    return DiscoveryOutcome(
+        False, reason, bundle_available=bundle_available, contact_state=contact_state
+    )
+
+
+def _refuse_pre_probe(
+    session: Session,
+    enrollment: TargetDiscoveryEnrollment,
+    *,
+    reason: str,
+    contact_state: str,
+) -> DiscoveryOutcome:
+    """Fail closed BEFORE any host contact for a mandatory pre-probe gate (worker identity or
+    bundle-to-job binding). No evidence snapshot is written — the job never matched a usable,
+    authorized bundle, so there is no host observation to record (SECP-B6 F-IDENTITY / F-BIND)."""
+    enrollment.status = TargetDiscoveryStatus.failed
+    enrollment.failure_code = reason
+    enrollment.revision = enrollment.revision + 1
+    session.flush()
+    return DiscoveryOutcome(False, reason, bundle_available=False, contact_state=contact_state)
 
 
 def _capacity_hash(facts: InventoryFacts | None, evidence: dict) -> str:
@@ -263,9 +315,31 @@ def run_discovery(
     presence-check candidates → persist immutable evidence + candidate plan. No mutation, ever."""
     enrollment = session.get(TargetDiscoveryEnrollment, job.enrollment_id)
     if enrollment is None:
-        return DiscoveryOutcome(False, DiscoveryFailureCode.internal_error.value)
+        return DiscoveryOutcome(
+            False,
+            DiscoveryFailureCode.internal_error.value,
+            bundle_available=False,
+            contact_state="internal_error",
+        )
 
-    identity = _approved_registration(session, enrollment.organization_id)
+    # ``live`` == the controlled-integration composition that can contact a host. The mandatory
+    # worker-identity gate and the bundle-to-job binding gate below are enforced ONLY on this path;
+    # the sealed/test compositions contact nothing, so they need neither.
+    live = composition.bundle_binding is not None
+
+    # SECP-B6 F-IDENTITY: an approved worker identity is MANDATORY before any live host contact.
+    # Exactly one approved registration must exist; zero or ambiguous fails closed BEFORE probing.
+    registrations = _approved_registrations(session, enrollment.organization_id)
+    identity = registrations[0] if len(registrations) == 1 else None
+    if live and len(registrations) != 1:
+        reason = (
+            DiscoveryFailureCode.worker_identity_unapproved.value
+            if not registrations
+            else DiscoveryFailureCode.worker_identity_ambiguous.value
+        )
+        return _refuse_pre_probe(
+            session, enrollment, reason=reason, contact_state="identity_refused"
+        )
     worker_identity_version = identity.identity_version if identity is not None else 0
     worker_registration_id = identity.id if identity is not None else None
 
@@ -281,6 +355,7 @@ def run_discovery(
             worker_identity_version=worker_identity_version,
             bundle_available=False,
             now=now,
+            contact_state="drift",
         )
     onboarding = _active_onboarding(session, enrollment.execution_target_id)
     if onboarding is None or onboarding.id != enrollment.onboarding_id:
@@ -294,7 +369,20 @@ def run_discovery(
             worker_identity_version=worker_identity_version,
             bundle_available=False,
             now=now,
+            contact_state="drift",
         )
+
+    # SECP-B6 F-BIND: the mounted bundle must be authorized for THIS exact job (organization /
+    # target / onboarding / enrollment + a current approved live-read authorization) BEFORE any SSH.
+    # A bundle mounted for another org/target can never be used here, and no snapshot is written.
+    if live:
+        assert composition.bundle_binding is not None
+        try:
+            authorize_discovery_bundle(session, enrollment, composition.bundle_binding, now=now)
+        except DiscoveryBindingRefused as exc:
+            return _refuse_pre_probe(
+                session, enrollment, reason=exc.reason_code, contact_state="binding_refused"
+            )
 
     enrollment.status = TargetDiscoveryStatus.discovering
     enrollment.revision = enrollment.revision + 1
@@ -304,6 +392,9 @@ def run_discovery(
     try:
         facts = composition.probe_source.read_inventory()
     except ProbeSourceUnavailable as exc:
+        contact_state, bundle_available = _PROBE_CONTACT_STATE.get(
+            exc.reason_code, ("contacted", True)
+        )
         return _fail(
             session,
             enrollment,
@@ -312,8 +403,9 @@ def run_discovery(
             facts=None,
             job=job,
             worker_identity_version=worker_identity_version,
-            bundle_available=False,
+            bundle_available=bundle_available,
             now=now,
+            contact_state=contact_state,
         )
 
     # 2. Eligibility (fail closed on any unsupported/unsafe condition).
@@ -331,6 +423,7 @@ def run_discovery(
             worker_identity_version=worker_identity_version,
             bundle_available=True,
             now=now,
+            contact_state="contacted",
         )
 
     # 3. Allocate candidate VMIDs + storage from the observed inventory.
@@ -348,6 +441,7 @@ def run_discovery(
             worker_identity_version=worker_identity_version,
             bundle_available=True,
             now=now,
+            contact_state="contacted",
         )
     if vmids is None:
         evidence = _evidence_dict(
@@ -363,6 +457,7 @@ def run_discovery(
             worker_identity_version=worker_identity_version,
             bundle_available=True,
             now=now,
+            contact_state="contacted",
         )
     cp_vmid, nt_vmid = vmids[0], vmids[1]
     storage, storage_avail = storage_sel
@@ -372,6 +467,9 @@ def run_discovery(
     try:
         presences = composition.probe_source.probe_candidate_presence(tuple(locators))
     except ProbeSourceUnavailable as exc:
+        contact_state, bundle_available = _PROBE_CONTACT_STATE.get(
+            exc.reason_code, ("contacted", True)
+        )
         return _fail(
             session,
             enrollment,
@@ -380,8 +478,9 @@ def run_discovery(
             facts=facts,
             job=job,
             worker_identity_version=worker_identity_version,
-            bundle_available=True,
+            bundle_available=bundle_available,
             now=now,
+            contact_state=contact_state,
         )
     presence_summary: dict[str, dict] = {}
     specs = candidate_resource_specs(
@@ -417,11 +516,40 @@ def run_discovery(
                 worker_identity_version=worker_identity_version,
                 bundle_available=True,
                 now=now,
+                contact_state="contacted",
             )
         # A candidate VMID observed as present-but-ours is fine (idempotent re-discovery); a foreign
         # VMID would have been caught above. Also guard the raw VMID collision explicitly.
         marker = compute_resource_marker(enrollment.ownership_label, spec["kind"], 0)
         assert marker == spec["ownership_marker"]  # contract self-check
+
+    # SECP-B6 F-IDENTITY: re-verify the approved worker identity did not change DURING probing.
+    # A revocation or identity-version bump mid-discovery must not mint an approvable plan.
+    if live:
+        current = _approved_registrations(session, enrollment.organization_id)
+        if (
+            len(current) != 1
+            or current[0].id != worker_registration_id
+            or current[0].identity_version != worker_identity_version
+        ):
+            evidence = _evidence_dict(
+                facts,
+                selected_storage=storage,
+                candidate_vmids=[cp_vmid, nt_vmid],
+                presence=presence_summary,
+            )
+            return _fail(
+                session,
+                enrollment,
+                evidence,
+                reason=DiscoveryFailureCode.worker_identity_changed.value,
+                facts=facts,
+                job=job,
+                worker_identity_version=worker_identity_version,
+                bundle_available=True,
+                now=now,
+                contact_state="contacted",
+            )
 
     # 5. Persist the immutable evidence snapshot + the content-addressed candidate plan.
     evidence = _evidence_dict(
@@ -498,4 +626,6 @@ def run_discovery(
     enrollment.failure_code = None
     enrollment.revision = enrollment.revision + 1
     session.flush()
-    return DiscoveryOutcome(True, "plan_ready", plan_hash)
+    return DiscoveryOutcome(
+        True, "plan_ready", plan_hash, bundle_available=True, contact_state="contacted"
+    )

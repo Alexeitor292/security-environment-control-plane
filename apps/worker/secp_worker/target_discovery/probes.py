@@ -45,6 +45,10 @@ _JSON = ("--output-format", "json")
 _NESTED_MODULES = ("kvm_intel", "kvm_amd")
 _NESTED_PATH_RE = re.compile(r"^/sys/module/(kvm_intel|kvm_amd)/parameters/nested$")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# Any token reaching the runner must contain no whitespace or shell metacharacter (belt-and-braces
+# over shell=False). A pvesh path token must further be a strict slash-separated safe-token path.
+_TOKEN_UNSAFE_RE = re.compile(r"[\s;&|<>$`\\(){}\[\]*?!~'\"\x00]")
+_SAFE_PVESH_PATH_RE = re.compile(r"^(/[A-Za-z0-9._@-]+)+$")
 
 
 class ProbeError(ValueError):
@@ -176,6 +180,12 @@ def assert_read_only(argv: Sequence[str]) -> None:
     write/install/upload/download/reload/restart command can ever be emitted by a probe."""
     if not argv:
         raise ProbeError("empty_probe_argv")
+    # Defense in depth: no token may carry whitespace or a shell metacharacter even though the
+    # runner is shell=False. This bounds any future code path that reaches assert_read_only with a
+    # value derived from hostile output before the closed-form checks below.
+    for tok in argv:
+        if not isinstance(tok, str) or not tok or _TOKEN_UNSAFE_RE.search(tok):
+            raise ProbeError("probe_token_unsafe")
     exe = argv[0]
     if exe not in _READ_ONLY_EXECUTABLES:
         raise ProbeError("executable_not_read_only")
@@ -191,6 +201,8 @@ def assert_read_only(argv: Sequence[str]) -> None:
                 continue
             if not tok.startswith("/"):
                 raise ProbeError("pvesh_arg_not_path")
+            if not _SAFE_PVESH_PATH_RE.match(tok):
+                raise ProbeError("pvesh_path_unsafe")
     elif exe == _CAT:
         # cat is restricted to the fixed nested-virt sysfs kernel parameter files ONLY.
         if len(argv) != 2 or not _NESTED_PATH_RE.match(argv[1]):

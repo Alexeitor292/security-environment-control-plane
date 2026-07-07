@@ -43,9 +43,16 @@ def build_discovery_composition(settings=None) -> DiscoveryComposition:
         return sealed_discovery_composition()
 
     mount_path = getattr(settings, "discovery_bootstrap_mount", "")
+    # One mounted-bundle source serves BOTH roles: the read-only probe executor's SSH bundle source
+    # AND the engine's pre-SSH bundle-to-job authorization anchor (SECP-B6 F-BIND). Because the live
+    # composition always carries ``bundle_binding``, the engine's mandatory approved-worker-identity
+    # gate and the bundle-to-job binding gate are ALWAYS enforced before any host contact.
+    # strict=True selects the hardened descriptor-based validation + read-only-mount requirement +
+    # worker-private inode-pinned copy for ssh (SECP-B6 F-FS).
+    bundle_source = MountedWorkerBootstrapBundleSource(mount_path, strict=True)
     probe_source = ReadOnlyProbeExecutor(
-        bundle_source=MountedWorkerBootstrapBundleSource(mount_path),
+        bundle_source=bundle_source,
         runner=SubprocessHostCommandRunner(),
         host_key_verifier=FileKnownHostsBindingVerifier(),
     )
-    return DiscoveryComposition(probe_source=probe_source)
+    return DiscoveryComposition(probe_source=probe_source, bundle_binding=bundle_source)

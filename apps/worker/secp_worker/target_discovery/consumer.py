@@ -143,7 +143,16 @@ def claim_and_process_one(
     try:
         outcome = run_discovery(session, job, composition=composition, now=now)
     except Exception:  # never leak a raw engine/host error onto the job record
-        outcome = DiscoveryOutcome(False, DiscoveryFailureCode.internal_error.value)
+        # SECP-B6 F-AUDIT: do NOT fall back to the "sealed"/no-contact defaults — an uncaught error
+        # AFTER a live host contact must never be audited as sealed. On the live composition a
+        # contact may already have happened, so report it conservatively.
+        live = composition.bundle_binding is not None
+        outcome = DiscoveryOutcome(
+            False,
+            DiscoveryFailureCode.internal_error.value,
+            bundle_available=live,
+            contact_state="internal_error",
+        )
 
     terminal = DiscoveryJobStatus.completed if outcome.ok else DiscoveryJobStatus.failed
     _cas(
@@ -174,7 +183,11 @@ def claim_and_process_one(
             data={
                 "status": enrollment.status.value,
                 "reason_code": outcome.reason_code,
-                "bundle_available": False,
+                # SECP-B6 F-AUDIT: the TRUTHFUL per-run execution signals (never a hardcoded value)
+                # so a security operator can tell sealed vs. real read-only host contact apart. No
+                # host/account/key/fingerprint/endpoint/output ever appears here.
+                "bundle_available": outcome.bundle_available,
+                "contact_state": outcome.contact_state,
             },
         )
     return job.id
