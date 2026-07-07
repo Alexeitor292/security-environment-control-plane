@@ -16,6 +16,7 @@ commands and parses their output into typed, bounded, secret-free facts; it perf
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -137,7 +138,10 @@ def _locator_get_path(locator: ResourceLocator) -> str:
     if isinstance(locator, ServiceIdentityLocator):
         return f"/access/users/{locator.userid}"
     if isinstance(locator, GuestLocator):
-        return f"/nodes/{locator.node}/qemu/{locator.vmid}/config"
+        # SECP-B6: a lightweight existence/status read (never the full guest config), so we never
+        # inspect or retain an unrelated guest's configuration. A present candidate VMID is refused
+        # as occupied regardless (a candidate is always allocated from the free pool).
+        return f"/nodes/{locator.node}/qemu/{locator.vmid}/status/current"
     raise ProbeError("unsupported_candidate_locator")
 
 
@@ -206,17 +210,31 @@ def candidate_presence_probe(locator: ResourceLocator) -> ProbeCandidateLocatorP
 _MAX_OUTPUT_BYTES = 512 * 1024  # a read-only probe's output is small; refuse an oversized blob
 
 
+def _reject_constant(_token: str) -> object:
+    # json permits the non-standard ``NaN``/``Infinity``/``-Infinity`` literals by default; a
+    # read-only probe's output must never carry a non-finite number. Fail closed at the source.
+    raise ProbeError("malformed_probe_output")
+
+
 def _load_json(stdout: bytes) -> object:
     if len(stdout) > _MAX_OUTPUT_BYTES:
         raise ProbeError("probe_output_too_large")
     try:
-        return json.loads(stdout.decode("utf-8", "strict"))
-    except (ValueError, UnicodeDecodeError) as exc:
+        return json.loads(stdout.decode("utf-8", "strict"), parse_constant=_reject_constant)
+    except ProbeError:
+        raise
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        # RecursionError (a RuntimeError) covers a deeply nested payload under the size cap; all
+        # collapse to the same closed reason so no raw output or non-closed exception escapes.
         raise ProbeError("malformed_probe_output") from exc
 
 
 def _int(value: object, *, lo: int = 0, hi: int = 10**15) -> int:
     if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ProbeError("malformed_probe_output")
+    if isinstance(value, float) and not math.isfinite(value):
+        # inf/nan (e.g. a hostile ``1e400``) would raise OverflowError/ValueError from int();
+        # reject as a closed malformed reason instead of leaking a non-ProbeError exception.
         raise ProbeError("malformed_probe_output")
     ivalue = int(value)
     if not (lo <= ivalue <= hi):

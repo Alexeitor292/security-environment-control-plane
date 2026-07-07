@@ -107,6 +107,9 @@ def candidate_resource_specs(
 def build_candidate_plan_document(
     *,
     ownership_label: str,
+    organization_id: object,
+    enrollment_id: object,
+    worker_registration_id: object,
     resource_profile: str,
     node: str,
     storage: str,
@@ -119,11 +122,22 @@ def build_candidate_plan_document(
     enrollment_version: int,
     expires_at: datetime,
 ) -> dict:
-    """Build the closed, deterministic candidate-plan document. Live apply remains sealed: the plan
-    explicitly declares it is not executable in this PR."""
+    """Build the closed, deterministic candidate-plan document. The content hash binds the exact
+    organization / enrollment / worker-registration identities (SECP-B6) in addition to the
+    discovery
+    evidence — not only via record-level foreign keys. Live apply remains sealed: the plan
+    explicitly
+    declares it is not executable."""
     return {
         "schema_version": DISCOVERY_PLAN_SCHEMA_VERSION,
         "ownership_tag": compute_ownership_tag(ownership_label),
+        # Identity binding (SECP-B6): the content hash covers these, so a plan cannot be replayed
+        # across a different org / enrollment / worker registration even if a record were forged.
+        "organization_id": str(organization_id),
+        "enrollment_id": str(enrollment_id),
+        "worker_registration_id": ""
+        if worker_registration_id is None
+        else str(worker_registration_id),
         "resource_profile": resource_profile,
         "node": node,
         "storage": storage,
@@ -139,7 +153,9 @@ def build_candidate_plan_document(
         "artifact_manifest_id": artifact_manifest_id,
         "enrollment_version": enrollment_version,
         "expires_at": expires_at.isoformat(),
-        # Live deployment apply remains sealed pending controlled integration enablement (SECP-B5).
+        # Live deployment apply remains sealed pending controlled integration enablement; this plan
+        # is
+        # the exact INPUT for the later controlled deployment-enablement phase, not executable now.
         "executable": False,
     }
 

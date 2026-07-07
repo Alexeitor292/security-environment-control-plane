@@ -27,7 +27,6 @@ from secp_worker.target_discovery.engine import (
     DiscoveryComposition,
     DiscoveryOutcome,
     run_discovery,
-    sealed_discovery_composition,
 )
 
 # Lease TTL: a claimed/running job older than this is reclaimable (restart recovery).
@@ -121,11 +120,15 @@ def claim_and_process_one(
 ) -> uuid.UUID | None:
     """Claim and process one discovery job. Returns its id, or None if none/lost.
 
-    ``composition`` defaults to the SHIPPED SEALED composition, so the normal runtime invokes the
-    read-only engine but contacts nothing (the sealed probe source refuses). Injectable for
-    tests."""
+    ``composition`` defaults to :func:`build_discovery_composition`, which is SEALED unless the
+    deployment-local controlled-integration profile is enabled AND a valid worker-local bundle is
+    mounted (SECP-B6). With the profile disabled (the shipped default) it contacts nothing.
+    Injectable for tests."""
     now = now or _utcnow()
-    composition = composition or sealed_discovery_composition()
+    if composition is None:
+        from secp_worker.target_discovery.composition import build_discovery_composition
+
+        composition = build_discovery_composition()
     job = _claim_candidate(session, now)
     if job is None:
         return None

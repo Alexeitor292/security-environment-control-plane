@@ -267,6 +267,7 @@ def run_discovery(
 
     identity = _approved_registration(session, enrollment.organization_id)
     worker_identity_version = identity.identity_version if identity is not None else 0
+    worker_registration_id = identity.id if identity is not None else None
 
     # Enrollment drift: the job must still match the current active enrollment version + onboarding.
     if enrollment.enrollment_version != job.enrollment_version:
@@ -456,6 +457,9 @@ def run_discovery(
     expires_at = now + _PLAN_TTL
     plan_document = build_candidate_plan_document(
         ownership_label=enrollment.ownership_label,
+        organization_id=enrollment.organization_id,
+        enrollment_id=enrollment.id,
+        worker_registration_id=worker_registration_id,
         resource_profile=enrollment.resource_profile,
         node=facts.node,
         storage=storage,

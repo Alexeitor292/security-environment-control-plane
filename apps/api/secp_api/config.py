@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # staging-lab work-item consumer loop. The consumer runs ONLY in the worker process.
     staging_lab_poll_interval_seconds: float = 2.0
 
+    # SECP-B6: worker-local, deployment-controlled read-only discovery enablement. Both are
+    # DEPLOYMENT-LOCAL only (set in the worker container's deploy manifest) — never API/UI/DB
+    # controlled, and they carry NO SSH/credential material. When the profile is disabled OR the
+    # mount is absent/invalid, discovery stays sealed (the shipped default). The bundle FIELDS
+    # (host/account/port/key/known_hosts/fingerprint) NEVER come from config/env — only from the
+    # fixed mounted bundle directory below. These are read ONLY by the worker discovery composition.
+    discovery_controlled_integration_enabled: bool = False
+    discovery_bootstrap_mount: str = "/var/run/secp/discovery-bundle"
+
     # Auth. The dev fallback principal is ONLY honored when auth_dev_mode is true
     # AND app_env != production (enforced below). Production requires real OIDC.
     auth_dev_mode: bool = True
