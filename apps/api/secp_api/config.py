@@ -49,15 +49,22 @@ class Settings(BaseSettings):
     discovery_controlled_integration_enabled: bool = False
     discovery_bootstrap_mount: str = "/var/run/secp/discovery-bundle"
 
-    # SECP-B6 MB-1: worker discovery ADMISSION over mutual TLS. These are DEPLOYMENT-LOCAL worker
-    # settings (paths + an internal endpoint URL) — never API/UI/DB controlled. They carry NO
-    # secret material in config: the client certificate + private key live ONLY on the worker's
-    # deployment-local filesystem, and the admission endpoint verifies the presented client
-    # certificate's public-key fingerprint against the approved worker registration. When any of
-    # these is unset/invalid/unreachable, live discovery fails closed (sealed).
+    # SECP-B6 MB-1: worker discovery ADMISSION over the internal control-plane endpoint. These are
+    # DEPLOYMENT-LOCAL worker settings (an internal HTTPS URL + file paths) — never API/UI/DB
+    # controlled. Worker AUTHENTICATION is the Ed25519 signed-nonce proof-of-possession handshake
+    # (NOT X.509 client-certificate mTLS): the worker signs the server-issued nonce with its
+    # deployment-local Ed25519 PRIVATE key, and the control plane verifies the signature against the
+    # PUBLIC anchor whose fingerprint is pinned in the approved worker registration. The TLS layer
+    # the endpoint is validated against ``discovery_admission_ca`` (server-cert validation, never
+    # disabled). No secret material lives in config: the Ed25519 private key + public anchor live
+    # ONLY on the worker's deployment-local filesystem at the paths below. When the endpoint or the
+    # identity material is unset/invalid/unreachable, live discovery fails closed (sealed).
     discovery_admission_endpoint: str = ""
-    discovery_worker_mtls_cert: str = ""
-    discovery_worker_mtls_key: str = ""
+    # Path to the worker's deployment-local Ed25519 identity PRIVATE key (hex). Signs the nonce.
+    discovery_worker_identity_key: str = ""
+    # Path to the worker's deployment-local Ed25519 PUBLIC anchor (hex). Presented + pinned by fp.
+    discovery_worker_identity_anchor: str = ""
+    # Path to the CA bundle that validates the internal admission endpoint's server TLS certificate.
     discovery_admission_ca: str = ""
 
     # Auth. The dev fallback principal is ONLY honored when auth_dev_mode is true

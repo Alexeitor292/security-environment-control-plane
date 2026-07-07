@@ -56,9 +56,14 @@ _EXPECTED_CONTRACT = LiveReadAuthorizationContract(
 
 @runtime_checkable
 class DiscoveryBundlePreparer(Protocol):
-    """Deployment-local seam yielding ONE strictly-validated discovery bundle snapshot."""
+    """Deployment-local seam yielding ONE strictly-validated discovery bundle snapshot in 2 phases:
+    :meth:`prepare_metadata` validates the NON-secret manifest/binding (pre-admission) and
+    :meth:`finalize_key_material` reads the private key material ONLY after admission (SECP-B6
+    item-4)."""
 
-    def prepare_for_discovery(self) -> PreparedDiscoveryBundle: ...
+    def prepare_metadata(self) -> PreparedDiscoveryBundle: ...
+
+    def finalize_key_material(self) -> None: ...
 
     def dispose(self) -> None: ...
 
@@ -115,7 +120,9 @@ def authorize_prepared_discovery_bundle(
     Does not dispose (the engine owns the prepared snapshot's lifecycle).
     """
     anchor = prepared.anchor
-    ssh = prepared.ssh_bundle
+    # The endpoint binding (MB-2) uses only the NON-secret manifest metadata (host/port/fingerprint)
+    # — available from the pre-admission metadata phase, never the private key material.
+    ssh = prepared.endpoint
 
     # Structural identity binding: the anchor must name THIS claimed job.
     if anchor.organization_id != enrollment.organization_id:

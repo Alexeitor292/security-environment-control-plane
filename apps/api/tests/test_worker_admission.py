@@ -340,3 +340,82 @@ def test_admission_revoked_worker_before_consume_refused(session, principal):
             now=now,
         )
     assert exc.value.reason_code == "worker_identity_unapproved"
+
+
+def test_admission_expired_worker_identity_refused(session, principal):
+    # An approved-but-EXPIRED worker registration cannot obtain an admission (SECP-B6 MB-1 §3).
+    now = datetime.now(UTC)
+    priv, pub, ebh, auth, enrollment, job = _full_setup(session, principal)
+    far_future = now + timedelta(days=3650)  # beyond the registration's TTL
+    with pytest.raises(adm.WorkerAdmissionRefused) as exc:
+        adm.issue_discovery_admission_challenge(
+            session,
+            discovery_job_id=job.id,
+            authorization_id=auth.id,
+            authorization_version=auth.authorization_version,
+            endpoint_binding_hash=ebh,
+            now=far_future,
+        )
+    assert exc.value.reason_code == "worker_identity_expired"
+
+
+def test_admission_authorization_revoked_before_consume_no_consume(session, principal):
+    # Authorization approved at pre-probe admission, then REVOKED before consume → consume refuses
+    # and the admission is NOT consumed (no plan can be minted).
+    now = datetime.now(UTC)
+    priv, pub, ebh, auth, enrollment, job = _full_setup(session, principal)
+    admission = adm.issue_discovery_admission_challenge(
+        session,
+        discovery_job_id=job.id,
+        authorization_id=auth.id,
+        authorization_version=auth.authorization_version,
+        endpoint_binding_hash=ebh,
+        now=now,
+    )
+    _sign_and_complete(session, admission, priv, pub, now=now)
+    adm.assert_discovery_admission_valid(
+        session,
+        admission_id=admission.id,
+        enrollment=enrollment,
+        discovery_job_id=job.id,
+        endpoint_binding_hash=ebh,
+        now=now,
+    )
+    readonly_preflight.revoke_preflight_authorization(session, principal, auth.id)
+    with pytest.raises(adm.WorkerAdmissionRefused) as exc:
+        adm.consume_discovery_admission(
+            session,
+            admission_id=admission.id,
+            enrollment=enrollment,
+            discovery_job_id=job.id,
+            endpoint_binding_hash=ebh,
+            now=now,
+        )
+    assert exc.value.reason_code == "authorization_revoked"
+    assert session.get(WorkerDiscoveryAdmission, admission.id).status == (
+        WorkerDiscoveryAdmissionStatus.admitted  # NOT consumed
+    )
+
+
+def test_admission_expired_admission_refused_at_assert(session, principal):
+    now = datetime.now(UTC)
+    priv, pub, ebh, auth, enrollment, job = _full_setup(session, principal)
+    admission = adm.issue_discovery_admission_challenge(
+        session,
+        discovery_job_id=job.id,
+        authorization_id=auth.id,
+        authorization_version=auth.authorization_version,
+        endpoint_binding_hash=ebh,
+        now=now,
+    )
+    _sign_and_complete(session, admission, priv, pub, now=now)
+    with pytest.raises(adm.WorkerAdmissionRefused) as exc:
+        adm.assert_discovery_admission_valid(
+            session,
+            admission_id=admission.id,
+            enrollment=enrollment,
+            discovery_job_id=job.id,
+            endpoint_binding_hash=ebh,
+            now=now + timedelta(seconds=1000),
+        )
+    assert exc.value.reason_code == "admission_expired"

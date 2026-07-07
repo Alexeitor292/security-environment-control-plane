@@ -43,11 +43,22 @@ The mount is a **read-only** directory containing exactly four files:
 | `binding.json` | JSON with exactly `{organization_id, execution_target_id, onboarding_id, enrollment_id, authorization_id, authorization_version, endpoint_binding_hash}` — the **non-secret** authorization anchor (no host/account/key). `endpoint_binding_hash` is the opaque `sha256:` SSH-endpoint digest (MB-2). Binds this bundle to the exact job **and** endpoint it may use | owner-only writable |
 
 Additionally, on the **worker** container (not the mount), deployment-local settings provide the
-worker's control-plane admission identity material (MB-1): `SECP_DISCOVERY_WORKER_MTLS_KEY` (path to
-the worker's Ed25519 private key hex) and `SECP_DISCOVERY_WORKER_MTLS_CERT` (path to its public
-anchor hex), plus `SECP_DISCOVERY_ADMISSION_ENDPOINT` / `SECP_DISCOVERY_ADMISSION_CA` for the mTLS
-channel to the internal admission route. When any is absent the admission client is **sealed** and
-live discovery fails closed. The private key never leaves the worker and is never logged/serialized.
+worker's control-plane admission identity material (MB-1):
+
+- `SECP_DISCOVERY_ADMISSION_ENDPOINT` — the internal HTTPS URL of the control-plane admission
+  endpoint the worker calls (it does **not** import the admission service in-process);
+- `SECP_DISCOVERY_WORKER_IDENTITY_KEY` — path to the worker's **Ed25519 private key** (hex) that
+  signs the server-issued nonce;
+- `SECP_DISCOVERY_WORKER_IDENTITY_ANCHOR` — path to the worker's **Ed25519 public anchor** (hex),
+  presented and pinned by fingerprint;
+- `SECP_DISCOVERY_ADMISSION_CA` — CA bundle validating the endpoint's **server** TLS certificate.
+
+Worker authentication is the **Ed25519 signed-nonce proof-of-possession** carried in the request
+bodies — **not** X.509 client-certificate mTLS (the transport is CA-validated server TLS; the
+identity proof is the signature). When the endpoint or the identity material is absent/unreadable the
+admission client is **sealed** and live discovery fails closed. The private key never leaves the
+worker and is never logged/serialized. (These settings were previously mis-named `*_MTLS_*`; they were
+renamed to describe the Ed25519 material honestly since no X.509 client-cert verification is done.)
 
 The mount directory and every file must be:
 
@@ -59,11 +70,15 @@ The mount directory and every file must be:
 - well-formed (a malformed JSON file fails closed).
 
 Under the controlled-live profile the worker validates every file **by descriptor** (`openat` /
-`fstat`, `O_NOFOLLOW`), **requires a read-only filesystem**, and copies the validated `id_key` /
-`known_hosts` bytes into a fresh worker-private directory so the host-key verifier and ssh consume the
-exact validated inode — immune to a post-validation mount swap (TOCTOU). Any failed check refuses with a
+`fstat`, `O_NOFOLLOW`), **requires a read-only filesystem**, and — in **two phases** so no private key
+material is touched before admission — first validates only the **non-secret** `manifest.json` /
+`binding.json` (enough to compute the endpoint digest and cross admission), then, **only after the
+control-plane admission succeeds**, copies the validated `id_key` / `known_hosts` bytes into a fresh
+worker-private directory from the **same pinned descriptor snapshot** so the host-key verifier and ssh
+consume the exact validated inode — immune to a post-validation mount swap (TOCTOU). A refused
+admission leaves the private key **unread** and invokes **zero SSH**. Any failed check refuses with a
 **closed reason code** that never echoes a raw bundle value, and the source falls back to sealed. See
-`secp_worker/mounted_bundle.py`.
+`secp_worker/mounted_bundle.py` (`prepare_metadata` → `finalize_key_material`).
 
 ## Bundle-to-job authorization binding (before any SSH)
 
@@ -81,24 +96,42 @@ the **exact** claimed job, or refuses fail-closed with no snapshot/plan:
 ## MB-1 — Control-plane-verified worker admission (before any SSH)
 
 An **approved DB registration is not proof** that the running worker holds the registered identity.
-Before host contact the worker must prove possession of its deployment-local Ed25519 identity key to
-the **control-plane** admission verifier (`secp_api/services/worker_admission.py`, reached in
-deployment via the internal mTLS route `POST /internal/worker-discovery-admission/{begin,complete}`):
+The admission is a real **control-plane boundary**, not an in-process shortcut: the worker crosses it
+over the internal HTTPS route
+`POST /internal/worker-discovery-admission/{begin,complete,assert,consume}` and **never imports**
+`secp_api.services.worker_admission` or passes a DB `Session` to its admission client (enforced by
+`apps/api/tests/test_discovery_boundary.py`). The control plane owns the identity **decision** and the
+authoritative **clock** (a client-supplied time is never trusted):
 
-1. the verifier issues a durable, **single-use nonce** bound to the job / organization / registration
-   / identity-version / endpoint digest;
-2. the worker signs it with its private key; the control plane **verifies the Ed25519 signature
-   against the registration's pinned public-anchor fingerprint** (never a self-asserted key) and marks
-   a one-time `WorkerDiscoveryAdmission` `admitted`;
-3. the discovery engine binds that admission to the **exact** claimed job and **consumes it once**
-   before persisting a plan.
+1. **begin** — the verifier issues a durable, **single-use nonce** bound to the job / organization /
+   registration / identity-version / endpoint digest;
+2. **complete** — the worker signs it with its private key; the control plane **verifies the Ed25519
+   signature against the registration's pinned public-anchor fingerprint** (never a self-asserted key)
+   and marks a one-time `WorkerDiscoveryAdmission` `admitted`;
+3. **assert** — pre-probe, the engine binds that admission to the **exact** claimed job + endpoint;
+4. **consume** — post-probe, the engine **consumes it once** (a replay fails closed) before a plan
+   persists.
 
-A missing/invalid/expired/replayed/wrong-key/wrong-worker/cross-job/cross-org admission fails closed
-with **zero SSH**. Exactly one approved worker-identity registration must exist; a revocation or
+At **every** phase (begin, complete, assert, consume) the control plane re-checks that the worker
+registration is approved **and unexpired** at the pinned version **and** re-runs the authoritative
+live-read verifier (status / expiry / target-active / onboarding-active / connection-hash /
+boundary-hash). So an admission whose registration **expires**, or whose authorization is **revoked /
+drifts**, between the pre-probe admission and the post-probe consume mints **no plan**. A
+missing/invalid/expired/replayed/wrong-key/wrong-worker/cross-job/cross-org admission fails closed with
+**zero SSH**. Exactly one approved worker-identity registration must exist; a revocation or
 identity-version bump between admission and plan persistence fails closed and mints no plan. A
 candidate plan is bound to the exact registration **id + version** and is **never approvable** at
 version `0` or against a rotated/different identity. Nothing but a closed reason code / safe ID is
 persisted or audited — never a certificate, key, anchor, signature, or challenge byte.
+
+**Database authority (item-2).** Issuing a `WorkerDiscoveryAdmission` and every status transition is a
+control-plane authority enforced **in PostgreSQL**, not only by the ORM: migration `d4e8a1c6f9b2`
+installs a `BEFORE INSERT/UPDATE/DELETE` trigger that raises `insufficient_privilege` unless the
+current DB role is a member of the `secp_control_plane` role. A restricted **worker DB role** therefore
+cannot forge or transition an `admitted` record even by bypassing the ORM (proven by
+`apps/api/tests/test_worker_admission_postgres.py`). **Deployment requirement:** the control-plane API
+DB role must be `GRANT`ed membership in `secp_control_plane` (a superuser is implicitly a member); the
+worker's DB role must **not** be a member and should hold at most `SELECT` on the table.
 
 ## MB-2 — SSH endpoint bound to the approved target authorization (before any SSH)
 

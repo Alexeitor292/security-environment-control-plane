@@ -38,6 +38,7 @@ from secp_api.models import (
     DiscoverySnapshot,
     ExecutionTarget,
     LiveReadAuthorization,
+    TargetDiscoveryEnrollment,
     TargetOnboarding,
 )
 from secp_api.services import readonly_preflight, staging_labs
@@ -121,7 +122,7 @@ def _endpoint_hash(*, ssh_host=_HOST, ssh_port=22, fingerprint=_FP) -> str:
 
 def _ed_worker(session, principal, *, label: str = "staging-worker-a") -> tuple[str, str]:
     """Register + approve a worker identity whose anchor is a real Ed25519 public key. Returns
-    (private_key_hex, public_anchor_hex) so a SignedWorkerAdmissionClient can prove possession."""
+    (private_key_hex, public_anchor_hex) so the HttpWorkerAdmissionClient can prove possession."""
     from secp_api.worker_admission_contract import generate_ed25519_keypair
 
     priv, pub = generate_ed25519_keypair()
@@ -251,15 +252,103 @@ def _full_mount(tmp_path, anchor: dict, *, ssh_host=_HOST, account="secp", finge
     return str(mount)
 
 
-def _live_comp(mount: str, probe: _FakeProbe, priv: str, pub: str) -> DiscoveryComposition:
-    from secp_worker.target_discovery.admission_client import SignedWorkerAdmissionClient
+class _InProcAdmissionTransport:
+    """A faithful in-process realization of the internal admission ROUTE for the engine gate tests.
 
-    # bundle_binding + admission_client present => the engine enforces the control-plane admission,
-    # bundle-to-job binding, and endpoint binding gates before probing.
+    The engine crosses the SAME control-plane boundary as production — its
+    :class:`HttpWorkerAdmissionClient` builds the begin/complete/assert/consume requests and signs
+    the server-issued nonce with Ed25519 — but this transport dispatches them against the engine's
+    OWN session (mirroring the FastAPI route: server clock, enrollment re-derived from the job,
+    closed reason codes). That keeps the ~15 gating tests on ONE transaction (no SQLite cross-conn
+    lock contention with a long-lived engine session). The dedicated ASGI tests in
+    ``test_worker_admission_route.py`` prove the identical client over the REAL HTTP route.
+    """
+
+    _BASE = "/internal/worker-discovery-admission"
+
+    def __init__(self, session):
+        self._session = session
+
+    def post(self, path: str, payload: dict) -> tuple[int, dict]:
+        from secp_api.services import worker_admission as adm
+
+        s = self._session
+        rel = path[len(self._BASE) :] if path.startswith(self._BASE) else path
+        now = datetime.now(UTC)  # the route always uses the SERVER clock, never a client value
+        try:
+            if rel == "/begin":
+                a = adm.issue_discovery_admission_challenge(
+                    s,
+                    discovery_job_id=uuid.UUID(payload["discovery_job_id"]),
+                    authorization_id=uuid.UUID(payload["authorization_id"]),
+                    authorization_version=payload["authorization_version"],
+                    endpoint_binding_hash=payload["endpoint_binding_hash"],
+                    now=now,
+                )
+                return 200, {
+                    "admission_id": str(a.id),
+                    "nonce": a.nonce,
+                    "organization_id": str(a.organization_id),
+                    "discovery_job_id": str(a.discovery_job_id),
+                    "worker_registration_id": str(a.worker_registration_id),
+                    "identity_version": a.identity_version,
+                    "endpoint_binding_hash": a.endpoint_binding_hash,
+                    "expires_at": a.expires_at.isoformat(),
+                }
+            if rel == "/complete":
+                adm.complete_discovery_admission(
+                    s,
+                    admission_id=uuid.UUID(payload["admission_id"]),
+                    presented_anchor=payload["public_anchor"],
+                    signature=payload["signature"],
+                    now=now,
+                )
+                return 200, {"status": "admitted", "admission_id": payload["admission_id"]}
+            if rel in ("/assert", "/consume"):
+                job = s.get(DiscoveryJob, uuid.UUID(payload["discovery_job_id"]))
+                if job is None:
+                    return 403, {"reason_code": "job_not_found"}
+                enrollment = s.get(TargetDiscoveryEnrollment, job.enrollment_id)
+                if enrollment is None:
+                    return 403, {"reason_code": "enrollment_not_found"}
+                fn = (
+                    adm.assert_discovery_admission_valid
+                    if rel == "/assert"
+                    else adm.consume_discovery_admission
+                )
+                result = fn(
+                    s,
+                    admission_id=uuid.UUID(payload["admission_id"]),
+                    enrollment=enrollment,
+                    discovery_job_id=uuid.UUID(payload["discovery_job_id"]),
+                    endpoint_binding_hash=payload["endpoint_binding_hash"],
+                    now=now,
+                )
+                return 200, {
+                    "status": "valid" if rel == "/assert" else "consumed",
+                    "registration_id": str(result.registration_id),
+                    "identity_version": result.identity_version,
+                }
+        except adm.WorkerAdmissionRefused as exc:
+            return 403, {"code": "worker_admission_refused", "reason_code": exc.reason_code}
+        return 404, {"code": "not_found"}
+
+
+def _live_comp(session, mount: str, probe: _FakeProbe, priv: str, pub: str) -> DiscoveryComposition:
+    from secp_worker.target_discovery.admission_client import HttpWorkerAdmissionClient
+
+    # bundle_binding + admission_client present => the engine crosses the control-plane admission
+    # BOUNDARY (real HTTP client + Ed25519 signing) and enforces the bundle-to-job + endpoint bind
+    # gates before probing. The worker imports no admission service and passes no Session to the
+    # client (see test_discovery_boundary.py).
     return DiscoveryComposition(
         probe_source=probe,
         bundle_binding=MountedWorkerBootstrapBundleSource(mount),
-        admission_client=SignedWorkerAdmissionClient(private_key_hex=priv, public_anchor_hex=pub),
+        admission_client=HttpWorkerAdmissionClient(
+            transport=_InProcAdmissionTransport(session),
+            private_key_hex=priv,
+            public_anchor_hex=pub,
+        ),
     )
 
 
@@ -297,7 +386,7 @@ def test_bind_bundle_for_other_target_same_org_fails_closed(session, principal, 
     anchor["execution_target_id"] = str(target_a.id)  # bundle claims a different target
     mount = _full_mount(tmp_path, anchor)
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job_b)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job_b)
     assert outcome.ok is False and outcome.reason_code == "bundle_target_mismatch"
     assert probe.calls == 0  # zero ssh
     assert session.query(DiscoverySnapshot).filter_by(enrollment_id=enroll_b.id).count() == 0
@@ -312,7 +401,7 @@ def test_bind_bundle_for_other_org_fails_closed(session, principal, tmp_path):
     anchor["organization_id"] = str(uuid.uuid4())  # bundle claims a different organization
     mount = _full_mount(tmp_path, anchor)
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "bundle_organization_mismatch"
     assert probe.calls == 0
     assert session.query(DiscoverySnapshot).filter_by(enrollment_id=enrollment.id).count() == 0
@@ -324,15 +413,16 @@ def test_bind_valid_matching_bundle_proceeds_to_probe(session, principal, tmp_pa
     enrollment, job = _enroll(session, principal, target)
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is True and outcome.reason_code == "plan_ready"
     assert probe.inventory_calls >= 1  # the read-only path ran after all gates passed
     assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 1
 
 
 def test_bind_disabled_target_fails_closed(session, principal, tmp_path):
-    # The admission passes (authorization approved) but the bundle live-read binding catches the
-    # inactive target — proving the binding gate independently of the admission.
+    # SECP-B6 MB-1 §3: the control-plane admission re-verifies the live-read authorization at every
+    # phase, so a target disabled AFTER approval is caught at ADMISSION (fail-closed, before the
+    # bundle-binding gate would independently catch it — the other-target test proves that gate).
     priv, pub = _ed_worker(session, principal)
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
@@ -340,8 +430,8 @@ def test_bind_disabled_target_fails_closed(session, principal, tmp_path):
     session.flush()
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
-    assert outcome.ok is False and outcome.reason_code == "live_read_target_not_active"
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
+    assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
     assert probe.calls == 0
 
 
@@ -358,7 +448,7 @@ def test_endpoint_manifest_host_mismatch_fails_closed(session, principal, tmp_pa
     anchor["endpoint_binding_hash"] = other_hash
     mount = _full_mount(tmp_path, anchor, ssh_host="attacker.example")
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is False
     # A non-target ssh_host yields a digest the approved authorization never stored, so the
     # admission (endpoint-hash bound) or the binding's host check rejects it — either way, zero SSH.
@@ -379,7 +469,7 @@ def test_endpoint_changed_port_fails_closed(session, principal, tmp_path):
     anchor["endpoint_binding_hash"] = _endpoint_hash(ssh_port=2222)  # digest for a different port
     mount = _full_mount(tmp_path, anchor)  # manifest still uses port 22
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is False
     # The admission binds the (wrong) hash to the authorization (which stores the port-22 hash).
     assert outcome.reason_code in (
@@ -398,7 +488,7 @@ def test_endpoint_changed_fingerprint_fails_closed(session, principal, tmp_path)
     anchor["endpoint_binding_hash"] = _endpoint_hash(fingerprint=other_fp)
     mount = _full_mount(tmp_path, anchor, fingerprint=other_fp)  # manifest fp != authorized fp
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is False
     assert outcome.reason_code in (
         "worker_admission_unverified",
@@ -438,7 +528,7 @@ def test_admission_wrong_worker_key_fails_closed(session, principal, tmp_path):
     enrollment, job = _enroll(session, principal, target)
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, wrong_priv, wrong_pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, wrong_priv, wrong_pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
     assert probe.calls == 0
 
@@ -450,7 +540,7 @@ def test_admission_revoked_authorization_fails_closed(session, principal, tmp_pa
     readonly_preflight.revoke_preflight_authorization(session, principal, auth.id)
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
     assert probe.calls == 0
 
@@ -465,7 +555,7 @@ def test_identity_no_approved_registration_fails_closed(session, principal, tmp_
     enrollment, job = _enroll(session, principal, target)
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_identity_unapproved"
     assert probe.calls == 0
     assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0
@@ -479,7 +569,7 @@ def test_identity_ambiguous_registration_fails_closed(session, principal, tmp_pa
     enrollment, job = _enroll(session, principal, target)
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe()
-    outcome = _run(session, _live_comp(mount, probe, priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_identity_ambiguous"
     assert probe.calls == 0
 
@@ -499,7 +589,7 @@ def test_identity_revoked_mid_run_blocks_plan(session, principal, tmp_path):
             wi.revoke_worker_identity(session, principal, reg.id, reason_code="compromise")
             return super().read_inventory()
 
-    outcome = _run(session, _live_comp(mount, _RevokingProbe(), priv, pub), job)
+    outcome = _run(session, _live_comp(session, mount, _RevokingProbe(), priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_identity_changed"
     assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0
 
@@ -536,7 +626,9 @@ def test_e2e_live_discovery_through_consumer_then_approve(session, principal, tm
     enrollment, job = _enroll(session, principal, target)
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     jid = claim_and_process_one(
-        session, composition=_live_comp(mount, _FakeProbe(), priv, pub), now=datetime.now(UTC)
+        session,
+        composition=_live_comp(session, mount, _FakeProbe(), priv, pub),
+        now=datetime.now(UTC),
     )
     assert jid == job.id
     session.refresh(enrollment)
@@ -595,7 +687,7 @@ def test_audit_live_error_after_contact_is_not_recorded_sealed(
             raise RuntimeError("post-contact boom")  # not a ProbeSourceUnavailable
 
     data = _capture_completion_audit(
-        session, monkeypatch, _live_comp(mount, _ContactThenCrashProbe(), priv, pub), job
+        session, monkeypatch, _live_comp(session, mount, _ContactThenCrashProbe(), priv, pub), job
     )
     assert data.get("reason_code") == "internal_error"
     assert data.get("contact_state") == "internal_error"  # NOT "sealed"
@@ -623,7 +715,7 @@ def test_audit_live_success_is_truthful(session, principal, tmp_path, monkeypatc
     enrollment, job = _enroll(session, principal, target)
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     data = _capture_completion_audit(
-        session, monkeypatch, _live_comp(mount, _FakeProbe(), priv, pub), job
+        session, monkeypatch, _live_comp(session, mount, _FakeProbe(), priv, pub), job
     )
     assert data.get("bundle_available") is True
     assert data.get("contact_state") == "contacted"
@@ -651,7 +743,9 @@ def test_audit_host_key_refusal_is_truthful(session, principal, tmp_path, monkey
     enrollment, job = _enroll(session, principal, target)
     mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
     probe = _FakeProbe(raises="host_key_binding_unverified")
-    data = _capture_completion_audit(session, monkeypatch, _live_comp(mount, probe, priv, pub), job)
+    data = _capture_completion_audit(
+        session, monkeypatch, _live_comp(session, mount, probe, priv, pub), job
+    )
     assert data.get("reason_code") == "host_key_binding_unverified"
     assert data.get("contact_state") == "host_key_refused"
     assert data.get("bundle_available") is True  # a bundle WAS acquired before the host-key check
@@ -789,3 +883,73 @@ def test_fs_strict_happy_path_pins_private_copy(tmp_path, monkeypatch):
     assert open(bundle.known_hosts_path, "rb").read() == b"pve-a ssh-ed25519 AAAA\n"
     src.dispose()
     assert not os.path.exists(bundle.private_key_path)  # disposed
+
+
+# --- SECP-B6 item-4: private SSH key material is read ONLY after admission ----
+
+
+class _FinalizeSpyBundle:
+    """Wraps the real bundle source and counts finalize_key_material() — the ONLY place the private
+    id_key/known_hosts bytes are read/copied (item-4). prepare_metadata reads NON-secret data."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.prepare_calls = 0
+        self.finalize_calls = 0
+
+    def prepare_metadata(self):
+        self.prepare_calls += 1
+        return self._inner.prepare_metadata()
+
+    def finalize_key_material(self):
+        self.finalize_calls += 1
+        return self._inner.finalize_key_material()
+
+    def dispose(self):
+        return self._inner.dispose()
+
+
+def test_item4_refused_admission_never_reads_key_material(session, principal, tmp_path):
+    # A refused control-plane admission must leave the worker-private key material UNREAD (item-4)
+    # and invoke zero SSH — no plan, no snapshot.
+    from secp_worker.target_discovery.admission_client import SealedWorkerAdmissionClient
+
+    _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    spy = _FinalizeSpyBundle(MountedWorkerBootstrapBundleSource(mount))
+    probe = _FakeProbe()
+    comp = DiscoveryComposition(
+        probe_source=probe, bundle_binding=spy, admission_client=SealedWorkerAdmissionClient()
+    )
+    outcome = run_discovery(session, job, composition=comp, now=datetime.now(UTC))
+    assert outcome.ok is False and outcome.reason_code == "worker_admission_unverified"
+    assert spy.prepare_calls == 1  # non-secret manifest/binding WAS validated (endpoint digest)
+    assert spy.finalize_calls == 0  # ... but the private key bytes were NEVER read
+    assert probe.calls == 0  # and zero SSH
+    assert session.query(DiscoverySnapshot).filter_by(enrollment_id=enrollment.id).count() == 0
+    assert session.query(DiscoveryCandidatePlan).filter_by(enrollment_id=enrollment.id).count() == 0
+
+
+def test_item4_successful_admission_reads_key_material_after(session, principal, tmp_path):
+    # The private key material is read EXACTLY once and only AFTER admission succeeds.
+    from secp_worker.target_discovery.admission_client import HttpWorkerAdmissionClient
+
+    priv, pub = _ed_worker(session, principal)
+    target, onb, auth = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    mount = _full_mount(tmp_path, _valid_anchor(principal, target, onb, enrollment, auth))
+    spy = _FinalizeSpyBundle(MountedWorkerBootstrapBundleSource(mount))
+    comp = DiscoveryComposition(
+        probe_source=_FakeProbe(),
+        bundle_binding=spy,
+        admission_client=HttpWorkerAdmissionClient(
+            transport=_InProcAdmissionTransport(session),
+            private_key_hex=priv,
+            public_anchor_hex=pub,
+        ),
+    )
+    outcome = run_discovery(session, job, composition=comp, now=datetime.now(UTC))
+    assert outcome.ok is True and outcome.reason_code == "plan_ready"
+    assert spy.prepare_calls == 1 and spy.finalize_calls == 1  # key read once, post-admission

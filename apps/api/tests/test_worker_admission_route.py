@@ -208,3 +208,126 @@ def test_route_handshake_and_body_spoof_refused(app_and_ctx):
         },
     )
     assert ok.status_code == 200 and ok.json()["status"] == "admitted"
+
+
+class _TestClientAdmissionTransport:
+    """Wraps the FastAPI ``TestClient`` as an :class:`AdmissionTransport` so the REAL
+    ``HttpWorkerAdmissionClient`` drives the REAL ASGI admission route (begin/complete/assert/
+    consume) — the runtime endpoint path, end to end, over a committed DB (no engine session)."""
+
+    def __init__(self, client: TestClient) -> None:
+        self._client = client
+
+    def post(self, path: str, payload: dict) -> tuple[int, dict]:
+        resp = self._client.post(path, json=payload)
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, dict) and isinstance(body.get("detail"), dict):
+            body = body["detail"]
+        if not isinstance(body, dict):
+            body = {}
+        return resp.status_code, body
+
+
+def _http_client(app, ctx):
+    from secp_worker.target_discovery.admission_client import HttpWorkerAdmissionClient
+
+    client = _enabled_client(app)
+    transport = _TestClientAdmissionTransport(client)
+    return HttpWorkerAdmissionClient(
+        transport=transport, private_key_hex=ctx["priv"], public_anchor_hex=ctx["pub"]
+    )
+
+
+def test_real_http_client_full_handshake_admit_assert_consume(app_and_ctx):
+    """The runtime worker client crosses the real internal endpoint: begin → sign nonce → complete →
+    assert (exact-job binding) → consume (one-time). Proves completion requirement #1 end to end."""
+    import uuid as _uuid
+
+    from secp_worker.target_discovery.admission_client import (
+        HttpWorkerAdmissionClient,
+        WorkerAdmissionUnavailable,
+    )
+
+    app, ctx = app_and_ctx
+    client = _http_client(app, ctx)
+    job_id = _uuid.UUID(ctx["job_id"])
+    ebh = ctx["endpoint_binding_hash"]
+
+    admission_id = client.admit(
+        discovery_job_id=job_id,
+        authorization_id=_uuid.UUID(ctx["authorization_id"]),
+        authorization_version=ctx["authorization_version"],
+        endpoint_binding_hash=ebh,
+    )
+    assert isinstance(admission_id, _uuid.UUID)
+
+    grant = client.assert_valid(
+        admission_id=admission_id, discovery_job_id=job_id, endpoint_binding_hash=ebh
+    )
+    assert grant.identity_version >= 1
+
+    consumed = client.consume(
+        admission_id=admission_id, discovery_job_id=job_id, endpoint_binding_hash=ebh
+    )
+    assert consumed.registration_id == grant.registration_id
+
+    # A replayed consume of the same one-time admission fails closed: sequentially the admission is
+    # already ``consumed`` so the re-assert rejects it (``admission_not_admitted``); a concurrent
+    # racer would instead lose the atomic transition (``admission_replayed``). Both fail closed.
+    with pytest.raises(WorkerAdmissionUnavailable) as exc:
+        client.consume(
+            admission_id=admission_id, discovery_job_id=job_id, endpoint_binding_hash=ebh
+        )
+    assert exc.value.reason_code in ("admission_not_admitted", "admission_replayed")
+    # sanity: the isinstance guard above proves the runtime type, not a test double.
+    assert isinstance(client, HttpWorkerAdmissionClient)
+
+
+def test_real_http_client_wrong_endpoint_binding_refused_at_assert(app_and_ctx):
+    import uuid as _uuid
+
+    from secp_worker.target_discovery.admission_client import WorkerAdmissionUnavailable
+
+    app, ctx = app_and_ctx
+    client = _http_client(app, ctx)
+    job_id = _uuid.UUID(ctx["job_id"])
+    ebh = ctx["endpoint_binding_hash"]
+    admission_id = client.admit(
+        discovery_job_id=job_id,
+        authorization_id=_uuid.UUID(ctx["authorization_id"]),
+        authorization_version=ctx["authorization_version"],
+        endpoint_binding_hash=ebh,
+    )
+    with pytest.raises(WorkerAdmissionUnavailable) as exc:
+        client.assert_valid(
+            admission_id=admission_id,
+            discovery_job_id=job_id,
+            endpoint_binding_hash="sha256:" + "0" * 64,  # not the admitted endpoint digest
+        )
+    assert exc.value.reason_code == "admission_endpoint_mismatch"
+
+
+def test_real_http_client_inert_when_profile_disabled(app_and_ctx):
+    import uuid as _uuid
+
+    from secp_worker.target_discovery.admission_client import (
+        HttpWorkerAdmissionClient,
+        WorkerAdmissionUnavailable,
+    )
+
+    app, ctx = app_and_ctx
+    # A client whose transport hits the app with the profile DISABLED (route 404s) fails closed.
+    transport = _TestClientAdmissionTransport(TestClient(app))
+    client = HttpWorkerAdmissionClient(
+        transport=transport, private_key_hex=ctx["priv"], public_anchor_hex=ctx["pub"]
+    )
+    with pytest.raises(WorkerAdmissionUnavailable):
+        client.admit(
+            discovery_job_id=_uuid.UUID(ctx["job_id"]),
+            authorization_id=_uuid.UUID(ctx["authorization_id"]),
+            authorization_version=ctx["authorization_version"],
+            endpoint_binding_hash=ctx["endpoint_binding_hash"],
+        )

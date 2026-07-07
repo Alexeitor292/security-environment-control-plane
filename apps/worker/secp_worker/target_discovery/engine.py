@@ -43,11 +43,6 @@ from secp_api.models import (
     WorkerIdentityRegistration,
 )
 from secp_api.ownership_contract import compute_resource_marker
-from secp_api.services.worker_admission import (
-    WorkerAdmissionRefused,
-    assert_discovery_admission_valid,
-    consume_discovery_admission,
-)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -413,16 +408,18 @@ def _run_discovery_body(
             contact_state="drift",
         )
 
-    # SECP-B6 MB-1/MB-2/F-BIND: on the live path, prepare ONE validated bundle snapshot, obtain a
-    # control-plane-verified worker admission, and bind the SSH endpoint to the authoritative target
-    # authorization — ALL before any host contact. No snapshot/plan is written on any refusal.
+    # SECP-B6 MB-1/MB-2/F-BIND/item-4: on the live path, validate ONLY the non-secret bundle
+    # metadata, cross the control-plane admission BOUNDARY, and ONLY THEN read the private key
+    # material + bind the SSH endpoint — ALL before host contact. No snapshot/plan on any refusal.
     admission_id: uuid.UUID | None = None
     endpoint_binding_hash: str | None = None
     if live:
         assert composition.bundle_binding is not None
         assert composition.admission_client is not None
+        # (1) item-4: pin + validate the NON-secret manifest/binding (enough to compute the endpoint
+        #     digest). The private id_key/known_hosts bytes are NOT read here.
         try:
-            prepared = composition.bundle_binding.prepare_for_discovery()
+            prepared = composition.bundle_binding.prepare_metadata()
         except BootstrapBundleUnavailable as exc:
             return _refuse_pre_probe(
                 session,
@@ -433,16 +430,15 @@ def _run_discovery_body(
         prepared_holder.append(prepared)
         endpoint_binding_hash = prepared.anchor.endpoint_binding_hash
 
-        # MB-1: the worker proves possession of its registered identity key to the control-plane
-        # admission verifier BEFORE any host contact. A missing/invalid proof fails closed.
+        # (2) MB-1: the worker proves possession of its registered identity key to the CONTROL-PLANE
+        #     admission endpoint (HTTP boundary) BEFORE any host contact. A missing/invalid proof
+        #     fails closed. The worker never calls the admission service or a DB session directly.
         try:
             admission_id = composition.admission_client.admit(
-                session,
                 discovery_job_id=job.id,
                 authorization_id=prepared.anchor.authorization_id,
                 authorization_version=prepared.anchor.authorization_version,
                 endpoint_binding_hash=endpoint_binding_hash,
-                now=now,
             )
         except WorkerAdmissionUnavailable:
             return _refuse_pre_probe(
@@ -451,32 +447,42 @@ def _run_discovery_body(
                 reason=DiscoveryFailureCode.worker_admission_unverified.value,
                 contact_state="admission_refused",
             )
-        # F-BIND + MB-2: the prepared snapshot must match the claimed job AND bind the SSH endpoint.
+        # (3) item-4: ONLY after admission succeeds, read/copy the private id_key + known_hosts from
+        #     the SAME pinned snapshot. A pre-admission refusal above never touches the key bytes.
+        try:
+            composition.bundle_binding.finalize_key_material()
+        except BootstrapBundleUnavailable as exc:
+            return _refuse_pre_probe(
+                session,
+                enrollment,
+                reason=getattr(exc, "reason_code", "bootstrap_unavailable"),
+                contact_state="bundle_unavailable",
+            )
+        # (4) F-BIND + MB-2: the prepared snapshot must match the claimed job AND bind the SSH
+        #     endpoint to the authoritative target authorization.
         try:
             authorize_prepared_discovery_bundle(session, enrollment, prepared, now=now)
         except DiscoveryBindingRefused as exc:
             return _refuse_pre_probe(
                 session, enrollment, reason=exc.reason_code, contact_state="binding_refused"
             )
-        # The admission must itself be bound to THIS exact job + endpoint (defence in depth).
+        # (5) The admission must itself be bound to THIS exact job + endpoint (control-plane
+        #     re-verifies identity + live-read authorization at its own clock). Defence in depth.
         try:
-            admission = assert_discovery_admission_valid(
-                session,
+            grant = composition.admission_client.assert_valid(
                 admission_id=admission_id,
-                enrollment=enrollment,
                 discovery_job_id=job.id,
                 endpoint_binding_hash=endpoint_binding_hash,
-                now=now,
             )
-        except WorkerAdmissionRefused:
+        except WorkerAdmissionUnavailable:
             return _refuse_pre_probe(
                 session,
                 enrollment,
                 reason=DiscoveryFailureCode.worker_admission_unverified.value,
                 contact_state="admission_refused",
             )
-        worker_registration_id = admission.registration_id
-        worker_identity_version = admission.identity_version
+        worker_registration_id = grant.registration_id
+        worker_identity_version = grant.identity_version
 
     enrollment.status = TargetDiscoveryStatus.discovering
     enrollment.revision = enrollment.revision + 1
@@ -622,18 +628,16 @@ def _run_discovery_body(
     # reused admission mid-discovery must not mint an approvable plan.
     if live:
         assert admission_id is not None and endpoint_binding_hash is not None
+        assert composition.admission_client is not None
         try:
-            consumed = consume_discovery_admission(
-                session,
+            consumed = composition.admission_client.consume(
                 admission_id=admission_id,
-                enrollment=enrollment,
                 discovery_job_id=job.id,
                 endpoint_binding_hash=endpoint_binding_hash,
-                now=now,
             )
             worker_registration_id = consumed.registration_id
             worker_identity_version = consumed.identity_version
-        except WorkerAdmissionRefused:
+        except WorkerAdmissionUnavailable:
             evidence = _evidence_dict(
                 facts,
                 selected_storage=storage,

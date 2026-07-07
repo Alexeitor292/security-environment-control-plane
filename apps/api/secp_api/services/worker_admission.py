@@ -28,13 +28,18 @@ from secp_api import audit
 from secp_api.enums import (
     AuditAction,
     LiveReadAuthorizationStatus,
+    OnboardingStatus,
+    TargetStatus,
     WorkerDiscoveryAdmissionStatus,
     WorkerIdentityStatus,
 )
+from secp_api.live_read_contract import connection_identity_hash
 from secp_api.models import (
     DiscoveryJob,
+    ExecutionTarget,
     LiveReadAuthorization,
     TargetDiscoveryEnrollment,
+    TargetOnboarding,
     WorkerDiscoveryAdmission,
     WorkerIdentityRegistration,
 )
@@ -80,6 +85,61 @@ def _approved_registrations(
         .scalars()
         .all()
     )
+
+
+def _verify_registration(
+    session: Session, registration_id: uuid.UUID, expected_version: int, now: datetime
+) -> WorkerIdentityRegistration:
+    """The worker registration must exist, be approved, UNEXPIRED (even if status still says
+    approved), and at the expected identity version. Raises ``WorkerAdmissionRefused`` otherwise."""
+    reg = session.get(WorkerIdentityRegistration, registration_id)
+    if reg is None or reg.status != WorkerIdentityStatus.approved:
+        raise WorkerAdmissionRefused("worker_identity_unapproved")
+    if _aware(reg.expiry) <= now:
+        raise WorkerAdmissionRefused("worker_identity_expired")
+    if reg.identity_version != expected_version:
+        raise WorkerAdmissionRefused("worker_identity_version_drift")
+    return reg
+
+
+def _verify_authorization(session: Session, auth: LiveReadAuthorization, now: datetime) -> None:
+    """Re-run the authoritative live-read authorization checks (SECP-B6 MB-1 §3): approved,
+    unexpired, target active, onboarding active, connection-hash and boundary-hash not drifted.
+    Raises ``WorkerAdmissionRefused`` on any failure. Called at issue, complete, assert, AND consume
+    so a revocation/drift at any phase fails closed."""
+    if auth.status == LiveReadAuthorizationStatus.revoked:
+        raise WorkerAdmissionRefused("authorization_revoked")
+    if auth.status != LiveReadAuthorizationStatus.approved:
+        raise WorkerAdmissionRefused("authorization_not_approved")
+    if _aware(auth.authorization_expiry) <= now:
+        raise WorkerAdmissionRefused("authorization_expired")
+    target = session.get(ExecutionTarget, auth.execution_target_id)
+    onboarding = session.get(TargetOnboarding, auth.onboarding_id)
+    if target is None or onboarding is None:
+        raise WorkerAdmissionRefused("authorization_records_missing")
+    if target.status != TargetStatus.active:
+        raise WorkerAdmissionRefused("target_not_active")
+    if onboarding.status != OnboardingStatus.active:
+        raise WorkerAdmissionRefused("onboarding_not_active")
+    if auth.connection_hash != connection_identity_hash(target.config or {}):
+        raise WorkerAdmissionRefused("connection_hash_drift")
+    if auth.boundary_hash != onboarding.boundary_hash:
+        raise WorkerAdmissionRefused("boundary_hash_drift")
+
+
+def _load_admission_authorization(
+    session: Session, admission: WorkerDiscoveryAdmission
+) -> LiveReadAuthorization:
+    """Load the live-read authorization the admission was issued against and confirm it still names
+    the same version + endpoint digest, else fail closed."""
+    auth = session.get(LiveReadAuthorization, admission.live_read_authorization_id)
+    if auth is None:
+        raise WorkerAdmissionRefused("authorization_missing")
+    if auth.authorization_version != admission.authorization_version:
+        raise WorkerAdmissionRefused("authorization_version_drift")
+    if auth.endpoint_binding_hash != admission.endpoint_binding_hash:
+        raise WorkerAdmissionRefused("endpoint_binding_mismatch")
+    return auth
 
 
 def _audit(
@@ -140,6 +200,8 @@ def issue_discovery_admission_challenge(
     if len(regs) > 1:
         refuse("worker_identity_ambiguous")
     reg = regs[0]
+    if _aware(reg.expiry) <= now:
+        refuse("worker_identity_expired")
 
     auth = session.get(LiveReadAuthorization, authorization_id)
     if auth is None:
@@ -151,16 +213,14 @@ def issue_discovery_admission_challenge(
         or auth.onboarding_id != enrollment.onboarding_id
     ):
         refuse("authorization_target_mismatch")
-    if auth.status != LiveReadAuthorizationStatus.approved:
-        refuse("authorization_not_approved")
-    if _aware(auth.authorization_expiry) <= now:
-        refuse("authorization_expired")
     if auth.authorization_version != authorization_version:
         refuse("authorization_version_drift")
     if not (auth.endpoint_binding_hash and isinstance(endpoint_binding_hash, str)):
         refuse("endpoint_binding_unset")
     if auth.endpoint_binding_hash != endpoint_binding_hash:
         refuse("endpoint_binding_mismatch")
+    # Full authoritative re-verification (status/expiry/target/onboarding/connection/boundary).
+    _verify_authorization(session, auth, now)
 
     admission = WorkerDiscoveryAdmission(
         organization_id=enrollment.organization_id,
@@ -223,12 +283,20 @@ def complete_discovery_admission(
 
     if _aware(admission.expires_at) <= now:
         refuse("admission_expired")
-    reg = session.get(WorkerIdentityRegistration, admission.worker_registration_id)
-    if reg is None or reg.status != WorkerIdentityStatus.approved:
-        refuse("worker_identity_unapproved")
-    assert reg is not None
-    if reg.identity_version != admission.identity_version:
-        refuse("worker_identity_version_drift")
+    # Re-verify the worker registration (approved + UNEXPIRED + version) and the live-read
+    # authorization (status/expiry/target/onboarding/connection/boundary) at completion too.
+    try:
+        reg = _verify_registration(
+            session, admission.worker_registration_id, admission.identity_version, now
+        )
+        _verify_authorization(
+            session,
+            _load_admission_authorization(session, admission),
+            now,
+        )
+    except WorkerAdmissionRefused as exc:
+        refuse(exc.reason_code)
+        raise  # unreachable (refuse raises)
     # Pin the presented public anchor to the AUTHORITATIVE registered fingerprint (never asserted).
     if not (isinstance(presented_anchor, str) and presented_anchor):
         refuse("anchor_missing")
@@ -291,11 +359,13 @@ def assert_discovery_admission_valid(
         raise WorkerAdmissionRefused("admission_job_mismatch")
     if admission.endpoint_binding_hash != endpoint_binding_hash:
         raise WorkerAdmissionRefused("admission_endpoint_mismatch")
-    reg = session.get(WorkerIdentityRegistration, admission.worker_registration_id)
-    if reg is None or reg.status != WorkerIdentityStatus.approved:
-        raise WorkerAdmissionRefused("worker_identity_unapproved")
-    if reg.identity_version != admission.identity_version:
-        raise WorkerAdmissionRefused("worker_identity_version_drift")
+    # Re-verify the worker registration (approved + UNEXPIRED + version) AND rerun the authoritative
+    # live-read authorization verifier — so a revocation / expiry / target-onboarding / config /
+    # boundary drift between admission and this check fails closed (SECP-B6 MB-1 §3).
+    reg = _verify_registration(
+        session, admission.worker_registration_id, admission.identity_version, now
+    )
+    _verify_authorization(session, _load_admission_authorization(session, admission), now)
     return AdmissionResult(registration_id=reg.id, identity_version=reg.identity_version)
 
 

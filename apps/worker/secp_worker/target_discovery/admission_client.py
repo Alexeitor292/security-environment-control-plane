@@ -1,26 +1,29 @@
-"""Worker-side discovery admission client seam (SECP-B6 MB-1).
+"""Worker-side discovery admission client (SECP-B6 MB-1).
 
-The worker proves possession of its deployment-local Ed25519 identity key to the CONTROL-PLANE
-admission verifier before any host contact. This module holds ONLY the seam + a signing client; the
-identity DECISION is made by :mod:`secp_api.services.worker_admission` (the verifier issues the
-single-use nonce and checks the signature against the registered anchor — never a self-asserted
-key).
+Before any host contact the isolated worker must obtain a CONTROL-PLANE-VERIFIED, one-time admission
+by proving possession of its deployment-local Ed25519 identity key to the control plane. This module
+is the worker side of that boundary. It NEVER imports :mod:`secp_api.services.worker_admission` and
+NEVER touches a DB ``Session``: the identity DECISION is made by the control plane behind the
+internal admission endpoint, reached here over an injected :class:`AdmissionTransport` (the shipped
+transport is CA-validated HTTPS). The client only (a) begins a challenge, (b) signs the
+server-issued nonce with its deployment-local key, (c) completes, and later (d) asserts the exact
+binding and (e) consumes the one-time admission — all as request/response over the transport.
 
 The shipped default is :class:`SealedWorkerAdmissionClient`, which refuses and performs no signing.
-A real client is constructed only on the isolated worker from deployment-local key material. In a
-deployed topology the worker and control plane are separate processes and the client talks to the
-internal admission route over mutual TLS; the in-process signing client is the co-located / test
-realization of the SAME control-plane-verified handshake. This module imports no SSH/Proxmox/
-mutation/transport code and holds no private key beyond the deployment-local signer.
+A real :class:`HttpWorkerAdmissionClient` is constructed only on the isolated worker from
+deployment-local key material + the internal endpoint. This module holds no private key beyond the
+deployment-local signer, constructs no SSH/Proxmox/mutation code, and imports the shared
+Ed25519 signing-message CONTRACT (a pure crypto/encoding library — never the admission service).
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from sqlalchemy.orm import Session
+_ADMISSION_BASE_PATH = "/internal/worker-discovery-admission"
 
 
 class WorkerAdmissionUnavailable(Exception):
@@ -31,20 +34,54 @@ class WorkerAdmissionUnavailable(Exception):
         self.reason_code = reason_code
 
 
+@dataclass(frozen=True)
+class AdmissionGrant:
+    """The authoritative registration id + version the control plane proved for an admission.
+
+    Never a value the worker asserted — the control plane returns it after verifying the pinned
+    anchor + re-running the authoritative verifier."""
+
+    registration_id: uuid.UUID
+    identity_version: int
+
+
+@runtime_checkable
+class AdmissionTransport(Protocol):
+    """A request/response seam to the internal admission endpoint. Returns ``(status, body)``; the
+    body is the parsed JSON object (already unwrapped from any ``{"detail": ...}`` envelope)."""
+
+    def post(self, path: str, payload: dict) -> tuple[int, dict]: ...
+
+
 @runtime_checkable
 class WorkerAdmissionClient(Protocol):
-    """Obtains a control-plane-verified, one-time admission id for a discovery job, or fails."""
+    """Crosses the control-plane admission boundary for a discovery job. NO DB ``Session`` and NO
+    caller-supplied clock: the control plane owns the identity decision and authoritative time."""
 
     def admit(
         self,
-        session: Session,
         *,
         discovery_job_id: uuid.UUID,
         authorization_id: uuid.UUID,
         authorization_version: int,
         endpoint_binding_hash: str,
-        now: datetime,
     ) -> uuid.UUID: ...
+
+    def assert_valid(
+        self,
+        *,
+        admission_id: uuid.UUID,
+        discovery_job_id: uuid.UUID,
+        endpoint_binding_hash: str,
+    ) -> AdmissionGrant: ...
+
+    def consume(
+        self,
+        *,
+        admission_id: uuid.UUID,
+        discovery_job_id: uuid.UUID,
+        endpoint_binding_hash: str,
+    ) -> AdmissionGrant: ...
 
 
 class SealedWorkerAdmissionClient:
@@ -52,73 +89,192 @@ class SealedWorkerAdmissionClient:
 
     def admit(
         self,
-        session: Session,
         *,
         discovery_job_id: uuid.UUID,
         authorization_id: uuid.UUID,
         authorization_version: int,
         endpoint_binding_hash: str,
-        now: datetime,
     ) -> uuid.UUID:
         raise WorkerAdmissionUnavailable("no worker admission client is configured")
 
+    def assert_valid(
+        self,
+        *,
+        admission_id: uuid.UUID,
+        discovery_job_id: uuid.UUID,
+        endpoint_binding_hash: str,
+    ) -> AdmissionGrant:
+        raise WorkerAdmissionUnavailable("no worker admission client is configured")
 
-class SignedWorkerAdmissionClient:
-    """Performs the control-plane-verified handshake with a deployment-local Ed25519 signer.
+    def consume(
+        self,
+        *,
+        admission_id: uuid.UUID,
+        discovery_job_id: uuid.UUID,
+        endpoint_binding_hash: str,
+    ) -> AdmissionGrant:
+        raise WorkerAdmissionUnavailable("no worker admission client is configured")
 
-    Constructed ONLY on the isolated worker from its deployment-local identity key material. It
-    signs the verifier-issued nonce; the control-plane admission service verifies the signature
-    against the registered anchor and marks the durable admission ``admitted``. The client never
-    verifies its own proof (that would be a self-check) and never persists/logs the private key.
+
+class HttpWorkerAdmissionClient:
+    """Performs the control-plane-verified handshake over the internal admission endpoint.
+
+    Constructed ONLY on the isolated worker from its deployment-local Ed25519 identity material + a
+    transport to the internal endpoint. ``admit`` begins a challenge, signs the server-issued nonce
+    with the deployment-local key, and completes; ``assert_valid``/``consume`` bind + one-time
+    consume the admission. The client never verifies its own proof (that would be a self-check),
+    never persists/logs the private key, and never talks to a DB or the admission service directly —
+    only request/response JSON of NON-secret IDs (+ the signature) over the transport.
     """
 
-    def __init__(self, *, private_key_hex: str, public_anchor_hex: str) -> None:
+    def __init__(
+        self, *, transport: AdmissionTransport, private_key_hex: str, public_anchor_hex: str
+    ) -> None:
+        self._transport = transport
         self._private_key_hex = private_key_hex
         self._public_anchor_hex = public_anchor_hex
 
     def __repr__(self) -> str:  # never expose the private key
-        return "SignedWorkerAdmissionClient(<redacted>)"
+        return "HttpWorkerAdmissionClient(<redacted>)"
+
+    def _post(self, path: str, payload: dict) -> dict:
+        try:
+            status, body = self._transport.post(_ADMISSION_BASE_PATH + path, payload)
+        except Exception as exc:  # a transport/TLS failure fails closed with a closed reason
+            raise WorkerAdmissionUnavailable("admission_endpoint_unreachable") from exc
+        if status != 200:
+            reason = "worker_admission_refused"
+            if isinstance(body, dict):
+                reason = str(body.get("reason_code") or body.get("code") or reason)
+            raise WorkerAdmissionUnavailable(reason)
+        if not isinstance(body, dict):
+            raise WorkerAdmissionUnavailable("admission_response_malformed")
+        return body
 
     def admit(
         self,
-        session: Session,
         *,
         discovery_job_id: uuid.UUID,
         authorization_id: uuid.UUID,
         authorization_version: int,
         endpoint_binding_hash: str,
-        now: datetime,
     ) -> uuid.UUID:
-        # The verification DECISION lives in the control-plane service; the client only signs.
-        from secp_api.services import worker_admission as adm
         from secp_api.worker_admission_contract import admission_signing_message, ed25519_sign
 
+        begin = self._post(
+            "/begin",
+            {
+                "discovery_job_id": str(discovery_job_id),
+                "authorization_id": str(authorization_id),
+                "authorization_version": authorization_version,
+                "endpoint_binding_hash": endpoint_binding_hash,
+            },
+        )
         try:
-            admission = adm.issue_discovery_admission_challenge(
-                session,
-                discovery_job_id=discovery_job_id,
-                authorization_id=authorization_id,
-                authorization_version=authorization_version,
-                endpoint_binding_hash=endpoint_binding_hash,
-                now=now,
-            )
             message = admission_signing_message(
-                nonce=admission.nonce,
-                organization_id=str(admission.organization_id),
-                discovery_job_id=str(admission.discovery_job_id),
-                worker_registration_id=str(admission.worker_registration_id),
-                identity_version=admission.identity_version,
-                endpoint_binding_hash=admission.endpoint_binding_hash,
-                expires_at=admission.expires_at,
+                nonce=str(begin["nonce"]),
+                organization_id=str(begin["organization_id"]),
+                discovery_job_id=str(begin["discovery_job_id"]),
+                worker_registration_id=str(begin["worker_registration_id"]),
+                identity_version=int(begin["identity_version"]),
+                endpoint_binding_hash=str(begin["endpoint_binding_hash"]),
+                expires_at=datetime.fromisoformat(str(begin["expires_at"])),
             )
-            signature = ed25519_sign(private_key_hex=self._private_key_hex, message=message)
-            adm.complete_discovery_admission(
-                session,
-                admission_id=admission.id,
-                presented_anchor=self._public_anchor_hex,
-                signature=signature,
-                now=now,
+            admission_id = uuid.UUID(str(begin["admission_id"]))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise WorkerAdmissionUnavailable("admission_response_malformed") from exc
+        signature = ed25519_sign(private_key_hex=self._private_key_hex, message=message)
+        self._post(
+            "/complete",
+            {
+                "admission_id": str(admission_id),
+                "public_anchor": self._public_anchor_hex,
+                "signature": signature,
+            },
+        )
+        return admission_id
+
+    def assert_valid(
+        self,
+        *,
+        admission_id: uuid.UUID,
+        discovery_job_id: uuid.UUID,
+        endpoint_binding_hash: str,
+    ) -> AdmissionGrant:
+        body = self._post(
+            "/assert",
+            {
+                "admission_id": str(admission_id),
+                "discovery_job_id": str(discovery_job_id),
+                "endpoint_binding_hash": endpoint_binding_hash,
+            },
+        )
+        return self._grant(body)
+
+    def consume(
+        self,
+        *,
+        admission_id: uuid.UUID,
+        discovery_job_id: uuid.UUID,
+        endpoint_binding_hash: str,
+    ) -> AdmissionGrant:
+        body = self._post(
+            "/consume",
+            {
+                "admission_id": str(admission_id),
+                "discovery_job_id": str(discovery_job_id),
+                "endpoint_binding_hash": endpoint_binding_hash,
+            },
+        )
+        return self._grant(body)
+
+    @staticmethod
+    def _grant(body: dict) -> AdmissionGrant:
+        try:
+            return AdmissionGrant(
+                registration_id=uuid.UUID(str(body["registration_id"])),
+                identity_version=int(body["identity_version"]),
             )
-            return admission.id
-        except adm.WorkerAdmissionRefused as exc:
-            raise WorkerAdmissionUnavailable(exc.reason_code) from None
+        except (KeyError, ValueError, TypeError) as exc:
+            raise WorkerAdmissionUnavailable("admission_response_malformed") from exc
+
+
+class HttpxAdmissionTransport:
+    """The shipped production transport: CA-validated HTTPS to the internal admission endpoint.
+
+    The base URL + CA bundle are deployment-local worker settings. TLS server-certificate validation
+    uses the configured CA when provided, else the system trust store — it is NEVER disabled
+    (``verify`` is provably never ``False``). ``httpx`` is imported lazily so this module — and the
+    worker discovery package — carry no network/transport import at rest; the transport is
+    constructed ONLY when the deployment-local live profile supplies an endpoint. Worker
+    authentication is the Ed25519 signed-nonce proof carried in the request bodies, NOT a client
+    certificate (this is not X.509 mTLS)."""
+
+    def __init__(self, *, base_url: str, ca_path: str = "", timeout: float = 10.0) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._ca_path = ca_path
+        self._timeout = timeout
+
+    def __repr__(self) -> str:
+        return f"HttpxAdmissionTransport(base_url={self._base_url!r})"
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    def post(self, path: str, payload: dict) -> tuple[int, dict]:
+        import httpx
+
+        verify: str | bool = self._ca_path if self._ca_path else True
+        with httpx.Client(verify=verify, timeout=self._timeout) as client:
+            resp = client.post(self._base_url + path, json=payload)
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        # Unwrap FastAPI's error envelope so callers see the closed reason code directly.
+        if isinstance(body, dict) and isinstance(body.get("detail"), dict):
+            body = body["detail"]
+        if not isinstance(body, dict):
+            body = {}
+        return resp.status_code, body

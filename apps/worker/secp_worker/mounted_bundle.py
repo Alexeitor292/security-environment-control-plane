@@ -61,18 +61,42 @@ class BundleBindingAnchor:
     endpoint_binding_hash: str
 
 
-@dataclass
-class PreparedDiscoveryBundle:
-    """A single strictly-validated discovery bundle snapshot (SECP-B6 MB-1/MB-2 Phase C).
+@dataclass(frozen=True)
+class SshEndpointMetadata:
+    """The NON-secret SSH endpoint metadata a bundle's manifest declares (SECP-B6 item-4).
 
-    Produced by one descriptor-pinned acquisition so the authorization gates AND the probe executor
-    consume the SAME validated bytes — a post-validation mount swap cannot change what ssh reads.
-    Non-serializable; the SSH bundle has a redacted repr; ``dispose`` removes the private copy.
+    Sufficient to compute + bind the endpoint digest (MB-2) WITHOUT any private key material — read
+    in the pre-admission metadata phase. Never carries the id_key/known_hosts bytes or their paths.
     """
 
-    ssh_bundle: SshBootstrapBundle
+    ssh_host: str
+    ssh_port: int
+    account: str
+    host_key_fingerprint: str
+
+
+@dataclass
+class PreparedDiscoveryBundle:
+    """A single strictly-validated discovery bundle snapshot (SECP-B6 MB-1/MB-2/item-4 Phase C).
+
+    Produced in TWO phases from ONE descriptor-pinned acquisition so the authorization gates AND the
+    probe executor consume the SAME validated snapshot — a post-validation mount swap cannot change
+    what ssh reads. Phase 1 (:meth:`MountedWorkerBootstrapBundleSource.prepare_metadata`) fills the
+    non-secret ``anchor`` + ``endpoint``; the PRIVATE ``ssh_bundle`` (id_key + known_hosts) loads
+    ONLY after control-plane admission by :meth:`finalize_key_material`, so it is ``None`` until
+    then. Non-serializable; the SSH bundle has a redacted repr; ``dispose`` removes the private
+    copy AND closes the pinned descriptor.
+    """
+
     anchor: BundleBindingAnchor
+    endpoint: SshEndpointMetadata
     _source: MountedWorkerBootstrapBundleSource
+    ssh_bundle: SshBootstrapBundle | None = None
+
+    @property
+    def key_material_loaded(self) -> bool:
+        """True only once the private id_key/known_hosts have been read (post-admission)."""
+        return self.ssh_bundle is not None
 
     def dispose(self) -> None:
         self._source._finalize_private_dir()
@@ -236,22 +260,48 @@ class MountedWorkerBootstrapBundleSource:
         self._strict = strict
         self._private_dir: str | None = None
         self._prepared: PreparedDiscoveryBundle | None = None
+        # Strict two-phase state: the mount directory fd stays pinned between the metadata phase and
+        # the post-admission key-material phase so BOTH read the same descriptor snapshot.
+        self._dir_fd: int | None = None
+        self._mount_dev: int | None = None
 
-    def prepare_for_discovery(self) -> PreparedDiscoveryBundle:
-        """Acquire the SSH bundle AND the binding anchor as ONE strictly-validated snapshot (SECP-B6
-        MB-1/MB-2 Phase C). The anchor and the SSH material come from the same acquisition, and both
-        the authorization gates and the probe executor consume this cached snapshot — a mount swap
-        after preparation cannot change what ssh reads. Caches the snapshot so a subsequent
-        ``acquire``/``load_anchor`` (e.g. the executor's own ``acquire``) returns the SAME bytes."""
-        ssh_bundle = self.acquire()
-        anchor = self._load_anchor_uncached()
-        prepared = PreparedDiscoveryBundle(ssh_bundle=ssh_bundle, anchor=anchor, _source=self)
+    def prepare_metadata(self) -> PreparedDiscoveryBundle:
+        """Phase 1 (SECP-B6 item-4): pin + validate ONLY the NON-secret manifest + binding metadata,
+        enough to compute the endpoint-binding digest and the authorization anchor. The private
+        ``id_key`` / ``known_hosts`` are NOT read here — call :meth:`finalize_key_material` AFTER
+        control-plane admission succeeds. In strict mode the mount dir fd stays pinned so the later
+        key read comes from the SAME descriptor snapshot (immune to a post-validation swap)."""
+        if self._strict:
+            if not _IS_POSIX:
+                _reject("mount_non_posix_unsupported")
+            endpoint, anchor = self._prepare_metadata_descriptor()
+        else:
+            endpoint, anchor = self._prepare_metadata_pathbased()
+        prepared = PreparedDiscoveryBundle(anchor=anchor, endpoint=endpoint, _source=self)
         self._prepared = prepared
         return prepared
+
+    def finalize_key_material(self) -> None:
+        """Phase 2 (SECP-B6 item-4): AFTER admission, read/copy the private ``id_key`` +
+        ``known_hosts`` from the SAME pinned descriptor snapshot and complete the SSH bundle.
+        Idempotent. Must follow :meth:`prepare_metadata`; key bytes are untouched before this."""
+        prepared = self._prepared
+        if prepared is None:
+            _reject("bundle_not_prepared")
+        assert prepared is not None
+        if prepared.ssh_bundle is not None:
+            return
+        if self._strict:
+            prepared.ssh_bundle = self._finalize_descriptor(prepared.endpoint)
+        else:
+            prepared.ssh_bundle = self._finalize_pathbased(prepared.endpoint)
 
     def acquire(self) -> SshBootstrapBundle:
         # Return the already-validated snapshot so the executor never re-reads the mount by name.
         if self._prepared is not None:
+            if self._prepared.ssh_bundle is None:
+                # The probe executor must never run before post-admission key material is loaded.
+                _reject("bundle_key_material_not_loaded")
             return self._prepared.ssh_bundle
         if self._strict:
             if not _IS_POSIX:
@@ -365,6 +415,131 @@ class MountedWorkerBootstrapBundleSource:
             host_key_fingerprint=fingerprint,
         )
 
+    def _prepare_metadata_descriptor(self) -> tuple[SshEndpointMetadata, BundleBindingAnchor]:
+        """Phase-1 strict path: pin the mount dir fd, validate + read ONLY the non-secret manifest +
+        binding (never id_key/known_hosts), and keep the fd open for the later key phase."""
+        mount = self._mount_path
+        if not (isinstance(mount, str) and mount):
+            _reject("mount_path_unset")
+        try:
+            dir_fd = os.open(mount, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+        except OSError:
+            _reject("mount_open_failed")
+        keep_open = False
+        try:
+            dst = os.fstat(dir_fd)
+            if not stat.S_ISDIR(dst.st_mode):
+                _reject("mount_not_directory")
+            if _getuid is not None and dst.st_uid != _getuid():
+                _reject("mount_not_owned")
+            if dst.st_mode & 0o022:
+                _reject("mount_bad_permissions")
+            if _statvfs is not None and not (_statvfs(dir_fd).f_flag & _ST_RDONLY):
+                _reject("mount_not_read_only")
+            mount_dev = dst.st_dev
+            manifest_bytes = self._read_regular_at(
+                dir_fd, _MANIFEST_NAME, _MAX_MANIFEST_BYTES, 0o022, mount_dev, "manifest"
+            )
+            manifest = self._parse_bytes(manifest_bytes, _MANIFEST_KEYS, "manifest")
+            host, port, account, fingerprint = _validate_manifest_fields(manifest)
+            binding_bytes = self._read_regular_at(
+                dir_fd, _BINDING_NAME, _MAX_BINDING_BYTES, 0o022, mount_dev, "binding"
+            )
+            anchor = self._build_anchor(self._parse_bytes(binding_bytes, _BINDING_KEYS, "binding"))
+            self._dir_fd = dir_fd
+            self._mount_dev = mount_dev
+            keep_open = True
+            return SshEndpointMetadata(host, port, account, fingerprint), anchor
+        finally:
+            if not keep_open:
+                os.close(dir_fd)
+
+    def _finalize_descriptor(self, endpoint: SshEndpointMetadata) -> SshBootstrapBundle:
+        """Phase-2 strict path: read/copy id_key + known_hosts from the PINNED descriptor snapshot
+        into a fresh worker-private (0700) dir, then close the fd. Same hardlink/inode/cross-device/
+        owner/perm protections as the single-shot acquire; immune to a post-metadata mount swap."""
+        dir_fd = self._dir_fd
+        mount_dev = self._mount_dev
+        if dir_fd is None or mount_dev is None:
+            _reject("bundle_descriptor_closed")
+        assert dir_fd is not None and mount_dev is not None
+        try:
+            key_bytes = self._read_regular_at(
+                dir_fd, _KEY_NAME, _MAX_KEY_BYTES, 0o077, mount_dev, "key"
+            )
+            known_hosts_bytes = self._read_regular_at(
+                dir_fd, _KNOWN_HOSTS_NAME, _MAX_KNOWN_HOSTS_BYTES, 0o022, mount_dev, "known_hosts"
+            )
+        finally:
+            os.close(dir_fd)
+            self._dir_fd = None
+            self._mount_dev = None
+        private_dir = tempfile.mkdtemp(prefix="secp-b6-bundle-")
+        os.chmod(private_dir, 0o700)
+        self._private_dir = private_dir
+        key_path = os.path.join(private_dir, _KEY_NAME)
+        known_hosts_path = os.path.join(private_dir, _KNOWN_HOSTS_NAME)
+        _write_private(key_path, key_bytes)
+        _write_private(known_hosts_path, known_hosts_bytes)
+        return SshBootstrapBundle(
+            ssh_host=endpoint.ssh_host,
+            ssh_port=endpoint.ssh_port,
+            account=endpoint.account,
+            private_key_path=key_path,
+            known_hosts_path=known_hosts_path,
+            host_key_fingerprint=endpoint.host_key_fingerprint,
+        )
+
+    def _prepare_metadata_pathbased(self) -> tuple[SshEndpointMetadata, BundleBindingAnchor]:
+        """Phase-1 non-strict path (tests / non-live): validate the mount + manifest + binding by
+        path. Reads NO private key material — only the non-secret manifest + binding.json."""
+        mount = self._mount_path
+        if not (isinstance(mount, str) and mount):
+            _reject("mount_path_unset")
+        mount_st = _lstat(mount)
+        if stat.S_ISLNK(mount_st.st_mode):
+            _reject("mount_symlink")
+        if not stat.S_ISDIR(mount_st.st_mode):
+            _reject("mount_not_directory")
+        _check_owner_and_perms(mount_st, world_perm_mask=0o022, missing_reason="mount")
+        manifest_path = os.path.join(mount, _MANIFEST_NAME)
+        _require_regular_file(
+            mount,
+            manifest_path,
+            max_bytes=_MAX_MANIFEST_BYTES,
+            world_perm_mask=0o022,
+            reason="manifest",
+        )
+        manifest = self._read_manifest(manifest_path)
+        host, port, account, fingerprint = _validate_manifest_fields(manifest)
+        anchor = self._load_anchor_uncached()
+        return SshEndpointMetadata(host, port, account, fingerprint), anchor
+
+    def _finalize_pathbased(self, endpoint: SshEndpointMetadata) -> SshBootstrapBundle:
+        """Phase-2 non-strict path: validate the id_key + known_hosts files and build the SSH bundle
+        pointing at the mount paths (ssh reads the bytes). Reached only AFTER admission."""
+        mount = self._mount_path
+        key_path = os.path.join(mount, _KEY_NAME)
+        known_hosts_path = os.path.join(mount, _KNOWN_HOSTS_NAME)
+        _require_regular_file(
+            mount, key_path, max_bytes=_MAX_KEY_BYTES, world_perm_mask=0o077, reason="key"
+        )
+        _require_regular_file(
+            mount,
+            known_hosts_path,
+            max_bytes=_MAX_KNOWN_HOSTS_BYTES,
+            world_perm_mask=0o022,
+            reason="known_hosts",
+        )
+        return SshBootstrapBundle(
+            ssh_host=endpoint.ssh_host,
+            ssh_port=endpoint.ssh_port,
+            account=endpoint.account,
+            private_key_path=key_path,
+            known_hosts_path=known_hosts_path,
+            host_key_fingerprint=endpoint.host_key_fingerprint,
+        )
+
     def _read_regular_at(
         self, dir_fd: int, name: str, max_bytes: int, world_mask: int, mount_dev: int, reason: str
     ) -> bytes:
@@ -437,6 +612,12 @@ class MountedWorkerBootstrapBundleSource:
         data = self._read_json(binding_path, _MAX_BINDING_BYTES, "binding")
         if not isinstance(data, dict) or set(data.keys()) != _BINDING_KEYS:
             _reject("binding_shape_invalid")
+        assert isinstance(data, dict)
+        return self._build_anchor(data)
+
+    def _build_anchor(self, data: dict) -> BundleBindingAnchor:
+        """Validate a binding dict (already confirmed to have exactly ``_BINDING_KEYS``) into the
+        non-secret :class:`BundleBindingAnchor`. Shared by the path-based + descriptor phases."""
         version = data["authorization_version"]
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             _reject("binding_version_invalid")
@@ -487,9 +668,18 @@ class MountedWorkerBootstrapBundleSource:
         self._finalize_private_dir()
 
     def _finalize_private_dir(self) -> None:
-        # Remove the worker-private copy of the validated key/known_hosts (strict path). The mount
-        # itself persists and is read-only; nothing else sensitive is held in memory.
+        # Remove the worker-private copy of the validated key/known_hosts (strict) AND close the
+        # pinned mount descriptor if the run refused before the key-material phase. The mount itself
+        # persists and is read-only; nothing else sensitive is held in memory. Called on every path.
         self._prepared = None
+        dir_fd = self._dir_fd
+        self._dir_fd = None
+        self._mount_dev = None
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except OSError:
+                pass
         private_dir = self._private_dir
         self._private_dir = None
         if private_dir is not None:
