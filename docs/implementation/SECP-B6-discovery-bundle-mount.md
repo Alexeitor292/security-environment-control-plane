@@ -100,7 +100,8 @@ The admission is a real **control-plane boundary**, not an in-process shortcut: 
 over the internal HTTPS route
 `POST /internal/worker-discovery-admission/{begin,complete,assert,consume}` and **never imports**
 `secp_api.services.worker_admission` or passes a DB `Session` to its admission client (enforced by
-`apps/api/tests/test_discovery_boundary.py`). The control plane owns the identity **decision** and the
+`apps/api/tests/test_discovery_admission_boundary.py`). The control plane owns the identity
+**decision** and the
 authoritative **clock** (a client-supplied time is never trusted):
 
 1. **begin** — the verifier issues a durable, **single-use nonce** bound to the job / organization /

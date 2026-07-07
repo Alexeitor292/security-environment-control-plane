@@ -340,7 +340,7 @@ def _live_comp(session, mount: str, probe: _FakeProbe, priv: str, pub: str) -> D
     # bundle_binding + admission_client present => the engine crosses the control-plane admission
     # BOUNDARY (real HTTP client + Ed25519 signing) and enforces the bundle-to-job + endpoint bind
     # gates before probing. The worker imports no admission service and passes no Session to the
-    # client (see test_discovery_boundary.py).
+    # client (see test_discovery_admission_boundary.py).
     return DiscoveryComposition(
         probe_source=probe,
         bundle_binding=MountedWorkerBootstrapBundleSource(mount),
