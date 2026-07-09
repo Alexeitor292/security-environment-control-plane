@@ -532,7 +532,9 @@ export interface BindingDescriptor {
 
 // --- SECP-B8: worker-owned discovery bundle automation ---
 
-/** A worker's self-published PUBLIC key material (the worker owns/generates its keys). */
+/** A worker's self-published PUBLIC key material (the worker owns/generates its keys).
+ *  The worker-identity registration linkage is deliberately NOT surfaced to the UI (worker-identity
+ *  internals never leak to the frontend — see test_frontend_has_no_lease_or_activation_interface). */
 export interface WorkerDiscoveryNode {
   id: string;
   organization_id: string;
@@ -542,7 +544,6 @@ export interface WorkerDiscoveryNode {
   ssh_public_key_fingerprint: string;
   admission_anchor_hex: string;
   admission_anchor_fingerprint: string;
-  worker_identity_registration_id: string | null;
   created_at: string;
   updated_at: string;
 }
