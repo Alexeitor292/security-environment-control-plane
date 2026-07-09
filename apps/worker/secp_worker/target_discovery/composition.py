@@ -52,13 +52,22 @@ def build_discovery_composition(settings=None) -> DiscoveryComposition:
         return sealed_discovery_composition()
 
     mount_path = getattr(settings, "discovery_bootstrap_mount", "")
+    # SECP-B8: in the worker-MANAGED bundle profile the worker itself owns + wrote the bundle into a
+    # worker-private writable dir, so the strict filesystem-read-only check (which a self-writing
+    # worker cannot satisfy) is relaxed. EVERY other strict protection is retained (descriptor
+    # pinning, owner==uid, no group/other perms, single-hardlink, same-device, bounded size, and the
+    # worker-private validated copy for ssh). With the classic externally-provisioned RO mount the
+    # filesystem-RO requirement stays enforced.
+    require_read_only_mount = not getattr(settings, "discovery_worker_managed_bundle", False)
     # One mounted-bundle source serves BOTH roles: the read-only probe executor's SSH bundle source
     # AND the engine's single prepared-snapshot preparer (Phase C / F-BIND). The live composition
     # always carries ``bundle_binding`` + ``admission_client``, so the engine's mandatory
     # control-plane worker-admission and endpoint-binding gates are ALWAYS enforced before any host
-    # contact. strict=True selects the hardened descriptor-based validation + read-only-mount
-    # requirement + worker-private inode-pinned copy for ssh (SECP-B6 F-FS).
-    bundle_source = MountedWorkerBootstrapBundleSource(mount_path, strict=True)
+    # contact. strict=True selects the hardened descriptor-based validation + worker-private inode-
+    # pinned copy for ssh (SECP-B6 F-FS).
+    bundle_source = MountedWorkerBootstrapBundleSource(
+        mount_path, strict=True, require_read_only_mount=require_read_only_mount
+    )
     probe_source = ReadOnlyProbeExecutor(
         bundle_source=bundle_source,
         runner=SubprocessHostCommandRunner(),

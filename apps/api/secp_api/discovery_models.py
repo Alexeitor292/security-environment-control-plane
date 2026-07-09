@@ -38,11 +38,11 @@ from secp_api.enums import (
     DiscoveryJobStatus,
     TargetDiscoveryStatus,
 )
-from secp_api.models import Base, TimestampMixin, _uuid
+from secp_api.models import Base, UpdatedTimestampMixin, _uuid
 from secp_api.types import EnumType
 
 
-class TargetDiscoveryEnrollment(Base, TimestampMixin):
+class TargetDiscoveryEnrollment(Base, UpdatedTimestampMixin):
     """The app-owned target-discovery enrollment the operator drives (SECP-B5). All labels are
     server-generated; it binds an active onboarding of an execution target. Lifecycle is mutable via
     compare-and-swap; live apply of any derived plan remains sealed in this PR."""
@@ -91,7 +91,7 @@ class TargetDiscoveryEnrollment(Base, TimestampMixin):
         )
 
 
-class DiscoveryJob(Base, TimestampMixin):
+class DiscoveryJob(Base, UpdatedTimestampMixin):
     """Durable, resumable, idempotent, concurrency-safe read-only discovery operation (SECP-B5).
 
     ``operation_fingerprint`` is a deterministic key over (enrollment, version), so a retry after a
@@ -139,7 +139,7 @@ class DiscoveryJob(Base, TimestampMixin):
         )
 
 
-class DiscoverySnapshot(Base, TimestampMixin):
+class DiscoverySnapshot(Base, UpdatedTimestampMixin):
     """Immutable typed discovery evidence (SECP-B5). ``evidence`` is a bounded, secret-free JSON of
     booleans/bounded ints/safe tokens only. Immutable + undeletable after insert."""
 
@@ -174,7 +174,7 @@ class DiscoverySnapshot(Base, TimestampMixin):
         )
 
 
-class DiscoveryCandidatePlan(Base, TimestampMixin):
+class DiscoveryCandidatePlan(Base, UpdatedTimestampMixin):
     """Immutable, content-addressed discovery-derived candidate plan (SECP-B5). Binds the exact
     discovered node/storage identity, bounded candidate VMIDs, generated ownership names + markers,
     and every drift anchor. ``executable`` is False — live apply is sealed. Immutable +
@@ -217,7 +217,7 @@ class DiscoveryCandidatePlan(Base, TimestampMixin):
         return f"DiscoveryCandidatePlan(id={self.id!s}, plan_hash={self.plan_hash!r})"
 
 
-class DiscoveryCandidatePlanApproval(Base, TimestampMixin):
+class DiscoveryCandidatePlanApproval(Base, UpdatedTimestampMixin):
     """Immutable explicit approval binding one EXACT candidate-plan hash + every drift anchor
     (enrollment version, evidence hash, capacity snapshot hash, worker identity version, expiry).
     Immutable + undeletable after insert."""

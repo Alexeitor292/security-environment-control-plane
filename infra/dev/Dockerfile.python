@@ -25,6 +25,13 @@ RUN uv pip install --system -e ".[worker]"
 
 # Non-root runtime user.
 RUN useradd --create-home --uid 10001 secp && chown -R secp:secp /app
+
+# SECP-B8: worker-owned discovery state root (key material + assembled mounted bundle). Created here
+# owned by the runtime user so a fresh named volume mounted at this path inherits secp ownership —
+# the worker can then write its 0700 key dir + the mounted bundle. Empty + inert unless the
+# worker-managed discovery profile is enabled. Never holds a committed secret.
+RUN mkdir -p /var/run/secp && chown -R secp:secp /var/run/secp
+
 USER secp
 
 EXPOSE 8080

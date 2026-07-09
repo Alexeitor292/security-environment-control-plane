@@ -67,6 +67,27 @@ class Settings(BaseSettings):
     # Path to the CA bundle that validates the internal admission endpoint's server TLS certificate.
     discovery_admission_ca: str = ""
 
+    # SECP-B8: worker-OWNED bundle automation. When enabled, a worker startup task generates + owns
+    # the SSH + Ed25519 admission keypairs under ``discovery_worker_key_dir`` (private halves never
+    # leave the worker), publishes ONLY the PUBLIC material to the control plane so the UI can
+    # auto-populate the bootstrap wizard, and — once a target's bootstrap is completed + bound + the
+    # host public key is captured — assembles the mounted bundle at ``discovery_bootstrap_mount``
+    # from the control plane's SECRET-FREE bundle descriptor. All DEPLOYMENT-LOCAL; no SSH/cred
+    # material lives in config. When disabled the worker never generates keys or writes a bundle.
+    discovery_worker_managed_bundle: bool = False
+    # Worker-private, persistent directory holding the worker-owned keypairs (0700; keys 0600). The
+    # admission key/anchor here should be the same files ``discovery_worker_identity_key`` /
+    # ``discovery_worker_identity_anchor`` point at, so the generated identity drives admission.
+    discovery_worker_key_dir: str = "/var/run/secp/worker-keys"
+    # Optional explicit organization id the self-publishing worker writes its PUBLIC node into. When
+    # empty and exactly ONE organization exists (first-time/single-tenant), that org is used; with
+    # multiple orgs and no explicit id, publication is skipped (never guess across tenants).
+    discovery_worker_node_organization: str = ""
+    # Stable label for this worker's published discovery node (unique per organization).
+    discovery_worker_node_label: str = "default-worker"
+    # Bounded poll interval (seconds) for the worker bundle-prep loop.
+    discovery_worker_bundle_poll_seconds: float = 15.0
+
     # Auth. The dev fallback principal is ONLY honored when auth_dev_mode is true
     # AND app_env != production (enforced below). Production requires real OIDC.
     auth_dev_mode: bool = True

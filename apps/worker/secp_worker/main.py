@@ -80,6 +80,23 @@ def _start_discovery_consumer(stop_event: threading.Event) -> threading.Thread:
     return thread
 
 
+def _start_discovery_bundle_prep(stop_event: threading.Event) -> threading.Thread:
+    """Start the SECP-B8 worker-owned discovery bundle-prep loop in a daemon thread (worker only).
+
+    Inert unless the deployment-local ``discovery_worker_managed_bundle`` profile is enabled. When
+    enabled it generates + owns the worker SSH/admission keypairs (private halves never leave the
+    worker), publishes ONLY the public material to the control plane, and assembles the mounted
+    bundle from the secret-free descriptor. Contacts no Proxmox host and runs no probe.
+    """
+    from secp_worker.discovery_bundle_runtime import run_forever
+
+    thread = threading.Thread(
+        target=run_forever, args=(stop_event,), name="discovery-bundle-prep", daemon=True
+    )
+    thread.start()
+    return thread
+
+
 def _install_signal_handlers(stop_event: threading.Event) -> None:  # pragma: no cover - signals
     def _handle(_signum, _frame):
         logger.info("shutdown signal received; stopping worker loops gracefully")
@@ -121,6 +138,7 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
     _start_readonly_preflight_consumer(stop_event)
     _start_deployment_consumer(stop_event)
     _start_discovery_consumer(stop_event)
+    _start_discovery_bundle_prep(stop_event)
     await asyncio.gather(worker.run(), _run_outbox_publisher_loop())
 
 
@@ -166,6 +184,7 @@ def main() -> None:
     _start_readonly_preflight_consumer(stop_event)
     _start_deployment_consumer(stop_event)
     _start_discovery_consumer(stop_event)
+    _start_discovery_bundle_prep(stop_event)
     from secp_worker.staging_lab.runtime import run_forever
 
     run_forever(stop_event)  # pragma: no cover - long-running loop

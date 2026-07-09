@@ -468,6 +468,106 @@ export interface BootstrapAvailability {
   reason_code: string;
 }
 
+// --- Proxmox read-only discovery bootstrap automation (SECP-B7) ---
+//
+// The wizard that replaces the manual SECP-B6 canary steps. It carries ONLY non-secret values: an
+// SSH PUBLIC key, a port, a public host-key fingerprint, a bounded proof block, and the opaque
+// endpoint-binding digest. It NEVER accepts an SSH private key or a raw command.
+
+export type BootstrapStatus = "pending" | "completed" | "bound" | "refused";
+
+export interface BootstrapSessionCreate {
+  execution_target_id: string;
+  /** The worker's SSH PUBLIC key (ssh-<type> <base64> [comment]). A private key is rejected. */
+  worker_ssh_public_key: string;
+  ssh_port?: number;
+}
+
+export interface BootstrapCompleteRequest {
+  /** Public SSH host-key fingerprint (SHA256:...) read off the Proxmox host. */
+  host_key_fingerprint: string;
+  /** Optional pasted SECPDISC-PROOF block (bounded, secret-free). */
+  proof_text?: string | null;
+  /** SECP-B8: optional host PUBLIC key line (normally parsed from the proof). Never a private key. */
+  host_public_key?: string | null;
+}
+
+export interface BootstrapSession {
+  id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  account: string;
+  pve_role: string;
+  worker_ssh_public_key_fingerprint: string;
+  status: BootstrapStatus;
+  ssh_port: number;
+  host_key_fingerprint: string | null;
+  endpoint_binding_hash: string | null;
+  live_read_authorization_id: string | null;
+  authorization_version: number | null;
+  failure_code: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BootstrapScript {
+  session_id: string;
+  account: string;
+  pve_role: string;
+  worker_ssh_public_key_fingerprint: string;
+  /** The idempotent Proxmox bootstrap script — the only operator action is running it (as root). */
+  script: string;
+}
+
+export interface BindingDescriptor {
+  organization_id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  enrollment_id: string;
+  authorization_id: string;
+  authorization_version: number;
+  endpoint_binding_hash: string;
+}
+
+// --- SECP-B8: worker-owned discovery bundle automation ---
+
+/** A worker's self-published PUBLIC key material (the worker owns/generates its keys).
+ *  The worker-identity registration linkage is deliberately NOT surfaced to the UI (worker-identity
+ *  internals never leak to the frontend — see test_frontend_has_no_lease_or_activation_interface). */
+export interface WorkerDiscoveryNode {
+  id: string;
+  organization_id: string;
+  node_label: string;
+  /** The worker's SSH PUBLIC key line. NEVER a private key. */
+  ssh_public_key: string;
+  ssh_public_key_fingerprint: string;
+  admission_anchor_hex: string;
+  admission_anchor_fingerprint: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Precise readiness diagnostic for an enrollment's live discovery path (SECP-B8). */
+export interface DiscoveryReadiness {
+  enrollment_id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  bootstrap_session_id: string | null;
+  bootstrap_status: string | null;
+  ready: boolean;
+  /** The prerequisite check names still failing (empty when ready). */
+  missing_prerequisites: string[];
+  checks: Record<string, boolean>;
+}
+
+export interface SubstrateEligibilityGrant {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  status: string;
+}
+
 // --- Worker-owned read-only target enrollment + discovery (SECP-B5) ---
 //
 // The control plane owns every label; this surface accepts only a substrate id, a closed resource

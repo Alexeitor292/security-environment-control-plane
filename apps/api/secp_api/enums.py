@@ -830,6 +830,13 @@ class AuditAction(str, Enum):
     worker_discovery_admission_issued = "worker_discovery_admission.issued"
     worker_discovery_admission_refused = "worker_discovery_admission.refused"
     worker_discovery_admission_consumed = "worker_discovery_admission.consumed"
+    # SECP-B7 — Proxmox read-only discovery bootstrap automation.
+    readonly_bootstrap_session_created = "readonly_bootstrap_session.created"
+    readonly_bootstrap_session_completed = "readonly_bootstrap_session.completed"
+    readonly_bootstrap_session_bound = "readonly_bootstrap_session.bound"
+    readonly_bootstrap_session_refused = "readonly_bootstrap_session.refused"
+    # SECP-B8: a worker published its PUBLIC discovery key material (SSH public key + anchor).
+    worker_discovery_node_published = "worker_discovery_node.published"
 
 
 class ResolutionLeaseStatus(str, Enum):
@@ -1021,6 +1028,19 @@ class TargetDiscoveryStatus(str, Enum):
     plan_ready = "plan_ready"
     approved = "approved"
     failed = "failed"
+
+
+class ProxmoxBootstrapStatus(str, Enum):
+    """Lifecycle of a SECP-B7 Proxmox read-only discovery bootstrap session.
+
+    ``pending`` (script issued, awaiting the operator's on-host run + bounded proof) →
+    ``completed`` (proof accepted, endpoint-binding digest computed) → ``bound`` (a separately
+    approved live-read authorization exists for the exact endpoint). ``refused`` is terminal."""
+
+    pending = "pending"
+    completed = "completed"
+    bound = "bound"
+    refused = "refused"
 
 
 class DiscoveryJobStatus(str, Enum):
