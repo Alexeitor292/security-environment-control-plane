@@ -1,4 +1,5 @@
 import {
+  AUDIT_TONE,
   AUTHORIZATION_TONE,
   BOOTSTRAP_TONE,
   TARGET_TONE,
@@ -28,6 +29,7 @@ const ALL_MAPS = {
   EVIDENCE_TONE,
   AUTHORIZATION_TONE,
   TARGET_TONE,
+  AUDIT_TONE,
 };
 
 describe("status tone maps", () => {
@@ -54,6 +56,7 @@ describe("status tone maps", () => {
       evidence: EVIDENCE_TONE,
       authorization: AUTHORIZATION_TONE,
       target: TARGET_TONE,
+      audit: AUDIT_TONE,
     } as const;
     for (const [domain, map] of Object.entries(domains)) {
       for (const state of Object.keys(map)) {

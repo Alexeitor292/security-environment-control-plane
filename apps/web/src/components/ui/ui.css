@@ -20,7 +20,9 @@
 @media (forced-colors: active) {
   .ui-btn:focus-visible,
   .ui-input:focus-visible,
-  .ui-select:focus-visible {
+  .ui-select:focus-visible,
+  .ui-decision:focus-visible,
+  .ui-action:focus-visible {
     outline: 2px solid transparent;
     outline-offset: 2px;
   }
@@ -212,6 +214,208 @@
   border: var(--border-width) solid var(--border-divider);
   border-radius: var(--radius-sm);
   padding: 1px 6px;
+}
+
+/* ----------------------------------------------------- cyber grid layer */
+.ui-cybergrid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(
+      42% 60% at 18% 20%,
+      color-mix(in srgb, var(--accent-mark) 14%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      50% 70% at 85% 10%,
+      color-mix(in srgb, var(--accent-brand) 10%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      40% 55% at 65% 90%,
+      color-mix(in srgb, var(--accent-primary) 10%, transparent),
+      transparent 70%
+    ),
+    linear-gradient(
+      color-mix(in srgb, var(--border-hairline) 34%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--border-hairline) 34%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 100% 100%, 100% 100%, 100% 100%, 34px 34px, 34px 34px;
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1),
+    rgba(0, 0, 0, 0.35)
+  );
+}
+
+/* ---------------------------------------------------------------- hero */
+.ui-hero {
+  position: relative;
+  overflow: hidden;
+  border: var(--border-width) solid var(--card-border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(
+    180deg,
+    var(--surface-panel),
+    color-mix(in srgb, var(--surface-panel) 60%, var(--surface-canvas))
+  );
+  box-shadow: var(--shadow-panel);
+  padding: 22px 24px;
+}
+.ui-hero__content {
+  position: relative;
+}
+.ui-hero__heading {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  color: var(--ink-primary);
+}
+.ui-hero__subheading {
+  margin-top: 4px;
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+}
+
+/* -------------------------------------------------------------- metric */
+.ui-metric {
+  background: var(--card-surface);
+  border: var(--border-width) solid var(--card-border);
+  border-radius: var(--card-radius);
+  padding: 12px 14px;
+  box-shadow: var(--shadow-panel);
+}
+.ui-metric__label {
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-micro);
+  color: var(--ink-secondary);
+}
+.ui-metric__value {
+  margin-top: 4px;
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-bold);
+  color: var(--ink-primary);
+  line-height: 1.1;
+}
+.ui-metric--ok .ui-metric__value { color: var(--tone-ok); }
+.ui-metric--warn .ui-metric__value { color: var(--tone-warn); }
+.ui-metric--danger .ui-metric__value { color: var(--tone-danger); }
+.ui-metric__detail {
+  margin-top: 4px;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+/* ------------------------------------------------------------ decision */
+.ui-decision {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: var(--border-width) solid var(--card-border);
+  border-radius: var(--card-radius);
+  background: var(--surface-raised);
+  color: var(--ink-primary);
+  text-decoration: none;
+  transition: box-shadow var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+.ui-decision:hover {
+  text-decoration: none;
+  border-color: var(--border-selected);
+  box-shadow: var(--glow-accent);
+}
+.ui-decision:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.ui-decision__chip {
+  flex: none;
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-micro);
+  color: var(--accent-brand);
+  background: var(--surface-well);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  padding: 3px 7px;
+}
+.ui-decision__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ui-decision__title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+.ui-decision__meta {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.ui-decision__arrow {
+  flex: none;
+  color: var(--accent-primary);
+}
+
+/* -------------------------------------------------------------- action */
+.ui-action {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: var(--border-width) solid var(--card-border);
+  border-radius: var(--card-radius);
+  background: var(--card-surface);
+  color: var(--ink-primary);
+  text-decoration: none;
+  transition: box-shadow var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+.ui-action:hover {
+  text-decoration: none;
+  border-color: var(--border-selected);
+  box-shadow: var(--glow-brand);
+}
+.ui-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.ui-action__icon {
+  flex: none;
+  color: var(--accent-brand);
+  margin-top: 1px;
+}
+.ui-action__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-action__title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+.ui-action__desc {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.ui-action--unavailable {
+  cursor: not-allowed;
+}
+.ui-action--unavailable .ui-action__icon {
+  color: var(--ink-muted);
 }
 
 /* --------------------------------------------------------------- table */

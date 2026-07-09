@@ -34,3 +34,8 @@ export { CyberTable, type CyberTableProps } from "./CyberTable";
 export { DataPanel, type DataPanelProps } from "./DataPanel";
 export { resolvePanelState, type PanelState } from "./data-panel";
 export { useAction, type ActionState } from "./useAction";
+export { CyberGridBackground } from "./CyberGridBackground";
+export { CyberHeroPanel, type CyberHeroPanelProps } from "./CyberHeroPanel";
+export { MetricTile, type MetricTileProps } from "./MetricTile";
+export { DecisionCard, type DecisionCardProps } from "./DecisionCard";
+export { ActionTile, type ActionTileProps } from "./ActionTile";

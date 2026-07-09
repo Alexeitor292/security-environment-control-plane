@@ -38,7 +38,8 @@ export type StatusDomain =
   | "preflight-outcome"
   | "evidence"
   | "authorization"
-  | "target";
+  | "target"
+  | "audit";
 
 export const LIFECYCLE_TONE: Record<LifecycleState, StatusTone> = {
   draft: "pending",
@@ -172,6 +173,15 @@ export const AUTHORIZATION_TONE: Record<string, StatusTone> = {
   sealed: "danger",
 };
 
+/** AuditEvent.outcome values (plain string in types.ts). */
+export const AUDIT_TONE: Record<string, StatusTone> = {
+  success: "ok",
+  denied: "danger",
+  refused: "danger",
+  failed: "danger",
+  error: "danger",
+};
+
 const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   lifecycle: LIFECYCLE_TONE,
   plan: PLAN_TONE,
@@ -185,6 +195,7 @@ const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   evidence: EVIDENCE_TONE,
   authorization: AUTHORIZATION_TONE,
   target: TARGET_TONE,
+  audit: AUDIT_TONE,
 };
 
 /** Resolution order for domain-less lookups. Lifecycle then plan first, which
@@ -206,6 +217,7 @@ const DEFAULT_ORDER: StatusDomain[] = [
   "evidence",
   "authorization",
   "target",
+  "audit",
 ];
 
 export interface ResolvedStatus {
