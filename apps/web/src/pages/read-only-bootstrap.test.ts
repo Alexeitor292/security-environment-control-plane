@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import { ApiClientError } from "../api/client";
 import type { BootstrapSession } from "../api/types";
 import {
+  PREREQUISITE_LABELS,
+  WORKER_SIDE_PREREQUISITES,
   bootstrapStatusLabel,
   currentStep,
   describeApiError,
+  prerequisiteLabel,
   validateFingerprint,
   validatePublicKey,
 } from "./read-only-bootstrap";
@@ -92,5 +95,22 @@ describe("bootstrapStatusLabel", () => {
   it("labels each status", () => {
     expect(bootstrapStatusLabel("pending")).toMatch(/Awaiting/);
     expect(bootstrapStatusLabel("bound")).toMatch(/ready/i);
+  });
+});
+
+describe("SECP-B8 readiness prerequisite labels", () => {
+  it("gives a friendly, actionable label for each known check", () => {
+    for (const name of Object.keys(PREREQUISITE_LABELS)) {
+      expect(prerequisiteLabel(name).length).toBeGreaterThan(0);
+      expect(prerequisiteLabel(name)).not.toBe(name);
+    }
+  });
+  it("falls back to the raw name for an unknown check", () => {
+    expect(prerequisiteLabel("some_new_check")).toBe("some_new_check");
+  });
+  it("surfaces worker-side prerequisites so a sealed worker is never a mystery", () => {
+    expect(WORKER_SIDE_PREREQUISITES.length).toBeGreaterThan(0);
+    // The guidance must name the worker-managed profile flag operators must set.
+    expect(WORKER_SIDE_PREREQUISITES.join(" ")).toMatch(/SECP_DISCOVERY_WORKER_MANAGED_BUNDLE/);
   });
 });

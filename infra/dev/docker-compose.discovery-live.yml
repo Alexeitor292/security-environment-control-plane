@@ -1,0 +1,53 @@
+# SECP-B8 — controlled worker-owned live read-only discovery override.
+#
+# Enables the worker to OWN its discovery key material and AUTOMATICALLY assemble the mounted
+# read-only discovery bundle — so the ONLY host-side manual action is running the app-generated
+# Proxmox bootstrap script. There is NO hand-written bundle and NO manual ssh-keygen.
+#
+# When layered on the base stack the worker:
+#   * generates + owns its SSH + Ed25519 admission keypairs under /var/run/secp/worker-keys (0700;
+#     the private halves NEVER leave the worker and are never uploaded);
+#   * publishes ONLY the PUBLIC material to the control plane so the bootstrap wizard auto-populates
+#     the "Worker SSH public key" field;
+#   * once a target's bootstrap is completed + bound and the host public key was captured, assembles
+#     the mounted bundle at /var/run/secp/discovery-bundle from the control plane's SECRET-FREE
+#     descriptor. The strict mounted-bundle validator + control-plane admission + endpoint binding
+#     still gate every SSH — a self-written bundle grants nothing on its own.
+#
+# The bundle mount + key dir live on a persistent named volume so keys/identity stay stable across
+# restarts. Live discovery ALSO requires the B6 control-plane admission material (an internal HTTPS
+# admission endpoint + a CA bundle); provision those out of band and set the SECP_DISCOVERY_ADMISSION_*
+# values in ../../.env (see docs/implementation/SECP-B6-discovery-bundle-mount.md). Without them the
+# worker stays sealed and fails closed — it never reads the SSH id_key.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.discovery-live.yml \
+#     --env-file ../../.env up -d --build
+name: secp-dev
+
+services:
+  worker:
+    environment:
+      # Turn on the reviewed controlled-integration profile AND the B8 worker-managed bundle path.
+      SECP_DISCOVERY_CONTROLLED_INTEGRATION_ENABLED: "true"
+      SECP_DISCOVERY_WORKER_MANAGED_BUNDLE: "true"
+      # Worker-owned, persistent state (on the named volume below).
+      SECP_DISCOVERY_WORKER_KEY_DIR: /var/run/secp/worker-keys
+      SECP_DISCOVERY_BOOTSTRAP_MOUNT: /var/run/secp/discovery-bundle
+      # The admission identity key/anchor ARE the worker-generated Ed25519 admission files, so the
+      # generated identity drives control-plane admission (no separate hand-provisioned identity).
+      SECP_DISCOVERY_WORKER_IDENTITY_KEY: /var/run/secp/worker-keys/admission_key
+      SECP_DISCOVERY_WORKER_IDENTITY_ANCHOR: /var/run/secp/worker-keys/admission_anchor
+      # Optional: pin the org the worker publishes its public node into (required only when >1 org
+      # exists; with a single org it is auto-detected). Stable label for this worker's node.
+      SECP_DISCOVERY_WORKER_NODE_ORGANIZATION: ${SECP_DISCOVERY_WORKER_NODE_ORGANIZATION:-}
+      SECP_DISCOVERY_WORKER_NODE_LABEL: ${SECP_DISCOVERY_WORKER_NODE_LABEL:-default-worker}
+      # B6 control-plane admission material (provisioned out of band; HTTPS-only endpoint + CA bundle).
+      SECP_DISCOVERY_ADMISSION_ENDPOINT: ${SECP_DISCOVERY_ADMISSION_ENDPOINT:-}
+      SECP_DISCOVERY_ADMISSION_CA: ${SECP_DISCOVERY_ADMISSION_CA:-}
+    volumes:
+      # Persistent, worker-owned discovery state (key material + the assembled mounted bundle). NOT
+      # mounted into the API or web containers — the mount is worker-only (SECP-B6 isolation).
+      - worker-discovery-state:/var/run/secp
+
+volumes:
+  worker-discovery-state:

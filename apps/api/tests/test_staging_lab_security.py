@@ -293,13 +293,23 @@ def test_lab_creator_cannot_grant_substrate_eligibility(session, principal):
         )
 
 
-def test_no_router_endpoint_grants_eligibility():
-    """No route in the staging-lab router (or anywhere in the API) grants substrate eligibility."""
+def test_lab_creator_router_never_grants_eligibility():
+    """The staging-lab router (the lab-creator surface) never wires the eligibility grant to HTTP —
+    a lab creator can NEVER self-grant substrate eligibility from their own router."""
     for path in _api_files():
         if path.name == "staging_labs.py" and path.parent.name == "routers":
             src = path.read_text(encoding="utf-8")
             assert "grant_substrate_eligibility" not in src
-    # Structural: the grant function is a service-only call, never wired to an HTTP handler.
+
+
+def test_only_the_target_admin_bootstrap_endpoint_exposes_eligibility_grant():
+    """SECP-B8 supersedes the earlier "no endpoint grants eligibility" guard: the bootstrap wizard
+    now exposes ONE guided target-admin grant endpoint. This test pins that surface — the ONLY
+    router that may call ``grant_substrate_eligibility`` is ``bootstrap_discovery.py``, and the
+    grant is never silently automatic (the service still enforces ``staging_substrate:manage``; a
+    lab creator is rejected — see ``test_lab_creator_cannot_grant_substrate_eligibility`` and
+    ``test_lab_creator_router_never_grants_eligibility``)."""
+    callers: set[str] = set()
     for path in _api_files():
         if path.parent.name != "routers":
             continue
@@ -308,9 +318,15 @@ def test_no_router_endpoint_grants_eligibility():
             if isinstance(node, ast.Call):
                 func = node.func
                 name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-                assert name != "grant_substrate_eligibility", (
-                    f"{path.name} exposes eligibility grant"
-                )
+                if name == "grant_substrate_eligibility":
+                    callers.add(path.name)
+    # Exactly one authorized target-admin endpoint — nothing else exposes the grant.
+    assert callers == {"bootstrap_discovery.py"}, f"unexpected eligibility-grant callers: {callers}"
+    # And the service it delegates to still enforces the target-admin permission (no auto-grant).
+    import inspect
+
+    grant_src = inspect.getsource(staging_labs.grant_substrate_eligibility)
+    assert "Permission.staging_substrate_manage" in grant_src
 
 
 def test_eligible_substrate_list_requires_all_gates(session, principal):

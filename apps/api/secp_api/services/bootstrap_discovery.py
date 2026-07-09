@@ -39,6 +39,7 @@ from secp_api.enums import (
     OnboardingStatus,
     Permission,
     ProxmoxBootstrapStatus,
+    StagingSubstrateEligibilityStatus,
     TargetStatus,
 )
 from secp_api.errors import DomainError, NotFoundError
@@ -50,6 +51,7 @@ from secp_api.live_read_contract import (
 from secp_api.models import (
     ExecutionTarget,
     ProxmoxReadOnlyBootstrapSession,
+    StagingSubstrateEligibility,
     TargetDiscoveryEnrollment,
     TargetOnboarding,
 )
@@ -187,9 +189,14 @@ def complete_bootstrap_session(
     *,
     host_key_fingerprint: str,
     proof_text: str | None = None,
+    host_public_key: str | None = None,
 ) -> ProxmoxReadOnlyBootstrapSession:
     """Accept the operator's bounded, secret-free proof + the public host-key fingerprint, compute
-    the endpoint-binding digest (backend code) and transition ``pending`` → ``completed``."""
+    the endpoint-binding digest (backend code) and transition ``pending`` → ``completed``.
+
+    SECP-B8: if the proof (or an explicit arg) carries the host's PUBLIC key line, it is validated,
+    cross-checked against ``host_key_fingerprint`` (fail closed on mismatch) and stored so the
+    worker can synthesize an authoritative ``known_hosts`` entry without contacting Proxmox."""
     actor.require(Permission.target_discovery_manage)
     row = _get_session(session, actor, session_id)
     if row.status != ProxmoxBootstrapStatus.pending:
@@ -200,6 +207,19 @@ def complete_bootstrap_session(
     if not (fp.startswith("SHA256:") and 8 < len(fp) <= _FINGERPRINT_MAX and "\n" not in fp):
         raise _fail("host_key_fingerprint must be an SSH 'SHA256:...' fingerprint")
     proof_summary = _parse_proof(proof_text) if proof_text else {"submitted": True}
+
+    # SECP-B8: capture the host PUBLIC key (explicit arg wins over the parsed proof fact). It is
+    # validated as a public key (private-key material rejected) and its derived fingerprint MUST
+    # equal the operator-supplied host_key_fingerprint, or completion fails closed.
+    host_key_line = str(host_public_key or proof_summary.get("host_public_key") or "").strip()
+    normalized_host_public_key: str | None = None
+    if host_key_line and host_key_line.lower() != "unknown":
+        try:
+            normalized_host_public_key, derived_fp = validate_public_ssh_key(host_key_line)
+        except BootstrapContractError:
+            raise _fail("host_public_key is not a valid SSH public key") from None
+        if derived_fp != fp:
+            raise _fail("host_public_key does not match host_key_fingerprint")
 
     target = _load_target(session, actor, row.execution_target_id)
     try:
@@ -213,6 +233,8 @@ def complete_bootstrap_session(
         host_key_fingerprint=fp,
     )
     row.host_key_fingerprint = fp
+    if normalized_host_public_key is not None:
+        row.host_public_key = normalized_host_public_key
     row.endpoint_binding_hash = endpoint_binding_hash
     row.proof_summary = proof_summary
     row.status = ProxmoxBootstrapStatus.completed
@@ -291,6 +313,214 @@ def get_binding_descriptor(session: Session, actor: Principal, enrollment_id: uu
     }
 
 
+def get_bundle_descriptor(session: Session, actor: Principal, enrollment_id: uuid.UUID) -> dict:
+    """SECP-B8: the SECRET-FREE superset the worker's bundle manager needs to assemble the mounted
+    discovery bundle without contacting Proxmox — the ``binding.json`` fields PLUS the SSH endpoint
+    facts (host/port/account), the public host-key fingerprint, and the host PUBLIC key line the
+    worker writes into ``known_hosts``. Fails closed unless a fully-bound session exists AND the
+    host public key was captured at completion. No secret is ever returned."""
+    enrollment = session.get(TargetDiscoveryEnrollment, enrollment_id)
+    if enrollment is None:
+        raise NotFoundError("enrollment_not_found")
+    actor.require_org(enrollment.organization_id)
+    row = _bound_session_for_enrollment(session, enrollment)
+    if not (
+        row.endpoint_binding_hash and row.live_read_authorization_id and row.authorization_version
+    ):
+        raise _fail("bootstrap session binding is incomplete")
+    if not row.host_public_key:
+        raise _fail("bootstrap session has no captured host public key; re-run completion")
+    if not row.host_key_fingerprint:
+        raise _fail("bootstrap session has no host key fingerprint")
+    target = _load_target(session, actor, row.execution_target_id)
+    try:
+        ssh_host = normalize_target_host(target.config or {})
+    except ValueError:
+        raise _fail("target host is unresolvable from its config") from None
+    descriptor = {
+        "organization_id": str(enrollment.organization_id),
+        "execution_target_id": str(enrollment.execution_target_id),
+        "onboarding_id": str(enrollment.onboarding_id),
+        "enrollment_id": str(enrollment.id),
+        "authorization_id": str(row.live_read_authorization_id),
+        "authorization_version": int(row.authorization_version),
+        "endpoint_binding_hash": row.endpoint_binding_hash,
+        # SSH endpoint facts + host key material (all non-secret) for manifest.json + known_hosts.
+        "ssh_host": ssh_host,
+        "ssh_port": int(row.ssh_port),
+        "account": row.account.split("@", 1)[0],
+        "host_key_fingerprint": row.host_key_fingerprint,
+        "host_public_key": row.host_public_key,
+    }
+    return descriptor
+
+
+def resolve_ready_bundle_descriptors(session: Session) -> list[dict]:
+    """SECP-B8 worker/system-facing: build the SECRET-FREE bundle descriptor for EVERY enrollment
+    whose bootstrap session is fully bound AND has the host public key captured. No principal — the
+    worker process resolves its own bundle prep from the shared control-plane store, and every field
+    is non-secret (IDs, endpoint digest, SSH host/port/account, host public key). Returns [] when
+    nothing is ready. It contacts nothing and reads no private key."""
+    rows = (
+        session.execute(
+            select(ProxmoxReadOnlyBootstrapSession).where(
+                ProxmoxReadOnlyBootstrapSession.status == ProxmoxBootstrapStatus.bound,
+                ProxmoxReadOnlyBootstrapSession.host_public_key.is_not(None),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    descriptors: list[dict] = []
+    for row in rows:
+        if not (
+            row.endpoint_binding_hash
+            and row.live_read_authorization_id
+            and row.authorization_version
+            and row.host_key_fingerprint
+            and row.host_public_key
+        ):
+            continue
+        enrollment = (
+            session.execute(
+                select(TargetDiscoveryEnrollment)
+                .where(
+                    TargetDiscoveryEnrollment.execution_target_id == row.execution_target_id,
+                    TargetDiscoveryEnrollment.onboarding_id == row.onboarding_id,
+                    TargetDiscoveryEnrollment.organization_id == row.organization_id,
+                )
+                .order_by(TargetDiscoveryEnrollment.created_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+        if enrollment is None:
+            continue
+        target = session.get(ExecutionTarget, row.execution_target_id)
+        if target is None:
+            continue
+        try:
+            ssh_host = normalize_target_host(target.config or {})
+        except ValueError:
+            continue
+        descriptors.append(
+            {
+                "organization_id": str(row.organization_id),
+                "execution_target_id": str(row.execution_target_id),
+                "onboarding_id": str(row.onboarding_id),
+                "enrollment_id": str(enrollment.id),
+                "authorization_id": str(row.live_read_authorization_id),
+                "authorization_version": int(row.authorization_version),
+                "endpoint_binding_hash": row.endpoint_binding_hash,
+                "ssh_host": ssh_host,
+                "ssh_port": int(row.ssh_port),
+                "account": row.account.split("@", 1)[0],
+                "host_key_fingerprint": row.host_key_fingerprint,
+                "host_public_key": row.host_public_key,
+            }
+        )
+    return descriptors
+
+
+def discovery_readiness(session: Session, actor: Principal, enrollment_id: uuid.UUID) -> dict:
+    """SECP-B8: a precise, secret-free readiness diagnostic for an enrollment's live discovery path.
+
+    Instead of the worker failing opaquely with ``probe_source_sealed``, this reports EXACTLY which
+    prerequisite is missing (Proxmox script not run / bootstrap not completed / not bound / host key
+    not captured / substrate ineligible). It reads state only — it grants nothing and contacts
+    nothing."""
+    enrollment = session.get(TargetDiscoveryEnrollment, enrollment_id)
+    if enrollment is None:
+        raise NotFoundError("enrollment_not_found")
+    actor.require_org(enrollment.organization_id)
+
+    onboarding = session.get(TargetOnboarding, enrollment.onboarding_id)
+    target = session.get(ExecutionTarget, enrollment.execution_target_id)
+    row = (
+        session.execute(
+            select(ProxmoxReadOnlyBootstrapSession)
+            .where(
+                ProxmoxReadOnlyBootstrapSession.execution_target_id
+                == enrollment.execution_target_id,
+                ProxmoxReadOnlyBootstrapSession.onboarding_id == enrollment.onboarding_id,
+            )
+            .order_by(ProxmoxReadOnlyBootstrapSession.created_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+
+    onboarding_active = bool(onboarding and onboarding.status == OnboardingStatus.active)
+    substrate_eligible = bool(
+        target
+        and target.status == TargetStatus.active
+        and _active_substrate_eligibility(session, target.id) is not None
+    )
+    status_value = row.status.value if row else None
+    bootstrap_completed = bool(
+        row and row.status in (ProxmoxBootstrapStatus.completed, ProxmoxBootstrapStatus.bound)
+    )
+    bootstrap_bound = bool(row and row.status == ProxmoxBootstrapStatus.bound)
+    host_key_captured = bool(row and row.host_public_key)
+    live_read_authorized = bool(
+        row and row.live_read_authorization_id and row.authorization_version
+    )
+
+    checks = [
+        ("onboarding_active", onboarding_active),
+        ("substrate_eligible", substrate_eligible),
+        ("bootstrap_session_present", bool(row)),
+        ("bootstrap_completed", bootstrap_completed),
+        ("host_public_key_captured", host_key_captured),
+        ("live_read_authorized", live_read_authorized),
+        ("bootstrap_bound", bootstrap_bound),
+    ]
+    missing = [name for name, ok in checks if not ok]
+    ready = not missing
+    return {
+        "enrollment_id": str(enrollment.id),
+        "execution_target_id": str(enrollment.execution_target_id),
+        "onboarding_id": str(enrollment.onboarding_id),
+        "bootstrap_session_id": str(row.id) if row else None,
+        "bootstrap_status": status_value,
+        "ready": ready,
+        "missing_prerequisites": missing,
+        "checks": {name: ok for name, ok in checks},
+    }
+
+
+def _active_substrate_eligibility(
+    session: Session, target_id: uuid.UUID
+) -> StagingSubstrateEligibility | None:
+    return (
+        session.execute(
+            select(StagingSubstrateEligibility).where(
+                StagingSubstrateEligibility.execution_target_id == target_id,
+                StagingSubstrateEligibility.status == StagingSubstrateEligibilityStatus.active,
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+
+def _bound_session_for_enrollment(
+    session: Session, enrollment: TargetDiscoveryEnrollment
+) -> ProxmoxReadOnlyBootstrapSession:
+    row = session.execute(
+        select(ProxmoxReadOnlyBootstrapSession).where(
+            ProxmoxReadOnlyBootstrapSession.execution_target_id == enrollment.execution_target_id,
+            ProxmoxReadOnlyBootstrapSession.onboarding_id == enrollment.onboarding_id,
+            ProxmoxReadOnlyBootstrapSession.status == ProxmoxBootstrapStatus.bound,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise _fail("no bound bootstrap session for this enrollment's target + onboarding")
+    if row.organization_id != enrollment.organization_id:
+        raise _fail("bootstrap session organization mismatch")
+    return row
+
+
 def get_bootstrap_session(
     session: Session, actor: Principal, session_id: uuid.UUID
 ) -> ProxmoxReadOnlyBootstrapSession:
@@ -333,6 +563,7 @@ def _parse_proof(proof_text: str) -> dict:
         "force_command",
         "authorized_key_fingerprint",
         "host_key_fingerprint",
+        "host_public_key",
         "selftest_ok",
     }
     facts: dict[str, str] = {}
@@ -342,7 +573,7 @@ def _parse_proof(proof_text: str) -> dict:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        if key in allowed and len(value) <= 200 and "\x00" not in value:
+        if key in allowed and len(value) <= 400 and "\x00" not in value:
             facts[key] = value.strip()
     if facts.get("selftest_ok") not in (None, "1"):
         raise _fail("bootstrap self-test did not pass on the host")

@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secp_api.enums import ProxmoxBootstrapStatus
@@ -55,6 +55,10 @@ class ProxmoxReadOnlyBootstrapSession(Base, UpdatedTimestampMixin):
     ssh_port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
     # Public host-key fingerprint + opaque endpoint-binding digest — set once proof is accepted.
     host_key_fingerprint: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # SECP-B8: the Proxmox host's SSH PUBLIC key line ("ssh-ed25519 AAAA..."), captured from the
+    # bootstrap proof. Non-secret; the worker writes it into known_hosts so host-key pinning is
+    # authoritative (the host itself emitted it). NEVER a private key.
+    host_public_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     endpoint_binding_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     # Set when the session is bound to a separately-approved live-read authorization.
     live_read_authorization_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
@@ -70,3 +74,34 @@ class ProxmoxReadOnlyBootstrapSession(Base, UpdatedTimestampMixin):
             "ProxmoxReadOnlyBootstrapSession("
             f"id={self.id!s}, status={getattr(self.status, 'value', self.status)!r})"
         )
+
+
+class WorkerDiscoveryNode(Base, UpdatedTimestampMixin):
+    """SECP-B8: a worker node's self-published PUBLIC key material.
+
+    The worker generates + OWNS its SSH and Ed25519 admission keypairs; it publishes only the PUBLIC
+    halves here so the UI can auto-populate the bootstrap wizard and the operator can register the
+    worker identity. This record NEVER holds a private key — the API rejects private-key material on
+    the publication path. It is a convenience/registry surface; it grants nothing on its own."""
+
+    __tablename__ = "worker_discovery_node"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "node_label", name="uq_worker_discovery_node_label"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    node_label: Mapped[str] = mapped_column(String(120), nullable=False)
+    # PUBLIC key material only (a private key is rejected before this row is written).
+    ssh_public_key: Mapped[str] = mapped_column(Text, nullable=False)
+    ssh_public_key_fingerprint: Mapped[str] = mapped_column(String(120), nullable=False)
+    admission_anchor_hex: Mapped[str] = mapped_column(String(80), nullable=False)
+    admission_anchor_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Set once an operator has registered/approved the worker identity for this anchor.
+    worker_identity_registration_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"WorkerDiscoveryNode(id={self.id!s}, node_label={self.node_label!r})"

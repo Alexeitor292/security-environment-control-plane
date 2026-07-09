@@ -835,6 +835,8 @@ class AuditAction(str, Enum):
     readonly_bootstrap_session_completed = "readonly_bootstrap_session.completed"
     readonly_bootstrap_session_bound = "readonly_bootstrap_session.bound"
     readonly_bootstrap_session_refused = "readonly_bootstrap_session.refused"
+    # SECP-B8: a worker published its PUBLIC discovery key material (SSH public key + anchor).
+    worker_discovery_node_published = "worker_discovery_node.published"
 
 
 class ResolutionLeaseStatus(str, Enum):

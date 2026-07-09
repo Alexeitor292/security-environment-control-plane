@@ -488,6 +488,8 @@ export interface BootstrapCompleteRequest {
   host_key_fingerprint: string;
   /** Optional pasted SECPDISC-PROOF block (bounded, secret-free). */
   proof_text?: string | null;
+  /** SECP-B8: optional host PUBLIC key line (normally parsed from the proof). Never a private key. */
+  host_public_key?: string | null;
 }
 
 export interface BootstrapSession {
@@ -526,6 +528,43 @@ export interface BindingDescriptor {
   authorization_id: string;
   authorization_version: number;
   endpoint_binding_hash: string;
+}
+
+// --- SECP-B8: worker-owned discovery bundle automation ---
+
+/** A worker's self-published PUBLIC key material (the worker owns/generates its keys). */
+export interface WorkerDiscoveryNode {
+  id: string;
+  organization_id: string;
+  node_label: string;
+  /** The worker's SSH PUBLIC key line. NEVER a private key. */
+  ssh_public_key: string;
+  ssh_public_key_fingerprint: string;
+  admission_anchor_hex: string;
+  admission_anchor_fingerprint: string;
+  worker_identity_registration_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Precise readiness diagnostic for an enrollment's live discovery path (SECP-B8). */
+export interface DiscoveryReadiness {
+  enrollment_id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  bootstrap_session_id: string | null;
+  bootstrap_status: string | null;
+  ready: boolean;
+  /** The prerequisite check names still failing (empty when ready). */
+  missing_prerequisites: string[];
+  checks: Record<string, boolean>;
+}
+
+export interface SubstrateEligibilityGrant {
+  id: string;
+  organization_id: string;
+  execution_target_id: string;
+  status: string;
 }
 
 // --- Worker-owned read-only target enrollment + discovery (SECP-B5) ---

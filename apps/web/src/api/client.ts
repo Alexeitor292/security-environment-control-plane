@@ -43,6 +43,9 @@ import type {
   Template,
   Version,
   WorkflowRun,
+  WorkerDiscoveryNode,
+  DiscoveryReadiness,
+  SubstrateEligibilityGrant,
 } from "./types";
 
 export const API_BASE =
@@ -336,6 +339,24 @@ export const api = {
     request<BindingDescriptor>(
       "GET",
       `/api/v1/target-discovery/read-only-bootstrap/enrollments/${enrollmentId}/binding-descriptor`,
+    ),
+  // SECP-B8: precise discovery-readiness diagnostic (which prerequisite is missing).
+  getDiscoveryReadiness: (enrollmentId: string) =>
+    request<DiscoveryReadiness>(
+      "GET",
+      `/api/v1/target-discovery/read-only-bootstrap/enrollments/${enrollmentId}/readiness`,
+    ),
+  // SECP-B8: grant staging-substrate eligibility (target-admin; requires staging_substrate:manage).
+  grantSubstrateEligibility: (executionTargetId: string) =>
+    request<SubstrateEligibilityGrant>(
+      "POST",
+      `/api/v1/target-discovery/read-only-bootstrap/targets/${executionTargetId}/substrate-eligibility`,
+    ),
+  // SECP-B8: worker-published PUBLIC key material (the worker owns/generates its keys). No private keys.
+  listWorkerNodes: () =>
+    request<WorkerDiscoveryNode[]>(
+      "GET",
+      "/api/v1/target-discovery/read-only-bootstrap/worker-nodes",
     ),
 
   // App-owned read-only staging preflight (SECP-B2-0). API queues only; a worker executes.

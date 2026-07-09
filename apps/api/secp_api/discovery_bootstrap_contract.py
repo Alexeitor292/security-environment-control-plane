@@ -345,9 +345,12 @@ for bad in "bash -i" "pvesh set /nodes/x" "pvesh create /x" "pvesh delete /x" \
   if run_wrap "$bad"; then echo "SELFTEST FAIL: wrapper allowed: $bad" >&2; selftest_pass=0; fi
 done
 
-# 6. Host SSH key fingerprint (public, for pinning) — never a private key.
+# 6. Host SSH key fingerprint + PUBLIC key line (for host-key pinning) — never a private key.
 HOST_KEY_PUB="/etc/ssh/ssh_host_ed25519_key.pub"
 HOST_FP="$(ssh-keygen -lf "$HOST_KEY_PUB" 2>/dev/null | awk '{{print $2}}' || echo unknown)"
+# The host's PUBLIC key line (keytype + base64 blob only; comment dropped). SECP-B8: the worker
+# writes this into known_hosts so host-key pinning is authoritative (the host emitted it itself).
+HOST_KEY_LINE="$(awk '{{print $1" "$2}}' "$HOST_KEY_PUB" 2>/dev/null || echo unknown)"
 
 # 7. Bounded, secret-free proof.
 echo "-----BEGIN SECPDISC-PROOF-----"
@@ -358,6 +361,7 @@ echo "pve_privs=$PVE_PRIVS"
 echo "force_command=$FORCE_CMD"
 echo "authorized_key_fingerprint=$KEY_FP"
 echo "host_key_fingerprint=$HOST_FP"
+echo "host_public_key=$HOST_KEY_LINE"
 echo "selftest_ok=$selftest_pass"
 echo "-----END SECPDISC-PROOF-----"
 if [ "$selftest_pass" -ne 1 ]; then exit 3; fi

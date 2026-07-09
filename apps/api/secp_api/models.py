@@ -1876,6 +1876,7 @@ class ProvisioningChangeSetApproval(Base, TimestampMixin):
 # SECP-B4 deployment engine models (kept in a dedicated module for a focused diff).
 from secp_api.bootstrap_models import (  # noqa: E402,F401
     ProxmoxReadOnlyBootstrapSession,
+    WorkerDiscoveryNode,
 )
 from secp_api.deployment_models import (  # noqa: E402,F401
     StagingDeployment,

@@ -29,6 +29,9 @@ class BootstrapCompleteRequest(BaseModel):
     host_key_fingerprint: str = Field(min_length=9, max_length=200)
     # Optional pasted SECPDISC-PROOF block (bounded; secret-free; private-key material rejected).
     proof_text: str | None = Field(default=None, max_length=8192)
+    # SECP-B8: optional host PUBLIC key line ("ssh-ed25519 AAAA..."). Normally parsed from the
+    # proof; accepted explicitly for API clients. A private key is rejected; must match the fp.
+    host_public_key: str | None = Field(default=None, max_length=8192)
 
 
 class BootstrapSessionOut(ORMModel):
@@ -70,3 +73,46 @@ class BindingDescriptorOut(BaseModel):
     authorization_id: uuid.UUID
     authorization_version: int
     endpoint_binding_hash: str
+
+
+class BundleDescriptorOut(BaseModel):
+    """SECP-B8: the SECRET-FREE superset the worker's bundle manager assembles the mounted bundle
+    from — the ``binding.json`` fields PLUS the SSH endpoint facts, the public host-key fingerprint,
+    and the host PUBLIC key line for ``known_hosts``. NEVER contains a private key or credential."""
+
+    organization_id: uuid.UUID
+    execution_target_id: uuid.UUID
+    onboarding_id: uuid.UUID
+    enrollment_id: uuid.UUID
+    authorization_id: uuid.UUID
+    authorization_version: int
+    endpoint_binding_hash: str
+    ssh_host: str
+    ssh_port: int
+    account: str
+    host_key_fingerprint: str
+    host_public_key: str
+
+
+class DiscoveryReadinessOut(BaseModel):
+    """SECP-B8: a precise, secret-free readiness diagnostic — which prerequisite is missing for an
+    enrollment's live discovery path (so the worker never fails opaquely with sealed probes)."""
+
+    enrollment_id: uuid.UUID
+    execution_target_id: uuid.UUID
+    onboarding_id: uuid.UUID
+    bootstrap_session_id: uuid.UUID | None = None
+    bootstrap_status: str | None = None
+    ready: bool
+    missing_prerequisites: list[str]
+    checks: dict[str, bool]
+
+
+class SubstrateEligibilityGrantOut(ORMModel):
+    """SECP-B8: the result of granting a target staging-substrate eligibility (a target-admin action
+    gated by ``staging_substrate:manage``). Non-secret; grants nothing beyond eligibility."""
+
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    execution_target_id: uuid.UUID
+    status: str

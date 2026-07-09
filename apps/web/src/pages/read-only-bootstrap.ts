@@ -111,6 +111,34 @@ export function describeApiError(err: unknown): { code: string; message: string 
   return { code: "error", message: err instanceof Error ? err.message : "Unexpected error." };
 }
 
+// SECP-B8: friendly, actionable labels for each discovery-readiness prerequisite check — so a
+// missing prerequisite reads as a clear next step instead of an opaque `probe_source_sealed`.
+export const PREREQUISITE_LABELS: Record<string, string> = {
+  onboarding_active: "The target has an active onboarding.",
+  substrate_eligible: "The target is marked staging-substrate eligible (grant it below).",
+  bootstrap_session_present: "A read-only bootstrap session exists for this target.",
+  bootstrap_completed: "The Proxmox bootstrap script was run and confirmed.",
+  host_public_key_captured:
+    "The host's SSH public key was captured at confirmation (re-confirm with the full proof block).",
+  live_read_authorized: "A live-read authorization was created for this endpoint.",
+  bootstrap_bound: "The bootstrap session is bound to the approved live-read authorization.",
+};
+
+/** Human label for a readiness prerequisite check name (falls back to the raw name). */
+export function prerequisiteLabel(name: string): string {
+  return PREREQUISITE_LABELS[name] ?? name;
+}
+
+// SECP-B8: worker-side prerequisites the CONTROL PLANE cannot observe (they live on the worker /
+// deployment). Surfaced as guidance so a sealed worker never fails mysteriously with
+// `probe_source_sealed` — the operator knows exactly which worker-side step is missing.
+export const WORKER_SIDE_PREREQUISITES: string[] = [
+  "The worker-managed discovery profile is enabled (SECP_DISCOVERY_WORKER_MANAGED_BUNDLE=true) so the worker generates its keys and assembles the bundle.",
+  "The controlled-integration profile is enabled (SECP_DISCOVERY_CONTROLLED_INTEGRATION_ENABLED=true) on the worker.",
+  "The worker's control-plane admission material (HTTPS endpoint + CA bundle) is provisioned, or the worker stays sealed and reads no SSH key.",
+  "The worker has assembled its mounted bundle (it does this automatically once this target is bound and the host key is captured).",
+];
+
 /** Short status pill label. */
 export function bootstrapStatusLabel(status: BootstrapStatus): string {
   const map: Record<BootstrapStatus, string> = {

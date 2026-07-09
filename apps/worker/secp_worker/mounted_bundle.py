@@ -253,11 +253,23 @@ class MountedWorkerBootstrapBundleSource:
     ``known_hosts`` bytes into a fresh worker-private temp dir so the known-hosts verifier and ssh
     consume the exact validated content — immune to a post-validation mount swap. On a non-POSIX
     host the strict path fails closed. ``strict=False`` (default; used in tests / non-live paths)
-    keeps the path-based validation."""
+    keeps the path-based validation.
 
-    def __init__(self, mount_path: str, *, strict: bool = False) -> None:
+    ``require_read_only_mount`` (SECP-B8) defaults to True (production strict live profile: the
+    bundle is an externally-provisioned read-only mount). It is set False ONLY for the
+    WORKER-MANAGED bundle path, where the worker itself owns + wrote the bundle into a writable
+    directory (0700 dir / 0600 files, worker-owned). Every OTHER strict protection is retained —
+    descriptor pinning (``O_NOFOLLOW`` + fd snapshot), owner==uid, no group/other perms, single
+    hardlink, same-device, bounded size, and the worker-private validated copy for ssh — so a
+    post-validation swap is still defeated by the pinned descriptor; only the filesystem-RO check
+    (which a self-writing worker cannot satisfy) is relaxed."""
+
+    def __init__(
+        self, mount_path: str, *, strict: bool = False, require_read_only_mount: bool = True
+    ) -> None:
         self._mount_path = mount_path
         self._strict = strict
+        self._require_read_only_mount = require_read_only_mount
         self._private_dir: str | None = None
         self._prepared: PreparedDiscoveryBundle | None = None
         # Strict two-phase state: the mount directory fd stays pinned between the metadata phase and
@@ -379,7 +391,11 @@ class MountedWorkerBootstrapBundleSource:
                 _reject("mount_not_owned")
             if dst.st_mode & 0o022:
                 _reject("mount_bad_permissions")
-            if _statvfs is not None and not (_statvfs(dir_fd).f_flag & _ST_RDONLY):
+            if (
+                self._require_read_only_mount
+                and _statvfs is not None
+                and not (_statvfs(dir_fd).f_flag & _ST_RDONLY)
+            ):
                 _reject("mount_not_read_only")
             mount_dev = dst.st_dev
 
@@ -434,7 +450,11 @@ class MountedWorkerBootstrapBundleSource:
                 _reject("mount_not_owned")
             if dst.st_mode & 0o022:
                 _reject("mount_bad_permissions")
-            if _statvfs is not None and not (_statvfs(dir_fd).f_flag & _ST_RDONLY):
+            if (
+                self._require_read_only_mount
+                and _statvfs is not None
+                and not (_statvfs(dir_fd).f_flag & _ST_RDONLY)
+            ):
                 _reject("mount_not_read_only")
             mount_dev = dst.st_dev
             manifest_bytes = self._read_regular_at(
