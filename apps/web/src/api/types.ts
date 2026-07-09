@@ -468,6 +468,66 @@ export interface BootstrapAvailability {
   reason_code: string;
 }
 
+// --- Proxmox read-only discovery bootstrap automation (SECP-B7) ---
+//
+// The wizard that replaces the manual SECP-B6 canary steps. It carries ONLY non-secret values: an
+// SSH PUBLIC key, a port, a public host-key fingerprint, a bounded proof block, and the opaque
+// endpoint-binding digest. It NEVER accepts an SSH private key or a raw command.
+
+export type BootstrapStatus = "pending" | "completed" | "bound" | "refused";
+
+export interface BootstrapSessionCreate {
+  execution_target_id: string;
+  /** The worker's SSH PUBLIC key (ssh-<type> <base64> [comment]). A private key is rejected. */
+  worker_ssh_public_key: string;
+  ssh_port?: number;
+}
+
+export interface BootstrapCompleteRequest {
+  /** Public SSH host-key fingerprint (SHA256:...) read off the Proxmox host. */
+  host_key_fingerprint: string;
+  /** Optional pasted SECPDISC-PROOF block (bounded, secret-free). */
+  proof_text?: string | null;
+}
+
+export interface BootstrapSession {
+  id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  account: string;
+  pve_role: string;
+  worker_ssh_public_key_fingerprint: string;
+  status: BootstrapStatus;
+  ssh_port: number;
+  host_key_fingerprint: string | null;
+  endpoint_binding_hash: string | null;
+  live_read_authorization_id: string | null;
+  authorization_version: number | null;
+  failure_code: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BootstrapScript {
+  session_id: string;
+  account: string;
+  pve_role: string;
+  worker_ssh_public_key_fingerprint: string;
+  /** The idempotent Proxmox bootstrap script — the only operator action is running it (as root). */
+  script: string;
+}
+
+export interface BindingDescriptor {
+  organization_id: string;
+  execution_target_id: string;
+  onboarding_id: string;
+  enrollment_id: string;
+  authorization_id: string;
+  authorization_version: number;
+  endpoint_binding_hash: string;
+}
+
 // --- Worker-owned read-only target enrollment + discovery (SECP-B5) ---
 //
 // The control plane owns every label; this surface accepts only a substrate id, a closed resource

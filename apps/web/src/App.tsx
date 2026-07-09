@@ -11,6 +11,7 @@ const NAV = [
   { to: "/onboarding", label: "Target Onboarding" },
   { to: "/staging-labs", label: "Staging Labs" },
   { to: "/staging-deployments", label: "Staging Deployments" },
+  { to: "/read-only-bootstrap", label: "RO Discovery Bootstrap" },
   { to: "/target-discovery", label: "Target Discovery" },
   { to: "/readonly-preflight", label: "Read-Only Preflight" },
   { to: "/resolver-activation", label: "Resolver Activation" },

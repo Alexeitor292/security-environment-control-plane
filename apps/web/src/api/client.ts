@@ -2,6 +2,11 @@
 
 import type {
   AuditEvent,
+  BindingDescriptor,
+  BootstrapCompleteRequest,
+  BootstrapScript,
+  BootstrapSession,
+  BootstrapSessionCreate,
   DeploymentPlan,
   ExecutionTarget,
   Exercise,
@@ -69,13 +74,32 @@ async function request<T>(
   body?: unknown,
   params?: Record<string, string>,
 ): Promise<T> {
-  const res = await fetch(buildUrl(path, params), {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(buildUrl(path, params), {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    // A network-level failure (server unreachable, offline, CORS) — surface a clear, safe message
+    // instead of leaking the browser's raw "Failed to fetch" TypeError to the UI.
+    throw new ApiClientError(
+      0,
+      "api_unreachable",
+      `Cannot reach the API at ${API_BASE}. Check that the backend is running and reachable.`,
+    );
+  }
   const text = await res.text();
-  const payload = text ? JSON.parse(text) : null;
+  let payload: { error?: { code?: string; message?: string; details?: string[] } } | null = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    // A non-JSON body (e.g. a proxy error page) must not crash the client with a parse error.
+    if (!res.ok) {
+      throw new ApiClientError(res.status, "error", res.statusText || "request failed");
+    }
+  }
   if (!res.ok) {
     const err = payload?.error ?? {};
     throw new ApiClientError(
@@ -275,6 +299,44 @@ export const api = {
     }),
   rejectDiscoveryPlan: (id: string) =>
     request<DiscoveryEnrollment>("POST", `/api/v1/target-discovery/${id}/reject`),
+
+  // Proxmox read-only discovery bootstrap automation (SECP-B7). Public key only; no private keys.
+  listBootstrapSessions: (executionTargetId?: string) =>
+    request<BootstrapSession[]>(
+      "GET",
+      "/api/v1/target-discovery/read-only-bootstrap/sessions",
+      undefined,
+      executionTargetId ? { execution_target_id: executionTargetId } : undefined,
+    ),
+  createBootstrapSession: (body: BootstrapSessionCreate) =>
+    request<BootstrapSession>(
+      "POST",
+      "/api/v1/target-discovery/read-only-bootstrap/sessions",
+      body,
+    ),
+  getBootstrapSession: (id: string) =>
+    request<BootstrapSession>("GET", `/api/v1/target-discovery/read-only-bootstrap/sessions/${id}`),
+  getBootstrapScript: (id: string) =>
+    request<BootstrapScript>(
+      "GET",
+      `/api/v1/target-discovery/read-only-bootstrap/sessions/${id}/script`,
+    ),
+  completeBootstrapSession: (id: string, body: BootstrapCompleteRequest) =>
+    request<BootstrapSession>(
+      "POST",
+      `/api/v1/target-discovery/read-only-bootstrap/sessions/${id}/complete`,
+      body,
+    ),
+  bindBootstrapSession: (id: string) =>
+    request<BootstrapSession>(
+      "POST",
+      `/api/v1/target-discovery/read-only-bootstrap/sessions/${id}/bind`,
+    ),
+  getBootstrapBindingDescriptor: (enrollmentId: string) =>
+    request<BindingDescriptor>(
+      "GET",
+      `/api/v1/target-discovery/read-only-bootstrap/enrollments/${enrollmentId}/binding-descriptor`,
+    ),
 
   // App-owned read-only staging preflight (SECP-B2-0). API queues only; a worker executes.
   preflightSubstrates: () =>

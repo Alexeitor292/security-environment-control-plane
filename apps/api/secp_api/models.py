@@ -95,6 +95,22 @@ class TimestampMixin:
     )
 
 
+class UpdatedTimestampMixin(TimestampMixin):
+    """``created_at`` + a populated ``updated_at`` (SECP-B7 schema-consistency fix).
+
+    Several SECP-B5/B6 discovery tables were created with an ``updated_at NOT NULL`` column in their
+    migrations but only inherited :class:`TimestampMixin` (``created_at`` only) in the ORM, so the
+    ORM never populated ``updated_at`` — inserts failed on PostgreSQL and the SQLite ``create_all``
+    schema diverged from the migration schema. Models that own an ``updated_at`` column use THIS
+    mixin so the ORM populates it on insert (``default``) and bumps it on every UPDATE
+    (``onupdate``). It is Python-side only (no DDL/server default), so ``create_all`` and the
+    migrations stay identical."""
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
 # --- Tenancy & identity -------------------------------------------------------
 
 
@@ -790,7 +806,7 @@ class LiveReadAuthorization(Base, TimestampMixin):
         )
 
 
-class WorkerDiscoveryAdmission(Base, TimestampMixin):
+class WorkerDiscoveryAdmission(Base, UpdatedTimestampMixin):
     """Durable, one-time, control-plane-verified worker admission for live B6 discovery (MB-1).
 
     Secret-free: it records ONLY safe control-plane IDs, the closed lifecycle status, a
@@ -1858,6 +1874,9 @@ class ProvisioningChangeSetApproval(Base, TimestampMixin):
 
 
 # SECP-B4 deployment engine models (kept in a dedicated module for a focused diff).
+from secp_api.bootstrap_models import (  # noqa: E402,F401
+    ProxmoxReadOnlyBootstrapSession,
+)
 from secp_api.deployment_models import (  # noqa: E402,F401
     StagingDeployment,
     StagingDeploymentApproval,
