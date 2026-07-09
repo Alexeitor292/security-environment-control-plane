@@ -19,6 +19,7 @@ import { StagingLab } from "./pages/StagingLab";
 import { TargetDiscovery } from "./pages/TargetDiscovery";
 import { Templates } from "./pages/Templates";
 import { TopologyView } from "./pages/TopologyView";
+import "./design/tokens.css";
 import "./styles.css";
 import "reactflow/dist/style.css";
 

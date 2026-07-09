@@ -1,0 +1,246 @@
+/*
+ * SECP design tokens — foundation of the cyber command design system.
+ *
+ * Three layers, top to bottom:
+ *   1. Primitives  (--secp-*)     raw values sampled from the design reference
+ *                                 (docs/design/reference/secp-cyber-ui-reference.png)
+ *   2. Semantic    (--surface-*, --ink-*, --tone-*, --accent-*, ...)
+ *                                 meaning-bearing tokens; components consume these
+ *   3. Component   (--card-*, --button-*, --input-*, ...)
+ *                                 per-primitive-component defaults for the UI kit
+ *
+ * Legacy variable names from the pre-token stylesheet (--bg, --panel, --accent,
+ * --ok, ...) are preserved as aliases at the bottom so existing pages keep
+ * rendering without markup changes. New code must use semantic/component tokens.
+ *
+ * Light theme: :root[data-theme="light"] remaps the semantic layer only.
+ * This is a phase-2 scaffold (see docs/design/reference/SECP Redesign -
+ * Provenance.pdf, section 10) — not a complete rollout.
+ */
+
+:root {
+  /* ------------------------------------------------------------------ */
+  /* 1. PRIMITIVES                                                       */
+  /* ------------------------------------------------------------------ */
+
+  /* Surfaces (dark navy scale, darkest to most raised) */
+  --secp-void: #030509;
+  --secp-navy-950: #050b14;
+  --secp-navy-900: #081120;
+  --secp-navy-800: #0c1b2e;
+  --secp-navy-700: #12253c;
+  --secp-blue-950: #0a1f42;
+
+  /* Lines */
+  --secp-hairline: #1e3654;
+
+  /* Accents */
+  --secp-cyan: #3ec1e8;
+  --secp-blue: #2e7fe0;
+  --secp-green: #38d996;
+  --secp-red: #e4566b;
+  --secp-amber: #d4a94f;
+  --secp-ember: #f08a5c;
+  --secp-purple: #8b5fb8;
+  --secp-magenta: #c750b4;
+
+  /* Ink (text) */
+  --secp-ink-100: #eaeff9;
+  --secp-ink-300: #8492a6;
+  --secp-ink-500: #55647a;
+
+  /* Light-theme primitives (phase 2) */
+  --secp-cloud: #f6f7f9;
+  --secp-white: #ffffff;
+  --secp-slate-900: #1d2430;
+
+  /* ------------------------------------------------------------------ */
+  /* 2. SEMANTIC                                                         */
+  /* ------------------------------------------------------------------ */
+
+  /* Surfaces */
+  --surface-canvas: var(--secp-void);
+  --surface-panel: var(--secp-navy-900);
+  --surface-raised: var(--secp-navy-800);
+  --surface-hover: var(--secp-navy-700);
+  --surface-well: var(--secp-navy-950);
+  --surface-selected: var(--secp-blue-950);
+
+  /* Borders */
+  --border-hairline: var(--secp-hairline);
+  --border-divider: color-mix(in srgb, var(--secp-hairline) 55%, transparent);
+  --border-selected: color-mix(in srgb, var(--secp-blue) 70%, transparent);
+
+  /* Ink.
+     --ink-muted is 3.1:1 against --surface-panel — below WCAG AA (4.5:1) for
+     text. It is reserved for non-text, decorative use (disabled glyphs,
+     dividers, watermark numerals). Text — including 11px micro-labels —
+     must use --ink-secondary or brighter. */
+  --ink-primary: var(--secp-ink-100);
+  --ink-secondary: var(--secp-ink-300);
+  --ink-muted: var(--secp-ink-500);
+
+  /* Brand + interactive accents */
+  --accent-primary: var(--secp-blue);   /* primary actions, links */
+  --accent-brand: var(--secp-cyan);     /* brand highlights, simulated-env label */
+  --accent-mark: var(--secp-purple);    /* SECP logo mark, count badges */
+  --accent-flare: var(--secp-magenta);  /* notification badges, flare art */
+
+  /* Status tones */
+  --tone-ok: var(--secp-green);
+  --tone-warn: var(--secp-amber);
+  --tone-danger: var(--secp-red);
+  --tone-ember: var(--secp-ember);
+  --tone-info: var(--secp-cyan);
+  --tone-pending: var(--secp-ink-300);
+
+  /* Soft tone fills (tinted backgrounds behind toned content) */
+  --tone-ok-soft: color-mix(in srgb, var(--secp-green) 12%, transparent);
+  --tone-warn-soft: color-mix(in srgb, var(--secp-amber) 12%, transparent);
+  --tone-danger-soft: color-mix(in srgb, var(--secp-red) 12%, transparent);
+  --tone-info-soft: color-mix(in srgb, var(--secp-cyan) 12%, transparent);
+
+  /* Light ink over soft tone fills */
+  --tone-ok-ink: color-mix(in srgb, var(--secp-green) 70%, var(--secp-ink-100));
+  --tone-warn-ink: color-mix(in srgb, var(--secp-amber) 70%, var(--secp-ink-100));
+  --tone-danger-ink: color-mix(in srgb, var(--secp-red) 70%, var(--secp-ink-100));
+
+  /* Focus */
+  --focus-ring: 0 0 0 2px var(--surface-canvas), 0 0 0 4px var(--accent-primary);
+
+  /* Typography */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Uppercase micro-labels (table headers, nav group titles) */
+  --tracking-micro: 0.08em;
+  --tracking-wide: 0.03em;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Border widths */
+  --border-width: 1px;
+  --border-width-glow: 1.5px;
+
+  /* Glows + shadows (per-tone glow rings for cards, buttons, badges) */
+  --glow-accent: 0 0 0 1px
+      color-mix(in srgb, var(--accent-primary) 55%, transparent),
+    0 0 18px -4px color-mix(in srgb, var(--accent-primary) 60%, transparent);
+  --glow-brand: 0 0 0 1px color-mix(in srgb, var(--accent-brand) 55%, transparent),
+    0 0 18px -4px color-mix(in srgb, var(--accent-brand) 60%, transparent);
+  --glow-ok: 0 0 0 1px color-mix(in srgb, var(--tone-ok) 55%, transparent),
+    0 0 18px -4px color-mix(in srgb, var(--tone-ok) 60%, transparent);
+  --glow-danger: 0 0 0 1px color-mix(in srgb, var(--tone-danger) 55%, transparent),
+    0 0 18px -4px color-mix(in srgb, var(--tone-danger) 60%, transparent);
+  --shadow-panel: inset 0 1px 0 color-mix(in srgb, #ffffff 4%, transparent),
+    0 12px 32px -20px rgba(0, 0, 0, 0.9);
+
+  /* Motion. Skeleton pulse duration is specified as one gentle 1.6s opacity
+     pulse (design provenance, section 10); static under reduced motion. */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 320ms;
+  --motion-skeleton-pulse: 1.6s;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+
+  /* ------------------------------------------------------------------ */
+  /* 3. COMPONENT                                                        */
+  /* ------------------------------------------------------------------ */
+
+  --card-surface: var(--surface-panel);
+  --card-border: var(--border-hairline);
+  --card-radius: var(--radius-md);
+
+  --button-radius: var(--radius-sm);
+  --button-primary-surface: var(--accent-primary);
+  --button-primary-ink: #04101f;
+  --button-ok-surface: var(--tone-ok);
+  --button-ok-ink: #052015;
+  --button-danger-surface: var(--tone-danger);
+  --button-danger-ink: #2a050a;
+  --button-secondary-surface: var(--surface-raised);
+  --button-secondary-ink: var(--ink-primary);
+  --button-secondary-border: var(--border-hairline);
+
+  --input-surface: var(--surface-well);
+  --input-border: var(--border-hairline);
+  --input-ink: var(--ink-primary);
+  --input-radius: var(--radius-sm);
+
+  --badge-radius: var(--radius-pill);
+
+  --table-header-ink: var(--ink-secondary);
+  --table-row-border: var(--border-divider);
+
+  /* ------------------------------------------------------------------ */
+  /* LEGACY ALIASES — pre-token stylesheet variable names.               */
+  /* Existing pages keep rendering through these; do not use in new code. */
+  /* ------------------------------------------------------------------ */
+
+  --bg: var(--surface-canvas);
+  --panel: var(--surface-panel);
+  --panel-2: var(--surface-raised);
+  --border: var(--border-hairline);
+  --text: var(--ink-primary);
+  --muted: var(--ink-secondary);
+  --accent: var(--accent-primary);
+  --ok: var(--tone-ok);
+  --warn: var(--tone-warn);
+  --danger: var(--tone-danger);
+  --pending: var(--tone-pending);
+}
+
+/*
+ * Light theme scaffold (phase 2 — same semantic tokens, remapped).
+ * Only the semantic layer is remapped; primitives never change per theme.
+ * Full light rollout ships only after the component kit consumes semantic
+ * tokens everywhere.
+ */
+:root[data-theme="light"] {
+  --surface-canvas: var(--secp-cloud);
+  --surface-panel: var(--secp-white);
+  --surface-raised: var(--secp-cloud);
+  --surface-hover: #eceef2;
+  --surface-well: #eef0f4;
+  --surface-selected: #e3ecfb;
+
+  --border-hairline: #d4dae4;
+  --border-divider: #e4e8ee;
+
+  --ink-primary: var(--secp-slate-900);
+  --ink-secondary: #5a6678;
+  --ink-muted: #8b95a5;
+
+  --shadow-panel: 0 1px 2px rgba(29, 36, 48, 0.06),
+    0 8px 24px -18px rgba(29, 36, 48, 0.25);
+}
+
+/* Reduced motion: collapse durations so transitions/animations built on the
+   motion tokens become effectively static (skeletons render their first
+   frame; nothing pulses). */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+    --motion-slow: 0ms;
+    --motion-skeleton-pulse: 0ms;
+  }
+}

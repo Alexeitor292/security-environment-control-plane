@@ -1,25 +1,14 @@
-:root {
-  --bg: #0f1419;
-  --panel: #1a2230;
-  --panel-2: #222c3c;
-  --border: #2e3a4d;
-  --text: #e6edf3;
-  --muted: #8b98a9;
-  --accent: #4c9aff;
-  --ok: #3fb950;
-  --warn: #d29922;
-  --danger: #f85149;
-  --pending: #8b98a9;
-}
+/* Design tokens (including the legacy --bg/--panel/--accent/... aliases used
+   below) are defined in ./design/tokens.css, imported before this file. */
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
   background: var(--bg);
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--text-md);
 }
 
 a { color: var(--accent); text-decoration: none; }
@@ -67,31 +56,31 @@ a:hover { text-decoration: underline; }
 .grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
 
 button {
-  background: var(--accent); color: #06122a; border: none;
-  border-radius: 6px; padding: 8px 14px; font-weight: 600; cursor: pointer;
+  background: var(--button-primary-surface); color: var(--button-primary-ink); border: none;
+  border-radius: var(--button-radius); padding: 8px 14px; font-weight: 600; cursor: pointer;
 }
 button:hover { filter: brightness(1.08); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
-button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
-button.danger { background: var(--danger); color: #2a0606; }
-button.ok { background: var(--ok); color: #06210d; }
+button.secondary { background: var(--button-secondary-surface); color: var(--button-secondary-ink); border: 1px solid var(--button-secondary-border); }
+button.danger { background: var(--button-danger-surface); color: var(--button-danger-ink); }
+button.ok { background: var(--button-ok-surface); color: var(--button-ok-ink); }
 
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
 th { color: var(--muted); font-weight: 600; }
-code, pre { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+code, pre { font-family: var(--font-mono); }
 pre {
-  background: #0b0f15; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-well); border: 1px solid var(--border); border-radius: 6px;
   padding: 12px; overflow: auto; font-size: 12px; max-height: 480px;
 }
 textarea {
-  width: 100%; min-height: 360px; background: #0b0f15; color: var(--text);
-  border: 1px solid var(--border); border-radius: 6px; padding: 12px;
-  font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+  width: 100%; min-height: 360px; background: var(--input-surface); color: var(--input-ink);
+  border: 1px solid var(--input-border); border-radius: var(--input-radius); padding: 12px;
+  font-family: var(--font-mono); font-size: 12px;
 }
 input[type="text"], input:not([type]), select {
-  background: #0b0f15; color: var(--text); border: 1px solid var(--border);
-  border-radius: 6px; padding: 8px 10px; width: 100%;
+  background: var(--input-surface); color: var(--input-ink); border: 1px solid var(--input-border);
+  border-radius: var(--input-radius); padding: 8px 10px; width: 100%;
 }
 label { display: block; color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
 
@@ -114,7 +103,7 @@ label { display: block; color: var(--muted); font-size: 12px; margin: 8px 0 4px;
 
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .muted { color: var(--muted); }
-.mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
 
 .badge {
   display: inline-block; padding: 2px 8px; border-radius: 999px;
@@ -128,8 +117,8 @@ label { display: block; color: var(--muted); font-size: 12px; margin: 8px 0 4px;
 .badge.pending { color: var(--pending); }
 
 .error-box {
-  background: rgba(248, 81, 73, 0.12); border: 1px solid var(--danger);
-  color: #ffb4ae; padding: 10px 12px; border-radius: 6px; margin-bottom: 12px;
+  background: var(--tone-danger-soft); border: 1px solid var(--danger);
+  color: var(--tone-danger-ink); padding: 10px 12px; border-radius: 6px; margin-bottom: 12px;
   font-size: 13px;
 }
 .topology { height: 460px; border: 1px solid var(--border); border-radius: 8px; }
