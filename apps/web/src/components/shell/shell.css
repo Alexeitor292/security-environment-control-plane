@@ -1,0 +1,362 @@
+/* Cyber command application shell. Tokens only — no raw color literals
+   (transparent/none excepted). */
+
+.shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* Visually hidden, available to assistive technology. */
+.shell-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip link: hidden until keyboard-focused. */
+.shell-skip {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 60;
+  transform: translateY(-300%);
+  background: var(--surface-selected);
+  color: var(--ink-primary);
+  border: var(--border-width) solid var(--border-selected);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+}
+.shell-skip:focus-visible {
+  transform: none;
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ------------------------------------------------------------- sidebar */
+.shell-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  width: 248px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+  border-right: var(--border-width) solid var(--border-hairline);
+  transition: width var(--motion-base) var(--ease-out);
+}
+.shell--collapsed .shell-sidebar {
+  width: 68px;
+}
+.shell-sidebar__inner {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 14px 10px;
+}
+.shell-sidebar__spacer {
+  flex: 1;
+}
+
+.shell-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 6px 14px;
+}
+.shell-mark {
+  flex: none;
+}
+.shell-brand__title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-wide);
+  color: var(--ink-primary);
+  line-height: 1.1;
+}
+.shell-brand__sub {
+  font-size: 10px;
+  color: var(--ink-secondary);
+  margin-top: 2px;
+}
+
+.shell-nav__group {
+  margin-top: 10px;
+}
+.shell-nav__group-label {
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-micro);
+  color: var(--ink-secondary);
+  padding: 6px 10px 4px;
+}
+.shell-nav__item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+  text-decoration: none;
+  transition: background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.shell-nav__item:hover {
+  background: var(--surface-hover);
+  color: var(--ink-primary);
+  text-decoration: none;
+}
+.shell-nav__item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.shell-nav__item--active {
+  background: var(--surface-selected);
+  color: var(--ink-primary);
+  box-shadow: 0 0 0 1px var(--border-selected);
+}
+.shell-nav__item--active::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-primary);
+}
+.shell-nav__item--unavailable {
+  /* Text stays at full --ink-secondary (AA); only the glyph dims —
+     --ink-muted is sanctioned for disabled glyphs, not text. */
+  color: var(--ink-secondary);
+  cursor: not-allowed;
+}
+.shell-nav__item--unavailable svg {
+  color: var(--ink-muted);
+}
+.shell--collapsed .shell-nav__item {
+  justify-content: center;
+  padding: 8px 0;
+}
+.shell--collapsed .shell-brand {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.shell-user {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 8px 4px;
+  border-top: var(--border-width) solid var(--border-divider);
+  min-width: 0;
+}
+.shell-user__avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-selected);
+  border: var(--border-width) solid var(--border-selected);
+  color: var(--accent-brand);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.shell-user__meta {
+  min-width: 0;
+}
+.shell-user__name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+.shell-user__detail {
+  font-size: 10px;
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell--collapsed .shell-user {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.shell-collapse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px;
+  background: transparent;
+  border: none;
+  border-top: var(--border-width) solid var(--border-divider);
+  border-radius: 0;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.shell-collapse:hover {
+  background: var(--surface-hover);
+  color: var(--ink-primary);
+}
+.shell-collapse:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* -------------------------------------------------------------- topbar */
+.shell-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.shell-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 24px;
+  background: color-mix(in srgb, var(--surface-canvas) 86%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: var(--border-width) solid var(--border-divider);
+}
+.shell-topbar__menu {
+  display: none;
+  background: transparent;
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  color: var(--ink-secondary);
+  padding: 5px 7px;
+  cursor: pointer;
+}
+.shell-topbar__menu:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.shell-topbar__disclosure {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.shell-topbar__env {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-micro);
+  color: var(--accent-brand);
+  white-space: nowrap;
+}
+.shell-topbar__sep {
+  color: var(--ink-secondary);
+}
+.shell-topbar__text {
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell-topbar__milestone {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  background: var(--surface-well);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+
+.shell-main {
+  flex: 1;
+}
+.shell-main:focus {
+  outline: none;
+}
+
+/* ------------------------------------------------------ mobile drawer */
+.shell-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--secp-void) 62%, transparent);
+}
+
+@media (max-width: 820px) {
+  .shell-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 40;
+    width: 264px;
+    height: 100dvh;
+    transform: translateX(-100%);
+    /* visibility removes the closed drawer from the tab order and the
+       accessibility tree; the delay lets the slide-out finish first. */
+    visibility: hidden;
+    transition: transform var(--motion-base) var(--ease-out),
+      visibility 0s linear var(--motion-base);
+  }
+  .shell--collapsed .shell-sidebar {
+    width: 264px;
+  }
+  .shell--drawer-open .shell-sidebar {
+    transform: none;
+    visibility: visible;
+    transition: transform var(--motion-base) var(--ease-out), visibility 0s;
+    box-shadow: var(--shadow-panel);
+  }
+  .shell-collapse {
+    display: none;
+  }
+  .shell-topbar__menu {
+    display: inline-flex;
+  }
+  .shell-topbar {
+    padding: 9px 14px;
+  }
+  .shell-topbar__text {
+    white-space: normal;
+  }
+}
+
+.shell-sidebar:focus {
+  outline: none;
+}
+
+@media (forced-colors: active) {
+  .shell-nav__item:focus-visible,
+  .shell-collapse:focus-visible,
+  .shell-topbar__menu:focus-visible,
+  .shell-skip:focus-visible {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+}
