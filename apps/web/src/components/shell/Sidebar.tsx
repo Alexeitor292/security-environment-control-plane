@@ -108,7 +108,7 @@ export function Sidebar({ principal, collapsed, onNavigate }: SidebarProps) {
           <div>
             <div className="shell-brand__title">SECP</div>
             <div className="shell-brand__sub">
-              Security Environment Control Plane
+              Security Environment Control Platform
             </div>
           </div>
         )}
