@@ -1,0 +1,220 @@
+/* Read-only operations surfaces. Tokens only. */
+
+.rops {
+  display: grid;
+  gap: 14px;
+}
+.rops-head h1 {
+  margin: 0 0 6px;
+}
+.rops-intro {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+  max-width: 92ch;
+}
+
+.rops-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 1050px) {
+  .rops-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.rops-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.rops-detail-head h3 {
+  margin: 0;
+}
+.rops-sub {
+  margin-top: 2px;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+
+.rops-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: var(--border-width) solid var(--border-divider);
+}
+
+/* Preflight history rows */
+.rops-history {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  list-style: none;
+  padding: 0;
+}
+.rops-history__row {
+  border: var(--border-width) solid var(--card-border);
+  border-radius: var(--card-radius);
+  background: var(--surface-raised);
+  padding: 10px 12px;
+}
+.rops-history__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rops-history__time {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+.rops-history__note {
+  margin: 6px 0 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.rops-facts {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+}
+.rops-facts li {
+  font-size: var(--text-sm);
+}
+
+.rops-note {
+  margin: 10px 0 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.rops-expiry {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+/* Resolver kill-switch / evidence lists */
+.rops-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+.rops-list li {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.rops-evidence {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.rops-evidence__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+}
+.rops-evidence__kind {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Bootstrap wizard */
+.rops-resp {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-micro);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+  color: var(--ink-secondary);
+}
+.rops-resp--app { color: var(--accent-primary); border-color: var(--border-selected); }
+.rops-resp--worker { color: var(--accent-brand); border-color: color-mix(in srgb, var(--accent-brand) 45%, transparent); }
+.rops-resp--host { color: var(--tone-warn); border-color: var(--tone-warn); }
+
+.rops-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+/* Scope out the global DefinitionEditor textarea min-height so these compact
+   fields honor their rows and match the token input styling. */
+.rops textarea {
+  min-height: 0;
+  width: 100%;
+  background: var(--input-surface);
+  color: var(--input-ink);
+  border: var(--border-width) solid var(--input-border);
+  border-radius: var(--input-radius);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  resize: vertical;
+}
+.rops textarea:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rops-script {
+  background: var(--surface-well);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  max-height: 340px;
+  white-space: pre;
+}
+.rops-copyrow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.rops-checklist {
+  margin: 8px 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 5px;
+}
+.rops-checklist li {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.rops-disclosure {
+  margin-top: 10px;
+  border: var(--border-width) solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.rops-disclosure summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.rops-binding {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
