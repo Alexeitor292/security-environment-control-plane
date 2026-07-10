@@ -237,6 +237,9 @@
   --tone-warn: #8a6a1f;
   --tone-danger: #c22945;
   --tone-info: #0b7fa6;
+  --tone-ok-ink: #0f5c3b;
+  --tone-warn-ink: #6e5417;
+  --tone-danger-ink: #a02138;
 
   --shadow-panel: 0 1px 2px rgba(29, 36, 48, 0.06),
     0 8px 24px -18px rgba(29, 36, 48, 0.25);

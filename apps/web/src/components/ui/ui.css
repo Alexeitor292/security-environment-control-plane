@@ -22,7 +22,8 @@
   .ui-input:focus-visible,
   .ui-select:focus-visible,
   .ui-decision:focus-visible,
-  .ui-action:focus-visible {
+  .ui-action:focus-visible,
+  .ui-tab:focus-visible {
     outline: 2px solid transparent;
     outline-offset: 2px;
   }
@@ -416,6 +417,148 @@
 }
 .ui-action--unavailable .ui-action__icon {
   color: var(--ink-muted);
+}
+
+/* ------------------------------------------------------------ evidence */
+.ui-evidence {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--card-border);
+  border-radius: var(--card-radius);
+  padding: 10px 12px;
+}
+.ui-evidence__icon { flex: none; margin-top: 2px; }
+.ui-evidence--pass .ui-evidence__icon { color: var(--tone-ok); }
+.ui-evidence--fail .ui-evidence__icon { color: var(--tone-danger); }
+.ui-evidence--unverifiable .ui-evidence__icon { color: var(--ink-secondary); }
+.ui-evidence--other .ui-evidence__icon { color: var(--ink-secondary); }
+.ui-evidence__body { flex: 1; min-width: 0; }
+.ui-evidence__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ui-evidence__title { font-size: var(--text-sm); color: var(--ink-primary); }
+.ui-evidence__detail {
+  margin-top: 4px;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+/* -------------------------------------------------------- access chain */
+.ui-chain__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.ui-chain__link {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  padding: 0 0 16px;
+}
+.ui-chain__link:last-child { padding-bottom: 0; }
+.ui-chain__link::before {
+  content: "";
+  position: absolute;
+  left: 11px;
+  top: 24px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--border-divider);
+}
+.ui-chain__link:last-child::before { display: none; }
+.ui-chain__link--complete::before,
+.ui-chain__link--active::before {
+  background: color-mix(in srgb, var(--tone-ok) 45%, transparent);
+}
+.ui-chain__node {
+  flex: none;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  background: var(--surface-raised);
+  border: var(--border-width-glow) solid var(--border-hairline);
+  color: var(--ink-secondary);
+}
+.ui-chain__link--complete .ui-chain__node {
+  border-color: var(--tone-ok);
+  color: var(--tone-ok);
+  box-shadow: var(--glow-ok);
+}
+/* Active: satisfied but not yet operational/time-bound — visually distinct
+   from complete (hollow dashed node, no glow), not just different words. */
+.ui-chain__link--active .ui-chain__node {
+  border-color: var(--tone-ok);
+  border-style: dashed;
+  color: var(--tone-ok);
+  background: transparent;
+}
+.ui-chain__link--sealed .ui-chain__node {
+  border-color: var(--tone-danger);
+  color: var(--tone-danger);
+}
+.ui-chain__content { flex: 1; min-width: 0; }
+.ui-chain__title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+.ui-chain__status {
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.ui-chain__link--complete .ui-chain__status,
+.ui-chain__link--active .ui-chain__status { color: var(--tone-ok); }
+.ui-chain__link--sealed .ui-chain__status { color: var(--tone-danger-ink); }
+.ui-chain__body {
+  margin-top: 4px;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.ui-chain__footer {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: var(--border-width) solid var(--border-divider);
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+/* ---------------------------------------------------------------- tabs */
+.ui-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  border-bottom: var(--border-width) solid var(--border-divider);
+  padding-bottom: 8px;
+  margin-bottom: 14px;
+}
+.ui-tab {
+  background: transparent;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-pill);
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.ui-tab:hover { color: var(--ink-primary); background: var(--surface-hover); }
+.ui-tab:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ui-tab--active {
+  background: var(--surface-selected);
+  border-color: var(--border-selected);
+  color: var(--ink-primary);
 }
 
 /* --------------------------------------------------------------- table */

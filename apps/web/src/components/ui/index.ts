@@ -39,3 +39,16 @@ export { CyberHeroPanel, type CyberHeroPanelProps } from "./CyberHeroPanel";
 export { MetricTile, type MetricTileProps } from "./MetricTile";
 export { DecisionCard, type DecisionCardProps } from "./DecisionCard";
 export { ActionTile, type ActionTileProps } from "./ActionTile";
+export { EvidenceBadge, type EvidenceBadgeProps } from "./EvidenceBadge";
+export {
+  AccessChain,
+  type AccessChainLink,
+  type AccessChainProps,
+} from "./AccessChain";
+export {
+  TabRail,
+  tabId,
+  tabPanelId,
+  type TabItem,
+  type TabRailProps,
+} from "./TabRail";

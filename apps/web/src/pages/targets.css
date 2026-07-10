@@ -1,0 +1,146 @@
+/* Targets hub layout. Tokens only. */
+
+.thub {
+  display: grid;
+  gap: 16px;
+}
+.thub-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.thub-head h2 {
+  margin: 0;
+}
+.thub-tagline {
+  margin: 4px 0 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+}
+.thub-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.thub-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  background: var(--surface-well);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+
+/* Inventory table row treatment. Selection is signaled by background PLUS
+   an accent edge bar (not color contrast alone). */
+.thub-row--selected td {
+  background: var(--surface-selected);
+}
+.thub-row--selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent-primary);
+}
+.thub-target-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--ink-primary);
+  font: inherit;
+  text-align: left;
+}
+.thub-target-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+.thub-hex {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent-mark) 18%, transparent);
+  border: var(--border-width) solid
+    color-mix(in srgb, var(--accent-mark) 45%, transparent);
+  color: var(--accent-brand);
+}
+.thub-target-name {
+  display: block;
+  font-weight: var(--weight-semibold);
+}
+.thub-target-sub {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+.thub-cellmeta {
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+  margin-top: 2px;
+}
+.thub-cell--ok { color: var(--tone-ok); }
+.thub-cell--warn { color: var(--tone-warn); }
+.thub-cell--danger { color: var(--tone-danger-ink); }
+.thub-cell--pending { color: var(--ink-secondary); }
+.thub-cell--none { color: var(--ink-secondary); }
+
+/* Detail composition */
+.thub-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.thub-detail-head h3 {
+  margin: 0;
+}
+.thub-detail-sub {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  margin-top: 2px;
+}
+.thub-detail-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.thub-meta-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.thub-evidence-list {
+  display: grid;
+  gap: 8px;
+}
+.thub-evidence-meta {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  margin-bottom: 10px;
+}
+.thub-caption {
+  color: var(--ink-secondary);
+  font-size: var(--text-xs);
+  margin-top: 10px;
+}
+
+@media (max-width: 820px) {
+  .thub-detail-head,
+  .thub-head {
+    flex-direction: column;
+  }
+}
