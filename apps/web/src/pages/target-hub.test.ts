@@ -8,15 +8,18 @@ import {
   DEFAULT_PROVISIONING_BOUNDARY,
   buildScopePolicyFromBoundary,
 } from "./provider-targets";
+import { GENERIC_ERROR_TEXT } from "../components/ui/closed-code-error";
 import {
   COLLECTOR_GATE_STATEMENT,
   MILESTONE_NOTICE,
+  REGISTRATION_ERROR_TEXT,
   SECRET_REF_CAPTION,
   UNAVAILABLE_CELL,
   boundarySummaryFromScope,
   buildAccessChain,
   evidenceCellView,
   liveAccessCellView,
+  registrationErrorCopy,
 } from "./target-hub";
 
 const NOW = new Date("2026-07-09T12:00:00Z");
@@ -173,6 +176,47 @@ describe("buildAccessChain", () => {
     expect(links[2].state).toBe("sealed");
     expect(links[2].status).toContain("Approved — sealed (not active)");
     expect(links[2].status).toContain("evidence 1/1");
+  });
+
+  it("maps known registration codes to fixed copy, never the backend message", () => {
+    const err = Object.assign(
+      new Error("psycopg detail at postgresql://secp:hunter2@db/secp"),
+      { code: "validation_failed", details: ["raw backend detail"] },
+    );
+    const copy = registrationErrorCopy(err);
+    expect(copy.code).toBe("validation_failed");
+    expect(copy.text).toBe(REGISTRATION_ERROR_TEXT.validation_failed);
+    expect(copy.text).not.toContain("hunter2");
+    expect(copy.text).not.toContain("raw backend detail");
+  });
+
+  it("falls back to generic copy for unknown-but-valid codes, keeping the code", () => {
+    const copy = registrationErrorCopy(
+      Object.assign(new Error("free text"), { code: "target_quota_exhausted" }),
+    );
+    expect(copy).toEqual({ code: "target_quota_exhausted", text: GENERIC_ERROR_TEXT });
+  });
+
+  it("rejects malformed free-text codes entirely", () => {
+    const copy = registrationErrorCopy(
+      Object.assign(new Error("x"), { code: "Traceback at :5432 !!" }),
+    );
+    expect(copy).toEqual({ code: "error", text: GENERIC_ERROR_TEXT });
+  });
+
+  it("is safe against prototype/inherited-property codes", () => {
+    for (const code of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      const copy = registrationErrorCopy(Object.assign(new Error("x"), { code }));
+      expect(typeof copy.text).toBe("string");
+      expect(copy.text).toBe(GENERIC_ERROR_TEXT);
+    }
+  });
+
+  it("keeps registration copy free of endpoints and secrets", () => {
+    for (const text of Object.values(REGISTRATION_ERROR_TEXT)) {
+      expect(text).not.toMatch(/:\/\//);
+      expect(text.toLowerCase()).not.toContain("secret value");
+    }
   });
 
   it("keeps safety copy free of endpoints and secrets", () => {

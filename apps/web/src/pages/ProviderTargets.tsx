@@ -14,6 +14,7 @@ import type {
 } from "../api/types";
 import {
   AccessChain,
+  ClosedCodeError,
   CyberButton,
   CyberCard,
   CyberInput,
@@ -43,6 +44,7 @@ import {
   DISCOVERY_REFUSED_HINT,
   INVENTORY_TAGLINE,
   MILESTONE_NOTICE,
+  REGISTRATION_ERROR_TEXT,
   SECRET_REF_CAPTION,
   boundarySummaryFromScope,
   buildAccessChain,
@@ -146,7 +148,10 @@ function RegisterForm({ onCreated }: { onCreated: () => void }) {
   const [boundary, setBoundary] = useState<ProvisioningBoundaryDraft>(
     DEFAULT_PROVISIONING_BOUNDARY,
   );
-  const [error, setError] = useState<string | null>(null);
+  /** Frontend-authored validation copy from buildRegisterTargetPayload. */
+  const [clientError, setClientError] = useState<string | null>(null);
+  /** Raw API error — rendered only through the closed-code map. */
+  const [apiError, setApiError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
   function setBoundaryField<K extends keyof ProvisioningBoundaryDraft>(
@@ -158,7 +163,8 @@ function RegisterForm({ onCreated }: { onCreated: () => void }) {
 
   async function submit() {
     setBusy(true);
-    setError(null);
+    setClientError(null);
+    setApiError(null);
     try {
       const payload = buildRegisterTargetPayload({
         displayName,
@@ -167,13 +173,13 @@ function RegisterForm({ onCreated }: { onCreated: () => void }) {
         boundary,
       });
       if (!payload.ok || !payload.value) {
-        setError(payload.errors.join("; "));
+        setClientError(payload.errors.join("; "));
         return;
       }
       await api.registerTarget(payload.value);
       onCreated();
-    } catch (e: any) {
-      setError(`${e.message}${e.details ? " — " + e.details.join("; ") : ""}`);
+    } catch (e) {
+      setApiError(e);
     } finally {
       setBusy(false);
     }
@@ -186,7 +192,14 @@ function RegisterForm({ onCreated }: { onCreated: () => void }) {
         (e.g. <code>env:SECP_PROVIDER_SECRET__LAB</code>) — never a real secret. There is
         no secret-entry form by design.
       </p>
-      {error && <div className="error-box">{error}</div>}
+      {clientError && <div className="error-box">{clientError}</div>}
+      {apiError !== null && (
+        <ClosedCodeError
+          error={apiError}
+          codeText={REGISTRATION_ERROR_TEXT}
+          onDismiss={() => setApiError(null)}
+        />
+      )}
       <div className="grid cols-2">
         <div>
           <CyberInput
