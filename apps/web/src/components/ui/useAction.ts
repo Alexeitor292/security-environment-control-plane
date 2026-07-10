@@ -7,10 +7,13 @@ import {
 
 export interface ActionState {
   busy: boolean;
-  /** Closed-code copy for the last failure — never a raw backend message. */
+  /** Closed-code copy for the last failure - never a raw backend message. */
   error: ClosedCodeCopy | null;
   /** Run a mutation; `onDone` (typically a reload) fires only on success. */
-  run: (fn: () => Promise<unknown>, onDone?: () => void) => Promise<void>;
+  run: (
+    fn: () => Promise<unknown>,
+    onDone?: () => void | Promise<unknown>,
+  ) => Promise<void>;
   clearError: () => void;
 }
 
@@ -38,14 +41,17 @@ export function useAction(opts?: {
   }, []);
 
   const run = useCallback(
-    async (fn: () => Promise<unknown>, onDone?: () => void) => {
+    async (
+      fn: () => Promise<unknown>,
+      onDone?: () => void | Promise<unknown>,
+    ) => {
       const seq = ++seqRef.current;
       const current = () => mountedRef.current && seqRef.current === seq;
       setBusy(true);
       setError(null);
       try {
         await fn();
-        if (current()) onDone?.();
+        if (current()) await onDone?.();
       } catch (e) {
         if (current()) setError(resolveClosedCodeCopy(e, codeText));
       } finally {

@@ -12,6 +12,7 @@ import {
   PREFLIGHT_TONE,
   STAGING_DEPLOYMENT_TONE,
   STAGING_LAB_TONE,
+  VERIFICATION_TONE,
   resolveStatusTone,
   statusDisplayLabel,
 } from "./status-tone";
@@ -27,6 +28,7 @@ const ALL_MAPS = {
   PREFLIGHT_TONE,
   PREFLIGHT_OUTCOME_TONE,
   EVIDENCE_TONE,
+  VERIFICATION_TONE,
   AUTHORIZATION_TONE,
   TARGET_TONE,
   AUDIT_TONE,
@@ -54,6 +56,7 @@ describe("status tone maps", () => {
       preflight: PREFLIGHT_TONE,
       "preflight-outcome": PREFLIGHT_OUTCOME_TONE,
       evidence: EVIDENCE_TONE,
+      verification: VERIFICATION_TONE,
       authorization: AUTHORIZATION_TONE,
       target: TARGET_TONE,
       audit: AUDIT_TONE,
@@ -84,6 +87,8 @@ describe("status tone maps", () => {
     expect(resolveStatusTone("bound", "bootstrap").tone).toBe("ok");
     expect(resolveStatusTone("credential_unavailable", "preflight-outcome").tone).toBe("warn");
     expect(resolveStatusTone("unverifiable", "evidence").tone).toBe("pending");
+    expect(resolveStatusTone("passed", "verification").tone).toBe("ok");
+    expect(resolveStatusTone("failed", "verification").tone).toBe("danger");
   });
 
   it("unknown statuses resolve to the distinct 'unknown' tone, not 'pending'", () => {

@@ -600,7 +600,7 @@ button.ui-steprail__btn:focus-visible {
   border-color: var(--accent-primary);
   color: var(--accent-primary);
 }
-.ui-steprail__item--blocked .ui-steprail__btn {
+.ui-steprail__item--blocked button.ui-steprail__btn {
   cursor: not-allowed;
 }
 .ui-steprail__item--blocked .ui-steprail__marker {

@@ -160,6 +160,9 @@ describe("Staging lab UI logic", () => {
     expect(planHashPrefix(planned.plan_hash)).toBe("abcdef012345");
     expect(planResourceKinds(planned)).toContain("disposable_nested_proxmox_target");
     expect(statusLabel("simulation_queued")).toContain("queued");
+    expect(statusLabel("awaiting_approval")).toBe("Awaiting approval");
+    expect(statusLabel("draft")).toBe("Draft");
+    expect(statusLabel("failed")).toBe("Failed");
     expect(lifecycleIndex("simulated_ready")).toBeGreaterThan(lifecycleIndex("approved"));
   });
 
