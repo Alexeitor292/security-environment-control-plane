@@ -13,11 +13,14 @@ const KNOWN_ROUTES = [
   "/target-discovery",
   "/readonly-preflight",
   "/resolver-activation",
+  "/approvals",
   "/audit",
 ];
 
-/** Every route the previous sidebar linked to — nothing may become unreachable. */
-const PREVIOUS_NAV_ROUTES = KNOWN_ROUTES;
+/** Every route the previous sidebar linked to — nothing may become unreachable.
+ *  Frozen at the pre-approvals-queue set; /approvals is a new route, not a
+ *  previously navigable one. */
+const PREVIOUS_NAV_ROUTES = KNOWN_ROUTES.filter((r) => r !== "/approvals");
 
 const allItems = NAV_GROUPS.flatMap((g) => g.items);
 
@@ -27,6 +30,10 @@ describe("shell navigation model", () => {
     for (const route of PREVIOUS_NAV_ROUTES) {
       expect(hrefs, `route ${route} lost from the sidebar`).toContain(route);
     }
+  });
+
+  it("links the new approvals queue", () => {
+    expect(allItems.map((i) => i.href)).toContain("/approvals");
   });
 
   it("only links routes that exist in the router", () => {

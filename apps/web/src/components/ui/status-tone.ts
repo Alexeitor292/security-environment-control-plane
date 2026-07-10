@@ -203,13 +203,16 @@ export const PLAN_DECISION_TONE: Record<string, StatusTone> = {
   superseded: "pending",
 };
 
-/** AuditEvent.outcome values (plain string in types.ts). */
+/** AuditEvent.outcome values (plain string in types.ts). The backend also
+ *  records revoked/expired outcomes — both fail-closed truth events. */
 export const AUDIT_TONE: Record<string, StatusTone> = {
   success: "ok",
   denied: "danger",
   refused: "danger",
   failed: "danger",
   error: "danger",
+  revoked: "danger",
+  expired: "danger",
 };
 
 const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {

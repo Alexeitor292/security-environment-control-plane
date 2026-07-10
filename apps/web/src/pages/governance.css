@@ -1,0 +1,120 @@
+/* Governance surfaces: aggregate approvals queue + audit ledger. Tokens only. */
+
+.gov {
+  position: relative;
+  display: grid;
+  gap: 14px;
+}
+.gov-bg { z-index: 0; }
+.gov > *:not(.gov-bg) { position: relative; z-index: 1; }
+
+.gov-head h1 {
+  margin: 0 0 4px;
+}
+.gov-sub {
+  color: var(--ink-secondary);
+  max-width: 70ch;
+  margin: 0;
+}
+
+/* Tally strip */
+.gov-tally {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+/* Filter bar */
+.gov-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+/* Dense ledger rows */
+.gov-row-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  color: var(--ink-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gov-row-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+@media (forced-colors: active) {
+  .gov-row-btn:focus-visible {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+}
+.gov-row--selected {
+  background: color-mix(in srgb, var(--accent-primary) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent-primary);
+}
+
+.gov-note {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  margin: 8px 0 0;
+}
+
+/* Decision record cards (immutable) */
+.gov-records {
+  display: grid;
+  gap: 8px;
+}
+.gov-record {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-well) 60%, transparent);
+}
+.gov-record__action {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+.gov-record__meta {
+  color: var(--ink-secondary);
+  font-size: var(--text-xs);
+}
+.gov-record__reason {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--tone-danger);
+}
+
+/* Two-column layout for queue + records */
+.gov-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.gov-queue {
+  display: grid;
+  gap: 8px;
+}
+
+/* Detail panel */
+.gov-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
