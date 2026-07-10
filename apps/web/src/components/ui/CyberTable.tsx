@@ -1,4 +1,3 @@
-import clsx from "clsx";
 import type { ReactNode } from "react";
 
 export interface CyberTableProps {
@@ -8,31 +7,41 @@ export interface CyberTableProps {
   /** Footer caption line (e.g. "2 targets · secret references are opaque
    *  pointers"). Pass exported constants for safety-relevant captions. */
   caption?: ReactNode;
+  /** Accessible name for the table and its scrollable region. */
+  label?: string;
   className?: string;
 }
 
 /** Tokenized data table with uppercase letterspaced headers and its own
- *  horizontal-overflow container. */
+ *  horizontal-overflow container (keyboard-scrollable). */
 export function CyberTable({
   head,
   caption,
+  label,
   children,
   className,
 }: CyberTableProps) {
   return (
-    <div className={clsx("ui-table-wrap", className)}>
-      <table className="ui-table">
-        <thead>
-          <tr>
-            {head.map((h, i) => (
-              <th key={i} scope="col">
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>{children}</tbody>
-      </table>
+    <div className={className}>
+      <div
+        className="ui-table-wrap"
+        tabIndex={0}
+        role="region"
+        aria-label={label}
+      >
+        <table className="ui-table" aria-label={label}>
+          <thead>
+            <tr>
+              {head.map((h, i) => (
+                <th key={i} scope="col">
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>{children}</tbody>
+        </table>
+      </div>
       {caption !== undefined && (
         <div className="ui-table__caption">{caption}</div>
       )}
