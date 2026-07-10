@@ -214,5 +214,8 @@ export function statusLabel(status: StagingLabStatus): string {
   if (status === "tearing_down") return "Teardown in progress (worker running)";
   if (status === "destroyed") return "Torn down (simulated)";
   if (status === "simulated_ready") return "Simulated ready";
+  if (status === "failed") return "Failed";
+  const found = LIFECYCLE_STEPS.find((s) => s.status === status);
+  if (found) return found.label;
   return status;
 }

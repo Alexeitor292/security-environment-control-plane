@@ -37,6 +37,7 @@ export type StatusDomain =
   | "preflight"
   | "preflight-outcome"
   | "evidence"
+  | "verification"
   | "authorization"
   | "target"
   | "audit";
@@ -149,6 +150,14 @@ export const EVIDENCE_TONE: Record<string, StatusTone> = {
   unverifiable: "pending",
 };
 
+/** StagingDeploymentVerification.status values. These are distinct from the
+ *  evidence map: the backend emits "passed", not "pass". */
+export const VERIFICATION_TONE: Record<string, StatusTone> = {
+  passed: "ok",
+  failed: "danger",
+  unverifiable: "pending",
+};
+
 /** ExecutionTarget.status (backend TargetStatus enum — plain string in
  *  types.ts): active | disabled | discovery_failed. Disabled is a routine
  *  operator-initiated state, not an anomaly. */
@@ -193,6 +202,7 @@ const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   preflight: PREFLIGHT_TONE,
   "preflight-outcome": PREFLIGHT_OUTCOME_TONE,
   evidence: EVIDENCE_TONE,
+  verification: VERIFICATION_TONE,
   authorization: AUTHORIZATION_TONE,
   target: TARGET_TONE,
   audit: AUDIT_TONE,
@@ -215,6 +225,7 @@ const DEFAULT_ORDER: StatusDomain[] = [
   "preflight",
   "preflight-outcome",
   "evidence",
+  "verification",
   "authorization",
   "target",
   "audit",

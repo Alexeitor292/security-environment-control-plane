@@ -13,8 +13,9 @@ export interface StepRailItem {
 
 export interface StepRailProps {
   items: StepRailItem[];
-  /** Called only for complete/available steps; blocked steps never navigate. */
-  onSelect: (id: string) => void;
+  /** Called only for complete/available steps; blocked steps never navigate.
+   *  Omit for a purely presentational rail (lifecycle displays). */
+  onSelect?: (id: string) => void;
   "aria-label"?: string;
 }
 
@@ -30,7 +31,9 @@ export function StepRail({
   return (
     <ol className="ui-steprail" aria-label={ariaLabel}>
       {items.map((item, i) => {
-        const clickable = item.state === "complete" || item.state === "available";
+        const clickable =
+          onSelect !== undefined &&
+          (item.state === "complete" || item.state === "available");
         const marker =
           item.state === "complete" ? (
             <Check size={12} aria-hidden />
@@ -59,7 +62,7 @@ export function StepRail({
               <button
                 type="button"
                 className="ui-steprail__btn"
-                onClick={() => onSelect(item.id)}
+                onClick={() => onSelect!(item.id)}
               >
                 {content}
               </button>

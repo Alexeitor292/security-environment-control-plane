@@ -1,0 +1,129 @@
+/* Staging labs + deployments layout. Tokens only. */
+
+.stag {
+  display: grid;
+  gap: 14px;
+}
+.stag-head h1 {
+  margin: 0 0 6px;
+}
+.stag-intro {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+  max-width: 90ch;
+}
+
+.stag-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.stag-detail-head h3 {
+  margin: 0;
+}
+.stag-detail-sub {
+  margin-top: 2px;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+
+.stag-rail {
+  margin: 12px 0;
+}
+.stag-offrail {
+  margin: 8px 0 0;
+}
+
+.stag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+  gap: 14px;
+  align-items: start;
+  margin-top: 12px;
+}
+
+.stag-kinds {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+.stag-kinds li {
+  font-size: var(--text-sm);
+}
+.stag-constraints {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+.stag-constraints li {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.stag-note {
+  margin: 10px 0 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.stag-obs {
+  display: grid;
+  gap: 6px;
+}
+.stag-obs li {
+  list-style: none;
+  font-size: var(--text-sm);
+}
+
+.stag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: var(--border-width) solid var(--border-divider);
+}
+
+.stag-create-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 0 16px;
+}
+
+/* Inventory table row treatment. Selection is signaled by background plus an
+   accent edge bar, not color alone. */
+.stag-row--selected td {
+  background: var(--surface-selected);
+}
+.stag-row--selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent-primary);
+}
+.stag-item-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--ink-primary);
+  font: inherit;
+  text-align: left;
+}
+.stag-item-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+.stag-item-name {
+  display: block;
+  font-weight: var(--weight-semibold);
+}
+.stag-item-sub {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
