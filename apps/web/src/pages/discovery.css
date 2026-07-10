@@ -1,0 +1,183 @@
+/* Target discovery + candidate plan review layout. Tokens only. */
+
+.disc {
+  display: grid;
+  gap: 14px;
+}
+.disc-head h1 {
+  margin: 0 0 6px;
+}
+.disc-intro {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+  max-width: 92ch;
+}
+
+.disc-create-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 0 16px;
+}
+
+/* Inventory row selection: background + accent edge bar (not color alone). */
+.disc-row--selected td {
+  background: var(--surface-selected);
+}
+.disc-row--selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent-primary);
+}
+.disc-item-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--ink-primary);
+  font: inherit;
+  text-align: left;
+}
+.disc-item-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+/* Forced-colors strips box-shadow; repaint a system focus ring. */
+@media (forced-colors: active) {
+  .disc-item-btn:focus-visible {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+}
+.disc-item-name {
+  display: block;
+  font-weight: var(--weight-semibold);
+}
+.disc-item-sub {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+
+.disc-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.disc-detail-head h3 {
+  margin: 0;
+}
+.disc-sub {
+  margin-top: 2px;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+
+.disc-rail {
+  margin: 12px 0;
+}
+.disc-offrail {
+  margin: 8px 0 0;
+}
+
+.disc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  gap: 14px;
+  align-items: start;
+  margin-top: 12px;
+}
+
+.disc-eligibility {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.disc-reason {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.disc-facts {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.disc-plan-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.disc-kinds {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+}
+.disc-kinds li {
+  font-size: var(--text-sm);
+}
+.disc-constraints {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+.disc-constraints li {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.disc-note {
+  margin: 10px 0 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.disc-hashline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.disc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: var(--border-width) solid var(--border-divider);
+}
+
+.disc-disclosure {
+  margin-top: 10px;
+  border: var(--border-width) solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.disc-disclosure summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.disc-rawgrid {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+}
+.disc-rawgrid .mono {
+  font-size: var(--text-xs);
+}

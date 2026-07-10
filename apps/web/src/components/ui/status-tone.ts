@@ -40,7 +40,9 @@ export type StatusDomain =
   | "verification"
   | "authorization"
   | "target"
-  | "audit";
+  | "audit"
+  | "eligibility"
+  | "plan-decision";
 
 export const LIFECYCLE_TONE: Record<LifecycleState, StatusTone> = {
   draft: "pending",
@@ -182,6 +184,25 @@ export const AUTHORIZATION_TONE: Record<string, StatusTone> = {
   sealed: "danger",
 };
 
+/** DiscoveryEligibility outcome (eligible | ineligible | unverifiable) plus a
+ *  not-yet-recorded "pending". Unverifiable is neither pass nor fail. */
+export const ELIGIBILITY_TONE: Record<string, StatusTone> = {
+  eligible: "ok",
+  ineligible: "danger",
+  unverifiable: "pending",
+  pending: "pending",
+};
+
+/** DiscoveryCandidatePlanStatus (draft | approved | rejected | expired |
+ *  superseded). Draft = awaiting review; approved is a decision only. */
+export const PLAN_DECISION_TONE: Record<string, StatusTone> = {
+  draft: "warn",
+  approved: "ok",
+  rejected: "danger",
+  expired: "danger",
+  superseded: "pending",
+};
+
 /** AuditEvent.outcome values (plain string in types.ts). */
 export const AUDIT_TONE: Record<string, StatusTone> = {
   success: "ok",
@@ -206,6 +227,8 @@ const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   authorization: AUTHORIZATION_TONE,
   target: TARGET_TONE,
   audit: AUDIT_TONE,
+  eligibility: ELIGIBILITY_TONE,
+  "plan-decision": PLAN_DECISION_TONE,
 };
 
 /** Resolution order for domain-less lookups. Lifecycle then plan first, which
