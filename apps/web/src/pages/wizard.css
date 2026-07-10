@@ -1,9 +1,13 @@
 /* Onboarding wizard focus-mode layout. Tokens only. */
 
 .wiz {
+  position: relative;
   display: grid;
   gap: 14px;
 }
+/* Decorative blueprint layer sits behind the wizard content. */
+.wiz-bg { z-index: 0; }
+.wiz > *:not(.wiz-bg) { position: relative; z-index: 1; }
 .wiz-grid {
   display: grid;
   grid-template-columns: 230px minmax(0, 1fr) 300px;

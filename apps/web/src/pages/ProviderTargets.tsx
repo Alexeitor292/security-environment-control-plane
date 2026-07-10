@@ -1,6 +1,5 @@
 import "./targets.css";
 
-import { Boxes } from "lucide-react";
 import { useState } from "react";
 
 import { ApiClientError, api } from "../api/client";
@@ -32,6 +31,7 @@ import {
   truncateHash,
   useAction,
 } from "../components/ui";
+import { SECP_ICONS, providerIconName } from "../components/icons";
 import { useAsync } from "../hooks";
 import {
   DEFAULT_PROVISIONING_BOUNDARY,
@@ -694,7 +694,10 @@ export function ProviderTargets() {
                     aria-controls="thub-detail"
                   >
                     <span className="thub-hex" aria-hidden>
-                      <Boxes size={14} />
+                      {(() => {
+                        const Glyph = SECP_ICONS[providerIconName(t.plugin_name)];
+                        return <Glyph size={15} />;
+                      })()}
                     </span>
                     <span>
                       <span className="thub-target-name">{t.display_name}</span>

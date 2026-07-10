@@ -25,6 +25,7 @@ import {
   useAction,
   type ActionState,
 } from "../components/ui";
+import { BlueprintMeshBackground } from "../components/backgrounds";
 import { useAsync } from "../hooks";
 import {
   ISOLATION_MODELS,
@@ -128,6 +129,7 @@ export function OnboardingWizard() {
 
   return (
     <div className="wiz">
+      <BlueprintMeshBackground intensity="subtle" className="wiz-bg" />
       <div>
         <h2>Target onboarding wizard</h2>
         <SafetyNotice role="note" tone="warn">
