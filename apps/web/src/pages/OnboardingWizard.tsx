@@ -1,3 +1,5 @@
+import "./wizard.css";
+
 import { useMemo, useState } from "react";
 
 import { api } from "../api/client";
@@ -7,7 +9,22 @@ import type {
   OnboardingMode,
   TargetEvidence,
 } from "../api/types";
-import { StatusBadge } from "../components/StatusBadge";
+import {
+  ApprovedValuePicker,
+  CyberButton,
+  CyberCard,
+  CyberInput,
+  EvidenceBadge,
+  KeyValueList,
+  OptionCardGroup,
+  SafetyNotice,
+  Skeleton,
+  StatusBadge,
+  StepRail,
+  truncateHash,
+  useAction,
+  type ActionState,
+} from "../components/ui";
 import { useAsync } from "../hooks";
 import {
   ISOLATION_MODELS,
@@ -21,7 +38,6 @@ import {
   REVIEW_STATEMENT,
   SIMULATED_EVIDENCE_NOTICE,
   buildBoundary,
-  canAdvanceWizardStep,
   canCreateOnboardingDraft,
   draftFromScope,
   evidenceHashPrefix,
@@ -32,18 +48,23 @@ import {
   scopeOptionsFromPolicy,
   targetHasApprovedSegments,
   toggleDraftListValue,
+  valuesOutsideApproved,
   type BoundaryDraft,
+  type TargetScopeOptions,
 } from "./onboarding-wizard";
-
-const STEP_TITLES = [
-  "Select target",
-  "Onboarding mode",
-  "Isolation model",
-  "Lab network approach",
-  "Isolation profile",
-  "Define & review boundary",
-  "Lifecycle (simulated)",
-];
+import {
+  BOUNDARY_LOCKED_NOTICE,
+  DRAFT_NOT_SAVED_NOTICE,
+  LIFECYCLE_ACTIONS,
+  ONBOARDING_ERROR_TEXT,
+  STEP_TITLES,
+  SUMMARY_TRUTH_NOTICE,
+  TARGETS_UNAVAILABLE_TEXT,
+  boundarySummaryDeclaredRows,
+  boundarySummaryDraftRows,
+  lifecycleActionEnabled,
+  wizardStepStates,
+} from "./onboarding-wizard-view";
 
 export function OnboardingWizard() {
   const targets = useAsync(() => api.listTargets(), []);
@@ -53,8 +74,7 @@ export function OnboardingWizard() {
   const [isolationModel, setIsolationModel] = useState<IsolationModelName>("physical");
   const [draft, setDraft] = useState<BoundaryDraft>(emptyDraft());
   const [onboarding, setOnboarding] = useState<Onboarding | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const action = useAction({ codeText: ONBOARDING_ERROR_TEXT });
 
   const target = targets.data?.find((t) => t.id === targetId);
   const targetOptions = useMemo(
@@ -78,438 +98,462 @@ export function OnboardingWizard() {
     setDraft((d) => ({ ...d, [key]: value }));
   }
 
-  async function act(fn: () => Promise<Onboarding>) {
-    setBusy(true);
-    setError(null);
-    try {
+  const act = (fn: () => Promise<Onboarding>) =>
+    action.run(async () => {
       setOnboarding(await fn());
-    } catch (e: any) {
-      setError(`${e.message}${e.details ? " — " + e.details.join("; ") : ""}`);
-    } finally {
-      setBusy(false);
-    }
+    });
+
+  const gateArgs = {
+    targetSelected: !!targetId,
+    targetHasSegments: hasApprovedSegments,
+    validationOk: validation.ok,
+    onboardingExists: !!onboarding,
+  };
+  const railItems = wizardStepStates(step, gateArgs);
+  const canNext =
+    step < STEP_TITLES.length - 1 && railItems[step + 1].state !== "blocked";
+
+  // Navigating steps clears a stale action error so the alert never asserts a
+  // failure the current screen no longer reflects.
+  function goStep(next: number) {
+    action.clearError();
+    setStep(Math.min(STEP_TITLES.length - 1, Math.max(0, next)));
   }
-
-  const canNext = canAdvanceWizardStep(
-    step,
-    !!targetId,
-    hasApprovedSegments,
-    validation.ok,
-    !!onboarding,
-  );
   const canCreateDraft = canCreateOnboardingDraft(
-    busy,
+    action.busy,
     !!targetId,
     hasApprovedSegments,
     validation.ok,
   );
 
   return (
-    <div>
-      <h2>Target onboarding wizard</h2>
-      <div className="error-box" style={{ background: "transparent" }}>
-        <strong>Simulated onboarding (SECP-002B-1B-0.1).</strong> This constrains an
-        approved boundary; SECP later creates scenario resources inside it. Preflight is{" "}
-        <strong>simulated</strong> and the live-evidence seal remains in force — no real
-        server, network, bridge, or provider is contacted.
+    <div className="wiz">
+      <div>
+        <h2>Target onboarding wizard</h2>
+        <SafetyNotice role="note" tone="warn">
+          <strong>Simulated onboarding (SECP-002B-1B-0.1).</strong> This constrains an
+          approved boundary; SECP later creates scenario resources inside it. Preflight is{" "}
+          <strong>simulated</strong> and the live-evidence seal remains in force — no real
+          server, network, bridge, or provider is contacted.
+        </SafetyNotice>
       </div>
 
-      <ol className="wizard-steps">
-        {STEP_TITLES.map((title, i) => (
-          <li key={title} className={i === step ? "current" : i < step ? "done" : ""}>
-            <span className="mono">{i + 1}</span> {title}
-          </li>
-        ))}
-      </ol>
-
-      {error && <div className="error-box">{error}</div>}
-
-      <div className="panel">
-        <h3>
-          {step + 1}. {STEP_TITLES[step]}
-        </h3>
-
-        {step === 0 && (
-          <div>
-            <p className="muted">
-              Selecting an <strong>existing environment</strong> means selecting an existing
-              hypervisor/cluster <strong>boundary</strong> — it does <strong>not</strong>{" "}
-              adopt existing VMs or containers.
-            </p>
-            {targets.data && targets.data.length === 0 && (
-              <p className="muted">
-                No registered targets. Register one under “Provider Targets” first.
-              </p>
-            )}
-            <label>Registered execution target</label>
-            <select value={targetId} onChange={(e) => selectTarget(e.target.value)}>
-              <option value="">— select a target —</option>
-              {targets.data?.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.display_name} · {t.plugin_name}
-                </option>
-              ))}
-            </select>
-            {targetId && !hasApprovedSegments && (
-              <div className="error-box" style={{ marginTop: 10 }}>
-                {NO_APPROVED_SEGMENTS_MESSAGE}
-              </div>
-            )}
-          </div>
-        )}
-
-        {step === 1 && (
-          <RadioGroup
-            options={ONBOARDING_MODES}
-            value={mode}
-            onChange={(v) => setMode(v as OnboardingMode)}
-          />
-        )}
-
-        {step === 2 && (
-          <div>
-            <RadioGroup
-              options={ISOLATION_MODELS}
-              value={isolationModel}
-              onChange={(v) => setIsolationModel(v as IsolationModelName)}
-            />
-            {isolationModel === "logical" && (
-              <div className="error-box" style={{ marginTop: 10 }}>
-                Logical isolation requires a complete, verified boundary with{" "}
-                <strong>no route</strong> to management, home, corporate, storage, or public
-                networks. The <span className="mono">no_route_to_protected</span> preflight
-                check must pass.
-              </div>
-            )}
-          </div>
-        )}
-
-        {step === 3 && (
-          <div>
-            <RadioGroup
-              options={NETWORK_APPROACHES}
-              value={draft.networkApproach}
-              onChange={(v) => set("networkApproach", v as BoundaryDraft["networkApproach"])}
-            />
-            {draft.networkApproach === "secp_managed_dedicated_segment" && (
-              <div className="error-box" style={{ marginTop: 10 }}>
-                Activation pending — <strong>no network is created in this release</strong>.
-                The declared segment must still be within the target’s approved segments.
-              </div>
-            )}
-            {targetOptions.networkSegments.length > 0 && (
-              <p className="muted mono" style={{ marginTop: 8 }}>
-                approved segments: {targetOptions.networkSegments.join(", ")}
-              </p>
-            )}
-            {targetId && !hasApprovedSegments && (
-              <div className="error-box" style={{ marginTop: 10 }}>
-                {NO_APPROVED_SEGMENTS_MESSAGE}
-              </div>
-            )}
-          </div>
-        )}
-
-        {step === 4 && (
-          <div>
-            {ISOLATION_PROFILES.map((p) => (
-              <label
-                key={p.value}
-                className="radio-row"
-                style={{ opacity: p.available ? 1 : 0.55 }}
-              >
-                <input
-                  type="radio"
-                  name="isolation_profile"
-                  disabled={!p.available}
-                  checked={draft.isolationProfile === p.value}
-                  onChange={() => set("isolationProfile", p.value)}
-                />
-                <span>
-                  <strong>{p.label}</strong>
-                  {p.recommended && <span className="badge ok"> recommended</span>}
-                  {!p.available && <span className="badge pending"> planned, not available yet</span>}
-                  <div className="muted">{p.description}</div>
-                </span>
-              </label>
-            ))}
-          </div>
-        )}
-
-        {step === 5 && (
-          <div>
-            <div className="grid cols-2">
-              <div>
-                <ApprovedValuePicker
-                  label="Allowed nodes"
-                  approvedValues={targetOptions.nodes}
-                  selectedRaw={draft.nodes}
-                  onChange={(value) => set("nodes", value)}
-                />
-                <ApprovedValuePicker
-                  label="Allowed storage"
-                  approvedValues={targetOptions.storage}
-                  selectedRaw={draft.storage}
-                  onChange={(value) => set("storage", value)}
-                />
-                <ApprovedValuePicker
-                  label="Network segments / bridges"
-                  approvedValues={targetOptions.networkSegments}
-                  selectedRaw={draft.networkSegments}
-                  onChange={(value) => set("networkSegments", value)}
-                  helper={NETWORK_SEGMENT_HELPER_TEXT}
-                  emptyText={NO_APPROVED_SEGMENTS_MESSAGE}
-                />
-                <ApprovedValuePicker
-                  label="CIDR reservations"
-                  approvedValues={targetOptions.cidrs}
-                  selectedRaw={draft.cidrs}
-                  onChange={(value) => set("cidrs", value)}
-                  helper={CIDR_HELPER_TEXT}
-                />
-                <label>Credential-scope label (opaque, non-secret)</label>
-                <input
-                  value={draft.credentialScope}
-                  onChange={(e) => set("credentialScope", e.target.value)}
-                />
-              </div>
-              <div>
-                <div className="grid cols-2">
-                  <div>
-                    <label>VM-ID start</label>
-                    <input
-                      type="number"
-                      min={targetOptions.vmidRange?.start}
-                      max={targetOptions.vmidRange?.end}
-                      value={draft.vmidStart}
-                      onChange={(e) => set("vmidStart", e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label>VM-ID end</label>
-                    <input
-                      type="number"
-                      min={targetOptions.vmidRange?.start}
-                      max={targetOptions.vmidRange?.end}
-                      value={draft.vmidEnd}
-                      onChange={(e) => set("vmidEnd", e.target.value)}
-                    />
-                  </div>
-                </div>
-                {targetOptions.vmidRange && (
-                  <p className="muted mono" style={{ marginTop: 4 }}>
-                    approved VM-ID range: {targetOptions.vmidRange.start}-
-                    {targetOptions.vmidRange.end}
-                  </p>
-                )}
-                <label>Max teams / VMs / containers</label>
-                <div className="grid cols-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={targetOptions.quotas.maxTeams}
-                    value={draft.maxTeams}
-                    onChange={(e) => set("maxTeams", e.target.value)}
-                  />
-                  <input
-                    type="number"
-                    min={1}
-                    max={targetOptions.quotas.maxVms}
-                    value={draft.maxVms}
-                    onChange={(e) => set("maxVms", e.target.value)}
-                  />
-                </div>
-                <input
-                  type="number"
-                  min={0}
-                  max={targetOptions.quotas.maxContainers}
-                  value={draft.maxContainers}
-                  onChange={(e) => set("maxContainers", e.target.value)}
-                />
-                <label>Max vCPU / memory (MB) / disk (GB)</label>
-                <div className="grid cols-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={targetOptions.quotas.maxVcpu}
-                    value={draft.maxVcpu}
-                    onChange={(e) => set("maxVcpu", e.target.value)}
-                  />
-                  <input
-                    type="number"
-                    min={1}
-                    max={targetOptions.quotas.maxMemoryMb}
-                    value={draft.maxMemoryMb}
-                    onChange={(e) => set("maxMemoryMb", e.target.value)}
-                  />
-                </div>
-                <input
-                  type="number"
-                  min={1}
-                  max={targetOptions.quotas.maxDiskGb}
-                  value={draft.maxDiskGb}
-                  onChange={(e) => set("maxDiskGb", e.target.value)}
-                />
-                <p className="muted mono" style={{ marginTop: 8 }}>
-                  approved limits: teams={targetOptions.quotas.maxTeams ?? "unset"}, vms=
-                  {targetOptions.quotas.maxVms ?? "unset"}, containers=
-                  {targetOptions.quotas.maxContainers ?? "unset"}, vcpu=
-                  {targetOptions.quotas.maxVcpu ?? "unset"}, memory_mb=
-                  {targetOptions.quotas.maxMemoryMb ?? "unset"}, disk_gb=
-                  {targetOptions.quotas.maxDiskGb ?? "unset"}
-                </p>
-                <p className="muted mono" style={{ marginTop: 8 }}>
-                  external connectivity: deny (fixed)
-                </p>
-              </div>
-            </div>
-
-            {!validation.ok && (
-              <div className="error-box" style={{ marginTop: 10 }}>
-                <ul style={{ margin: 0, paddingLeft: 18 }}>
-                  {validation.errors.map((e) => (
-                    <li key={e}>{e}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <div className="panel" style={{ background: "#0b0f15", marginTop: 12 }}>
-              <h3 style={{ marginTop: 0 }}>Review</h3>
-              <p>{REVIEW_STATEMENT}</p>
-              <p className="muted mono">
-                mode={mode} · isolation={isolationModel} · network={draft.networkApproach} ·
-                profile={draft.isolationProfile}
-              </p>
-              {!onboarding ? (
-                <button
-                  className="ok"
-                  disabled={!canCreateDraft}
-                  onClick={() =>
-                    act(() =>
-                      api.createOnboarding(targetId, {
-                        onboarding_mode: mode,
-                        isolation_model: isolationModel,
-                        declared_boundary: validation.boundary!,
-                      }),
-                    )
-                  }
-                >
-                  Create onboarding draft
-                </button>
-              ) : (
-                <p className="muted">
-                  Onboarding draft created (<span className="mono">{onboarding.id.slice(0, 8)}</span>
-                  ). Continue to the lifecycle step.
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-
-        {step === 6 && <LifecycleStep onboarding={onboarding} busy={busy} error={error} act={act} />}
-      </div>
-
-      <div className="row" style={{ marginTop: 12 }}>
-        <button
-          className="secondary"
-          disabled={step === 0}
-          onClick={() => setStep((s) => Math.max(0, s - 1))}
-        >
-          Back
-        </button>
-        <button
-          disabled={step === STEP_TITLES.length - 1 || !canNext}
-          onClick={() => setStep((s) => Math.min(STEP_TITLES.length - 1, s + 1))}
-        >
-          Next
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function RadioGroup<T extends string>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { value: T; label: string; help: string }[];
-  value: T;
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div>
-      {options.map((o) => (
-        <label key={o.value} className="radio-row">
-          <input
-            type="radio"
-            checked={value === o.value}
-            onChange={() => onChange(o.value)}
-          />
-          <span>
-            <strong>{o.label}</strong>
-            <div className="muted">{o.help}</div>
-          </span>
-        </label>
-      ))}
-    </div>
-  );
-}
-
-function ApprovedValuePicker({
-  label,
-  approvedValues,
-  selectedRaw,
-  helper,
-  emptyText,
-  onChange,
-}: {
-  label: string;
-  approvedValues: string[];
-  selectedRaw: string;
-  helper?: string;
-  emptyText?: string;
-  onChange: (value: string) => void;
-}) {
-  const selected = new Set(parseList(selectedRaw));
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <label>{label}</label>
-      {helper && <p className="muted">{helper}</p>}
-      {approvedValues.length === 0 ? (
-        <div className="error-box" style={{ marginTop: 6 }}>
-          {emptyText ?? `No approved values configured for ${label}.`}
-        </div>
-      ) : (
-        <div>
-          <p className="muted mono" style={{ marginTop: 0 }}>
-            approved values: {approvedValues.join(", ")}
-          </p>
-          {approvedValues.map((value) => (
-            <label key={value} className="radio-row">
-              <input
-                type="checkbox"
-                checked={selected.has(value)}
-                onChange={(e) =>
-                  onChange(toggleDraftListValue(selectedRaw, value, e.target.checked))
-                }
-              />
-              <span className="mono">{value}</span>
-            </label>
-          ))}
+      {action.error && (
+        <div className="error-box" role="alert">
+          {action.error.text} <code className="mono">{action.error.code}</code>
         </div>
       )}
+
+      <div className="wiz-grid">
+        <aside className="wiz-rail">
+          <CyberCard>
+            <StepRail
+              items={railItems}
+              onSelect={(id) => goStep(Number(id))}
+              aria-label="Onboarding steps"
+            />
+          </CyberCard>
+        </aside>
+
+        <section>
+          <CyberCard heading={`${step + 1}. ${STEP_TITLES[step]}`}>
+            {step === 0 && (
+              <div>
+                <p className="muted">
+                  Selecting an <strong>existing environment</strong> means selecting an
+                  existing hypervisor/cluster <strong>boundary</strong> — it does{" "}
+                  <strong>not</strong> adopt existing VMs or containers.
+                </p>
+                {targets.loading && !targets.data && <Skeleton lines={3} />}
+                {targets.error && (
+                  <div className="error-box">{TARGETS_UNAVAILABLE_TEXT}</div>
+                )}
+                {targets.data && targets.data.length === 0 && (
+                  <p className="muted">
+                    No registered targets. Register one under “Provider Targets” first.
+                  </p>
+                )}
+                {targets.data && targets.data.length > 0 && (
+                  <OptionCardGroup
+                    name="onboarding_target"
+                    legend="Registered execution target"
+                    options={targets.data.map((t) => ({
+                      value: t.id,
+                      label: t.display_name,
+                      help: `${t.plugin_name} plugin · ${truncateHash(t.config_hash, { prefix: "strip", digits: 12, ellipsis: false })}`,
+                      meta: <StatusBadge state={t.status} domain="target" />,
+                    }))}
+                    value={targetId}
+                    onChange={selectTarget}
+                  />
+                )}
+                {targetId && !hasApprovedSegments && (
+                  <div className="error-box" style={{ marginTop: 10 }}>
+                    {NO_APPROVED_SEGMENTS_MESSAGE}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {step === 1 && (
+              <OptionCardGroup
+                name="onboarding_mode"
+                legend="Onboarding mode"
+                legendHidden
+                options={ONBOARDING_MODES}
+                value={mode}
+                onChange={(v) => setMode(v)}
+              />
+            )}
+
+            {step === 2 && (
+              <div>
+                <OptionCardGroup
+                  name="isolation_model"
+                  legend="Isolation model"
+                  legendHidden
+                  options={ISOLATION_MODELS}
+                  value={isolationModel}
+                  onChange={(v) => setIsolationModel(v)}
+                />
+                {isolationModel === "logical" && (
+                  <div className="error-box" style={{ marginTop: 10 }}>
+                    Logical isolation requires a complete, verified boundary with{" "}
+                    <strong>no route</strong> to management, home, corporate, storage, or
+                    public networks. The <span className="mono">no_route_to_protected</span>{" "}
+                    preflight check must pass.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {step === 3 && (
+              <div>
+                <OptionCardGroup
+                  name="network_approach"
+                  legend="Lab network approach"
+                  legendHidden
+                  options={NETWORK_APPROACHES}
+                  value={draft.networkApproach}
+                  onChange={(v) => set("networkApproach", v)}
+                />
+                {draft.networkApproach === "secp_managed_dedicated_segment" && (
+                  <div className="error-box" style={{ marginTop: 10 }}>
+                    Activation pending — <strong>no network is created in this release</strong>.
+                    The declared segment must still be within the target’s approved segments.
+                  </div>
+                )}
+                {targetOptions.networkSegments.length > 0 && (
+                  <p className="muted mono" style={{ marginTop: 8 }}>
+                    approved segments: {targetOptions.networkSegments.join(", ")}
+                  </p>
+                )}
+                {targetId && !hasApprovedSegments && (
+                  <div className="error-box" style={{ marginTop: 10 }}>
+                    {NO_APPROVED_SEGMENTS_MESSAGE}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {step === 4 && (
+              <OptionCardGroup
+                name="isolation_profile"
+                legend="Isolation profile"
+                legendHidden
+                options={ISOLATION_PROFILES.map((p) => ({
+                  value: p.value,
+                  label: p.label,
+                  help: p.description,
+                  disabled: !p.available,
+                  disabledReason: "planned, not available yet",
+                  meta: p.recommended ? (
+                    <span className="badge ok">recommended</span>
+                  ) : !p.available ? (
+                    <span className="badge pending">planned, not available yet</span>
+                  ) : undefined,
+                }))}
+                value={draft.isolationProfile}
+                onChange={(v) => set("isolationProfile", v)}
+              />
+            )}
+
+            {step === 5 && (
+              <BoundaryStep
+                draft={draft}
+                targetOptions={targetOptions}
+                validation={validation}
+                onboarding={onboarding}
+                mode={mode}
+                isolationModel={isolationModel}
+                canCreateDraft={canCreateDraft}
+                onSet={set}
+                onCreate={() =>
+                  act(() =>
+                    api.createOnboarding(targetId, {
+                      onboarding_mode: mode,
+                      isolation_model: isolationModel,
+                      declared_boundary: validation.boundary!,
+                    }),
+                  )
+                }
+              />
+            )}
+
+            {step === 6 && (
+              <LifecycleStep onboarding={onboarding} action={action} act={act} />
+            )}
+
+            <div className="wiz-step-actions">
+              <CyberButton
+                variant="secondary"
+                disabled={step === 0}
+                onClick={() => goStep(step - 1)}
+              >
+                Back
+              </CyberButton>
+              <CyberButton disabled={!canNext} onClick={() => goStep(step + 1)}>
+                Next
+              </CyberButton>
+            </div>
+          </CyberCard>
+        </section>
+
+        <aside className="wiz-summary">
+          <CyberCard heading="Boundary summary">
+            <div className="wiz-summary-status">
+              {onboarding ? (
+                <>
+                  <StatusBadge state={onboarding.status} domain="onboarding" />
+                  <span className="mono">
+                    onboarding {onboarding.id.slice(0, 8)} · boundary{" "}
+                    {truncateHash(onboarding.boundary_hash, { prefix: "strip", digits: 12 })}
+                  </span>
+                </>
+              ) : (
+                <span>{DRAFT_NOT_SAVED_NOTICE}</span>
+              )}
+            </div>
+            <KeyValueList
+              items={
+                onboarding
+                  ? boundarySummaryDeclaredRows(onboarding)
+                  : boundarySummaryDraftRows(mode, isolationModel, draft)
+              }
+            />
+            <p className="wiz-summary-note">{SUMMARY_TRUTH_NOTICE}</p>
+          </CyberCard>
+        </aside>
+      </div>
     </div>
   );
 }
 
-function EvidencePanel({ onboardingId }: { onboardingId: string }) {
-  const evidence = useAsync(() => api.listTargetEvidence(onboardingId), [onboardingId]);
+function BoundaryStep({
+  draft,
+  targetOptions,
+  validation,
+  onboarding,
+  mode,
+  isolationModel,
+  canCreateDraft,
+  onSet,
+  onCreate,
+}: {
+  draft: BoundaryDraft;
+  targetOptions: TargetScopeOptions;
+  validation: ReturnType<typeof buildBoundary>;
+  onboarding: Onboarding | null;
+  mode: OnboardingMode;
+  isolationModel: IsolationModelName;
+  canCreateDraft: boolean;
+  onSet: <K extends keyof BoundaryDraft>(key: K, value: BoundaryDraft[K]) => void;
+  onCreate: () => void;
+}) {
+  const picker = (
+    key: "nodes" | "storage" | "networkSegments" | "cidrs",
+    label: string,
+    approved: string[],
+    helper?: string,
+    emptyText?: string,
+  ) => {
+    const selectedValues = parseList(draft[key]);
+    return (
+      <ApprovedValuePicker
+        label={label}
+        approvedValues={approved}
+        selectedValues={selectedValues}
+        outOfBound={valuesOutsideApproved(selectedValues, approved)}
+        helper={helper}
+        emptyText={emptyText}
+        onToggle={(value, checked) =>
+          onSet(key, toggleDraftListValue(draft[key], value, checked))
+        }
+      />
+    );
+  };
+
+  return (
+    <div>
+      {onboarding && <p className="wiz-locked-note">{BOUNDARY_LOCKED_NOTICE}</p>}
+      <fieldset className="wiz-fieldset" disabled={!!onboarding}>
+      <div className="grid cols-2">
+        <div>
+          {picker("nodes", "Allowed nodes", targetOptions.nodes)}
+          {picker("storage", "Allowed storage", targetOptions.storage)}
+          {picker(
+            "networkSegments",
+            "Network segments / bridges",
+            targetOptions.networkSegments,
+            NETWORK_SEGMENT_HELPER_TEXT,
+            NO_APPROVED_SEGMENTS_MESSAGE,
+          )}
+          {picker("cidrs", "CIDR reservations", targetOptions.cidrs, CIDR_HELPER_TEXT)}
+          <CyberInput
+            label="Credential-scope label (opaque, non-secret)"
+            value={draft.credentialScope}
+            onChange={(e) => onSet("credentialScope", e.target.value)}
+          />
+        </div>
+        <div>
+          <div className="grid cols-2">
+            <CyberInput
+              label="VM-ID start"
+              type="number"
+              min={targetOptions.vmidRange?.start}
+              max={targetOptions.vmidRange?.end}
+              value={draft.vmidStart}
+              onChange={(e) => onSet("vmidStart", e.target.value)}
+            />
+            <CyberInput
+              label="VM-ID end"
+              type="number"
+              min={targetOptions.vmidRange?.start}
+              max={targetOptions.vmidRange?.end}
+              value={draft.vmidEnd}
+              onChange={(e) => onSet("vmidEnd", e.target.value)}
+            />
+          </div>
+          {targetOptions.vmidRange && (
+            <p className="muted mono" style={{ marginTop: 4 }}>
+              approved VM-ID range: {targetOptions.vmidRange.start}-
+              {targetOptions.vmidRange.end}
+            </p>
+          )}
+          <div className="grid cols-2">
+            <CyberInput
+              label="Max teams"
+              type="number"
+              min={1}
+              max={targetOptions.quotas.maxTeams}
+              value={draft.maxTeams}
+              onChange={(e) => onSet("maxTeams", e.target.value)}
+            />
+            <CyberInput
+              label="Max VMs"
+              type="number"
+              min={1}
+              max={targetOptions.quotas.maxVms}
+              value={draft.maxVms}
+              onChange={(e) => onSet("maxVms", e.target.value)}
+            />
+          </div>
+          <CyberInput
+            label="Max containers"
+            type="number"
+            min={0}
+            max={targetOptions.quotas.maxContainers}
+            value={draft.maxContainers}
+            onChange={(e) => onSet("maxContainers", e.target.value)}
+          />
+          <div className="grid cols-2">
+            <CyberInput
+              label="Max vCPU"
+              type="number"
+              min={1}
+              max={targetOptions.quotas.maxVcpu}
+              value={draft.maxVcpu}
+              onChange={(e) => onSet("maxVcpu", e.target.value)}
+            />
+            <CyberInput
+              label="Max memory (MB)"
+              type="number"
+              min={1}
+              max={targetOptions.quotas.maxMemoryMb}
+              value={draft.maxMemoryMb}
+              onChange={(e) => onSet("maxMemoryMb", e.target.value)}
+            />
+          </div>
+          <CyberInput
+            label="Max disk (GB)"
+            type="number"
+            min={1}
+            max={targetOptions.quotas.maxDiskGb}
+            value={draft.maxDiskGb}
+            onChange={(e) => onSet("maxDiskGb", e.target.value)}
+          />
+          <p className="muted mono" style={{ marginTop: 8 }}>
+            approved limits: teams={targetOptions.quotas.maxTeams ?? "unset"}, vms=
+            {targetOptions.quotas.maxVms ?? "unset"}, containers=
+            {targetOptions.quotas.maxContainers ?? "unset"}, vcpu=
+            {targetOptions.quotas.maxVcpu ?? "unset"}, memory_mb=
+            {targetOptions.quotas.maxMemoryMb ?? "unset"}, disk_gb=
+            {targetOptions.quotas.maxDiskGb ?? "unset"}
+          </p>
+          <p className="muted mono" style={{ marginTop: 8 }}>
+            external connectivity: deny (fixed)
+          </p>
+        </div>
+      </div>
+      </fieldset>
+
+      {!validation.ok && (
+        <div className="error-box" style={{ marginTop: 10 }}>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {validation.errors.map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <CyberCard surface="well" heading="Review" className="wiz-review">
+        <p>{REVIEW_STATEMENT}</p>
+        <p className="muted mono wiz-mono-line">
+          mode={mode} · isolation={isolationModel} · network={draft.networkApproach} ·
+          profile={draft.isolationProfile}
+        </p>
+        {!onboarding ? (
+          <CyberButton variant="ok" disabled={!canCreateDraft} onClick={onCreate}>
+            Create onboarding draft
+          </CyberButton>
+        ) : (
+          <p className="muted">
+            Onboarding draft created (
+            <span className="mono">{onboarding.id.slice(0, 8)}</span>). Continue to the
+            lifecycle step.
+          </p>
+        )}
+      </CyberCard>
+    </div>
+  );
+}
+
+function EvidencePanel({
+  onboardingId,
+  status,
+}: {
+  onboardingId: string;
+  /** Refetches when the lifecycle moves (preflight records new evidence). */
+  status: string;
+}) {
+  const evidence = useAsync(
+    () => api.listTargetEvidence(onboardingId),
+    [onboardingId, status],
+  );
   const latest: TargetEvidence | undefined = evidence.data?.[evidence.data.length - 1];
   return (
-    <div className="panel" style={{ marginTop: 12, background: "#0b0f15" }}>
-      <h3 style={{ marginTop: 0 }}>Observed target evidence</h3>
+    <CyberCard surface="well" heading="Observed target evidence" className="wiz-evidence">
       <p className="muted">
         <strong>simulated evidence</strong> - {SIMULATED_EVIDENCE_NOTICE}.
       </p>
@@ -523,43 +567,53 @@ function EvidencePanel({ onboardingId }: { onboardingId: string }) {
             source={latest.evidence_source} | verification={latest.verification_level} |
             hash={evidenceHashPrefix(latest.evidence_hash)} | status={latest.status}
           </p>
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
+          <div className="wiz-evidence-list">
             {latest.findings.map((finding) => (
-              <li key={finding.check}>
-                <span className="mono">{finding.status}</span> {finding.check}:{" "}
-                {finding.detail}
-              </li>
+              <EvidenceBadge
+                key={finding.check}
+                title={finding.check}
+                status={finding.status}
+                detail={finding.detail}
+              />
             ))}
-          </ul>
+          </div>
         </div>
       )}
-    </div>
+    </CyberCard>
   );
 }
 
 function LifecycleStep({
   onboarding,
-  busy,
-  error,
+  action,
   act,
 }: {
   onboarding: Onboarding | null;
-  busy: boolean;
-  error: string | null;
-  act: (fn: () => Promise<Onboarding>) => void;
+  action: ActionState;
+  act: (fn: () => Promise<Onboarding>) => Promise<void>;
 }) {
   if (!onboarding) {
     return <p className="muted">Create the onboarding draft (previous step) first.</p>;
   }
   const idx = lifecycleIndex(onboarding.status);
   const rejected = isTerminalRejected(onboarding.status);
+
+  const runners: Record<string, () => Promise<Onboarding>> = {
+    preflight: () =>
+      api.requestPreflight(onboarding.id).then(() => api.getOnboarding(onboarding.id)),
+    submit: () => api.submitOnboarding(onboarding.id),
+    approve: () => api.approveOnboarding(onboarding.id, "approved via wizard"),
+    activate: () => api.activateOnboarding(onboarding.id),
+  };
+
   return (
     <div>
-      <div className="row" style={{ justifyContent: "space-between" }}>
+      <div className="wiz-lifecycle-head">
         <p className="muted mono">
-          onboarding {onboarding.id.slice(0, 8)} · boundary {onboarding.boundary_hash.slice(7, 19)}…
+          onboarding {onboarding.id.slice(0, 8)} · boundary{" "}
+          {truncateHash(onboarding.boundary_hash, { prefix: "strip", digits: 12 })}
         </p>
-        <StatusBadge state={onboarding.status} />
+        <StatusBadge state={onboarding.status} domain="onboarding" />
       </div>
 
       <ol className="wizard-steps">
@@ -572,42 +626,50 @@ function LifecycleStep({
 
       <p className="muted">
         Simulated workflow — the preflight is fake and labelled{" "}
-        <span className="mono">simulated</span>; the B1-B-0 live-evidence seal is in force and
-        no real infrastructure is contacted. Human approval is required before{" "}
+        <span className="mono">simulated</span>; the B1-B-0 live-evidence seal is in force
+        and no real infrastructure is contacted. Human approval is required before{" "}
         <span className="mono">active</span>.
       </p>
-      <EvidencePanel onboardingId={onboarding.id} />
-      {error && <div className="error-box">{error}</div>}
+      <EvidencePanel onboardingId={onboarding.id} status={onboarding.status} />
 
-      <div className="row" style={{ marginTop: 8 }}>
-        <button
-          className="secondary"
-          disabled={busy || onboarding.status !== "draft"}
-          onClick={() => act(() => api.requestPreflight(onboarding.id).then(() => api.getOnboarding(onboarding.id)))}
-        >
-          Run simulated preflight
-        </button>
-        <button
-          className="secondary"
-          disabled={busy || onboarding.status !== "preflight_pending"}
-          onClick={() => act(() => api.submitOnboarding(onboarding.id))}
-        >
-          Submit for review
-        </button>
-        <button
-          className="ok"
-          disabled={busy || onboarding.status !== "ready_for_review"}
-          onClick={() => act(() => api.approveOnboarding(onboarding.id, "approved via wizard"))}
-        >
-          Approve (human)
-        </button>
-        <button
-          className="ok"
-          disabled={busy || onboarding.status !== "approved"}
-          onClick={() => act(() => api.activateOnboarding(onboarding.id))}
-        >
-          Activate
-        </button>
+      <div className="wiz-actions-list">
+        {LIFECYCLE_ACTIONS.map((a) => {
+          const enabled = lifecycleActionEnabled(a.id, onboarding.status);
+          return (
+            <div className="wiz-action" key={a.id}>
+              <div className="wiz-action__body">
+                <div className="wiz-action__title">
+                  {a.label}
+                  {a.simulated && <span className="badge accent">simulated</span>}
+                </div>
+                <p className="wiz-action__line">
+                  <strong>Does:</strong> {a.does}
+                </p>
+                <p className="wiz-action__line">
+                  <strong>Does not:</strong> {a.doesNot}
+                </p>
+                <p className="wiz-action__line">
+                  <strong>Next:</strong> {a.next}
+                </p>
+              </div>
+              <div className="wiz-action__cta">
+                <CyberButton
+                  variant={a.id === "approve" || a.id === "activate" ? "ok" : "secondary"}
+                  size="sm"
+                  disabled={action.busy || !enabled}
+                  title={
+                    enabled
+                      ? undefined
+                      : `Available when the onboarding is in the required state — current: ${onboarding.status.replace(/_/g, " ")}.`
+                  }
+                  onClick={() => void act(runners[a.id])}
+                >
+                  {a.label}
+                </CyberButton>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       {onboarding.status === "active" && (

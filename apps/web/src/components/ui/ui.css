@@ -23,7 +23,10 @@
   .ui-select:focus-visible,
   .ui-decision:focus-visible,
   .ui-action:focus-visible,
-  .ui-tab:focus-visible {
+  .ui-tab:focus-visible,
+  button.ui-steprail__btn:focus-visible,
+  .ui-option:has(.ui-option__input:focus-visible),
+  .ui-avp__chip:has(.ui-option__input:focus-visible) {
     outline: 2px solid transparent;
     outline-offset: 2px;
   }
@@ -86,6 +89,9 @@
 .ui-btn--sm { padding: 4px 10px; font-size: var(--text-sm); }
 
 /* --------------------------------------------------------------- field */
+.ui-field {
+  min-width: 0;
+}
 .ui-field label {
   display: block;
   color: var(--ink-secondary);
@@ -94,6 +100,7 @@
 }
 .ui-input,
 .ui-select {
+  min-width: 0;
   background: var(--input-surface);
   color: var(--input-ink);
   border: var(--border-width) solid var(--input-border);
@@ -532,6 +539,230 @@
   border-top: var(--border-width) solid var(--border-divider);
   font-size: var(--text-sm);
   color: var(--ink-secondary);
+}
+
+/* ------------------------------------------------------------ step rail */
+.ui-steprail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.ui-steprail__btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  color: var(--ink-secondary);
+  font: inherit;
+  font-size: var(--text-base);
+}
+button.ui-steprail__btn {
+  cursor: pointer;
+}
+button.ui-steprail__btn:hover {
+  background: var(--surface-hover);
+  color: var(--ink-primary);
+}
+button.ui-steprail__btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.ui-steprail__marker {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  border: var(--border-width) solid var(--border-hairline);
+  background: var(--surface-raised);
+}
+.ui-steprail__item--complete .ui-steprail__marker {
+  border-color: var(--tone-ok);
+  color: var(--tone-ok);
+}
+.ui-steprail__item--current .ui-steprail__btn {
+  background: var(--surface-selected);
+  border-color: var(--border-selected);
+  color: var(--ink-primary);
+}
+.ui-steprail__item--current .ui-steprail__marker {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+.ui-steprail__item--blocked .ui-steprail__btn {
+  cursor: not-allowed;
+}
+.ui-steprail__item--blocked .ui-steprail__marker {
+  /* Number text stays --ink-secondary (AA); dashed border carries the state. */
+  color: var(--ink-secondary);
+  border-style: dashed;
+}
+
+/* --------------------------------------------------------- option cards */
+.ui-options {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.ui-options__legend {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  margin-bottom: 6px;
+  padding: 0;
+}
+.ui-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: var(--border-width) solid var(--card-border);
+  border-radius: var(--card-radius);
+  background: var(--surface-raised);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+.ui-option:hover {
+  border-color: var(--border-selected);
+}
+.ui-option--selected {
+  background: var(--surface-selected);
+  border-color: var(--border-selected);
+  box-shadow: var(--glow-accent);
+}
+.ui-option--disabled {
+  cursor: not-allowed;
+}
+.ui-option--disabled .ui-option__label,
+.ui-option--disabled .ui-option__help {
+  color: var(--ink-secondary);
+}
+.ui-option--disabled .ui-option__check {
+  border-style: dashed;
+}
+.ui-option__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  clip: rect(0, 0, 0, 0);
+  overflow: hidden;
+}
+.ui-option:has(.ui-option__input:focus-visible) {
+  box-shadow: var(--focus-ring);
+}
+.ui-option__check {
+  flex: none;
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  border: var(--border-width-glow) solid var(--border-hairline);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-brand);
+}
+.ui-option--selected .ui-option__check {
+  border-color: var(--accent-primary);
+}
+.ui-option__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ui-option__label {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+.ui-option__help {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.ui-option__meta {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* ------------------------------------------------- approved value picker */
+.ui-avp {
+  border: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+.ui-avp__legend {
+  display: block;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  margin: 8px 0 4px;
+  padding: 0;
+}
+.ui-avp__helper {
+  margin: 0 0 6px;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.ui-avp__approved {
+  margin: 0 0 6px;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+.ui-avp__grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ui-avp__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-pill);
+  background: var(--surface-well);
+  padding: 4px 10px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  color: var(--ink-secondary);
+}
+.ui-avp__chip--selected {
+  background: var(--surface-selected);
+  border-color: var(--border-selected);
+  color: var(--ink-primary);
+}
+.ui-avp__chip:has(.ui-option__input:focus-visible) {
+  box-shadow: var(--focus-ring);
+}
+.ui-avp__check {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border-radius: var(--radius-pill);
+  border: var(--border-width) solid var(--border-hairline);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-brand);
+}
+.ui-avp__chip--selected .ui-avp__check {
+  border-color: var(--accent-primary);
 }
 
 /* ---------------------------------------------------------------- tabs */
