@@ -13,6 +13,10 @@ import type {
   TargetEvidence,
 } from "../api/types";
 import type { AccessChainLink } from "../components/ui/AccessChain";
+import {
+  resolveClosedCodeCopy,
+  type ClosedCodeCopy,
+} from "../components/ui/closed-code-error";
 import { truncateHash } from "../components/ui/hash-chip";
 import { usableAuthorization } from "./readonly-preflight";
 import {
@@ -48,6 +52,21 @@ export const CHAIN_FOOTER =
 export const COLLECTOR_GATE_STATEMENT =
   "No transport is constructed until every link above passes, in order — " +
   "the sealed shipped default.";
+
+// ---------------------------------------------------- registration errors
+
+/** Closed registration codes → fixed copy. Backend messages and detail
+ *  arrays are never rendered; the code stays visible for operators. */
+export const REGISTRATION_ERROR_TEXT: Record<string, string> = {
+  validation_failed:
+    "Registration was rejected: one or more values are outside the allowed grammar for a provisioning boundary. Review the boundary fields and try again.",
+  forbidden: "You are not permitted to register execution targets.",
+  unauthenticated: "Your session is not authenticated.",
+};
+
+export function registrationErrorCopy(err: unknown): ClosedCodeCopy {
+  return resolveClosedCodeCopy(err, REGISTRATION_ERROR_TEXT);
+}
 
 // ---------------------------------------------------------------- boundary
 
