@@ -1,4 +1,5 @@
 import { api } from "../api/client";
+import { StatusBadge } from "../components/ui";
 import { useAsync } from "../hooks";
 
 export function AuditLog() {
@@ -37,11 +38,7 @@ export function AuditLog() {
                   </td>
                   <td className="muted mono">{e.actor.slice(0, 12)}</td>
                   <td>
-                    <span
-                      className={`badge ${e.outcome === "denied" ? "danger" : "ok"}`}
-                    >
-                      {e.outcome}
-                    </span>
+                    <StatusBadge state={e.outcome} domain="audit" />
                   </td>
                 </tr>
               ))}
