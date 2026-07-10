@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { RouterProvider, createBrowserRouter } from "react-router-dom";
 
 import { App } from "./App";
+import { Approvals } from "./pages/Approvals";
 import { AuditLog } from "./pages/AuditLog";
 import { Dashboard } from "./pages/Dashboard";
 import { DefinitionEditor } from "./pages/DefinitionEditor";
@@ -43,6 +44,7 @@ const router = createBrowserRouter([
       { path: "target-discovery", element: <TargetDiscovery /> },
       { path: "readonly-preflight", element: <ReadonlyPreflight /> },
       { path: "resolver-activation", element: <ResolverActivation /> },
+      { path: "approvals", element: <Approvals /> },
       { path: "audit", element: <AuditLog /> },
     ],
   },

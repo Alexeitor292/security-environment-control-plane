@@ -116,6 +116,13 @@ describe("status tone maps", () => {
     expect(resolveStatusTone("discovery_failed").tone).toBe("danger");
   });
 
+  it("covers every backend audit outcome, including revoked and expired", () => {
+    for (const outcome of ["denied", "refused", "failed", "revoked", "expired"]) {
+      expect(resolveStatusTone(outcome, "audit").tone, outcome).toBe("danger");
+    }
+    expect(resolveStatusTone("success", "audit").tone).toBe("ok");
+  });
+
   it("treats Object.prototype keys as unknown, never as a tone", () => {
     for (const state of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
       expect(resolveStatusTone(state)).toEqual({ tone: "unknown", known: false });

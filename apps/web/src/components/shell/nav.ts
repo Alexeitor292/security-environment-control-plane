@@ -65,8 +65,7 @@ export const NAV_GROUPS: NavGroup[] = [
       {
         id: "approvals",
         label: "Approvals",
-        unavailableReason:
-          "No aggregate approvals queue in this milestone — approvals happen on each surface (exercise plans, onboardings, staging labs, authorizations).",
+        href: "/approvals",
       },
       {
         id: "readonly-preflight",
