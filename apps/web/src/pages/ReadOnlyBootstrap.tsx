@@ -21,6 +21,7 @@ import {
   StepRail,
   useAction,
 } from "../components/ui";
+import { RiveWorkerBundle } from "../components/rive/wrappers";
 import { useAsync } from "../hooks";
 import {
   BOOTSTRAP_ERROR_TEXT,
@@ -328,6 +329,14 @@ export function ReadOnlyBootstrap() {
               <div className="rops-step-head">
                 <h3 style={{ margin: 0 }}>{STEP_LABELS["run-discovery"]}</h3>
                 <RespBadge who={BOOTSTRAP_RESPONSIBILITY["run-discovery"]} />
+                {/* This step only renders once the session is bound, so the
+                    worker-owned bundle is prepared. "ready" means prepared,
+                    not that discovery ran. */}
+                <RiveWorkerBundle
+                  ready={session.status === "bound"}
+                  label="Worker bundle"
+                  size={22}
+                />
                 <StatusBadge state={session.status} domain="bootstrap" />
               </div>
               <p data-testid="bootstrap-bound">

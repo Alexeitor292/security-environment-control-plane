@@ -278,6 +278,19 @@
 }
 .ui-hero__content {
   position: relative;
+  z-index: 1;
+}
+/* Decorative globe: right-anchored, faded, never overlaps the left content. */
+.ui-hero__globe {
+  left: auto;
+  right: 0;
+  width: min(46%, 320px);
+  opacity: 0.5;
+  -webkit-mask-image: linear-gradient(to left, rgba(0, 0, 0, 1), transparent);
+  mask-image: linear-gradient(to left, rgba(0, 0, 0, 1), transparent);
+}
+@media (max-width: 720px) {
+  .ui-hero__globe { display: none; }
 }
 .ui-hero__heading {
   margin: 0;

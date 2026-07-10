@@ -1,0 +1,245 @@
+/* SECP cyber background system. CSS/SVG only, tokens only — no raw color
+   literals. Every layer is decorative: aria-hidden, pointer-events:none,
+   position:absolute inset:0, and static under prefers-reduced-motion. */
+
+.bg-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 0;
+}
+
+/* ------------------------------------------------------------ cyber grid */
+.bg-grid {
+  background-image:
+    linear-gradient(
+      color-mix(in srgb, var(--border-hairline) 34%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--border-hairline) 34%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 34px 34px, 34px 34px;
+  mask-image: radial-gradient(120% 90% at 50% 0%, rgba(0, 0, 0, 0.9), transparent 75%);
+}
+.bg-grid.is-subtle { opacity: 0.35; }
+.bg-grid.is-standard { opacity: 0.6; }
+.bg-grid.is-hero { opacity: 0.85; }
+
+/* ------------------------------------------------------ blueprint mesh */
+.bg-blueprint {
+  background-image:
+    linear-gradient(
+      color-mix(in srgb, var(--accent-brand) 10%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent-brand) 10%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      color-mix(in srgb, var(--border-hairline) 20%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--border-hairline) 20%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 96px 96px, 96px 96px, 24px 24px, 24px 24px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.8), transparent 90%);
+}
+.bg-blueprint.is-subtle { opacity: 0.3; }
+.bg-blueprint.is-standard { opacity: 0.5; }
+.bg-blueprint.is-hero { opacity: 0.7; }
+
+/* ------------------------------------------------------ provider mesh */
+.bg-provider {
+  background-image:
+    radial-gradient(
+      40% 60% at 20% 20%,
+      color-mix(in srgb, var(--accent-mark) 12%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      45% 65% at 82% 18%,
+      color-mix(in srgb, var(--accent-brand) 10%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      50% 60% at 60% 90%,
+      color-mix(in srgb, var(--accent-primary) 9%, transparent),
+      transparent 70%
+    );
+}
+.bg-provider.is-subtle { opacity: 0.5; }
+.bg-provider.is-standard { opacity: 0.75; }
+.bg-provider.is-hero { opacity: 1; }
+
+/* -------------------------------------------------------- packet flow */
+/* Faint diagonal traces that drift — purely ambient, never real packets. */
+@keyframes bg-packet-drift {
+  from { background-position: 0 0; }
+  to { background-position: 260px 0; }
+}
+.bg-packet {
+  background-image: repeating-linear-gradient(
+    115deg,
+    transparent 0,
+    transparent 22px,
+    color-mix(in srgb, var(--accent-brand) 16%, transparent) 22px,
+    color-mix(in srgb, var(--accent-brand) 16%, transparent) 24px
+  );
+  background-size: 260px 100%;
+  animation: bg-packet-drift 9s linear infinite;
+  mask-image: linear-gradient(to right, transparent, rgba(0, 0, 0, 0.6) 40%, transparent);
+}
+.bg-packet.is-subtle { opacity: 0.25; }
+.bg-packet.is-standard { opacity: 0.4; }
+.bg-packet.is-hero { opacity: 0.55; }
+
+/* ------------------------------------------------ threat constellation */
+.bg-constellation {
+  background-image:
+    radial-gradient(1px 1px at 12% 24%, var(--accent-brand) 99%, transparent),
+    radial-gradient(1px 1px at 30% 62%, var(--accent-mark) 99%, transparent),
+    radial-gradient(1px 1px at 54% 18%, var(--accent-primary) 99%, transparent),
+    radial-gradient(1px 1px at 68% 74%, var(--accent-brand) 99%, transparent),
+    radial-gradient(1px 1px at 82% 40%, var(--accent-flare) 99%, transparent),
+    radial-gradient(1px 1px at 44% 88%, var(--accent-primary) 99%, transparent);
+  background-repeat: no-repeat;
+}
+.bg-constellation.is-subtle { opacity: 0.4; }
+.bg-constellation.is-standard { opacity: 0.65; }
+.bg-constellation.is-hero { opacity: 0.9; }
+
+/* ------------------------------------------------------- topology grid */
+.bg-topogrid {
+  background-image:
+    linear-gradient(
+      color-mix(in srgb, var(--accent-primary) 8%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent-primary) 8%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 44px 44px, 44px 44px;
+  transform: perspective(600px) rotateX(38deg);
+  transform-origin: 50% 100%;
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.9), transparent 70%);
+}
+.bg-topogrid.is-subtle { opacity: 0.3; }
+.bg-topogrid.is-standard { opacity: 0.5; }
+.bg-topogrid.is-hero { opacity: 0.7; }
+
+/* --------------------------------------------------------- scan lines */
+@keyframes bg-scan {
+  from { background-position-y: 0; }
+  to { background-position-y: 6px; }
+}
+.bg-scanlines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--ink-primary) 4%, transparent) 0,
+    color-mix(in srgb, var(--ink-primary) 4%, transparent) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  animation: bg-scan 1.2s steps(3) infinite;
+}
+.bg-scanlines.is-subtle { opacity: 0.35; }
+.bg-scanlines.is-standard { opacity: 0.55; }
+.bg-scanlines.is-hero { opacity: 0.7; }
+
+/* --------------------------------------------------------- noise overlay */
+.bg-noise {
+  background-image: radial-gradient(
+    var(--ink-primary) 0.5px,
+    transparent 0.6px
+  );
+  background-size: 3px 3px;
+  mix-blend-mode: overlay;
+}
+.bg-noise.is-subtle { opacity: 0.03; }
+.bg-noise.is-standard { opacity: 0.05; }
+.bg-noise.is-hero { opacity: 0.08; }
+
+/* ---------------------------------------------------- holographic globe */
+.bg-globe {
+  display: grid;
+  place-items: center;
+}
+.bg-globe__svg {
+  width: min(78%, 340px);
+  height: auto;
+  max-height: 100%;
+}
+.bg-globe__wire { stroke: var(--accent-brand); fill: none; }
+.bg-globe__orbit { stroke: var(--accent-mark); fill: none; }
+.bg-globe__node { fill: var(--accent-brand); }
+.bg-globe__flare { fill: var(--accent-flare); }
+@keyframes bg-globe-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes bg-globe-sweep {
+  0% { opacity: 0.15; }
+  50% { opacity: 0.5; }
+  100% { opacity: 0.15; }
+}
+/* ambient/active animate; sealed/authorized/degraded stay still (no false
+   "live" activity) — driven by the state class the React component sets. */
+.bg-globe[data-globe="ambient"] .bg-globe__orbits,
+.bg-globe[data-globe="active"] .bg-globe__orbits {
+  transform-origin: 50% 50%;
+  animation: bg-globe-spin 48s linear infinite;
+}
+.bg-globe[data-globe="active"] .bg-globe__sweep {
+  animation: bg-globe-sweep 4s ease-in-out infinite;
+}
+.bg-globe[data-globe="sealed"] .bg-globe__wire { stroke: var(--ink-secondary); }
+.bg-globe[data-globe="degraded"] .bg-globe__flare { fill: var(--tone-warn); }
+
+/* ------------------------------------------------------- sealed vault */
+.bg-vault {
+  display: grid;
+  place-items: center;
+}
+.bg-vault__svg { width: min(60%, 180px); height: auto; }
+.bg-vault__ring { stroke: var(--accent-primary); fill: none; opacity: 0.5; }
+.bg-vault__body {
+  stroke: var(--tone-danger);
+  fill: color-mix(in srgb, var(--tone-danger) 10%, transparent);
+}
+.bg-vault__shackle { stroke: var(--tone-danger); fill: none; }
+@keyframes bg-vault-ripple {
+  0% { transform: scale(0.9); opacity: 0.5; }
+  100% { transform: scale(1.15); opacity: 0; }
+}
+.bg-vault__ring--pulse {
+  transform-origin: 50% 50%;
+  animation: bg-vault-ripple 3.4s ease-out infinite;
+}
+
+/* Paused when offscreen or the document is hidden (set by useAmbientMotion). */
+.bg-paused,
+.bg-paused * {
+  animation-play-state: paused !important;
+}
+
+/* ------------------------------------------------ global reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .bg-packet,
+  .bg-scanlines,
+  .bg-globe__orbits,
+  .bg-globe__sweep,
+  .bg-vault__ring--pulse {
+    animation: none !important;
+  }
+}

@@ -15,6 +15,7 @@ import {
   StatusBadge,
   useAction,
 } from "../components/ui";
+import { RiveSealedLock } from "../components/rive/wrappers";
 import { useAsync } from "../hooks";
 import {
   READONLY_COMMON_CODES,
@@ -131,7 +132,13 @@ export function ResolverActivation() {
 
       <div className="rops-grid">
         <CyberCard heading="Cumulative activation gates">
-          <p className="rops-note">{RESOLVER_INTRO}</p>
+          <div className="rops-detail-head">
+            <p className="rops-note" style={{ margin: 0 }}>{RESOLVER_INTRO}</p>
+            {/* The resolver is the sealed shipped default; the lock stays
+                sealed even when an authorization is approved (a decision is not
+                activation). */}
+            <RiveSealedLock sealed label="Resolver" size={26} />
+          </div>
           <AccessChain
             links={gates.map((g) => ({
               id: g.id,

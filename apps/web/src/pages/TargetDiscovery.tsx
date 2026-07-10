@@ -26,6 +26,7 @@ import {
   StepRail,
   useAction,
 } from "../components/ui";
+import { RiveDiscoveryScan } from "../components/rive/wrappers";
 import { useAsync } from "../hooks";
 import {
   CANDIDATE_PLAN_STALE_HINT,
@@ -299,7 +300,14 @@ function EnrollmentDetail({
           <h3>{enrollment.display_name}</h3>
           <div className="disc-sub mono">{enrollment.ownership_label}</div>
         </div>
-        <StatusBadge state={enrollment.status} domain="discovery" />
+        <span className="disc-eligibility">
+          <RiveDiscoveryScan
+            status={enrollment.status}
+            label="Discovery"
+            size={22}
+          />
+          <StatusBadge state={enrollment.status} domain="discovery" />
+        </span>
       </div>
       <SafetyNotice role="note" tone="warn">
         {READ_ONLY_LABEL}

@@ -207,6 +207,7 @@ export function Dashboard() {
         <CyberHeroPanel
           heading={heroName ? `Welcome back, ${heroName}` : "Overview"}
           subheading={today}
+          globeState={caps ? "ambient" : "sealed"}
         >
           <div className="dash-hero-chips">
             {caps ? (

@@ -21,6 +21,7 @@ import {
   shortId,
   useAction,
 } from "../components/ui";
+import { CyberGridBackground } from "../components/backgrounds";
 import { useAsync } from "../hooks";
 import {
   BOOTSTRAP_PROFILES,
@@ -430,6 +431,7 @@ export function StagingLab() {
 
   return (
     <div className="stag">
+      <CyberGridBackground intensity="subtle" className="stag-bg" />
       <div className="stag-head">
         <h1>Disposable Staging Labs</h1>
         <p className="stag-intro">

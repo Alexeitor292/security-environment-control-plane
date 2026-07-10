@@ -1,0 +1,154 @@
+/* CSS/SVG fallbacks for the SECP motion pack. Tokens only. These are the
+   ground-truth visuals — they render regardless of any .riv asset. State is
+   carried by a data-state attribute and, critically, is never color-only:
+   each state has a distinct glyph/shape treatment. Animation is gated by the
+   .rm-animate class the wrapper adds only when motion is allowed. */
+
+.rm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-secondary);
+}
+.rm svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* ---------------------------------------------------------- sealed lock */
+.rm-lock[data-state="sealed"] { color: var(--tone-danger); }
+.rm-lock[data-state="authorized"] { color: var(--tone-ok); }
+.rm-lock[data-state="active"] { color: var(--accent-brand); }
+.rm-lock[data-state="refused"] { color: var(--tone-danger); }
+.rm-lock__shackle { transition: transform var(--motion-base) var(--ease-out); }
+/* Authorized/active lift the shackle slightly (distinct shape, not just hue). */
+.rm-lock[data-state="authorized"] .rm-lock__shackle,
+.rm-lock[data-state="active"] .rm-lock__shackle {
+  transform: translateY(-2px);
+}
+.rm-lock[data-state="refused"] .rm-lock__slash { display: initial; }
+.rm-lock__slash { display: none; stroke: var(--tone-danger); }
+@keyframes rm-lock-pulse {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
+}
+.rm-animate.rm-lock[data-state="active"] .rm-lock__body {
+  animation: rm-lock-pulse 2.6s ease-in-out infinite;
+}
+
+/* --------------------------------------------------- authorization pulse */
+.rm-authz[data-state="draft"] { color: var(--ink-secondary); }
+.rm-authz[data-state="pending"] { color: var(--tone-warn); }
+.rm-authz[data-state="approved"] { color: var(--tone-ok); }
+.rm-authz[data-state="expired"],
+.rm-authz[data-state="revoked"],
+.rm-authz[data-state="refused"] { color: var(--tone-danger); }
+/* Distinct glyphs per state (not color-only): check, clock, x, dot. */
+.rm-authz__glyph > * { display: none; }
+.rm-authz[data-state="approved"] .rm-authz__check,
+.rm-authz[data-state="pending"] .rm-authz__clock,
+.rm-authz[data-state="draft"] .rm-authz__dot,
+.rm-authz[data-state="expired"] .rm-authz__x,
+.rm-authz[data-state="revoked"] .rm-authz__x,
+.rm-authz[data-state="refused"] .rm-authz__x { display: initial; }
+@keyframes rm-ring-pulse {
+  0% { transform: scale(0.8); opacity: 0.6; }
+  100% { transform: scale(1.2); opacity: 0; }
+}
+.rm-animate.rm-authz[data-state="pending"] .rm-authz__ring {
+  transform-origin: 50% 50%;
+  animation: rm-ring-pulse 2.8s ease-out infinite;
+}
+
+/* -------------------------------------------------------- packet flow */
+.rm-flow { color: var(--ink-secondary); }
+.rm-flow__packet { display: none; fill: var(--accent-brand); }
+.rm-flow__slash { display: none; stroke: var(--tone-danger); }
+.rm-flow[data-state="read-only"] { color: var(--accent-brand); }
+.rm-flow[data-state="read-only"] .rm-flow__packet { display: initial; }
+.rm-flow[data-state="read-only"] .rm-flow__track { stroke-dasharray: 3 2; }
+.rm-flow[data-state="denied"] { color: var(--tone-danger); }
+.rm-flow[data-state="denied"] .rm-flow__slash { display: initial; }
+.rm-flow[data-state="sealed"] { color: var(--ink-muted); }
+/* sealed and idle show NO packet and NO motion. */
+@keyframes rm-flow-move {
+  from { transform: translateX(-10px); }
+  to { transform: translateX(28px); }
+}
+.rm-animate.rm-flow[data-state="read-only"] .rm-flow__packet {
+  animation: rm-flow-move 1.8s linear infinite;
+}
+
+/* ------------------------------------------------------ topology node */
+.rm-node[data-state="default"] { color: var(--ink-secondary); }
+.rm-node[data-state="selected"] { color: var(--accent-primary); }
+.rm-node[data-state="isolated"] { color: var(--tone-warn); }
+.rm-node[data-state="compromised"] { color: var(--tone-danger); }
+.rm-node[data-state="sealed"] { color: var(--ink-muted); }
+.rm-node__ring { display: none; }
+.rm-node[data-state="selected"] .rm-node__ring { display: initial; }
+/* isolated = dashed ring; compromised = cross; sealed = small lock bar. */
+.rm-node__dash,
+.rm-node__cross,
+.rm-node__bar { display: none; }
+.rm-node[data-state="isolated"] .rm-node__dash { display: initial; stroke-dasharray: 2 2; }
+.rm-node[data-state="compromised"] .rm-node__cross { display: initial; }
+.rm-node[data-state="sealed"] .rm-node__bar { display: initial; }
+
+/* ------------------------------------------------------ approval stamp */
+.rm-stamp[data-state="pending"] { color: var(--tone-warn); }
+.rm-stamp[data-state="approved"] { color: var(--tone-ok); }
+.rm-stamp[data-state="rejected"] { color: var(--tone-danger); }
+.rm-stamp[data-state="stale"] { color: var(--ink-secondary); }
+.rm-stamp__glyph > * { display: none; }
+.rm-stamp[data-state="approved"] .rm-stamp__check,
+.rm-stamp[data-state="rejected"] .rm-stamp__x,
+.rm-stamp[data-state="pending"] .rm-stamp__dots,
+.rm-stamp[data-state="stale"] .rm-stamp__slash { display: initial; }
+
+/* -------------------------------------------------------- worker bundle */
+.rm-bundle[data-state="preparing"] { color: var(--tone-warn); }
+.rm-bundle[data-state="ready"] { color: var(--tone-ok); }
+.rm-bundle[data-state="failed"] { color: var(--tone-danger); }
+.rm-bundle[data-state="sealed"] { color: var(--ink-muted); }
+.rm-bundle__glyph > * { display: none; }
+.rm-bundle[data-state="ready"] .rm-bundle__check,
+.rm-bundle[data-state="failed"] .rm-bundle__x,
+.rm-bundle[data-state="sealed"] .rm-bundle__lock,
+.rm-bundle[data-state="preparing"] .rm-bundle__gear { display: initial; }
+@keyframes rm-spin { to { transform: rotate(360deg); } }
+.rm-animate.rm-bundle[data-state="preparing"] .rm-bundle__gear {
+  transform-origin: 50% 50%;
+  animation: rm-spin 3s linear infinite;
+}
+
+/* -------------------------------------------------------- discovery scan */
+.rm-scan[data-state="queued"] { color: var(--tone-warn); }
+.rm-scan[data-state="running"] { color: var(--accent-brand); }
+.rm-scan[data-state="completed"] { color: var(--tone-ok); }
+.rm-scan[data-state="failed"] { color: var(--tone-danger); }
+.rm-scan__beam { display: none; }
+.rm-scan__glyph > * { display: none; }
+/* queued = clock (no beam); running = animated beam; completed = check;
+   failed = x. Completed does NOT imply eligible — it is a lifecycle glyph. */
+.rm-scan[data-state="queued"] .rm-scan__clock,
+.rm-scan[data-state="completed"] .rm-scan__check,
+.rm-scan[data-state="failed"] .rm-scan__x { display: initial; }
+.rm-scan[data-state="running"] .rm-scan__beam { display: initial; }
+@keyframes rm-scan-sweep {
+  0% { transform: rotate(-38deg); }
+  100% { transform: rotate(38deg); }
+}
+.rm-animate.rm-scan[data-state="running"] .rm-scan__beam {
+  transform-origin: 12px 12px;
+  animation: rm-scan-sweep 1.6s ease-in-out infinite alternate;
+}
+
+/* ---------------------------------------------- global reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .rm * { animation: none !important; }
+}
+/* Forced-colors: currentColor already maps to system text; keep glyph strokes
+   visible by relying on currentColor (no override needed for shape-based
+   states since meaning is carried by shape, not color). */
