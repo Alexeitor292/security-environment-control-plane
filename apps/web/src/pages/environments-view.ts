@@ -538,8 +538,9 @@ export function topologySummaryText(topo: TeamTopology): string {
 }
 
 export const TOPOLOGY_EDGE_LEGEND: Record<string, string> = {
-  attached: "attached to network (declared)",
+  network: "attached to network (declared)",
   monitors: "monitoring relationship (declared)",
+  reaches: "declared reachability (intra-instance)",
 };
 
 export function edgeLegendLabel(kind: string): string {

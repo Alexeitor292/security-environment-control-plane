@@ -7,6 +7,9 @@ export interface CyberSelectOption {
   value: string;
   label: string;
   help?: string;
+  /** Visibly unavailable option (kept in the list with an explanation in its
+   *  label rather than hidden). */
+  disabled?: boolean;
 }
 
 export interface CyberSelectProps
@@ -52,7 +55,7 @@ export function CyberSelect({
         {...rest}
       >
         {options.map((o) => (
-          <option key={o.value} value={o.value}>
+          <option key={o.value} value={o.value} disabled={o.disabled}>
             {o.label}
           </option>
         ))}
