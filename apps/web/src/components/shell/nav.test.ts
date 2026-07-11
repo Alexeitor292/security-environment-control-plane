@@ -14,13 +14,16 @@ const KNOWN_ROUTES = [
   "/readonly-preflight",
   "/resolver-activation",
   "/approvals",
+  "/exercises",
   "/audit",
 ];
 
 /** Every route the previous sidebar linked to — nothing may become unreachable.
  *  Frozen at the pre-approvals-queue set; /approvals is a new route, not a
  *  previously navigable one. */
-const PREVIOUS_NAV_ROUTES = KNOWN_ROUTES.filter((r) => r !== "/approvals");
+const PREVIOUS_NAV_ROUTES = KNOWN_ROUTES.filter(
+  (r) => r !== "/approvals" && r !== "/exercises",
+);
 
 const allItems = NAV_GROUPS.flatMap((g) => g.items);
 
@@ -34,6 +37,10 @@ describe("shell navigation model", () => {
 
   it("links the new approvals queue", () => {
     expect(allItems.map((i) => i.href)).toContain("/approvals");
+  });
+
+  it("links the new exercise inventory", () => {
+    expect(allItems.map((i) => i.href)).toContain("/exercises");
   });
 
   it("only links routes that exist in the router", () => {

@@ -8,6 +8,7 @@ import { AuditLog } from "./pages/AuditLog";
 import { Dashboard } from "./pages/Dashboard";
 import { DefinitionEditor } from "./pages/DefinitionEditor";
 import { ExerciseDetail } from "./pages/ExerciseDetail";
+import { Exercises } from "./pages/Exercises";
 import { Login } from "./pages/Login";
 import { OnboardingWizard } from "./pages/OnboardingWizard";
 import { PlanApproval } from "./pages/PlanApproval";
@@ -33,6 +34,7 @@ const router = createBrowserRouter([
       { index: true, element: <Dashboard /> },
       { path: "templates", element: <Templates /> },
       { path: "templates/new", element: <DefinitionEditor /> },
+      { path: "exercises", element: <Exercises /> },
       { path: "exercises/:exerciseId", element: <ExerciseDetail /> },
       { path: "exercises/:exerciseId/plan", element: <PlanApproval /> },
       { path: "exercises/:exerciseId/topology", element: <TopologyView /> },
