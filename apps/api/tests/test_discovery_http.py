@@ -9,7 +9,10 @@ approval requires the exact plan hash and is fail-closed; and no privileged valu
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,18 +22,77 @@ from secp_api.models import ExecutionTarget, TargetDiscoveryEnrollment, TargetOn
 MARKER = "s3cr3t-hunter2"
 MALICIOUS = f"PVEAPIToken=user@pam!tok={MARKER}"
 
-# Substrings that must NEVER appear in any discovery API response.
-_FORBIDDEN = (
+# Unmistakable sensitive markers seeded onto the target so a real transport /
+# secret leak is caught by an EXACT value match instead of a probabilistic bare
+# substring. The port lives inside the full endpoint value; it is never checked
+# as a lone "8006" substring (which is valid hexadecimal and appears by chance
+# in content-addressed hashes/ids — the original false positive).
+ENDPOINT_MARKER = "https://host.example:8006/api2/json"
+SECRET_REF_MARKER = f"vault:secp/proxmox/svc-account:{MARKER}"
+
+# Exact transport/secret field NAMES that must never appear as a key anywhere in
+# a discovery response. Compared by EXACT normalized name — never as a substring
+# — so safe keys that merely contain one of these words (ownership_marker,
+# endpoint_binding_hash, worker_identity_version, …) are allowed.
+_FORBIDDEN_KEYS = frozenset(
+    {
+        "ssh",
+        "ssh_host",
+        "ssh_port",
+        "endpoint",
+        "base_url",
+        "host",
+        "port",
+        "token",
+        "api_token",
+        "known_hosts",
+        "private_key",
+        "fingerprint",
+    }
+)
+
+# Sensitive VALUE substrings (real transport/secret material and the exact
+# seeded markers) that must never appear anywhere in a serialized response body.
+# Opaque hashes/ids/ownership markers may contain arbitrary hexadecimal
+# (including "8006") and are deliberately NOT matched here.
+_FORBIDDEN_VALUES = (
+    ENDPOINT_MARKER,
+    SECRET_REF_MARKER,
+    MARKER,
     "host.example",
     "secpops",
     "known_hosts",
-    "SHA256:",
+    "SHA256:",  # SSH key-fingerprint prefix (distinct from lowercase sha256: hashes)
     "PVEAPIToken",
     "BEGIN OPENSSH",
     "/mnt/",
-    "8006",
     "private_key",
 )
+
+
+def _iter_keys(obj: Any) -> Iterator[str]:
+    """Yield every dict key anywhere in a (possibly nested) JSON structure."""
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            yield str(key)
+            yield from _iter_keys(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _iter_keys(item)
+
+
+def assert_discovery_response_safe(payload: Any, raw_text: str) -> None:
+    """Structural + seeded-value safety check for a discovery response.
+
+    Structural: no explicit transport/secret field NAME (exact, normalized)
+    appears as a key at any depth. Value: no sensitive/seeded material appears
+    anywhere in the serialized body. Replaces the removed probabilistic bare
+    "8006" substring heuristic without weakening the leak check.
+    """
+    leaked_keys = sorted({k for k in _iter_keys(payload) if k.lower() in _FORBIDDEN_KEYS})
+    assert not leaked_keys, f"discovery response exposed forbidden field name(s): {leaked_keys}"
+    for value in _FORBIDDEN_VALUES:
+        assert value not in raw_text, f"discovery response leaked sensitive value: {value!r}"
 
 
 @pytest.fixture
@@ -96,9 +158,11 @@ def _seed_and_discover(engine) -> str:
             organization_id=org.id,
             display_name="s",
             plugin_name="proxmox",
-            config={"base_url": "x", "verify_tls": True},
+            # Seed unmistakable endpoint + secret markers so any leak of the
+            # target's transport/secret material is caught by an exact match.
+            config={"base_url": ENDPOINT_MARKER, "verify_tls": True},
             config_hash="sha256:" + "ab" * 32,
-            secret_ref="vault:x",
+            secret_ref=SECRET_REF_MARKER,
             status=TargetStatus.active,
             scope_policy={},
             created_by=user.id,
@@ -214,11 +278,11 @@ def test_discovery_lifecycle_and_safe_fields(client, engine):
     r = client.get(f"/api/v1/target-discovery/{enrollment_id}/bootstrap-availability")
     assert r.json() == {"available": False, "reason_code": "worker_local_bootstrap_not_mounted"}
 
-    # No response leaks any SSH/endpoint/raw material.
+    # No response leaks any SSH/endpoint/raw material: structural (no explicit
+    # transport/secret field name at any depth) + exact seeded-value checks.
     for path in ("", "/evidence", "/candidate-plan", "/bootstrap-availability", "/apply-status"):
-        body = client.get(f"/api/v1/target-discovery/{enrollment_id}{path}").text
-        for forbidden in _FORBIDDEN:
-            assert forbidden not in body
+        resp = client.get(f"/api/v1/target-discovery/{enrollment_id}{path}")
+        assert_discovery_response_safe(resp.json(), resp.text)
 
     # Approve with the WRONG hash → refused; with the EXACT hash → approved.
     assert (
@@ -233,6 +297,37 @@ def test_discovery_lifecycle_and_safe_fields(client, engine):
         json={"expected_plan_hash": plan_hash},
     )
     assert r.status_code == 200 and r.json()["status"] == "approved"
+
+
+def test_discovery_safety_helper_structural_and_value_checks():
+    """Regression for the removed probabilistic bare-"8006" heuristic: opaque
+    hashes/ids/ownership markers may contain arbitrary hex (incl. "8006") and are
+    accepted, while an explicit port/endpoint field or the seeded endpoint value
+    is rejected."""
+    # Safe: opaque content-addressed hash + ownership marker + resource ref that
+    # all happen to contain the "8006" hex sequence — accepted (no assertion).
+    safe = {
+        "status": "plan_ready",
+        "plan_hash": "sha256:aabbccddee0011223344c8006923ff00112233445566778899aabbccddeeff11",
+        "ownership_marker": "secp-owned:deadbeef8006cafe",
+        "worker_identity_version": 2,
+        "resources": [{"kind": "isolated_bridge", "resource_ref": "secp64c8006-bridge-0"}],
+    }
+    assert_discovery_response_safe(safe, json.dumps(safe))
+
+    # Rejected: an explicit port field (structural).
+    with pytest.raises(AssertionError):
+        assert_discovery_response_safe({"port": 8006}, json.dumps({"port": 8006}))
+
+    # Rejected: an explicit endpoint/base_url field (structural, at any depth).
+    nested = {"config": {"base_url": ENDPOINT_MARKER}}
+    with pytest.raises(AssertionError):
+        assert_discovery_response_safe(nested, json.dumps(nested))
+
+    # Rejected: the seeded endpoint value appearing anywhere in the body (value).
+    leaky = {"note": f"connected to {ENDPOINT_MARKER}"}
+    with pytest.raises(AssertionError):
+        assert_discovery_response_safe(leaky, json.dumps(leaky))
 
 
 def test_request_schema_rejects_unsafe_fields():
