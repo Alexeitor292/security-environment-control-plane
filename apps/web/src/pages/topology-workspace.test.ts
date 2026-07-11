@@ -12,6 +12,7 @@ import {
   draftKey,
   hasRecordedSimulatorState,
   initialWorkspace,
+  initialWorkspaceFromDraft,
   isDraftLocalId,
   modeAllowsEditing,
   modeAvailability,
@@ -21,6 +22,7 @@ import {
   validationStale,
   workspaceReducer,
   workspaceSummaryText,
+  type Draft,
   zonesFromDraft,
   type WorkspaceState,
 } from "./topology-workspace";
@@ -174,6 +176,38 @@ describe("workspace reducer — semantic history only, bounded, deterministic", 
     s = workspaceReducer(s, { type: "remove", nodeIds: ["n1"], edgeIds: [] });
     expect(s.draft.nodes.map((n) => n.id)).not.toContain("n1");
     expect(s.draft.edges.map((e) => e.id)).toEqual(["e3"]);
+  });
+
+  it("rebase continues draft-local numbering above existing draft ids (no collision)", () => {
+    // A saved revision already contains draft:target-1; after rebase, a new
+    // node must be draft:target-2, never a colliding draft:target-1.
+    const withDraftId: Draft = {
+      nodes: [
+        { id: "draft:target-1", kind: "target", label: "t", role: null, ip: null, cidr: null, x: 0, y: 0 },
+      ],
+      edges: [],
+    };
+    let s = initialWorkspaceFromDraft(withDraftId, "rev:1");
+    s = workspaceReducer(s, { type: "add-node", kind: "target", x: 0, y: 0 });
+    const added = s.draft.nodes[s.draft.nodes.length - 1];
+    expect(added.id).toBe("draft:target-2");
+    expect(s.draft.nodes.filter((n) => n.id === "draft:target-1")).toHaveLength(1);
+  });
+
+  it("rebase re-baselines to an arbitrary draft, clearing dirty/history/validation", () => {
+    let s = ws();
+    s = workspaceReducer(s, { type: "add-node", kind: "target", x: 0, y: 0 });
+    s = workspaceReducer(s, { type: "validate" });
+    expect(s.dirty).toBe(true);
+    const saved = draftFromTopology({ ...TOPO, instance_id: "saved" });
+    s = workspaceReducer(s, { type: "rebase", draft: saved, key: "rev:2" });
+    expect(s.authoritativeKey).toBe("rev:2");
+    expect(s.dirty).toBe(false);
+    expect(s.past).toHaveLength(0);
+    expect(s.future).toHaveLength(0);
+    expect(s.validatedFor).toBeNull();
+    // undoing an edit against the new baseline is a no-op (matches saved)
+    expect(s.draft.nodes).toHaveLength(4);
   });
 
   it("switching authoritative topology resets the draft safely", () => {

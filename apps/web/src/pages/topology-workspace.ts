@@ -279,9 +279,32 @@ export interface WorkspaceState {
 export const HISTORY_LIMIT = 50;
 
 export function initialWorkspace(topo: TeamTopology): WorkspaceState {
-  const draft = draftFromTopology(topo);
+  return initialWorkspaceFromDraft(draftFromTopology(topo), topo.instance_id);
+}
+
+const DRAFT_SEQ_RE = /^draft:.+-(\d+)$/;
+
+/** Highest draft-local sequence already present in a draft, so a rebased
+ *  workspace continues numbering above existing draft ids instead of colliding
+ *  with them (a saved revision may already contain `draft:target-1`). */
+function maxDraftSeq(draft: Draft): number {
+  let max = 0;
+  for (const n of draft.nodes) {
+    const m = DRAFT_SEQ_RE.exec(n.id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max;
+}
+
+/** Build a fresh workspace whose authoritative baseline is an arbitrary draft
+ *  (e.g. reconstructed from a saved revision's canonical document). `key`
+ *  identifies the authoritative source so switching it resets cleanly. */
+export function initialWorkspaceFromDraft(
+  draft: Draft,
+  key: string,
+): WorkspaceState {
   return {
-    authoritativeKey: topo.instance_id,
+    authoritativeKey: key,
     draft,
     initialKey: draftKey(draft),
     dirty: false,
@@ -289,12 +312,15 @@ export function initialWorkspace(topo: TeamTopology): WorkspaceState {
     future: [],
     validatedFor: null,
     findings: [],
-    seq: 1,
+    // Continue above any existing draft-local ids so a new node never reuses
+    // a previously-saved draft id.
+    seq: maxDraftSeq(draft) + 1,
   };
 }
 
 export type WsAction =
   | { type: "reset"; topo: TeamTopology }
+  | { type: "rebase"; draft: Draft; key: string }
   | { type: "add-node"; kind: string; x: number; y: number }
   | { type: "move-node"; id: string; x: number; y: number }
   | { type: "rename-node"; id: string; label: string }
@@ -334,6 +360,12 @@ export function workspaceReducer(
   switch (action.type) {
     case "reset":
       return initialWorkspace(action.topo);
+
+    // Re-baseline to authoritative content (a loaded or freshly-saved
+    // revision). History and validation reset to the new baseline; local
+    // edits are intentionally discarded by the caller's explicit action.
+    case "rebase":
+      return initialWorkspaceFromDraft(action.draft, action.key);
 
     case "add-node": {
       const node = newDraftNode(action.kind, state.seq, action.x, action.y);
