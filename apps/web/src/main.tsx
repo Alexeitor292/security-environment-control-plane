@@ -20,10 +20,13 @@ import { StagingDeployment } from "./pages/StagingDeployment";
 import { StagingLab } from "./pages/StagingLab";
 import { TargetDiscovery } from "./pages/TargetDiscovery";
 import { Templates } from "./pages/Templates";
-import { TopologyView } from "./pages/TopologyView";
+// The topology workspace (with the React Flow + ELK runtime) is code-split so
+// the heavy canvas libraries load only when the workspace route is opened.
+const TopologyView = React.lazy(() =>
+  import("./pages/TopologyView").then((m) => ({ default: m.TopologyView })),
+);
 import "./design/tokens.css";
 import "./styles.css";
-import "reactflow/dist/style.css";
 
 const router = createBrowserRouter([
   { path: "/login", element: <Login /> },
@@ -37,7 +40,14 @@ const router = createBrowserRouter([
       { path: "exercises", element: <Exercises /> },
       { path: "exercises/:exerciseId", element: <ExerciseDetail /> },
       { path: "exercises/:exerciseId/plan", element: <PlanApproval /> },
-      { path: "exercises/:exerciseId/topology", element: <TopologyView /> },
+      {
+        path: "exercises/:exerciseId/topology",
+        element: (
+          <React.Suspense fallback={<p className="muted">Loading workspace…</p>}>
+            <TopologyView />
+          </React.Suspense>
+        ),
+      },
       { path: "provider-targets", element: <ProviderTargets /> },
       { path: "onboarding", element: <OnboardingWizard /> },
       { path: "staging-labs", element: <StagingLab /> },

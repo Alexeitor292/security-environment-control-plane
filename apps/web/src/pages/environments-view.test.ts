@@ -276,8 +276,8 @@ const TOPO: TeamTopology = {
     { id: "n4", type: "host", data: { label: "mystery", kind: "quantum-router" } },
   ],
   edges: [
-    { id: "e1", source: "n1", target: "n3", label: "attached", data: { kind: "attached" } },
-    { id: "e2", source: "n2", target: "n3", label: "attached", data: { kind: "monitors" } },
+    { id: "e1", source: "n1", target: "n3", label: "network", data: { kind: "network" } },
+    { id: "e2", source: "n2", target: "n3", label: "network", data: { kind: "monitors" } },
   ],
 };
 
@@ -313,6 +313,7 @@ describe("topology preview — declarative, never live", () => {
 
   it("edge legend labels everything as declared; declarative note has no live/packet claim", () => {
     expect(edgeLegendLabel("monitors")).toContain("declared");
+    expect(edgeLegendLabel("network")).toContain("attached to network");
     expect(edgeLegendLabel("unheard-of")).toContain("declared");
     expect(TOPOLOGY_DECLARATIVE_NOTE).toContain("not observed");
     expect(TOPOLOGY_DECLARATIVE_NOTE.toLowerCase()).toContain("no live traffic");

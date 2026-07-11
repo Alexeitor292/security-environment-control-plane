@@ -223,18 +223,6 @@
 .env-legend__swatch--sensor { border-color: var(--accent-brand); }
 .env-legend__swatch--network { border-color: var(--tone-ok); }
 
-/* Declared edge kinds — visually distinct, never animated. */
-.env-edge--attached .react-flow__edge-path {
-  stroke: color-mix(in srgb, var(--tone-ok) 70%, transparent);
-}
-.env-edge--monitors .react-flow__edge-path {
-  stroke: color-mix(in srgb, var(--accent-brand) 70%, transparent);
-  stroke-dasharray: 6 4;
-}
-.env-edge--unknown .react-flow__edge-path {
-  stroke: color-mix(in srgb, var(--ink-secondary) 60%, transparent);
-  stroke-dasharray: 2 3;
-}
 
 /* Validation posture badge — its own closed vocabulary. */
 .env-vbadge {
