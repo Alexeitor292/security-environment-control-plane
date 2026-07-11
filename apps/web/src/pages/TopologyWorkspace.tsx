@@ -52,6 +52,7 @@ import {
   draftFromTopology,
   hasRecordedSimulatorState,
   initialWorkspace,
+  initialWorkspaceFromDraft,
   isDraftLocalId,
   modeAllowsEditing,
   modeAvailability,
@@ -269,9 +270,42 @@ function InspectorPanel({
   );
 }
 
-function WorkspaceInner({ topo }: { topo: TeamTopology }) {
-  const [state, dispatch] = useReducer(workspaceReducer, topo, initialWorkspace);
-  const [mode, setMode] = useState<WorkspaceMode>("planned");
+/** Additive durable-persistence layer (PR-15). When provided, the workspace is
+ *  baselined from an authoritative saved revision instead of the read-only team
+ *  projection, reports its draft to the persistence controller, honors an
+ *  external editing gate, and renders persistence controls/panel. Absent = the
+ *  PR-13 local-draft-only workspace, unchanged. */
+export interface WorkspacePersistence {
+  /** Reconstructed draft of the current authoritative revision. */
+  authoritativeDraft: Draft;
+  /** Stable key of the authoritative revision (changes trigger a rebase). */
+  revisionKey: string;
+  /** External editing gate (false for locked/read-only/historical postures). */
+  editingEnabled: boolean;
+  /** Reports the live draft + dirty/changed flags to the controller. */
+  onDraftChange: (draft: Draft, dirty: boolean) => void;
+  /** Persistence controls injected into the command bar. */
+  toolbar?: import("react").ReactNode;
+  /** Persistence panel (posture/workflow/history/conflict) below the canvas. */
+  panel?: import("react").ReactNode;
+}
+
+function WorkspaceInner({
+  topo,
+  persistence,
+}: {
+  topo: TeamTopology;
+  persistence?: WorkspacePersistence;
+}) {
+  const [state, dispatch] = useReducer(
+    workspaceReducer,
+    undefined,
+    () =>
+      persistence
+        ? initialWorkspaceFromDraft(persistence.authoritativeDraft, persistence.revisionKey)
+        : initialWorkspace(topo),
+  );
+  const [mode, setMode] = useState<WorkspaceMode>(persistence ? "edit" : "planned");
   const [selection, setSelection] = useState<Selection>(EMPTY_SELECTION);
   const [showZones, setShowZones] = useState(true);
   const [showMinimap, setShowMinimap] = useState(true);
@@ -282,9 +316,32 @@ function WorkspaceInner({ topo }: { topo: TeamTopology }) {
   const availability = modeAvailability(
     hasRecordedSimulatorState(topo.lifecycle_state),
   );
-  const editable = modeAllowsEditing(mode);
+  // Editing also requires the external gate (locked/read-only/historical
+  // postures set editingEnabled=false).
+  const editable =
+    modeAllowsEditing(mode) && (persistence?.editingEnabled ?? true);
   const stale = validationStale(state);
   const overlaysOn = mode === "validation" || showFindings;
+
+  // Re-baseline to the authoritative revision when it changes (a save or an
+  // explicit revision load), without remounting — the canvas viewport survives.
+  useEffect(() => {
+    if (persistence && persistence.revisionKey !== state.authoritativeKey) {
+      dispatch({
+        type: "rebase",
+        draft: persistence.authoritativeDraft,
+        key: persistence.revisionKey,
+      });
+      setSelection(EMPTY_SELECTION);
+    }
+  }, [persistence, state.authoritativeKey]);
+
+  // Report the live draft + dirty to the persistence controller (which owns the
+  // Save action). Only fires on a semantic draft change.
+  const reportDraft = persistence?.onDraftChange;
+  useEffect(() => {
+    reportDraft?.(state.draft, state.dirty);
+  }, [reportDraft, state.draft, state.dirty]);
 
   // Simulated mode displays ONLY the recorded authoritative projection —
   // never local draft fabrication.
@@ -497,7 +554,13 @@ function WorkspaceInner({ topo }: { topo: TeamTopology }) {
   return (
     <div className="tw">
       <SafetyNotice role="note" tone={editable ? "warn" : "info"}>
-        {editable ? WORKSPACE_LOCAL_DRAFT_NOTE : WORKSPACE_DECLARATIVE_NOTE}
+        {persistence
+          ? editable
+            ? "Edits are a local draft until you Save a new immutable revision. Saving does not validate, submit, approve, generate a plan, or deploy anything."
+            : WORKSPACE_DECLARATIVE_NOTE
+          : editable
+            ? WORKSPACE_LOCAL_DRAFT_NOTE
+            : WORKSPACE_DECLARATIVE_NOTE}
         {mode === "simulated" ? ` ${SIMULATED_MODE_NOTE}` : ""}
       </SafetyNotice>
 
@@ -605,9 +668,18 @@ function WorkspaceInner({ topo }: { topo: TeamTopology }) {
             Findings{state.findings.length > 0 ? ` (${state.findings.length})` : ""}
           </CyberButton>
         </div>
+        {persistence?.toolbar && (
+          <div className="tw-bar__group">{persistence.toolbar}</div>
+        )}
         <span className="tw-bar__spacer" />
         <span className="tw-bar__group tw-note" aria-live="polite">
-          {state.dirty ? "local draft — unsaved (no persistence contract)" : "matches plan"}
+          {persistence
+            ? state.dirty
+              ? "local unsaved changes"
+              : "matches saved revision"
+            : state.dirty
+              ? "local draft — unsaved (no persistence contract)"
+              : "matches plan"}
           {stale ? " · validation stale" : ""}
         </span>
       </div>
@@ -755,18 +827,29 @@ function WorkspaceInner({ topo }: { topo: TeamTopology }) {
           <span className="tw-kbd">Esc</span> clear selection.
         </p>
       </CyberCard>
+
+      {persistence?.panel}
     </div>
   );
 }
 
-/** Cyber-range topology workspace (local-draft foundation). */
-export function TopologyWorkspace({ topo }: { topo: TeamTopology }) {
+/** Cyber-range topology workspace. Without `persistence` it is the PR-13
+ *  local-draft-only workspace; with it, the canvas is baselined from a durable
+ *  authoring revision and the persistence controls/panel are rendered. */
+export function TopologyWorkspace({
+  topo,
+  persistence,
+}: {
+  topo: TeamTopology;
+  persistence?: WorkspacePersistence;
+}) {
+  // Key by the authoritative source so switching teams (local mode) or
+  // documents (persistence mode) remounts cleanly; revision changes WITHIN a
+  // document are handled by the in-place rebase effect, not a remount.
+  const key = persistence ? `doc:${persistence.revisionKey.split(":")[0]}` : topo.instance_id;
   return (
     <ReactFlowProvider>
-      {/* Keyed remount: switching teams swaps the authoritative source, so the
-          whole workspace (draft, history, mode, selection, viewport) resets
-          atomically with zero stale frames. */}
-      <WorkspaceInner key={topo.instance_id} topo={topo} />
+      <WorkspaceInner key={key} topo={topo} persistence={persistence} />
     </ReactFlowProvider>
   );
 }

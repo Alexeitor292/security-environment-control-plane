@@ -13,8 +13,10 @@ import {
   tabId,
   tabPanelId,
 } from "../components/ui";
+import { TOPOLOGY_PERSISTENCE_ENABLED } from "../api/topology-authoring-adapter";
 import { useAsync } from "../hooks";
 import { TOPOLOGY_DECLARATIVE_NOTE } from "./environments-view";
+import { TopologyAuthoring } from "./TopologyAuthoring";
 import { TopologyWorkspace } from "./TopologyWorkspace";
 
 export function TopologyView() {
@@ -89,7 +91,11 @@ export function TopologyView() {
                   recorded simulator state · not real infrastructure
                 </span>
               </div>
-              <TopologyWorkspace topo={current} />
+              {TOPOLOGY_PERSISTENCE_ENABLED ? (
+                <TopologyAuthoring topo={current} />
+              ) : (
+                <TopologyWorkspace topo={current} />
+              )}
             </div>
           )}
         </>

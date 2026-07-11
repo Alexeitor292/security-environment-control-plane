@@ -279,3 +279,86 @@
   fill: var(--surface-base);
 }
 .tw-canvas .react-flow__attribution { display: none; }
+
+/* Durable persistence panel (PR-15) */
+.tw-persist {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+}
+.tw-persist-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.tw-persist-actions {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.tw-persist-field { min-width: 220px; flex: 1 1 220px; }
+.tw-persist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  gap: 12px;
+  align-items: start;
+}
+.tw-conflict { display: grid; gap: 4px; }
+.tw-conflict-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.tw-warn { color: var(--tone-warn); }
+.tw-rev--viewing {
+  background: color-mix(in srgb, var(--accent-primary) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent-primary);
+}
+
+/* Posture chip — its own closed vocabulary (not a status-tone domain). */
+.tw-posture {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--border-hairline);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+.tw-posture--matches-saved {
+  color: var(--tone-ok);
+  border-color: color-mix(in srgb, var(--tone-ok) 50%, transparent);
+}
+.tw-posture--local-unsaved {
+  color: var(--tone-warn);
+  border-color: color-mix(in srgb, var(--tone-warn) 50%, transparent);
+}
+.tw-posture--stale-base {
+  color: var(--tone-danger);
+  border-color: color-mix(in srgb, var(--tone-danger) 50%, transparent);
+  border-style: dashed;
+}
+.tw-posture--submitted-locked,
+.tw-posture--approved {
+  color: var(--accent-brand);
+  border-color: color-mix(in srgb, var(--accent-brand) 50%, transparent);
+}
+.tw-posture--rejected {
+  color: var(--tone-danger);
+  border-color: color-mix(in srgb, var(--tone-danger) 50%, transparent);
+}
+.tw-posture--read-only,
+.tw-posture--no-document,
+.tw-posture--unavailable,
+.tw-posture--disabled {
+  border-style: dashed;
+}
+
+.tw-reasons {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+  color: var(--ink-secondary);
+  font-size: var(--text-xs);
+}
