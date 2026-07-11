@@ -1,126 +1,214 @@
+import "./environments.css";
+
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
-import { StatusBadge } from "../components/StatusBadge";
+import { CyberGridBackground } from "../components/backgrounds";
+import {
+  CyberButton,
+  CyberCard,
+  CyberInput,
+  CyberTable,
+  HashChip,
+  KeyValueList,
+  SafetyNotice,
+  Skeleton,
+  StatusBadge,
+  useAction,
+} from "../components/ui";
 import { useAsync } from "../hooks";
+import {
+  APPROVAL_RECORDS_ONLY_NOTE,
+  ENVIRONMENTS_ERROR_TEXT,
+  PLAN_PINNED_NOTE,
+  canDecidePlan,
+  canSubmitPlan,
+  onlyNotFoundAsNull,
+  planStatusLabel,
+} from "./environments-view";
 
 export function PlanApproval() {
   const { exerciseId = "" } = useParams();
   const navigate = useNavigate();
-  const plan = useAsync(() => api.latestPlan(exerciseId).catch(() => null), [exerciseId]);
+  // Only a not_found means "no plan recorded"; any other failure is an
+  // unavailable state, never a claim of absence.
+  const plan = useAsync(() => api.latestPlan(exerciseId).catch(onlyNotFoundAsNull), [exerciseId]);
   const [reason, setReason] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const action = useAction({ codeText: ENVIRONMENTS_ERROR_TEXT });
 
-  async function act(fn: () => Promise<unknown>, back = false) {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-      if (back) navigate(`/exercises/${exerciseId}`);
-      else plan.reload();
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (plan.loading) return <p className="muted">Loading plan…</p>;
+  if (plan.loading && !plan.data)
+    return (
+      <CyberCard>
+        <Skeleton lines={5} />
+      </CyberCard>
+    );
+  if (plan.error !== null && plan.error !== undefined)
+    return (
+      <div className="error-box" role="alert">
+        Plan unavailable.
+      </div>
+    );
   if (!plan.data)
     return (
-      <div>
-        <h2>Deployment plan approval</h2>
-        <p className="muted">No plan generated for this exercise yet.</p>
+      <div className="env">
+        <div className="env-head">
+          <div>
+            <h1>Deployment Plan Review</h1>
+            <p className="env-sub">No plan generated for this exercise yet.</p>
+          </div>
+        </div>
+        <p className="env-note">
+          <Link to={`/exercises/${exerciseId}`}>← Back to exercise</Link>
+        </p>
       </div>
     );
 
   const p = plan.data;
-  const canDecide = p.status === "awaiting_approval";
-  const canSubmit = p.status === "generated";
+  const submitAllowed = canSubmitPlan(p);
+  const decideAllowed = canDecidePlan(p);
 
   return (
-    <div>
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h2 style={{ marginBottom: 4 }}>Deployment plan approval</h2>
-        <StatusBadge state={p.status} />
-      </div>
-      <p className="muted mono">
-        deterministic plan · pinned to version hash {p.version_content_hash.slice(7, 23)}…
-      </p>
-
-      {error && <div className="error-box">{error}</div>}
-
-      <div className="panel">
-        <h3>What will be created</h3>
-        <p className="muted">
-          {p.summary.total_nodes} simulated nodes across {p.summary.teams} isolated
-          teams · {p.summary.isolation} isolation · plugin{" "}
-          <span className="mono">{p.summary.plugin}</span>
-        </p>
-        <div className="grid cols-2">
-          {p.summary.per_team.map((team) => (
-            <div className="panel" key={team.team_ref} style={{ background: "#0b0f15" }}>
-              <h3 style={{ marginTop: 0 }}>{team.team_ref}</h3>
-              <label>Networks</label>
-              {team.networks.map((n) => (
-                <div key={n.name} className="mono">
-                  {n.name} → {n.cidr}
-                </div>
-              ))}
-              <label>Nodes</label>
-              {team.nodes.map((n) => (
-                <div key={n.name} className="mono">
-                  {n.role} · {n.kind} · {n.ip}
-                </div>
-              ))}
-            </div>
-          ))}
+    <div className="env">
+      <CyberGridBackground intensity="subtle" className="env-bg" />
+      <div className="env-head">
+        <div>
+          <h1>Deployment Plan Review</h1>
+          <p className="env-sub">{PLAN_PINNED_NOTE}</p>
         </div>
+        <StatusBadge state={p.status} domain="plan" />
       </div>
 
-      <div className="panel">
-        <h3>Decision</h3>
-        <label>Reason / note</label>
-        <input
-          type="text"
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="optional justification recorded in the audit log"
-        />
-        <div className="row" style={{ marginTop: 12 }}>
-          {canSubmit && (
-            <button
-              className="secondary"
-              disabled={busy}
-              onClick={() => act(() => api.submitPlan(p.id))}
-            >
-              Submit for approval
-            </button>
-          )}
-          <button
-            className="ok"
-            disabled={busy || !canDecide}
-            onClick={() => act(() => api.approvePlan(p.id, reason), true)}
-          >
-            Approve
-          </button>
-          <button
-            className="danger"
-            disabled={busy || !canDecide}
-            onClick={() => act(() => api.rejectPlan(p.id, reason))}
-          >
-            Reject
-          </button>
-        </div>
+      <div className="env-hashline">
+        <span>
+          pinned to version hash <HashChip value={p.version_content_hash} digits={16} />
+        </span>
         {p.approved_content_hash && (
-          <p className="muted" style={{ marginTop: 10 }}>
-            Approved · pinned hash {p.approved_content_hash.slice(7, 23)}… · apply may
-            now proceed.
-          </p>
+          <span>
+            · approved hash <HashChip value={p.approved_content_hash} digits={16} />
+          </span>
         )}
       </div>
+
+      <SafetyNotice role="note" tone="warn">
+        {APPROVAL_RECORDS_ONLY_NOTE}
+      </SafetyNotice>
+
+      {action.error && (
+        <div className="error-box" role="alert">
+          {action.error.text} <code className="mono">{action.error.code}</code>
+        </div>
+      )}
+
+      <CyberCard heading="Planned shape (simulated)">
+        <KeyValueList
+          items={[
+            {
+              key: "Totals",
+              value: `${p.summary.total_nodes} simulated nodes · ${p.summary.total_networks} networks · ${p.summary.teams} isolated teams`,
+            },
+            { key: "Isolation", value: p.summary.isolation },
+            { key: "Plugin", value: p.summary.plugin, mono: true },
+            { key: "Status", value: planStatusLabel(p.status) },
+            {
+              key: "Decided at",
+              value: p.decided_at ? p.decided_at.slice(0, 19).replace("T", " ") + " UTC" : "— (no decision recorded)",
+              mono: p.decided_at !== null,
+            },
+          ]}
+        />
+      </CyberCard>
+
+      <div className="env-grid">
+        {p.summary.per_team.map((team) => (
+          <CyberCard key={team.team_ref} surface="well" heading={team.team_ref}>
+            <CyberTable
+              label={`${team.team_ref} networks`}
+              head={["Network", "Planned CIDR"]}
+            >
+              {team.networks.map((n) => (
+                <tr key={n.name}>
+                  <td className="mono">{n.name}</td>
+                  <td className="mono muted">{n.cidr}</td>
+                </tr>
+              ))}
+            </CyberTable>
+            <CyberTable
+              label={`${team.team_ref} nodes`}
+              head={["Role", "Kind", "Planned IP"]}
+            >
+              {team.nodes.map((n) => (
+                <tr key={n.name}>
+                  <td className="mono">{n.role}</td>
+                  <td className="muted">{n.kind}</td>
+                  <td className="mono muted">{n.ip}</td>
+                </tr>
+              ))}
+            </CyberTable>
+          </CyberCard>
+        ))}
+      </div>
+
+      <CyberCard heading="Decision">
+        <CyberInput
+          label="Reason / note (recorded in the audit ledger)"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="optional justification"
+        />
+        <div className="env-actions" style={{ marginTop: 10 }}>
+          {submitAllowed && (
+            <CyberButton
+              variant="secondary"
+              disabled={action.busy}
+              onClick={() => action.run(() => api.submitPlan(p.id), () => plan.reload())}
+            >
+              Submit for approval
+            </CyberButton>
+          )}
+          <CyberButton
+            variant="ok"
+            disabled={action.busy || !decideAllowed}
+            title={
+              decideAllowed
+                ? APPROVAL_RECORDS_ONLY_NOTE
+                : `Available when awaiting approval — current: ${planStatusLabel(p.status)}`
+            }
+            onClick={() =>
+              action.run(
+                () => api.approvePlan(p.id, reason),
+                () => navigate(`/exercises/${exerciseId}`),
+              )
+            }
+          >
+            Approve (records decision)
+          </CyberButton>
+          <CyberButton
+            variant="danger"
+            disabled={action.busy || !decideAllowed}
+            title={
+              decideAllowed
+                ? "Records a rejection pinned to this plan."
+                : `Available when awaiting approval — current: ${planStatusLabel(p.status)}`
+            }
+            onClick={() => action.run(() => api.rejectPlan(p.id, reason), () => plan.reload())}
+          >
+            Reject
+          </CyberButton>
+        </div>
+        {p.approved_content_hash && (
+          <p className="env-note">
+            Decision recorded — pinned to{" "}
+            <HashChip value={p.approved_content_hash} digits={16} />. Approval
+            itself deployed nothing; deployment is a separate action on the
+            exercise page.
+          </p>
+        )}
+      </CyberCard>
+
+      <p className="env-note">
+        <Link to={`/exercises/${exerciseId}`}>← Back to exercise</Link>
+      </p>
     </div>
   );
 }

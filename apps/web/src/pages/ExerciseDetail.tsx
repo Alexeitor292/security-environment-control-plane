@@ -1,17 +1,52 @@
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import "./environments.css";
+
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
-import { StatusBadge } from "../components/StatusBadge";
+import { CyberGridBackground } from "../components/backgrounds";
+import {
+  CyberButton,
+  CyberCard,
+  CyberTable,
+  EmptyState,
+  HashChip,
+  KeyValueList,
+  SafetyNotice,
+  Skeleton,
+  StatusBadge,
+  StepRail,
+  shortId,
+  useAction,
+} from "../components/ui";
 import { useAsync } from "../hooks";
+import {
+  DEPLOY_DISPATCH_NOTE,
+  DESTROY_DISPATCH_NOTE,
+  ENVIRONMENTS_ERROR_TEXT,
+  SIMULATED_POSTURE_NOTE,
+  canDeployExercise,
+  canDestroyExercise,
+  canGeneratePlan,
+  canResetInstance,
+  canValidateExercise,
+  exerciseRailItems,
+  exerciseStatusLabel,
+  isExerciseOffRail,
+  onlyNotFoundAsNull,
+} from "./environments-view";
 
 export function ExerciseDetail() {
   const { exerciseId = "" } = useParams();
+  const navigate = useNavigate();
   const exercise = useAsync(() => api.getExercise(exerciseId), [exerciseId]);
   const instances = useAsync(() => api.listInstances(exerciseId), [exerciseId]);
-  const plan = useAsync(() => api.latestPlan(exerciseId).catch(() => null), [exerciseId]);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  // Only a not_found means "no plan generated"; other failures render as
+  // unavailable, never as absence.
+  const plan = useAsync(
+    () => api.latestPlan(exerciseId).catch(onlyNotFoundAsNull),
+    [exerciseId],
+  );
+  const action = useAction({ codeText: ENVIRONMENTS_ERROR_TEXT });
 
   function reloadAll() {
     exercise.reload();
@@ -19,158 +54,239 @@ export function ExerciseDetail() {
     plan.reload();
   }
 
-  async function action(fn: () => Promise<unknown>) {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-      reloadAll();
-    } catch (e: any) {
-      setError(`${e.message}${e.details ? " — " + e.details.join("; ") : ""}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (exercise.error) return <div className="error-box">{exercise.error}</div>;
-  if (!exercise.data) return <p className="muted">Loading…</p>;
+  if (exercise.error !== null && exercise.error !== undefined)
+    return (
+      <div className="error-box" role="alert">
+        Exercise unavailable.
+      </div>
+    );
+  if (!exercise.data)
+    return (
+      <CyberCard>
+        <Skeleton lines={5} />
+      </CyberCard>
+    );
 
   const ex = exercise.data;
   const state = ex.lifecycle_state;
-  const planData = plan.data;
+  const planData = plan.data ?? null;
+  const planUnavailable = plan.error !== null && plan.error !== undefined;
+  const offRail = isExerciseOffRail(state);
 
   return (
-    <div>
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h2 style={{ marginBottom: 4 }}>{ex.name}</h2>
-        <StatusBadge state={state} />
-      </div>
-      <p className="muted mono">
-        version {ex.environment_version_id.slice(0, 8)} · {ex.team_count} teams
-      </p>
-
-      {error && <div className="error-box">{error}</div>}
-
-      <div className="panel">
-        <h3>Lifecycle</h3>
-        <div className="row">
-          <button
-            className="secondary"
-            disabled={busy || state !== "draft"}
-            onClick={() => action(() => api.validateExercise(ex.id))}
-          >
-            1. Validate
-          </button>
-          <button
-            className="secondary"
-            disabled={busy || state !== "validated"}
-            onClick={() => action(() => api.generatePlan(ex.id))}
-          >
-            2. Generate plan
-          </button>
-          <Link to={`/exercises/${ex.id}/plan`}>
-            <button className="secondary" disabled={!planData}>
-              3. Plan &amp; approval →
-            </button>
-          </Link>
-          <button
-            disabled={busy || state !== "approved"}
-            onClick={() => action(() => api.deployExercise(ex.id))}
-          >
-            4. Start simulated exercise
-          </button>
+    <div className="env">
+      <CyberGridBackground intensity="subtle" className="env-bg" />
+      <div className="env-head">
+        <div>
+          <h1>{ex.name}</h1>
+          <p className="env-sub mono">
+            version {shortId(ex.environment_version_id)} · {ex.team_count} teams ·
+            created {ex.created_at.slice(0, 10)}
+          </p>
         </div>
-        <p className="muted" style={{ marginTop: 10 }}>
-          Deploy is refused until a plan is explicitly approved (approval gate).
-        </p>
+        <span className="env-hashline">
+          <StatusBadge state={state} domain="lifecycle" />
+          <span className="muted">{exerciseStatusLabel(state)}</span>
+        </span>
       </div>
 
-      <div className="panel">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <h3>Team instances</h3>
-          <div className="row">
-            <Link to={`/exercises/${ex.id}/topology`}>
-              <button className="secondary" disabled={!instances.data?.length}>
-                View topologies
-              </button>
-            </Link>
-            <button
-              className="danger"
-              disabled={busy || !["running", "failed"].includes(state)}
-              onClick={() => action(() => api.destroyExercise(ex.id))}
+      <SafetyNotice role="note" tone="warn">
+        {SIMULATED_POSTURE_NOTE} Lifecycle reflects recorded state only — the API
+        dispatches work; it never contacts infrastructure.
+      </SafetyNotice>
+
+      {action.error && (
+        <div className="error-box" role="alert">
+          {action.error.text} <code className="mono">{action.error.code}</code>
+        </div>
+      )}
+
+      <div className="env-grid">
+        <CyberCard heading="Lifecycle">
+          <StepRail items={exerciseRailItems(state)} aria-label="Exercise lifecycle" />
+          {offRail && (
+            <SafetyNotice
+              role="status"
+              // failed is danger; in-progress dispatched work (resetting/
+              // destroying) is warn; destroyed is a terminal recorded fact.
+              tone={
+                state === "failed" ? "danger" : state === "destroyed" ? "info" : "warn"
+              }
             >
-              Destroy exercise
-            </button>
+              Current state: {exerciseStatusLabel(state)}
+            </SafetyNotice>
+          )}
+          <div className="env-actions" style={{ marginTop: 10 }}>
+            <CyberButton
+              variant="secondary"
+              size="sm"
+              disabled={action.busy || !canValidateExercise(state)}
+              title={
+                canValidateExercise(state)
+                  ? "Validates the exercise definition. Validation is not approval."
+                  : `Available while draft — current: ${exerciseStatusLabel(state)}`
+              }
+              onClick={() => action.run(() => api.validateExercise(ex.id), reloadAll)}
+            >
+              Validate
+            </CyberButton>
+            <CyberButton
+              variant="secondary"
+              size="sm"
+              disabled={action.busy || !canGeneratePlan(state)}
+              title={
+                canGeneratePlan(state)
+                  ? "Generates a deterministic plan pinned to the version hash. Generation is not approval."
+                  : `Available when validated — current: ${exerciseStatusLabel(state)}`
+              }
+              onClick={() => action.run(() => api.generatePlan(ex.id), reloadAll)}
+            >
+              Generate plan
+            </CyberButton>
+            <CyberButton
+              variant="secondary"
+              size="sm"
+              disabled={!planData}
+              onClick={() => navigate(`/exercises/${ex.id}/plan`)}
+            >
+              Plan review & decision →
+            </CyberButton>
+            <CyberButton
+              size="sm"
+              disabled={action.busy || !canDeployExercise(state)}
+              title={
+                canDeployExercise(state)
+                  ? DEPLOY_DISPATCH_NOTE
+                  : `Available when a plan is approved — current: ${exerciseStatusLabel(state)}`
+              }
+              onClick={() => action.run(() => api.deployExercise(ex.id), reloadAll)}
+            >
+              Dispatch simulated deploy
+            </CyberButton>
           </div>
+          <p className="env-note">
+            Deploy is refused until a plan is explicitly approved (approval gate).{" "}
+            {DEPLOY_DISPATCH_NOTE}
+          </p>
+        </CyberCard>
+
+        <CyberCard heading="Deployment plan (immutable)">
+          {planUnavailable ? (
+            <p className="muted">Plan status unavailable.</p>
+          ) : !planData ? (
+            <EmptyState title="No plan generated yet">
+              Generate a plan after validation. Plans are deterministic and
+              pinned to the immutable version hash.
+            </EmptyState>
+          ) : (
+            <>
+              <div className="env-hashline">
+                <StatusBadge state={planData.status} domain="plan" />
+                <span>
+                  pinned to <HashChip value={planData.version_content_hash} digits={12} />
+                </span>
+              </div>
+              <KeyValueList
+                items={[
+                  {
+                    key: "Shape",
+                    value: `${planData.summary.total_nodes} nodes · ${planData.summary.total_networks} networks · ${planData.summary.isolation} isolation`,
+                  },
+                  { key: "Plugin", value: planData.summary.plugin || "—", mono: true },
+                  {
+                    key: "Approved hash",
+                    value: planData.approved_content_hash ? (
+                      <HashChip value={planData.approved_content_hash} digits={12} />
+                    ) : (
+                      "— (no decision recorded)"
+                    ),
+                  },
+                ]}
+              />
+              <p className="env-note">
+                <Link to={`/exercises/${ex.id}/plan`}>Open plan review →</Link>
+              </p>
+            </>
+          )}
+        </CyberCard>
+      </div>
+
+      <CyberCard heading="Team instances (simulated)">
+        <div className="env-actions" style={{ marginBottom: 8 }}>
+          <CyberButton
+            variant="secondary"
+            size="sm"
+            disabled={!instances.data?.length}
+            onClick={() => navigate(`/exercises/${ex.id}/topology`)}
+          >
+            Topology preview →
+          </CyberButton>
+          <CyberButton
+            variant="danger"
+            size="sm"
+            disabled={action.busy || !canDestroyExercise(state)}
+            title={
+              canDestroyExercise(state)
+                ? DESTROY_DISPATCH_NOTE
+                : `Available while running or failed — current: ${exerciseStatusLabel(state)}`
+            }
+            onClick={() => action.run(() => api.destroyExercise(ex.id), reloadAll)}
+          >
+            Dispatch destroy
+          </CyberButton>
         </div>
-        {instances.data && instances.data.length === 0 && (
-          <p className="muted">No instances yet — deploy to create one per team.</p>
-        )}
-        {instances.data && instances.data.length > 0 && (
-          <table>
-            <thead>
-              <tr>
-                <th>Team</th>
-                <th>Instance</th>
-                <th>Lifecycle</th>
-                <th>Provider</th>
-                <th></th>
+        {instances.loading && !instances.data ? (
+          <Skeleton lines={3} />
+        ) : instances.data && instances.data.length === 0 ? (
+          <EmptyState title="No instances yet">
+            Instances appear per team after deployment work runs. Dispatching a
+            deploy does not create them by itself.
+          </EmptyState>
+        ) : instances.data ? (
+          <CyberTable
+            label="Team instances"
+            head={["Team", "Instance", "Lifecycle", "Provider", "Actions"]}
+            caption={`${instances.data.length} team instance${instances.data.length === 1 ? "" : "s"} · simulated execution only`}
+          >
+            {instances.data.map((inst) => (
+              <tr key={inst.id}>
+                <td>{inst.team_ref}</td>
+                <td className="mono muted" title={inst.instance_ref}>
+                  {shortId(inst.instance_ref)}
+                </td>
+                <td>
+                  <StatusBadge state={inst.lifecycle_state} domain="lifecycle" />
+                </td>
+                <td className="mono muted">{inst.provider} · simulated</td>
+                <td>
+                  <CyberButton
+                    variant="secondary"
+                    size="sm"
+                    disabled={action.busy || !canResetInstance(inst)}
+                    title={
+                      canResetInstance(inst)
+                        ? "Dispatches reset work for this instance."
+                        : "Available while the instance is running."
+                    }
+                    onClick={() =>
+                      action.run(() => api.resetInstance(ex.id, inst.id), reloadAll)
+                    }
+                  >
+                    Reset
+                  </CyberButton>
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {instances.data.map((inst) => (
-                <tr key={inst.id}>
-                  <td>{inst.team_ref}</td>
-                  <td className="mono">{inst.instance_ref}</td>
-                  <td>
-                    <StatusBadge state={inst.lifecycle_state} />
-                  </td>
-                  <td>
-                    {inst.provider}{" "}
-                    <span className="badge accent">simulated</span>
-                  </td>
-                  <td>
-                    <button
-                      className="secondary"
-                      disabled={busy || inst.lifecycle_state !== "running"}
-                      onClick={() =>
-                        action(() => api.resetInstance(ex.id, inst.id))
-                      }
-                    >
-                      Reset
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+            ))}
+          </CyberTable>
+        ) : (
+          <p className="muted">Instances unavailable.</p>
         )}
-      </div>
+        <p className="env-note">{DESTROY_DISPATCH_NOTE}</p>
+      </CyberCard>
 
-      <div className="panel">
-        <h3>Deployment plan</h3>
-        {!planData && <p className="muted">No plan generated yet.</p>}
-        {planData && (
-          <div>
-            <div className="row">
-              <StatusBadge state={planData.status} />
-              <span className="muted mono">
-                hash {planData.version_content_hash.slice(7, 19)}…
-              </span>
-            </div>
-            <p className="muted">
-              {planData.summary.total_nodes} nodes ·{" "}
-              {planData.summary.total_networks} networks ·{" "}
-              {planData.summary.isolation} isolation
-            </p>
-            <Link to={`/exercises/${ex.id}/plan`}>Open approval screen →</Link>
-          </div>
-        )}
-      </div>
-
-      <div className="row">
-        <Link to={`/audit`}>View full audit log →</Link>
-      </div>
+      <p className="env-note">
+        <Link to="/audit">Full audit ledger →</Link>
+      </p>
     </div>
   );
 }

@@ -38,8 +38,7 @@ export const NAV_GROUPS: NavGroup[] = [
       {
         id: "exercises",
         label: "Exercises",
-        unavailableReason:
-          "No exercise index in this milestone — open exercises from Overview.",
+        href: "/exercises",
       },
     ],
   },
