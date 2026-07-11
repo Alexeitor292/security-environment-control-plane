@@ -738,3 +738,89 @@ export interface ResolverActivation {
   created_at: string;
   evidence: ResolverActivationEvidence[];
 }
+
+// SECP-B9 — durable topology draft authoring (backend contract for PR-15).
+// Secret-free, server-owned records mirroring schemas_topology_authoring.py.
+export type TopologyAuthoringStatus =
+  | "draft"
+  | "validated"
+  | "submitted"
+  | "approved"
+  | "rejected";
+
+export type TopologyRevisionStatus =
+  | "draft"
+  | "validated"
+  | "submitted"
+  | "approved"
+  | "rejected"
+  | "superseded";
+
+export type TopologyValidationStatus =
+  | "valid"
+  | "valid_with_warnings"
+  | "invalid"
+  | "unverifiable"
+  | "stale";
+
+export interface TopologyFinding {
+  severity: "error" | "warning";
+  code: string;
+  node_id?: string;
+  edge_id?: string;
+}
+
+export interface TopologyRevisionSummary {
+  id: string;
+  document_id: string;
+  revision_number: number;
+  parent_revision_id: string | null;
+  schema_version: string;
+  content_hash: string;
+  status: TopologyRevisionStatus;
+  change_note: string | null;
+  source_environment_version_id: string | null;
+  created_by: string | null;
+  created_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+}
+
+export interface TopologyRevisionDetail extends TopologyRevisionSummary {
+  /** The canonical, secret-free topology document. */
+  document_content: Record<string, unknown>;
+}
+
+export interface TopologyValidationResult {
+  id: string;
+  revision_id: string;
+  content_hash: string;
+  status: TopologyValidationStatus;
+  error_count: number;
+  warning_count: number;
+  findings: TopologyFinding[];
+  result_hash: string;
+  validated_by: string | null;
+  validated_at: string;
+}
+
+export interface TopologyDocument {
+  id: string;
+  organization_id: string;
+  display_name: string;
+  status: TopologyAuthoringStatus;
+  source_environment_version_id: string | null;
+  exercise_id: string | null;
+  current_revision_id: string | null;
+  validated_revision_id: string | null;
+  submitted_revision_id: string | null;
+  approved_revision_id: string | null;
+  revision_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TopologyDocumentDetail extends TopologyDocument {
+  current_revision: TopologyRevisionDetail | null;
+  current_validation_status: TopologyValidationStatus;
+}

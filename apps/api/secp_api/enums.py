@@ -444,6 +444,16 @@ class Permission(str, Enum):
     # grants NO infrastructure execution — live apply remains sealed pending controlled integration.
     target_discovery_manage = "target_discovery:manage"
     target_discovery_approve = "target_discovery:approve"
+    # SECP-B9 — durable topology draft authoring. Reading, drafting/revising,
+    # validating, and submitting are separate capabilities; DECIDING (approve/
+    # reject) is a DELIBERATELY SEPARATE permission that can never be inferred
+    # from drafting or validating. None of these grant plan generation or
+    # infrastructure execution — live apply remains sealed.
+    topology_read = "topology:read"
+    topology_draft = "topology:draft"
+    topology_validate = "topology:validate"
+    topology_submit = "topology:submit"
+    topology_decide = "topology:decide"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -837,6 +847,17 @@ class AuditAction(str, Enum):
     readonly_bootstrap_session_refused = "readonly_bootstrap_session.refused"
     # SECP-B8: a worker published its PUBLIC discovery key material (SSH public key + anchor).
     worker_discovery_node_published = "worker_discovery_node.published"
+    # SECP-B9 — durable topology draft authoring (control-plane only; no infra contact).
+    topology_draft_created = "topology_authoring.draft_created"
+    topology_revision_created = "topology_authoring.revision_created"
+    topology_revision_refused = "topology_authoring.revision_refused"
+    topology_validation_recorded = "topology_authoring.validation_recorded"
+    topology_validation_refused = "topology_authoring.validation_refused"
+    topology_submitted = "topology_authoring.submitted"
+    topology_submission_refused = "topology_authoring.submission_refused"
+    topology_approved = "topology_authoring.approved"
+    topology_rejected = "topology_authoring.rejected"
+    topology_decision_refused = "topology_authoring.decision_refused"
 
 
 class ResolutionLeaseStatus(str, Enum):
@@ -1119,3 +1140,70 @@ class DiscoveryFailureCode(str, Enum):
     stale_evidence = "stale_evidence"
     plan_expired = "plan_expired"
     internal_error = "internal_error"
+
+
+class TopologyAuthoringStatus(str, Enum):
+    """Lifecycle of a topology-authoring aggregate (SECP-B9).
+
+    The aggregate advances only through explicit, separately-permissioned
+    actions. ``approved`` records a decision — it never generates a plan or
+    contacts infrastructure. A new revision after approval reopens drafting.
+    """
+
+    draft = "draft"
+    validated = "validated"
+    submitted = "submitted"
+    approved = "approved"
+    rejected = "rejected"
+
+
+class TopologyRevisionStatus(str, Enum):
+    """Per-revision lifecycle. Content + hash are immutable once created; only
+    this status advances (draft → validated → submitted → approved/rejected).
+    A submitted/approved revision is frozen — edits create a NEW draft revision.
+    ``superseded`` marks a former current revision replaced by a newer one."""
+
+    draft = "draft"
+    validated = "validated"
+    submitted = "submitted"
+    approved = "approved"
+    rejected = "rejected"
+    superseded = "superseded"
+
+
+class TopologyValidationStatus(str, Enum):
+    """Outcome of a validation action, pinned to an exact revision + hash.
+
+    Never implies approval or deployability. ``unverifiable`` is neither pass
+    nor fail. ``stale`` is used by the read model when a recorded result no
+    longer matches the aggregate's current revision hash."""
+
+    valid = "valid"
+    valid_with_warnings = "valid_with_warnings"
+    invalid = "invalid"
+    unverifiable = "unverifiable"
+    stale = "stale"
+
+
+class TopologyAuthoringErrorCode(str, Enum):
+    """Closed, message-redacted error codes for topology authoring (SECP-B9)."""
+
+    topology_not_found = "topology_not_found"
+    topology_revision_not_found = "topology_revision_not_found"
+    topology_revision_stale = "topology_revision_stale"
+    topology_hash_mismatch = "topology_hash_mismatch"
+    topology_revision_not_current = "topology_revision_not_current"
+    topology_schema_invalid = "topology_schema_invalid"
+    topology_validation_required = "topology_validation_required"
+    topology_validation_not_current = "topology_validation_not_current"
+    topology_already_submitted = "topology_already_submitted"
+    topology_revision_immutable = "topology_revision_immutable"
+    topology_approval_required = "topology_approval_required"
+    topology_not_submitted = "topology_not_submitted"
+    topology_permission_denied = "topology_permission_denied"
+    topology_document_too_large = "topology_document_too_large"
+    topology_secret_field_forbidden = "topology_secret_field_forbidden"
+    topology_unknown_object_kind = "topology_unknown_object_kind"
+    topology_invalid_relationship = "topology_invalid_relationship"
+    topology_cross_org_forbidden = "topology_cross_org_forbidden"
+    topology_source_not_found = "topology_source_not_found"

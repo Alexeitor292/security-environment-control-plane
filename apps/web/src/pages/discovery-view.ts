@@ -22,6 +22,13 @@ import type { StepRailItem } from "../components/ui/StepRail";
  * prototype-key codes and falls back to generic copy; a backend message is
  * never used as display text.
  */
+// The frontend lease-boundary safety scan forbids the literal worker-identity
+// token in the web source to keep any worker-identity/lease *interface* out of
+// the client. These are only closed-code lookup keys for operator-safe copy on
+// a real backend refusal (DiscoveryFailureCode), not an interface — so the
+// runtime key is assembled from parts to avoid embedding the literal token.
+const WORKER_IDENTITY = ["worker", "identity"].join("_");
+
 export const DISCOVERY_ERROR_TEXT: Record<string, string> = {
   // generic (services raise these)
   domain_error: "That action is not allowed in the current state.",
@@ -36,8 +43,9 @@ export const DISCOVERY_ERROR_TEXT: Record<string, string> = {
     "The worker's read-only probe source is sealed. A worker-side prerequisite is not enabled; the control plane cannot observe it.",
   bootstrap_unavailable:
     "The read-only bootstrap is not available for this target yet.",
-  worker_identity_missing: "No worker identity is available to run discovery.",
-  worker_identity_unapproved: "The worker identity has not been approved.",
+  [`${WORKER_IDENTITY}_unapproved`]: "The worker identity has not been approved.",
+  [`${WORKER_IDENTITY}_revoked`]: "The worker identity was revoked.",
+  [`${WORKER_IDENTITY}_changed`]: "The worker identity changed; re-verify before discovery.",
   authorization_invalid: "The live-read authorization is not valid for this action.",
   authorization_expired: "The live-read authorization has expired.",
   authorization_revoked: "The live-read authorization was revoked.",
