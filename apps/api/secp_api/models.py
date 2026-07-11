@@ -1896,3 +1896,10 @@ from secp_api.discovery_models import (  # noqa: E402,F401
     DiscoverySnapshot,
     TargetDiscoveryEnrollment,
 )
+
+# SECP-B9 durable topology draft authoring models (dedicated module for a focused diff).
+from secp_api.topology_authoring_models import (  # noqa: E402,F401
+    TopologyAuthoringDocument,
+    TopologyRevision,
+    TopologyValidationResult,
+)

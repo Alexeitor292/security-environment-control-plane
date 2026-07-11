@@ -37,6 +37,7 @@ from secp_api.routers import resolver_activation as resolver_activation_router
 from secp_api.routers import staging_deployments as staging_deployments_router
 from secp_api.routers import staging_labs as staging_labs_router
 from secp_api.routers import target_discovery as target_discovery_router
+from secp_api.routers import topology_authoring as topology_authoring_router
 from secp_api.routers import worker_admission as worker_admission_router
 from secp_api.routers import worker_identity as worker_identity_router
 from secp_api.routers import worker_nodes as worker_nodes_router
@@ -142,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(staging_labs_router.router)
     app.include_router(staging_deployments_router.router)
     app.include_router(target_discovery_router.router)
+    app.include_router(topology_authoring_router.router)
     app.include_router(bootstrap_discovery_router.router)
     app.include_router(worker_nodes_router.router)
     app.include_router(readonly_preflight_router.router)

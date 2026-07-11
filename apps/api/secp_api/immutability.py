@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from secp_api.enums import (
     LiveReadAuthorizationStatus,
     ResolverActivationStatus,
+    TopologyRevisionStatus,
     WorkerDiscoveryAdmissionStatus,
     WorkerIdentityStatus,
 )
@@ -47,6 +48,55 @@ from secp_api.models import (
     WorkerDiscoveryAdmission,
     WorkerIdentityEvidence,
     WorkerIdentityRegistration,
+)
+from secp_api.topology_authoring_models import (
+    TopologyRevision,
+    TopologyValidationResult,
+)
+
+# SECP-B9: a topology revision's content/hash/binding are immutable; only its
+# lifecycle ``status`` and set-once decision metadata may change.
+_TOPOLOGY_REVISION_PROTECTED = (
+    "organization_id",
+    "document_id",
+    "revision_number",
+    "parent_revision_id",
+    "schema_version",
+    "document_content",
+    "content_hash",
+    "source_environment_version_id",
+    "change_note",
+    "created_by",
+)
+_TOPOLOGY_REVISION_SET_ONCE = ("decided_by", "decided_at", "decision_reason")
+# SECP-B9: the only legal revision status moves (defense-in-depth; the service
+# never attempts others). Terminal states (approved/rejected/superseded) admit
+# no further transition.
+_TOPOLOGY_REVISION_ALLOWED_TRANSITIONS = frozenset(
+    {
+        (TopologyRevisionStatus.draft, TopologyRevisionStatus.validated),
+        (TopologyRevisionStatus.draft, TopologyRevisionStatus.superseded),
+        (TopologyRevisionStatus.validated, TopologyRevisionStatus.submitted),
+        (TopologyRevisionStatus.validated, TopologyRevisionStatus.superseded),
+        (TopologyRevisionStatus.submitted, TopologyRevisionStatus.approved),
+        (TopologyRevisionStatus.submitted, TopologyRevisionStatus.rejected),
+    }
+)
+# SECP-B9: a validation result is append-only; EVERY field (incl. detail) is
+# immutable once recorded, matching the Postgres trigger.
+_TOPOLOGY_VALIDATION_PROTECTED = (
+    "organization_id",
+    "document_id",
+    "revision_id",
+    "content_hash",
+    "status",
+    "error_count",
+    "warning_count",
+    "findings",
+    "result_hash",
+    "validated_by",
+    "validated_at",
+    "detail",
 )
 
 _VERSION_PROTECTED = ("spec", "content_hash", "version_number", "api_version")
@@ -530,6 +580,44 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                         "LiveReadAuthorization revocation requires preserved approval and "
                         "explicit revocation metadata"
                     )
+        # TopologyRevision (SECP-B9): content/hash/binding immutable; only status
+        # and set-once decision metadata may change. A new edit is a new revision.
+        if isinstance(obj, TopologyRevision):
+            changed = [a for a in _TOPOLOGY_REVISION_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "TopologyRevision content is immutable after creation; "
+                    f"attempted to change {changed}. Create a new revision instead."
+                )
+            repeated = [
+                a
+                for a in _TOPOLOGY_REVISION_SET_ONCE
+                if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+            ]
+            if repeated:
+                raise ImmutableResourceError(
+                    "TopologyRevision decision metadata is set-once; "
+                    f"attempted to change {repeated}"
+                )
+            if _attr_changed(obj, "status"):
+                previous = _previous_value(obj, "status")
+                if (
+                    previous is not None
+                    and (previous, obj.status) not in _TOPOLOGY_REVISION_ALLOWED_TRANSITIONS
+                ):
+                    raise ImmutableResourceError(
+                        "TopologyRevision status transition is not allowed: "
+                        f"{getattr(previous, 'value', previous)!r} -> "
+                        f"{getattr(obj.status, 'value', obj.status)!r}"
+                    )
+        # TopologyValidationResult (SECP-B9): append-only, fully immutable.
+        if isinstance(obj, TopologyValidationResult):
+            changed = [a for a in _TOPOLOGY_VALIDATION_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "TopologyValidationResult is immutable after recording; "
+                    f"attempted to change {changed}"
+                )
         # WorkerDiscoveryAdmission (SECP-B6 MB-1): binding facts immutable; admitted/consumed
         # timestamps set once; status advances only along the one-time admission lifecycle.
         if isinstance(obj, WorkerDiscoveryAdmission):
@@ -751,6 +839,9 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
         if isinstance(obj, AuditEvent):
             raise ImmutableResourceError("AuditEvent records cannot be deleted")
+        # SECP-B9: topology revisions and validation results are append-only evidence.
+        if isinstance(obj, TopologyRevision | TopologyValidationResult):
+            raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
 
 
 def install_guards() -> None:

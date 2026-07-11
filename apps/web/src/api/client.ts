@@ -23,6 +23,10 @@ import type {
   Principal,
   ReadonlyPreflight,
   ResolverActivation,
+  TopologyDocumentDetail,
+  TopologyRevisionDetail,
+  TopologyRevisionSummary,
+  TopologyValidationResult,
   ProviderCapabilities,
   StagingLab,
   StagingLabCreate,
@@ -420,5 +424,100 @@ export const api = {
     request<ResolverActivation>(
       "POST",
       `/api/v1/resolver-activation/authorizations/${id}/revoke`,
+    ),
+
+  // SECP-B9 — durable topology draft authoring (backend contract for PR-15).
+  // These are the typed, secret-free client methods a future frontend PR wires
+  // the topology workspace to. The PR-13 workspace stays local-draft-only until
+  // that PR ships. Save/revise/validate/submit are hash-pinned (optimistic
+  // concurrency); a stale base fails closed with a topology_* closed code.
+  createTopologyDraft: (body: {
+    display_name: string;
+    source_environment_version_id?: string | null;
+    exercise_id?: string | null;
+    document?: Record<string, unknown> | null;
+  }) =>
+    request<TopologyDocumentDetail>(
+      "POST",
+      "/api/v1/topology-authoring/documents",
+      body,
+    ),
+  getTopologyDocument: (documentId: string) =>
+    request<TopologyDocumentDetail>(
+      "GET",
+      `/api/v1/topology-authoring/documents/${documentId}`,
+    ),
+  listTopologyRevisions: (documentId: string, limit = 50, offset = 0) =>
+    request<TopologyRevisionSummary[]>(
+      "GET",
+      `/api/v1/topology-authoring/documents/${documentId}/revisions`,
+      undefined,
+      { limit: String(limit), offset: String(offset) },
+    ),
+  getTopologyRevision: (documentId: string, revisionId: string) =>
+    request<TopologyRevisionDetail>(
+      "GET",
+      `/api/v1/topology-authoring/documents/${documentId}/revisions/${revisionId}`,
+    ),
+  createTopologyRevision: (
+    documentId: string,
+    body: {
+      base_revision_number: number;
+      base_content_hash: string;
+      document: Record<string, unknown>;
+      change_note?: string | null;
+    },
+  ) =>
+    request<TopologyRevisionDetail>(
+      "POST",
+      `/api/v1/topology-authoring/documents/${documentId}/revisions`,
+      body,
+    ),
+  validateTopologyRevision: (
+    documentId: string,
+    revisionId: string,
+    contentHash: string,
+  ) =>
+    request<TopologyValidationResult>(
+      "POST",
+      `/api/v1/topology-authoring/documents/${documentId}/revisions/${revisionId}/validate`,
+      { content_hash: contentHash },
+    ),
+  getTopologyValidation: (documentId: string, revisionId: string) =>
+    request<TopologyValidationResult | null>(
+      "GET",
+      `/api/v1/topology-authoring/documents/${documentId}/revisions/${revisionId}/validation`,
+    ),
+  submitTopologyRevision: (
+    documentId: string,
+    revisionId: string,
+    contentHash: string,
+  ) =>
+    request<TopologyRevisionSummary>(
+      "POST",
+      `/api/v1/topology-authoring/documents/${documentId}/revisions/${revisionId}/submit`,
+      { content_hash: contentHash },
+    ),
+  approveTopologyRevision: (
+    documentId: string,
+    revisionId: string,
+    contentHash: string,
+    reason?: string,
+  ) =>
+    request<TopologyRevisionSummary>(
+      "POST",
+      `/api/v1/topology-authoring/documents/${documentId}/revisions/${revisionId}/approve`,
+      { content_hash: contentHash, reason },
+    ),
+  rejectTopologyRevision: (
+    documentId: string,
+    revisionId: string,
+    contentHash: string,
+    reason?: string,
+  ) =>
+    request<TopologyRevisionSummary>(
+      "POST",
+      `/api/v1/topology-authoring/documents/${documentId}/revisions/${revisionId}/reject`,
+      { content_hash: contentHash, reason },
     ),
 };

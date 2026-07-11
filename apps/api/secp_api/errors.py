@@ -78,6 +78,48 @@ class ResolverActivationError(DomainError):
         self.http_status = self._STATUS.get(code_value, 400)
 
 
+class TopologyAuthoringError(DomainError):
+    """Closed-code, message-redacted error for topology draft authoring (SECP-B9).
+
+    The HTTP layer serializes only the closed code (``{"error": {"code": ...}}``);
+    no free-form backend message, rejected input, or topology content reaches the
+    API/UI. Codes are :class:`~secp_api.enums.TopologyAuthoringErrorCode` values.
+    """
+
+    redacted = True
+    # True when a fail-closed refusal ALSO recorded a durable refusal audit event
+    # that must survive the request. The router commits before re-raising.
+    durable_transition: bool = False
+
+    _STATUS = {
+        "topology_not_found": 404,
+        "topology_revision_not_found": 404,
+        "topology_source_not_found": 404,
+        "topology_permission_denied": 403,
+        "topology_cross_org_forbidden": 403,
+        "topology_revision_stale": 409,
+        "topology_hash_mismatch": 409,
+        "topology_revision_not_current": 409,
+        "topology_validation_required": 409,
+        "topology_validation_not_current": 409,
+        "topology_already_submitted": 409,
+        "topology_revision_immutable": 409,
+        "topology_approval_required": 409,
+        "topology_not_submitted": 409,
+        "topology_schema_invalid": 422,
+        "topology_document_too_large": 413,
+        "topology_secret_field_forbidden": 422,
+        "topology_unknown_object_kind": 422,
+        "topology_invalid_relationship": 422,
+    }
+
+    def __init__(self, code: object) -> None:
+        code_value = getattr(code, "value", str(code))
+        super().__init__(code_value)
+        self.code = code_value
+        self.http_status = self._STATUS.get(code_value, 400)
+
+
 class WorkerIdentityError(DomainError):
     """Closed-code, message-redacted error for worker-identity registration (SECP-B2-4.3).
 
