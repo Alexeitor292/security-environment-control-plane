@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -285,25 +286,182 @@ def test_lease_identity_gate_modules_add_no_backend_or_network_client():
             assert token not in src, f"{name} must not reference `{token}`"
 
 
+# --- frontend activation-boundary guard -------------------------------------
+#
+# The frontend is ALLOWED to DISPLAY worker-side refusal vocabulary — fixed
+# operator copy for closed reason codes such as worker_identity_missing /
+# worker_identity_unapproved. Those are evidence a gate refused a probe, not an
+# interface. What the frontend must NEVER contain is a CONTROL surface capable
+# of acquiring a resolution lease, activating the worker-side resolver gate,
+# entering/resolving credentials, registering/approving/enrolling worker
+# identities, submitting worker-identity evidence, or constructing secret
+# material. The guard therefore bans precise IDENTIFIER forms (method / route /
+# field / component names) — never generic words, prose, the display refusal
+# codes, or the sealed resolver-activation AUTHORIZATION governance surface
+# (createResolverActivation / approveResolverActivation / recordResolverActivation
+# Evidence / resolverGates / ResolverGate / …), which is an allowed read-only
+# decision surface that "never performs activation from this interface".
+
+# Exact worker-side mechanism identifiers (retained indicators). Identifier
+# forms only — deliberately distinct from prose ("no lease is issued",
+# "activation gate") and from the display refusal codes.
+_FORBIDDEN_FRONTEND_LITERALS = (
+    "resolution_lease",
+    "resolutionLease",
+    "activation-gate",
+    "activationGate",
+    "acquireLease",
+    "beginAttempt",
+)
+
+# Precise control-interface entry points a real forbidden surface would use.
+# Each is anchored to a domain noun (Lease / Gate / WorkerIdentity / Worker+
+# management-noun / Credential / Secret / Material / a "password" input) so it
+# matches method/route/field/component IDENTIFIERS while never matching the
+# display refusal codes, explanatory prose, or the governance/read-only surface.
+_FORBIDDEN_FRONTEND_PATTERNS = (
+    # (1) acquiring a resolution lease — the durable lease identifier (any
+    #     case/separator) and any verb that mints/obtains one.
+    re.compile(r"resolution[_-]?lease", re.IGNORECASE),
+    re.compile(
+        r"(acquire|begin|open|obtain|renew|create|start|request|claim|mint|issue|grant|reserve|take)"
+        r"(Resolution)?Lease"
+    ),
+    # (2) activating the worker-side resolver GATE — the sealed-gate identifier
+    #     (any case/separator; e.g. ResolutionActivationGate / SealedActivationGate)
+    #     and any verb that opens it. "activation gate(s)" prose has a space and
+    #     is not matched; ResolverGate / resolverGates (read-only view-model) have
+    #     no leading verb and are not matched.
+    re.compile(r"activation[_-]?gate", re.IGNORECASE),
+    re.compile(
+        r"(activate|open|reopen|unseal|arm|enable|lift|trip|disarm|unlock)"
+        r"(Resolution|Resolver)?Gate"
+    ),
+    # (3) registering / approving / enrolling a worker identity, or submitting its
+    #     evidence — camelCase methods (verb+WorkerIdentity, or verb+Worker+optional
+    #     management noun) and snake/kebab/path routes. The display refusal codes
+    #     worker_identity_missing / worker_identity_unapproved are not management
+    #     nouns, and "worker-identity registration" prose uses a space, so none match.
+    re.compile(
+        r"(register|approve|reject|create|enroll|provision|submit|record|activate|admit|revoke)"
+        r"WorkerIdentity"
+    ),
+    re.compile(
+        r"(register|approve|reject|enroll|provision|admit|revoke)"
+        r"Worker(Identity|Registration|Admission|Enrollment|Approval|Credential)?\b"
+    ),
+    re.compile(
+        r"worker[_/-]identity[_/-]"
+        r"(registration|register|approval|approve|management|enroll(ment)?|evidence|provision|create|admission)"
+    ),
+    # (4) entering / resolving credentials or constructing secret material. Verb-
+    #     anchored so "Credential resolution failed closed" prose and the
+    #     credential_unavailable display code (no verb prefix) never match; the
+    #     material nouns are Secret/Credential only (never Key/Bundle — a worker
+    #     PUBLIC-key bundle is legitimate).
+    re.compile(
+        r"(resolve|reveal|unseal|decrypt|fetch|construct|build|assemble)"
+        r"(Provider|Target|Worker|Live|Read)?(Credential|Secret)"
+    ),
+    re.compile(r"(Secret|Credential)(Material|Payload)"),
+    # (5) a credential/password input field or component — a type-like attribute
+    #     set to "password" (incl. JSX-expression / ternary / htmlType / inputType
+    #     forms) or a password/secret input component. Anchored to a type= attr so
+    #     the audit secret-detection regex /(...|password|...)/ is not matched.
+    re.compile(r"""(type|htmlType|inputType)\s*=\s*\{?[^}"']*['"]password['"]"""),
+    re.compile(r"(Password|Secret)(Input|Field)"),
+)
+
+
+def _forbidden_frontend_hits(source: str) -> list[str]:
+    """Every forbidden control-interface indicator in a frontend source string:
+    exact worker-side mechanism identifiers plus the precise lease / gate /
+    worker-identity / credential / secret control-entry patterns. Display-only
+    refusal codes (worker_identity_missing / _unapproved), explanatory prose, and
+    the resolver-activation governance surface produce no hit."""
+    hits = [lit for lit in _FORBIDDEN_FRONTEND_LITERALS if lit in source]
+    for pattern in _FORBIDDEN_FRONTEND_PATTERNS:
+        hits += [m.group(0) for m in pattern.finditer(source)]
+    return hits
+
+
 def test_frontend_has_no_lease_or_activation_interface():
     web_src = REPO_ROOT / "apps" / "web" / "src"
-    forbidden = (
-        "resolution_lease",
-        "resolutionLease",
-        "activation-gate",
-        "activationGate",
-        "acquireLease",
-        "beginAttempt",
-        "worker_identity",
-        'type="password"',
-        "type='password'",
-    )
     scanned = 0
     for path in list(web_src.rglob("*.ts")) + list(web_src.rglob("*.tsx")):
         if ".mypy_cache" in path.parts or "node_modules" in path.parts:
             continue
         scanned += 1
-        src = path.read_text(encoding="utf-8")
-        for token in forbidden:
-            assert token not in src, f"frontend {path.name} references `{token}`"
+        hits = _forbidden_frontend_hits(path.read_text(encoding="utf-8"))
+        assert not hits, f"frontend {path.name} exposes forbidden control indicator(s): {hits}"
     assert scanned >= 5
+
+
+def test_frontend_activation_guard_distinguishes_display_from_interface():
+    """Regression for the removed bare-"worker_identity" ban: the guard ALLOWS
+    display-only refusal codes + explanatory copy + the sealed resolver-activation
+    governance surface, but REJECTS any real lease / gate / worker-identity /
+    credential / secret control interface (including on-convention synonyms of the
+    exact backend/API names). Proves removing the lexical ban did not weaken the
+    invariant."""
+    # Allowed: display-only refusal vocabulary, explanatory prose, read-only view
+    # models, the governance surface, and non-secret inputs — all must be hit-free.
+    allowed = "\n".join(
+        (
+            'worker_identity_missing: "No worker identity is available to run discovery.",',
+            'worker_identity_unapproved: "The worker identity has not been approved.",',
+            'credential_unavailable: "Credential resolution failed closed.",',
+            "// The worker-identity registration linkage is deliberately NOT surfaced to the UI.",
+            "// worker identity refused; activation gate sealed; activation gates documented;",
+            "// no lease is issued and no resolution occurs from this interface.",
+            "const gates = resolverGates(newest);  // read-only posture view-model",
+            "interface ResolverGate { id: string }",
+            "const workerActivation: ResolverGate = buildGate();",
+            "api.approveResolverActivation(auth.id);  // sealed decision, not gate activation",
+            "api.createResolverActivation(preflightId, ttl);",
+            "api.recordResolverActivationEvidence(id, kind, status, proofId, issuer);",
+            "api.revokeResolverActivation(id); api.listResolverActivations(targetId);",
+            "const p = Promise.resolve([]); resolveClosedCodeCopy(code); resolveStatusTone(s);",
+            "const payload = buildRegisterTargetPayload({}); const u = buildUrl(path);",
+            "api.registerTarget(body); api.listWorkerNodes(); workerPostureRows(e);",
+            "import { RiveWorkerBundle } from './rive'; type N = WorkerDiscoveryNode;",
+            '<CyberButton type="button" /> <input type="number" /> <input type="checkbox" />',
+            "const SECRETISH_KEY_RE = /(secret|token|password|credential|private|api_key|ssh)/i;",
+        )
+    )
+    allowed_hits = _forbidden_frontend_hits(allowed)
+    assert allowed_hits == [], (
+        f"allowed display/governance vocabulary produced hits: {allowed_hits}"
+    )
+
+    # Rejected: each snippet is a real forbidden control interface (or an
+    # on-convention synonym of the exact backend/API spelling).
+    forbidden_samples = {
+        "lease acquisition (retained literal)": "onClick={() => api.acquireLease(id)}",
+        "lease acquisition (synonym verb)": "await api.claimResolutionLease(id);",
+        "lease acquisition (request verb)": "await api.requestResolutionLease(x);",
+        "resolution-lease type (PascalCase)": 'import type { ResolutionLease } from "./types";',
+        "resolution-lease identifier (snake)": "const x: resolution_lease = y;",
+        "resolver-gate activation (retained literal)": "import { activationGate } from './x';",
+        "resolver-gate activation (verb)": "await api.activateResolverGate(id);",
+        "resolver-gate activation (synonym verb)": "unsealResolverGate();",
+        "activation-gate type (PascalCase)": "import type { ResolutionActivationGate } from './x';",
+        "worker-identity registration method": "await api.registerWorkerIdentity(body);",
+        "worker-identity approval method": "await api.approveWorkerIdentity(id);",
+        "worker-identity evidence (record verb)": "await api.recordWorkerIdentityEvidence(ev);",
+        "worker registration (no Identity token)": "await api.registerWorker(body);",
+        "worker admission (backend vocab)": "await api.admitWorker(id);",
+        "worker-identity kebab route": 'fetch("/api/v1/worker-identity/registrations");',
+        "credential resolution": "const c = await resolveCredential(ref);",
+        "credential resolution (qualified)": "const c = await resolveProviderCredential(ref);",
+        "secret reveal": "const s = revealSecret(ref);",
+        "secret material construction": "const m = buildSecretMaterial(bytes);",
+        "credential payload type": "type X = { m: CredentialPayload };",
+        "password input field": '<input type="password" name="secret" />',
+        "password input (jsx expression)": '<input type={"password"} />',
+        "password input (ternary show/hide)": '<CyberInput type={masked ? "password" : "text"} />',
+        "password input (htmlType wrapper prop)": '<Field htmlType="password" />',
+        "secret input component": "<SecretInput value={v} onChange={f} />",
+    }
+    for label, sample in forbidden_samples.items():
+        assert _forbidden_frontend_hits(sample), f"guard failed to reject {label}: {sample!r}"
