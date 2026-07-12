@@ -38,6 +38,20 @@ export interface Template {
   created_at: string;
 }
 
+// Typed, server-owned publication provenance for a published v1alpha2 EnvironmentVersion
+// (ADR-016 PR C). Mirrors VersionPublicationProvenanceOut. Every value is server-owned; the
+// frontend never derives or supplies any of these (esp. publication_fingerprint).
+export interface VersionPublicationProvenance {
+  topology_document_id: string;
+  topology_revision_id: string;
+  topology_content_hash: string;
+  topology_validation_result_id: string;
+  topology_validation_result_hash: string;
+  base_environment_version_id: string | null;
+  publication_contract_version: string;
+  publication_fingerprint: string;
+}
+
 export interface Version {
   id: string;
   template_id: string;
@@ -46,6 +60,30 @@ export interface Version {
   content_hash: string;
   spec: Record<string, unknown>;
   created_at: string;
+  // null for legacy/manual v1alpha1; populated for versions published from an approved topology.
+  publication_provenance: VersionPublicationProvenance | null;
+}
+
+// The exact publication request body (ADR-016 PR C). Deliberately narrow: no idempotency key, no
+// caller publication fingerprint, no topology document content, no caller provenance, and no
+// plan/exercise/workflow/infrastructure fields. The server owns hashing, provenance, and the
+// idempotency fingerprint.
+export interface EnvironmentPublicationRequest {
+  template_id: string;
+  definition: Record<string, unknown>;
+  topology_document_id: string;
+  topology_revision_id: string;
+  expected_topology_content_hash: string;
+  validation_result_id: string;
+  base_environment_version_id: string | null;
+}
+
+// Status-aware publication outcome: `created` is derived ONLY from the HTTP status (201 vs 200),
+// never from response content or version_number.
+export interface EnvironmentPublicationClientResult {
+  version: Version;
+  created: boolean;
+  status: 200 | 201;
 }
 
 export interface Exercise {

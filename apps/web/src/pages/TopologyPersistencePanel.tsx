@@ -18,6 +18,7 @@ import {
   shortId,
 } from "../components/ui";
 import type { ClosedCodeCopy } from "../components/ui/closed-code-error";
+import { PUBLISH_ENTRY_NOTE } from "./environment-publication";
 import {
   DECISION_NOTE,
   SAVE_REVISION_NOTE,
@@ -74,6 +75,10 @@ export interface PersistencePanelProps {
   onLoadRevision: (revisionId: string) => void;
   onDiscardAndLoadLatest: () => void;
   viewingRevisionId: string | null;
+  /** ADR-016 PR D: contextual publication entry point. Eligibility is usability-only (the backend
+   *  is authoritative); the action only NAVIGATES to the publication workflow — it never publishes. */
+  publish?: ControlEligibility;
+  onPublish?: () => void;
 }
 
 function ControlButton({
@@ -124,6 +129,8 @@ export function TopologyPersistencePanel(props: PersistencePanelProps) {
     onLoadRevision,
     onDiscardAndLoadLatest,
     viewingRevisionId,
+    publish,
+    onPublish,
   } = props;
 
   const [changeNote, setChangeNote] = useState("");
@@ -332,6 +339,28 @@ export function TopologyPersistencePanel(props: PersistencePanelProps) {
           )}
         </CyberCard>
       </div>
+
+      {publish && (
+        <CyberCard heading="Publish environment version">
+          <p className="tw-note">{PUBLISH_ENTRY_NOTE}</p>
+          <div className="tw-persist-actions">
+            <CyberButton
+              variant="ok"
+              size="sm"
+              disabled={busy || !publish.eligible}
+              title={publish.eligible ? PUBLISH_ENTRY_NOTE : (publish.reason ?? PUBLISH_ENTRY_NOTE)}
+              onClick={() => onPublish?.()}
+            >
+              Publish version…
+            </CyberButton>
+          </div>
+          {!publish.eligible && publish.reason && (
+            <ul className="tw-reasons" aria-label="Why publishing is unavailable">
+              <li>{publish.reason}</li>
+            </ul>
+          )}
+        </CyberCard>
+      )}
 
       <CyberCard heading="Revision history">
         {revisions === null ? (

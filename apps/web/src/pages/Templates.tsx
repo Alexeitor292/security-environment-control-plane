@@ -1,10 +1,11 @@
 import "./environments.css";
 
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Template, Version } from "../api/types";
+import { libraryProvenanceView } from "./environment-publication";
 import { ProviderMeshBackground } from "../components/backgrounds";
 import { SECP_ICONS } from "../components/icons";
 import {
@@ -108,11 +109,62 @@ function DefinitionPreview({ version }: { version: Version }) {
   );
 }
 
-function VersionList({ template }: { template: Template }) {
+/** Typed publication provenance for the library — driven ONLY by Version.publication_provenance
+ *  from the API, never derived from spec. Legacy/manual v1alpha1 shows no provenance. */
+function VersionProvenanceCard({ version }: { version: Version }) {
+  const view = libraryProvenanceView(version);
+  const p = view.provenance;
+  return (
+    <CyberCard surface="well" heading="Publication provenance">
+      <p className="env-note">
+        <strong>{view.label}.</strong> {view.note}
+      </p>
+      {p ? (
+        <KeyValueList
+          items={[
+            { key: "Topology document", value: <HashChip value={p.topology_document_id} digits={12} /> },
+            { key: "Topology revision", value: <HashChip value={p.topology_revision_id} digits={12} /> },
+            { key: "Topology hash", value: <HashChip value={p.topology_content_hash} digits={14} /> },
+            { key: "Validation result", value: <HashChip value={p.topology_validation_result_id} digits={12} /> },
+            { key: "Validation result hash", value: <HashChip value={p.topology_validation_result_hash} digits={14} /> },
+            {
+              key: "Base version",
+              value: p.base_environment_version_id ? (
+                <HashChip value={p.base_environment_version_id} digits={12} />
+              ) : (
+                "none"
+              ),
+            },
+            { key: "Publication contract", value: p.publication_contract_version, mono: true },
+            { key: "Publication fingerprint", value: <HashChip value={p.publication_fingerprint} digits={14} /> },
+          ]}
+        />
+      ) : (
+        <p className="muted">No publication provenance — this version was not published from topology.</p>
+      )}
+    </CyberCard>
+  );
+}
+
+function VersionList({
+  template,
+  initialPreviewId,
+}: {
+  template: Template;
+  initialPreviewId?: string | null;
+}) {
   const navigate = useNavigate();
   const versions = useAsync(() => api.listVersions(template.id), [template.id]);
   const action = useAction({ codeText: ENVIRONMENTS_ERROR_TEXT });
   const [previewId, setPreviewId] = useState<string | null>(null);
+
+  // Deterministic ?version= deep-link: expand exactly that version if it exists in the data.
+  // Invalid values are ignored; selecting never triggers a mutation.
+  useEffect(() => {
+    if (initialPreviewId && versions.data?.some((v) => v.id === initialPreviewId)) {
+      setPreviewId(initialPreviewId);
+    }
+  }, [initialPreviewId, versions.data]);
 
   function startExercise(v: Version) {
     void action.run(async () => {
@@ -182,7 +234,12 @@ function VersionList({ template }: { template: Template }) {
         ))}
       </CyberTable>
       <div id="env-version-preview">
-        {preview && <DefinitionPreview version={preview} />}
+        {preview && (
+          <>
+            <VersionProvenanceCard version={preview} />
+            <DefinitionPreview version={preview} />
+          </>
+        )}
       </div>
     </>
   );
@@ -190,10 +247,22 @@ function VersionList({ template }: { template: Template }) {
 
 export function Templates() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const templateParam = searchParams.get("template");
+  const versionParam = searchParams.get("version");
   const templates = useAsync(() => api.listTemplates(), []);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const list = templates.data ?? null;
+
+  // Deterministic ?template= deep-link (e.g. from a successful publication): expand exactly that
+  // template if it exists. Invalid values are ignored; no server mutation occurs.
+  useEffect(() => {
+    if (templateParam && list?.some((t) => t.id === templateParam)) {
+      setExpanded((cur) => cur ?? templateParam);
+    }
+  }, [templateParam, list]);
+
   const selected = list?.find((t) => t.id === expanded) ?? null;
 
   return (
@@ -267,7 +336,11 @@ export function Templates() {
           <CyberCard heading={`${selected.display_name || selected.name} — immutable versions`}>
             {/* Keyed so switching templates remounts the list: no stale rows,
                 preview, or action error can carry across templates. */}
-            <VersionList key={selected.id} template={selected} />
+            <VersionList
+              key={selected.id}
+              template={selected}
+              initialPreviewId={selected.id === templateParam ? versionParam : null}
+            />
           </CyberCard>
         )}
       </div>

@@ -254,3 +254,22 @@
 .env-vbadge--not-run {
   border-style: dashed;
 }
+
+/* ADR-016 PR D — publication workflow */
+.env-confirm {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 14px 0;
+  max-width: 68ch;
+}
+.env-confirm input {
+  margin-top: 4px;
+  flex: 0 0 auto;
+}
+.env-links {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}

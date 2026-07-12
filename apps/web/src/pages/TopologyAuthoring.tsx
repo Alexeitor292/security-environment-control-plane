@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { ApiClientError, api } from "../api/client";
 import type {
@@ -12,6 +12,7 @@ import {
 } from "../api/topology-authoring-adapter";
 import { CyberButton, CyberCard, EmptyState, Skeleton, useAction } from "../components/ui";
 import { useAsync } from "../hooks";
+import { canOfferPublish, hasPublishPermission } from "./environment-publication";
 import { TopologyPersistencePanel } from "./TopologyPersistencePanel";
 import { TopologyWorkspace, type WorkspacePersistence } from "./TopologyWorkspace";
 import { draftFromTopology, type Draft } from "./topology-workspace";
@@ -44,6 +45,7 @@ function isNotFound(e: unknown): boolean {
  */
 export function TopologyAuthoring({ topo }: { topo: TeamTopology }) {
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   const documentId = params.get("doc");
 
   const me = useAsync(() => api.me(), []);
@@ -320,6 +322,17 @@ export function TopologyAuthoring({ topo }: { topo: TeamTopology }) {
     viewingHistorical,
   };
 
+  // Contextual publication entry point (ADR-016 PR D): offered only for the exact
+  // approved/current/passing/clean/non-historical posture; the action only NAVIGATES.
+  const publishEligibility = canOfferPublish({
+    document,
+    validation: validation.data ?? null,
+    hasPublishPermission: hasPublishPermission(me.data?.permissions),
+    dirty,
+    viewingHistorical,
+    busy: action.busy || createAction.busy,
+  });
+
   const persistence: WorkspacePersistence = {
     authoritativeDraft,
     revisionKey: `${documentId}:${baseRevision.id}`,
@@ -356,6 +369,8 @@ export function TopologyAuthoring({ topo }: { topo: TeamTopology }) {
         onLoadRevision={onLoadRevision}
         onDiscardAndLoadLatest={onDiscardAndLoadLatest}
         viewingRevisionId={viewingRevisionId}
+        publish={publishEligibility}
+        onPublish={() => documentId && navigate(`/environment-publication/${documentId}`)}
       />
     ),
   };
