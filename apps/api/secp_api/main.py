@@ -119,7 +119,13 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
-        description="SECP-001 Control Plane Foundation (simulated execution only).",
+        description=(
+            "Security Environment Control Platform control plane for governed environment "
+            "authoring, simulated execution, and controlled provider integration. The API "
+            "performs no privileged infrastructure actions; execution is dispatched to the "
+            "worker boundary. Real provisioning and live discovery remain sealed by default. "
+            "See docs/STATUS.md for the current-capability ledger."
+        ),
     )
 
     app.add_middleware(
@@ -150,7 +156,9 @@ def create_app() -> FastAPI:
     app.include_router(resolver_activation_router.router)
     app.include_router(worker_identity_router.router)
     # Internal worker-only admission route (SECP-B6 MB-1) — NOT under /api/v1; inert unless the
-    # deployment-local controlled-integration profile is enabled; reached only over internal mTLS.
+    # deployment-local controlled-integration profile is enabled. Worker admission uses CA-validated
+    # internal HTTPS for server identity and transport security, plus an Ed25519 signed-nonce
+    # proof-of-possession handshake for worker authentication — NOT X.509 client-certificate mTLS.
     app.include_router(worker_admission_router.router)
 
     @app.on_event("startup")

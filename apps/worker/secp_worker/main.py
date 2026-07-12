@@ -67,9 +67,12 @@ def _start_deployment_consumer(stop_event: threading.Event) -> threading.Thread:
 def _start_discovery_consumer(stop_event: threading.Event) -> threading.Thread:
     """Start the read-only target-discovery consumer loop in a daemon thread (worker process only).
 
-    SEALED composition in this PR: it claims queued discovery jobs and invokes the READ-ONLY engine,
-    but contacts nothing (the sealed probe source refuses). Contacts no infrastructure; cannot
-    mutate.
+    DEFAULT-SEALED: it claims queued discovery jobs and invokes the READ-ONLY engine via
+    ``build_discovery_composition()``, which contacts nothing unless the deployment-local,
+    worker-owned controlled-integration profile is enabled AND a valid mounted bundle, host-key
+    binding, approved worker identity, control-plane admission, and endpoint/authorization gates all
+    pass — only then can it perform strictly READ-ONLY host contact. It imports no mutation-capable
+    module and can never mutate.
     """
     from secp_worker.target_discovery.runtime import run_forever
 

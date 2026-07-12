@@ -2,10 +2,11 @@
 
 Claims a committed, queued :class:`DiscoveryJob` with a compare-and-swap + a lease (``claimed_at`` +
 a lease TTL for restart recovery), transitions it queued → claimed → running → terminal, and invokes
-the READ-ONLY discovery engine with the SHIPPED SEALED composition — so the normal worker runtime is
-wired end to end but performs ZERO host contact (the sealed probe source refuses). A real read-only
-probe executor is supplied only out of band on the isolated worker after a bootstrap bundle is
-mounted. This module imports no mutation-capable code and contacts nothing.
+the READ-ONLY discovery engine. The composition defaults to ``build_discovery_composition()``,
+which is SEALED (zero host contact) unless the deployment-local, worker-owned controlled-integration
+profile is enabled AND the full gate chain validates (worker-local bundle, host-key binding,
+approved worker identity, control-plane admission, endpoint/authorization) before any read-only
+probe. This module imports no mutation-capable code and can never mutate.
 """
 
 from __future__ import annotations
