@@ -8,6 +8,8 @@ import type {
   BootstrapSession,
   BootstrapSessionCreate,
   DeploymentPlan,
+  EnvironmentPublicationClientResult,
+  EnvironmentPublicationRequest,
   ExecutionTarget,
   Exercise,
   Instance,
@@ -75,12 +77,20 @@ export function buildUrl(path: string, params?: Record<string, string>): string 
   return url.toString();
 }
 
-async function request<T>(
+export interface ResponseMetadata<T> {
+  data: T;
+  status: number;
+}
+
+// The single fetch/parse/error core. Preserves the closed-error parsing and network-failure
+// behavior; additionally exposes the HTTP status so callers that need truthful status semantics
+// (e.g. publication's 201-created vs 200-idempotent-replay) can read it without inspecting content.
+async function requestWithResponseMetadata<T>(
   method: string,
   path: string,
   body?: unknown,
   params?: Record<string, string>,
-): Promise<T> {
+): Promise<ResponseMetadata<T>> {
   let res: Response;
   try {
     res = await fetch(buildUrl(path, params), {
@@ -116,7 +126,17 @@ async function request<T>(
       err.details,
     );
   }
-  return payload as T;
+  return { data: payload as T, status: res.status };
+}
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  params?: Record<string, string>,
+): Promise<T> {
+  const { data } = await requestWithResponseMetadata<T>(method, path, body, params);
+  return data;
 }
 
 export const api = {
@@ -136,6 +156,28 @@ export const api = {
       "/api/v1/definitions/validate",
       { definition },
     ),
+
+  // ADR-016 PR C — publish an approved topology revision into a new immutable EnvironmentVersion.
+  // `created` is derived ONLY from the HTTP status: 201 => a new version, 200 => an exact idempotent
+  // replay (same version). Any other successful status fails closed with a safe client code — the
+  // client never inspects the body or version_number to guess creation, and never sends an
+  // idempotency key or a caller publication fingerprint.
+  publishEnvironmentVersion: async (
+    body: EnvironmentPublicationRequest,
+  ): Promise<EnvironmentPublicationClientResult> => {
+    const { data, status } = await requestWithResponseMetadata<Version>(
+      "POST",
+      "/api/v1/environment-versions/publish",
+      body,
+    );
+    if (status === 201) return { version: data, created: true, status: 201 };
+    if (status === 200) return { version: data, created: false, status: 200 };
+    throw new ApiClientError(
+      status,
+      "environment_publication_unexpected_status",
+      "The publication API returned an unexpected status.",
+    );
+  },
 
   listExercises: () => request<Exercise[]>("GET", "/api/v1/exercises"),
   createExercise: (body: { template_id: string; version_id: string; name: string }) =>

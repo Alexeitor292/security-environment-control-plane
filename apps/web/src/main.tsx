@@ -7,6 +7,7 @@ import { Approvals } from "./pages/Approvals";
 import { AuditLog } from "./pages/AuditLog";
 import { Dashboard } from "./pages/Dashboard";
 import { DefinitionEditor } from "./pages/DefinitionEditor";
+import { EnvironmentPublication } from "./pages/EnvironmentPublication";
 import { ExerciseDetail } from "./pages/ExerciseDetail";
 import { Exercises } from "./pages/Exercises";
 import { Login } from "./pages/Login";
@@ -37,6 +38,9 @@ const router = createBrowserRouter([
       { index: true, element: <Dashboard /> },
       { path: "templates", element: <Templates /> },
       { path: "templates/new", element: <DefinitionEditor /> },
+      // ADR-016 PR D: contextual publication workflow. Entered from an approved topology document
+      // (only the document id is authoritative from the URL); no global nav item.
+      { path: "environment-publication/:documentId", element: <EnvironmentPublication /> },
       { path: "exercises", element: <Exercises /> },
       { path: "exercises/:exerciseId", element: <ExerciseDetail /> },
       { path: "exercises/:exerciseId/plan", element: <PlanApproval /> },
