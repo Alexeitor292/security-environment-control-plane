@@ -94,7 +94,9 @@ def seeded_version(pg_engine):
                 "id": ver_id,
                 "org": org_id,
                 "tmpl": tmpl_id,
-                "spec": '{"a": 1}',
+                # Coherent legacy v1alpha1 spec (the hardened BEFORE INSERT trigger requires
+                # spec.apiVersion == api_version); no publication columns are set.
+                "spec": '{"apiVersion": "controlplane.security/v1alpha1"}',
                 "hash": "sha256:abc",
                 "ts": _now(),
             },
@@ -157,20 +159,29 @@ def test_audit_event_delete_blocked_at_db(pg_engine, seeded_version):
     )
 
 
-def test_version_nonprotected_update_allowed(pg_engine, seeded_version):
-    # The trigger must be precise: updating a NON-protected column is permitted,
-    # proving it does not simply block every update.
-    new_creator = uuid.uuid4()
+def test_version_created_by_now_immutable_at_db(pg_engine, seeded_version):
+    # SECP-B10 / ADR-016: created_by is now a protected binding — raw UPDATE must fail.
+    _expect_immutable_error(
+        pg_engine,
+        "UPDATE environment_version SET created_by = :c WHERE id = :id",
+        {"c": uuid.uuid4(), "id": seeded_version["version_id"]},
+    )
+
+
+def test_version_created_at_still_updatable_at_db(pg_engine, seeded_version):
+    # The trigger must stay precise (not a blanket block): created_at is not a protected
+    # binding, so it remains updatable and no timestamp policy changed.
+    new_ts = _now()
     with pg_engine.begin() as conn:
         conn.execute(
-            text("UPDATE environment_version SET created_by = :c WHERE id = :id"),
-            {"c": new_creator, "id": seeded_version["version_id"]},
+            text("UPDATE environment_version SET created_at = :t WHERE id = :id"),
+            {"t": new_ts, "id": seeded_version["version_id"]},
         )
-        row = conn.execute(
-            text("SELECT created_by FROM environment_version WHERE id = :id"),
+        got = conn.execute(
+            text("SELECT created_at FROM environment_version WHERE id = :id"),
             {"id": seeded_version["version_id"]},
         ).scalar_one()
-    assert str(row) == str(new_creator)
+    assert got is not None
 
 
 def test_migration_created_expected_tables(pg_engine):

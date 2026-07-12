@@ -341,6 +341,27 @@ def content_hash(document: dict[str, Any]) -> str:
     return f"sha256:{digest}"
 
 
+def topology_validation_result_hash(
+    content_hash: str, status: str, findings: list[dict[str, Any]]
+) -> str:
+    """Authoritative hash of a topology validation result (SECP-B9; SECP-B10 / ADR-016 PR B).
+
+    The single source of truth for the immutable ``TopologyValidationResult.result_hash``:
+    ``"sha256:"`` + SHA-256 over the ADR-002 canonical JSON of
+    ``{"content_hash", "status", "findings"}``, where ``status`` is the string value
+    (e.g. ``"valid"`` / ``"valid_with_warnings"`` / ``"invalid"``) and ``findings`` is the
+    list-of-dicts form. The authoring service records it; publication independently re-verifies
+    it. Do not fork this algorithm.
+    """
+    payload = json.dumps(
+        {"content_hash": content_hash, "status": status, "findings": findings},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 # --------------------------------------------------------------- findings
 
 
