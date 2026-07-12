@@ -695,6 +695,9 @@ class AuditAction(str, Enum):
     template_created = "template.created"
     version_created = "version.created"
     version_mutation_rejected = "version.mutation_rejected"
+    # SECP-B10 / ADR-016 PR C: explicit EnvironmentVersion publication (success + durable refusal).
+    version_published = "version.published"
+    version_publish_refused = "version.publish_refused"
     exercise_created = "exercise.created"
     exercise_validated = "exercise.validated"
     plan_generated = "plan.generated"
@@ -1246,3 +1249,6 @@ class EnvironmentPublicationErrorCode(str, Enum):
     )
     version_publish_template_mismatch = "version_publish_template_mismatch"
     version_publish_conflict = "version_publish_conflict"
+    # PR C: durable refusal auditing itself failed — the route returns this closed code as HTTP 500
+    # and persists no version. The audit/database exception is never exposed.
+    version_publish_audit_failure = "version_publish_audit_failure"
