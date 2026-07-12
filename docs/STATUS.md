@@ -3,6 +3,7 @@
 **Status of this document:** point-in-time implementation snapshot (descriptive).
 **Governing document:** [`docs/PROJECT_CHARTER.md`](PROJECT_CHARTER.md).
 **Design lock:** authoring convergence — publishing an approved topology revision into a canonical immutable EnvironmentVersion — is design-locked (not implemented) by [`ADR-016`](adr/ADR-016-authoring-convergence-environment-version-publication.md).
+**Publication contract (PR A):** the `controlplane.security/v1alpha2` publication composition, canonical-topology reconstruction, whole-definition environment hash, and server-derived publication fingerprint are now **contract-complete** as a pure, database-free contract. Publication **persistence, API route, permission, audit, and UI are not implemented**; approval still does not publish; and this contract enables **no** plan generation, EnvironmentVersion creation, or infrastructure execution. `v1alpha1` is unchanged.
 
 [`docs/PROJECT_CHARTER.md`](PROJECT_CHARTER.md) remains the authoritative product and
 architecture charter — the mission, the domain model, the architectural invariants (§6),
