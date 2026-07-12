@@ -155,19 +155,54 @@ class EnvironmentPublicationError(DomainError):
 
     The publication service maps every failure (including pure ``PublicationContractError`` codes)
     onto a closed :class:`~secp_api.enums.EnvironmentPublicationErrorCode`; no backend exception
-    text, IntegrityError, ValidationError, or SchemaValidationError escapes. Per-code HTTP status
-    mapping and refusal auditing are added by PR C (the route); this slice carries only the code.
+    text, IntegrityError, ValidationError, or SchemaValidationError escapes. PR C adds the complete
+    closed per-code HTTP status map below — every enum member is mapped deliberately; an unknown
+    code fails closed to 500 rather than leaking through a generic default.
     """
 
     redacted = True
-    # Generic status; the per-code HTTP mapping is deferred to PR C (there is no route yet).
-    http_status = 409
+
+    # Complete, explicit EnvironmentPublicationErrorCode -> HTTP status map (ADR-016 PR C). Keep in
+    # sync with the enum; a boundary test asserts every member is present.
+    _STATUS = {
+        # 403 Forbidden — authorization / cross-org
+        "version_publish_permission_denied": 403,
+        "version_publish_cross_org_forbidden": 403,
+        "version_publish_base_version_cross_org_forbidden": 403,
+        # 404 Not Found — a referenced object does not exist for this actor
+        "version_publish_template_not_found": 404,
+        "version_publish_topology_not_found": 404,
+        "version_publish_validation_missing": 404,
+        "version_publish_base_version_not_found": 404,
+        # 409 Conflict — state/precondition/idempotency conflicts
+        "version_publish_topology_not_approved": 409,
+        "version_publish_topology_hash_mismatch": 409,
+        "version_publish_validation_not_passing": 409,
+        "version_publish_validation_stale": 409,
+        "version_publish_base_version_required": 409,
+        "version_publish_base_version_mismatch": 409,
+        "version_publish_template_mismatch": 409,
+        "version_publish_conflict": 409,
+        # 422 Unprocessable Entity — malformed/forbidden caller content in the definition
+        "version_publish_definition_invalid": 422,
+        "version_publish_topology_in_payload_forbidden": 422,
+        "version_publish_provenance_in_payload_forbidden": 422,
+        "version_publish_topology_invalid": 422,
+        "version_publish_provenance_invalid": 422,
+        "version_publish_role_topology_mismatch": 422,
+        "version_publish_network_topology_mismatch": 422,
+        "version_publish_unsupported_role_kind": 422,
+        # 500 Internal — durable refusal auditing itself failed (no version persisted)
+        "version_publish_audit_failure": 500,
+    }
 
     def __init__(self, code: object) -> None:
         code_value = getattr(code, "value", str(code))
         # The internal message equals the code; it is never serialized (redacted).
         super().__init__(code_value)
         self.code = code_value
+        # Fail closed: an unmapped code becomes 500 rather than leaking through a generic default.
+        self.http_status = self._STATUS.get(code_value, 500)
 
 
 class NotFoundError(DomainError):

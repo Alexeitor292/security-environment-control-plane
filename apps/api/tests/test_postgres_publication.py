@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import secp_api.immutability  # noqa: F401  (registers ORM immutability guards)
 from secp_api.enums import TopologyRevisionStatus
+from secp_api.models import EnvironmentVersion
 from secp_api.seed import bootstrap_dev
 from secp_api.services import catalog
 from secp_api.services import environment_publication as pub
@@ -565,3 +566,72 @@ def test_downgrade_restores_prior_trigger_then_reupgrades_on_postgres():
         else:
             os.environ["SECP_DATABASE_URL"] = previous
         get_settings.cache_clear()
+
+
+def test_success_audit_atomicity_rolls_back_version_on_postgres(pg):
+    """ADR-016 PR C atomicity on a REAL transactional DB: the publication service flushes the new
+    version inside its savepoint; if the route's success audit then fails, rolling back the request
+    transaction must leave NO version persisted (no version without its success audit). SQLite's
+    savepoint-release semantics differ, so this invariant is authoritative only on PostgreSQL."""
+    engine, SessionLocal, principal = pg
+    setup = SessionLocal()
+    template = catalog.create_template(
+        setup, principal, name="T", slug=f"atom-{uuid.uuid4().hex[:8]}"
+    )
+    doc_id, rev_id, ch, val_id = _approve(setup, principal)
+    tid = template.id
+    setup.commit()
+    setup.close()
+
+    req = SessionLocal()
+    result = pub.publish_version_with_result(
+        req,
+        principal,
+        template_id=tid,
+        definition=base_definition(),
+        topology_document_id=doc_id,
+        topology_revision_id=rev_id,
+        expected_topology_content_hash=ch,
+        validation_result_id=val_id,
+        base_environment_version_id=None,
+    )
+    assert result.created is True
+    # the route rolls back the request transaction when the success audit fails
+    req.rollback()
+    req.close()
+
+    check = SessionLocal()
+    count = check.query(EnvironmentVersion).filter_by(template_id=tid).count()
+    check.close()
+    assert count == 0
+
+
+def test_idempotent_replay_reports_not_created_on_postgres(pg):
+    """publish_version_with_result reports created=False for an exact replay (same row) and
+    created=True for the first insert — the signal the API uses for truthful 201-vs-200."""
+    engine, SessionLocal, principal = pg
+    session = SessionLocal()
+    template = catalog.create_template(
+        session, principal, name="T", slug=f"idem-{uuid.uuid4().hex[:8]}"
+    )
+    doc_id, rev_id, ch, val_id = _approve(session, principal)
+    tid = template.id
+    session.commit()
+
+    kwargs = dict(
+        template_id=tid,
+        definition=base_definition(),
+        topology_document_id=doc_id,
+        topology_revision_id=rev_id,
+        expected_topology_content_hash=ch,
+        validation_result_id=val_id,
+        base_environment_version_id=None,
+    )
+    first = pub.publish_version_with_result(session, principal, **kwargs)
+    session.commit()
+    assert first.created is True
+    second = pub.publish_version_with_result(session, principal, **kwargs)
+    session.commit()
+    assert second.created is False
+    assert second.version.id == first.version.id
+    session.close()

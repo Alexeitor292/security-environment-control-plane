@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from secp_api.models import EnvironmentVersion
 
 
 class ORMModel(BaseModel):
@@ -50,6 +54,22 @@ class TemplateOut(ORMModel):
     created_at: datetime
 
 
+class VersionPublicationProvenanceOut(BaseModel):
+    """Typed, server-owned publication provenance for a published v1alpha2 EnvironmentVersion
+    (ADR-016 PR C). Populated ONLY from the immutable mirrored database columns; every value
+    equals the embedded ``spec.publicationProvenance`` (the DB enforces that coherence), and
+    ``publication_fingerprint`` is the server-derived column — never client-supplied."""
+
+    topology_document_id: uuid.UUID
+    topology_revision_id: uuid.UUID
+    topology_content_hash: str
+    topology_validation_result_id: uuid.UUID
+    topology_validation_result_hash: str
+    base_environment_version_id: uuid.UUID | None
+    publication_contract_version: str
+    publication_fingerprint: str
+
+
 class VersionOut(ORMModel):
     id: uuid.UUID
     template_id: uuid.UUID
@@ -58,6 +78,40 @@ class VersionOut(ORMModel):
     content_hash: str
     spec: dict
     created_at: datetime
+    # None for legacy/manual v1alpha1 rows; typed provenance for published v1alpha2 rows.
+    publication_provenance: VersionPublicationProvenanceOut | None = None
+
+    @classmethod
+    def from_version(cls, version: EnvironmentVersion) -> VersionOut:
+        """Centralized EnvironmentVersion -> VersionOut serializer.
+
+        A published v1alpha2 row (``publication_fingerprint`` set) carries typed provenance built
+        from its immutable mirrored columns; a legacy v1alpha1 row carries ``publication_provenance
+        = None``. A v1alpha2 row missing any mirrored column is impossible (the DB rejects
+        incoherent rows) and fails closed here via the required-field validation.
+        """
+        provenance = None
+        if version.publication_fingerprint is not None:
+            provenance = VersionPublicationProvenanceOut(
+                topology_document_id=version.source_topology_document_id,
+                topology_revision_id=version.source_topology_revision_id,
+                topology_content_hash=version.topology_content_hash,
+                topology_validation_result_id=version.topology_validation_result_id,
+                topology_validation_result_hash=version.topology_validation_result_hash,
+                base_environment_version_id=version.base_environment_version_id,
+                publication_contract_version=version.publication_contract_version,
+                publication_fingerprint=version.publication_fingerprint,
+            )
+        return cls(
+            id=version.id,
+            template_id=version.template_id,
+            version_number=version.version_number,
+            api_version=version.api_version,
+            content_hash=version.content_hash,
+            spec=version.spec,
+            created_at=version.created_at,
+            publication_provenance=provenance,
+        )
 
 
 class ExerciseOut(ORMModel):

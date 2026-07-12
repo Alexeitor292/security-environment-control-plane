@@ -18,6 +18,7 @@ exception text escapes the service boundary.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from secp_scenario_schema.v1alpha2.models import (
@@ -51,6 +52,20 @@ _Row = TypeVar("_Row")
 _PASSING = frozenset(
     {TopologyValidationStatus.valid.value, TopologyValidationStatus.valid_with_warnings.value}
 )
+
+
+@dataclass(frozen=True)
+class EnvironmentPublicationResult:
+    """Outcome of a publication attempt (ADR-016 PR C).
+
+    ``created`` distinguishes a NEW inserted EnvironmentVersion (True) from an exact idempotent
+    replay that returned the already-published row (False), so the API can use a truthful
+    201-vs-200 status and avoid a duplicate mutation audit. The publication algorithm — hashing,
+    locking, preconditions, idempotency, and IntegrityError retry — is unchanged.
+    """
+
+    version: EnvironmentVersion
+    created: bool
 
 
 def _val(x: Any) -> Any:
@@ -176,7 +191,7 @@ def _rows_agree(existing: EnvironmentVersion, columns: dict[str, Any]) -> bool:
     return all(getattr(existing, name) == value for name, value in columns.items())
 
 
-def publish_version(
+def publish_version_with_result(
     session: Session,
     actor: Principal,
     *,
@@ -187,10 +202,11 @@ def publish_version(
     expected_topology_content_hash: str,
     validation_result_id: uuid.UUID,
     base_environment_version_id: uuid.UUID | None,
-) -> EnvironmentVersion:
+) -> EnvironmentPublicationResult:
     """Publish an approved topology revision + full definition into a new immutable
-    v1alpha2 EnvironmentVersion. Idempotent on the exact same inputs; fail-closed otherwise.
-    Runs inside the caller's transaction and only flushes (never commits)."""
+    v1alpha2 EnvironmentVersion, returning the version AND whether it was newly created.
+    Idempotent on the exact same inputs; fail-closed otherwise. Runs inside the caller's
+    transaction and only flushes (never commits)."""
     # 1. permission — required by the service itself, not a future router.
     if not actor.has(Permission.version_publish):
         raise _refuse(EC.version_publish_permission_denied)
@@ -288,7 +304,7 @@ def publish_version(
     existing = _find_published(session, template_id, composed.publication_fingerprint)
     if existing is not None:
         if _rows_agree(existing, columns):
-            return existing
+            return EnvironmentPublicationResult(version=existing, created=False)
         raise _refuse(EC.version_publish_conflict)
 
     # 15/16. allocate + insert under the template lock; the savepoint keeps a uniqueness race
@@ -306,6 +322,36 @@ def publish_version(
         session.expire_all()
         existing = _find_published(session, template_id, composed.publication_fingerprint)
         if existing is not None and _rows_agree(existing, columns):
-            return existing
+            return EnvironmentPublicationResult(version=existing, created=False)
         raise _refuse(EC.version_publish_conflict) from None
-    return version
+    return EnvironmentPublicationResult(version=version, created=True)
+
+
+def publish_version(
+    session: Session,
+    actor: Principal,
+    *,
+    template_id: uuid.UUID,
+    definition: dict[str, Any],
+    topology_document_id: uuid.UUID,
+    topology_revision_id: uuid.UUID,
+    expected_topology_content_hash: str,
+    validation_result_id: uuid.UUID,
+    base_environment_version_id: uuid.UUID | None,
+) -> EnvironmentVersion:
+    """Backward-compatible wrapper returning only the EnvironmentVersion (unchanged behavior).
+
+    Delegates to :func:`publish_version_with_result`; the publication implementation is not
+    duplicated and no hashing/locking/precondition/retry behavior changes.
+    """
+    return publish_version_with_result(
+        session,
+        actor,
+        template_id=template_id,
+        definition=definition,
+        topology_document_id=topology_document_id,
+        topology_revision_id=topology_revision_id,
+        expected_topology_content_hash=expected_topology_content_hash,
+        validation_result_id=validation_result_id,
+        base_environment_version_id=base_environment_version_id,
+    ).version

@@ -30,6 +30,7 @@ from secp_api.routers import (
     providers,
     system,
 )
+from secp_api.routers import environment_publication as environment_publication_router
 from secp_api.routers import onboarding as onboarding_router
 from secp_api.routers import provisioning as provisioning_router
 from secp_api.routers import readonly_preflight as readonly_preflight_router
@@ -55,6 +56,9 @@ _REDACTED_VALIDATION_ROUTES: tuple[tuple[str, str], ...] = (
     ("/api/v1/readonly-preflight", "invalid_readonly_preflight_input"),
     ("/api/v1/resolver-activation", "invalid_resolver_activation_input"),
     ("/api/v1/worker-identity", "invalid_worker_identity_input"),
+    # PR C: the publication route is the only /api/v1/environment-versions endpoint; a malformed
+    # request (bad UUID/hash, unknown/missing field, caller idempotency key) returns only this code.
+    ("/api/v1/environment-versions/publish", "invalid_environment_publication_input"),
 )
 
 
@@ -140,6 +144,7 @@ def create_app() -> FastAPI:
 
     app.include_router(system.router)
     app.include_router(catalog.router)
+    app.include_router(environment_publication_router.router)
     app.include_router(exercises.router)
     app.include_router(plans.router)
     app.include_router(observability.router)

@@ -54,7 +54,7 @@ def list_versions(
     principal: Principal = Depends(current_principal),
 ) -> list[VersionOut]:
     return [
-        VersionOut.model_validate(v) for v in catalog.list_versions(session, principal, template_id)
+        VersionOut.from_version(v) for v in catalog.list_versions(session, principal, template_id)
     ]
 
 
@@ -68,7 +68,7 @@ def create_version(
     version = catalog.create_version(
         session, principal, template_id=template_id, definition=body.definition
     )
-    return VersionOut.model_validate(version)
+    return VersionOut.from_version(version)
 
 
 @router.post("/definitions/validate", response_model=ValidationOut)
