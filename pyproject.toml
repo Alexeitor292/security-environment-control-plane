@@ -53,6 +53,7 @@ packages = [
 
 [tool.hatch.build.targets.wheel.force-include]
 "contracts/scenario-schema/secp_scenario_schema/v1alpha1/schema.json" = "secp_scenario_schema/v1alpha1/schema.json"
+"contracts/scenario-schema/secp_scenario_schema/v1alpha2/schema.json" = "secp_scenario_schema/v1alpha2/schema.json"
 
 [tool.uv]
 package = true
