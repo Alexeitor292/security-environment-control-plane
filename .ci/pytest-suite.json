@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "description": "Canonical pytest corpus for CI (SECP test-pipeline acceleration). The complete required backend test corpus, divided into balanced parallel shards. Every Git-tracked pytest-discoverable file under `roots` is assigned to exactly one shard; a new managed test file is auto-included, and a new pytest-shaped file outside `roots` fails the inventory closed unless it is listed in `exclusions`.",
+  "shard_count": 4,
+  "test_globs": ["test_*.py", "*_test.py"],
+  "roots": [
+    "apps/api/tests",
+    "tests",
+    "contracts/scenario-schema/tests"
+  ],
+  "exclusions": [
+    {
+      "path": "apps/worker/secp_worker/preflight/self_test.py",
+      "reason": "Runtime worker preflight-wiring self-test MODULE (SECP-B2-4.2), not a pytest suite. It matches the `*_test.py` glob but lives in the `secp_worker` source package (not a test root), contains no `test_*` functions or `Test*` classes, performs no I/O, and is imported as a normal module by apps/api/tests/test_readonly_preflight_activation.py (which exercises it as a unit under test). Collecting it as tests would collect zero nodes and misrepresent it as a suite."
+    }
+  ],
+  "timings_path": ".ci/pytest-timings.json",
+  "notes": [
+    "roots is the authoritative corpus. It intentionally ADDS contracts/scenario-schema/tests, which the pre-acceleration workflow (`pytest apps/api/tests tests`) omitted — a coverage correction, not a scope expansion.",
+    "No pytest suites exist under apps/worker, contracts/plugin-api, plugins, or other packages (verified against the Git-tracked file inventory).",
+    "Sharding is by FILE: every node in a file runs in the same shard, so the node-level union of shards equals the canonical collection with empty pairwise intersection.",
+    "PostgreSQL-gated, migration, immutability, concurrency, boundary, schema, and security tests are all inside roots and are never excluded; each shard runs against its own real PostgreSQL service."
+  ]
+}
