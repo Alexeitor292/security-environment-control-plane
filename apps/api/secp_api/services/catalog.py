@@ -114,6 +114,12 @@ def create_version(
     Validates against the versioned schema, computes a content hash, and assigns
     the next per-template version number (ADR-002). The row is immutable once
     created (enforced in :mod:`secp_api.immutability`).
+
+    This is the direct/manual path and creates ONLY ``controlplane.security/v1alpha1``
+    versions. ``v1alpha2`` EnvironmentVersions (carrying ``spec.topology`` +
+    ``spec.publicationProvenance``) are created EXCLUSIVELY by the publication service
+    (SECP-B10 / ADR-016), never here — so a caller cannot persist a self-authored
+    publication envelope that skips the publication preconditions.
     """
     actor.require(Permission.version_create)
     template = get_template(session, actor, template_id)
@@ -124,6 +130,16 @@ def create_version(
         raise ValidationFailedError(
             "environment definition failed schema validation", errors=exc.errors
         ) from exc
+
+    # SECP-B10 / ADR-016 bypass closure. Generic v1alpha2 schema validation (and the
+    # non-persisting /definitions/validate endpoint) remain available; only DIRECT
+    # persistence of a v1alpha2 version is refused here.
+    if validated.apiVersion != "controlplane.security/v1alpha1":
+        raise ValidationFailedError(
+            "environment versions may only be created directly for "
+            "controlplane.security/v1alpha1; v1alpha2 versions are created only by the "
+            "publication service"
+        )
 
     next_number = (
         session.execute(

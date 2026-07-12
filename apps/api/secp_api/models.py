@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -193,16 +194,63 @@ class EnvironmentTemplate(Base, TimestampMixin):
     )
 
 
+# Coherent publication binding (SECP-B10 / ADR-016). Exactly two states are legal, keyed on
+# api_version so an unpublished v1alpha2 row (all publication columns NULL) is impossible: a
+# legacy/manual row is api_version=controlplane.security/v1alpha1 with EVERY publication column
+# NULL (incl. base_environment_version_id); a published row is api_version=v1alpha2 with all
+# required publication columns non-null and publication_contract_version=secp.publication/v1
+# (base_environment_version_id stays nullable by policy). No other apiVersion/persistence state
+# is legal in the current schema. Portable SQL (SQLite + PostgreSQL). Kept byte-identical to the
+# migration's copy.
+_PUBLICATION_COHERENCE_CHECK = (
+    "(api_version = 'controlplane.security/v1alpha1'"
+    " AND source_topology_document_id IS NULL"
+    " AND source_topology_revision_id IS NULL"
+    " AND topology_content_hash IS NULL"
+    " AND topology_validation_result_id IS NULL"
+    " AND topology_validation_result_hash IS NULL"
+    " AND base_environment_version_id IS NULL"
+    " AND publication_contract_version IS NULL"
+    " AND publication_fingerprint IS NULL)"
+    " OR (api_version = 'controlplane.security/v1alpha2'"
+    " AND source_topology_document_id IS NOT NULL"
+    " AND source_topology_revision_id IS NOT NULL"
+    " AND topology_content_hash IS NOT NULL"
+    " AND topology_validation_result_id IS NOT NULL"
+    " AND topology_validation_result_hash IS NOT NULL"
+    " AND publication_contract_version = 'secp.publication/v1'"
+    " AND publication_fingerprint IS NOT NULL)"
+)
+
+
 class EnvironmentVersion(Base, TimestampMixin):
     """Immutable snapshot of a template's declarative spec (Charter Invariant 2).
 
-    Protected columns (``spec``, ``content_hash``, ``version_number``,
-    ``api_version``) must never change after creation. See
-    :mod:`secp_api.immutability`.
+    Protected columns — ``organization_id``, ``template_id``, ``version_number``,
+    ``api_version``, ``spec``, ``content_hash``, ``created_by``, and every publication
+    binding column — must never change after creation. See :mod:`secp_api.immutability`
+    (the Postgres trigger additionally guards the binding columns against raw SQL).
+
+    Legacy/manual v1alpha1 rows keep every publication column NULL. A published row
+    (SECP-B10 / ADR-016) is a controlplane.security/v1alpha2 EnvironmentVersion with all
+    required publication columns non-null; the coherent-publication check enforces the
+    all-or-none binding. Published rows are created ONLY by the publication service.
     """
 
     __tablename__ = "environment_version"
-    __table_args__ = (UniqueConstraint("template_id", "version_number"),)
+    __table_args__ = (
+        UniqueConstraint("template_id", "version_number"),
+        # Server-derived publication fingerprint uniqueness = idempotency (ADR-016 §D7).
+        UniqueConstraint(
+            "template_id",
+            "publication_fingerprint",
+            name="uq_environment_version_publication_fingerprint",
+        ),
+        CheckConstraint(
+            _PUBLICATION_COHERENCE_CHECK,
+            name="ck_environment_version_publication_coherent",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -216,6 +264,25 @@ class EnvironmentVersion(Base, TimestampMixin):
     spec: Mapped[dict] = mapped_column(JSON, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # --- Publication binding (SECP-B10 / ADR-016). NULL on legacy/manual v1alpha1 rows;
+    #     all-or-none per ck_environment_version_publication_coherent. Immutable. ---
+    source_topology_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("topology_authoring_document.id"), nullable=True, index=True
+    )
+    source_topology_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("topology_revision.id"), nullable=True, index=True
+    )
+    topology_content_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    topology_validation_result_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("topology_validation_result.id"), nullable=True, index=True
+    )
+    topology_validation_result_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    base_environment_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("environment_version.id"), nullable=True, index=True
+    )
+    publication_contract_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Indexed through uq_environment_version_publication_fingerprint (composite with template_id).
+    publication_fingerprint: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     template: Mapped[EnvironmentTemplate] = relationship(back_populates="versions")
 

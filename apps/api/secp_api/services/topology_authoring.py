@@ -17,8 +17,6 @@ separate, later milestone (Option B in the PR-14 brief).
 
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -47,6 +45,7 @@ from secp_api.topology_authoring_contract import (
     content_hash,
     derive_findings,
     reason_is_secret_shaped,
+    topology_validation_result_hash,
     validate_document,
 )
 from secp_api.topology_authoring_models import (
@@ -610,13 +609,9 @@ def validate_revision(
 
 
 def _result_hash(chash: str, status: TopologyValidationStatus, findings: list[dict]) -> str:
-    payload = json.dumps(
-        {"content_hash": chash, "status": status.value, "findings": findings},
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    # Single-sourced: the authoritative algorithm lives in the pure contract layer so
+    # publication (SECP-B10) re-verifies exactly what authoring recorded (byte-for-byte).
+    return topology_validation_result_hash(chash, status.value, findings)
 
 
 # ------------------------------------------------------------------ submit

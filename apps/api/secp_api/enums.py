@@ -454,6 +454,11 @@ class Permission(str, Enum):
     topology_validate = "topology:validate"
     topology_submit = "topology:submit"
     topology_decide = "topology:decide"
+    # SECP-B10 / ADR-016 — publish an approved topology revision + full definition into a
+    # canonical immutable EnvironmentVersion. DELIBERATELY SEPARATE from version:create,
+    # topology:decide, and plan:generate — none of those imply it. It creates a control-plane
+    # record only: no exercise, plan, workflow, or infrastructure execution.
+    version_publish = "version:publish"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -1207,3 +1212,37 @@ class TopologyAuthoringErrorCode(str, Enum):
     topology_invalid_relationship = "topology_invalid_relationship"
     topology_cross_org_forbidden = "topology_cross_org_forbidden"
     topology_source_not_found = "topology_source_not_found"
+
+
+class EnvironmentPublicationErrorCode(str, Enum):
+    """Closed, message-redacted error codes for EnvironmentVersion publication (SECP-B10 /
+    ADR-016). Backend exception text never reaches a caller; only these codes do. The pure
+    ``PublicationContractError`` codes map 1:1 onto this catalog. HTTP status mapping is PR C."""
+
+    version_publish_permission_denied = "version_publish_permission_denied"
+    version_publish_cross_org_forbidden = "version_publish_cross_org_forbidden"
+    version_publish_template_not_found = "version_publish_template_not_found"
+    version_publish_topology_not_found = "version_publish_topology_not_found"
+    version_publish_topology_not_approved = "version_publish_topology_not_approved"
+    version_publish_topology_hash_mismatch = "version_publish_topology_hash_mismatch"
+    version_publish_topology_invalid = "version_publish_topology_invalid"
+    version_publish_validation_missing = "version_publish_validation_missing"
+    version_publish_validation_not_passing = "version_publish_validation_not_passing"
+    version_publish_validation_stale = "version_publish_validation_stale"
+    version_publish_definition_invalid = "version_publish_definition_invalid"
+    version_publish_topology_in_payload_forbidden = "version_publish_topology_in_payload_forbidden"
+    version_publish_provenance_in_payload_forbidden = (
+        "version_publish_provenance_in_payload_forbidden"
+    )
+    version_publish_provenance_invalid = "version_publish_provenance_invalid"
+    version_publish_role_topology_mismatch = "version_publish_role_topology_mismatch"
+    version_publish_network_topology_mismatch = "version_publish_network_topology_mismatch"
+    version_publish_unsupported_role_kind = "version_publish_unsupported_role_kind"
+    version_publish_base_version_required = "version_publish_base_version_required"
+    version_publish_base_version_not_found = "version_publish_base_version_not_found"
+    version_publish_base_version_mismatch = "version_publish_base_version_mismatch"
+    version_publish_base_version_cross_org_forbidden = (
+        "version_publish_base_version_cross_org_forbidden"
+    )
+    version_publish_template_mismatch = "version_publish_template_mismatch"
+    version_publish_conflict = "version_publish_conflict"

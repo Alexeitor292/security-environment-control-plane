@@ -70,7 +70,17 @@ def engine(tmp_path):
     eng = reset_engine_for_tests(url)
     Base.metadata.create_all(eng)
     yield eng
-    Base.metadata.drop_all(eng)
+    # ``environment_version`` and ``topology_authoring_document`` reference each other
+    # (ADR-016: a version can cite its source topology document, and a topology document
+    # can cite its source version), so metadata forms an FK cycle that ``drop_all`` cannot
+    # topologically sort. Disable SQLite FK enforcement on the raw DBAPI connection (so the
+    # PRAGMA runs outside any transaction and is not a no-op) and drop on that same
+    # connection. Production ordering is handled explicitly by Alembic migrations.
+    with eng.connect() as conn:
+        if conn.dialect.name == "sqlite":
+            conn.connection.dbapi_connection.execute("PRAGMA foreign_keys=OFF")
+        Base.metadata.drop_all(bind=conn)
+        conn.commit()
 
 
 @pytest.fixture

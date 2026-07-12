@@ -8,6 +8,10 @@ path for protected fields. Defense in depth.
 
 from __future__ import annotations
 
+from secp_scenario_schema.v1alpha2.models import API_VERSION as _V1ALPHA2
+from secp_scenario_schema.v1alpha2.models import (
+    PUBLICATION_CONTRACT_VERSION as _PUBLICATION_CONTRACT_VERSION,
+)
 from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
 
@@ -99,7 +103,111 @@ _TOPOLOGY_VALIDATION_PROTECTED = (
     "detail",
 )
 
-_VERSION_PROTECTED = ("spec", "content_hash", "version_number", "api_version")
+# EnvironmentVersion: identity, spec/hash, created_by, and every publication binding column are
+# immutable after creation (SECP-B10 / ADR-016). The migration-installed PostgreSQL trigger guards
+# the same set on UPDATE (created_by included); this ORM guard is the portable layer.
+_VERSION_PROTECTED = (
+    "organization_id",
+    "template_id",
+    "version_number",
+    "api_version",
+    "spec",
+    "content_hash",
+    "created_by",
+    "source_topology_document_id",
+    "source_topology_revision_id",
+    "topology_content_hash",
+    "topology_validation_result_id",
+    "topology_validation_result_hash",
+    "base_environment_version_id",
+    "publication_contract_version",
+    "publication_fingerprint",
+)
+_V1ALPHA1 = "controlplane.security/v1alpha1"
+# Required-non-null publication columns for a published v1alpha2 row (base stays nullable).
+_VERSION_PUBLICATION_REQUIRED = (
+    "source_topology_document_id",
+    "source_topology_revision_id",
+    "topology_content_hash",
+    "topology_validation_result_id",
+    "topology_validation_result_hash",
+    "publication_contract_version",
+    "publication_fingerprint",
+)
+_VERSION_PUBLICATION_COLUMNS = (*_VERSION_PUBLICATION_REQUIRED, "base_environment_version_id")
+# EnvironmentVersion column -> its mirrored spec.publicationProvenance key (server-owned
+# provenance; publication_fingerprint is intentionally NOT embedded in the spec).
+_VERSION_PROVENANCE_MIRROR = {
+    "source_topology_document_id": "topology_document_id",
+    "source_topology_revision_id": "topology_revision_id",
+    "topology_content_hash": "topology_content_hash",
+    "topology_validation_result_id": "topology_validation_result_id",
+    "topology_validation_result_hash": "topology_validation_result_hash",
+    "base_environment_version_id": "base_environment_version_id",
+    "publication_contract_version": "publication_contract_version",
+}
+
+
+def _mirror_str(value: object) -> str | None:
+    """Canonical string form for mirror comparison (UUID/str -> str; None -> None)."""
+    return None if value is None else str(value)
+
+
+def _guard_version_insert(obj: EnvironmentVersion) -> None:
+    """Insertion-coherence gate for a NEW EnvironmentVersion (SECP-B10 / ADR-016).
+
+    A caller must not persist a fabricated, partial, mismatched, or unpublished-v1alpha2 row
+    directly through the ORM (the publication service is the only legitimate v1alpha2 producer).
+    This mirrors the migration-installed PostgreSQL BEFORE INSERT trigger and rejects mismatches
+    with the repository's immutable-resource exception convention. It never repairs values.
+    """
+    spec = obj.spec
+    if not isinstance(spec, dict) or spec.get("apiVersion") != obj.api_version:
+        raise ImmutableResourceError("EnvironmentVersion spec.apiVersion must equal api_version")
+    if obj.api_version == _V1ALPHA1:
+        present = [c for c in _VERSION_PUBLICATION_COLUMNS if getattr(obj, c) is not None]
+        if present:
+            raise ImmutableResourceError(
+                f"v1alpha1 EnvironmentVersion must carry no publication columns; got {present}"
+            )
+        return
+    if obj.api_version != _V1ALPHA2:
+        raise ImmutableResourceError(
+            f"EnvironmentVersion has unsupported api_version {obj.api_version!r}"
+        )
+    missing = [c for c in _VERSION_PUBLICATION_REQUIRED if getattr(obj, c) is None]
+    if missing:
+        raise ImmutableResourceError(
+            f"published EnvironmentVersion requires publication columns {missing}"
+        )
+    if obj.publication_contract_version != _PUBLICATION_CONTRACT_VERSION:
+        raise ImmutableResourceError(
+            "EnvironmentVersion publication_contract_version must be "
+            f"{_PUBLICATION_CONTRACT_VERSION!r}"
+        )
+    fingerprint = obj.publication_fingerprint
+    if not isinstance(fingerprint, str) or not fingerprint.startswith("sha256:"):
+        raise ImmutableResourceError(
+            "EnvironmentVersion publication_fingerprint must be a sha256 digest"
+        )
+    inner = spec.get("spec")
+    provenance = inner.get("publicationProvenance") if isinstance(inner, dict) else None
+    if not isinstance(provenance, dict):
+        raise ImmutableResourceError(
+            "published EnvironmentVersion spec is missing publicationProvenance"
+        )
+    mismatched = [
+        column
+        for column, key in _VERSION_PROVENANCE_MIRROR.items()
+        if _mirror_str(getattr(obj, column)) != provenance.get(key)
+    ]
+    if mismatched:
+        raise ImmutableResourceError(
+            "EnvironmentVersion publication columns must mirror spec.publicationProvenance; "
+            f"mismatched {mismatched}"
+        )
+
+
 _TARGET_PROTECTED = ("config", "config_hash", "plugin_name")
 # Binding fields that plan approval covers — mutable lifecycle fields (status,
 # approved_content_hash, decided_by, decided_at, decision_reason) are excluded.
@@ -786,6 +894,10 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             raise ImmutableResourceError("AuditEvent records are immutable")
 
     for obj in session.new:
+        # EnvironmentVersion: a new row must be a coherent v1alpha1 legacy row or a fully
+        # server-mirrored v1alpha2 published row (SECP-B10 / ADR-016). No fabricated bypass.
+        if isinstance(obj, EnvironmentVersion):
+            _guard_version_insert(obj)
         # ResolverActivationEvidence: cannot be inserted once the authorization leaves draft.
         if isinstance(obj, ResolverActivationEvidence):
             _guard_resolver_evidence(session, obj, "inserted")

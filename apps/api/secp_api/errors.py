@@ -150,6 +150,26 @@ class WorkerIdentityError(DomainError):
         self.http_status = self._STATUS.get(code_value, 400)
 
 
+class EnvironmentPublicationError(DomainError):
+    """Closed-code, message-redacted error for EnvironmentVersion publication (SECP-B10 / ADR-016).
+
+    The publication service maps every failure (including pure ``PublicationContractError`` codes)
+    onto a closed :class:`~secp_api.enums.EnvironmentPublicationErrorCode`; no backend exception
+    text, IntegrityError, ValidationError, or SchemaValidationError escapes. Per-code HTTP status
+    mapping and refusal auditing are added by PR C (the route); this slice carries only the code.
+    """
+
+    redacted = True
+    # Generic status; the per-code HTTP mapping is deferred to PR C (there is no route yet).
+    http_status = 409
+
+    def __init__(self, code: object) -> None:
+        code_value = getattr(code, "value", str(code))
+        # The internal message equals the code; it is never serialized (redacted).
+        super().__init__(code_value)
+        self.code = code_value
+
+
 class NotFoundError(DomainError):
     http_status = 404
     code = "not_found"
