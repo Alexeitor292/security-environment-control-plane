@@ -2,6 +2,7 @@
 
 **Status of this document:** point-in-time implementation snapshot (descriptive).
 **Governing document:** [`docs/PROJECT_CHARTER.md`](PROJECT_CHARTER.md).
+**Design lock:** authoring convergence — publishing an approved topology revision into a canonical immutable EnvironmentVersion — is design-locked (not implemented) by [`ADR-016`](adr/ADR-016-authoring-convergence-environment-version-publication.md).
 
 [`docs/PROJECT_CHARTER.md`](PROJECT_CHARTER.md) remains the authoritative product and
 architecture charter — the mission, the domain model, the architectural invariants (§6),
