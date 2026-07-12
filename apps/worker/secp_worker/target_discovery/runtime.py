@@ -1,10 +1,14 @@
 """Worker-side runtime loop for the read-only discovery consumer (SECP-B5).
 
-Runs inside the worker process ONLY. Periodically drains committed, queued discovery jobs by calling
-the worker consumer, which invokes the READ-ONLY discovery engine with the SHIPPED SEALED
-composition
-— so the loop is wired end to end but contacts nothing (the sealed probe source refuses). It imports
-no mutation-capable module and contacts no infrastructure. The API must never import or run this.
+Runs inside the worker process ONLY. Periodically drains committed, queued discovery jobs via the
+worker consumer, which invokes the READ-ONLY discovery engine through the default composition
+(``build_discovery_composition``). With the shipped default that composition is SEALED and contacts
+nothing (the sealed probe source refuses); when the deployment-local, worker-owned
+controlled-integration profile is enabled AND the full gate chain validates (mounted bundle,
+host-key binding, approved worker identity, control-plane admission, endpoint/authorization
+binding), the loop can perform strictly READ-ONLY host contact (``run_forever`` logs the actual
+mode). It imports no mutation-capable module and can never mutate. The API must never import or run
+this.
 """
 
 from __future__ import annotations

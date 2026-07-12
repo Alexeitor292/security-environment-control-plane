@@ -3,10 +3,14 @@
 An enterprise-grade, AI-native control plane for creating, operating, observing,
 validating, resetting, and reporting on controlled security environments.
 
-> **Status:** SECP-001 — Control Plane Foundation. This milestone runs entirely
-> against a **local Docker Compose** dev stack and a **simulated** infrastructure
-> plugin. It does **not** touch real infrastructure (no Proxmox/VMware/cloud/
-> OpenTofu/Ansible/Wazuh/CTFd). See [`docs/PROJECT_CHARTER.md`](docs/PROJECT_CHARTER.md).
+> **Status:** The **simulator remains the only complete deployment lifecycle** — its
+> effects are database records, not real infrastructure. Beyond it, the platform now
+> includes provider foundations, **controlled worker-owned read-only Proxmox discovery**,
+> target onboarding, governance surfaces, and durable topology authoring. **Real Proxmox
+> provisioning and real OpenTofu execution remain sealed**, and **production OIDC
+> authentication is not yet implemented**. See
+> [`docs/PROJECT_CHARTER.md`](docs/PROJECT_CHARTER.md) (governing charter) and
+> [`docs/STATUS.md`](docs/STATUS.md) (detailed current-capability ledger).
 
 ## What this is
 
@@ -19,15 +23,16 @@ from the API.
 Read these before changing anything:
 
 - [`docs/PROJECT_CHARTER.md`](docs/PROJECT_CHARTER.md) — governing product/architecture charter
-- [`docs/architecture/secp-001-design.md`](docs/architecture/secp-001-design.md) — SECP-001 design
-- [`docs/implementation/secp-001-plan.md`](docs/implementation/secp-001-plan.md) — vertical slices & acceptance criteria
+- [`docs/STATUS.md`](docs/STATUS.md) — current-capability ledger (what is implemented, simulated, sealed, or not yet built)
 - [`docs/adr/`](docs/adr/) — architecture decision records
+- [`docs/architecture/secp-001-design.md`](docs/architecture/secp-001-design.md) — SECP-001 foundational design (historical)
+- [`docs/implementation/secp-001-plan.md`](docs/implementation/secp-001-plan.md) — SECP-001 vertical slices & acceptance criteria (historical)
 
 ## Repository layout
 
 ```
 apps/
-  web/        React + TypeScript application (Vite, React Flow)
+  web/        React + TypeScript application (Vite, React topology workspace)
   api/        FastAPI control-plane API (secp_api)
   worker/     Workflow worker boundary (secp_worker)
 contracts/
@@ -94,19 +99,53 @@ docker compose up --build
 See [`infra/dev/README.md`](infra/dev/README.md) for credentials, health checks,
 and the workflow dispatch mode (`inline` default vs. `temporal`).
 
-## The controlled flow (SECP-001 vertical slice)
+## Current flows
+
+The platform has several **separate** lifecycle stages. An earlier stage passing never
+implies a later one, and only the simulator flow runs a complete deployment. See
+[`docs/STATUS.md`](docs/STATUS.md) for the exact status of each.
+
+### A. Complete simulator flow (the only complete deployment lifecycle)
 
 ```
-Create Template → Create Immutable Version → Validate → Generate Plan →
-Approve Plan → Start Simulated Exercise → Per-Team Topologies →
-Reset One Team → Destroy Exercise → View Audit Log
+Create Immutable EnvironmentVersion → Generate Deterministic Plan → Explicit Approval →
+Simulator Execution → Per-Team Topology → Reset / Destroy → Audit
 ```
 
-Every step is approval-gated where required, every mutation is audited, and all
-execution is simulated. See the design doc for the boundaries that make this safe.
+Every step is approval-gated where required and every mutation is audited. All effects are
+simulated database records — no real infrastructure.
+
+### B. Topology-authoring flow
+
+```
+Local draft → Saved immutable revision → Validation → Submission → Approval decision → STOP
+```
+
+Each transition is separately permissioned and audited. **Approval is a decision only.**
+Publication to a canonical `EnvironmentVersion` and plan generation are **future, separate
+transitions** — an approved topology revision is not yet a published version and does not
+generate a deployment plan.
+
+### C. Controlled live read-only discovery flow
+
+```
+Target onboarding / eligibility → Bootstrap & worker-bundle readiness →
+Separate live-read authorization → Worker admission & exact endpoint binding →
+Fixed read-only probes → Immutable evidence / candidate plan →
+Optional exact-plan approval → STOP
+```
+
+This path is **sealed by default** and reachable only through the reviewed, deployment-local,
+worker-owned profile once every gate passes (see [`docs/STATUS.md`](docs/STATUS.md) §E). It is
+**read-only**: it never implies deployment or mutation, and its candidate plans are
+non-executable.
 
 ## Safety
 
-This repository follows strict scope limits for SECP-001: no real infrastructure,
-no production secrets, no privileged execution from the API. Secrets are never
-committed; `.env` is git-ignored and only `.env.example` (placeholders) is tracked.
+The control plane performs no privileged infrastructure actions; execution is dispatched to
+the isolated worker boundary, and plugins are reached only through versioned contracts.
+**Real Proxmox provisioning and real OpenTofu execution remain sealed**, controlled live
+read-only discovery is fail-closed and off by default, and **no UI or API approval alone
+activates infrastructure execution**. Secrets are never committed; `.env` is git-ignored and
+only `.env.example` (placeholders) is tracked. See [`docs/STATUS.md`](docs/STATUS.md) for the
+exact boundary between what is simulated, sealed, and not yet implemented.
