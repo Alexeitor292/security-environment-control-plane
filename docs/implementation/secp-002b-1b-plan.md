@@ -51,6 +51,11 @@ code change. **No configuration flag alone advances a capability.**
 
 ## B1B-PR2 — Real toolchain attestation
 
+**Status: implemented by this slice** (worker-local, filesystem-only `RealToolchainVerifier` +
+`ToolchainFilesystemLayout`; expanded facet set; comprehensive tests over inert fixtures). No
+execution capability was unsealed; both B1-A subprocess seals remain `True`; the verifier is not
+wired into the runner/`run_real_provisioning` default (still fake). B1B-PR3 remains next.
+
 - **Allowed:** the worker `ToolchainVerifier` real implementation (`RealToolchainVerifier`) —
   **filesystem verification only** of the on-disk executable/version/binary-digest/module-bundle/
   lockfile/offline-mirror/renderer/CLI-config/remote-state-backend-class/no-runtime-download.
