@@ -10,6 +10,14 @@ worker-only OpenTofu dry run against a disposable Proxmox lab. It is intentional
 conservative: the first real run is narrowly scoped, reviewed, applied, verified, and
 destroyed.
 
+> **No box in this checklist is checked by the ADR-020 architecture-lock PR (B1B-PR1).**
+> That PR is documentation + tests only; it activates nothing and satisfies no prerequisite.
+> Every box remains **unchecked** and is satisfied only by the future reviewed implementation
+> slices (B1B-PR2…PR8) plus deployment-local operator review. See
+> [ADR-020](../adr/ADR-020-first-real-disposable-lab-lifecycle.md),
+> [architecture](../architecture/secp-002b-1b-real-lab-lifecycle.md), and
+> [implementation plan](../implementation/secp-002b-1b-plan.md).
+
 ## 0. Approved target onboarding (SECP-002B-1B-0, ADR-014)
 
 - [ ] The target has an **approved & active `TargetOnboarding`** record with no config/scope
@@ -102,6 +110,86 @@ destroyed.
       `SECP_PROVISIONING_APPLICATION_MODE=isolated_lab` set only for the lab run.
 - [ ] Temporal/durable worker path only; inline execution remains refused.
 - [ ] A rollback/kill plan is ready before the first apply.
+
+## 9. Activation dossier (deployment-local, reviewed — ADR-020 §D)
+
+- [ ] A **deployment-local activation dossier** (outside source control) binds organization,
+      execution target, onboarding record, exact node/storage/bridge-VLAN/CIDR/VM-ID allowlists,
+      quotas, deny-external policy, trusted TLS identity, least-privileged **credential reference**
+      (no raw credential), OpenTofu executable identity/version/digest, module-bundle identity/hash,
+      provider-lockfile hash, offline-mirror identity, renderer version, remote-state backend
+      reference, state-locking proof, state backup/restore proof, recovery owner, emergency-stop
+      owner, approval actors, review timestamp, and dossier revision/hash.
+- [ ] The dossier is **human-reviewed**; only its **redacted hash + bound ids** become durable SECP
+      evidence; raw values and the credential remain external operator evidence.
+
+## 10. Operation-specific unseal phases (ADR-020 §C, plan B1B-PR2…PR7)
+
+- [ ] Each capability (plan / apply / destroy) has its **own** code seal constant, **own** runtime
+      enablement, and **own** human approval; unsealing one leaves the others sealed as `True`.
+- [ ] Advancing a capability is a **reviewed code-and-review change plus the full runtime gate** —
+      never a configuration flag.
+
+## 11. Real toolchain attestation (ADR-020 §F; §5 above)
+
+- [ ] The **real** `ToolchainVerifier` (not `FakeToolchainVerifier`) attests the on-disk toolchain
+      before any init/plan/apply/destroy; no fake verifier and **no fake-runner fallback** may satisfy
+      a real-lab gate.
+
+## 12. Exact minimum first-lab resource budget (ADR-020 §P)
+
+- [ ] The first run uses the **smallest** already-representable shape: one target, one allowed node,
+      one dedicated disposable storage target, one isolated network boundary, one bounded CIDR, one
+      minimal disposable guest (or smallest existing fixture), strict CPU/RAM/disk caps, and no
+      external connectivity. If the renderer cannot yet emit a genuinely minimal *real* resource, that
+      is an explicit implementation prerequisite (B1B-PR5), not something fabricated.
+
+## 13. Plan-only stage before apply enablement (ADR-020 §C, plan B1B-PR5)
+
+- [ ] A reviewed **plan-only** run (real `init`/`plan`/`show`) has completed with an **exact
+      change-set-hash approval** **before** apply is ever enabled. Apply and destroy remain
+      technically **incapable** (their seal constants `True`) during the plan-only stage.
+
+## 14. Verification criteria (post-apply — ADR-020 §K)
+
+- [ ] Post-apply verification compares approved change-set resources, remote state, Proxmox observed
+      inventory, expected VM/container/network/disk identities, target boundary, reservations, quotas,
+      network-isolation + no-route checks, and health/readiness. **A successful exit code alone is not
+      sufficient.** Outcomes are closed: `verified` / `verification_failed` / `state_disagreement` /
+      `isolation_failed` / `recovery_required`.
+
+## 15. Destroy readiness + separate approval before first apply (ADR-020 §L)
+
+- [ ] The **destroy** implementation and a tested destroy path are ready **before** the first apply.
+- [ ] Destroy uses its **own** newly generated change set, its **own** redacted canonical hash, and a
+      **separate** human approval — never a reuse of the apply approval.
+
+## 16. Zero-residue closeout (ADR-020 §L)
+
+- [ ] Zero-residue verification independently re-inspects the provider **and** state to prove absence
+      of guests, disks/volumes, network attachments, generated firewall entries, unreleased
+      reservations/leases, workspace artifacts, transient binary plans, and removable state objects
+      inside the declared boundary. **Destroying resources does not by itself prove cleanup.**
+
+## 17. Emergency stop and manual containment (ADR-020 §N)
+
+- [ ] A **deployment-local kill mechanism** can stop new privileged work without mutating approvals
+      into success, erasing evidence, enabling a fake fallback, or bypassing state locking.
+- [ ] The distinction between preventing new work, terminating a local process, stopping a Temporal
+      workflow, provider-side in-progress operations, and manual containment is documented.
+
+## 18. Partial-apply recovery owner + manual cleanup (ADR-020 §M)
+
+- [ ] A named **recovery owner** and a documented **manual-cleanup procedure** exist **before** the
+      first apply; no automatic blind re-apply or blind destroy; destructive recovery requires a fresh
+      exact approval.
+
+## 19. Evidence retention (ADR-020 §O)
+
+- [ ] Immutable, redacted, hash-bound evidence is retained for preflight, toolchain attestation, plan,
+      approval, apply, verification, destroy, zero-residue, recovery, and kill-switch events. Evidence
+      contains ids/hashes/categories/counts/timestamps only — never credentials, raw plan/state, or
+      provider bodies.
 
 Only when **every** box is checked and independently reviewed may B1-B proceed to a
 narrowly scoped first real dry run → approval → apply → verify → destroy.
