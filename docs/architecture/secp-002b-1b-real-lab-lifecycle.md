@@ -36,13 +36,13 @@ Every component below is tagged with exactly one maturity level. This document m
 | Worker-only runner behind sealed executor | `OpenTofuRunner`, `ProcessExecutor`, `SubprocessProcessExecutor` (**SEALED**), `FakeProcessExecutor` | contract-complete-but-sealed |
 | Transient exact prepared plan | `PreparedOpenTofuPlan`, `apply_prepared`, `destroy_prepared` (`provisioning/opentofu.py`) | code-implemented-with-fakes |
 | Canonical redacted change set | `plan_json.canonicalize_plan_json` + `change_set_hash` | code-implemented-with-fakes |
-| Toolchain verifier seam | `ToolchainVerifier` protocol; `FakeToolchainVerifier`; `RealToolchainVerifier` (inert) | code-implemented-with-fakes |
+| Toolchain verifier seam | `ToolchainVerifier` protocol; `FakeToolchainVerifier` (execution default); `RealToolchainVerifier` (real, filesystem-only; B1B-PR2) | code-implemented-with-fakes |
 | Isolated-lab activation gate | `RealLabActivationGrant`, `build_process_executor`, `run_real_provisioning`, `_assert_real_gate` | contract-complete-but-sealed |
 | Worker secret resolution (final) | `WorkerSecretResolver`, `SealedSecretResolver` (→ `credential_unavailable`) | contract-complete-but-sealed |
 | Worker identity / admission | `WorkerIdentityRegistration`, `WorkerDiscoveryAdmission` (Ed25519 signed-nonce PoP) | contract-complete-but-sealed |
 | Resolver activation / resolution lease | `ResolverActivationAuthorization`, `SealedActivationGate`, `ResolutionLease` | contract-complete-but-sealed |
 | Worker-owned SSH read-only discovery | `services/target_discovery.py`, `onboarding/live_readonly.py` | controlled-live-read-only |
-| Real toolchain attestation (on-disk) | — | future-real-mutation |
+| Real toolchain attestation (on-disk) | `RealToolchainVerifier` (`toolchain_verify.py`, B1B-PR2) | code-implemented (filesystem-only; not wired into execution) |
 | Real eligibility preflight (Proxmox read-only) | — | future-real-mutation |
 | Remote-state / JIT-secret readiness | — | future-real-mutation |
 | Real `init`/`plan`/`show` | — | future-real-mutation |

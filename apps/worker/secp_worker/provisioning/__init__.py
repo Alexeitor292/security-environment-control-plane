@@ -36,12 +36,18 @@ from secp_worker.provisioning.runner import (
 )
 from secp_worker.provisioning.state_store import DbRunnerStateStore, RunnerStateStore
 from secp_worker.provisioning.toolchain_verify import (
+    ATTESTATION_POLICY_VERSION,
     FakeToolchainVerifier,
+    RealToolchainVerifier,
+    ToolchainAttestationEvidence,
+    ToolchainFilesystemLayout,
     ToolchainVerification,
     ToolchainVerifier,
+    render_offline_cli_config,
 )
 
 __all__ = [
+    "ATTESTATION_POLICY_VERSION",
     "DbRunnerStateStore",
     "FakeOpenTofuRunner",
     "FakeProcessExecutor",
@@ -53,6 +59,7 @@ __all__ = [
     "ProcessResult",
     "ProcessSpec",
     "ProvisioningRunner",
+    "RealToolchainVerifier",
     "RenderedWorkspace",
     "RunnerApplyResult",
     "RunnerChangeSet",
@@ -62,12 +69,15 @@ __all__ = [
     "RunnerStateStore",
     "RunnerValidationResult",
     "SubprocessProcessExecutor",
+    "ToolchainAttestationEvidence",
+    "ToolchainFilesystemLayout",
     "ToolchainVerification",
     "ToolchainVerifier",
     "WorkspaceRenderer",
     "build_fixture_show_json",
     "canonicalize_plan_json",
     "change_set_hash",
+    "render_offline_cli_config",
     "planned_resources",
     "summarize",
 ]

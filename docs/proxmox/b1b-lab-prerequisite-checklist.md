@@ -132,6 +132,12 @@ destroyed.
 
 ## 11. Real toolchain attestation (ADR-020 §F; §5 above)
 
+> **B1B-PR2 note:** the `RealToolchainVerifier` code now exists (worker-local, filesystem-only
+> attestation). That does **not** check any box below — no operator has attested a real installed
+> toolchain, the verifier is not wired into any execution path, and a passing unit fixture is not
+> deployment evidence. These boxes are satisfied only by a reviewed deployment-local attestation of
+> the actual on-disk toolchain.
+
 - [ ] The **real** `ToolchainVerifier` (not `FakeToolchainVerifier`) attests the on-disk toolchain
       before any init/plan/apply/destroy; no fake verifier and **no fake-runner fallback** may satisfy
       a real-lab gate.
