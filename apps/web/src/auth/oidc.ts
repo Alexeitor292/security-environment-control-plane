@@ -76,6 +76,9 @@ export async function resolveUser(client: OidcClient): Promise<OidcUser | null> 
 export function authErrorCategory(err: unknown): AuthErrorCategory {
   if (err instanceof AuthConfigError) return "configuration_invalid";
   if (err instanceof ApiClientError) {
+    // A closed API-base/deployment misconfiguration (ADR-019 same-origin resolution failed) maps to
+    // the configuration-invalid category — checked before the generic status-0 mapping below.
+    if (err.code === "configuration_invalid") return "configuration_invalid";
     if (err.status === 401) return "session_expired";
     if (err.status === 503 || err.code === "authentication_unavailable") {
       return "authentication_unavailable";

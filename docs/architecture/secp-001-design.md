@@ -338,8 +338,21 @@ poll without surprises.
   `offline_access` does not by itself stop an ordinary refresh token — the frontend also
   strips any `refresh_token` before persisting the user and keeps only a refresh-token-free
   projection in memory. An invalid callback, state/nonce mismatch, or API 401 fails closed
-  to `/login`; access-token expiry requires a fresh interactive login. OIDC-C production
-  deployment/runbooks remain future work.
+  to `/login`; access-token expiry requires a fresh interactive login.
+- **Production deployment guardrails, preflight, and runbooks (ADR-019 / OIDC-C).** A
+  **same-origin** production model is locked: one canonical HTTPS public origin
+  (`SECP_PUBLIC_ORIGIN`, validated as an exact origin) serves both the web app and the
+  `/api/` SECP API, and the browser callback/logout URLs derive from it. Production **CORS
+  is disabled** (the API uses stateless bearer tokens, never cookies; empty allow-origins),
+  while development allows only the exact configured origin without credentials or
+  wildcards. A production **Host allowlist** (canonical host + optional internal health
+  host, never `*`) fails closed with no `/health` bypass, and callback URLs are never built
+  from a backend Host header. A token-free operator **preflight**
+  (`python -m secp_api.oidc_preflight`) reuses the OIDC-A hardened HTTP seam to check
+  discovery/JWKS, exact issuer agreement, HTTPS endpoints, and a usable RSA signing key —
+  without logging in, obtaining a token, or touching the database/audit — and normal
+  liveness/startup never contacts the IdP. This makes authentication **deployable**; it does
+  **not** make the whole platform production-ready, and real provisioning stays sealed.
 - A documented dev-only **fallback principal** keeps the stack runnable without a
   configured realm, honored only on a no-`Authorization`-header request; it is gated
   behind `AUTH_DEV_MODE=true` and refuses to enable when `APP_ENV=production`. A

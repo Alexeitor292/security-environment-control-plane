@@ -64,11 +64,12 @@ RESTRICTED_MODULES = {
     # Orchestration (which drives plugin side effects) is imported only by the
     # inline-dispatch seam (ADR-005).
     "secp_worker": {"dispatch.py"},
-    # ADR-017: the OIDC verifier is the ONLY API file allowed an HTTP client, and only to fetch the
-    # configured issuer's discovery/JWKS (read-only authentication trust infrastructure — never a
-    # provider/infrastructure call, which remains worker-only). No redirects, bounded, no ambient
-    # proxy (see secp_api/oidc.py).
-    "httpx": {"oidc.py"},
+    # ADR-017 / ADR-019: the OIDC verifier and the token-free operator preflight are the ONLY API
+    # files allowed an HTTP client, and only to fetch the configured issuer's discovery/JWKS
+    # (read-only authentication trust infrastructure — never a provider/infrastructure call, which
+    # remains worker-only). The preflight reuses the verifier's hardened seam (no redirects,
+    # bounded, no ambient proxy; see secp_api/oidc.py and secp_api/oidc_preflight.py).
+    "httpx": {"oidc.py", "oidc_preflight.py"},
 }
 
 # Full module paths that must never be imported by any API file, including dispatch.py.

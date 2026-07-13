@@ -39,6 +39,9 @@ _OIDC_PROD = dict(
     oidc_issuer="https://idp.example.test/realms/secp",
     oidc_audience="secp-api",
     oidc_web_client_id="secp-web",
+    # OIDC-C (ADR-019): safe same-origin production config.
+    public_origin="https://secp.example.test",
+    cors_allow_origins=[],
 )
 
 

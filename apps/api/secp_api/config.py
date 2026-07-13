@@ -7,12 +7,140 @@ committed (Charter §13).
 
 from __future__ import annotations
 
+import ipaddress
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# OIDC-C (ADR-019): the canonical public application origin is bounded and never path-bearing.
+_PUBLIC_ORIGIN_MAX_LENGTH = 255
+
+
+def _canonicalize_origin(value: str) -> tuple[str, str]:
+    """Normalize an origin to ``(canonical_origin_without_trailing_slash, host_without_port)``.
+
+    Pure normalization — no validation (callers validate separately). Only the host is lowercased
+    (hostnames are case-insensitive by spec); a scheme://host[:port] form is rebuilt with any
+    trailing slash removed. No path is ever carried (a valid public origin has none).
+    """
+    parsed = urlsplit(value.strip())
+    host = parsed.hostname or ""
+    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+    if parsed.scheme and netloc:
+        return f"{parsed.scheme}://{netloc}", host
+    # Malformed (validated elsewhere): best-effort trailing-slash strip, no other transformation.
+    return value.strip().rstrip("/"), host
+
+
+def _loopback_or_ambiguous_problem(hostname: str) -> str | None:
+    """Return a problem for a host that must never be a PRODUCTION public origin: ``localhost`` /
+    any ``*.localhost`` / any IP loopback (all IPv4 ``127.0.0.0/8``, and compressed, expanded, and
+    IPv4-mapped IPv6 loopback) / a trailing-dot host. IP detection uses the stdlib ``ipaddress``
+    parser (not a literal list). Performs NO DNS resolution and never rejects an ordinary private
+    enterprise DNS name merely because it might resolve internally."""
+    host = hostname.lower()
+    if host.endswith("."):
+        return "SECP_PUBLIC_ORIGIN host must not end with '.' in production"
+    if host == "localhost" or host.endswith(".localhost"):
+        return "SECP_PUBLIC_ORIGIN must not be a localhost host in production"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return None  # a DNS name (possibly private-enterprise) — allowed; never resolved here
+    if ip.is_loopback:
+        return "SECP_PUBLIC_ORIGIN must not be a loopback IP in production"
+    mapped = getattr(ip, "ipv4_mapped", None)  # IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
+    if mapped is not None and mapped.is_loopback:
+        return "SECP_PUBLIC_ORIGIN must not be an IPv4-mapped loopback IP in production"
+    return None
+
+
+def _public_origin_problems(
+    value: str, *, require_https: bool, forbid_loopback: bool = False
+) -> list[str]:
+    """Validate a public application origin (ADR-019). Empty == valid. No DNS/network access."""
+    raw = value.strip()
+    if not raw:
+        return ["SECP_PUBLIC_ORIGIN must be set"]
+    problems: list[str] = []
+    if len(raw) > _PUBLIC_ORIGIN_MAX_LENGTH:
+        problems.append(
+            f"SECP_PUBLIC_ORIGIN must be at most {_PUBLIC_ORIGIN_MAX_LENGTH} characters"
+        )
+    if "*" in raw:
+        problems.append("SECP_PUBLIC_ORIGIN must not contain a wildcard")
+    parsed = urlsplit(raw)
+    try:
+        hostname = parsed.hostname
+        _ = parsed.port  # a malformed port / malformed bracketed IPv6 raises here
+    except ValueError:
+        problems.append("SECP_PUBLIC_ORIGIN is malformed")
+        return problems  # cannot reason further about a malformed authority — fail closed
+    if require_https:
+        if parsed.scheme != "https":
+            problems.append("SECP_PUBLIC_ORIGIN must use https:// in production")
+    elif parsed.scheme not in ("http", "https"):
+        problems.append("SECP_PUBLIC_ORIGIN must be an http(s) origin")
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        problems.append("SECP_PUBLIC_ORIGIN must not contain credentials (userinfo)")
+    if parsed.query or parsed.fragment:
+        problems.append("SECP_PUBLIC_ORIGIN must not contain a query or fragment")
+    if parsed.path not in ("", "/"):
+        problems.append("SECP_PUBLIC_ORIGIN must not contain a path")
+    if not hostname:
+        problems.append("SECP_PUBLIC_ORIGIN must contain a host")
+    else:
+        # A bracketed IPv6 literal (the netloc has '[') must be a syntactically valid IPv6 address.
+        if "[" in parsed.netloc and ":" in hostname:
+            try:
+                ipaddress.ip_address(hostname)
+            except ValueError:
+                problems.append("SECP_PUBLIC_ORIGIN has a malformed IPv6 host")
+        if forbid_loopback:
+            loopback_problem = _loopback_or_ambiguous_problem(hostname)
+            if loopback_problem:
+                problems.append(loopback_problem)
+    return problems
+
+
+def _cors_origin_problems(origins: list[str]) -> list[str]:
+    """Validate CORS allow-origins in any environment (ADR-019). Each must be an exact,
+    wildcard-free http(s) origin: no ``*``, protocol-relative, path/query/fragment, or userinfo."""
+    problems: list[str] = []
+    for origin in origins:
+        raw = origin.strip()
+        if "*" in raw:  # reject "*" AND any wildcard-bearing origin (e.g. https://*.evil.test)
+            problems.append(f"must not contain a wildcard: {origin!r}")
+            continue
+        if raw.startswith("//"):
+            problems.append(f"protocol-relative origin is forbidden: {origin!r}")
+            continue
+        parsed = urlsplit(raw)
+        if parsed.scheme not in ("http", "https"):
+            problems.append(f"origin must be an http(s) origin: {origin!r}")
+        if parsed.username or parsed.password or "@" in parsed.netloc:
+            problems.append(f"origin must not contain userinfo: {origin!r}")
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+            problems.append(f"origin must not contain a path/query/fragment: {origin!r}")
+        if not parsed.hostname:
+            problems.append(f"origin must contain a host: {origin!r}")
+    return problems
+
+
+def _internal_health_host_problems(value: str) -> list[str]:
+    """Validate the optional production internal health host (ADR-019): a bare hostname only."""
+    raw = value.strip()
+    if not raw:
+        return ["SECP_INTERNAL_HEALTH_HOST must be non-empty when set"]
+    problems: list[str] = []
+    if "*" in raw:
+        problems.append("SECP_INTERNAL_HEALTH_HOST must not contain a wildcard")
+    if any(ch in raw for ch in ("/", "@", ":")) or "://" in raw:
+        problems.append("SECP_INTERNAL_HEALTH_HOST must be a bare hostname (no scheme/port/path)")
+    return problems
 
 
 class Settings(BaseSettings):
@@ -138,9 +266,52 @@ class Settings(BaseSettings):
 
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 
+    # OIDC-C (ADR-019): the ONE canonical public application origin. In production the web app and
+    # the SECP API are served from this SAME origin (so CORS is disabled) and the browser
+    # callback/logout URLs derive from it. Production requires an exact HTTPS origin (scheme https,
+    # a host, no userinfo/query/fragment, no path beyond '/', no wildcard, bounded length).
+    # Development may use the Vite dev origin. It is NOT returned to the browser (which knows its
+    # own origin); it drives the production Host allowlist and operator preflight only.
+    public_origin: str = "http://localhost:5173"
+    # OIDC-C (ADR-019): an OPTIONAL additional internal hostname the production edge/load balancer
+    # uses for liveness (e.g. a cluster-internal service name). Empty by default; a bare hostname
+    # when set (never '*'). It only widens the Host allowlist; it never relaxes token verification.
+    internal_health_host: str = ""
+
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def public_origin_canonical(self) -> str:
+        """The canonical public origin (scheme://host[:port], no trailing slash)."""
+        return _canonicalize_origin(self.public_origin)[0]
+
+    @property
+    def public_origin_host(self) -> str:
+        """The public origin's host (no port) — the production Host allowlist entry."""
+        return _canonicalize_origin(self.public_origin)[1]
+
+    @property
+    def oidc_callback_url(self) -> str:
+        """The exact browser Authorization Code callback URL derived from the public origin."""
+        return self.public_origin_canonical + "/auth/callback"
+
+    @property
+    def oidc_logout_url(self) -> str:
+        """The exact browser post-logout URL derived from the public origin."""
+        return self.public_origin_canonical + "/login"
+
+    def trusted_hosts(self) -> list[str] | None:
+        """Allowed Host-header values for the production TrustedHost middleware, or ``None`` to skip
+        the middleware entirely (development/test convenience). Never contains '*'."""
+        if not self.is_production:
+            return None
+        hosts = [self.public_origin_host]
+        internal = self.internal_health_host.strip()
+        if internal:
+            hosts.append(internal)
+        return hosts
 
     @property
     def dev_auth_enabled(self) -> bool:
@@ -206,8 +377,33 @@ class Settings(BaseSettings):
             problems.append(
                 "SECP_OIDC_WEB_CLIENT_ID must be a non-empty public client id in production"
             )
+        # --- OIDC-C (ADR-019): same-origin production deployment guardrails -----------------------
+        # The canonical public origin must be a safe exact HTTPS origin (callback/logout/Host derive
+        # from it). CORS is disabled because the browser and API are same-origin — any configured
+        # origin is refused (fail closed, never silently emptied). The optional internal health
+        # host, when set, must be a bare hostname so it never widens Host trust arbitrarily.
+        problems.extend(
+            _public_origin_problems(self.public_origin, require_https=True, forbid_loopback=True)
+        )
+        if self.cors_allow_origins:
+            problems.append(
+                "SECP_CORS_ALLOW_ORIGINS must be empty in production "
+                "(the browser and API are same-origin; no CORS is used)"
+            )
+        if self.internal_health_host.strip():
+            problems.extend(_internal_health_host_problems(self.internal_health_host))
         if problems:
             raise ValueError("unsafe production configuration refused: " + "; ".join(problems))
+        return self
+
+    @model_validator(mode="after")
+    def _validate_cors_origin_shape(self) -> Settings:
+        """CORS allow-origins (in EVERY environment) must be exact, wildcard-free http(s) origins —
+        never '*', protocol-relative, or path/query/fragment/userinfo-bearing. Fails closed; unsafe
+        values are refused, never silently rewritten."""
+        problems = _cors_origin_problems(self.cors_allow_origins)
+        if problems:
+            raise ValueError("invalid SECP_CORS_ALLOW_ORIGINS: " + "; ".join(problems))
         return self
 
 

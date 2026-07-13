@@ -197,6 +197,8 @@ def test_guard_refuses_production_for_any_plugin():
         workflow_dispatch_mode="temporal",
         oidc_issuer="https://idp.example.test/realms/secp",
         oidc_audience="secp-api",
+        public_origin="https://secp.example.test",
+        cors_allow_origins=[],
     )
     bootstrapped = get_registry().get("simulator")
     with pytest.raises(InlineExecutionForbidden):
@@ -210,6 +212,8 @@ def test_get_dispatcher_refuses_inline_in_production():
         workflow_dispatch_mode="temporal",
         oidc_issuer="https://idp.example.test/realms/secp",
         oidc_audience="secp-api",
+        public_origin="https://secp.example.test",
+        cors_allow_origins=[],
     )
     object.__setattr__(settings, "workflow_dispatch_mode", "inline")
     with pytest.raises(InlineExecutionForbidden):
