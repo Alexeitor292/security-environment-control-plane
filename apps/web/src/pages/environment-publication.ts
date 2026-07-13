@@ -237,24 +237,16 @@ export interface DestinationResolution {
 
 /** Find the EXACT version by id across pre-fetched (template, versions) pairs — never a nearby or
  *  first match. Returns null when the exact id is absent. */
-export function findVersionById(
-  versionId: string,
-  templates: readonly { template: Template; versions: readonly Version[] }[],
-): { template: Template; version: Version } | null {
-  for (const { template, versions } of templates) {
-    const match = versions.find((v) => v.id === versionId);
-    if (match) return { template, version: match };
-  }
-  return null;
-}
-
-/** Source-derived destination: base + template are server-derived and locked to the exact source
- *  version. Blocked if the exact source version cannot be resolved. */
-export function resolveDestinationForSource(
+/** Source-derived destination from the EXACT base version fetched via
+ *  GET /api/v1/environment-versions/{id} (ADR-016 PR E — no list-all scan, no latest inference).
+ *  base = source_environment_version_id; destination template = the base version's template_id
+ *  (its Template object is looked up separately for display). Blocked (publication refused) when
+ *  the exact version cannot be resolved (missing / cross-org refused). Never mutates the version. */
+export function resolveDestinationFromVersion(
   sourceVersionId: string,
-  found: { template: Template; version: Version } | null,
+  version: Version | null,
 ): DestinationResolution {
-  if (found === null || found.version.id !== sourceVersionId) {
+  if (version === null || version.id !== sourceVersionId) {
     return {
       destinationTemplateId: null,
       base_environment_version_id: sourceVersionId,
@@ -264,9 +256,9 @@ export function resolveDestinationForSource(
     };
   }
   return {
-    destinationTemplateId: found.template.id,
+    destinationTemplateId: version.template_id,
     base_environment_version_id: sourceVersionId,
-    sourceVersion: found.version,
+    sourceVersion: version,
     locked: true,
     blocked: false,
   };

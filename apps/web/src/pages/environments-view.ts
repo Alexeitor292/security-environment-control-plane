@@ -4,7 +4,9 @@ import type {
   Exercise,
   Instance,
   LifecycleState,
+  PlanEnvironmentVersionBinding,
   TeamTopology,
+  VersionPublicationProvenance,
 } from "../api/types";
 
 // Pure view-model for the ENVIRONMENTS surfaces: template library, definition
@@ -396,6 +398,63 @@ export const PLAN_STATUS_LABEL: Record<string, string> = {
 
 export function planStatusLabel(status: string): string {
   return PLAN_STATUS_LABEL[status] ?? status;
+}
+
+// ------------------------------------------- plan environment-version binding
+//
+// ADR-016 PR E: the plan review surfaces the ONE immutable EnvironmentVersion a
+// plan binds, plus its server-owned publication provenance. Origin and
+// provenance are read ONLY from `plan.environment_version_binding` — never from
+// plan.summary, the version spec, a workspace, or any URL — so a legacy/manual
+// version can never masquerade as published, and a published version's
+// provenance can never be forged from plan content.
+
+export interface PlanBindingView {
+  /** True only when the server surfaced typed publication provenance. */
+  isPublished: boolean;
+  /** Origin label: published-from-topology vs legacy/manual immutable version. */
+  originLabel: string;
+  originNote: string;
+  environmentVersionId: string;
+  templateId: string;
+  versionNumber: number;
+  apiVersion: string;
+  contentHash: string;
+  /** Deep-link into the Environment Library at this exact template + version. */
+  libraryDeepLink: string;
+  /** The server-owned provenance, taken ONLY from the binding (null for legacy). */
+  provenance: VersionPublicationProvenance | null;
+}
+
+export const PLAN_BINDING_PUBLISHED_LABEL = "Published from approved topology";
+export const PLAN_BINDING_LEGACY_LABEL = "Legacy/manual immutable version";
+
+const PLAN_BINDING_PUBLISHED_NOTE =
+  "This version was published from an approved, validated topology. The provenance below is server-owned and pinned to this exact version — it is not derived from the plan.";
+const PLAN_BINDING_LEGACY_NOTE =
+  "A legacy/manual immutable version with no publication provenance. It remains plannable; nothing about it is inferred or upgraded here.";
+
+/**
+ * Pure view-model for the plan's one-version binding. `isPublished` is decided
+ * SOLELY by the presence of `publication_provenance` on the binding — a
+ * legacy/manual version (provenance null) always reads as legacy, and provenance
+ * is passed through verbatim, never reconstructed from any other field.
+ */
+export function planBindingView(binding: PlanEnvironmentVersionBinding): PlanBindingView {
+  const provenance = binding.publication_provenance ?? null;
+  const isPublished = provenance !== null;
+  return {
+    isPublished,
+    originLabel: isPublished ? PLAN_BINDING_PUBLISHED_LABEL : PLAN_BINDING_LEGACY_LABEL,
+    originNote: isPublished ? PLAN_BINDING_PUBLISHED_NOTE : PLAN_BINDING_LEGACY_NOTE,
+    environmentVersionId: binding.environment_version_id,
+    templateId: binding.template_id,
+    versionNumber: binding.version_number,
+    apiVersion: binding.api_version,
+    contentHash: binding.content_hash,
+    libraryDeepLink: `/templates?template=${binding.template_id}&version=${binding.environment_version_id}`,
+    provenance,
+  };
 }
 
 // --------------------------------------------------------------- inventory

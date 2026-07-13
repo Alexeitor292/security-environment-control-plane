@@ -1,5 +1,5 @@
 import { ApiClientError } from "../api/client";
-import type { TeamTopology } from "../api/types";
+import type { PlanEnvironmentVersionBinding, TeamTopology, VersionPublicationProvenance } from "../api/types";
 import {
   APPROVAL_RECORDS_ONLY_NOTE,
   DEPLOY_DISPATCH_NOTE,
@@ -7,6 +7,8 @@ import {
   EDITOR_REVISION_NOTE,
   ENVIRONMENTS_ERROR_TEXT,
   LIBRARY_INTRO,
+  PLAN_BINDING_LEGACY_LABEL,
+  PLAN_BINDING_PUBLISHED_LABEL,
   TEMPLATE_IS_DEFINITION_NOTE,
   TOPOLOGY_DECLARATIVE_NOTE,
   VALIDATION_IS_NOT_APPROVAL_NOTE,
@@ -26,6 +28,7 @@ import {
   nodeIconName,
   nodeKindClass,
   onlyNotFoundAsNull,
+  planBindingView,
   planStatusLabel,
   recordedDate,
   topologyGraph,
@@ -229,6 +232,59 @@ describe("plan review", () => {
       expect(text).not.toContain("{");
       expect(text.length).toBeGreaterThan(10);
     }
+  });
+});
+
+describe("planBindingView — one-version binding + provenance (ADR-016 PR E)", () => {
+  const PROV: VersionPublicationProvenance = {
+    topology_document_id: "doc-1",
+    topology_revision_id: "rev-1",
+    topology_content_hash: "sha256:" + "a".repeat(64),
+    topology_validation_result_id: "val-1",
+    topology_validation_result_hash: "sha256:" + "b".repeat(64),
+    base_environment_version_id: null,
+    publication_contract_version: "secp.publication/v1",
+    publication_fingerprint: "sha256:" + "f".repeat(64),
+  };
+
+  function binding(over: Partial<PlanEnvironmentVersionBinding> = {}): PlanEnvironmentVersionBinding {
+    return {
+      environment_version_id: "ver-1",
+      template_id: "tmpl-1",
+      version_number: 3,
+      api_version: "controlplane.security/v1alpha2",
+      content_hash: "sha256:" + "c".repeat(64),
+      publication_provenance: null,
+      ...over,
+    };
+  }
+
+  it("labels a legacy/manual binding (null provenance) and never fabricates provenance", () => {
+    const v = planBindingView(binding({ api_version: "controlplane.security/v1alpha1" }));
+    expect(v.isPublished).toBe(false);
+    expect(v.originLabel).toBe(PLAN_BINDING_LEGACY_LABEL);
+    expect(v.provenance).toBeNull();
+    expect(v.apiVersion).toBe("controlplane.security/v1alpha1");
+  });
+
+  it("labels a published binding and passes provenance through verbatim (only from the binding)", () => {
+    const v = planBindingView(binding({ publication_provenance: PROV }));
+    expect(v.isPublished).toBe(true);
+    expect(v.originLabel).toBe(PLAN_BINDING_PUBLISHED_LABEL);
+    expect(v.provenance).toEqual(PROV);
+  });
+
+  it("deep-links into the Environment Library at the exact template + version", () => {
+    const v = planBindingView(binding({ environment_version_id: "ver-9", template_id: "tmpl-9" }));
+    expect(v.libraryDeepLink).toBe("/templates?template=tmpl-9&version=ver-9");
+  });
+
+  it("surfaces the exact bound version fields (number, id, template, hash)", () => {
+    const v = planBindingView(binding());
+    expect(v.versionNumber).toBe(3);
+    expect(v.environmentVersionId).toBe("ver-1");
+    expect(v.templateId).toBe("tmpl-1");
+    expect(v.contentHash).toBe("sha256:" + "c".repeat(64));
   });
 });
 

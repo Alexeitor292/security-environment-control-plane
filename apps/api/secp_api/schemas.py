@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
-    from secp_api.models import EnvironmentVersion
+    from secp_api.models import DeploymentPlan, EnvironmentVersion
 
 
 class ORMModel(BaseModel):
@@ -69,6 +69,26 @@ class VersionPublicationProvenanceOut(BaseModel):
     publication_contract_version: str
     publication_fingerprint: str
 
+    @classmethod
+    def from_version(cls, version: EnvironmentVersion) -> VersionPublicationProvenanceOut | None:
+        """The single provenance serializer: typed provenance from the immutable mirrored columns
+        for a published v1alpha2 row (``publication_fingerprint`` set), else ``None`` for legacy
+        v1alpha1. Never derived from spec, plan summary, or topology-authoring rows. A v1alpha2 row
+        missing any mirrored column is impossible (the DB rejects incoherent rows) and fails closed
+        here via the required-field validation."""
+        if version.publication_fingerprint is None:
+            return None
+        return cls(
+            topology_document_id=version.source_topology_document_id,
+            topology_revision_id=version.source_topology_revision_id,
+            topology_content_hash=version.topology_content_hash,
+            topology_validation_result_id=version.topology_validation_result_id,
+            topology_validation_result_hash=version.topology_validation_result_hash,
+            base_environment_version_id=version.base_environment_version_id,
+            publication_contract_version=version.publication_contract_version,
+            publication_fingerprint=version.publication_fingerprint,
+        )
+
 
 class VersionOut(ORMModel):
     id: uuid.UUID
@@ -83,25 +103,7 @@ class VersionOut(ORMModel):
 
     @classmethod
     def from_version(cls, version: EnvironmentVersion) -> VersionOut:
-        """Centralized EnvironmentVersion -> VersionOut serializer.
-
-        A published v1alpha2 row (``publication_fingerprint`` set) carries typed provenance built
-        from its immutable mirrored columns; a legacy v1alpha1 row carries ``publication_provenance
-        = None``. A v1alpha2 row missing any mirrored column is impossible (the DB rejects
-        incoherent rows) and fails closed here via the required-field validation.
-        """
-        provenance = None
-        if version.publication_fingerprint is not None:
-            provenance = VersionPublicationProvenanceOut(
-                topology_document_id=version.source_topology_document_id,
-                topology_revision_id=version.source_topology_revision_id,
-                topology_content_hash=version.topology_content_hash,
-                topology_validation_result_id=version.topology_validation_result_id,
-                topology_validation_result_hash=version.topology_validation_result_hash,
-                base_environment_version_id=version.base_environment_version_id,
-                publication_contract_version=version.publication_contract_version,
-                publication_fingerprint=version.publication_fingerprint,
-            )
+        """Centralized EnvironmentVersion -> VersionOut serializer."""
         return cls(
             id=version.id,
             template_id=version.template_id,
@@ -110,7 +112,7 @@ class VersionOut(ORMModel):
             content_hash=version.content_hash,
             spec=version.spec,
             created_at=version.created_at,
-            publication_provenance=provenance,
+            publication_provenance=VersionPublicationProvenanceOut.from_version(version),
         )
 
 
@@ -136,6 +138,24 @@ class InstanceOut(ORMModel):
     provider: str
 
 
+class PlanEnvironmentVersionBindingOut(BaseModel):
+    """Typed read model for the ONE EnvironmentVersion a DeploymentPlan binds (ADR-016 PR E).
+
+    Derived from the exact immutable EnvironmentVersion the plan pins via
+    ``environment_version_id`` + ``version_content_hash`` — NOT from plan.summary, the version
+    spec, or any topology-authoring row. It carries no full spec and adds no second canonical
+    binding: the plan's only canonical version binding stays ``environment_version_id`` +
+    ``version_content_hash``. ``publication_provenance`` is the same server-owned provenance
+    surfaced by ``VersionOut`` (null for legacy/manual v1alpha1)."""
+
+    environment_version_id: uuid.UUID
+    template_id: uuid.UUID
+    version_number: int
+    api_version: str
+    content_hash: str
+    publication_provenance: VersionPublicationProvenanceOut | None
+
+
 class PlanOut(ORMModel):
     id: uuid.UUID
     exercise_id: uuid.UUID
@@ -149,6 +169,51 @@ class PlanOut(ORMModel):
     approved_content_hash: str | None
     decided_at: datetime | None
     created_at: datetime
+    # ADR-016 PR E: typed view of the exact bound immutable EnvironmentVersion + its provenance.
+    # Optional-with-default only so ``model_validate`` stays usable in narrow internal paths; every
+    # API response is built through ``from_plan`` with the verified version.
+    environment_version_binding: PlanEnvironmentVersionBindingOut | None = None
+
+    @classmethod
+    def from_plan(cls, plan: DeploymentPlan, version: EnvironmentVersion) -> PlanOut:
+        """Centralized DeploymentPlan -> PlanOut serializer with the verified bound version.
+
+        Fails closed (``PlanVersionBindingError``, redacted 409) unless the plan and the supplied
+        version agree on organization, id, and the pinned content hash. The exercise-side invariants
+        (exercise.environment_version_id == plan.environment_version_id and exercise.template_id ==
+        version.template_id) are enforced by ``planning.require_plan_version_binding``, which
+        produces the ``version`` passed here. No topology-authoring row is consulted.
+        """
+        from secp_api.errors import PlanVersionBindingError
+
+        if (
+            plan.organization_id != version.organization_id
+            or plan.environment_version_id != version.id
+            or plan.version_content_hash != version.content_hash
+        ):
+            raise PlanVersionBindingError()
+        binding = PlanEnvironmentVersionBindingOut(
+            environment_version_id=version.id,
+            template_id=version.template_id,
+            version_number=version.version_number,
+            api_version=version.api_version,
+            content_hash=version.content_hash,
+            publication_provenance=VersionPublicationProvenanceOut.from_version(version),
+        )
+        return cls(
+            id=plan.id,
+            exercise_id=plan.exercise_id,
+            environment_version_id=plan.environment_version_id,
+            version_content_hash=plan.version_content_hash,
+            execution_target_id=plan.execution_target_id,
+            target_config_hash=plan.target_config_hash,
+            status=plan.status.value,
+            summary=plan.summary,
+            approved_content_hash=plan.approved_content_hash,
+            decided_at=plan.decided_at,
+            created_at=plan.created_at,
+            environment_version_binding=binding,
+        )
 
 
 class WorkflowRunOut(ORMModel):

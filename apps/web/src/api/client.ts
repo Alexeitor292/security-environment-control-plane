@@ -148,6 +148,10 @@ export const api = {
     request<Template>("POST", "/api/v1/templates", body),
   listVersions: (templateId: string) =>
     request<Version[]>("GET", `/api/v1/templates/${templateId}/versions`),
+  // ADR-016 PR E: exact, org-scoped, read-only single-version read (replaces list-all scans for
+  // source-derived base resolution). No template id, no list-all fallback, no "latest" inference.
+  getEnvironmentVersion: (versionId: string) =>
+    request<Version>("GET", `/api/v1/environment-versions/${versionId}`),
   createVersion: (templateId: string, definition: unknown) =>
     request<Version>("POST", `/api/v1/templates/${templateId}/versions`, { definition }),
   validateDefinition: (definition: unknown) =>

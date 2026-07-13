@@ -54,6 +54,28 @@ function mockFetch(status: number, body?: unknown) {
   }));
 }
 
+describe("api.getEnvironmentVersion", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reads exactly one version by id via GET (no template id, no query scan)", async () => {
+    const f = mockFetch(200, VERSION);
+    vi.stubGlobal("fetch", f);
+    const v = await api.getEnvironmentVersion("v1");
+    expect(v).toEqual(VERSION);
+    const [url, init] = f.mock.calls[0] as unknown as [string, { method?: string }];
+    expect(url).toContain("/api/v1/environment-versions/v1");
+    expect(init?.method).toBe("GET");
+  });
+
+  it("propagates a not_found as a closed client error (no latest/nearest fallback)", async () => {
+    vi.stubGlobal("fetch", mockFetch(404, { error: { code: "not_found" } }));
+    await expect(api.getEnvironmentVersion("missing")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+    });
+  });
+});
+
 describe("api.publishEnvironmentVersion", () => {
   afterEach(() => vi.unstubAllGlobals());
 

@@ -122,6 +122,18 @@ export interface PlanSummary {
   per_team: PlanSummaryTeam[];
 }
 
+// ADR-016 PR E: typed view of the ONE immutable EnvironmentVersion a plan binds (from the exact
+// version — never plan.summary, spec, or topology-authoring rows). publication_provenance is the
+// same server-owned provenance as Version (null for legacy/manual v1alpha1).
+export interface PlanEnvironmentVersionBinding {
+  environment_version_id: string;
+  template_id: string;
+  version_number: number;
+  api_version: string;
+  content_hash: string;
+  publication_provenance: VersionPublicationProvenance | null;
+}
+
 export interface DeploymentPlan {
   id: string;
   exercise_id: string;
@@ -132,6 +144,8 @@ export interface DeploymentPlan {
   approved_content_hash: string | null;
   decided_at: string | null;
   created_at: string;
+  // The plan's one-version binding + its publication provenance (ADR-016 PR E).
+  environment_version_binding: PlanEnvironmentVersionBinding;
 }
 
 export interface WorkflowRun {

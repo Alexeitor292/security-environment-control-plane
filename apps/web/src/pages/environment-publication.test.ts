@@ -17,14 +17,13 @@ import {
   buildReview,
   canOfferPublish,
   definitionReadiness,
-  findVersionById,
   generateInitialDraft,
   hasPublishPermission,
   inspectDefinition,
   libraryProvenanceView,
   parseDefinitionYaml,
   resolveAuthoritativeInputs,
-  resolveDestinationForSource,
+  resolveDestinationFromVersion,
   resolveDestinationSourceless,
   resolveLibrarySelection,
   resultView,
@@ -226,9 +225,11 @@ describe("source/base/template policy", () => {
     expect(sourcePolicy(doc({ source_environment_version_id: "ver-1" })).kind).toBe("source-derived");
   });
 
-  it("locks base + template to the exact source version", () => {
-    const found = { template: tmpl(), version: ver({ id: "ver-1", template_id: "tmpl-1" }) };
-    const r = resolveDestinationForSource("ver-1", found);
+  it("locks base + template to the EXACT version returned by the read endpoint", () => {
+    // The base + destination template are derived from exactly the version the
+    // read endpoint returns for the id — no list-all scan, no latest inference.
+    const version = ver({ id: "ver-1", template_id: "tmpl-1" });
+    const r = resolveDestinationFromVersion("ver-1", version);
     expect(r).toMatchObject({
       destinationTemplateId: "tmpl-1",
       base_environment_version_id: "ver-1",
@@ -238,19 +239,19 @@ describe("source/base/template policy", () => {
     expect(r.sourceVersion?.id).toBe("ver-1");
   });
 
-  it("blocks when the exact source version is unresolvable (no latest inference)", () => {
-    const r = resolveDestinationForSource("ver-1", null);
+  it("blocks when the exact source version is unresolvable (read returned null)", () => {
+    const r = resolveDestinationFromVersion("ver-1", null);
     expect(r.blocked).toBe(true);
     expect(r.destinationTemplateId).toBeNull();
   });
 
-  it("finds a version by EXACT id only", () => {
-    const set = [
-      { template: tmpl({ id: "ta" }), versions: [ver({ id: "va" })] },
-      { template: tmpl({ id: "tb" }), versions: [ver({ id: "vb" })] },
-    ];
-    expect(findVersionById("vb", set)?.template.id).toBe("tb");
-    expect(findVersionById("missing", set)).toBeNull();
+  it("blocks (never nearest-matches) when the read returns a different version id", () => {
+    // A cross-org refusal or any id disagreement fails closed: the endpoint
+    // never yields a version whose id differs from the requested one.
+    const r = resolveDestinationFromVersion("ver-1", ver({ id: "ver-2", template_id: "tmpl-9" }));
+    expect(r.blocked).toBe(true);
+    expect(r.destinationTemplateId).toBeNull();
+    expect(r.sourceVersion).toBeNull();
   });
 
   it("sourceless sends base=null and requires an explicit template choice", () => {
