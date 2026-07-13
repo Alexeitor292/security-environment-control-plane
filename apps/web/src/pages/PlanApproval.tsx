@@ -25,8 +25,75 @@ import {
   canDecidePlan,
   canSubmitPlan,
   onlyNotFoundAsNull,
+  planBindingView,
   planStatusLabel,
 } from "./environments-view";
+import type { PlanEnvironmentVersionBinding, VersionPublicationProvenance } from "../api/types";
+
+/** Typed publication provenance rows (server-owned; ADR-016 PR C/E). Rendered
+ *  ONLY from the plan binding's provenance — never from plan.summary or spec. */
+function ProvenanceList({ provenance }: { provenance: VersionPublicationProvenance }) {
+  return (
+    <KeyValueList
+      items={[
+        { key: "Topology document", value: <HashChip value={provenance.topology_document_id} digits={12} /> },
+        { key: "Topology revision", value: <HashChip value={provenance.topology_revision_id} digits={12} /> },
+        { key: "Topology content hash", value: <HashChip value={provenance.topology_content_hash} digits={14} /> },
+        { key: "Validation result", value: <HashChip value={provenance.topology_validation_result_id} digits={12} /> },
+        { key: "Validation result hash", value: <HashChip value={provenance.topology_validation_result_hash} digits={14} /> },
+        {
+          key: "Base version",
+          value: provenance.base_environment_version_id ? (
+            <HashChip value={provenance.base_environment_version_id} digits={12} />
+          ) : (
+            "none"
+          ),
+        },
+        { key: "Publication contract", value: provenance.publication_contract_version, mono: true },
+        { key: "Publication fingerprint", value: <HashChip value={provenance.publication_fingerprint} digits={14} /> },
+      ]}
+    />
+  );
+}
+
+/**
+ * The plan's ONE-version binding + its publication provenance (ADR-016 PR E).
+ * Origin and provenance are read solely from `plan.environment_version_binding`
+ * (via `planBindingView`) — never from plan.summary, the version spec, a
+ * workspace, or a URL. A legacy/manual version therefore can never read as
+ * published, and a published version's provenance can never be fabricated from
+ * plan content. Purely presentational: it renders no mutation control.
+ */
+export function PlanBindingCard({ binding }: { binding: PlanEnvironmentVersionBinding }) {
+  const view = planBindingView(binding);
+  return (
+    <CyberCard surface="well" heading="Environment version binding">
+      <p className="env-note">
+        {view.originLabel} — {view.originNote}
+      </p>
+      <KeyValueList
+        items={[
+          { key: "Version number", value: String(view.versionNumber) },
+          { key: "Version id", value: <HashChip value={view.environmentVersionId} digits={12} /> },
+          { key: "Template id", value: <HashChip value={view.templateId} digits={12} /> },
+          { key: "API version", value: view.apiVersion, mono: true },
+          { key: "Content hash", value: <HashChip value={view.contentHash} digits={16} /> },
+        ]}
+      />
+      {view.provenance ? (
+        <>
+          <p className="env-note">Publication provenance (server-owned):</p>
+          <ProvenanceList provenance={view.provenance} />
+        </>
+      ) : (
+        <p className="env-note">No publication provenance — legacy/manual immutable version.</p>
+      )}
+      <p className="env-links">
+        <Link to={view.libraryDeepLink}>Open in Environment Library →</Link>
+      </p>
+    </CyberCard>
+  );
+}
 
 export function PlanApproval() {
   const { exerciseId = "" } = useParams();
@@ -99,6 +166,8 @@ export function PlanApproval() {
           {action.error.text} <code className="mono">{action.error.code}</code>
         </div>
       )}
+
+      <PlanBindingCard binding={p.environment_version_binding} />
 
       <CyberCard heading="Planned shape (simulated)">
         <KeyValueList

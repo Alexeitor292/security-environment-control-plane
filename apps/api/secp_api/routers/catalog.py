@@ -71,6 +71,22 @@ def create_version(
     return VersionOut.from_version(version)
 
 
+@router.get("/environment-versions/{version_id}", response_model=VersionOut)
+def get_environment_version(
+    version_id: uuid.UUID,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> VersionOut:
+    """Exact, organization-scoped, read-only EnvironmentVersion read (ADR-016 PR E).
+
+    Resolves the one version by id through ``catalog.get_version`` (Principal org boundary). Legacy
+    v1alpha1 returns ``publication_provenance=null``; published v1alpha2 returns the typed immutable
+    provenance. No mutation or audit event, no topology-authoring lookup, no caller template id, no
+    list-all/latest fallback.
+    """
+    return VersionOut.from_version(catalog.get_version(session, principal, version_id))
+
+
 @router.post("/definitions/validate", response_model=ValidationOut)
 def validate_definition_endpoint(
     body: VersionCreate,

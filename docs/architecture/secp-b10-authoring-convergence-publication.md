@@ -1,7 +1,16 @@
 # SECP-B10 — Authoring Convergence & Environment Version Publication
 
-**Status:** design lock (documentation only — no implementation).
+**Status:** implemented on the control-plane / simulated path (ADR-016 PR A–E complete); this document remains the operational design reference.
 **Authoritative decision:** [`ADR-016`](../adr/ADR-016-authoring-convergence-environment-version-publication.md).
+
+> **Implementation status (status note only — the architecture below is unchanged).** PR A–E are
+> implemented as designed on the control-plane / **simulated** planning path: explicit,
+> `version:publish`-gated, audited, idempotent publication into one immutable `v1alpha2`
+> `EnvironmentVersion`; approval publishes nothing automatically; and a plan binds exactly one
+> version and surfaces its typed publication provenance (null for legacy `v1alpha1`), re-verified
+> and fail-closed on every plan mutation/response. No plan topology/provenance column or migration
+> was added. This note loosens no seal or gate; real provisioning and production OIDC remain
+> sealed/absent. See [`docs/STATUS.md`](../STATUS.md).
 **Governing charter:** [`docs/PROJECT_CHARTER.md`](../PROJECT_CHARTER.md) (§5 Layer 3; §6 Invariants 2, 3, 4, 5, 13; §7).
 
 This document explains the selected publication architecture operationally. It introduces no

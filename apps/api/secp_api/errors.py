@@ -205,6 +205,21 @@ class EnvironmentPublicationError(DomainError):
         self.http_status = self._STATUS.get(code_value, 500)
 
 
+class PlanVersionBindingError(DomainError):
+    """Closed-code, message-redacted error for an impossible/corrupted DeploymentPlan <-> one
+    EnvironmentVersion binding (ADR-016 PR E). The HTTP layer serializes ONLY the closed code —
+    no expected/actual hash, version/template/exercise id, spec, or raw database text — so an
+    external caller cannot probe which field disagreed. Server logs may name the invariant
+    category without logging definition/topology content."""
+
+    redacted = True
+    http_status = 409
+    code = "plan_version_binding_invalid"
+
+    def __init__(self, message: str = "plan/version binding invalid") -> None:
+        super().__init__(message)
+
+
 class NotFoundError(DomainError):
     http_status = 404
     code = "not_found"

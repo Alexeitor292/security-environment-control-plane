@@ -29,13 +29,12 @@ import {
   buildPublicationRequest,
   buildReview,
   definitionReadiness,
-  findVersionById,
   generateInitialDraft,
   hasPublishPermission,
   inspectDefinition,
   parseDefinitionYaml,
   resolveAuthoritativeInputs,
-  resolveDestinationForSource,
+  resolveDestinationFromVersion,
   resolveDestinationSourceless,
   resultView,
   sourcePolicy,
@@ -113,14 +112,12 @@ export function EnvironmentPublication() {
 
   const sp = document ? sourcePolicy(document) : null;
 
-  // Source-derived: resolve the EXACT source version by id (scan existing template/version reads).
+  // Source-derived: resolve the EXACT base version by id via the read endpoint (ADR-016 PR E) —
+  // no list-all scan, no latest inference. A missing/cross-org-refused base blocks publication.
   const sourceResolve = useAsync<DestinationResolution | null>(async () => {
     if (!sp || sp.kind !== "source-derived" || !sp.sourceVersionId) return null;
-    const ts = await api.listTemplates();
-    const withVersions = await Promise.all(
-      ts.map(async (t) => ({ template: t, versions: await api.listVersions(t.id) })),
-    );
-    return resolveDestinationForSource(sp.sourceVersionId, findVersionById(sp.sourceVersionId, withVersions));
+    const version = await api.getEnvironmentVersion(sp.sourceVersionId).catch(() => null);
+    return resolveDestinationFromVersion(sp.sourceVersionId, version);
   }, [sp?.kind, sp?.sourceVersionId]);
 
   // --- editable state (no mutation on render) ---

@@ -1,10 +1,23 @@
 # ADR-016 — Authoring Convergence and Environment Version Publication
 
-- **Status:** Accepted (architecture lock / design only — no implementation)
+- **Status:** Accepted — implemented on the control-plane / simulated path (PR A–E complete)
 - **Date:** 2026-07-11
 - **Milestone:** SECP-B10 — Authoring Convergence & Environment Version Publication
 - **Deciders:** Implementation engineering
 - **Related:** Charter §5 (Layer 3), §6 Invariants 2, 3, 4, 5, 13, §7 (Environment Version); ADR-002 (scenario versioning + immutable versions + canonical hashing); ADR-004 (deployment-plan approval gate); [`docs/architecture/secp-b10-authoring-convergence-publication.md`](../architecture/secp-b10-authoring-convergence-publication.md)
+
+> **Implementation status (added post-acceptance; the design below is unchanged).** The D13
+> slices PR A–E are now implemented on the control-plane / **simulated** planning path, exactly as
+> designed: publication is one explicit, `version:publish`-gated, audited, idempotent mutation that
+> creates one immutable `v1alpha2` `EnvironmentVersion`; approval of a topology revision publishes
+> nothing automatically; and a deployment plan binds **exactly one** version (`environment_version_id`
+> + `version_content_hash`) and surfaces its typed, server-owned publication provenance (null for
+> legacy `v1alpha1`), re-verifying that one-version binding on every plan mutation and response and
+> failing closed (`plan_version_binding_invalid`). No topology/provenance column was added to the
+> plan and no plan migration exists; planning consumes only the immutable `version.spec`. This note
+> records status only and **loosens no seal or gate** — real provisioning, the OpenTofu subprocess,
+> worker execution, and production OIDC remain exactly as sealed/absent as before. See
+> [`docs/STATUS.md`](../STATUS.md) for the consolidated ledger.
 
 ## Context
 

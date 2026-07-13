@@ -7,24 +7,122 @@ the hash still matches (ADR-004).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
 from secp_plugin_api.v1 import TargetInstance
-from secp_scenario_schema import validate_definition
+from secp_scenario_schema import content_hash, validate_definition
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.enums import AuditAction, LifecycleState, Permission, PlanStatus, TargetStatus
-from secp_api.errors import DomainError, NotFoundError
+from secp_api.errors import DomainError, NotFoundError, PlanVersionBindingError
 from secp_api.lifecycle import transition
-from secp_api.models import DeploymentPlan
+from secp_api.models import DeploymentPlan, EnvironmentVersion, Exercise
 from secp_api.provisioning_scope import provisioning_scope_policy_hash
 from secp_api.registry import get_registry
 from secp_api.services.catalog import get_version
 from secp_api.services.exercises import get_exercise
+
+logger = logging.getLogger("secp.api")
+
+
+def _binding_disagreement_category(
+    actor: Principal,
+    plan: DeploymentPlan,
+    exercise: Exercise | None,
+    version: EnvironmentVersion | None,
+) -> str | None:
+    """The bounded invariant category that disagrees for this plan's one-version binding, or
+    ``None`` when every invariant holds. Returns a short, content-free tag (never an id/hash/spec)
+    usable only for server-side logging — the closed HTTP response never distinguishes categories.
+
+    Every internal-corruption state is folded here: a plan whose organization differs from the
+    actor; a missing or cross-organization referenced Exercise or EnvironmentVersion; an
+    exercise/version id or template disagreement; a plan/version content-hash disagreement; or a
+    ``content_hash(spec)`` recompute mismatch. Order is a fixed pipeline; the caller cannot observe
+    which check fired.
+    """
+    org = actor.organization_id
+    if plan.organization_id != org:
+        return "plan_org"
+    if exercise is None:
+        return "exercise_missing"
+    if exercise.organization_id != org:
+        return "exercise_org"
+    if version is None:
+        return "version_missing"
+    if version.organization_id != org:
+        return "version_org"
+    if exercise.environment_version_id != plan.environment_version_id:
+        return "exercise_version_ref"
+    if plan.environment_version_id != version.id:
+        return "plan_version_ref"
+    if exercise.template_id != version.template_id:
+        return "exercise_template"
+    if plan.version_content_hash != version.content_hash:
+        return "content_hash"
+    # Defense in depth: the immutable row hash must equal a fresh canonical hash of its own spec.
+    if content_hash(version.spec) != version.content_hash:
+        return "content_hash_recompute"
+    return None
+
+
+def require_plan_version_binding(
+    session: Session, actor: Principal, plan: DeploymentPlan
+) -> EnvironmentVersion:
+    """Re-verify a DeploymentPlan's ONE-EnvironmentVersion binding and return that exact immutable
+    version (ADR-016 PR E).
+
+    Loads the referenced Exercise and EnvironmentVersion with a raw, org-unaware ``session.get`` —
+    NEVER the user-facing ``get_exercise`` / ``get_version`` helpers — so that EVERY internal
+    binding disagreement (a dangling, cross-organization, or mismatched Exercise/EnvironmentVersion
+    reference; an org, id, template, or content-hash disagreement; or a ``content_hash(spec)``
+    recompute mismatch) collapses into the SAME redacted ``PlanVersionBindingError`` (HTTP 409, body
+    exactly ``{"error":{"code":"plan_version_binding_invalid"}}``). A caller can never probe which
+    internal field disagreed. NEVER queries topology-authoring rows and NEVER silently repairs it.
+    """
+    exercise = session.get(Exercise, plan.exercise_id)
+    version = session.get(EnvironmentVersion, plan.environment_version_id)
+    category = _binding_disagreement_category(actor, plan, exercise, version)
+    if category is not None:
+        # Bounded, content-free category + plan id only (never spec/topology/ids/hashes).
+        logger.warning("plan/version binding invalid (plan=%s, category=%s)", plan.id, category)
+        raise PlanVersionBindingError()
+    assert version is not None  # a ``None`` category guarantees a present, matching version
+    return version
+
+
+def _version_lineage_audit(version: EnvironmentVersion) -> dict:
+    """Allowlisted, safe version-binding lineage for the plan.generated audit (visibility metadata
+    only — never a canonical binding). Published rows add server-owned provenance ids/hashes; NO
+    spec/topology/roles/networks/findings/names/IPs/free text is ever included."""
+    published = version.publication_fingerprint is not None
+    data: dict = {
+        "environment_version_id": str(version.id),
+        "environment_version_number": version.version_number,
+        "environment_version_api_version": version.api_version,
+        "version_content_hash": version.content_hash,
+        "version_origin": "published" if published else "legacy_manual",
+    }
+    if published:
+        base = version.base_environment_version_id
+        data.update(
+            {
+                "publication_fingerprint": version.publication_fingerprint,
+                "topology_document_id": str(version.source_topology_document_id),
+                "topology_revision_id": str(version.source_topology_revision_id),
+                "topology_content_hash": version.topology_content_hash,
+                "topology_validation_result_id": str(version.topology_validation_result_id),
+                "topology_validation_result_hash": version.topology_validation_result_hash,
+                "base_environment_version_id": (str(base) if base is not None else None),
+                "publication_contract_version": version.publication_contract_version,
+            }
+        )
+    return data
 
 
 def _preview_targets(definition) -> list[TargetInstance]:
@@ -232,9 +330,12 @@ def generate_plan(session: Session, actor: Principal, exercise_id: uuid.UUID) ->
     )
     session.add(plan)
     session.flush()
+    # Safe version-binding lineage (published provenance included) so reviewers can follow the
+    # immutable chain — visibility metadata only, never a second canonical binding (ADR-016 PR E).
     audit_data: dict = {
         "content_hash": version.content_hash,
         "execution_provider": execution_provider,
+        **_version_lineage_audit(version),
     }
     if target is not None:
         audit_data["execution_target_id"] = str(target.id)
@@ -280,6 +381,9 @@ def submit_plan(session: Session, actor: Principal, plan_id: uuid.UUID) -> Deplo
     plan = get_plan(session, actor, plan_id)
     if plan.status != PlanStatus.generated:
         raise DomainError(f"plan is '{plan.status.value}', cannot submit")
+    # Re-verify the exact one-version binding (fail-closed 409) BEFORE any state change or exercise
+    # load (ADR-016 PR E). A refused corrupted binding leaves plan + exercise untouched.
+    require_plan_version_binding(session, actor, plan)
     exercise = get_exercise(session, actor, plan.exercise_id)
     exercise.lifecycle_state = transition(
         exercise.lifecycle_state, LifecycleState.awaiting_approval
@@ -306,8 +410,11 @@ def approve_plan(
         raise DomainError(
             f"plan is '{plan.status.value}', only 'awaiting_approval' can be approved"
         )
+    # Verify the exact one-version binding (fail-closed 409) BEFORE any mutation or exercise load;
+    # approved_content_hash is then the verified immutable hash (== plan.version_content_hash ==
+    # version.content_hash) (ADR-016 PR E). A refused corrupted binding records/mutates nothing.
+    version = require_plan_version_binding(session, actor, plan)
     exercise = get_exercise(session, actor, plan.exercise_id)
-    version = get_version(session, actor, exercise.environment_version_id)
 
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.approved)
     plan.status = PlanStatus.approved
@@ -336,6 +443,9 @@ def reject_plan(
         raise DomainError(
             f"plan is '{plan.status.value}', only 'awaiting_approval' can be rejected"
         )
+    # A terminal decision is recorded only against a valid one-version binding (fail-closed 409),
+    # verified BEFORE any state change or exercise load (ADR-016 PR E).
+    require_plan_version_binding(session, actor, plan)
     exercise = get_exercise(session, actor, plan.exercise_id)
     exercise.lifecycle_state = transition(exercise.lifecycle_state, LifecycleState.validated)
     plan.status = PlanStatus.rejected
