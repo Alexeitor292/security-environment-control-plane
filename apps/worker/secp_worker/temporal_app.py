@@ -123,6 +123,112 @@ async def discover_activity(arg: dict) -> str:
         return str(snapshot_id)
 
 
+def _cancelled() -> bool:
+    """True only inside a real, cancelled Temporal activity; False without Temporal or in tests."""
+    if not TEMPORAL_AVAILABLE:
+        return False
+    try:
+        return bool(activity.is_cancelled())
+    except Exception:
+        return False
+
+
+def _finish_run(session, run_id, now) -> None:
+    from secp_api.enums import WorkflowStatus
+    from secp_api.models import WorkflowRun
+
+    if run_id is None:
+        return
+    run = session.get(WorkflowRun, run_id)
+    if run is not None:
+        run.status = WorkflowStatus.completed
+        run.finished_at = now
+
+
+def run_eligibility_preflight_activity_body(arg: dict) -> str:
+    """Durable worker-owned read-only eligibility preflight body (sync core; the activity awaits).
+
+    Loads the authoritative records from a FRESH worker session, resolves the current approved
+    authorization + worker identity, checks cancellation / the deployment-local stop posture BEFORE
+    any contact, then runs the sealed-by-default ``run_real_eligibility_preflight``. The shipped
+    composition is fully sealed, so this durable path runs end to end but refuses at the seal before
+    any transport/resolver/collector/target contact. Returns the closed outcome string.
+    """
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    from secp_api import audit
+    from secp_api.config import get_settings
+    from secp_api.db import session_scope
+    from secp_api.enums import AuditAction, EligibilityOutcome
+    from secp_api.models import TargetOnboarding, WorkflowRun
+
+    from secp_worker.onboarding.eligibility_preflight import (
+        build_eligibility_composition,
+        resolve_eligibility_preflight_request,
+        run_real_eligibility_preflight,
+    )
+
+    onboarding_id = _uuid.UUID(arg["onboarding_id"])
+    run_id = _opt_uuid(arg.get("workflow_run_id"))
+    now = datetime.now(UTC)
+
+    with session_scope() as session:
+        if run_id is not None:
+            run = session.get(WorkflowRun, run_id)
+            if run is not None:
+                from secp_api.enums import WorkflowStatus
+
+                run.status = WorkflowStatus.running
+
+        ob = session.get(TargetOnboarding, onboarding_id)
+        if ob is None:
+            _finish_run(session, run_id, now)
+            return EligibilityOutcome.refused.value
+        org_id = ob.organization_id
+
+        def _refuse(reason: str) -> str:
+            audit.record(
+                session,
+                action=AuditAction.eligibility_preflight_refused,
+                resource_type="target_onboarding",
+                resource_id=onboarding_id,
+                organization_id=org_id,
+                actor="worker",
+                outcome="refused",
+                data={"reason_category": reason, "onboarding_id": str(onboarding_id)},
+            )
+            _finish_run(session, run_id, now)
+            return EligibilityOutcome.refused.value
+
+        # Cancellation / deployment-local stop posture is checked BEFORE any contact or record work.
+        if _cancelled():
+            return _refuse("emergency_stop")
+
+        request, reason = resolve_eligibility_preflight_request(session, onboarding_id, now)
+        if request is None:
+            return _refuse(reason.value if reason is not None else "gate_incomplete")
+
+        # Re-check cancellation immediately before invoking the seam (its only contact is deep
+        # inside, and is itself sealed by the default composition).
+        if _cancelled():
+            return _refuse("emergency_stop")
+
+        result = run_real_eligibility_preflight(
+            session,
+            request=request,
+            composition=build_eligibility_composition(get_settings()),
+            now=now,
+        )
+        _finish_run(session, run_id, now)
+        return result.outcome
+
+
+@activity.defn
+async def eligibility_preflight_activity(arg: dict) -> str:
+    return run_eligibility_preflight_activity_body(arg)
+
+
 def _activity_timeout():
     from datetime import timedelta
 
@@ -162,4 +268,13 @@ class DiscoverWorkflow:
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
             discover_activity, arg, start_to_close_timeout=_activity_timeout()
+        )
+
+
+@workflow.defn
+class EligibilityPreflightWorkflow:
+    @workflow.run
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        return await workflow.execute_activity(
+            eligibility_preflight_activity, arg, start_to_close_timeout=_activity_timeout()
         )

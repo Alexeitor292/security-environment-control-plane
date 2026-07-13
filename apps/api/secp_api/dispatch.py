@@ -62,6 +62,10 @@ class WorkflowDispatcher(Protocol):
         created_by: uuid.UUID | None,
     ) -> TargetPreflight: ...
 
+    def dispatch_real_eligibility_preflight(
+        self, session: Session, onboarding_id: uuid.UUID
+    ) -> WorkflowRun: ...
+
 
 class InlineDispatcher:
     """Runs orchestration synchronously in the caller's session/transaction."""
@@ -117,6 +121,21 @@ class InlineDispatcher:
             collector_kind=collector_kind,
             collector_identity=collector_identity,
             created_by=created_by,
+        )
+
+    def dispatch_real_eligibility_preflight(
+        self, session: Session, onboarding_id: uuid.UUID
+    ) -> WorkflowRun:
+        # The controlled live read-only eligibility preflight contacts a real target; it has NO
+        # inline-safe path (SECP-002B-1B B1B-PR3 §2 — durable worker path only). Refuse inline
+        # BEFORE any record load, audit, or seam construction. There is NO inline fallback: when
+        # Temporal is unavailable the request simply does not execute (it never runs in-process).
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            "real read-only eligibility preflight is not permitted via the inline dispatcher; "
+            "it runs only on the durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). "
+            "The API never contacts the target."
         )
 
 
@@ -337,6 +356,35 @@ class TemporalDispatcher:
             "in SECP-002B-1B-1; use the inline dispatcher (SECP_WORKFLOW_DISPATCH_MODE=inline) "
             "for dev/test, or wait for a future durable B1-B implementation"
         )
+
+    def dispatch_real_eligibility_preflight(
+        self, session: Session, onboarding_id: uuid.UUID
+    ) -> WorkflowRun:
+        # ENQUEUE-ONLY: durably queue a WorkflowRun + outbox row for the worker-owned eligibility
+        # preflight. This creates only durable state; NOTHING is submitted to Temporal until the API
+        # transaction commits, and the API never loads a target config/boundary/secret/observation,
+        # never contacts a host, and never imports the worker seam/collector/transport/recorder. The
+        # onboarding id is the only stable identifier passed; the worker activity loads the
+        # authoritative records itself.
+        from secp_api.enums import WorkflowKind
+        from secp_api.models import TargetOnboarding
+
+        ob = session.get(TargetOnboarding, onboarding_id)
+        if ob is None:
+            raise NotFoundError(f"onboarding {onboarding_id} not found")
+        run = self._queue_run(
+            session,
+            kind=WorkflowKind.eligibility_preflight,
+            organization_id=ob.organization_id,
+            execution_target_id=ob.execution_target_id,
+        )
+        self._queue_outbox(
+            session,
+            run,
+            workflow="EligibilityPreflightWorkflow",
+            args={"onboarding_id": str(onboarding_id), "workflow_run_id": str(run.id)},
+        )
+        return run
 
 
 def _utcnow() -> datetime:

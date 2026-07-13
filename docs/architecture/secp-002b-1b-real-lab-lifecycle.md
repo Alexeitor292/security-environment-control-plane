@@ -43,7 +43,7 @@ Every component below is tagged with exactly one maturity level. This document m
 | Resolver activation / resolution lease | `ResolverActivationAuthorization`, `SealedActivationGate`, `ResolutionLease` | contract-complete-but-sealed |
 | Worker-owned SSH read-only discovery | `services/target_discovery.py`, `onboarding/live_readonly.py` | controlled-live-read-only |
 | Real toolchain attestation (on-disk) | `RealToolchainVerifier` (`toolchain_verify.py`, B1B-PR2) | code-implemented (filesystem-only; not wired into execution) |
-| Real eligibility preflight (Proxmox read-only) | — | future-real-mutation |
+| Real eligibility preflight (Proxmox read-only) | `onboarding/eligibility_preflight.py` (`run_real_eligibility_preflight`), `eligibility_policy.py`, `services/eligibility.py` (B1B-PR3) | code-implemented (sealed by default; reuses the dormant read-only Proxmox transport + existing `TargetPreflight`/`TargetEvidenceRecord`; no mutation, no OpenTofu, both B1-A seals `True`) |
 | Remote-state / JIT-secret readiness | — | future-real-mutation |
 | Real `init`/`plan`/`show` | — | future-real-mutation |
 | Real apply / verify / destroy / zero-residue | — | future-real-mutation |

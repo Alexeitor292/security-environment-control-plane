@@ -23,7 +23,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 PG_URL = os.environ.get("SECP_TEST_POSTGRES_URL")
-HEAD = "f2b8c1d4a9e7"
+HEAD = "c7e1a9b3d5f2"
 DOWN = "b2c9e5a1f4d7"
 INDEX_NAME = "uq_app_user_subject"
 

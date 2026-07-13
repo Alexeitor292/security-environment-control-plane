@@ -384,6 +384,9 @@ class WorkflowKind(str, Enum):
     reset = "reset"
     destroy = "destroy"
     discover = "discover"  # provider inventory discovery (read-only)
+    # SECP-002B-1B B1B-PR3 — durable, worker-owned, read-only eligibility preflight (sealed by
+    # default). Stored via the VARCHAR-backed EnumType, so this value is additive (no migration).
+    eligibility_preflight = "eligibility_preflight"
 
 
 class WorkflowStatus(str, Enum):
@@ -688,6 +691,75 @@ class LivePreflightEvidenceErrorCode(str, Enum):
     internal_failure = "live_preflight_evidence_internal_failure"
 
 
+class EligibilityOutcome(str, Enum):
+    """Closed outcome of a controlled read-only eligibility preflight (SECP-002B-1B, B1B-PR3).
+
+    Provider-neutral and deterministic; there is no partial/score outcome. ``eligible`` requires
+    every mandatory dimension to pass EXPLICITLY. ``ineligible`` is an explicit boundary failure.
+    ``unverifiable`` means a required fact could not be observed (fail closed). ``expired`` /
+    ``drifted`` / ``refused`` denote invalidation, binding drift, and a gate refusal respectively.
+    Only ``eligible`` — bound to ``live_verified`` evidence from the exact controlled path — may
+    ever satisfy future real-lab eligibility; the other outcomes never do.
+    """
+
+    eligible = "eligible"
+    ineligible = "ineligible"
+    unverifiable = "unverifiable"
+    expired = "expired"
+    drifted = "drifted"
+    refused = "refused"
+
+
+class EligibilityDimension(str, Enum):
+    """Closed set of mandatory read-only eligibility dimensions (SECP-002B-1B, B1B-PR3 §4).
+
+    Every dimension must pass explicitly for an ``eligible`` outcome; none is optional and none is
+    scored. Names are provider-neutral closed codes — never a node/storage/network/target value.
+    """
+
+    target_identity = "target_identity"
+    node_boundary = "node_boundary"
+    storage_boundary = "storage_boundary"
+    network_segments = "network_segments"
+    route_isolation = "route_isolation"
+    vmid_range = "vmid_range"
+    quotas = "quotas"
+    credential_read_capability = "credential_read_capability"
+    onboarding_drift = "onboarding_drift"
+
+
+class EligibilityReasonCategory(str, Enum):
+    """Closed catalog of secret-free eligibility refusal/invalidation reason categories.
+
+    Every refusal or invalidation maps to exactly one of these safe codes (SECP-002B-1B §9/§10).
+    Never a free-text message, endpoint, credential reference, raw observation, or rejected value.
+    """
+
+    # Gate refusals (before any target contact).
+    sealed = "sealed"
+    gate_incomplete = "gate_incomplete"
+    inline_execution_refused = "inline_execution_refused"
+    production_blocked = "production_blocked"
+    onboarding_not_active = "onboarding_not_active"
+    authorization_invalid = "authorization_invalid"
+    worker_identity_untrusted = "worker_identity_untrusted"
+    bundle_invalid = "bundle_invalid"
+    transport_pin_mismatch = "transport_pin_mismatch"
+    contract_version_mismatch = "contract_version_mismatch"
+    policy_version_mismatch = "policy_version_mismatch"
+    emergency_stop = "emergency_stop"
+    caller_supplied_binding = "caller_supplied_binding"
+    plugin_unsupported = "plugin_unsupported"
+    # Post-collection invalidation / integrity.
+    evidence_expired = "evidence_expired"
+    config_drift = "config_drift"
+    boundary_drift = "boundary_drift"
+    hash_disagreement = "hash_disagreement"
+    unobservable = "unobservable"
+    collection_failed = "collection_failed"
+    internal = "internal"
+
+
 class AuditAction(str, Enum):
     organization_created = "organization.created"
     user_created = "user.created"
@@ -866,6 +938,13 @@ class AuditAction(str, Enum):
     topology_approved = "topology_authoring.approved"
     topology_rejected = "topology_authoring.rejected"
     topology_decision_refused = "topology_authoring.decision_refused"
+    # SECP-002B-1B B1B-PR3 — controlled worker-owned read-only eligibility preflight.
+    eligibility_preflight_requested = "eligibility_preflight.requested"
+    eligibility_preflight_started = "eligibility_preflight.started"
+    eligibility_preflight_completed = "eligibility_preflight.completed"
+    eligibility_preflight_refused = "eligibility_preflight.refused"
+    eligibility_preflight_expired = "eligibility_preflight.expired"
+    eligibility_preflight_invalidated = "eligibility_preflight.invalidated"
 
 
 class ResolutionLeaseStatus(str, Enum):

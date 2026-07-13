@@ -73,10 +73,16 @@ RESTRICTED_MODULES = {
 }
 
 # Full module paths that must never be imported by any API file, including dispatch.py.
-# These are worker-internal collector implementations; the API must only dispatch.
+# These are worker-internal collector/persistence implementations; the API must only dispatch.
 FULL_MODULE_FORBIDDEN = frozenset(
     {
         "secp_worker.onboarding.target_evidence",
+        # SECP-002B-1B B1B-PR3: the controlled-live eligibility seam, its live-collection
+        # transport, and the worker-only live-evidence recorder are NEVER importable by the API.
+        # Live evidence is structurally worker-originated; the API only enqueues.
+        "secp_worker.onboarding.eligibility_preflight",
+        "secp_worker.onboarding.eligibility_recorder",
+        "secp_worker.onboarding.live_readonly",
     }
 )
 
@@ -85,6 +91,13 @@ FORBIDDEN_IMPORT_NAMES = frozenset(
     {
         "SimulatedTargetEvidenceCollector",
         "TargetEvidenceCollector",
+        # SECP-002B-1B B1B-PR3 — worker-only live eligibility execution/persistence entry points.
+        "run_real_eligibility_preflight",
+        "run_live_readonly_collection",
+        "LiveReadOnlyProxmoxCollector",
+        "record_live_eligibility_evidence",
+        "build_eligibility_composition",
+        "resolve_eligibility_preflight_request",
     }
 )
 

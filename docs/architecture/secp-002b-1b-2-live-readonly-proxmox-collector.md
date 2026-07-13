@@ -299,3 +299,50 @@ mutated. No Proxmox user/role/token/permission/endpoint/secret/env var is create
 hostname/IP/URL/bridge/VLAN/storage/credential/secret-ref/infrastructure value is added. The
 live-evidence seal is **not** lifted, and the simulated collector behaviour is unchanged. This
 PR is design/threat-model/checklist documentation only.
+
+## B1B-PR3 activation seam — the authoritative eligibility transport (added by B1B-PR3)
+
+This HTTP read-only Proxmox collector (Path B) is the **authoritative shipped
+controlled-live-read-only transport for eligibility preflight**. The B1B-PR3 worker seam
+`run_real_eligibility_preflight` (`apps/worker/secp_worker/onboarding/eligibility_preflight.py`) is
+the sealed activation seam that — only through an explicitly-injected, separately-reviewed
+composition — reaches `run_live_readonly_collection` here, normalizes the bounded observations, and
+records `live_verified` eligibility evidence into the existing `TargetPreflight`/`TargetEvidenceRecord`
+tables (via the worker-only recorder).
+
+**Durably wired but default-disabled (not "dormant with no caller").** B1B-PR3 wires the complete
+durable path end to end: the API `request_eligibility_preflight` is **enqueue-only** (it durably
+queues a `WorkflowRun` + outbox row and **refuses inline execution**, never contacting a target,
+building a transport, resolving a secret, or persisting evidence); the worker registers an
+`EligibilityPreflightWorkflow` + `eligibility_preflight_activity` (Temporal, worker-only); and the
+activity loads the authoritative records itself and runs `run_real_eligibility_preflight`. The seam
+is nonetheless **default-disabled**: the shipped `build_eligibility_composition` returns a fully
+sealed composition (no transport/resolver/collector), so the durable path runs to completion but
+**refuses at the seal before any target contact**. The load-bearing seal is the out-of-band reviewed
+composition — it is NEVER derived from an environment flag, the API, or the database; no single flag
+can enable execution (mirroring the `SealedActivationGate`/`sealed_discovery_composition` precedent).
+
+**Real-collector frontier (truthful).** Through the currently reviewed GET allowlist the real
+`LiveReadOnlyProxmoxCollector` emits ONLY nodes / storage / network segments / CIDR reservations. It
+does **not** infer isolation posture / no-route, VM-ID collision, quota capacity, or storage
+disposability. So against a fully-segregated first-lab boundary the real collector produces
+`unverifiable` (observable dimensions pass; the rest fail closed to `unverifiable`) or `ineligible`
+(a genuinely absent declared segment) — **never `eligible`**. An integration test drives the exact
+real chain (real seam → real collection → real collector → real normalizer → real policy → real
+persistence) over a fake `ReadOnlyHttpTransport` and asserts this. Reaching `eligible` is a documented
+deployment prerequisite (an authorized activation supplying the approved dedicated observations), not
+something the shipped read-only collector can fabricate, and a fake-collector success in tests is
+**not** evidence of production-path eligibility.
+
+**Why Path B, not Path A (documented truthfully).** The worker-owned SSH discovery path (Path A,
+`target_discovery/`, `ReadOnlyProbeExecutor`) is a *separate capability*: it produces a non-executable
+discovery candidate plan against app-owned nested-lab profile requirements (`DiscoverySnapshot` /
+`DiscoveryCandidatePlan`), and its closed probe set observes no network segment / VLAN / CIDR / route /
+isolation posture. Direct code inspection confirms Path A neither imports nor delegates to Path B (and
+vice versa). Only Path B's normalized `observed{}` structure feeds the mandated
+`compare_boundary_to_evidence` comparison and the network/CIDR/isolation eligibility dimensions.
+Choosing Path A would have required building a third collector / an adapter into a parallel evidence
+model — which the milestone forbids. The two paths are **never both activated**, and there is **no
+fallback** from one to the other or from the live path to simulated evidence. Path B remains dormant
+(default-disabled gate); the eligibility seam is sealed by default; both B1-A subprocess seals remain
+`True`; no OpenTofu runs and no real Proxmox host is contacted.

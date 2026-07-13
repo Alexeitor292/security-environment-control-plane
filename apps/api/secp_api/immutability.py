@@ -304,6 +304,14 @@ _PREFLIGHT_PROTECTED = (
     "evidence_hash",
     "target_evidence_id",
     "target_evidence_hash",
+    # SECP-002B-1B B1B-PR3: the live read-only eligibility bindings are immutable once recorded.
+    "operation_fingerprint",
+    "eligibility_outcome",
+    "eligibility_policy_version",
+    "evidence_expires_at",
+    "live_read_authorization_id",
+    "live_read_authorization_version",
+    "worker_identity_registration_id",
 )
 _TARGET_EVIDENCE_PROTECTED = (
     "organization_id",
