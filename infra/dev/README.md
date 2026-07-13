@@ -74,9 +74,21 @@ non-production (automatically refused when `SECP_APP_ENV=production`). The dev K
 `secp-api` audience mapper and a deterministic dev-admin subject so a real dev token maps to the same
 seeded user as the fallback.
 
-**Interactive browser login (Authorization Code + PKCE) is not implemented yet** — that is the future
-OIDC-B slice. The dev Keycloak issuer differs by host (`keycloak:8080` in-container vs `localhost:8081`
-in the browser); configure `SECP_OIDC_ISSUER` to exactly match the `iss` of the tokens you verify.
+**Interactive browser login (Authorization Code + PKCE) is implemented** (ADR-018 / OIDC-B). The web
+app reads the public, secret-free `GET /api/v1/auth/config`, runs the code + PKCE (S256) flow through
+the public `secp-web` client (no secret) via `oidc-client-ts`, and sends the resulting **access
+token** as `Authorization: Bearer` to the API. `/api/v1/me` is the authoritative browser identity;
+tokens are session-scoped only (no localStorage/DB persistence, no `offline_access`). The dev Keycloak
+issuer differs by host (`keycloak:8080` in-container vs `localhost:8081` in the browser); configure
+`SECP_OIDC_ISSUER` to exactly match the `iss` of the tokens you verify. OIDC-C production
+deployment/runbook work remains.
+
+### Local login / logout
+
+Open the web app and choose **Sign in with SSO** (OIDC mode) — you are redirected to Keycloak, sign in
+with the dev account, and are returned to the app; or **Continue as dev-admin** (dev-fallback mode).
+Sign out from the sidebar **Sign out** control, which clears the local session and (when the provider
+supplies an end-session endpoint) redirects through Keycloak logout. Tokens are never displayed.
 
 ### Provisioning a user's subject
 
@@ -86,9 +98,13 @@ needs no SECP change — the verifier refreshes JWKS once when it sees an unknow
 
 ### Dev Keycloak smoke test (Docker)
 
-Bring up Keycloak, obtain a dev access token via the direct-access grant (never print it), and inspect
-only bounded claim names: confirm `aud` contains `secp-api` and `sub` equals the seeded subject, call
-a protected API endpoint with the token, confirm a forged token is refused, then remove the containers.
+The `secp-web` browser client requires PKCE S256 and disables the direct-access (password) grant, so a
+smoke test runs the Authorization Code + PKCE flow (browser, or a scripted code exchange with a PKCE
+S256 `code_challenge` and the exact `/auth/callback` redirect — no `client_secret`). Confirm the
+authorization request uses `response_type=code` + `code_challenge_method=S256`, complete login with the
+dev account (never printing tokens/codes/state/verifier), confirm `/api/v1/me` succeeds with the
+resulting access token and renders the DB-backed principal, confirm a forged/expired token is refused
+by the backend verifier, and confirm logout clears the local session. Remove the containers afterward.
 
 ## Safety notes
 

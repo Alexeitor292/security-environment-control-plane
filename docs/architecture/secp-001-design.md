@@ -325,8 +325,21 @@ poll without surprises.
   bounded timeouts, no redirects, no ambient proxy, and size caps, and cached with
   bounded monotonic expirations. Failures are closed/redacted (`401 unauthenticated`
   with `WWW-Authenticate: Bearer`; `503 authentication_unavailable` when the IdP is
-  unreachable). **Interactive browser login (Authorization Code + PKCE) is the future
-  OIDC-B slice and is not built here.**
+  unreachable).
+- **The browser obtains that access token via Authorization Code + PKCE (ADR-018 /
+  OIDC-B).** The public `secp-web` client (no secret) runs the code + PKCE (S256) flow
+  through `oidc-client-ts`, reading the public, secret-free `GET /api/v1/auth/config`,
+  and sends only the **access token** as `Authorization: Bearer`; the ID token is never
+  an API credential. `/api/v1/me` is the authoritative browser identity — token claims
+  grant no organization/role/permission. Tokens are session-scoped only (no
+  localStorage/DB persistence, no `offline_access`, no silent renewal). SECP does not
+  request, retain, or use a browser **refresh token**: the dev Keycloak client disables
+  refresh-token issuance (`use.refresh.tokens=false`) and — because omitting
+  `offline_access` does not by itself stop an ordinary refresh token — the frontend also
+  strips any `refresh_token` before persisting the user and keeps only a refresh-token-free
+  projection in memory. An invalid callback, state/nonce mismatch, or API 401 fails closed
+  to `/login`; access-token expiry requires a fresh interactive login. OIDC-C production
+  deployment/runbooks remain future work.
 - A documented dev-only **fallback principal** keeps the stack runnable without a
   configured realm, honored only on a no-`Authorization`-header request; it is gated
   behind `AUTH_DEV_MODE=true` and refuses to enable when `APP_ENV=production`. A

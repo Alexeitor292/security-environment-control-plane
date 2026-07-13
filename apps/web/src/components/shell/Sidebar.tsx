@@ -10,6 +10,7 @@ import {
   KeyRound,
   ListChecks,
   Lock,
+  LogOut,
   Puzzle,
   Rocket,
   ScrollText,
@@ -20,6 +21,7 @@ import {
   Terminal,
   type LucideIcon,
 } from "lucide-react";
+import { useState } from "react";
 import { NavLink } from "react-router-dom";
 
 import type { Principal } from "../../api/types";
@@ -96,10 +98,13 @@ export interface SidebarProps {
   collapsed: boolean;
   /** Called when a nav link is followed (closes the mobile drawer). */
   onNavigate?: () => void;
+  /** Sign out of the current session (ADR-018). */
+  onLogout?: () => void;
 }
 
-export function Sidebar({ principal, collapsed, onNavigate }: SidebarProps) {
+export function Sidebar({ principal, collapsed, onNavigate, onLogout }: SidebarProps) {
   const display = principal ? principalDisplay(principal) : null;
+  const [signingOut, setSigningOut] = useState(false);
   return (
     <div className="shell-sidebar__inner">
       <div className="shell-brand">
@@ -143,6 +148,22 @@ export function Sidebar({ principal, collapsed, onNavigate }: SidebarProps) {
             <div className="shell-user__name">{display.name}</div>
             <div className="shell-user__detail mono">{display.detail}</div>
           </div>
+          {onLogout && (
+            <button
+              type="button"
+              className="shell-user__logout"
+              title="Sign out"
+              aria-label="Sign out"
+              disabled={signingOut}
+              onClick={() => {
+                setSigningOut(true); // disable duplicate activation
+                onLogout();
+              }}
+            >
+              <LogOut size={15} aria-hidden />
+              {!collapsed && <span>Sign out</span>}
+            </button>
+          )}
         </div>
       )}
     </div>

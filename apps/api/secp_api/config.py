@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     oidc_issuer: str = "http://localhost:8081/realms/secp"
     oidc_audience: str = "secp-api"
 
+    # OIDC-B (ADR-018): the PUBLIC browser client id used by the Authorization Code + PKCE flow.
+    # It is NOT a secret (a public client has none); it is surfaced by GET /api/v1/auth/config so
+    # the browser can start the flow. Bounded length; production requires a non-empty value.
+    oidc_web_client_id: str = Field(default="secp-web", max_length=200)
+
     # --- Strict OIDC bearer verification (ADR-017) -------------------------------------------
     # Discovery + JWKS are DEPLOYMENT-CONFIGURED trust infrastructure derived only from
     # ``oidc_issuer`` — never caller- or database-provided. The numeric bounds below are
@@ -195,6 +200,12 @@ class Settings(BaseSettings):
                 problems.append("SECP_OIDC_ISSUER must contain a host")
         if not self.oidc_audience.strip():
             problems.append("SECP_OIDC_AUDIENCE must be non-empty in production")
+        # OIDC-B (ADR-018): the public browser client id must be present in production (it is not a
+        # secret; a public client has none). Its length bound is Field-validated in every env.
+        if not self.oidc_web_client_id.strip():
+            problems.append(
+                "SECP_OIDC_WEB_CLIENT_ID must be a non-empty public client id in production"
+            )
         if problems:
             raise ValueError("unsafe production configuration refused: " + "; ".join(problems))
         return self

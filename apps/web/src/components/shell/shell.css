@@ -193,10 +193,35 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.shell-user__logout {
+  flex: none;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: var(--border-width) solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.shell-user__logout:hover:not(:disabled) {
+  color: var(--ink-primary);
+  border-color: var(--border-selected);
+}
+.shell-user__logout:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
 .shell--collapsed .shell-user {
   justify-content: center;
   padding-left: 0;
   padding-right: 0;
+}
+.shell--collapsed .shell-user__logout {
+  margin-left: 0;
 }
 
 .shell-collapse {

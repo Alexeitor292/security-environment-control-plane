@@ -28,6 +28,19 @@ export interface Principal {
   is_dev_fallback: boolean;
 }
 
+// Public, secret-free browser authentication configuration (GET /api/v1/auth/config; ADR-018).
+export type AuthMode = "dev_fallback" | "oidc";
+
+export interface AuthConfig {
+  mode: AuthMode;
+  issuer: string;
+  client_id: string;
+  audience: string;
+  scope: string;
+  redirect_path: string;
+  post_logout_redirect_path: string;
+}
+
 export interface Template {
   id: string;
   organization_id: string;
