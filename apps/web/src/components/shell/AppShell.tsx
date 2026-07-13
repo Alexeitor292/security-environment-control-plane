@@ -12,12 +12,14 @@ export interface AppShellProps {
   principal: Principal | null;
   capabilities: ProviderCapabilities | null;
   children: ReactNode;
+  /** Sign out of the current session (ADR-018). */
+  onLogout?: () => void;
 }
 
 /** Cyber command application shell: persistent sidebar (collapsible on
  *  desktop, overlay drawer on small screens), top status bar with the
  *  development disclosure, and the main content viewport. */
-export function AppShell({ principal, capabilities, children }: AppShellProps) {
+export function AppShell({ principal, capabilities, children, onLogout }: AppShellProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
@@ -73,6 +75,7 @@ export function AppShell({ principal, capabilities, children }: AppShellProps) {
           principal={principal}
           collapsed={drawerOpen ? false : collapsed}
           onNavigate={() => setDrawerOpen(false)}
+          onLogout={onLogout}
         />
         <button
           type="button"

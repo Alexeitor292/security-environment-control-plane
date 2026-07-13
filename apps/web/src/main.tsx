@@ -3,6 +3,9 @@ import ReactDOM from "react-dom/client";
 import { RouterProvider, createBrowserRouter } from "react-router-dom";
 
 import { App } from "./App";
+import { AuthBoundary } from "./auth/AuthBoundary";
+import { AuthCallback } from "./auth/AuthCallback";
+import { AuthProvider } from "./auth/AuthProvider";
 import { Approvals } from "./pages/Approvals";
 import { AuditLog } from "./pages/AuditLog";
 import { Dashboard } from "./pages/Dashboard";
@@ -30,10 +33,17 @@ import "./design/tokens.css";
 import "./styles.css";
 
 const router = createBrowserRouter([
+  // Public auth routes (ADR-018 / OIDC-B) render outside the protected shell.
   { path: "/login", element: <Login /> },
+  { path: "/auth/callback", element: <AuthCallback /> },
   {
     path: "/",
-    element: <App />,
+    // Every application route is guarded: protected content renders only once authenticated.
+    element: (
+      <AuthBoundary>
+        <App />
+      </AuthBoundary>
+    ),
     children: [
       { index: true, element: <Dashboard /> },
       { path: "templates", element: <Templates /> },
@@ -68,6 +78,8 @@ const router = createBrowserRouter([
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    <AuthProvider>
+      <RouterProvider router={router} />
+    </AuthProvider>
   </React.StrictMode>,
 );

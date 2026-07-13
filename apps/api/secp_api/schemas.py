@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -255,6 +255,24 @@ class PrincipalOut(BaseModel):
     email: str
     permissions: list[str]
     is_dev_fallback: bool
+
+
+class AuthConfigOut(BaseModel):
+    """Public, SECRET-FREE browser authentication configuration (ADR-018 / OIDC-B).
+
+    Everything here is non-secret and server-owned. ``mode`` is derived from the dev-fallback gate;
+    ``scope`` is a fixed value that excludes ``offline_access``; ``redirect_path`` /
+    ``post_logout_redirect_path`` are fixed relative application paths. There is NO client secret,
+    token, or endpoint credential — a public browser client has none, and the backend remains the
+    authoritative token verifier (OIDC-A / ADR-017)."""
+
+    mode: Literal["dev_fallback", "oidc"]
+    issuer: str
+    client_id: str
+    audience: str
+    scope: str
+    redirect_path: str
+    post_logout_redirect_path: str
 
 
 class ValidationOut(BaseModel):

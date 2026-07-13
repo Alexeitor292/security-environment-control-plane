@@ -21,6 +21,7 @@ from secp_api.config import get_settings
 from secp_api.db import get_engine, session_scope
 from secp_api.errors import DomainError, ValidationFailedError
 from secp_api.models import Base
+from secp_api.routers import auth_config as auth_config_router
 from secp_api.routers import bootstrap_discovery as bootstrap_discovery_router
 from secp_api.routers import (
     catalog,
@@ -151,6 +152,7 @@ def create_app() -> FastAPI:
     _install_error_handlers(app)
 
     app.include_router(system.router)
+    app.include_router(auth_config_router.router)
     app.include_router(catalog.router)
     app.include_router(environment_publication_router.router)
     app.include_router(exercises.router)

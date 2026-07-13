@@ -1,7 +1,9 @@
 // Thin typed API client over the control-plane REST API.
 
+import { currentAccessToken, notifyUnauthorized } from "../auth/apiAuth";
 import type {
   AuditEvent,
+  AuthConfig,
   BindingDescriptor,
   BootstrapCompleteRequest,
   BootstrapScript,
@@ -82,6 +84,25 @@ export interface ResponseMetadata<T> {
   status: number;
 }
 
+export interface RequestOptions {
+  /** When true, send NO Authorization header (used only for the public GET /api/v1/auth/config). */
+  anonymous?: boolean;
+}
+
+// Build request headers. The bearer is attached ONLY for protected requests (not `anonymous`) and
+// ONLY when an access token is available (OIDC mode) — dev-fallback mode and the public auth-config
+// request carry no Authorization header. The token is only ever sent to the SECP API base (this
+// client fetches nothing else), never in the URL or body, and is never logged.
+function buildRequestHeaders(body: unknown, anonymous: boolean): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (body) headers["Content-Type"] = "application/json";
+  if (!anonymous) {
+    const token = currentAccessToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 // The single fetch/parse/error core. Preserves the closed-error parsing and network-failure
 // behavior; additionally exposes the HTTP status so callers that need truthful status semantics
 // (e.g. publication's 201-created vs 200-idempotent-replay) can read it without inspecting content.
@@ -90,12 +111,13 @@ async function requestWithResponseMetadata<T>(
   path: string,
   body?: unknown,
   params?: Record<string, string>,
+  opts?: RequestOptions,
 ): Promise<ResponseMetadata<T>> {
   let res: Response;
   try {
     res = await fetch(buildUrl(path, params), {
       method,
-      headers: body ? { "Content-Type": "application/json" } : {},
+      headers: buildRequestHeaders(body, opts?.anonymous ?? false),
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
@@ -107,6 +129,9 @@ async function requestWithResponseMetadata<T>(
       `Cannot reach the API at ${API_BASE}. Check that the backend is running and reachable.`,
     );
   }
+  // A 401 means the session is no longer valid: notify the auth layer to clear it and require a
+  // fresh interactive login. The failed request is NEVER auto-replayed; a 403 is left untouched.
+  if (res.status === 401) notifyUnauthorized();
   const text = await res.text();
   let payload: { error?: { code?: string; message?: string; details?: string[] } } | null = null;
   try {
@@ -134,12 +159,16 @@ async function request<T>(
   path: string,
   body?: unknown,
   params?: Record<string, string>,
+  opts?: RequestOptions,
 ): Promise<T> {
-  const { data } = await requestWithResponseMetadata<T>(method, path, body, params);
+  const { data } = await requestWithResponseMetadata<T>(method, path, body, params, opts);
   return data;
 }
 
 export const api = {
+  // Public browser auth configuration (ADR-018). Sent WITHOUT an Authorization header.
+  authConfig: () =>
+    request<AuthConfig>("GET", "/api/v1/auth/config", undefined, undefined, { anonymous: true }),
   me: () => request<Principal>("GET", "/api/v1/me"),
   plugins: () => request<PluginInfo[]>("GET", "/api/v1/plugins"),
 
