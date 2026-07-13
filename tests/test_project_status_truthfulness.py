@@ -68,8 +68,13 @@ def test_status_states_real_provisioning_is_unavailable_and_sealed():
     assert _has(STATUS, "the opentofu subprocess remains hard-sealed")
 
 
-def test_status_states_oidc_bearer_verification_is_not_implemented():
-    assert _has(STATUS, "oidc bearer-token verification is not implemented")
+def test_status_states_oidc_bearer_verification_is_implemented_backend_only():
+    # OIDC-A landed backend bearer verification; interactive browser login (PKCE) is still future
+    # OIDC-B work. STATUS must state both truthfully.
+    assert _has(STATUS, "oidc bearer-token verification is implemented")
+    assert _has(
+        STATUS, "interactive browser login (authorization code + pkce) is still not implemented"
+    )
 
 
 def test_status_states_topology_approval_does_not_publish_or_deploy():

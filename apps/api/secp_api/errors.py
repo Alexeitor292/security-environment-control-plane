@@ -11,6 +11,9 @@ class DomainError(Exception):
     # When True, the HTTP handler serializes ONLY the closed ``code`` (no free-form message,
     # details, or rejected input). Existing errors keep their message (redacted=False).
     redacted = False
+    # When set (e.g. "Bearer"), the HTTP handler adds a ``WWW-Authenticate`` response header.
+    # Only the authentication errors set this; every other error leaves it None.
+    www_authenticate: str | None = None
 
     def __init__(self, message: str):
         super().__init__(message)
@@ -231,8 +234,32 @@ class AuthorizationError(DomainError):
 
 
 class AuthenticationError(DomainError):
+    """Closed, redacted authentication refusal (ADR-017). The HTTP layer serializes ONLY the closed
+    code ``{"error": {"code": "unauthenticated"}}`` with a ``WWW-Authenticate: Bearer`` header — it
+    NEVER reveals whether the cause was a bad signature, expiration, issuer, audience, kid, missing
+    subject, unknown internal user, malformed token, provider response, or network failure. The
+    internal message aids server-side debugging only and is never sent to the caller."""
+
     http_status = 401
     code = "unauthenticated"
+    redacted = True
+    www_authenticate = "Bearer"
+
+
+class AuthenticationUnavailableError(DomainError):
+    """Closed, redacted 503 for a TEMPORARY verifier-infrastructure failure — the token could not be
+    checked because discovery/JWKS is unavailable or malformed (ADR-017). Distinct from a definitive
+    401 refusal: the caller may retry. The body is ONLY ``{"error": {"code":
+    "authentication_unavailable"}}`` with a ``WWW-Authenticate: Bearer`` header; no provider URL,
+    response body, or exception text is ever exposed."""
+
+    http_status = 503
+    code = "authentication_unavailable"
+    redacted = True
+    www_authenticate = "Bearer"
+
+    def __init__(self, message: str = "authentication temporarily unavailable") -> None:
+        super().__init__(message)
 
 
 class ImmutableResourceError(DomainError):

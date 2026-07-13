@@ -123,7 +123,10 @@ def _published_binding(fingerprint="sha256:" + "ab" * 32):
 def test_single_head():
     scripts = ScriptDirectory.from_config(_config("sqlite://"))
     heads = scripts.get_heads()
-    assert list(heads) == [REVISION], heads
+    # Exactly one head (no branch). A later migration (ADR-017 subject uniqueness) now sits on top,
+    # so this revision is no longer the head, but it remains in the single linear history.
+    assert len(heads) == 1, heads
+    assert REVISION in {r.revision for r in scripts.walk_revisions()}
 
 
 def test_upgrade_adds_columns_and_preserves_legacy_rows(tmp_path, monkeypatch):

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -94,6 +95,20 @@ class Settings(BaseSettings):
     oidc_issuer: str = "http://localhost:8081/realms/secp"
     oidc_audience: str = "secp-api"
 
+    # --- Strict OIDC bearer verification (ADR-017) -------------------------------------------
+    # Discovery + JWKS are DEPLOYMENT-CONFIGURED trust infrastructure derived only from
+    # ``oidc_issuer`` — never caller- or database-provided. The numeric bounds below are
+    # validated ALWAYS (a negative/zero/excessive value is refused in every environment); the
+    # issuer-shape, HTTPS, and non-empty-audience requirements are enforced only in production
+    # (non-production may use the HTTP dev Keycloak service). No secret/URL here is ever
+    # controlled by an API request or a database row.
+    oidc_discovery_cache_seconds: int = Field(default=300, ge=0, le=86400)
+    oidc_jwks_cache_seconds: int = Field(default=300, ge=0, le=86400)
+    oidc_http_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    oidc_clock_skew_seconds: int = Field(default=60, ge=0, le=300)
+    oidc_max_token_bytes: int = Field(default=8192, ge=256, le=65536)
+    oidc_max_document_bytes: int = Field(default=1_048_576, ge=1024, le=5_242_880)
+
     # Object storage (MinIO in dev). Wired for artifacts; lightly used in SECP-001.
     s3_endpoint: str = "http://localhost:9000"
     s3_bucket: str = "secp-artifacts"
@@ -161,6 +176,25 @@ class Settings(BaseSettings):
                 "(the real OpenTofu subprocess executor is not cleared for production "
                 "in SECP-002B-1A; it is armed only for a reviewed disposable lab in B1-B)"
             )
+        # --- OIDC bearer verification must be safely configured in production (ADR-017) -------
+        # The issuer is the sole root of trust: it must be a bare HTTPS origin+path with no
+        # embedded credentials, query, or fragment; the audience must be non-empty. (The bounded
+        # numeric verifier settings are Field-validated in every environment.)
+        issuer = self.oidc_issuer.strip()
+        if not issuer:
+            problems.append("SECP_OIDC_ISSUER must be set in production")
+        else:
+            parsed = urlsplit(issuer)
+            if parsed.scheme != "https":
+                problems.append("SECP_OIDC_ISSUER must use https:// in production")
+            if parsed.username or parsed.password or "@" in parsed.netloc:
+                problems.append("SECP_OIDC_ISSUER must not contain credentials (userinfo)")
+            if parsed.query or parsed.fragment:
+                problems.append("SECP_OIDC_ISSUER must not contain a query or fragment")
+            if not parsed.hostname:
+                problems.append("SECP_OIDC_ISSUER must contain a host")
+        if not self.oidc_audience.strip():
+            problems.append("SECP_OIDC_AUDIENCE must be non-empty in production")
         if problems:
             raise ValueError("unsafe production configuration refused: " + "; ".join(problems))
         return self

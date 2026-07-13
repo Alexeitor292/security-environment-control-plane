@@ -14,7 +14,20 @@
       "directAccessGrantsEnabled": true,
       "redirectUris": ["http://localhost:5173/*"],
       "webOrigins": ["http://localhost:5173"],
-      "protocol": "openid-connect"
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "secp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "secp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "clientId": "secp-api",
@@ -36,6 +49,7 @@
   },
   "users": [
     {
+      "id": "5ec9ad00-0000-4000-8000-000000000001",
       "username": "dev-admin",
       "enabled": true,
       "email": "dev-admin@local.test",

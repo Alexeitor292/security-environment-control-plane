@@ -43,9 +43,10 @@ HARD_FORBIDDEN_MODULES = {
     "kubernetes",
     "docker",
     # SECP-002A: the API must not import the Proxmox plugin/client or a provider
-    # HTTP client (proof #2). Provider contact is worker-only.
+    # HTTP client (proof #2). Provider contact is worker-only. (``httpx`` is seam-restricted
+    # to the OIDC verifier below — that is authentication trust infrastructure, not provider
+    # contact.)
     "secp_plugin_proxmox",
-    "httpx",
     "requests",
     "aiohttp",
     # SECP-002B-0: the API must not import an IaC runner/tool. The provisioning
@@ -63,6 +64,11 @@ RESTRICTED_MODULES = {
     # Orchestration (which drives plugin side effects) is imported only by the
     # inline-dispatch seam (ADR-005).
     "secp_worker": {"dispatch.py"},
+    # ADR-017: the OIDC verifier is the ONLY API file allowed an HTTP client, and only to fetch the
+    # configured issuer's discovery/JWKS (read-only authentication trust infrastructure — never a
+    # provider/infrastructure call, which remains worker-only). No redirects, bounded, no ambient
+    # proxy (see secp_api/oidc.py).
+    "httpx": {"oidc.py"},
 }
 
 # Full module paths that must never be imported by any API file, including dispatch.py.
