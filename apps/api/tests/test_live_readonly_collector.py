@@ -953,11 +953,18 @@ def test_live_read_path_has_no_production_direct_instantiation_or_runner_call():
     for path in worker_onboarding.rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
+        # ``eligibility_preflight.py`` is the sealed-by-default B1B-PR3 activation seam: the ONE
+        # reviewed caller of ``run_live_readonly_collection`` (always through the shipped SEALED
+        # composition, which refuses before any contact), but never directly instantiates the
+        # collector/transport (those arrive via injection). Allow that one call name, only there.
+        forbidden = forbidden_call_names - (
+            {"run_live_readonly_collection"} if path.name == "eligibility_preflight.py" else set()
+        )
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 name = call_name(node)
-                assert name not in forbidden_call_names, f"{path.name} directly calls {name}"
+                assert name not in forbidden, f"{path.name} directly calls {name}"
 
 
 def test_no_evidence_persistence_in_live_run():

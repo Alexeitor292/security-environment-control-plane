@@ -32,6 +32,15 @@ destroyed.
       `no_route_to_protected` check must pass. (B1-B replaces the fake collector with a real,
       still-redacted collector.)
 
+> **B1B-PR3 note:** the controlled worker-owned read-only eligibility preflight seam
+> (`run_real_eligibility_preflight`) now exists — sealed by default. It reuses the dormant read-only
+> Proxmox transport and the existing `TargetPreflight`/`TargetEvidenceRecord` tables to produce
+> redacted, expiry-bound, hash-bound `live_verified` eligibility evidence via a versioned deterministic
+> policy. That does **not** check any box here: no operator has run it against a real target, the
+> shipped composition is disabled (no transport/resolver/collector injected), it runs no OpenTofu and
+> mutates nothing, and a passing unit fixture is not deployment evidence. These boxes are satisfied only
+> by a reviewed activation against an actual disposable lab. Both B1-A subprocess seals remain `True`.
+
 ## 1. Dedicated, disposable target
 
 - [ ] A **dedicated** Proxmox host/cluster reserved for disposable labs only — never a

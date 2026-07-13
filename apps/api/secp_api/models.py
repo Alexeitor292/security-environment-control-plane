@@ -783,6 +783,21 @@ class TargetPreflight(Base, TimestampMixin):
     """
 
     __tablename__ = "target_preflight"
+    # SECP-002B-1B B1B-PR3: exact-once idempotency for a controlled live eligibility preflight.
+    # ``operation_fingerprint`` is a secret-free digest over the complete immutable binding
+    # (org/target/config/onboarding/boundary/authorization id+version+expiry/evidence-source/
+    # verification-level/policy-version/contract+allowlist versions). NULL for simulated preflights,
+    # so this partial-unique index constrains only the live-eligibility rows.
+    __table_args__ = (
+        Index(
+            "uq_target_preflight_eligibility_operation",
+            "onboarding_id",
+            "operation_fingerprint",
+            unique=True,
+            sqlite_where=text("operation_fingerprint IS NOT NULL"),
+            postgresql_where=text("operation_fingerprint IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -814,6 +829,19 @@ class TargetPreflight(Base, TimestampMixin):
     )
     target_evidence_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # --- SECP-002B-1B B1B-PR3: controlled live read-only eligibility preflight bindings ---------
+    # All nullable/additive: simulated preflights leave them NULL. Set once at insert and immutable
+    # (guarded in secp_api.immutability). None is a raw endpoint/credential/secret — closed ids,
+    # versions, a closed outcome code, a policy-version label, an opaque fingerprint, and an expiry.
+    operation_fingerprint: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    eligibility_outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    eligibility_policy_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    evidence_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    live_read_authorization_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    live_read_authorization_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    worker_identity_registration_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     onboarding: Mapped[TargetOnboarding] = relationship(back_populates="preflights")
     target_evidence: Mapped[TargetEvidenceRecord | None] = relationship(back_populates="preflights")

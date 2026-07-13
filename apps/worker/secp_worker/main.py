@@ -120,10 +120,12 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
         DeployWorkflow,
         DestroyWorkflow,
         DiscoverWorkflow,
+        EligibilityPreflightWorkflow,
         ResetWorkflow,
         deploy_activity,
         destroy_activity,
         discover_activity,
+        eligibility_preflight_activity,
         reset_activity,
     )
 
@@ -132,8 +134,20 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
     worker = Worker(
         client,
         task_queue=settings.temporal_task_queue,
-        workflows=[DeployWorkflow, ResetWorkflow, DestroyWorkflow, DiscoverWorkflow],
-        activities=[deploy_activity, reset_activity, destroy_activity, discover_activity],
+        workflows=[
+            DeployWorkflow,
+            ResetWorkflow,
+            DestroyWorkflow,
+            DiscoverWorkflow,
+            EligibilityPreflightWorkflow,
+        ],
+        activities=[
+            deploy_activity,
+            reset_activity,
+            destroy_activity,
+            discover_activity,
+            eligibility_preflight_activity,
+        ],
     )
     logger.info("Temporal worker started on task queue %s", settings.temporal_task_queue)
     # The fake staging-lab + read-only preflight + deployment consumers run in daemon threads.

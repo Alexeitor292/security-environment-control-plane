@@ -73,6 +73,29 @@ wired into the runner/`run_real_provisioning` default (still fake). B1B-PR3 rema
 
 ## B1B-PR3 — Real eligibility preflight
 
+**Status: implemented by this slice** (sealed by default). A worker-owned `run_real_eligibility_preflight`
+seam reuses the **existing** dormant read-only Proxmox transport (Path B, `run_live_readonly_collection`)
+and the **existing** immutable `TargetPreflight`/`TargetEvidenceRecord` tables (no parallel evidence
+table) to produce redacted, org/target/onboarding/authorization/worker-identity/policy-bound, hash-bound,
+expiry-bound `live_verified` eligibility evidence via a versioned, deterministic, provider-neutral
+eligibility policy. **Transport choice (documented truthfully):** the authoritative transport is the
+HTTP read-only Proxmox collector (Path B), because it is the only shipped transport whose normalized
+observations feed the mandated `compare_boundary_to_evidence` pipeline and the network/CIDR/isolation
+dimensions the SSH discovery path (Path A, `target_discovery`) structurally cannot observe; the two paths
+are independent (neither delegates to the other) and are never both activated. **Durable execution is
+part of PR3 (not deferred to PR4):** the API is enqueue-only (durable `WorkflowRun` + outbox; inline
+execution refused with no fallback); a worker-only `EligibilityPreflightWorkflow`/activity loads the
+authoritative records and runs the seam; live-evidence persistence is worker-only (the API cannot import
+it) and takes a typed evaluator result (the source/level label alone can never create live evidence). The
+seam is **durably wired but default-disabled**: the shipped `build_eligibility_composition` is fully sealed
+(no transport/resolver/collector; the seal is an out-of-band reviewed composition, never an env flag), so
+the durable path runs to completion but refuses at the seal before any contact. The actual production
+collector, through the reviewed GET allowlist, yields `unverifiable`/`ineligible` — **never `eligible`**
+(isolation/VM-ID/quota/disposability are not inferred; reaching `eligible` is a documented deployment
+prerequisite), proven by an integration test over the exact real chain. No OpenTofu runs, nothing is
+mutated, both B1-A subprocess seals remain `True`, and no real Proxmox host has been contacted. B1B-PR4
+(remote-state + JIT secret readiness) remains next.
+
 - **Allowed:** a worker-only, **read-only** Proxmox eligibility/boundary preflight producing
   immutable, redacted, org-scoped, target-bound, timestamped, hash-bound, expiry-bound evidence
   (target identity, TLS verified, nodes/storage/bridge/VLAN exist, VM-ID no collision, CIDR no

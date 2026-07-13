@@ -23,6 +23,7 @@ from secp_api.target_evidence import (
     CHECK_VMID_RANGE,
     FINDING_FAIL,
     FINDING_UNVERIFIABLE,
+    LIVE_READONLY_EVIDENCE_SOURCE,
     SIMULATED_EVIDENCE_SOURCE,
     compare_boundary_to_evidence,
     target_evidence_hash,
@@ -139,7 +140,9 @@ def test_evidence_hash_refuses_verification_level_drift():
     drifted_payload = copy.deepcopy(payload)
     drifted_payload["verification_level"] = VerificationLevel.live_verified.value
 
-    with pytest.raises(ValidationFailedError, match="only simulated"):
+    # A simulated payload with a live_verified level is a MISMATCHED (source, level) pair — a fake
+    # payload can never be admitted as live evidence — so it is still refused.
+    with pytest.raises(ValidationFailedError, match="unsupported target evidence"):
         target_evidence_hash(
             **{
                 **base,
@@ -165,19 +168,35 @@ def test_target_evidence_record_is_append_only(session, principal):
         session.flush()
 
 
-def test_only_simulated_evidence_source_is_accepted():
+def test_only_accepted_source_level_pairs_are_admitted():
     payload = _payload(VALID_ONBOARDING_BOUNDARY)
     validate_target_evidence_payload(payload)
 
+    # An unknown source is refused regardless of the level.
     bad_source = copy.deepcopy(payload)
     bad_source["evidence_source"] = "unavailable"
-    with pytest.raises(ValidationFailedError, match="only simulated"):
+    with pytest.raises(ValidationFailedError, match="unsupported target evidence"):
         validate_target_evidence_payload(bad_source)
 
+    # A simulated source paired with a live_verified level is a MISMATCH: a fake payload can never
+    # be admitted as live evidence.
     bad_level = copy.deepcopy(payload)
     bad_level["verification_level"] = VerificationLevel.live_verified.value
-    with pytest.raises(ValidationFailedError, match="only simulated"):
+    with pytest.raises(ValidationFailedError, match="unsupported target evidence"):
         validate_target_evidence_payload(bad_level)
+
+    # The live source paired with a simulated level is equally a mismatch and refused.
+    live_source_sim_level = copy.deepcopy(payload)
+    live_source_sim_level["evidence_source"] = LIVE_READONLY_EVIDENCE_SOURCE
+    with pytest.raises(ValidationFailedError, match="unsupported target evidence"):
+        validate_target_evidence_payload(live_source_sim_level)
+
+    # The controlled live pair (live_readonly_proxmox, live_verified) is the one additional
+    # accepted combination — the observed section is unchanged, only the labels differ.
+    live_pair = copy.deepcopy(payload)
+    live_pair["evidence_source"] = LIVE_READONLY_EVIDENCE_SOURCE
+    live_pair["verification_level"] = VerificationLevel.live_verified.value
+    assert validate_target_evidence_payload(live_pair) == live_pair
 
 
 @pytest.mark.parametrize(

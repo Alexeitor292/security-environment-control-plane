@@ -15,10 +15,25 @@ from secp_scenario_schema import content_hash
 
 from secp_api.enums import EvidenceStatus, IsolationProfile, VerificationLevel
 from secp_api.errors import ValidationFailedError
+from secp_api.live_read_contract import LIVE_READ_EVIDENCE_SOURCE
 from secp_api.onboarding import OnboardingBoundarySpec
 
 TARGET_EVIDENCE_SCHEMA_VERSION = "secp-002b-1b-1/target-evidence/v1"
 SIMULATED_EVIDENCE_SOURCE = "simulated_target_evidence"
+# The controlled live read-only evidence-source label (SECP-002B-1B-4, B1B-PR3). It is single-
+# sourced from the API's plugin-free live-read contract mirror, so the literal value
+# lives in exactly one place (``live_read_contract``); this module imports no worker/plugin code.
+LIVE_READONLY_EVIDENCE_SOURCE = LIVE_READ_EVIDENCE_SOURCE
+
+# The ONLY accepted (evidence_source -> required verification_level) pairs. A simulated payload can
+# therefore NEVER be recorded as ``live_verified`` and a live payload can never claim ``simulated``:
+# the source and level are validated as a matching pair (fake evidence can never satisfy live
+# eligibility). Extending this map is a deliberate, reviewed change — it is not caller-controlled.
+ACCEPTED_SOURCE_LEVELS: dict[str, str] = {
+    SIMULATED_EVIDENCE_SOURCE: VerificationLevel.simulated.value,
+    LIVE_READONLY_EVIDENCE_SOURCE: VerificationLevel.live_verified.value,
+}
+
 FINDING_PASS = EvidenceStatus.passed.value
 FINDING_FAIL = EvidenceStatus.failed.value
 FINDING_UNVERIFIABLE = EvidenceStatus.unverifiable.value
@@ -91,15 +106,25 @@ def _cidr_within_any(cidr: str, observed: Iterable[str]) -> bool | None:
     return matched
 
 
+def _assert_accepted_source_level(evidence_source: object, verification_level: object) -> None:
+    """Fail closed unless ``(evidence_source, verification_level)`` is a known ACCEPTED pair.
+
+    The pair must match exactly — a simulated source with a ``live_verified`` level (or vice versa)
+    is refused, so fake/simulated evidence can never be admitted as live eligibility evidence.
+    """
+    expected = ACCEPTED_SOURCE_LEVELS.get(str(evidence_source))
+    if expected is None or verification_level != expected:
+        raise ValidationFailedError(
+            "unsupported target evidence source/verification-level combination"
+        )
+
+
 def validate_target_evidence_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValidationFailedError("target evidence payload must be an object")
     if payload.get("schema_version") != TARGET_EVIDENCE_SCHEMA_VERSION:
         raise ValidationFailedError("unsupported target evidence schema version")
-    if payload.get("evidence_source") != SIMULATED_EVIDENCE_SOURCE:
-        raise ValidationFailedError("only simulated target evidence is accepted in SECP-002B-1B-1")
-    if payload.get("verification_level") != VerificationLevel.simulated.value:
-        raise ValidationFailedError("only simulated target evidence is accepted in SECP-002B-1B-1")
+    _assert_accepted_source_level(payload.get("evidence_source"), payload.get("verification_level"))
     observed = payload.get("observed")
     if not isinstance(observed, dict):
         raise ValidationFailedError("target evidence observed section is missing")
@@ -244,10 +269,7 @@ def target_evidence_package(
         raise ValidationFailedError(
             "target evidence findings must not contain secret-like material"
         )
-    if evidence_source != SIMULATED_EVIDENCE_SOURCE:
-        raise ValidationFailedError("only simulated target evidence is accepted in SECP-002B-1B-1")
-    if verification_level != VerificationLevel.simulated.value:
-        raise ValidationFailedError("only simulated target evidence is accepted in SECP-002B-1B-1")
+    _assert_accepted_source_level(evidence_source, verification_level)
     if validated["evidence_source"] != evidence_source:
         raise ValidationFailedError("target evidence context does not match payload source")
     if validated["verification_level"] != verification_level:
