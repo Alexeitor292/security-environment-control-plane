@@ -70,13 +70,21 @@ def _path_under(path: str, base: str) -> bool:
 def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(DomainError)
     async def _domain_error(_: Request, exc: DomainError) -> JSONResponse:
-        # Redacted errors (e.g. read-only preflight) serialize ONLY the closed code — no message.
+        # Authentication errors add a WWW-Authenticate challenge (ADR-017); all others set none.
+        challenge = getattr(exc, "www_authenticate", None)
+        headers = {"WWW-Authenticate": challenge} if challenge else None
+        # Redacted errors (e.g. authentication, read-only preflight) serialize ONLY the closed
+        # code — no message, details, or rejected input.
         if getattr(exc, "redacted", False):
-            return JSONResponse(status_code=exc.http_status, content={"error": {"code": exc.code}})
+            return JSONResponse(
+                status_code=exc.http_status,
+                content={"error": {"code": exc.code}},
+                headers=headers,
+            )
         payload: dict = {"error": {"code": exc.code, "message": exc.message}}
         if isinstance(exc, ValidationFailedError) and exc.errors:
             payload["error"]["details"] = exc.errors
-        return JSONResponse(status_code=exc.http_status, content=payload)
+        return JSONResponse(status_code=exc.http_status, content=payload, headers=headers)
 
     @app.exception_handler(RequestValidationError)
     async def _request_validation_error(

@@ -1,16 +1,33 @@
-"""FastAPI dependencies: DB session and authenticated principal."""
+"""FastAPI dependencies: DB session and authenticated principal (ADR-017)."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 
-from fastapi import Depends, Header
+from fastapi import Depends, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from secp_api.auth import Principal, dev_principal
+from secp_api.auth import Principal, dev_principal, principal_from_oidc_claims
 from secp_api.config import Settings, get_settings
 from secp_api.db import get_db
-from secp_api.errors import AuthenticationError
+from secp_api.errors import AuthenticationError, AuthenticationUnavailableError
+from secp_api.oidc import (
+    CATEGORY_HEADER_INVALID,
+    OidcUnavailableError,
+    OidcVerificationError,
+    OidcVerifier,
+    get_oidc_verifier,
+)
+
+logger = logging.getLogger("secp.api")
+
+# Advertise an HTTP Bearer security scheme in OpenAPI. ``auto_error=False`` means this NEVER raises
+# or parses — the strict raw-header detection in ``resolve_principal`` governs. Every route that
+# depends on ``current_principal`` is thereby marked Bearer-secured in the schema; the public
+# ``/health`` route does not depend on it and stays unsecured.
+_bearer_scheme = HTTPBearer(auto_error=False, description="OIDC access token (ADR-017)")
 
 
 def db_session() -> Iterator[Session]:
@@ -21,51 +38,77 @@ def settings_dep() -> Settings:
     return get_settings()
 
 
-def current_principal(
-    session: Session = Depends(db_session),
-    settings: Settings = Depends(settings_dep),
-    authorization: str | None = Header(default=None),
-) -> Principal:
-    """Resolve the request principal.
+def _refuse(category: str) -> AuthenticationError:
+    """Log ONE bounded reason category (never the header/token/claims/subject) and return the
+    closed, redacted 401. The caller raises it."""
+    logger.info("authentication refused: %s", category)
+    return AuthenticationError(f"authentication refused ({category})")
 
-    SECP-001 authentication behaviour
-    -----------------------------------
-    The Authorization header is checked FIRST, before the dev fallback, so
-    that a token is never silently ignored.
 
-    * **Bearer token presented** (any value in ``Authorization`` header): OIDC
-      bearer-token validation is **not implemented** in SECP-001.  The request
-      is explicitly rejected with an ``AuthenticationError`` naming SECP-001 as
-      the scope and "not implemented" as the reason.  This applies even when
-      ``AUTH_DEV_MODE=true`` — a token must not be silently dropped in favour of
-      the dev principal, as that would mislead callers into thinking their token
-      was verified.
+def _parse_bearer(authorization: str, *, max_len: int) -> str:
+    """Strictly parse exactly ONE Bearer credential from a raw Authorization header value.
 
-    * **No Authorization header + dev fallback enabled**
-      (``SECP_AUTH_DEV_MODE=true``, ``APP_ENV != production``): the bootstrapped
-      development admin principal is returned.  This is the only working
-      authentication path in SECP-001.
-
-    * **No Authorization header + dev fallback disabled**: ``AuthenticationError``
-      is raised explaining that no usable authentication method is available.
-
-    NOTE: The production startup guard (``Settings`` validator) ensures
-    ``dev_auth_enabled`` is always ``False`` in production, so the dev fallback
-    can never activate there regardless of this function's logic.
+    Returns the raw token unchanged, or raises the closed 401. The scheme is case-insensitive (HTTP
+    semantics: ``Bearer``/``bearer``/``BEARER``); the token is never transformed. A non-Bearer
+    header (e.g. ``Basic``) is an ERROR — it must NOT be treated as "header absent" and must never
+    fall back. Multiple / comma-combined / whitespace-split credentials and an empty token are
+    refused.
     """
-    # Check Authorization header FIRST — a token must never be silently ignored.
+    if len(authorization) > max_len + 32:  # bound the raw header (token bound enforced in verify)
+        raise _refuse(CATEGORY_HEADER_INVALID)
+    scheme, sep, rest = authorization.partition(" ")
+    if not sep or scheme.lower() != "bearer":
+        raise _refuse(CATEGORY_HEADER_INVALID)
+    token = rest
+    if not token or any(ch.isspace() for ch in token) or "," in token:
+        raise _refuse(CATEGORY_HEADER_INVALID)
+    return token
+
+
+def resolve_principal(
+    *,
+    session: Session,
+    settings: Settings,
+    verifier: OidcVerifier,
+    authorization: str | None,
+) -> Principal:
+    """Core precedence logic (ADR-017), independent of FastAPI plumbing so it is directly testable.
+
+    An Authorization header is ALWAYS evaluated first; a presented bearer token is strictly parsed,
+    cryptographically verified, and mapped to a pre-provisioned internal user — it NEVER falls back
+    to the dev principal on any failure. Only a request with NO Authorization header may use the dev
+    fallback, and only when it is enabled (which is impossible in production).
+    """
     if authorization is not None:
-        raise AuthenticationError(
-            "OIDC bearer-token verification is not implemented in SECP-001; "
-            "tokens cannot be validated in this milestone. "
-            "Bearer authentication will be available in SECP-002+."
-        )
+        token = _parse_bearer(authorization, max_len=verifier.max_token_bytes)
+        try:
+            issuer, claims = verifier.verify(token)
+            return principal_from_oidc_claims(session, issuer=issuer, claims=claims)
+        except OidcUnavailableError as exc:
+            logger.warning("authentication unavailable: %s", exc.category)
+            raise AuthenticationUnavailableError() from None
+        except OidcVerificationError as exc:
+            raise _refuse(exc.category) from None
 
     if settings.dev_auth_enabled:
         return dev_principal(session)
 
-    raise AuthenticationError(
-        "No authentication method is available: "
-        "dev auth fallback is disabled and OIDC token verification is not "
-        "implemented in SECP-001."
+    raise _refuse("no_credential")
+
+
+def current_principal(
+    request: Request,
+    session: Session = Depends(db_session),
+    settings: Settings = Depends(settings_dep),
+    verifier: OidcVerifier = Depends(get_oidc_verifier),
+    _scheme: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> Principal:
+    """Resolve the request principal. The raw ``Authorization`` header is read directly (so strict
+    detection is not weakened by the lenient OpenAPI scheme); the security scheme only documents
+    Bearer auth in the schema."""
+    return resolve_principal(
+        session=session,
+        settings=settings,
+        verifier=verifier,
+        authorization=request.headers.get("Authorization"),
     )

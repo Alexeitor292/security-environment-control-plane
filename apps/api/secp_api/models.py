@@ -125,7 +125,22 @@ class Organization(Base, TimestampMixin):
 
 class User(Base, TimestampMixin):
     __tablename__ = "app_user"
-    __table_args__ = (UniqueConstraint("organization_id", "email"),)
+    # A non-null OIDC subject is globally unique for the single configured issuer (ADR-017): the
+    # exact ``sub`` claim maps to exactly one pre-provisioned user. NULL subjects (users not yet
+    # linked to an IdP identity) stay unconstrained, so multiple NULLs are permitted. A partial
+    # unique index enforces this portably on SQLite + PostgreSQL. Multi-issuer support will require
+    # an (issuer, subject) identity model in a future version; email is intentionally NOT globally
+    # unique (only per-organization), and the existing (organization_id, email) constraint stays.
+    __table_args__ = (
+        UniqueConstraint("organization_id", "email"),
+        Index(
+            "uq_app_user_subject",
+            "subject",
+            unique=True,
+            sqlite_where=text("subject IS NOT NULL"),
+            postgresql_where=text("subject IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     organization_id: Mapped[uuid.UUID] = mapped_column(

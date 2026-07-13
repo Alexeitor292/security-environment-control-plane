@@ -14,7 +14,12 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from secp_api.auth import DEV_PRINCIPAL_SUBJECT, Principal, principal_from_user
+from secp_api.auth import (
+    DEV_PRINCIPAL_SUBJECT,
+    LEGACY_DEV_PRINCIPAL_SUBJECT,
+    Principal,
+    principal_from_user,
+)
 from secp_api.enums import Permission
 from secp_api.models import Organization, Role, User, UserRoleAssignment
 from secp_api.services import catalog
@@ -52,9 +57,20 @@ def bootstrap_dev(session: Session) -> Principal:
         role.permissions = all_permissions
         session.flush()
 
+    # ADR-017 idempotent adoption: an existing dev database seeded before OIDC-A carries the legacy
+    # dev subject; adopt the deterministic UUID subject in place so the same row resolves on the
+    # dev-fallback and the real Keycloak bearer path (dev/test only — production never seeds).
     user = session.execute(
         select(User).where(User.subject == DEV_PRINCIPAL_SUBJECT)
     ).scalar_one_or_none()
+    if user is None:
+        legacy = session.execute(
+            select(User).where(User.subject == LEGACY_DEV_PRINCIPAL_SUBJECT)
+        ).scalar_one_or_none()
+        if legacy is not None:
+            legacy.subject = DEV_PRINCIPAL_SUBJECT
+            session.flush()
+            user = legacy
     if user is None:
         user = User(
             organization_id=org.id,

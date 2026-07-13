@@ -310,13 +310,27 @@ poll without surprises.
 ### 11.1 Local development (SECP-001)
 
 - **OIDC-compatible IdP** (Keycloak-compatible dev server) provides authentication.
-  For the local demo, a clearly-labeled **bootstrap/login placeholder** seeds a
-  development admin. All default credentials are documented as **UNSAFE FOR
-  PRODUCTION** in `.env.example` and the README.
-- The API validates bearer tokens. In `dev` mode it accepts the dev IdP and a
-  documented dev-only fallback principal so the stack is runnable without a fully
-  configured realm; this fallback is gated behind `AUTH_DEV_MODE=true` and refuses to
-  enable when `APP_ENV=production`.
+  All default credentials are documented as **UNSAFE FOR PRODUCTION** in
+  `.env.example` and the README.
+- **The API cryptographically verifies bearer tokens (ADR-017 / OIDC-A).** A
+  presented `Authorization: Bearer` token is accepted only when it is RS256-signed
+  (a fixed allowlist — no symmetric/`none`/caller-selected algorithms), its signature
+  verifies against the configured issuer's JWKS, its `iss` exactly matches
+  configuration, the configured API audience is present, it is unexpired with valid
+  `nbf`/`iat` within a bounded clock skew, and its exact `sub` maps to exactly one
+  **pre-provisioned** internal user (`app_user.subject`). Organization and permissions
+  are resolved from the database; the token's roles, groups, email, or organization
+  claims grant nothing; there is no just-in-time user creation. Discovery/JWKS are
+  deployment-configured trust infrastructure (never caller/DB input), fetched with
+  bounded timeouts, no redirects, no ambient proxy, and size caps, and cached with
+  bounded monotonic expirations. Failures are closed/redacted (`401 unauthenticated`
+  with `WWW-Authenticate: Bearer`; `503 authentication_unavailable` when the IdP is
+  unreachable). **Interactive browser login (Authorization Code + PKCE) is the future
+  OIDC-B slice and is not built here.**
+- A documented dev-only **fallback principal** keeps the stack runnable without a
+  configured realm, honored only on a no-`Authorization`-header request; it is gated
+  behind `AUTH_DEV_MODE=true` and refuses to enable when `APP_ENV=production`. A
+  presented bearer token is always verified first and never falls back.
 - **No production secrets** are present. Secrets are read from environment / `.env`
   (git-ignored). `.env.example` contains only placeholders.
 - Authorization is **organization-scoped RBAC**: every resource carries an

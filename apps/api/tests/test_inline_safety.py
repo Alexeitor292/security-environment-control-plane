@@ -192,7 +192,11 @@ def test_guard_refuses_plugin_claiming_simulated_true():
 def test_guard_refuses_production_for_any_plugin():
     """Production always refuses inline execution, even for the bootstrapped Simulator."""
     settings = Settings(
-        app_env="production", auth_dev_mode=False, workflow_dispatch_mode="temporal"
+        app_env="production",
+        auth_dev_mode=False,
+        workflow_dispatch_mode="temporal",
+        oidc_issuer="https://idp.example.test/realms/secp",
+        oidc_audience="secp-api",
     )
     bootstrapped = get_registry().get("simulator")
     with pytest.raises(InlineExecutionForbidden):
@@ -201,7 +205,11 @@ def test_guard_refuses_production_for_any_plugin():
 
 def test_get_dispatcher_refuses_inline_in_production():
     settings = Settings(
-        app_env="production", auth_dev_mode=False, workflow_dispatch_mode="temporal"
+        app_env="production",
+        auth_dev_mode=False,
+        workflow_dispatch_mode="temporal",
+        oidc_issuer="https://idp.example.test/realms/secp",
+        oidc_audience="secp-api",
     )
     object.__setattr__(settings, "workflow_dispatch_mode", "inline")
     with pytest.raises(InlineExecutionForbidden):

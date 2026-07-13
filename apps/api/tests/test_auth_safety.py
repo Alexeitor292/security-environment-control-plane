@@ -27,7 +27,12 @@ def test_production_with_inline_dispatch_is_rejected():
 
 def test_valid_production_config_disables_dev_auth():
     settings = Settings(
-        app_env="production", auth_dev_mode=False, workflow_dispatch_mode="temporal"
+        app_env="production",
+        auth_dev_mode=False,
+        workflow_dispatch_mode="temporal",
+        # Production also requires a safe OIDC issuer/audience (ADR-017).
+        oidc_issuer="https://idp.example.test/realms/secp",
+        oidc_audience="secp-api",
     )
     assert settings.dev_auth_enabled is False
     assert settings.is_production is True
@@ -42,70 +47,55 @@ def test_dev_auth_requires_both_dev_env_and_explicit_mode():
     assert Settings(app_env="test", auth_dev_mode=True).dev_auth_enabled is True
 
 
+def _verifier():
+    # A seam-injected verifier (no network); the tokens below fail before any discovery/JWKS fetch.
+    from tests.oidc_helpers import FakeIdp, build_verifier  # type: ignore
+
+    return build_verifier(FakeIdp())
+
+
 def test_current_principal_refused_when_dev_auth_disabled(session, principal):
-    from secp_api.deps import current_principal
+    from secp_api.deps import resolve_principal
 
     settings = Settings(app_env="dev", auth_dev_mode=False)  # fallback disabled
     with pytest.raises(AuthenticationError):
-        current_principal(session=session, settings=settings, authorization=None)
+        resolve_principal(
+            session=session, settings=settings, verifier=_verifier(), authorization=None
+        )
 
 
-def test_bearer_token_explicitly_rejected_with_oidc_not_implemented_error(session):
-    """Any bearer token is explicitly refused with a clear SECP-001 placeholder message.
-
-    OIDC token verification is not implemented in SECP-001; a caller sending a
-    token must receive an unambiguous error — not a silent fallback and not a
-    generic authentication failure that might imply the token was inspected.
-    """
-    from secp_api.deps import current_principal
+def test_invalid_bearer_is_verified_and_refused_not_placeholder(session):
+    """A bearer token is now cryptographically verified (ADR-017): a malformed/unverifiable token is
+    refused with a closed AuthenticationError — NOT the old 'not implemented' SECP-001 placeholder,
+    and never a silent fallback."""
+    from secp_api.deps import resolve_principal
 
     settings = Settings(app_env="dev", auth_dev_mode=False)
     with pytest.raises(AuthenticationError) as exc_info:
-        current_principal(
+        resolve_principal(
             session=session,
             settings=settings,
-            authorization="Bearer eyJhbGciOiJSUzI1NiJ9.fake.token",
+            verifier=_verifier(),
+            authorization="Bearer not.a.valid.jwt",
         )
-    message = str(exc_info.value)
-    assert "not implemented" in message.lower()
-    assert "SECP-001" in message
+    message = str(exc_info.value).lower()
+    assert "not implemented" not in message
+    assert "secp-001" not in message
 
 
-def test_bearer_token_rejected_even_when_dev_auth_enabled(session):
-    """A bearer token is rejected EVEN when dev_auth_mode=True.
+def test_invalid_bearer_never_falls_back_even_when_dev_auth_enabled(session):
+    """The Authorization header is evaluated BEFORE the dev fallback: an invalid token never yields
+    the dev principal, even with dev auth enabled."""
+    from secp_api.deps import resolve_principal
 
-    The Authorization header check runs BEFORE the dev fallback, so a token is
-    never silently dropped in favour of the dev admin principal.  This prevents
-    callers from being misled into thinking their token was validated.
-    """
-    from secp_api.deps import current_principal
-
-    # dev mode enabled — would normally return the dev principal for unauthenticated
-    # requests, but a presented token must still be refused explicitly.
     settings = Settings(app_env="dev", auth_dev_mode=True, workflow_dispatch_mode="inline")
-    with pytest.raises(AuthenticationError) as exc_info:
-        current_principal(
+    with pytest.raises(AuthenticationError):
+        resolve_principal(
             session=session,
             settings=settings,
+            verifier=_verifier(),
             authorization="Bearer eyJhbGciOiJSUzI1NiJ9.fake.token",
         )
-    message = str(exc_info.value)
-    assert "not implemented" in message.lower()
-    assert "SECP-001" in message
-
-
-def test_bearer_token_rejected_even_when_dev_auth_disabled_no_production_fallback(session):
-    """Production-like settings (dev_auth disabled) also reject bearer tokens."""
-    from secp_api.deps import current_principal
-
-    settings = Settings(app_env="dev", auth_dev_mode=False)
-    with pytest.raises(AuthenticationError) as exc_info:
-        current_principal(
-            session=session,
-            settings=settings,
-            authorization="Bearer some.opaque.token",
-        )
-    assert "SECP-001" in str(exc_info.value)
 
 
 def test_no_credential_defaults_in_settings_source():
@@ -118,6 +108,65 @@ def test_no_credential_defaults_in_settings_source():
     # Check the SOURCE-declared default (not a runtime instance, which may read a
     # developer's local .env): the default database URL embeds no credentials.
     assert str(Settings.model_fields["database_url"].default).startswith("sqlite")
+
+
+# --- ADR-017: OIDC production validation + bounded verifier settings ----------
+
+_VALID_PROD = dict(
+    app_env="production",
+    auth_dev_mode=False,
+    workflow_dispatch_mode="temporal",
+    oidc_issuer="https://idp.example.test/realms/secp",
+    oidc_audience="secp-api",
+)
+
+
+def test_valid_production_oidc_config_is_accepted():
+    settings = Settings(**_VALID_PROD)
+    assert settings.is_production is True
+    assert settings.dev_auth_enabled is False
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"oidc_issuer": ""},  # empty issuer
+        {"oidc_issuer": "http://idp.example.test/realms/secp"},  # non-HTTPS
+        {"oidc_issuer": "https://user:pass@idp.example.test/realms/secp"},  # credentials
+        {"oidc_issuer": "https://idp.example.test/realms/secp?x=1"},  # query
+        {"oidc_issuer": "https://idp.example.test/realms/secp#frag"},  # fragment
+        {"oidc_audience": ""},  # empty audience
+    ],
+)
+def test_production_rejects_unsafe_issuer_or_audience(override):
+    with pytest.raises(ValidationError):
+        Settings(**{**_VALID_PROD, **override})
+
+
+def test_non_production_allows_http_issuer():
+    # The dev Keycloak service is HTTP; non-production may use it.
+    settings = Settings(app_env="dev", oidc_issuer="http://keycloak:8080/realms/secp")
+    assert settings.oidc_issuer.startswith("http://")
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"oidc_http_timeout_seconds": 0},  # not > 0
+        {"oidc_http_timeout_seconds": 999},  # excessive
+        {"oidc_clock_skew_seconds": -1},  # negative
+        {"oidc_clock_skew_seconds": 100000},  # excessive
+        {"oidc_discovery_cache_seconds": -5},  # negative
+        {"oidc_jwks_cache_seconds": 10**9},  # excessive
+        {"oidc_max_token_bytes": 10},  # below floor
+        {"oidc_max_token_bytes": 10**9},  # above ceiling
+        {"oidc_max_document_bytes": 100},  # below floor
+        {"oidc_max_document_bytes": 10**9},  # above ceiling
+    ],
+)
+def test_bounded_oidc_numeric_settings_are_validated_in_every_env(override):
+    with pytest.raises(ValidationError):
+        Settings(app_env="dev", **override)
 
 
 # --- authorization coverage: cross-org + role-gated destroy -------------------

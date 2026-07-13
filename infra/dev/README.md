@@ -59,11 +59,36 @@ Both paths run the **same** orchestration code and pass through the approval gat
 
 ## Authentication in dev
 
-The API accepts the Keycloak dev realm. For convenience it also supports a
-**dev fallback principal** (`SECP_AUTH_DEV_MODE=true`) so the stack is usable
-before wiring a full OIDC login. The fallback is automatically refused when
-`SECP_APP_ENV=production`. Full OIDC token verification is a documented SECP-001
-placeholder (see the design doc §11).
+The API performs **strict OIDC bearer-token verification** (ADR-017). A request with
+`Authorization: Bearer <access-token>` is accepted only when the token is RS256-signed, its signature
+verifies against the configured issuer's JWKS, its `iss` exactly matches `SECP_OIDC_ISSUER`, the
+`SECP_OIDC_AUDIENCE` audience is present, it is unexpired, and its exact `sub` maps to a
+**pre-provisioned** `app_user.subject`. Organization and permissions come from the database; token
+roles/groups/email grant nothing; there is no just-in-time user creation. An invalid token is a
+closed `401 {"error":{"code":"unauthenticated"}}` (a `503 authentication_unavailable` when the IdP's
+discovery/JWKS is unreachable) — never a fallback.
+
+For convenience the stack also supports a **dev fallback principal** (`SECP_AUTH_DEV_MODE=true`),
+honored **only** on a request that carries **no** `Authorization` header and **only** in
+non-production (automatically refused when `SECP_APP_ENV=production`). The dev Keycloak realm ships an
+`secp-api` audience mapper and a deterministic dev-admin subject so a real dev token maps to the same
+seeded user as the fallback.
+
+**Interactive browser login (Authorization Code + PKCE) is not implemented yet** — that is the future
+OIDC-B slice. The dev Keycloak issuer differs by host (`keycloak:8080` in-container vs `localhost:8081`
+in the browser); configure `SECP_OIDC_ISSUER` to exactly match the `iss` of the tokens you verify.
+
+### Provisioning a user's subject
+
+Create the `app_user` row out of band (no JIT provisioning) and set `app_user.subject` to the IdP's
+exact `sub` for that user; assign roles via `user_role_assignment`. Rotating the IdP's signing keys
+needs no SECP change — the verifier refreshes JWKS once when it sees an unknown `kid`.
+
+### Dev Keycloak smoke test (Docker)
+
+Bring up Keycloak, obtain a dev access token via the direct-access grant (never print it), and inspect
+only bounded claim names: confirm `aud` contains `secp-api` and `sub` equals the seeded subject, call
+a protected API endpoint with the token, confirm a forged token is refused, then remove the containers.
 
 ## Safety notes
 
