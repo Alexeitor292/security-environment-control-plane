@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 from secp_api import immutability  # noqa: F401  (registers ORM immutability guards)
@@ -141,13 +142,32 @@ def create_app() -> FastAPI:
         ),
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_allow_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS reflects the actual bearer-token architecture (ADR-019): the SECP API authenticates with
+    # a stateless ``Authorization: Bearer`` access token and uses NO SECP cookie, so CORS never
+    # needs credentials. In production the web app and API are SAME-ORIGIN, so no CORS origin is
+    # configured (``cors_allow_origins`` is validated empty) and this middleware is not added.
+    # In development the Vite dev server may be a different origin, so CORS is enabled ONLY for the
+    # exact configured dev origin(s), without credentials, with an explicit method/header allow
+    # list and a bounded preflight cache — no wildcard origin/method/header and no exposed headers.
+    if settings.cors_allow_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_allow_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type"],
+            max_age=600,
+        )
+
+    # Host validation (ADR-019): in production the Host header must match the canonical public
+    # origin's host (plus an optional documented internal health host); an unknown or malformed Host
+    # fails closed and no '*' can be configured. ``www_redirect=False`` means a redirect URL is
+    # never built from the (untrusted) Host header. In development/test no allowlist is applied so
+    # runs stay convenient and deterministic. This never bypasses ``/health`` — it is subject to the
+    # same allowlist, so a production liveness probe uses the canonical or configured internal host.
+    trusted_hosts = settings.trusted_hosts()
+    if trusted_hosts is not None:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts, www_redirect=False)
 
     _install_error_handlers(app)
 

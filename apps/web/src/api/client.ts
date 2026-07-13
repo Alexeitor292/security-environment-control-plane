@@ -56,8 +56,81 @@ import type {
   SubstrateEligibilityGrant,
 } from "./types";
 
-export const API_BASE =
-  (import.meta.env && import.meta.env.VITE_API_BASE_URL) || "http://localhost:8080";
+export interface ApiBaseResolution {
+  /** true when a usable API base was resolved; false means requests must fail closed. */
+  ok: boolean;
+  /** the resolved absolute API origin, or null when resolution failed. */
+  base: string | null;
+}
+
+/**
+ * Whether an explicit production `VITE_API_BASE_URL` override is EXACTLY the same origin as the
+ * browser (ADR-019 same-origin production model): identical scheme/host/port, and no userinfo,
+ * query, fragment, or non-root path. Anything else is an unsafe override and is refused (never
+ * silently ignored). The candidate is parsed strictly with the URL parser.
+ */
+function isExactSameOrigin(candidate: string, origin: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(candidate);
+  } catch {
+    return false;
+  }
+  if (u.username || u.password) return false; // userinfo
+  if (u.search || u.hash) return false; // query / fragment
+  if (u.pathname !== "" && u.pathname !== "/") return false; // non-root path
+  return u.origin === origin; // exact scheme + host + port
+}
+
+/**
+ * Resolve the API base origin (ADR-019 / OIDC-C).
+ *
+ * PRODUCTION (`env.PROD`) locks to ONE same-origin web/API deployment, so the bearer only ever
+ * reaches our own origin:
+ *  - no explicit override       → `window.location.origin`;
+ *  - an explicit override       → accepted ONLY when it is exactly the same origin, else REFUSED;
+ *  - no usable browser `window` → REFUSED (fail closed — NEVER a localhost API).
+ *
+ * DEVELOPMENT / node tests keep the explicit-override → window → deterministic-loopback behavior so
+ * a cross-origin dev API and jsdom-free node tests both work. `ok:false` is returned only in
+ * production; the request core turns that into a closed, value-free `configuration_invalid` error.
+ */
+export function resolveApiBase(
+  env: { VITE_API_BASE_URL?: string; PROD?: boolean } | undefined,
+  win: { location?: { origin?: string } } | undefined,
+): ApiBaseResolution {
+  const explicit = env?.VITE_API_BASE_URL;
+  const windowOrigin = win?.location?.origin;
+
+  if (env?.PROD) {
+    if (!windowOrigin) return { ok: false, base: null };
+    if (!explicit) return { ok: true, base: windowOrigin };
+    if (isExactSameOrigin(explicit, windowOrigin)) return { ok: true, base: windowOrigin };
+    return { ok: false, base: null };
+  }
+
+  if (explicit) return { ok: true, base: explicit };
+  if (windowOrigin) return { ok: true, base: windowOrigin };
+  return { ok: true, base: "http://localhost:8080" };
+}
+
+let apiBaseResolution: ApiBaseResolution = resolveApiBase(
+  import.meta.env,
+  typeof window !== "undefined" ? window : undefined,
+);
+const initialApiBaseResolution = apiBaseResolution;
+
+/** The resolved API base string, or "" when resolution failed (requests then fail closed). */
+export const API_BASE = apiBaseResolution.base ?? "";
+
+/**
+ * Test-only seam: force the resolved API base so the production fail-closed path is exercisable in
+ * the node test environment (where `import.meta.env.PROD` is false). Pass `null` to reset. Never
+ * used by application code.
+ */
+export function __setApiBaseResolutionForTests(resolution: ApiBaseResolution | null): void {
+  apiBaseResolution = resolution ?? initialApiBaseResolution;
+}
 
 export class ApiClientError extends Error {
   code: string;
@@ -113,6 +186,16 @@ async function requestWithResponseMetadata<T>(
   params?: Record<string, string>,
   opts?: RequestOptions,
 ): Promise<ResponseMetadata<T>> {
+  // Resolve the API base BEFORE retrieving any bearer token. If production same-origin resolution
+  // failed (no browser window, or an unsafe cross-origin override), fail CLOSED: do not call the
+  // access-token provider, do not make a request, and never surface the rejected override value.
+  if (!apiBaseResolution.ok || apiBaseResolution.base === null) {
+    throw new ApiClientError(
+      0,
+      "configuration_invalid",
+      "The API base URL is not valid for this deployment.",
+    );
+  }
   let res: Response;
   try {
     res = await fetch(buildUrl(path, params), {

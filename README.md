@@ -7,10 +7,17 @@ validating, resetting, and reporting on controlled security environments.
 > effects are database records, not real infrastructure. Beyond it, the platform now
 > includes provider foundations, **controlled worker-owned read-only Proxmox discovery**,
 > target onboarding, governance surfaces, and durable topology authoring. **Real Proxmox
-> provisioning and real OpenTofu execution remain sealed**, and **production OIDC
-> authentication is not yet implemented**. See
-> [`docs/PROJECT_CHARTER.md`](docs/PROJECT_CHARTER.md) (governing charter) and
-> [`docs/STATUS.md`](docs/STATUS.md) (detailed current-capability ledger).
+> provisioning and real OpenTofu execution remain sealed.** **OIDC authentication is
+> implemented** — backend bearer verification (OIDC-A / ADR-017), browser Authorization
+> Code + PKCE login (OIDC-B / ADR-018), and production deployment guardrails, a token-free
+> preflight, and operations runbooks (OIDC-C / ADR-019). **This does not make the whole
+> platform production-ready:** pre-provisioned internal identities are still required,
+> same-origin production deployment is the locked model, the development stack remains
+> unsafe for production, real provisioning remains sealed, and the complete real
+> disposable-lab lifecycle is incomplete. See
+> [`docs/PROJECT_CHARTER.md`](docs/PROJECT_CHARTER.md) (governing charter),
+> [`docs/STATUS.md`](docs/STATUS.md) (detailed current-capability ledger), and
+> [`docs/runbooks/oidc-production.md`](docs/runbooks/oidc-production.md).
 
 ## What this is
 

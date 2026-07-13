@@ -30,9 +30,12 @@ def test_valid_production_config_disables_dev_auth():
         app_env="production",
         auth_dev_mode=False,
         workflow_dispatch_mode="temporal",
-        # Production also requires a safe OIDC issuer/audience (ADR-017).
+        # Production also requires a safe OIDC issuer/audience (ADR-017) and a same-origin public
+        # origin with CORS disabled (ADR-019).
         oidc_issuer="https://idp.example.test/realms/secp",
         oidc_audience="secp-api",
+        public_origin="https://secp.example.test",
+        cors_allow_origins=[],
     )
     assert settings.dev_auth_enabled is False
     assert settings.is_production is True
@@ -118,6 +121,10 @@ _VALID_PROD = dict(
     workflow_dispatch_mode="temporal",
     oidc_issuer="https://idp.example.test/realms/secp",
     oidc_audience="secp-api",
+    # OIDC-C (ADR-019): a safe same-origin production config supplies a canonical HTTPS public
+    # origin and disables CORS (browser and API are same-origin).
+    public_origin="https://secp.example.test",
+    cors_allow_origins=[],
 )
 
 

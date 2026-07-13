@@ -99,10 +99,11 @@ class _CacheEntry:
     value: Any
 
 
-def _default_client_factory(timeout_seconds: float) -> Callable[[], httpx.Client]:
+def build_client_factory(timeout_seconds: float) -> Callable[[], httpx.Client]:
     """A bounded, redirect-disabled, proxy/env-disabled synchronous client factory (production
     default). ``trust_env=False`` disables ambient proxy and environment configuration; the
-    repository ships no reviewed proxy configuration, so ambient proxying stays off."""
+    repository ships no reviewed proxy configuration, so ambient proxying stays off. Shared by the
+    token verifier and the operator OIDC preflight so both use the identical hardened posture."""
     timeout = httpx.Timeout(
         timeout_seconds,
         connect=timeout_seconds,
@@ -115,6 +116,56 @@ def _default_client_factory(timeout_seconds: float) -> Callable[[], httpx.Client
         return httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False)
 
     return factory
+
+
+# Backwards-compatible private alias (the original name).
+_default_client_factory = build_client_factory
+
+
+def require_safe_url(url: str, *, require_https: bool) -> None:
+    """Reject a discovery/JWKS/endpoint URL that is not a bare HTTP(S) URL with a host and no
+    userinfo (HTTPS required when ``require_https``). Raises :class:`OidcUnavailableError` on any
+    problem — never surfacing the URL/network detail. Shared by the verifier and the preflight."""
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        raise OidcUnavailableError()
+    if require_https and parsed.scheme != "https":
+        raise OidcUnavailableError()
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise OidcUnavailableError()
+    if not parsed.hostname:
+        raise OidcUnavailableError()
+
+
+def fetch_document_bytes(
+    url: str,
+    *,
+    client_factory: Callable[[], httpx.Client],
+    max_document_bytes: int,
+    require_https: bool,
+) -> bytes:
+    """The single hardened, bounded document retrieval used by BOTH the token verifier and the
+    operator preflight: safe URL (scheme/https/no-userinfo/host), no redirects, no ambient proxy
+    (the ``client_factory`` decides), a 2xx status, and a response-size cap enforced while reading.
+    Any transport problem raises :class:`OidcUnavailableError` — never provider/network/exception
+    detail. JSON parsing and semantic validation are the caller's responsibility (so the preflight
+    can distinguish 'unavailable' from 'metadata invalid')."""
+    require_safe_url(url, require_https=require_https)
+    body = bytearray()
+    try:
+        with client_factory() as client, client.stream("GET", url) as response:
+            if response.status_code // 100 != 2:
+                raise OidcUnavailableError()
+            for chunk in response.iter_bytes():
+                body.extend(chunk)
+                if len(body) > max_document_bytes:
+                    raise OidcUnavailableError()
+    except OidcUnavailableError:
+        raise
+    except Exception:
+        # Never surface provider/network/exception detail — one closed category.
+        raise OidcUnavailableError() from None
+    return bytes(body)
 
 
 class OidcVerifier:
@@ -320,23 +371,14 @@ class OidcVerifier:
         return result
 
     def _fetch_json(self, url: str) -> dict[str, Any]:
-        self._require_safe_url(url)
-        body = bytearray()
+        raw = fetch_document_bytes(
+            url,
+            client_factory=self._client_factory,
+            max_document_bytes=self.config.max_document_bytes,
+            require_https=self.config.require_https,
+        )
         try:
-            with self._client_factory() as client, client.stream("GET", url) as response:
-                if response.status_code // 100 != 2:
-                    raise OidcUnavailableError()
-                for chunk in response.iter_bytes():
-                    body.extend(chunk)
-                    if len(body) > self.config.max_document_bytes:
-                        raise OidcUnavailableError()
-        except OidcUnavailableError:
-            raise
-        except Exception:
-            # Never surface provider/network/exception detail — one closed category.
-            raise OidcUnavailableError() from None
-        try:
-            parsed = json.loads(bytes(body))
+            parsed = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise OidcUnavailableError() from None
         if not isinstance(parsed, dict):
@@ -344,15 +386,7 @@ class OidcVerifier:
         return parsed
 
     def _require_safe_url(self, url: str) -> None:
-        parsed = urlsplit(url)
-        if parsed.scheme not in ("http", "https"):
-            raise OidcUnavailableError()
-        if self.config.require_https and parsed.scheme != "https":
-            raise OidcUnavailableError()
-        if parsed.username or parsed.password or "@" in parsed.netloc:
-            raise OidcUnavailableError()
-        if not parsed.hostname:
-            raise OidcUnavailableError()
+        require_safe_url(url, require_https=self.config.require_https)
 
 
 # --- process-wide singleton (rebindable for tests) ---------------------------------------------

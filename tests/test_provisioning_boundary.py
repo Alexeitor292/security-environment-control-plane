@@ -91,10 +91,11 @@ def test_api_never_imports_runner_or_iac(path: Path):
             continue
         low = mod.lower()
         for bad in FORBIDDEN_IMPORT_SUBSTRINGS:
-            # ADR-017: the OIDC verifier (oidc.py) is the sole API seam permitted an HTTP client,
-            # and only to fetch the configured issuer's discovery/JWKS (read-only authentication
-            # trust infrastructure — never a provider/IaC call, which stays worker-only).
-            if bad == "httpx" and path.name == "oidc.py":
+            # ADR-017 / ADR-019: the OIDC verifier (oidc.py) and the token-free operator preflight
+            # (oidc_preflight.py) are the API seam permitted an HTTP client, and only to fetch the
+            # configured issuer's discovery/JWKS (read-only authentication trust infrastructure —
+            # never a provider/IaC call, which stays worker-only).
+            if bad == "httpx" and path.name in ("oidc.py", "oidc_preflight.py"):
                 continue
             assert bad not in low, f"{path.name} imports forbidden module '{mod}'"
     bad_names = FORBIDDEN_IMPORT_NAMES & set(names)
