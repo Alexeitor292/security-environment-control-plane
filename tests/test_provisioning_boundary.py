@@ -33,6 +33,10 @@ FORBIDDEN_IMPORT_SUBSTRINGS = (
     # SECP-002B-1B-0: the onboarding preflight collector is worker-only.
     "secp_worker.onboarding",
     "onboarding.preflight",
+    # SECP-002B-1B B1B-PR4 (ADR-021): the readiness adapters, resolver self-test, resolution
+    # lease, JIT environment projection, and immutable evidence recorder are worker-only.
+    "secp_worker.readiness",
+    "secp_worker.preflight",
 )
 
 # Symbols that name a runner / executor / renderer / secret resolver / preflight collector;
@@ -53,6 +57,13 @@ FORBIDDEN_IMPORT_NAMES = {
     "PreflightCollector",
     "SimulatedTargetEvidenceCollector",
     "TargetEvidenceCollector",
+    # SECP-002B-1B B1B-PR4 — the API never touches secret material, a state adapter, or the JIT
+    # child-process environment builder.
+    "SecretMaterial",
+    "RemoteStateReadinessAdapter",
+    "build_plan_secret_env",
+    "build_process_env",
+    "build_lab_secret_env",
 }
 
 # dispatch.py is the only API file permitted to import the worker's onboarding
@@ -172,6 +183,14 @@ def test_api_provisioning_modules_have_no_shell_or_http():
         "toolchain_profile.py",
         "onboarding.py",
         "routers/onboarding.py",
+        # SECP-002B-1B B1B-PR4 (ADR-021) — the enqueue-only readiness surface.
+        "readiness_contract.py",
+        "readiness_binding.py",
+        "readiness_models.py",
+        "schemas_readiness.py",
+        "services/readiness.py",
+        "services/plan_secret_authorization.py",
+        "routers/readiness.py",
     ):
         src = (API_PKG / name).read_text(encoding="utf-8")
         for forbidden in ("import subprocess", "os.system(", "import httpx", "subprocess."):

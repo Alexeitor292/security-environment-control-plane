@@ -208,6 +208,13 @@ def register_target(
     session.add(target)
     session.flush()
 
+    # B1B-PR4: give the target's credential SELECTION an opaque, versioned identity. It stores no
+    # reference and no hash of one; changing ``secret_ref`` later ROTATES it (unavoidably), which
+    # invalidates every prior readiness authorization/record through the operation fingerprint.
+    from secp_api.credential_binding import ensure_credential_binding
+
+    ensure_credential_binding(session, target, created_by=actor.user_id)
+
     for cidr_block, subnet_prefix in normalized_address_spaces:
         session.add(
             AddressSpacePolicy(
@@ -283,3 +290,57 @@ def list_address_spaces(
         .scalars()
         .all()
     )
+
+
+def rotate_target_credential(
+    session: Session,
+    actor: Principal,
+    target_id: uuid.UUID,
+    *,
+    secret_ref: str | None,
+) -> ExecutionTarget:
+    """The SUPPORTED path for replacing a target's opaque credential reference (B1B-PR4 §2).
+
+    It validates the new reference's syntax, writes it, and — through the ORM rotation hook —
+    ROTATES the target's opaque credential binding to the next version. The reference itself is
+    never persisted anywhere but ``ExecutionTarget.secret_ref`` (an opaque pointer, never a secret)
+    and is never hashed.
+
+    Rotating the binding invalidates every prior plan-secret authorization and readiness record
+    (their operation fingerprints bind the old binding id + version) **without modifying any
+    historical evidence**.
+    """
+    from secp_api.credential_binding import active_credential_binding
+
+    actor.require(Permission.credential_binding_manage)
+    target = get_target(session, actor, target_id)
+    if secret_ref is not None:
+        if looks_like_plaintext_secret(secret_ref):
+            raise ValidationFailedError(
+                "secret_ref must be an opaque reference (e.g. 'env:SECP_PROVIDER_SECRET__X'),"
+                " never a plaintext secret"
+            )
+        try:
+            validate_secret_ref_syntax(secret_ref)
+        except InvalidSecretRefError as exc:
+            raise ValidationFailedError("invalid secret_ref syntax", errors=[str(exc)]) from exc
+
+    target.secret_ref = secret_ref
+    session.flush()  # the ORM before_flush hook rotates the credential binding
+
+    binding = active_credential_binding(session, target.id)
+    audit.record(
+        session,
+        action=AuditAction.target_credential_rotated,
+        resource_type="execution_target",
+        resource_id=target.id,
+        organization_id=target.organization_id,
+        actor=str(actor.user_id),
+        data={
+            # OPAQUE ids only: never the reference, never a hash of it.
+            "has_secret_ref": secret_ref is not None,
+            "credential_binding_id": str(binding.id) if binding is not None else None,
+            "credential_binding_version": binding.binding_version if binding is not None else None,
+        },
+    )
+    return target

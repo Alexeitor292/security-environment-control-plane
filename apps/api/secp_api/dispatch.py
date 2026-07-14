@@ -66,6 +66,18 @@ class WorkflowDispatcher(Protocol):
         self, session: Session, onboarding_id: uuid.UUID
     ) -> WorkflowRun: ...
 
+    def dispatch_toolchain_attestation(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun: ...
+
+    def dispatch_remote_state_readiness(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun: ...
+
+    def dispatch_plan_secret_readiness(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun: ...
+
 
 class InlineDispatcher:
     """Runs orchestration synchronously in the caller's session/transaction."""
@@ -136,6 +148,47 @@ class InlineDispatcher:
             "real read-only eligibility preflight is not permitted via the inline dispatcher; "
             "it runs only on the durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). "
             "The API never contacts the target."
+        )
+
+    def dispatch_toolchain_attestation(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun:
+        # Toolchain attestation reads the WORKER's own deployment-local filesystem layout; the API
+        # process has no such layout and must never inspect one. There is NO inline-safe path.
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            "toolchain attestation is not permitted via the inline dispatcher; it runs only on the "
+            "durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). The API never reads a "
+            "worker-local filesystem."
+        )
+
+    def dispatch_remote_state_readiness(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun:
+        # Remote-state readiness contacts a real state backend; it has NO inline-safe path
+        # (B1B-PR4 / ADR-021 §3-§4 — durable worker path only). Refuse inline BEFORE any record
+        # load, audit, adapter, or binding. There is NO inline fallback: when Temporal is
+        # unavailable the request simply does not execute.
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            "remote-state readiness is not permitted via the inline dispatcher; it runs only on "
+            "the durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). The API never "
+            "contacts a state backend."
+        )
+
+    def dispatch_plan_secret_readiness(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun:
+        # Plan-secret readiness contacts a real secret manager; it has NO inline-safe path. The API
+        # never constructs a resolver, resolves a secret, or receives secret material.
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            "plan-secret readiness is not permitted via the inline dispatcher; it runs only on "
+            "the durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). The API never "
+            "resolves a secret."
         )
 
 
@@ -385,6 +438,69 @@ class TemporalDispatcher:
             args={"onboarding_id": str(onboarding_id), "workflow_run_id": str(run.id)},
         )
         return run
+
+    def _queue_readiness(
+        self,
+        session: Session,
+        manifest_id: uuid.UUID,
+        *,
+        kind: WorkflowKind,
+        workflow: str,
+    ) -> WorkflowRun:
+        # ENQUEUE-ONLY: durably queue a WorkflowRun + outbox row for the worker-owned readiness
+        # operation. This creates only durable state; NOTHING is submitted to Temporal until the API
+        # transaction commits. The MANIFEST ID is the only identifier passed — the workflow argument
+        # carries no endpoint, backend reference, backend kind, state key, namespace, secret
+        # reference, credential, target config, evidence payload, or adapter configuration. The
+        # worker activity opens a FRESH session and re-derives the complete authoritative binding.
+        from secp_api.models import ProvisioningManifest
+
+        manifest = session.get(ProvisioningManifest, manifest_id)
+        if manifest is None:
+            raise NotFoundError(f"provisioning manifest {manifest_id} not found")
+        run = self._queue_run(
+            session,
+            kind=kind,
+            organization_id=manifest.organization_id,
+            execution_target_id=manifest.execution_target_id,
+        )
+        self._queue_outbox(
+            session,
+            run,
+            workflow=workflow,
+            args={"manifest_id": str(manifest_id), "workflow_run_id": str(run.id)},
+        )
+        return run
+
+    def dispatch_toolchain_attestation(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun:
+        return self._queue_readiness(
+            session,
+            manifest_id,
+            kind=WorkflowKind.toolchain_attestation,
+            workflow="ToolchainAttestationWorkflow",
+        )
+
+    def dispatch_remote_state_readiness(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun:
+        return self._queue_readiness(
+            session,
+            manifest_id,
+            kind=WorkflowKind.remote_state_readiness,
+            workflow="RemoteStateReadinessWorkflow",
+        )
+
+    def dispatch_plan_secret_readiness(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun:
+        return self._queue_readiness(
+            session,
+            manifest_id,
+            kind=WorkflowKind.plan_secret_readiness,
+            workflow="PlanSecretReadinessWorkflow",
+        )
 
 
 def _utcnow() -> datetime:

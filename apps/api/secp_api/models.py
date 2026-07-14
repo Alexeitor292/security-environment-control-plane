@@ -2007,6 +2007,17 @@ from secp_api.discovery_models import (  # noqa: E402,F401
     TargetDiscoveryEnrollment,
 )
 
+# SECP-002B-1B B1B-PR4 durable readiness models (dedicated module for a focused diff).
+from secp_api.readiness_models import (  # noqa: E402,F401
+    CredentialBinding,
+    PlanSecretReadinessAuthorization,
+    PlanSecretReadinessEvidence,
+    PlanSecretReadinessRecord,
+    PlanSecretResolutionLease,
+    RemoteStateReadinessRecord,
+    ToolchainAttestationRecord,
+)
+
 # SECP-B9 durable topology draft authoring models (dedicated module for a focused diff).
 from secp_api.topology_authoring_models import (  # noqa: E402,F401
     TopologyAuthoringDocument,

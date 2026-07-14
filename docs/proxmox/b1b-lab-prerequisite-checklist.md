@@ -76,6 +76,16 @@ destroyed.
       certificate-pinning approach). `verify_tls=false` is refused.
 - [ ] A **least-privileged** API token scoped to only the lab node/storage/bridge/VM-ID
       allocation — never a root/full-admin token.
+      > **B1B-PR4 truth:** `ExecutionTarget` has exactly ONE generic `secret_ref`. B1B-PR4 binds a
+      > **plan-read PURPOSE CLASS**, a reviewed reference **SCHEME**, and — since the security
+      > amendment — an **opaque, versioned credential BINDING** (a bare UUID + a monotonic version;
+      > **no reference and no hash of one is ever stored**). Changing `secret_ref` **rotates** that
+      > binding, which invalidates every prior readiness authorization and record, so a credential
+      > replacement can never be invisible. It still makes **no least-privilege claim about the
+      > credential itself**. Operation-specific credential separation (plan vs apply vs destroy;
+      > provider vs state backend) remains an explicit implementation prerequisite for B1B-PR5. This
+      > box is satisfied only by an operator provisioning a genuinely scoped token and independently
+      > verifying its scope.
 - [ ] The credential is stored **only** in a secret manager and referenced by an opaque
       `secret_ref`; it is resolved **just-in-time in the worker** and never persisted,
       logged, or committed.
@@ -96,10 +106,40 @@ destroyed.
 
 ## 6. Remote state protection
 
+> **B1B-PR4 note (ADR-021):** the durable, worker-owned **remote-state readiness** operation now
+> exists — **sealed by default**. It VALIDATES backend control metadata through an explicitly-injected
+> adapter whose contract has **no state-body surface** (ten mandatory facets: remote-only backend
+> class, transport security, server-derived namespace identity, encryption-at-rest proof, locking
+> proof, backup proof, restore proof, least-privileged access, empty-or-expected namespace, no local
+> fallback; any unprovable fact fails closed to `unverifiable`). That does **not** check any box below.
+> **This PR performs no backup and no restore against real state** — it validates EXTERNAL proofs,
+> never invents them. No operator has run it against a real backend, the shipped composition injects
+> no adapter, and **no real remote-state backend has been contacted**. A passing unit fixture is not
+> deployment evidence. Both B1-A subprocess seals remain `True`.
+>
+> **Security amendment — three additional operator prerequisites:**
+>
+> 1. **A durable toolchain attestation must exist.** A matching toolchain-profile hash is a
+>    DECLARATION, not evidence: the worker must actually run the real verifier against a reviewed,
+>    deployment-local, immutable filesystem layout. The shipped composition carries **no layout**.
+> 2. **A reviewed activation dossier must exist.** The fail-closed placeholder authorizes nothing —
+>    no binding, no readiness outcome, no capability, no combined-ready status.
+> 3. **The adapter must be independently activation-bound and code-reviewed.** A self-declared
+>    `contract_version` is **not** provenance: a controlled-live capability is issued only against a
+>    reviewed implementation digest. The interface exposes no state-body method and known state-body
+>    surfaces are refused before invocation — but **an arbitrary injected implementation's internals
+>    cannot be proven safe by reflection alone**, and **a compromised worker remains residual risk**.
+>    Human review of the deployment-local adapter is the control.
+
 - [ ] A **remote** state backend (never local) with access control, encryption at rest,
       and state locking.
 - [ ] State backend credentials handled like all other secrets (worker-only, redacted).
-- [ ] Backup/restore of state tested.
+      **Note:** B1B-PR4 does **not** resolve a state-backend credential — the deployment-local
+      adapter authenticates itself. A distinct, operation-scoped state-backend credential is an
+      explicit implementation prerequisite for B1B-PR5.
+- [ ] Backup/restore of state tested. **The immutable backup/restore proofs are supplied and issued
+      externally; SECP validates their binding, freshness, and (for restore) that a restore was
+      actually TESTED. SECP performs neither operation.**
 
 ## 7. Approval, recovery, and destroy
 
@@ -205,6 +245,28 @@ destroyed.
       approval, apply, verification, destroy, zero-residue, recovery, and kill-switch events. Evidence
       contains ids/hashes/categories/counts/timestamps only — never credentials, raw plan/state, or
       provider bodies.
+
+## 20. Plan-secret (JIT) readiness authorization (ADR-021 §G; B1B-PR4)
+
+> **B1B-PR4 note:** the durable, worker-owned **plan-secret readiness** operation now exists — sealed
+> by default. It proves only that the worker can AUTHENTICATE to the secret backend (a reviewed
+> resolver **self-test**, which returns **no target credential**) and that opaque secret material
+> projects into ONLY the allowlisted child-process environment (exercised with an **inert sentinel**;
+> no process runs). **`WorkerSecretResolver.resolve()` is never called and the real target
+> provisioning credential is NOT resolved.** No operator has run it, no real secret manager has been
+> contacted, and the shipped composition injects no self-test. These boxes are satisfied only by a
+> reviewed deployment-local activation.
+
+- [ ] A **dedicated, time-bounded, revocable** plan-secret readiness authorization exists, approved
+      under the **separate** `readiness:approve` permission against a **complete** human-review
+      evidence set (least-privileged plan credential; credential rotation/revocation; worker-only JIT
+      injection; **no apply-or-destroy capability**; secret-backend access policy; independent
+      adversarial review). It is **never** inferred from topology, publication, plan, onboarding,
+      live-read, eligibility, toolchain, or state readiness.
+- [ ] The secret purpose is **`plan_read` only**. Apply and destroy purposes are **unrepresentable**
+      in this phase and belong to their own separately reviewed phases.
+- [ ] The deployment-local secret backend exposes a **self-test / canary** mechanism that reveals no
+      target credential and returns no backend response body.
 
 Only when **every** box is checked and independently reviewed may B1-B proceed to a
 narrowly scoped first real dry run → approval → apply → verify → destroy.

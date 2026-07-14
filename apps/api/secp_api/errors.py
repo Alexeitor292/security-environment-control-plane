@@ -81,6 +81,38 @@ class ResolverActivationError(DomainError):
         self.http_status = self._STATUS.get(code_value, 400)
 
 
+class ReadinessError(DomainError):
+    """Closed-code, message-redacted error for the B1B-PR4 readiness surface (ADR-021 §P).
+
+    The HTTP layer serializes only the closed code (``{"error": {"code": ...}}``). No backend
+    message, endpoint, backend URL, state key, secret reference, evidence value, adapter detail,
+    rejected caller value, or exception body ever reaches the API/UI.
+    """
+
+    redacted = True
+    # True when a fail-closed refusal ALSO materialized a durable, revision-safe transition (e.g.
+    # expiring a stale authorization + its single expiry audit) that must be committed even though
+    # the request errors. The router commits before re-raising.
+    durable_transition: bool = False
+
+    _STATUS = {
+        "not_found": 404,
+        "forbidden": 403,
+        "invalid_state": 409,
+        "binding_invalid": 409,
+        "evidence_incomplete": 409,
+        "evidence_invalid": 422,
+        "lifecycle_conflict": 409,
+        "internal_failure": 500,
+    }
+
+    def __init__(self, code: object) -> None:
+        code_value = getattr(code, "value", str(code))
+        super().__init__(code_value)
+        self.code = code_value
+        self.http_status = self._STATUS.get(code_value, 400)
+
+
 class TopologyAuthoringError(DomainError):
     """Closed-code, message-redacted error for topology draft authoring (SECP-B9).
 

@@ -5,7 +5,8 @@
 **activates nothing**. No real OpenTofu process, plan, apply, or destroy has run; no real Proxmox host
 has been contacted. Both B1-A subprocess seals remain `True`.
 
-Related: ADR-011/012/013/014; `docs/architecture/secp-002b-0-provisioning-safety.md`;
+Related: ADR-011/012/013/014; **ADR-021 (remote-state + JIT secret readiness, B1B-PR4)**;
+`docs/architecture/secp-002b-0-provisioning-safety.md`;
 `docs/architecture/secp-002b-1a-opentofu-lab-contract.md`;
 `docs/architecture/secp-002b-1b-target-onboarding.md`;
 `docs/implementation/secp-002b-1b-plan.md`; `docs/proxmox/b1b-lab-prerequisite-checklist.md`;
@@ -44,7 +45,8 @@ Every component below is tagged with exactly one maturity level. This document m
 | Worker-owned SSH read-only discovery | `services/target_discovery.py`, `onboarding/live_readonly.py` | controlled-live-read-only |
 | Real toolchain attestation (on-disk) | `RealToolchainVerifier` (`toolchain_verify.py`, B1B-PR2) | code-implemented (filesystem-only; not wired into execution) |
 | Real eligibility preflight (Proxmox read-only) | `onboarding/eligibility_preflight.py` (`run_real_eligibility_preflight`), `eligibility_policy.py`, `services/eligibility.py` (B1B-PR3) | code-implemented (sealed by default; reuses the dormant read-only Proxmox transport + existing `TargetPreflight`/`TargetEvidenceRecord`; no mutation, no OpenTofu, both B1-A seals `True`) |
-| Remote-state / JIT-secret readiness | — | future-real-mutation |
+| Remote-state readiness (adapter with NO state-body surface) | `readiness/state_adapter.py`, `state_evaluation.py`, `state_readiness.py` (B1B-PR4, ADR-021) | code-implemented (sealed by default; validates backend control metadata only; no state payload is ever created/read/written/restored/deleted; no backup or restore is performed) |
+| Plan-secret (JIT) readiness | `readiness/plan_secret_readiness.py`, `plan_env.py`, `plan_secret_lease.py`, `PlanSecretReadinessAuthorization` (B1B-PR4, ADR-021) | code-implemented (sealed by default; a resolver SELF-TEST + an allowlisted env projection with an inert sentinel; `resolve()` is never called and no target provisioning credential is resolved) |
 | Real `init`/`plan`/`show` | — | future-real-mutation |
 | Real apply / verify / destroy / zero-residue | — | future-real-mutation |
 | A completed real lifecycle run | — | evidence-from-a-real-run (**none**) |

@@ -114,6 +114,41 @@ mutated, both B1-A subprocess seals remain `True`, and no real Proxmox host has 
 
 ## B1B-PR4 — Remote-state and secret-resolution readiness
 
+**Status: implemented by this slice** (sealed by default; locked by
+[ADR-021](../adr/ADR-021-remote-state-and-jit-secret-readiness.md)). Two SEPARATE durable,
+worker-owned readiness operations now exist — `remote_state_readiness` and `plan_secret_readiness` —
+each with the full chain: API request → transactionally durable `WorkflowRun` + outbox → Temporal
+workflow → worker activity → fresh-session authoritative record loading → complete gate → readiness
+adapter → typed evaluation → immutable evidence → **STOP**. Neither operation invokes the other;
+passing eligibility requests neither; completing both creates **no plan**.
+
+**Remote-state readiness** validates backend CONTROL METADATA through a provider-neutral, explicitly
+injected `RemoteStateReadinessAdapter` whose contract **has no state-body surface at all** (an
+adapter exposing `read_state`/`upload_state`/`force_unlock`/… is refused before invocation). Ten
+mandatory facets — backend class (remote only), transport security, server-derived namespace
+identity, encryption-at-rest proof, locking proof, backup proof, restore proof, least-privileged
+access, empty-or-expected namespace, no local fallback — must ALL pass explicitly; any unprovable
+fact fails closed to `unverifiable`. **PR4 performs no backup and no restore against real state**: it
+VALIDATES external proofs, never invents them.
+
+**Plan-secret readiness** proves two things without revealing a target credential: the worker can
+AUTHENTICATE to the secret backend (the reviewed `ResolverSelfTest`), and opaque `SecretMaterial`
+projects into ONLY the allowlisted child-process environment (exercised with an **inert sentinel**;
+no process runs; `os.environ` is neither read nor mutated — `plan_env` does not import `os` at all).
+**`WorkerSecretResolver.resolve()` is never called; the actual target provisioning credential is NOT
+resolved as project evidence.** It requires its own dedicated, time-bounded, revocable
+`PlanSecretReadinessAuthorization` (a `readiness:approve` permission, a complete human-review evidence
+set) plus a single-use CAS `PlanSecretResolutionLease` (fixed `N=3` budget; `begin_attempt` is the
+last thing before the secret boundary).
+
+**Purpose is plan-only.** `PlanSecretPurpose` has exactly ONE member (`plan_read`) — apply and destroy
+purposes are **unrepresentable**, not merely rejected. The API is **enqueue-only** (the inline
+dispatcher refuses with no fallback) and the shipped composition is fully **sealed** (no adapter, no
+self-test), so the durable path runs to completion yet refuses at the seal before any state backend or
+secret manager is contacted. No OpenTofu ran, nothing was mutated, both B1-A subprocess seals remain
+`True`, and **no real state backend, secret manager, or Proxmox host has been contacted**. B1B-PR5
+(real `init`/`plan`/`show`) remains next.
+
 - **Allowed:** remote-state backend validation (remote only, encryption at rest, state locking,
   least-privileged access, tested backup/restore, exact workspace/state identity binding); worker-only
   JIT secret injection readiness (`WorkerSecretResolver` real path replacing `SealedSecretResolver`,
@@ -121,13 +156,30 @@ mutated, both B1-A subprocess seals remain `True`, and no real Proxmox host has 
 - **Forbidden:** any plan/apply/destroy; local state or local fallback; API-side secret resolution;
   state contents in logs/audits/responses. **Both subprocess seals stay `True`.**
 - **Activation before → after:** read-only eligibility → + state/secret readiness (still no execution).
-- **Live-contact:** state backend + secret manager (validate/resolve readiness). **Mutation:** none.
+- **Live-contact:** state backend + secret manager (validate/self-test readiness) — **supported by the
+  code, NOT exercised as project evidence** (the shipped composition is sealed). **Mutation:** none.
 - **Required tests:** backend validation refuses local/unlocked/unencrypted; backup/restore proof;
   JIT resolution injects only allowlisted redacted env; no secret persisted; seals still `True`.
 - **Human-review gate:** state + secret-handling review.
 - **Rollback:** revert; resolver returns to sealed `credential_unavailable`.
 - **Evidence:** state readiness + resolution readiness (redacted).
-- **Completion:** state + secret readiness proven; still no plan/apply/destroy.
+- **Completion:** state + secret readiness **contracts** proven over fixtures; still no plan/apply/
+  destroy. **A passing fixture is not operator deployment readiness** — the prerequisite-checklist
+  boxes for remote state and least-privileged credentials remain unchecked.
+
+### Implementation prerequisites for B1B-PR5 surfaced by PR4 (documented, not fabricated)
+
+1. **Operation-specific credential separation is not real yet.** `ExecutionTarget` has ONE generic
+   `secret_ref`, so PR4 binds a plan-read PURPOSE CLASS + a reviewed reference SCHEME — it makes **no
+   least-privilege claim about the credential itself**. Separate plan/apply/destroy credentials, and a
+   separate STATE-BACKEND credential (PR4 resolves none — the deployment-local adapter authenticates
+   itself), are a PR5 prerequisite.
+2. **No third independent credential-reference source exists** for provisioning (the manifest is
+   secret-free by design), so a genuine three-way reference comparison is a PR5 prerequisite.
+3. **PR2's toolchain attestation is in-memory only (not persisted)**, so PR4 binds the profile
+   identity + attestation policy version; a durable on-disk attestation record is a PR5 prerequisite.
+4. **The activation dossier is still a placeholder literal.**
+5. **Path B still cannot reach `eligible`** through the reviewed GET allowlist against a real target.
 
 ## B1B-PR5 — Live plan-only execution
 
