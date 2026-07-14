@@ -35,6 +35,7 @@ from secp_api.routers import (
 from secp_api.routers import environment_publication as environment_publication_router
 from secp_api.routers import onboarding as onboarding_router
 from secp_api.routers import provisioning as provisioning_router
+from secp_api.routers import readiness as readiness_router
 from secp_api.routers import readonly_preflight as readonly_preflight_router
 from secp_api.routers import resolver_activation as resolver_activation_router
 from secp_api.routers import staging_deployments as staging_deployments_router
@@ -57,6 +58,13 @@ _REDACTED_VALIDATION_ROUTES: tuple[tuple[str, str], ...] = (
     ("/api/v1/target-discovery", "invalid_target_discovery_input"),
     ("/api/v1/readonly-preflight", "invalid_readonly_preflight_input"),
     ("/api/v1/resolver-activation", "invalid_resolver_activation_input"),
+    # B1B-PR4: a malformed readiness request (bad UUID, unknown/missing field, an apply/destroy
+    # secret purpose) returns only this safe code — never the rejected caller value. BOTH bases are
+    # registered: the authorization lifecycle routes AND the manifest-nested create route (the only
+    # readiness route that accepts a body, hence the only one whose 422 could echo a rejected
+    # ``purpose``). The provisioning-manifest base has no other body-accepting route.
+    ("/api/v1/plan-secret-authorizations", "invalid_readiness_input"),
+    ("/api/v1/provisioning-manifests", "invalid_readiness_input"),
     ("/api/v1/worker-identity", "invalid_worker_identity_input"),
     # PR C: the publication route is the only /api/v1/environment-versions endpoint; a malformed
     # request (bad UUID/hash, unknown/missing field, caller idempotency key) returns only this code.
@@ -189,6 +197,7 @@ def create_app() -> FastAPI:
     app.include_router(worker_nodes_router.router)
     app.include_router(readonly_preflight_router.router)
     app.include_router(resolver_activation_router.router)
+    app.include_router(readiness_router.router)
     app.include_router(worker_identity_router.router)
     # Internal worker-only admission route (SECP-B6 MB-1) — NOT under /api/v1; inert unless the
     # deployment-local controlled-integration profile is enabled. Worker admission uses CA-validated

@@ -239,17 +239,29 @@ def test_no_production_code_imports_an_external_secret_backend():
 
 
 def test_shipped_default_resolver_remains_sealed_and_constructs_no_material():
-    # The shipped default is still the sealed unavailable resolver. The ONLY production file that
-    # may construct SecretMaterial is the SECP-B2-4 OpenBao adapter, and only behind its
-    # fail-closed client boundary (no client -> no construction); no other production code may.
+    # The shipped default is still the sealed unavailable resolver. Only TWO production files may
+    # construct SecretMaterial: the SECP-B2-4 OpenBao adapter (behind its fail-closed client
+    # boundary — no client -> no construction), and the B1B-PR4 readiness INERT CANARY (locally
+    # generated randomness, never a value read from a backend/DB/file/environment). No other
+    # production code may.
     from secp_worker.preflight.sealed_secret_resolver import SealedSecretResolver
     from secp_worker.preflight.secret_resolution import SealedUnavailableResolver
 
     assert issubclass(SealedSecretResolver, SealedUnavailableResolver)
 
     adapter = REPO / "apps/worker/secp_worker/preflight/backends/openbao_resolver.py"
+    # SECP-002B-1B B1B-PR4 (ADR-021): ONE additional production file may construct SecretMaterial —
+    # the readiness INERT CANARY. It is locally generated randomness, used to prove the JIT
+    # environment-projection contract WITHOUT resolving the operator's real provisioning material.
+    # The extra assertions below make this allowance STRICTLY TIGHTER than a bare exemption: the
+    # canary module's only source of material must be ``secrets.token_hex``, and it must import
+    # nothing capable of reading a backend, a database, a file, or the environment.
+    canary = REPO / "apps/worker/secp_worker/readiness/canary.py"
+    allowed = {adapter, canary}
+
     offenders: list[str] = []
     adapter_constructs = False
+    canary_constructs = False
     for path in _py(WORKER_PKG) + _py(API_PKG):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
             if isinstance(node, ast.Call):
@@ -258,14 +270,44 @@ def test_shipped_default_resolver_remains_sealed_and_constructs_no_material():
                 if name == "SecretMaterial":
                     if path == adapter:
                         adapter_constructs = True
+                    elif path == canary:
+                        canary_constructs = True
                     else:
                         offenders.append(str(path.relative_to(REPO)))
     assert not offenders, f"non-adapter production code constructs SecretMaterial: {offenders}"
+    assert allowed  # the allowlist is exactly these two files
+
     # The adapter's construction sits behind the fail-closed client boundary.
     adapter_src = adapter.read_text(encoding="utf-8")
     assert adapter_constructs
     assert "if self._client is None:" in adapter_src
     assert "SecretMaterial(secret)" in adapter_src
+
+    # The canary's construction is INERT: locally generated randomness only.
+    assert canary_constructs
+    canary_tree = ast.parse(canary.read_text(encoding="utf-8"), filename=str(canary))
+    canary_calls = {
+        (n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", ""))
+        for n in ast.walk(canary_tree)
+        if isinstance(n, ast.Call)
+    }
+    # It generates its material; it never READS it from anywhere.
+    assert "token_hex" in canary_calls, "the canary must be locally generated randomness"
+    canary_imports: set[str] = set()
+    for node in ast.walk(canary_tree):
+        if isinstance(node, ast.Import):
+            canary_imports.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            canary_imports.add(node.module.split(".")[0])
+    # No backend, database, HTTP, filesystem, environment, or configuration reach.
+    for forbidden_root in ("os", "io", "pathlib", "httpx", "requests", "sqlalchemy", "socket"):
+        assert forbidden_root not in canary_imports, (
+            f"the inert canary module must not import {forbidden_root}: it can only ever produce "
+            "locally generated randomness, never a value read from a backend/DB/file/environment"
+        )
+    canary_src = canary.read_text(encoding="utf-8")
+    for forbidden_token in ("session", "reveal_secret", "secret_ref", "resolve("):
+        assert forbidden_token not in canary_src, forbidden_token
 
 
 def test_preflight_package_has_no_backend_or_network_client():

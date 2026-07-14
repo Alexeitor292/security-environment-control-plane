@@ -426,11 +426,23 @@ class LabEnv:
         self.onboarding = onboarding
 
 
-def build_lab_env(session, principal, *, toolchain=None, scope=None, approve=True) -> LabEnv:
+def build_lab_env(
+    session,
+    principal,
+    *,
+    toolchain=None,
+    scope=None,
+    approve=True,
+    secret_ref="env:SECP_PROVIDER_SECRET__LAB",
+) -> LabEnv:
     """Approved target-bound plan + reservations + toolchain profile + manifest.
 
     The toolchain profile is registered BEFORE plan generation so the plan pins it,
     and the manifest copies the binding — the full real-lab chain (ADR-013).
+
+    ``secret_ref`` is an OPAQUE placeholder pointer (never a secret). B1B-PR4 readiness
+    suites pass a ``vault:`` placeholder because a plan-read provisioning credential may
+    only use the ``vault`` reference scheme.
     """
     import copy
 
@@ -452,7 +464,7 @@ def build_lab_env(session, principal, *, toolchain=None, scope=None, approve=Tru
         display_name="Disposable Lab (placeholder)",
         plugin_name="proxmox",
         config={"base_url": "https://proxmox.example.test:8006/api2/json", "verify_tls": True},
-        secret_ref="env:SECP_PROVIDER_SECRET__LAB",
+        secret_ref=secret_ref,
         scope_policy={"provisioning": copy.deepcopy(scope or VALID_PROVISIONING_SCOPE)},
         address_spaces=[{"cidr_block": "10.60.0.0/16", "subnet_prefix": 24}],
     )

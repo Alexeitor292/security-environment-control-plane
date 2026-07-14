@@ -83,6 +83,10 @@ FULL_MODULE_FORBIDDEN = frozenset(
         "secp_worker.onboarding.eligibility_preflight",
         "secp_worker.onboarding.eligibility_recorder",
         "secp_worker.onboarding.live_readonly",
+        # SECP-002B-1B B1B-PR4 (ADR-021): the worker-owned readiness package owns EVERY external
+        # readiness contact (the remote-state backend + the secret manager) and the worker-only
+        # immutable readiness recorder. The API is enqueue-only and can never import any of it.
+        "secp_worker.readiness",
     }
 )
 
@@ -98,6 +102,21 @@ FORBIDDEN_IMPORT_NAMES = frozenset(
         "record_live_eligibility_evidence",
         "build_eligibility_composition",
         "resolve_eligibility_preflight_request",
+        # SECP-002B-1B B1B-PR4 — worker-only readiness execution / persistence / adapter /
+        # resolver / JIT-environment entry points. The API never resolves a secret, contacts a
+        # backend, constructs an adapter, or builds a process environment.
+        "run_remote_state_readiness",
+        "run_plan_secret_readiness",
+        "record_remote_state_readiness",
+        "record_plan_secret_readiness",
+        "build_readiness_composition",
+        "sealed_readiness_composition",
+        "RemoteStateReadinessAdapter",
+        "SealedRemoteStateReadinessAdapter",
+        "build_plan_secret_env",
+        "SecretMaterial",
+        "WorkerSecretResolver",
+        "OpenBaoWorkerSecretResolver",
     }
 )
 

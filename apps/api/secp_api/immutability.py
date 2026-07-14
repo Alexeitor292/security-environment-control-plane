@@ -12,11 +12,12 @@ from secp_scenario_schema.v1alpha2.models import API_VERSION as _V1ALPHA2
 from secp_scenario_schema.v1alpha2.models import (
     PUBLICATION_CONTRACT_VERSION as _PUBLICATION_CONTRACT_VERSION,
 )
-from sqlalchemy import event, inspect
+from sqlalchemy import event, inspect, text
 from sqlalchemy.orm import Session
 
 from secp_api.enums import (
     LiveReadAuthorizationStatus,
+    PlanSecretAuthorizationStatus,
     ResolverActivationStatus,
     TopologyRevisionStatus,
     WorkerDiscoveryAdmissionStatus,
@@ -25,6 +26,7 @@ from secp_api.enums import (
 from secp_api.errors import ImmutableResourceError
 from secp_api.models import (
     AuditEvent,
+    CredentialBinding,
     DeploymentPlan,
     DiscoveryCandidatePlan,
     DiscoveryCandidatePlanApproval,
@@ -33,10 +35,14 @@ from secp_api.models import (
     ExecutionTarget,
     LivePreflightEvidence,
     LiveReadAuthorization,
+    PlanSecretReadinessAuthorization,
+    PlanSecretReadinessEvidence,
+    PlanSecretReadinessRecord,
     ProviderInventorySnapshot,
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
     ReadonlyStagingPreflight,
+    RemoteStateReadinessRecord,
     ResolverActivationAuthorization,
     ResolverActivationEvidence,
     StagingDeploymentApproval,
@@ -48,6 +54,7 @@ from secp_api.models import (
     TargetEvidenceRecord,
     TargetOnboarding,
     TargetPreflight,
+    ToolchainAttestationRecord,
     ToolchainProfile,
     WorkerDiscoveryAdmission,
     WorkerIdentityEvidence,
@@ -209,6 +216,20 @@ def _guard_version_insert(obj: EnvironmentVersion) -> None:
 
 
 _TARGET_PROTECTED = ("config", "config_hash", "plugin_name")
+# B1B-PR4 amendment: the OPAQUE credential binding's identity is immutable; only its lifecycle
+# (status + rotated_at) may transition. It holds no reference, no hash of one, and no secret.
+_CREDENTIAL_BINDING_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "purpose_class",
+    "binding_version",
+    "created_at",
+)
+# Per-session key: set on the flush in which the SUPPORTED ORM rotation path announced itself to
+# PostgreSQL. It lives in ``Session.info`` — NEVER a module global — so a second, concurrent session
+# can never clear this session's announcement and leave ``secp.credential_rotation = 'on'`` stuck on
+# for a later raw UPDATE in this transaction (which would silently suppress the rotation trigger).
+_ROTATION_ANNOUNCED_KEY = "secp_credential_rotation_announced"
 # Binding fields that plan approval covers — mutable lifecycle fields (status,
 # approved_content_hash, decided_by, decided_at, decision_reason) are excluded.
 _PLAN_PROTECTED = (
@@ -471,6 +492,81 @@ _RESOLVER_ACTIVATION_ALLOWED_TRANSITIONS = {
     (ResolverActivationStatus.approved, ResolverActivationStatus.revoked),
     (ResolverActivationStatus.approved, ResolverActivationStatus.expired),
 }
+
+
+# PlanSecretReadinessAuthorization (SECP-002B-1B B1B-PR4 / ADR-021 §G): every bound fact is
+# immutable after creation; the approval/revocation metadata + evidence fingerprint are set-once;
+# only the closed lifecycle transitions are allowed. The service mutates via Core CAS (which
+# bypasses this ORM guard), so the migration installs a PostgreSQL trigger for the raw/Core path —
+# this guard is the portable (SQLite + PostgreSQL) ORM-path layer + defence in depth.
+_PLAN_SECRET_AUTHORIZATION_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "target_onboarding_id",
+    "deployment_plan_id",
+    "provisioning_manifest_id",
+    "toolchain_profile_id",
+    "eligibility_preflight_id",
+    "remote_state_readiness_id",
+    "toolchain_attestation_id",
+    "credential_binding_id",
+    "credential_binding_version",
+    "worker_identity_registration_id",
+    "worker_identity_version",
+    "provisioning_manifest_content_hash",
+    "target_config_hash",
+    "onboarding_boundary_hash",
+    "eligibility_evidence_hash",
+    "toolchain_profile_hash",
+    "toolchain_attestation_hash",
+    "remote_state_evidence_hash",
+    "activation_dossier_hash",
+    "purpose",
+    "credential_reference_scheme",
+    "resolver_contract_version",
+    "readiness_policy_version",
+    "operation_fingerprint",
+    "authorization_expiry",
+    "authorization_version",
+    "created_by",
+    "created_at",
+)
+_PLAN_SECRET_AUTHORIZATION_SET_ONCE = (
+    "evidence_fingerprint",
+    "approved_by",
+    "approved_at",
+    "revoked_by",
+    "revoked_at",
+    "revocation_reason_code",
+)
+_PLAN_SECRET_AUTHORIZATION_ALLOWED_TRANSITIONS = {
+    (PlanSecretAuthorizationStatus.draft, PlanSecretAuthorizationStatus.approved),
+    (PlanSecretAuthorizationStatus.draft, PlanSecretAuthorizationStatus.revoked),
+    (PlanSecretAuthorizationStatus.draft, PlanSecretAuthorizationStatus.expired),
+    (PlanSecretAuthorizationStatus.approved, PlanSecretAuthorizationStatus.revoked),
+    (PlanSecretAuthorizationStatus.approved, PlanSecretAuthorizationStatus.expired),
+}
+
+
+def _plan_secret_parent_status(
+    session: Session, evidence: PlanSecretReadinessEvidence
+) -> PlanSecretAuthorizationStatus | None:
+    """The lifecycle status of an evidence row's parent authorization (identity-map first)."""
+    parent = session.get(PlanSecretReadinessAuthorization, evidence.authorization_id)
+    if parent is None:
+        parent = evidence.authorization  # fall back to the relationship (unflushed insert)
+    return None if parent is None else parent.status
+
+
+def _guard_plan_secret_evidence(
+    session: Session, evidence: PlanSecretReadinessEvidence, verb: str
+) -> None:
+    status = _plan_secret_parent_status(session, evidence)
+    if status is not None and status != PlanSecretAuthorizationStatus.draft:
+        raise ImmutableResourceError(
+            f"PlanSecretReadinessEvidence may not be {verb} once the authorization is "
+            f"{getattr(status, 'value', status)!r}; evidence is managed only while draft"
+        )
 
 
 def _resolver_activation_parent_status(
@@ -885,6 +981,66 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # LivePreflightEvidence (SECP-B2-4.5): fully immutable after insert — no field may change.
         if isinstance(obj, LivePreflightEvidence):
             raise ImmutableResourceError("LivePreflightEvidence records are immutable after insert")
+        # B1B-PR4: readiness EVIDENCE (incl. the durable toolchain attestation) is fully immutable
+        # after insert. A prior successful record is NEVER mutated into failure by later drift or
+        # expiry — validity is DERIVED, and a new attempt creates a new immutable record under a new
+        # operation fingerprint (ADR-021 §N).
+        if isinstance(
+            obj,
+            RemoteStateReadinessRecord | PlanSecretReadinessRecord | ToolchainAttestationRecord,
+        ):
+            raise ImmutableResourceError(f"{type(obj).__name__} records are immutable after insert")
+        # B1B-PR4 amendment: an ExecutionTarget whose ``secret_ref`` changes MUST rotate its opaque
+        # credential binding. This is the portable (SQLite + PostgreSQL) ORM layer; the PR4
+        # migration additionally installs a PostgreSQL trigger for the raw/Core path. Rotation is
+        # not a caller decision — a credential replacement can never be invisible.
+        if isinstance(obj, ExecutionTarget) and _attr_changed(obj, "secret_ref"):
+            from secp_api.credential_binding import rotate_credential_binding
+
+            session.info[_ROTATION_ANNOUNCED_KEY] = True
+            rotate_credential_binding(session, obj)
+        # B1B-PR4 amendment: a credential binding's OPAQUE identity is immutable; only the
+        # lifecycle transition active -> rotated/revoked (+ rotated_at) may change.
+        if isinstance(obj, CredentialBinding):
+            changed = [a for a in _CREDENTIAL_BINDING_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "CredentialBinding identity is immutable after creation; "
+                    f"attempted to change {changed}"
+                )
+        # PlanSecretReadinessAuthorization (B1B-PR4): binding facts immutable; approval/revocation
+        # facts + evidence fingerprint set-once; only closed transitions allowed.
+        if isinstance(obj, PlanSecretReadinessAuthorization):
+            changed = [a for a in _PLAN_SECRET_AUTHORIZATION_PROTECTED if _attr_changed(obj, a)]
+            if changed:
+                raise ImmutableResourceError(
+                    "PlanSecretReadinessAuthorization binding facts are immutable after creation; "
+                    f"attempted to change {changed}"
+                )
+            repeated = [
+                a
+                for a in _PLAN_SECRET_AUTHORIZATION_SET_ONCE
+                if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+            ]
+            if repeated:
+                raise ImmutableResourceError(
+                    "PlanSecretReadinessAuthorization approval/revocation facts are set-once; "
+                    f"attempted to change {repeated}"
+                )
+            if _attr_changed(obj, "status"):
+                previous = _previous_value(obj, "status")
+                if (
+                    previous is not None
+                    and (previous, obj.status) not in _PLAN_SECRET_AUTHORIZATION_ALLOWED_TRANSITIONS
+                ):
+                    raise ImmutableResourceError(
+                        "PlanSecretReadinessAuthorization status transition is not allowed: "
+                        f"{getattr(previous, 'value', previous)!r} -> "
+                        f"{getattr(obj.status, 'value', obj.status)!r}"
+                    )
+        # PlanSecretReadinessEvidence: managed (changed) only while the authorization is draft.
+        if isinstance(obj, PlanSecretReadinessEvidence):
+            _guard_plan_secret_evidence(session, obj, "changed")
         # SECP-B4: content-addressed plans, approvals, and verification results are immutable.
         if isinstance(
             obj,
@@ -912,6 +1068,9 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # WorkerIdentityEvidence: cannot be inserted once the registration leaves draft.
         if isinstance(obj, WorkerIdentityEvidence):
             _guard_worker_identity_evidence(session, obj, "inserted")
+        # PlanSecretReadinessEvidence: cannot be inserted once the authorization leaves draft.
+        if isinstance(obj, PlanSecretReadinessEvidence):
+            _guard_plan_secret_evidence(session, obj, "inserted")
 
     for obj in session.deleted:
         if isinstance(obj, StagingLab):
@@ -942,6 +1101,20 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             _guard_worker_identity_evidence(session, obj, "deleted")
         if isinstance(obj, LivePreflightEvidence):
             raise ImmutableResourceError("LivePreflightEvidence records cannot be deleted")
+        # B1B-PR4: readiness evidence + the plan-secret authorization are append-only evidence.
+        if isinstance(
+            obj,
+            RemoteStateReadinessRecord | PlanSecretReadinessRecord | ToolchainAttestationRecord,
+        ):
+            raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
+        if isinstance(obj, CredentialBinding):
+            raise ImmutableResourceError("CredentialBinding records cannot be deleted")
+        if isinstance(obj, PlanSecretReadinessAuthorization):
+            raise ImmutableResourceError(
+                "PlanSecretReadinessAuthorization records cannot be deleted"
+            )
+        if isinstance(obj, PlanSecretReadinessEvidence):
+            _guard_plan_secret_evidence(session, obj, "deleted")
         # SECP-B4: content-addressed plans, approvals, and verification results cannot be deleted
         # outside an explicit governed archival path (none exists yet), preserving the audit chain.
         if isinstance(
@@ -962,6 +1135,26 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # SECP-B9: topology revisions and validation results are append-only evidence.
         if isinstance(obj, TopologyRevision | TopologyValidationResult):
             raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
+
+
+@event.listens_for(Session, "after_flush")
+def _clear_credential_rotation_flag(session: Session, _flush_context) -> None:
+    """Retire the transaction-scoped ``secp.credential_rotation`` announcement (B1B-PR4 §2).
+
+    ``rotate_credential_binding`` sets it so the PostgreSQL ``execution_target`` trigger knows the
+    SUPPORTED ORM path already rotated, and does not rotate a second time. Clearing it immediately
+    after the flush means a LATER raw/Core ``UPDATE`` in the same transaction is still caught and
+    auto-rotated by the trigger: the announcement covers exactly one flush and nothing more.
+
+    The announcement lives in THIS session's ``info`` — never a module global — so a concurrent
+    session can never clear it out from under us and leave ``secp.credential_rotation`` stuck on.
+    """
+    if not session.info.pop(_ROTATION_ANNOUNCED_KEY, False):
+        return
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    session.execute(text("SET LOCAL secp.credential_rotation = 'off'"))
 
 
 def install_guards() -> None:

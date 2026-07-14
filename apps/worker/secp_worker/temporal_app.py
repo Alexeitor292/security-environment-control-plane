@@ -229,6 +229,178 @@ async def eligibility_preflight_activity(arg: dict) -> str:
     return run_eligibility_preflight_activity_body(arg)
 
 
+def run_toolchain_attestation_activity_body(arg: dict) -> str:
+    """Durable worker-owned PR2 toolchain attestation (B1B-PR4 §1). It STOPS at the record.
+
+    The Temporal argument carries ONLY a manifest id + the workflow-run id — never a path, a layout,
+    a digest, or an environment. The reviewed deployment-local filesystem LAYOUT comes exclusively
+    from the worker's own composition, which is **sealed by default**: the shipped runtime therefore
+    refuses at the seal and reads no disk.
+
+    It executes no binary, opens no socket, loads no provider, renders no workspace, and constructs
+    no ``OpenTofuRunner``, process executor, or activation grant.
+    """
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    from secp_api.config import get_settings
+    from secp_api.db import session_scope
+    from secp_api.enums import ToolchainAttestationOutcome, WorkflowStatus
+    from secp_api.models import ProvisioningManifest, WorkflowRun
+
+    from secp_worker.readiness.composition import build_readiness_composition
+    from secp_worker.readiness.toolchain_attestation import run_toolchain_attestation
+
+    manifest_id = _uuid.UUID(arg["manifest_id"])
+    run_id = _opt_uuid(arg.get("workflow_run_id"))
+    now = datetime.now(UTC)
+    failed = ToolchainAttestationOutcome.failed.value
+
+    with session_scope() as session:
+        if run_id is not None:
+            run = session.get(WorkflowRun, run_id)
+            if run is not None:
+                run.status = WorkflowStatus.running
+
+        manifest = session.get(ProvisioningManifest, manifest_id)
+        if manifest is None or manifest.toolchain_profile_id is None or _cancelled():
+            _finish_run(session, run_id, now)
+            return failed
+
+        composition = build_readiness_composition(get_settings())
+        result = run_toolchain_attestation(
+            session,
+            toolchain_profile_id=manifest.toolchain_profile_id,
+            layout=composition.toolchain_layout,
+            now=now,
+        )
+        _finish_run(session, run_id, now)
+        return result.outcome
+
+
+@activity.defn
+async def toolchain_attestation_activity(arg: dict) -> str:
+    return run_toolchain_attestation_activity_body(arg)
+
+
+def _run_readiness_activity_body(arg: dict, *, kind: str) -> str:
+    """Durable worker-owned readiness body (sync core; the activity awaits).
+
+    Opens a FRESH worker session and loads every authoritative record itself — the Temporal argument
+    carries ONLY a manifest id and the workflow-run id (no endpoint, backend reference, backend
+    kind,
+    state key, namespace, secret reference, credential, target config, evidence payload, or adapter
+    configuration). Cancellation / the deployment-local stop posture is checked BEFORE any contact.
+
+    The shipped composition is fully **sealed**, so this durable path runs end to end but refuses at
+    the seal before any state backend or secret manager is contacted. Returns the closed outcome.
+    """
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    from secp_api import audit
+    from secp_api.config import get_settings
+    from secp_api.db import session_scope
+    from secp_api.enums import (
+        AuditAction,
+        PlanSecretReadinessOutcome,
+        RemoteStateReadinessOutcome,
+        WorkflowStatus,
+    )
+    from secp_api.models import ProvisioningManifest, WorkflowRun
+
+    from secp_worker.readiness.composition import build_readiness_composition
+    from secp_worker.readiness.plan_secret_readiness import run_plan_secret_readiness
+    from secp_worker.readiness.state_readiness import run_remote_state_readiness
+
+    is_state = kind == "remote_state_readiness"
+    refused = (
+        RemoteStateReadinessOutcome.refused.value
+        if is_state
+        else PlanSecretReadinessOutcome.refused.value
+    )
+    refused_action = (
+        AuditAction.remote_state_readiness_refused
+        if is_state
+        else AuditAction.plan_secret_readiness_refused
+    )
+
+    manifest_id = _uuid.UUID(arg["manifest_id"])
+    run_id = _opt_uuid(arg.get("workflow_run_id"))
+    now = datetime.now(UTC)
+
+    with session_scope() as session:
+        if run_id is not None:
+            run = session.get(WorkflowRun, run_id)
+            if run is not None:
+                run.status = WorkflowStatus.running
+
+        manifest = session.get(ProvisioningManifest, manifest_id)
+        if manifest is None:
+            _finish_run(session, run_id, now)
+            return refused
+        org_id = manifest.organization_id
+
+        def _refuse(reason: str) -> str:
+            audit.record(
+                session,
+                action=refused_action,
+                resource_type="provisioning_manifest",
+                resource_id=manifest_id,
+                organization_id=org_id,
+                actor="worker",
+                outcome="refused",
+                data={
+                    "operation_kind": kind,
+                    "provisioning_manifest_id": str(manifest_id),
+                    "reason_code": reason,
+                },
+            )
+            _finish_run(session, run_id, now)
+            return refused
+
+        # Cancellation / the deployment-local stop posture is checked BEFORE any contact.
+        if _cancelled():
+            return _refuse("operation_cancelled")
+
+        composition = build_readiness_composition(get_settings())
+
+        # Re-check cancellation immediately before invoking the seam (its only external contact is
+        # deep inside, and is itself sealed by the default composition).
+        if _cancelled():
+            return _refuse("operation_cancelled")
+
+        if is_state:
+            state_result = run_remote_state_readiness(
+                session, manifest_id=manifest_id, composition=composition, now=now
+            )
+            _finish_run(session, run_id, now)
+            return state_result.outcome
+        secret_result = run_plan_secret_readiness(
+            session, manifest_id=manifest_id, composition=composition, now=now
+        )
+        _finish_run(session, run_id, now)
+        return secret_result.outcome
+
+
+def run_remote_state_readiness_activity_body(arg: dict) -> str:
+    return _run_readiness_activity_body(arg, kind="remote_state_readiness")
+
+
+def run_plan_secret_readiness_activity_body(arg: dict) -> str:
+    return _run_readiness_activity_body(arg, kind="plan_secret_readiness")
+
+
+@activity.defn
+async def remote_state_readiness_activity(arg: dict) -> str:
+    return run_remote_state_readiness_activity_body(arg)
+
+
+@activity.defn
+async def plan_secret_readiness_activity(arg: dict) -> str:
+    return run_plan_secret_readiness_activity_body(arg)
+
+
 def _activity_timeout():
     from datetime import timedelta
 
@@ -277,4 +449,47 @@ class EligibilityPreflightWorkflow:
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
             eligibility_preflight_activity, arg, start_to_close_timeout=_activity_timeout()
+        )
+
+
+@workflow.defn
+class ToolchainAttestationWorkflow:
+    """Durable, worker-only PR2 toolchain attestation (B1B-PR4 §1). It STOPS at the record.
+
+    A hard PREREQUISITE of both readiness operations — and it triggers neither. It runs no OpenTofu.
+    """
+
+    @workflow.run
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        return await workflow.execute_activity(
+            toolchain_attestation_activity, arg, start_to_close_timeout=_activity_timeout()
+        )
+
+
+@workflow.defn
+class RemoteStateReadinessWorkflow:
+    """Durable, worker-only remote-state readiness (B1B-PR4). It STOPS at readiness.
+
+    It never dispatches a plan, an apply, or a destroy: completing readiness triggers nothing.
+    """
+
+    @workflow.run
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        return await workflow.execute_activity(
+            remote_state_readiness_activity, arg, start_to_close_timeout=_activity_timeout()
+        )
+
+
+@workflow.defn
+class PlanSecretReadinessWorkflow:
+    """Durable, worker-only plan-secret readiness (B1B-PR4). It STOPS at readiness.
+
+    A SEPARATE operation from remote-state readiness: neither workflow invokes the other, and
+    completing both never creates a plan.
+    """
+
+    @workflow.run
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        return await workflow.execute_activity(
+            plan_secret_readiness_activity, arg, start_to_close_timeout=_activity_timeout()
         )

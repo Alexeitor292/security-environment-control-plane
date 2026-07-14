@@ -387,6 +387,16 @@ class WorkflowKind(str, Enum):
     # SECP-002B-1B B1B-PR3 — durable, worker-owned, read-only eligibility preflight (sealed by
     # default). Stored via the VARCHAR-backed EnumType, so this value is additive (no migration).
     eligibility_preflight = "eligibility_preflight"
+    # SECP-002B-1B B1B-PR4 — durable, worker-owned readiness operations (sealed by default). Both
+    # are READINESS ONLY: they validate a backend/secret-manager posture and STOP. Neither runs
+    # OpenTofu, renders a workspace, plans, applies, destroys, or advances to any execution phase.
+    # They are two SEPARATE explicit operator actions; neither invokes the other.
+    remote_state_readiness = "remote_state_readiness"
+    plan_secret_readiness = "plan_secret_readiness"
+    # B1B-PR4 amendment: a durable, worker-owned, READINESS-ONLY toolchain attestation. It performs
+    # real on-disk verification through the existing RealToolchainVerifier and STOPS. It executes no
+    # binary, runs no subprocess, opens no socket, loads no provider, and renders no workspace.
+    toolchain_attestation = "toolchain_attestation"
 
 
 class WorkflowStatus(str, Enum):
@@ -462,6 +472,17 @@ class Permission(str, Enum):
     # topology:decide, and plan:generate — none of those imply it. It creates a control-plane
     # record only: no exercise, plan, workflow, or infrastructure execution.
     version_publish = "version:publish"
+    # SECP-002B-1B B1B-PR4 — remote-state + plan-secret readiness. Requesting a readiness operation
+    # and managing a plan-secret authorization is an admin action; APPROVING a plan-secret
+    # readiness authorization is a DELIBERATELY SEPARATE permission that can never be inferred from
+    # onboarding, live-read, resolver-activation, staging-lab, topology, or plan approval. None of
+    # these grants infrastructure execution: readiness is a validation posture and STOPS.
+    readiness_read = "readiness:read"
+    readiness_manage = "readiness:manage"
+    readiness_approve = "readiness:approve"
+    # B1B-PR4 amendment: rotating a target's opaque credential BINDING is a target-admin action,
+    # deliberately separate from readiness management. It stores no reference and no secret.
+    credential_binding_manage = "credential_binding:manage"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -945,6 +966,330 @@ class AuditAction(str, Enum):
     eligibility_preflight_refused = "eligibility_preflight.refused"
     eligibility_preflight_expired = "eligibility_preflight.expired"
     eligibility_preflight_invalidated = "eligibility_preflight.invalidated"
+    # SECP-002B-1B B1B-PR4 — remote-state readiness (worker-owned, sealed by default). Every value
+    # is <= 80 chars (AuditEvent.action is String(80)). Audit data carries ONLY safe ids/hashes/
+    # bounded outcomes/reason codes/versions/timestamps — never a backend URL, state key, bucket,
+    # object name, endpoint, secret, secret reference, response body, or exception text.
+    remote_state_readiness_requested = "remote_state_readiness.requested"
+    remote_state_readiness_started = "remote_state_readiness.started"
+    remote_state_readiness_completed = "remote_state_readiness.completed"
+    remote_state_readiness_refused = "remote_state_readiness.refused"
+    # SECP-002B-1B B1B-PR4 — plan-secret readiness authorization lifecycle + readiness operation.
+    plan_secret_authorization_created = "plan_secret_readiness.authorization_created"
+    plan_secret_authorization_evidence = "plan_secret_readiness.authorization_evidence"
+    plan_secret_authorized = "plan_secret_readiness.authorized"
+    plan_secret_authorization_revoked = "plan_secret_readiness.revoked"
+    plan_secret_authorization_expired = "plan_secret_readiness.authorization_expired"
+    plan_secret_readiness_requested = "plan_secret_readiness.requested"
+    plan_secret_readiness_started = "plan_secret_readiness.started"
+    plan_secret_readiness_completed = "plan_secret_readiness.completed"
+    plan_secret_readiness_refused = "plan_secret_readiness.refused"
+    # A derived current-readiness check refused (drift/expiry). It mutates no historical record.
+    provisioning_readiness_refused = "provisioning_readiness.check_refused"
+    # B1B-PR4 amendment — durable, worker-owned, READINESS-ONLY toolchain attestation.
+    toolchain_attestation_requested = "toolchain_attestation.requested"
+    toolchain_attestation_started = "toolchain_attestation.started"
+    toolchain_attestation_completed = "toolchain_attestation.completed"
+    toolchain_attestation_refused = "toolchain_attestation.refused"
+    # B1B-PR4 amendment — the opaque credential BINDING (no reference, no hash of one, ever).
+    credential_binding_created = "credential_binding.created"
+    credential_binding_rotated = "credential_binding.rotated"
+    # The supported credential-replacement path. Its audit carries OPAQUE binding ids only — never
+    # the reference and never a hash of it.
+    target_credential_rotated = "execution_target.credential_rotated"
+
+
+# --- SECP-002B-1B B1B-PR4: remote-state + plan-secret readiness ----------------------------------
+
+
+class ReadinessOperationKind(str, Enum):
+    """The two SEPARATE durable readiness operations (ADR-021). Neither invokes the other, and
+    neither advances to a plan: readiness is a validation posture that STOPS."""
+
+    remote_state_readiness = "remote_state_readiness"
+    plan_secret_readiness = "plan_secret_readiness"
+
+
+class ReadinessFacetStatus(str, Enum):
+    """Per-facet outcome. There is no partial credit: ``ready`` requires every MANDATORY facet to
+    be ``pass`` explicitly; an unprovable facet fails closed to ``unverifiable``."""
+
+    passed = "pass"
+    failed = "fail"
+    unverifiable = "unverifiable"
+
+
+class RemoteStateReadinessFacet(str, Enum):
+    """The MANDATORY remote-state readiness facets (ADR-021 §D). All are required."""
+
+    backend_class = "backend_class"
+    transport_security = "transport_security"
+    namespace_identity = "namespace_identity"
+    encryption_at_rest = "encryption_at_rest"
+    locking = "locking"
+    backup_proof = "backup_proof"
+    restore_proof = "restore_proof"
+    least_privileged_access = "least_privileged_access"
+    empty_or_expected_namespace = "empty_or_expected_namespace"
+    no_local_fallback = "no_local_fallback"
+
+
+class RemoteStateReadinessOutcome(str, Enum):
+    """Closed remote-state readiness outcomes. ``ready`` never implies a plan may run."""
+
+    ready = "ready"
+    not_ready = "not_ready"
+    unverifiable = "unverifiable"
+    expired = "expired"
+    drifted = "drifted"
+    refused = "refused"
+
+
+class PlanSecretReadinessFacet(str, Enum):
+    """The MANDATORY plan-secret readiness facets (ADR-021 §H). Both are required.
+
+    ``backend_authentication_readiness`` proves the worker can authenticate to the configured secret
+    backend through the reviewed resolver self-test — it returns NO target provisioning secret.
+    ``jit_injection_contract`` proves that opaque secret material yields ONLY the exact allowlisted
+    child-process environment variables — it is exercised with INERT sentinel material and runs no
+    process.
+    """
+
+    backend_authentication_readiness = "backend_authentication_readiness"
+    jit_injection_contract = "jit_injection_contract"
+
+
+class PlanSecretReadinessOutcome(str, Enum):
+    """Closed plan-secret readiness outcomes. ``ready`` never authorizes apply or destroy."""
+
+    ready = "ready"
+    not_ready = "not_ready"
+    unavailable = "unavailable"
+    expired = "expired"
+    drifted = "drifted"
+    refused = "refused"
+
+
+class PlanSecretPurpose(str, Enum):
+    """The ONLY secret purpose PR4 may bind (ADR-021 §7 / plan-only phase).
+
+    ``plan_read`` is a READ-ONLY provider credential class for a future ``init``/``plan``/``show``
+    operation. Apply and destroy purposes are DELIBERATELY ABSENT from this enum, so an
+    apply/destroy secret purpose is not merely rejected — it is unrepresentable. Adding one is a
+    reviewed code change in that capability's own separately-reviewed phase.
+    """
+
+    plan_read = "plan_read"
+
+
+class PlanSecretAuthorizationStatus(str, Enum):
+    """Closed plan-secret readiness authorization lifecycle: draft → approved → revoked / expired.
+
+    Deliberately distinct from ``ResolverActivationStatus`` (whose bound record is a read-only
+    staging preflight) so a live-read authorization can never be mistaken for a provisioning-secret
+    authorization.
+    """
+
+    draft = "draft"
+    approved = "approved"
+    revoked = "revoked"
+    expired = "expired"
+
+
+class PlanSecretEvidenceKind(str, Enum):
+    """The closed human-review evidence package a plan-secret authorization must carry.
+
+    Every kind must be present and ``verified`` before approval. These are REVIEW facts about the
+    deployment, recorded as opaque proof metadata only — never a reference, endpoint, or secret.
+    """
+
+    least_privileged_plan_credential_review = "least_privileged_plan_credential_review"
+    credential_rotation_revocation_review = "credential_rotation_revocation_review"
+    worker_only_jit_injection_review = "worker_only_jit_injection_review"
+    no_apply_or_destroy_capability_review = "no_apply_or_destroy_capability_review"
+    secret_backend_access_policy_review = "secret_backend_access_policy_review"
+    independent_adversarial_review = "independent_adversarial_review"
+
+
+class PlanSecretEvidenceStatus(str, Enum):
+    pending = "pending"
+    verified = "verified"
+    failed = "failed"
+
+
+class ReadinessErrorCode(str, Enum):
+    """Closed, redacted API error codes for the readiness surface."""
+
+    not_found = "not_found"
+    forbidden = "forbidden"
+    invalid_state = "invalid_state"
+    binding_invalid = "binding_invalid"
+    evidence_incomplete = "evidence_incomplete"
+    evidence_invalid = "evidence_invalid"
+    lifecycle_conflict = "lifecycle_conflict"
+    internal_failure = "internal_failure"
+
+
+class ReadinessReason(str, Enum):
+    """Closed, secret-free readiness reason codes. Bounded categories only — never a backend URL,
+    state key, bucket/container/object name, endpoint, credential, secret reference, response body,
+    rejected caller value, or exception text."""
+
+    # --- binding / precondition (shared) ---------------------------------------------------------
+    sealed = "sealed"
+    gate_incomplete = "gate_incomplete"
+    # B1B-PR4 amendment — real toolchain ATTESTATION (a matching profile hash is not an attestation)
+    toolchain_attestation_missing = "toolchain_attestation_missing"
+    toolchain_attestation_failed = "toolchain_attestation_failed"
+    toolchain_attestation_expired = "toolchain_attestation_expired"
+    toolchain_attestation_drifted = "toolchain_attestation_drifted"
+    toolchain_attestation_hash_invalid = "toolchain_attestation_hash_invalid"
+    toolchain_layout_unavailable = "toolchain_layout_unavailable"
+    # B1B-PR4 amendment — the activation dossier placeholder can never satisfy readiness
+    activation_dossier_placeholder = "activation_dossier_placeholder"
+    # B1B-PR4 amendment — controlled-live adapter provenance capability
+    adapter_capability_missing = "adapter_capability_missing"
+    adapter_capability_invalid = "adapter_capability_invalid"
+    adapter_capability_not_controlled_live = "adapter_capability_not_controlled_live"
+    # B1B-PR4 amendment — opaque credential binding (never a reference, never a hash of one)
+    credential_binding_missing = "credential_binding_missing"
+    credential_binding_drift = "credential_binding_drift"
+    manifest_missing = "manifest_missing"
+    manifest_hash_invalid = "manifest_hash_invalid"
+    plan_not_approved = "plan_not_approved"
+    plan_binding_invalid = "plan_binding_invalid"
+    target_not_active = "target_not_active"
+    target_config_drift = "target_config_drift"
+    onboarding_not_active = "onboarding_not_active"
+    onboarding_boundary_drift = "onboarding_boundary_drift"
+    eligibility_missing = "eligibility_missing"
+    eligibility_not_eligible = "eligibility_not_eligible"
+    eligibility_expired = "eligibility_expired"
+    eligibility_drifted = "eligibility_drifted"
+    eligibility_hash_invalid = "eligibility_hash_invalid"
+    toolchain_profile_missing = "toolchain_profile_missing"
+    toolchain_profile_invalid = "toolchain_profile_invalid"
+    toolchain_profile_drift = "toolchain_profile_drift"
+    toolchain_policy_mismatch = "toolchain_policy_mismatch"
+    activation_dossier_mismatch = "activation_dossier_mismatch"
+    worker_identity_untrusted = "worker_identity_untrusted"
+    readiness_policy_mismatch = "readiness_policy_mismatch"
+    adapter_contract_mismatch = "adapter_contract_mismatch"
+    adapter_unavailable = "adapter_unavailable"
+    operation_cancelled = "operation_cancelled"
+    evidence_too_large = "evidence_too_large"
+    # An external proof id / issuer that is not an OPAQUE UUID. A shape-bounded LABEL could
+    # itself BE a backend locator, and an unsalted digest of one is a confirmation oracle for it
+    # (B1B-PR4 §5).
+    state_proof_id_not_opaque = "state_proof_id_not_opaque"
+    adapter_report_invalid = "adapter_report_invalid"
+
+    # --- remote state ---------------------------------------------------------------------------
+    state_backend_missing = "state_backend_missing"
+    state_backend_local = "state_backend_local"
+    state_backend_kind_drift = "state_backend_kind_drift"
+    state_backend_reference_drift = "state_backend_reference_drift"
+    state_namespace_mismatch = "state_namespace_mismatch"
+    state_namespace_cross_organization = "state_namespace_cross_organization"
+    state_namespace_caller_selected = "state_namespace_caller_selected"
+    state_namespace_occupied = "state_namespace_occupied"
+    state_namespace_unknown = "state_namespace_unknown"
+    state_tls_disabled = "state_tls_disabled"
+    state_trust_env_enabled = "state_trust_env_enabled"
+    state_redirect_observed = "state_redirect_observed"
+    state_destination_unstable = "state_destination_unstable"
+    state_encryption_proof_absent = "state_encryption_proof_absent"
+    state_encryption_proof_stale = "state_encryption_proof_stale"
+    state_encryption_proof_unbound = "state_encryption_proof_unbound"
+    state_lock_unavailable = "state_lock_unavailable"
+    state_lock_contention_undetected = "state_lock_contention_undetected"
+    state_lock_force_unlock_available = "state_lock_force_unlock_available"
+    state_lock_owner_caller_supplied = "state_lock_owner_caller_supplied"
+    state_lock_probe_not_released = "state_lock_probe_not_released"
+    state_lock_proof_unbound = "state_lock_proof_unbound"
+    state_backup_proof_absent = "state_backup_proof_absent"
+    state_backup_proof_stale = "state_backup_proof_stale"
+    state_backup_proof_unbound = "state_backup_proof_unbound"
+    state_restore_proof_absent = "state_restore_proof_absent"
+    state_restore_proof_stale = "state_restore_proof_stale"
+    state_restore_proof_unbound = "state_restore_proof_unbound"
+    state_least_privilege_unproven = "state_least_privilege_unproven"
+    state_privilege_excessive = "state_privilege_excessive"
+    state_local_fallback_available = "state_local_fallback_available"
+    state_body_access_attempted = "state_body_access_attempted"
+
+    # --- plan secret ------------------------------------------------------------------------------
+    secret_authorization_missing = "secret_authorization_missing"
+    secret_authorization_draft = "secret_authorization_draft"
+    secret_authorization_revoked = "secret_authorization_revoked"
+    secret_authorization_expired = "secret_authorization_expired"
+    secret_authorization_purpose_invalid = "secret_authorization_purpose_invalid"
+    secret_authorization_binding_invalid = "secret_authorization_binding_invalid"
+    secret_authorization_version_drift = "secret_authorization_version_drift"
+    secret_evidence_fingerprint_mismatch = "secret_evidence_fingerprint_mismatch"
+    secret_state_readiness_missing = "secret_state_readiness_missing"
+    secret_state_readiness_expired = "secret_state_readiness_expired"
+    secret_state_readiness_drifted = "secret_state_readiness_drifted"
+    resolver_contract_mismatch = "resolver_contract_mismatch"
+    resolver_sealed = "resolver_sealed"
+    resolver_self_test_unavailable = "resolver_self_test_unavailable"
+    resolver_self_test_failed = "resolver_self_test_failed"
+    resolver_self_test_leaked_details = "resolver_self_test_leaked_details"
+    credential_reference_missing = "credential_reference_missing"
+    credential_reference_mismatch = "credential_reference_mismatch"
+    credential_reference_scheme_unsupported = "credential_reference_scheme_unsupported"
+    credential_reference_scheme_mismatch = "credential_reference_scheme_mismatch"
+    authoritative_reverification_missing = "authoritative_reverification_missing"
+    jit_env_contract_violation = "jit_env_contract_violation"
+    lease_refused = "lease_refused"
+
+
+class ToolchainAttestationOutcome(str, Enum):
+    """Closed outcome of one worker-local, filesystem-only toolchain attestation (B1B-PR4).
+
+    ``attested`` requires EVERY required facet of the RealToolchainVerifier to be verified against
+    the actual on-disk toolchain. Anything else is ``failed``: a matching profile id/hash is NOT an
+    attestation.
+    """
+
+    attested = "attested"
+    failed = "failed"
+
+
+class CredentialBindingStatus(str, Enum):
+    """Lifecycle of one OPAQUE target credential binding (B1B-PR4 amendment).
+
+    The binding carries **no** secret, **no** secret reference, and **no** hash of a reference
+    — only
+    an opaque id and a monotonic version. Changing ``ExecutionTarget.secret_ref`` ROTATES it, which
+    (through the operation fingerprint) invalidates every prior authorization and readiness record.
+    """
+
+    active = "active"
+    rotated = "rotated"
+    revoked = "revoked"
+
+
+class CredentialPurposeClass(str, Enum):
+    """The credential purpose classes a binding may serve.
+
+    Only the PLAN-READ provider credential exists in B1B-PR4. Apply/destroy classes and a distinct
+    STATE-BACKEND credential class are unrepresentable here and remain PR5 prerequisites.
+    """
+
+    provider_plan_read = "provider_plan_read"
+
+
+class ReadinessCapabilityClass(str, Enum):
+    """Whether a readiness adapter capability is CONTROLLED-LIVE or explicitly TEST-ONLY.
+
+    Only ``controlled_live`` evidence may make combined provisioning readiness current. A
+    ``test_only`` capability is an explicitly named test escape hatch: it produces evidence that is
+    permanently marked test-only and can never satisfy a controlled-live gate.
+    """
+
+    controlled_live = "controlled_live"
+    test_only = "test_only"
 
 
 class ResolutionLeaseStatus(str, Enum):

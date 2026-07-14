@@ -31,6 +31,16 @@ class TargetCreate(BaseModel):
     address_spaces: list[AddressSpaceIn] = []
 
 
+class TargetCredentialRotate(BaseModel):
+    """Replace a target's OPAQUE credential reference through the supported rotation path.
+
+    ``secret_ref`` remains an opaque ``<scheme>:<locator>`` pointer — never a secret. Applying it
+    rotates the target's opaque credential binding to the next version (B1B-PR4 §2).
+    """
+
+    secret_ref: str | None = None
+
+
 class AddressSpaceOut(ORMModel):
     cidr_block: str
     subnet_prefix: int

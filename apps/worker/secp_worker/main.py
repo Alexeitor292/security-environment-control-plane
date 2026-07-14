@@ -121,12 +121,18 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
         DestroyWorkflow,
         DiscoverWorkflow,
         EligibilityPreflightWorkflow,
+        PlanSecretReadinessWorkflow,
+        RemoteStateReadinessWorkflow,
         ResetWorkflow,
+        ToolchainAttestationWorkflow,
         deploy_activity,
         destroy_activity,
         discover_activity,
         eligibility_preflight_activity,
+        plan_secret_readiness_activity,
+        remote_state_readiness_activity,
         reset_activity,
+        toolchain_attestation_activity,
     )
 
     settings = get_settings()
@@ -140,6 +146,11 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
             DestroyWorkflow,
             DiscoverWorkflow,
             EligibilityPreflightWorkflow,
+            # B1B-PR4 attestation + readiness workflows are registered ONLY in the worker. The API
+            # never imports them and can never execute them inline (the inline dispatcher refuses).
+            ToolchainAttestationWorkflow,
+            RemoteStateReadinessWorkflow,
+            PlanSecretReadinessWorkflow,
         ],
         activities=[
             deploy_activity,
@@ -147,6 +158,9 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
             destroy_activity,
             discover_activity,
             eligibility_preflight_activity,
+            toolchain_attestation_activity,
+            remote_state_readiness_activity,
+            plan_secret_readiness_activity,
         ],
     )
     logger.info("Temporal worker started on task queue %s", settings.temporal_task_queue)

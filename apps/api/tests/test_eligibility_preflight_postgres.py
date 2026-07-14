@@ -23,7 +23,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 _PRIOR_REVISION = "f2b8c1d4a9e7"
-_HEAD = "c7e1a9b3d5f2"
+# The B1B-PR3 revision this suite pins. It is NOT the head any more (B1B-PR4 added
+# ``d6a1f3c8b902`` on top); this suite deliberately upgrades only as far as PR3, because it
+# proves exactly what PR3's migration does to ``target_preflight``.
+_PR3_REVISION = "c7e1a9b3d5f2"
 _NEW_COLUMNS = {
     "operation_fingerprint",
     "eligibility_outcome",
@@ -164,5 +167,5 @@ def test_downgrade_removes_exactly_the_new_columns_and_index(pg_engine):
     assert not (_NEW_COLUMNS & cols), f"downgrade left columns {_NEW_COLUMNS & cols}"
     assert _UNIQUE_INDEX not in idx
     # Re-upgrade restores them (idempotent, reversible).
-    command.upgrade(_alembic_cfg(), _HEAD)
+    command.upgrade(_alembic_cfg(), _PR3_REVISION)
     assert _NEW_COLUMNS <= _columns(pg_engine)

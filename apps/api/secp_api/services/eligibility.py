@@ -16,6 +16,7 @@ outside the dispatch seam and name-forbids the eligibility symbols everywhere).
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
@@ -94,31 +95,45 @@ def _latest_live_eligibility_preflight(
     )
 
 
-def get_live_eligibility_evidence(
-    session: Session,
-    actor: Principal,
-    onboarding_id: uuid.UUID,
-    *,
-    now: datetime,
-) -> dict | None:
-    """Return a safe, redacted projection of the latest live-eligibility evidence, or ``None``.
+@dataclass(frozen=True)
+class LiveEligibilityStatus:
+    """The authoritative, derived current-validity view of the latest live-eligibility evidence.
 
-    Exposes ONLY: evidence source, verification level, closed outcome, per-dimension outcomes +
-    reason categories, safe hashes, collection + expiry times, current validity, the bound ids, and
-    the policy version. It NEVER exposes an endpoint, hostname, command, raw observation, credential
-    reference, mounted path, host key, certificate, provider response, or stack trace.
+    ``valid`` is TRUE only when the evidence is live-verified, ``eligible``, produced by the current
+    policy, hash-consistent, unexpired, and undrifted. It is DERIVED on every read; the immutable
+    stored row is never mutated (a prior successful preflight never becomes a failure).
     """
-    from secp_api.services.onboarding import get_onboarding
 
-    actor.require(Permission.onboarding_manage)
-    ob = get_onboarding(session, actor, onboarding_id)
-    pf = _latest_live_eligibility_preflight(session, ob.id)
+    preflight: TargetPreflight
+    record: TargetEvidenceRecord | None
+    evidence_source: str
+    outcome: str
+    policy_version: str
+    evidence_hash: str
+    expires_at: datetime | None
+    expired: bool
+    drifted: bool
+    hash_matches: bool
+    findings_ok: bool
+    valid: bool
+
+
+def evaluate_live_eligibility(
+    session: Session, onboarding, *, now: datetime
+) -> LiveEligibilityStatus | None:
+    """Derive the current validity of the latest live-eligibility evidence for an onboarding.
+
+    Actor-free and side-effect free: it loads authoritative records only. It is the SINGLE source of
+    eligibility current-validity, shared by the API read model and the B1B-PR4 readiness binding, so
+    a readiness operation can never disagree with what an operator sees.
+    """
+    pf = _latest_live_eligibility_preflight(session, onboarding.id)
     if pf is None:
         return None
     record = (
         session.get(TargetEvidenceRecord, pf.target_evidence_id) if pf.target_evidence_id else None
     )
-    target = session.get(ExecutionTarget, ob.execution_target_id)
+    target = session.get(ExecutionTarget, onboarding.execution_target_id)
 
     expires_at = pf.evidence_expires_at
     expired = expires_at is not None and _aware(expires_at) <= now
@@ -127,7 +142,7 @@ def get_live_eligibility_evidence(
     # and worker-identity lifecycle/version. Any disagreement invalidates the stored evidence; a new
     # preflight (a new operation fingerprint) is required. The historical row is never mutated.
     boundary_or_config_drift = bool(
-        ob.boundary_hash != pf.boundary_hash
+        onboarding.boundary_hash != pf.boundary_hash
         or (target is not None and target.config_hash != pf.target_config_hash)
     )
     policy_drift = pf.eligibility_policy_version != ELIGIBILITY_POLICY_VERSION
@@ -165,6 +180,45 @@ def get_live_eligibility_evidence(
             drifted=drifted,
         )
     )
+    return LiveEligibilityStatus(
+        preflight=pf,
+        record=record,
+        evidence_source=(record.evidence_source if record is not None else ""),
+        outcome=pf.eligibility_outcome or "",
+        policy_version=pf.eligibility_policy_version or "",
+        evidence_hash=pf.evidence_hash,
+        expires_at=_aware(expires_at) if expires_at is not None else None,
+        expired=expired,
+        drifted=drifted,
+        hash_matches=hash_matches,
+        findings_ok=findings_ok,
+        valid=valid,
+    )
+
+
+def get_live_eligibility_evidence(
+    session: Session,
+    actor: Principal,
+    onboarding_id: uuid.UUID,
+    *,
+    now: datetime,
+) -> dict | None:
+    """Return a safe, redacted projection of the latest live-eligibility evidence, or ``None``.
+
+    Exposes ONLY: evidence source, verification level, closed outcome, per-dimension outcomes +
+    reason categories, safe hashes, collection + expiry times, current validity, the bound ids, and
+    the policy version. It NEVER exposes an endpoint, hostname, command, raw observation, credential
+    reference, mounted path, host key, certificate, provider response, or stack trace.
+    """
+    from secp_api.services.onboarding import get_onboarding
+
+    actor.require(Permission.onboarding_manage)
+    ob = get_onboarding(session, actor, onboarding_id)
+    status = evaluate_live_eligibility(session, ob, now=now)
+    if status is None:
+        return None
+    pf = status.preflight
+    record = status.record
     return {
         "onboarding_id": str(ob.id),
         "execution_target_id": str(ob.execution_target_id),
@@ -188,10 +242,10 @@ def get_live_eligibility_evidence(
         "evidence_hash": pf.evidence_hash,
         "target_evidence_hash": pf.target_evidence_hash,
         "collected_at": _aware(record.collected_at).isoformat() if record is not None else None,
-        "expires_at": _aware(expires_at).isoformat() if expires_at is not None else None,
-        "expired": expired,
-        "drifted": drifted,
-        "valid": valid,
+        "expires_at": status.expires_at.isoformat() if status.expires_at is not None else None,
+        "expired": status.expired,
+        "drifted": status.drifted,
+        "valid": status.valid,
         "live_read_authorization_id": (
             str(pf.live_read_authorization_id) if pf.live_read_authorization_id else None
         ),

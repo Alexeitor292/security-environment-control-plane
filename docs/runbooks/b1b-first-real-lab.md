@@ -59,11 +59,43 @@ stage; each live capability requires a reviewed code unseal plus the full runtim
 
 ### Stage 3 — State + secret readiness (capability: validate-only)
 
-- **Entry:** remote-state + JIT secret readiness available (B1B-PR4).
-- **Action:** validate the remote backend (remote only, encrypted, locked, backup/restore tested) and
-  worker-only JIT secret injection readiness. *(No command provided; no plan/apply/destroy.)*
-- **Exit / HOLD (Operator):** state + secret readiness proven; no secret persisted or logged.
-- **Evidence:** state readiness + resolution readiness (redacted).
+- **Entry:** remote-state + JIT secret readiness available (B1B-PR4 / ADR-021) — **sealed by default**.
+  A reviewed deployment-local composition must inject **all** of: the toolchain **filesystem
+  layout**, the remote-state adapter **and its reviewed activation**, and the resolver self-test
+  **and its reviewed activation**. **No configuration flag alone can activate any of them**, and a
+  self-declared adapter `contract_version` is **not** provenance.
+- **Prerequisite (new, security amendment):** request the worker-owned **toolchain attestation**
+  first. A matching profile hash is a DECLARATION, not evidence — both readiness operations require
+  the exact current durable attestation record. The attestation executes **no binary**, opens **no
+  socket**, loads **no provider**, and renders **no workspace**.
+- **Action:** two **SEPARATE** explicit operator actions, in order. **(1)** Request remote-state
+  readiness: the worker validates backend **control metadata** only (remote-only backend class,
+  transport security, server-derived namespace identity, encryption-at-rest proof, locking proof,
+  backup proof, restore proof, least-privileged access, empty-or-expected namespace, no local
+  fallback). **No OpenTofu state payload is created, read, written, uploaded, downloaded, restored,
+  or deleted — the adapter contract has no such method. SECP performs no backup and no restore; it
+  VALIDATES external proofs.** **(2)** Create → evidence → **approve** (separate permission) a
+  dedicated **plan-read-only** secret authorization, then request plan-secret readiness: the worker
+  proves it can AUTHENTICATE to the secret backend (a self-test that returns **no target
+  credential**) and that opaque material projects into only the allowlisted environment (inert
+  sentinel; **no process runs**). *(No command is provided; no plan/apply/destroy; nothing here
+  advances to Stage 4.)*
+- **Exit / HOLD (Operator):** both readiness records are `ready`, unexpired, and undrifted; both
+  were produced under a **controlled-live** capability and a **reviewed (non-placeholder) activation
+  dossier**; both bind the exact current toolchain-attestation record and the current opaque
+  credential binding; and the combined current-readiness check passes. **No secret, secret reference,
+  backend URL, state key, namespace name, bucket, or token is persisted, logged, audited, or
+  returned — and no persisted value is a DIGEST of any of them.**
+- **Credential rotation:** replacing the target's `secret_ref` **rotates its opaque credential
+  binding** (enforced in the ORM *and* by a database trigger), which immediately invalidates every
+  prior authorization and readiness record. Re-run readiness after any rotation. **A credential
+  replacement can never be invisible.**
+- **Stop condition:** any mandatory facet not explicitly proven (an absent/stale/unbound proof,
+  unavailable scope evidence, an undeterminable namespace) → `unverifiable` → **refuse**. A revoked or
+  expired authorization refuses immediately. Never fabricate a pass.
+- **Evidence:** remote-state readiness + plan-secret readiness (immutable, redacted, expiry-bound).
+- **Truth:** apply and destroy secret purposes are **unrepresentable** in this phase. **Combined
+  readiness is not plan approval and launches nothing.**
 
 ### Stage 4 — Real plan (capability: plan-only)
 

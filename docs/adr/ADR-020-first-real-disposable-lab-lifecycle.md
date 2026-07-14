@@ -11,7 +11,8 @@
   `docs/architecture/secp-002b-1b-real-lab-lifecycle.md`; plan
   `docs/implementation/secp-002b-1b-plan.md`; checklist
   `docs/proxmox/b1b-lab-prerequisite-checklist.md`; runbook skeleton
-  `docs/runbooks/b1b-first-real-lab.md`.
+  `docs/runbooks/b1b-first-real-lab.md`; **ADR-021 (Phase 3 readiness — remote state + JIT secret,
+  implemented by B1B-PR4)**.
 
 > **This document changes no application code, no Settings, no environment example, no seal, and no
 > activation path. Both B1-A hard seals (`_B1A_SUBPROCESS_SEALED = True` in
@@ -98,6 +99,10 @@ code-and-review change plus the full runtime gate**.
   inspection producing immutable redacted evidence. **No OpenTofu execution. No mutation.**
 - **Phase 3 — remote-state + just-in-time secret-resolution readiness.** Validate the remote backend,
   state locking, backup/restore, and worker-only JIT secret injection. **No plan/apply/destroy.**
+  *(Implemented by B1B-PR4 and locked by [ADR-021](ADR-021-remote-state-and-jit-secret-readiness.md),
+  sealed by default. Readiness is a validation posture that STOPS: it performs no backup or restore
+  against real state, resolves no target provisioning credential, touches no state payload, creates no
+  plan, and unseals nothing. Both B1-A seals remain `True`.)*
 - **Phase 4 — real OpenTofu `init`/`plan`/`show` only.** **Apply and destroy remain independently
   impossible** (see the mechanism below).
 - **Phase 5 — first apply.** Apply may be enabled **only for one exact approved prepared plan**,

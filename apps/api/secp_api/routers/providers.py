@@ -21,6 +21,7 @@ from secp_api.schemas_provider import (
     ResourceOut,
     SnapshotOut,
     TargetCreate,
+    TargetCredentialRotate,
     TargetOut,
 )
 from secp_api.services import inventory, reservations, targets
@@ -77,6 +78,24 @@ def list_address_spaces(
         AddressSpaceOut.model_validate(a)
         for a in targets.list_address_spaces(session, principal, target_id)
     ]
+
+
+@router.post("/targets/{target_id}/rotate-credential", response_model=TargetOut)
+def rotate_target_credential(
+    target_id: uuid.UUID,
+    body: TargetCredentialRotate,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> TargetOut:
+    """The SUPPORTED path for replacing a target's opaque credential reference (B1B-PR4 §2).
+
+    Requires the dedicated ``credential_binding:manage`` permission and ROTATES the target's opaque
+    credential binding, which invalidates every prior plan-secret authorization and readiness record
+    without modifying any historical evidence. Credential replacement is never invisible.
+    """
+    return TargetOut.model_validate(
+        targets.rotate_target_credential(session, principal, target_id, secret_ref=body.secret_ref)
+    )
 
 
 @router.post("/targets/{target_id}/disable", response_model=TargetOut)
