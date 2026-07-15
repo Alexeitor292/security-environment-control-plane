@@ -313,13 +313,20 @@ class TemporalDispatcher:
     ) -> None:
         if run.workflow_id is None:  # pragma: no cover - defensive
             raise RuntimeError("workflow_run.workflow_id must be assigned before outbox enqueue")
+        # Deterministic routing (ADR-022 §12): the outbox row pins the task queue by workflow kind.
+        # Controlled-live operator-owned kinds route to the distinct operator queue when one is
+        # configured; every other kind (and all kinds when no operator worker is deployed) stays on
+        # the shipped queue. The queue is resolved ONCE, at enqueue time, and travels with the
+        # committed outbox row so the publisher submits to exactly that queue.
+        from secp_api.workflow_routing import resolve_task_queue
+
         session.add(
             WorkflowDispatchOutbox(
                 organization_id=run.organization_id,
                 workflow_run_id=run.id,
                 workflow=workflow,
                 workflow_id=run.workflow_id,
-                task_queue=self.settings.temporal_task_queue,
+                task_queue=resolve_task_queue(self.settings, run.kind),
                 args=args,
                 status=OUTBOX_PENDING,
             )

@@ -153,7 +153,9 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
             ToolchainAttestationWorkflow,
             RemoteStateReadinessWorkflow,
             PlanSecretReadinessWorkflow,
-            # B1B-PR5A real plan generation: worker-only, STOPS at the sealed plan-only boundary.
+            # B1B-PR5B real plan generation: worker-only. The plan-only code seal is now False, but
+            # this STOPS at a redacted change set + a pending human approval — it never applies, and
+            # the shipped composition is disabled so ordinary startup refuses before any execution.
             RealPlanGenerationWorkflow,
         ],
         activities=[
@@ -161,6 +163,14 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
             reset_activity,
             destroy_activity,
             discover_activity,
+            # The plan/readiness activities below are the SHIPPED, always-SEALED default instances
+            # (each constructed with its sealed composition provider in ``temporal_app``), so this
+            # shipped worker refuses at the composition gate before any I/O. It polls ONLY
+            # ``settings.temporal_task_queue``. A separately reviewed, deployment-local operator
+            # worker (maintained OUTSIDE this repo) instead registers the controlled-live instances
+            # built by ``operator_bootstrap.build_operator_activity_set`` under the SAME names, on
+            # the DISTINCT ``operator_bootstrap.operator_task_queue(settings)`` queue (ADR-022 §12),
+            # so controlled-live work routes deterministically to it and is never picked up here.
             eligibility_preflight_activity,
             toolchain_attestation_activity,
             remote_state_readiness_activity,

@@ -164,6 +164,16 @@ class Settings(BaseSettings):
     temporal_host: str = "localhost:7233"
     temporal_namespace: str = "default"
     temporal_task_queue: str = "secp-orchestration"
+    # B1B-PR5B deterministic operator routing (ADR-022 §12). The DEDICATED task queue the separately
+    # reviewed, deployment-local controlled-live operator worker polls. It is EMPTY by default: the
+    # shipped, sealed worker owns only ``temporal_task_queue`` and controlled-live plan/readiness
+    # work then routes to that SAME shipped queue where it refuses at the composition gate
+    # (unchanged behaviour). When an operator worker is deployed, this is a DISTINCT queue, so the
+    # controlled-live real-plan-generation workflow and its operator readiness prerequisites route
+    # deterministically to the operator worker and are NEVER picked up by the shipped sealed worker.
+    # Setting it activates nothing on its own — no live plan can occur without the reviewed
+    # controlled-live composition AND every authoritative database gate passing at request time.
+    temporal_operator_task_queue: str = ""
 
     # SECP-002B-1B-9: bounded poll interval (seconds) for the worker-side, fake-only
     # staging-lab work-item consumer loop. The consumer runs ONLY in the worker process.
@@ -404,6 +414,38 @@ class Settings(BaseSettings):
         problems = _cors_origin_problems(self.cors_allow_origins)
         if problems:
             raise ValueError("invalid SECP_CORS_ALLOW_ORIGINS: " + "; ".join(problems))
+        return self
+
+    @model_validator(mode="after")
+    def _validate_operator_task_queue(self) -> Settings:
+        """The operator task queue (when set) must be a bounded, whitespace-free name DISTINCT from
+        the shipped ``temporal_task_queue`` (B1B-PR5B / ADR-022 §12).
+
+        Empty is the default (no operator worker; controlled-live work stays on the shipped sealed
+        queue). A value EQUAL to the shipped queue is refused: it would put the controlled-live
+        operator worker and the shipped sealed worker on the SAME queue, where both register the
+        same activity names and Temporal would route a real-plan task non-deterministically. It
+        fails closed rather than silently sharing a queue. It is never '*' and carries no endpoint,
+        credential, or backend value.
+        """
+        raw = self.temporal_operator_task_queue
+        if not raw:
+            return self
+        problems: list[str] = []
+        if raw != raw.strip() or any(ch.isspace() for ch in raw):
+            problems.append("SECP_TEMPORAL_OPERATOR_TASK_QUEUE must not contain whitespace")
+        if len(raw) > 200:
+            problems.append("SECP_TEMPORAL_OPERATOR_TASK_QUEUE must be at most 200 characters")
+        if "*" in raw:
+            problems.append("SECP_TEMPORAL_OPERATOR_TASK_QUEUE must not contain a wildcard")
+        if raw == self.temporal_task_queue:
+            problems.append(
+                "SECP_TEMPORAL_OPERATOR_TASK_QUEUE must be DISTINCT from SECP_TEMPORAL_TASK_QUEUE "
+                "(a shared queue makes controlled-live routing non-deterministic between the "
+                "shipped sealed worker and the operator worker)"
+            )
+        if problems:
+            raise ValueError("invalid SECP_TEMPORAL_OPERATOR_TASK_QUEUE: " + "; ".join(problems))
         return self
 
 

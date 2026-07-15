@@ -55,6 +55,13 @@ FORBIDDEN_IMPORT_ROOTS = frozenset(
     {"subprocess", "socket", "httpx", "requests", "aiohttp", "paramiko", "asyncssh", "proxmoxer"}
 )
 
+# B1B-PR5B: ``process_boundary.py`` is the ONE plan-gen module that legitimately runs a subprocess —
+# the narrow, grammar-constrained, seal-gated plan-only executor. It is the only module allowed to
+# import ``subprocess`` (and NOTHING else from the forbidden set); every other plan-gen module still
+# forbids the entire set, including ``subprocess``. No plan-gen module may open a socket or a
+# provider/HTTP/SSH transport.
+_SUBPROCESS_ALLOWED_IN = frozenset({"process_boundary.py"})
+
 
 def _plan_gen_files() -> list[pathlib.Path]:
     return sorted(p for p in PLAN_GEN_PKG.rglob("*.py") if "__pycache__" not in p.parts)
@@ -63,23 +70,28 @@ def _plan_gen_files() -> list[pathlib.Path]:
 # --- the plan-only process seal ------------------------------------------------------------------
 
 
-def test_plan_only_seal_is_a_code_constant_set_true():
+def test_plan_only_seal_is_a_code_constant_set_false():
+    """The dedicated plan-only seal is a single CODE constant, now set to False (reviewed PR5B
+    activation) — never configuration, never an environment flag."""
     from secp_worker.plan_gen import process_boundary as pb
 
-    assert pb._PLAN_ONLY_PROCESS_SEALED is True
+    assert pb._PLAN_ONLY_PROCESS_SEALED is False
     text = pathlib.Path(pb.__file__).read_text(encoding="utf-8")
     assigns = re.findall(r"(?m)^_PLAN_ONLY_PROCESS_SEALED\s*=.*$", text)
     assert len(assigns) == 1
-    assert assigns[0].split("=", 1)[1].strip() == "True"
+    assert assigns[0].split("=", 1)[1].strip() == "False"
 
 
-def test_plan_only_executor_cannot_be_constructed_even_with_a_capability():
+def test_plan_only_executor_cannot_be_constructed_directly():
+    """Even with the seal False, a direct/token-less construction is refused (only the production
+    issuer or the token-gated test path may construct it)."""
     from secp_worker.plan_gen.process_boundary import PlanOnlyProcessError, PlanOnlyProcessExecutor
 
-    with pytest.raises(PlanOnlyProcessError, match="SEALED"):
+    with pytest.raises(PlanOnlyProcessError, match="cannot be constructed directly"):
         PlanOnlyProcessExecutor()
-    with pytest.raises(PlanOnlyProcessError, match="SEALED"):
-        PlanOnlyProcessExecutor(capability=object())
+    # Supplying a bare object as context does not create a construction path either.
+    with pytest.raises(PlanOnlyProcessError, match="cannot be constructed directly"):
+        PlanOnlyProcessExecutor(context=object())
 
 
 def test_both_b1a_subprocess_seals_remain_true():
@@ -166,24 +178,89 @@ def test_grammar_refuses_apply_destroy_and_every_other_shape(argv):
 
 def _activation(**overrides):
     from secp_api.plan_activation_contract import PLAN_ONLY_CAPABILITY_CONTRACT_VERSION
-    from secp_worker.plan_gen.capability import PlanOnlyActivation
+    from secp_worker.plan_gen.capability import CONTROLLED_LIVE_CLASSIFICATION, PlanOnlyActivation
+    from secp_worker.plan_gen.controlled_live import (
+        CONTROLLED_LIVE_PROVIDER_SOURCE,
+        CONTROLLED_LIVE_RENDERER_VERSION,
+        controlled_live_renderer_implementation_digest,
+    )
+    from secp_worker.plan_gen.process_boundary import (
+        PLAN_ONLY_EXECUTOR_IMPLEMENTATION_ID,
+        plan_only_executor_implementation_digest,
+    )
 
+    h = lambda c: "sha256:" + c * 64  # noqa: E731 - compact test hash helper
     base = dict(
+        organization_id=uuid.uuid4(),
         plan_generation_authorization_id=uuid.uuid4(),
         authorization_version=1,
-        activation_dossier_id=uuid.uuid4(),
-        activation_dossier_hash="sha256:" + "a" * 64,
+        authorization_expiry=NOW + timedelta(hours=2),
+        operation_fingerprint=h("c"),
+        plan_only_capability_contract_version=PLAN_ONLY_CAPABILITY_CONTRACT_VERSION,
+        classification=CONTROLLED_LIVE_CLASSIFICATION,
+        expires_at=NOW + timedelta(hours=1),
+        environment_version_id=uuid.uuid4(),
+        environment_version_content_hash=h("d"),
+        deployment_plan_id=uuid.uuid4(),
+        deployment_plan_content_hash=h("e"),
         provisioning_manifest_id=uuid.uuid4(),
-        provisioning_manifest_content_hash="sha256:" + "b" * 64,
+        provisioning_manifest_content_hash=h("b"),
         execution_target_id=uuid.uuid4(),
+        target_config_hash=h("f"),
+        target_onboarding_id=uuid.uuid4(),
+        onboarding_boundary_hash=h("1"),
+        eligibility_preflight_id=uuid.uuid4(),
+        eligibility_evidence_hash=h("2"),
+        toolchain_profile_id=uuid.uuid4(),
+        toolchain_profile_hash=h("3"),
+        toolchain_attestation_id=uuid.uuid4(),
+        toolchain_attestation_hash=h("4"),
+        fresh_attestation_evidence_hash=h("5"),
+        provider_source=CONTROLLED_LIVE_PROVIDER_SOURCE,
+        provider_version="0.80.0",
+        provider_lockfile_hash=h("6"),
+        provider_mirror_identity=h("7"),
+        module_bundle_hash=h("8"),
+        renderer_version=CONTROLLED_LIVE_RENDERER_VERSION,
+        activation_dossier_id=uuid.uuid4(),
+        activation_dossier_hash=h("a"),
+        activation_dossier_revision=1,
+        activation_dossier_expiry=NOW + timedelta(hours=3),
+        provider_credential_binding_id=uuid.uuid4(),
+        provider_credential_binding_version=1,
+        state_credential_binding_id=uuid.uuid4(),
+        state_credential_binding_version=1,
+        remote_state_readiness_id=uuid.uuid4(),
+        remote_state_evidence_hash=h("9"),
+        plan_secret_readiness_id=uuid.uuid4(),
+        plan_secret_evidence_hash=h("0"),
         worker_identity_registration_id=uuid.uuid4(),
         worker_identity_version=1,
-        plan_only_capability_contract_version=PLAN_ONLY_CAPABILITY_CONTRACT_VERSION,
-        operation_fingerprint="sha256:" + "c" * 64,
-        expires_at=NOW + timedelta(hours=1),
+        execution_lease_id=uuid.uuid4(),
+        attempt_id=uuid.uuid4(),
+        attempt_number=1,
+        process_implementation_id=PLAN_ONLY_EXECUTOR_IMPLEMENTATION_ID,
+        process_implementation_digest=plan_only_executor_implementation_digest(),
+        renderer_module_id=CONTROLLED_LIVE_RENDERER_VERSION,
+        renderer_module_digest=controlled_live_renderer_implementation_digest(),
     )
     base.update(overrides)
     return PlanOnlyActivation(**base)
+
+
+def _issue(activation, *, now=NOW):
+    from secp_worker.plan_gen.capability import issue_plan_only_capability
+    from secp_worker.plan_gen.controlled_live import (
+        controlled_live_renderer_implementation_digest,
+    )
+    from secp_worker.plan_gen.process_boundary import plan_only_executor_implementation_digest
+
+    return issue_plan_only_capability(
+        activation,
+        now=now,
+        expected_process_digest=plan_only_executor_implementation_digest(),
+        expected_renderer_digest=controlled_live_renderer_implementation_digest(),
+    )
 
 
 def test_capability_cannot_be_constructed_without_the_module_token():
@@ -194,9 +271,7 @@ def test_capability_cannot_be_constructed_without_the_module_token():
 
 
 def test_issued_capability_is_non_serializable_and_redacted():
-    from secp_worker.plan_gen.capability import issue_plan_only_capability
-
-    cap = issue_plan_only_capability(_activation(), now=NOW)
+    cap = _issue(_activation())
     with pytest.raises(TypeError):
         pickle.dumps(cap)
     with pytest.raises(TypeError):
@@ -208,17 +283,39 @@ def test_issued_capability_is_non_serializable_and_redacted():
 
 
 def test_capability_is_refused_when_expired_or_contract_drifted():
-    from secp_worker.plan_gen.capability import (
-        PlanOnlyCapabilityRefused,
-        issue_plan_only_capability,
-    )
+    from secp_worker.plan_gen.capability import PlanOnlyCapabilityRefused
 
     with pytest.raises(PlanOnlyCapabilityRefused, match="expired"):
-        issue_plan_only_capability(_activation(expires_at=NOW - timedelta(seconds=1)), now=NOW)
+        _issue(_activation(expires_at=NOW - timedelta(seconds=1)))
     with pytest.raises(PlanOnlyCapabilityRefused, match="contract"):
-        issue_plan_only_capability(
-            _activation(plan_only_capability_contract_version="wrong/v0"), now=NOW
-        )
+        _issue(_activation(plan_only_capability_contract_version="wrong/v0"))
+
+
+def test_capability_is_refused_on_implementation_digest_drift():
+    """A self-declared contract version is not enough: the process/renderer digest must be exact."""
+    from secp_worker.plan_gen.capability import PlanOnlyCapabilityRefused
+
+    with pytest.raises(PlanOnlyCapabilityRefused, match="process implementation digest"):
+        _issue(_activation(process_implementation_digest="sha256:" + "0" * 64))
+    with pytest.raises(PlanOnlyCapabilityRefused, match="renderer implementation digest"):
+        _issue(_activation(renderer_module_digest="sha256:" + "0" * 64))
+    with pytest.raises(PlanOnlyCapabilityRefused, match="classification"):
+        _issue(_activation(classification="bogus"))
+
+
+def test_capability_issuance_refuses_the_old_v1_implementation_identity():
+    """The seal flip advanced the executor identity v1 -> v2. A capability minted against the OLD
+    sealed v1 process implementation id/digest cannot be issued for the unsealed v2 executor."""
+    import hashlib
+
+    from secp_worker.plan_gen.capability import PlanOnlyCapabilityRefused
+
+    v1_id = "secp-002b-1b-pr5b/plan-only-executor/v1"
+    v1_digest = "sha256:" + hashlib.sha256(v1_id.encode()).hexdigest()
+    # An activation carrying the exact old v1 digest is refused at issuance (expected digest is v2).
+    v1_act = _activation(process_implementation_id=v1_id, process_implementation_digest=v1_digest)
+    with pytest.raises(PlanOnlyCapabilityRefused, match="process implementation digest"):
+        _issue(v1_act)
 
 
 # --- the plan_gen package imports nothing capable of I/O -----------------------------------------
@@ -226,6 +323,7 @@ def test_capability_is_refused_when_expired_or_contract_drifted():
 
 @pytest.mark.parametrize("path", _plan_gen_files(), ids=lambda p: p.name)
 def test_no_plan_gen_module_imports_subprocess_or_transport(path):
+    subprocess_ok = path.name in _SUBPROCESS_ALLOWED_IN
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         modules: list[str] = []
@@ -235,6 +333,9 @@ def test_no_plan_gen_module_imports_subprocess_or_transport(path):
             modules.append(node.module)
         for module in modules:
             root = module.split(".")[0]
+            if root == "subprocess" and subprocess_ok:
+                # The plan-only executor is the sole allowed subprocess site (seal-gated grammar).
+                continue
             assert root not in FORBIDDEN_IMPORT_ROOTS, f"{path.name}: {module}"
 
 

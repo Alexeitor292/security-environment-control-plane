@@ -36,7 +36,12 @@ from sqlalchemy import create_engine, inspect, text
 PG_URL = os.environ.get("SECP_TEST_POSTGRES_URL")
 # The current single Alembic head. A DELIBERATE DRIFT GUARD: every new migration must bump it, so a
 # migration can never be added without a conscious decision.
-HEAD = "b3d9f1a7c2e5"
+_CURRENT_HEAD = "c4e2f9a1b7d3"
+# This suite tests the PR5A plan-activation migration SPECIFICALLY (its dossier/authorization/
+# attempt tables + triggers, including the append-only attempt trigger that B1B-PR5B later REPLACED
+# with a transition guard). Its schema-under-test is therefore pinned to the exact PR5A revision,
+# not the moving current head — so it keeps asserting PR5A behavior truthfully as migrations land.
+_PR5A_REVISION = "b3d9f1a7c2e5"
 
 pytestmark = pytest.mark.skipif(
     not PG_URL, reason="set SECP_TEST_POSTGRES_URL to run PostgreSQL plan-activation tests"
@@ -92,7 +97,7 @@ def pg_engine():
     previous = os.environ.get("SECP_DATABASE_URL")
     os.environ["SECP_DATABASE_URL"] = str(PG_URL)
     get_settings.cache_clear()
-    command.upgrade(_cfg(), HEAD)
+    command.upgrade(_cfg(), _PR5A_REVISION)
     try:
         yield engine
     finally:
@@ -253,7 +258,7 @@ def _seed_attempt(conn, attempt_id: uuid.UUID) -> None:
 
 def test_single_head():
     script = ScriptDirectory.from_config(_cfg())
-    assert list(script.get_heads()) == [HEAD]
+    assert list(script.get_heads()) == [_CURRENT_HEAD]
 
 
 def test_the_migration_creates_every_plan_activation_table(pg_engine):

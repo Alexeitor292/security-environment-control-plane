@@ -27,6 +27,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -43,11 +44,17 @@ from secp_api.enums import (
     ActivationDossierEvidenceKind,
     ActivationDossierEvidenceStatus,
     ActivationDossierStatus,
+    PlanExecutionLeaseStatus,
     PlanGenerationAttemptStatus,
     PlanGenerationAuthorizationStatus,
+    PlanGenerationResultStatus,
 )
 from secp_api.models import Base, TimestampMixin, _utcnow, _uuid
 from secp_api.types import EnumType
+
+# The fixed durable retry budget for one plan-only execution operation key (ADR-022 §8). Shared
+# across every worker and lease instance; an expired-lease recovery never resets it.
+PLAN_EXECUTION_ATTEMPT_BUDGET = 3
 
 # CLOSED revocation reason codes (B1B-PR5A amendment §4). The empty string is the unset default. A
 # CHECK constraint (below) enforces this set at the DATABASE level for EVERY write — the ORM path, a
@@ -425,5 +432,255 @@ class RealPlanGenerationAttempt(Base, TimestampMixin):
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return (
             f"RealPlanGenerationAttempt(id={self.id!s}, "
+            f"status={getattr(self.status, 'value', self.status)!r})"
+        )
+
+
+# CLOSED plan-execution recovery reason codes (B1B-PR5B). Empty string is the unset default. A
+# DB-level CHECK enforces this set for every write (raw/Core/replica) — no free text is ever stored.
+PLAN_EXECUTION_RECOVERY_CODES: tuple[str, ...] = (
+    "cleanup_residue",
+    "uncertain_process_termination",
+    "commit_uncertain",
+    "internal",
+)
+_RECOVERY_CODE_CHECK = (
+    "recovery_reason_code IN ('', "
+    + ", ".join(f"'{c}'" for c in PLAN_EXECUTION_RECOVERY_CODES)
+    + ")"
+)
+
+_ACTIVE_LEASE = text("status = 'active'")
+
+
+class PlanGenerationExecutionLease(Base, TimestampMixin):
+    """The durable plan-only execution lease/claim — the CAS concurrency + attempt-budget control.
+
+    Exactly ONE ``active`` lease may exist per operation key at a time (a partial unique index on
+    ``operation_fingerprint WHERE status='active'`` is the CAS guard). The lease carries the fixed
+    durable attempt budget (:data:`PLAN_EXECUTION_ATTEMPT_BUDGET`) shared across every worker and
+    every lease instance for that operation. ``begin_attempt`` increments ``attempts_used`` (before
+    any secret-manager contact); an expired-lease recovery NEVER resets the budget. ``consumed`` is
+    set only after a durable result and a pending approval are committed; an uncertain process
+    termination becomes ``recovery_required`` (terminal, no automatic retry, no force-unlock).
+
+    It stores only safe typed bindings + opaque hashes — never a secret, reference, endpoint, a
+    backend address, a workspace/executable/mirror path, an argv, or process output.
+    """
+
+    __tablename__ = "plan_generation_execution_lease"
+    __table_args__ = (
+        # CAS: at most one active lease per exact operation fingerprint (across all workers).
+        Index(
+            "uq_plan_execution_lease_active",
+            "operation_fingerprint",
+            unique=True,
+            sqlite_where=_ACTIVE_LEASE,
+            postgresql_where=_ACTIVE_LEASE,
+        ),
+        UniqueConstraint(
+            "authorization_id",
+            "authorization_version",
+            "operation_fingerprint",
+            "lease_epoch",
+            name="uq_plan_execution_lease_epoch",
+        ),
+        CheckConstraint("attempt_budget > 0", name="ck_plan_execution_lease_budget_positive"),
+        CheckConstraint("attempts_used >= 0", name="ck_plan_execution_lease_attempts_nonneg"),
+        CheckConstraint(
+            "attempts_used <= attempt_budget", name="ck_plan_execution_lease_attempts_bounded"
+        ),
+        CheckConstraint(
+            "status IN ('active', 'consumed', 'expired', 'recovery_required')",
+            name="ck_plan_execution_lease_status",
+        ),
+        CheckConstraint(_RECOVERY_CODE_CHECK, name="ck_plan_execution_lease_recovery_reason_code"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    # --- authoritative bindings (immutable once set) ---------------------------------------------
+    authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("real_plan_generation_authorization.id"), nullable=False, index=True
+    )
+    authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    authorization_expiry: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    provisioning_manifest_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("provisioning_manifest.id"), nullable=False, index=True
+    )
+    provisioning_manifest_content_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    deployment_plan_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("deployment_plan.id"), nullable=False, index=True
+    )
+    environment_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execution_target.id"), nullable=False, index=True
+    )
+    target_config_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_onboarding_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    onboarding_boundary_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    activation_dossier_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("real_lab_activation_dossier.id"), nullable=False, index=True
+    )
+    activation_dossier_hash: Mapped[str] = mapped_column(String(120), nullable=False)
+    activation_dossier_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    eligibility_preflight_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    eligibility_evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    toolchain_profile_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    toolchain_profile_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    toolchain_attestation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    toolchain_attestation_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    worker_identity_registration_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    worker_identity_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_credential_binding_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    provider_credential_binding_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state_credential_binding_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    state_credential_binding_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    remote_state_readiness_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    remote_state_evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    plan_secret_readiness_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    plan_secret_evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    operation_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+
+    # --- lease control ----------------------------------------------------------------------------
+    # A monotonic epoch so a NEW lease (after a prior terminal one) for the same operation key is a
+    # distinct row without violating the (auth, version, fingerprint) uniqueness; the ACTIVE partial
+    # index still guarantees only one live lease at a time.
+    lease_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    lease_owner: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempt_budget: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=PLAN_EXECUTION_ATTEMPT_BUDGET
+    )
+    attempts_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[PlanExecutionLeaseStatus] = mapped_column(
+        EnumType(PlanExecutionLeaseStatus, length=40),
+        default=PlanExecutionLeaseStatus.active,
+        nullable=False,
+    )
+    recovery_reason_code: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    result_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return (
+            f"PlanGenerationExecutionLease(id={self.id!s}, "
+            f"status={getattr(self.status, 'value', self.status)!r}, "
+            f"attempts_used={self.attempts_used}/{self.attempt_budget})"
+        )
+
+
+class RealPlanGenerationResult(Base, TimestampMixin):
+    """The durable, immutable, append-only canonical plan-only change-set RESULT (ADR-022 §6).
+
+    Exactly ONE successful result may exist for ``(authorization_id, authorization_version,
+    operation_fingerprint)``. It persists ONLY safe typed bindings + the deterministic, redacted
+    canonical change set (secret-free by construction) + its exact ``change_set_hash``. It holds NO
+    binary plan, raw ``show`` JSON, argv, cwd, executable/workspace/mirror path, endpoint, backend
+    address, secret, secret reference, secret-reference hash, environment value, stdout, stderr, raw
+    diagnostic, or third-party exception text. It is never mutated after insert.
+    """
+
+    __tablename__ = "real_plan_generation_result"
+    __table_args__ = (
+        UniqueConstraint(
+            "authorization_id",
+            "authorization_version",
+            "operation_fingerprint",
+            name="uq_plan_generation_result_operation",
+        ),
+        CheckConstraint(
+            "status IN ('pending_approval', 'no_changes', 'superseded')",
+            name="ck_plan_generation_result_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    attempt_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("real_plan_generation_attempt.id"), nullable=False, index=True
+    )
+    execution_lease_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("plan_generation_execution_lease.id"), nullable=False, index=True
+    )
+    authorization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("real_plan_generation_authorization.id"), nullable=False, index=True
+    )
+    authorization_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    provisioning_manifest_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("provisioning_manifest.id"), nullable=False, index=True
+    )
+    provisioning_manifest_content_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    deployment_plan_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    deployment_plan_content_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    environment_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    environment_version_content_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    execution_target_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    target_config_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_onboarding_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    onboarding_boundary_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    activation_dossier_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    activation_dossier_hash: Mapped[str] = mapped_column(String(120), nullable=False)
+    eligibility_preflight_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    eligibility_evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    toolchain_profile_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    toolchain_profile_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    toolchain_attestation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    toolchain_attestation_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    # The FRESH execution-time re-attestation evidence hash (distinct from the durable record hash).
+    fresh_attestation_evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Provider provenance (identities/hashes only; never a mirror path, URL, or endpoint).
+    provider_source: Mapped[str] = mapped_column(String(120), nullable=False)
+    provider_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    provider_lockfile_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider_mirror_identity: Mapped[str] = mapped_column(String(80), nullable=False)
+    module_bundle_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    renderer_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    worker_identity_registration_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    worker_identity_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_credential_binding_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    provider_credential_binding_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state_credential_binding_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    state_credential_binding_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    remote_state_readiness_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    remote_state_evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    plan_secret_readiness_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    plan_secret_evidence_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+
+    # --- the redacted canonical change set + its exact hashes (secret-free by construction) -------
+    change_set: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    change_set_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    workspace_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    change_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    change_policy_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    change_policy_outcome: Mapped[str] = mapped_column(String(40), nullable=False)
+    plan_only_capability_contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    operation_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+
+    # The pending exact-hash human approval (prospective apply only). Never auto-approved.
+    change_set_approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("provisioning_change_set_approval.id"), nullable=True, index=True
+    )
+    status: Mapped[PlanGenerationResultStatus] = mapped_column(
+        EnumType(PlanGenerationResultStatus, length=40),
+        default=PlanGenerationResultStatus.pending_approval,
+        nullable=False,
+    )
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return (
+            f"RealPlanGenerationResult(id={self.id!s}, "
+            f"change_set_hash={self.change_set_hash!r}, "
             f"status={getattr(self.status, 'value', self.status)!r})"
         )

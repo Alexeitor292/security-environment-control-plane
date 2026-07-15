@@ -257,11 +257,18 @@ def test_shipped_default_resolver_remains_sealed_and_constructs_no_material():
     # canary module's only source of material must be ``secrets.token_hex``, and it must import
     # nothing capable of reading a backend, a database, a file, or the environment.
     canary = REPO / "apps/worker/secp_worker/readiness/canary.py"
-    allowed = {adapter, canary}
+    # SECP-002B-1B B1B-PR5B (ADR-022 §10): the reviewed CONCRETE plan-execution OpenBao resolver may
+    # construct SecretMaterial — and, like the preflight adapter, ONLY behind its fail-closed client
+    # boundary (``if self._client is None:`` -> no client -> no construction). It is sealed by
+    # default and constructs material only after the full plan-execution contract passes with an
+    # injected concrete client; the assertions below hold it to the same fail-closed shape.
+    plan_resolver = REPO / "apps/worker/secp_worker/plan_gen/openbao_plan_resolver.py"
+    allowed = {adapter, canary, plan_resolver}
 
     offenders: list[str] = []
     adapter_constructs = False
     canary_constructs = False
+    plan_resolver_constructs = False
     for path in _py(WORKER_PKG) + _py(API_PKG):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
             if isinstance(node, ast.Call):
@@ -272,16 +279,24 @@ def test_shipped_default_resolver_remains_sealed_and_constructs_no_material():
                         adapter_constructs = True
                     elif path == canary:
                         canary_constructs = True
+                    elif path == plan_resolver:
+                        plan_resolver_constructs = True
                     else:
                         offenders.append(str(path.relative_to(REPO)))
     assert not offenders, f"non-adapter production code constructs SecretMaterial: {offenders}"
-    assert allowed  # the allowlist is exactly these two files
+    assert allowed  # the allowlist is exactly these three files
 
     # The adapter's construction sits behind the fail-closed client boundary.
     adapter_src = adapter.read_text(encoding="utf-8")
     assert adapter_constructs
     assert "if self._client is None:" in adapter_src
     assert "SecretMaterial(secret)" in adapter_src
+
+    # The plan-execution resolver's construction sits behind the SAME fail-closed client boundary.
+    plan_src = plan_resolver.read_text(encoding="utf-8")
+    assert plan_resolver_constructs
+    assert "if self._client is None:" in plan_src
+    assert "SecretMaterial(secret)" in plan_src
 
     # The canary's construction is INERT: locally generated randomness only.
     assert canary_constructs

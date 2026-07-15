@@ -159,6 +159,7 @@ def test_run_real_eligibility_preflight_sole_caller_is_the_activity():
 
 
 def test_activity_body_runs_sealed_seam_and_persists_nothing(session, principal):
+    from secp_worker.onboarding.eligibility_provider import SealedEligibilityCompositionProvider
     from secp_worker.temporal_app import run_eligibility_preflight_activity_body
 
     chain = _build_chain(session)
@@ -166,8 +167,10 @@ def test_activity_body_runs_sealed_seam_and_persists_nothing(session, principal)
     run = dispatcher.dispatch_real_eligibility_preflight(session, chain.onboarding.id)
     session.commit()  # the activity opens its OWN worker session_scope; it must see committed state
 
+    # The shipped worker injects the SEALED provider; the body obtains the composition from it only.
     outcome = run_eligibility_preflight_activity_body(
-        {"onboarding_id": str(chain.onboarding.id), "workflow_run_id": str(run.id)}
+        {"onboarding_id": str(chain.onboarding.id), "workflow_run_id": str(run.id)},
+        eligibility_provider=SealedEligibilityCompositionProvider(),
     )
     assert outcome == "refused"  # sealed composition → refused before any contact
 
