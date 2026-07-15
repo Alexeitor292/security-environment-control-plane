@@ -668,13 +668,17 @@ def _guard_plan_activation_mutation(session: Session, obj: object) -> None:
     """B1B-PR5A dirty-mutation guard for the dossier, its evidence, and the plan-gen auth."""
     from secp_api.enums import (
         ActivationDossierStatus,
+        PlanExecutionLeaseStatus,
+        PlanGenerationAttemptStatus,
         PlanGenerationAuthorizationStatus,
     )
     from secp_api.plan_activation_models import (
+        PlanGenerationExecutionLease,
         RealLabActivationDossier,
         RealLabActivationDossierEvidence,
         RealPlanGenerationAttempt,
         RealPlanGenerationAuthorization,
+        RealPlanGenerationResult,
     )
 
     _dossier_transitions = {
@@ -753,9 +757,97 @@ def _guard_plan_activation_mutation(session: Session, obj: object) -> None:
     elif isinstance(obj, RealLabActivationDossierEvidence):
         _guard_dossier_evidence(session, obj, "changed")
     elif isinstance(obj, RealPlanGenerationAttempt):
-        raise ImmutableResourceError(
-            "RealPlanGenerationAttempt records are immutable after insert (append-only)"
+        # B1B-PR5B: the attempt carries the execution lifecycle with a TIGHT transition guard (the
+        # ORM counterpart to the ``secp_real_plan_generation_attempt_transition`` PG trigger).
+        # Binding facts stay immutable; only the allowed status edges are permitted.
+        _attempt_protected = (
+            "organization_id",
+            "authorization_id",
+            "authorization_version",
+            "execution_target_id",
+            "deployment_plan_id",
+            "provisioning_manifest_id",
+            "target_onboarding_id",
+            "activation_dossier_id",
+            "operation_fingerprint",
+            "collected_at",
         )
+        _S = PlanGenerationAttemptStatus
+        _attempt_transitions = {
+            (_S.requested, _S.running),
+            (_S.requested, _S.refused),
+            (_S.requested, _S.failed),
+            (_S.requested, _S.recovery_required),
+            (_S.running, _S.completed),
+            (_S.running, _S.failed),
+            (_S.running, _S.recovery_required),
+        }
+        _immutable("RealPlanGenerationAttempt", _attempt_protected, (), _attempt_transitions)
+    elif isinstance(obj, RealPlanGenerationResult):
+        # B1B-PR5B: the durable result is fully immutable (append-only) — no field may change.
+        raise ImmutableResourceError(
+            "RealPlanGenerationResult records are immutable after insert (append-only)"
+        )
+    elif isinstance(obj, PlanGenerationExecutionLease):
+        # B1B-PR5B: the lease binding facts are immutable; only the guarded control transitions are
+        # permitted (the ORM counterpart to the ``secp_plan_generation_execution_lease_guard``
+        # PostgreSQL trigger). ``attempts_used`` is monotonic non-decreasing.
+        _lease_protected = (
+            "organization_id",
+            "authorization_id",
+            "authorization_version",
+            "authorization_expiry",
+            "provisioning_manifest_id",
+            "provisioning_manifest_content_hash",
+            "deployment_plan_id",
+            "environment_version_id",
+            "execution_target_id",
+            "target_config_hash",
+            "target_onboarding_id",
+            "onboarding_boundary_hash",
+            "activation_dossier_id",
+            "activation_dossier_hash",
+            "activation_dossier_revision",
+            "eligibility_preflight_id",
+            "eligibility_evidence_hash",
+            "toolchain_profile_id",
+            "toolchain_profile_hash",
+            "toolchain_attestation_id",
+            "toolchain_attestation_hash",
+            "worker_identity_registration_id",
+            "worker_identity_version",
+            "provider_credential_binding_id",
+            "provider_credential_binding_version",
+            "state_credential_binding_id",
+            "state_credential_binding_version",
+            "remote_state_readiness_id",
+            "remote_state_evidence_hash",
+            "plan_secret_readiness_id",
+            "plan_secret_evidence_hash",
+            "operation_fingerprint",
+            "lease_epoch",
+            "attempt_budget",
+            "acquired_at",
+        )
+        _L = PlanExecutionLeaseStatus
+        _lease_transitions = {
+            (_L.active, _L.consumed),
+            (_L.active, _L.expired),
+            (_L.active, _L.recovery_required),
+        }
+        _immutable(
+            "PlanGenerationExecutionLease",
+            _lease_protected,
+            ("result_id", "consumed_at", "recovery_reason_code"),
+            _lease_transitions,
+        )
+        if _attr_changed(obj, "attempts_used"):
+            prev = _previous_value(obj, "attempts_used")
+            current_used = int(getattr(obj, "attempts_used", 0) or 0)
+            if isinstance(prev, int) and current_used < prev:
+                raise ImmutableResourceError(
+                    "PlanGenerationExecutionLease attempts_used cannot decrease"
+                )
 
 
 def _plan_secret_parent_status(
@@ -1312,6 +1404,9 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # B1B-PR5A: activation dossier + plan-generation authorization + attempts cannot be deleted;
         # dossier evidence cannot be deleted once the dossier leaves draft.
         from secp_api.plan_activation_models import (
+            PlanGenerationExecutionLease as _PGEL,
+        )
+        from secp_api.plan_activation_models import (
             RealLabActivationDossier as _RLAD,
         )
         from secp_api.plan_activation_models import (
@@ -1323,8 +1418,11 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         from secp_api.plan_activation_models import (
             RealPlanGenerationAuthorization as _RPGAuthz,
         )
+        from secp_api.plan_activation_models import (
+            RealPlanGenerationResult as _RPGRes,
+        )
 
-        if isinstance(obj, _RLAD | _RPGAuthz | _RPGA):
+        if isinstance(obj, _RLAD | _RPGAuthz | _RPGA | _RPGRes | _PGEL):
             raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
         if isinstance(obj, _RLADE2):
             _guard_dossier_evidence(session, obj, "deleted")

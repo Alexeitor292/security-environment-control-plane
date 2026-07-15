@@ -38,8 +38,32 @@ except Exception:  # pragma: no cover - import guard
     activity = workflow = _Stub()  # type: ignore[assignment]
 
 
+# Worker-bootstrap composition providers. Importing the SEALED defaults here (never a live provider)
+# lets the shipped worker construct its default, always-sealed activity instances at import time.
+from secp_worker.onboarding.eligibility_provider import (  # noqa: E402 - after the temporal guard
+    SealedEligibilityCompositionProvider,
+)
+from secp_worker.plan_gen.composition_provider import (  # noqa: E402 - after the temporal guard
+    SealedPlanExecutionCompositionProvider,
+)
+from secp_worker.readiness.composition_provider import (  # noqa: E402 - after the temporal guard
+    SealedReadinessCompositionProvider,
+)
+
+
 def _opt_uuid(value: str | None) -> uuid.UUID | None:
     return uuid.UUID(value) if value else None
+
+
+# --- Stable Temporal activity names ---------------------------------------------------------------
+# The workflow dispatches to its activity BY NAME (a string), so the same registered name is served
+# whether the shipped worker registers the SEALED-provider instance or a reviewed operator worker
+# registers a CONTROLLED-LIVE-provider instance. These constants are the single source of truth.
+REAL_PLAN_GENERATION_ACTIVITY_NAME = "real_plan_generation_activity"
+ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME = "eligibility_preflight_activity"
+TOOLCHAIN_ATTESTATION_ACTIVITY_NAME = "toolchain_attestation_activity"
+REMOTE_STATE_READINESS_ACTIVITY_NAME = "remote_state_readiness_activity"
+PLAN_SECRET_READINESS_ACTIVITY_NAME = "plan_secret_readiness_activity"
 
 
 @activity.defn
@@ -145,26 +169,29 @@ def _finish_run(session, run_id, now) -> None:
         run.finished_at = now
 
 
-def run_eligibility_preflight_activity_body(arg: dict) -> str:
+def run_eligibility_preflight_activity_body(arg: dict, *, eligibility_provider) -> str:  # noqa: ANN001
     """Durable worker-owned read-only eligibility preflight body (sync core; the activity awaits).
 
     Loads the authoritative records from a FRESH worker session, resolves the current approved
     authorization + worker identity, checks cancellation / the deployment-local stop posture BEFORE
-    any contact, then runs the sealed-by-default ``run_real_eligibility_preflight``. The shipped
-    composition is fully sealed, so this durable path runs end to end but refuses at the seal before
-    any transport/resolver/collector/target contact. Returns the closed outcome string.
+    any contact, then runs ``run_real_eligibility_preflight`` with the composition obtained
+    EXCLUSIVELY
+    from the injected ``eligibility_provider``. The shipped worker injects the sealed provider, so
+    this
+    durable path runs end to end but refuses at the seal before any
+    transport/resolver/collector/target
+    contact. A separately reviewed operator worker injects a controlled-live provider. Returns the
+    closed outcome string.
     """
     import uuid as _uuid
     from datetime import UTC, datetime
 
     from secp_api import audit
-    from secp_api.config import get_settings
     from secp_api.db import session_scope
     from secp_api.enums import AuditAction, EligibilityOutcome
     from secp_api.models import TargetOnboarding, WorkflowRun
 
     from secp_worker.onboarding.eligibility_preflight import (
-        build_eligibility_composition,
         resolve_eligibility_preflight_request,
         run_real_eligibility_preflight,
     )
@@ -217,25 +244,41 @@ def run_eligibility_preflight_activity_body(arg: dict) -> str:
         result = run_real_eligibility_preflight(
             session,
             request=request,
-            composition=build_eligibility_composition(get_settings()),
+            composition=eligibility_provider.get(),
             now=now,
         )
         _finish_run(session, run_id, now)
         return result.outcome
 
 
-@activity.defn
-async def eligibility_preflight_activity(arg: dict) -> str:
-    return run_eligibility_preflight_activity_body(arg)
+class EligibilityPreflightActivity:
+    """Class-based Temporal activity with a constructor-injected eligibility composition provider.
+
+    The shipped worker constructs it with the SEALED provider (below); a reviewed operator worker
+    constructs it with a controlled-live provider via the operator bootstrap factory. The registered
+    activity NAME is stable regardless of which provider is injected.
+    """
+
+    def __init__(self, eligibility_provider) -> None:  # noqa: ANN001
+        if eligibility_provider is None:
+            raise ValueError("eligibility_provider is required")
+        self._eligibility_provider = eligibility_provider
+
+    @activity.defn(name=ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME)
+    async def run(self, arg: dict) -> str:
+        return run_eligibility_preflight_activity_body(
+            arg, eligibility_provider=self._eligibility_provider
+        )
 
 
-def run_toolchain_attestation_activity_body(arg: dict) -> str:
+def run_toolchain_attestation_activity_body(arg: dict, *, readiness_provider) -> str:  # noqa: ANN001
     """Durable worker-owned PR2 toolchain attestation (B1B-PR4 §1). It STOPS at the record.
 
     The Temporal argument carries ONLY a manifest id + the workflow-run id — never a path, a layout,
     a digest, or an environment. The reviewed deployment-local filesystem LAYOUT comes exclusively
-    from the worker's own composition, which is **sealed by default**: the shipped runtime therefore
-    refuses at the seal and reads no disk.
+    from the composition obtained from the injected ``readiness_provider``, which is the SEALED
+    provider on the shipped worker: the shipped runtime therefore refuses at the seal and reads no
+    disk. A reviewed operator worker injects a controlled-live provider.
 
     It executes no binary, opens no socket, loads no provider, renders no workspace, and constructs
     no ``OpenTofuRunner``, process executor, or activation grant.
@@ -243,12 +286,10 @@ def run_toolchain_attestation_activity_body(arg: dict) -> str:
     import uuid as _uuid
     from datetime import UTC, datetime
 
-    from secp_api.config import get_settings
     from secp_api.db import session_scope
     from secp_api.enums import ToolchainAttestationOutcome, WorkflowStatus
     from secp_api.models import ProvisioningManifest, WorkflowRun
 
-    from secp_worker.readiness.composition import build_readiness_composition
     from secp_worker.readiness.toolchain_attestation import run_toolchain_attestation
 
     manifest_id = _uuid.UUID(arg["manifest_id"])
@@ -267,7 +308,7 @@ def run_toolchain_attestation_activity_body(arg: dict) -> str:
             _finish_run(session, run_id, now)
             return failed
 
-        composition = build_readiness_composition(get_settings())
+        composition = readiness_provider.get()
         result = run_toolchain_attestation(
             session,
             toolchain_profile_id=manifest.toolchain_profile_id,
@@ -278,12 +319,22 @@ def run_toolchain_attestation_activity_body(arg: dict) -> str:
         return result.outcome
 
 
-@activity.defn
-async def toolchain_attestation_activity(arg: dict) -> str:
-    return run_toolchain_attestation_activity_body(arg)
+class ToolchainAttestationActivity:
+    """Class-based Temporal activity with a constructor-injected readiness composition provider."""
+
+    def __init__(self, readiness_provider) -> None:  # noqa: ANN001
+        if readiness_provider is None:
+            raise ValueError("readiness_provider is required")
+        self._readiness_provider = readiness_provider
+
+    @activity.defn(name=TOOLCHAIN_ATTESTATION_ACTIVITY_NAME)
+    async def run(self, arg: dict) -> str:
+        return run_toolchain_attestation_activity_body(
+            arg, readiness_provider=self._readiness_provider
+        )
 
 
-def _run_readiness_activity_body(arg: dict, *, kind: str) -> str:
+def _run_readiness_activity_body(arg: dict, *, kind: str, readiness_provider) -> str:  # noqa: ANN001
     """Durable worker-owned readiness body (sync core; the activity awaits).
 
     Opens a FRESH worker session and loads every authoritative record itself — the Temporal argument
@@ -299,7 +350,6 @@ def _run_readiness_activity_body(arg: dict, *, kind: str) -> str:
     from datetime import UTC, datetime
 
     from secp_api import audit
-    from secp_api.config import get_settings
     from secp_api.db import session_scope
     from secp_api.enums import (
         AuditAction,
@@ -309,7 +359,6 @@ def _run_readiness_activity_body(arg: dict, *, kind: str) -> str:
     )
     from secp_api.models import ProvisioningManifest, WorkflowRun
 
-    from secp_worker.readiness.composition import build_readiness_composition
     from secp_worker.readiness.plan_secret_readiness import run_plan_secret_readiness
     from secp_worker.readiness.state_readiness import run_remote_state_readiness
 
@@ -363,7 +412,7 @@ def _run_readiness_activity_body(arg: dict, *, kind: str) -> str:
         if _cancelled():
             return _refuse("operation_cancelled")
 
-        composition = build_readiness_composition(get_settings())
+        composition = readiness_provider.get()
 
         # Re-check cancellation immediately before invoking the seam (its only external contact is
         # deep inside, and is itself sealed by the default composition).
@@ -383,33 +432,69 @@ def _run_readiness_activity_body(arg: dict, *, kind: str) -> str:
         return secret_result.outcome
 
 
-def run_remote_state_readiness_activity_body(arg: dict) -> str:
-    return _run_readiness_activity_body(arg, kind="remote_state_readiness")
+def run_remote_state_readiness_activity_body(arg: dict, *, readiness_provider) -> str:  # noqa: ANN001
+    return _run_readiness_activity_body(
+        arg, kind="remote_state_readiness", readiness_provider=readiness_provider
+    )
 
 
-def run_plan_secret_readiness_activity_body(arg: dict) -> str:
-    return _run_readiness_activity_body(arg, kind="plan_secret_readiness")
+def run_plan_secret_readiness_activity_body(arg: dict, *, readiness_provider) -> str:  # noqa: ANN001
+    return _run_readiness_activity_body(
+        arg, kind="plan_secret_readiness", readiness_provider=readiness_provider
+    )
 
 
-@activity.defn
-async def remote_state_readiness_activity(arg: dict) -> str:
-    return run_remote_state_readiness_activity_body(arg)
+class RemoteStateReadinessActivity:
+    """Class-based Temporal activity with a constructor-injected readiness composition provider.
+
+    A SEPARATE authority from plan-secret readiness: it uses only the composition's state adapter +
+    state activation. It never triggers plan-secret readiness or plan generation.
+    """
+
+    def __init__(self, readiness_provider) -> None:  # noqa: ANN001
+        if readiness_provider is None:
+            raise ValueError("readiness_provider is required")
+        self._readiness_provider = readiness_provider
+
+    @activity.defn(name=REMOTE_STATE_READINESS_ACTIVITY_NAME)
+    async def run(self, arg: dict) -> str:
+        return run_remote_state_readiness_activity_body(
+            arg, readiness_provider=self._readiness_provider
+        )
 
 
-@activity.defn
-async def plan_secret_readiness_activity(arg: dict) -> str:
-    return run_plan_secret_readiness_activity_body(arg)
+class PlanSecretReadinessActivity:
+    """Class-based Temporal activity with a constructor-injected readiness composition provider.
+
+    A SEPARATE authority from remote-state readiness: it uses only the composition's resolver
+    self-test + plan-secret activation. It never triggers remote-state readiness or plan generation.
+    """
+
+    def __init__(self, readiness_provider) -> None:  # noqa: ANN001
+        if readiness_provider is None:
+            raise ValueError("readiness_provider is required")
+        self._readiness_provider = readiness_provider
+
+    @activity.defn(name=PLAN_SECRET_READINESS_ACTIVITY_NAME)
+    async def run(self, arg: dict) -> str:
+        return run_plan_secret_readiness_activity_body(
+            arg, readiness_provider=self._readiness_provider
+        )
 
 
-def run_real_plan_generation_activity_body(arg: dict) -> str:
-    """Durable worker-owned real-plan-generation body (B1B-PR5A, ADR-022 §11). It STOPS at the seal.
+def run_real_plan_generation_activity_body(arg: dict, *, composition_provider) -> str:  # noqa: ANN001
+    """Durable worker-owned real-plan-generation body (B1B-PR5B, ADR-022 §11).
 
     Opens a FRESH worker session and re-derives the complete authoritative binding itself — the
-    Temporal argument carries ONLY a manifest id and the workflow-run id (no endpoint, credential,
-    secret reference, dossier payload, authorization token, or capability). It evaluates combined
-    plan-readiness, then reaches the plan-only process SEAL, which refuses construction of any
-    executor in PR5A. It resolves NO credential, renders NO workspace, creates NO binary plan, runs
-    NO process, and NEVER returns ``completed``. Returns the closed refused outcome string.
+    Temporal argument carries ONLY a manifest id and the workflow-run id (no composition, endpoint,
+    credential, secret reference, dossier payload, authorization token, capability, or path). It
+    obtains the :class:`PlanExecutionComposition` EXCLUSIVELY from the injected
+    ``composition_provider``
+    and passes it to ``run_plan_generation``. The shipped worker injects the SEALED provider, so the
+    orchestration refuses at the composition gate before any
+    filesystem/render/resolver/secret/process
+    and NEVER returns ``completed``; a separately reviewed operator worker injects a controlled-live
+    provider. Returns the closed outcome string.
     """
     import uuid as _uuid
     from datetime import UTC, datetime
@@ -430,19 +515,66 @@ def run_real_plan_generation_activity_body(arg: dict) -> str:
             if run is not None:
                 run.status = WorkflowStatus.running
 
-        # Cancellation / the deployment-local stop posture is checked BEFORE any authoritative load.
+        # Cancellation / the deployment-local stop posture is checked BEFORE the composition is even
+        # obtained from the provider, and BEFORE any authoritative load.
         if _cancelled():
             _finish_run(session, run_id, now)
             return PlanGenerationAttemptStatus.refused.value
 
-        result = run_plan_generation(session, manifest_id=manifest_id, now=now)
+        composition = composition_provider.get()
+        result = run_plan_generation(
+            session, manifest_id=manifest_id, composition=composition, now=now
+        )
         _finish_run(session, run_id, now)
         return result.outcome
 
 
-@activity.defn
-async def real_plan_generation_activity(arg: dict) -> str:
-    return run_real_plan_generation_activity_body(arg)
+class RealPlanGenerationActivity:
+    """Class-based Temporal activity with a constructor-injected plan-execution composition
+    provider.
+
+    This is the seam through which a separately reviewed operator worker injects the controlled-live
+    :class:`PlanExecutionComposition` into the EXISTING durable activity — without any manual direct
+    ``run_plan_generation(..., composition=...)`` invocation. The shipped worker constructs it with
+    the SEALED provider (below); the operator bootstrap constructs it with a controlled-live
+    provider. The registered activity NAME is stable regardless of which provider is injected, and
+    the composition never enters a Temporal argument (it is held here as instance state).
+    """
+
+    def __init__(self, composition_provider) -> None:  # noqa: ANN001
+        if composition_provider is None:
+            raise ValueError("composition_provider is required")
+        self._composition_provider = composition_provider
+
+    @activity.defn(name=REAL_PLAN_GENERATION_ACTIVITY_NAME)
+    async def run(self, arg: dict) -> str:
+        return run_real_plan_generation_activity_body(
+            arg, composition_provider=self._composition_provider
+        )
+
+
+# --- The DEFAULT activities the SHIPPED (sealed-by-default) worker registers
+# -----------------------
+# Each is constructed with its SEALED provider, so ordinary worker startup refuses at the
+# composition/seam gate before any I/O. These are IMMUTABLE default instances — never a mutable
+# module-global composition, never monkeypatched, never a service locator. A reviewed operator
+# worker
+# builds its OWN instances via ``secp_worker.operator_bootstrap.build_operator_activity_set`` and
+# registers those bound methods under the SAME stable activity names.
+_SEALED_ELIGIBILITY_ACTIVITY = EligibilityPreflightActivity(SealedEligibilityCompositionProvider())
+_SEALED_TOOLCHAIN_ACTIVITY = ToolchainAttestationActivity(SealedReadinessCompositionProvider())
+_SEALED_REMOTE_STATE_ACTIVITY = RemoteStateReadinessActivity(SealedReadinessCompositionProvider())
+_SEALED_PLAN_SECRET_ACTIVITY = PlanSecretReadinessActivity(SealedReadinessCompositionProvider())
+_SEALED_REAL_PLAN_GENERATION_ACTIVITY = RealPlanGenerationActivity(
+    SealedPlanExecutionCompositionProvider()
+)
+
+# The registered activity callables (bound methods) the shipped ``main.py`` imports + registers.
+eligibility_preflight_activity = _SEALED_ELIGIBILITY_ACTIVITY.run
+toolchain_attestation_activity = _SEALED_TOOLCHAIN_ACTIVITY.run
+remote_state_readiness_activity = _SEALED_REMOTE_STATE_ACTIVITY.run
+plan_secret_readiness_activity = _SEALED_PLAN_SECRET_ACTIVITY.run
+real_plan_generation_activity = _SEALED_REAL_PLAN_GENERATION_ACTIVITY.run
 
 
 def _activity_timeout():
@@ -491,8 +623,14 @@ class DiscoverWorkflow:
 class EligibilityPreflightWorkflow:
     @workflow.run
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        # Dispatch BY the stable activity NAME, so the worker's registered instance (sealed on the
+        # shipped worker, controlled-live on a reviewed operator worker) is served; the workflow
+        # neither constructs nor imports the composition/provider.
         return await workflow.execute_activity(
-            eligibility_preflight_activity, arg, start_to_close_timeout=_activity_timeout()
+            ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
+            arg,
+            result_type=str,
+            start_to_close_timeout=_activity_timeout(),
         )
 
 
@@ -506,7 +644,10 @@ class ToolchainAttestationWorkflow:
     @workflow.run
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
-            toolchain_attestation_activity, arg, start_to_close_timeout=_activity_timeout()
+            TOOLCHAIN_ATTESTATION_ACTIVITY_NAME,
+            arg,
+            result_type=str,
+            start_to_close_timeout=_activity_timeout(),
         )
 
 
@@ -520,7 +661,10 @@ class RemoteStateReadinessWorkflow:
     @workflow.run
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
-            remote_state_readiness_activity, arg, start_to_close_timeout=_activity_timeout()
+            REMOTE_STATE_READINESS_ACTIVITY_NAME,
+            arg,
+            result_type=str,
+            start_to_close_timeout=_activity_timeout(),
         )
 
 
@@ -535,22 +679,34 @@ class PlanSecretReadinessWorkflow:
     @workflow.run
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
-            plan_secret_readiness_activity, arg, start_to_close_timeout=_activity_timeout()
+            PLAN_SECRET_READINESS_ACTIVITY_NAME,
+            arg,
+            result_type=str,
+            start_to_close_timeout=_activity_timeout(),
         )
 
 
 @workflow.defn
 class RealPlanGenerationWorkflow:
-    """Durable, worker-only real plan generation (B1B-PR5A, ADR-022). It STOPS at the seal.
+    """Durable, worker-only real plan generation (B1B-PR5B, ADR-022).
 
     Every prerequisite readiness operation is a hard precondition, and this workflow triggers none
-    of them. It reaches the plan-only process seal and refuses in PR5A: it runs no OpenTofu,
-    resolves no credential, renders no workspace, and creates no plan. Completing it authorizes NO
+    of
+    them. It dispatches the ``real_plan_generation_activity`` BY NAME (never constructing or
+    importing a composition/provider). On the shipped worker the registered activity injects the
+    SEALED composition, so the orchestration refuses at the composition gate before any OpenTofu,
+    credential,
+    workspace, or plan; on a reviewed operator worker it injects a controlled-live composition and
+    the
+    activity STOPS at a redacted change set + a pending human approval. Completing it authorizes NO
     apply and NO destroy — those seals are independent code constants that stay True.
     """
 
     @workflow.run
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
-            real_plan_generation_activity, arg, start_to_close_timeout=_activity_timeout()
+            REAL_PLAN_GENERATION_ACTIVITY_NAME,
+            arg,
+            result_type=str,
+            start_to_close_timeout=_activity_timeout(),
         )

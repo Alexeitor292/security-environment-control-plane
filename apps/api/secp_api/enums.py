@@ -1055,6 +1055,23 @@ class AuditAction(str, Enum):
     plan_generation_refused = "plan_generation.refused"
     # B1B-PR5A — the SEPARATE state-backend credential rotation (its own dedicated reference).
     target_state_credential_rotated = "execution_target.state_credential_rotated"
+    # B1B-PR5B — the plan-only EXECUTION phase (ADR-022 §5/§6/§8). Every payload is bounded and
+    # secret-free: ids, hashes, bounded reason codes, bounded change counts, versions, timestamps —
+    # never an argv, cwd, path, endpoint, credential, provider output, raw plan JSON, or exception
+    # text. These fire only through the reviewed PR5B path; while the shipped composition is
+    # disabled the shipped worker still refuses before any of them (only ``plan_generation_refused``
+    # is emitted), even though the plan-only code seal is now False.
+    plan_execution_lease_acquired = "plan_generation.execution_lease_acquired"
+    plan_execution_reattested = "plan_generation.execution_reattested"
+    plan_execution_workspace_rendered = "plan_generation.execution_workspace_rendered"
+    plan_execution_secrets_resolved = "plan_generation.execution_secrets_resolved"
+    plan_execution_plan_created = "plan_generation.execution_plan_created"
+    plan_execution_change_set_recorded = "plan_generation.execution_change_set_recorded"
+    plan_execution_completed = "plan_generation.execution_completed"
+    plan_execution_failed = "plan_generation.execution_failed"
+    plan_execution_recovery_required = "plan_generation.execution_recovery_required"
+    plan_execution_lease_released = "plan_generation.execution_lease_released"
+    plan_generation_authorization_consumed = "plan_generation.authorization_consumed"
 
 
 # --- SECP-002B-1B B1B-PR4: remote-state + plan-secret readiness ----------------------------------
@@ -1480,14 +1497,126 @@ class PlanGenerationAuthorizationStatus(str, Enum):
 
 
 class PlanGenerationAttemptStatus(str, Enum):
-    """Bounded status of one durable real-plan-generation ATTEMPT record (B1B-PR5A).
+    """Bounded status of one durable real-plan-generation ATTEMPT record (B1B-PR5A / B1B-PR5B).
 
-    PR5A records only ``requested`` and ``refused`` — there is deliberately **no** ``completed``
-    because no plan executes: the worker refuses at the still-sealed plan-only process boundary.
+    PR5A recorded only ``requested`` and ``refused``. B1B-PR5B adds the execution-phase terminal
+    markers of a single append-only attempt trail — ``running`` (a durable claim marker that
+    plan-only execution began), ``completed`` (a create-only change set was recorded and awaits
+    exact-hash human approval), ``failed`` (a bounded, secret-free execution failure), and
+    ``recovery_required`` (residue could not be cleaned; a human must intervene before any retry).
+
+    These values exist so PR5B can record its append-only attempt trail. Although the plan-only
+    process seal (``_PLAN_ONLY_PROCESS_SEALED``) is now ``False``, no ``running`` or ``completed``
+    row is produced on an ORDINARY shipped path: the shipped ``PlanExecutionComposition`` stays
+    disabled, so ``run_plan_generation`` refuses at the composition gate before any lease/attempt is
+    created. A ``running``/``completed`` row arises only under a separately reviewed, activated
+    deployment-local composition, or the token-gated test-only path against the inert fixture.
     """
 
     requested = "requested"
     refused = "refused"
+    # --- B1B-PR5B execution-phase markers (append-only; never produced on a shipped/sealed path) --
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    recovery_required = "recovery_required"
+
+
+class PlanExecutionStateBackendKind(str, Enum):
+    """The ONLY state-backend kind a controlled-live plan-only execution may use (B1B-PR5B).
+
+    Only ``http`` is representable: the plan-only workspace declares an EMPTY ``backend "http" {}``
+    whose address/credential are supplied out-of-band via the ``TF_HTTP_*`` child environment and
+    never written into the artifact. ``local`` (and every other backend) is unrepresentable here, so
+    a local-state fallback cannot be selected even by a malformed profile — it fails closed before
+    rendering.
+    """
+
+    http = "http"
+
+
+class PlanGenerationResultStatus(str, Enum):
+    """Lifecycle of one durable, canonical, redacted plan-only change-set RESULT (B1B-PR5B).
+
+    A result persists ONLY the redacted canonical change set + its exact ``change_set_hash`` and the
+    safe provenance/summary counts — never the raw plan JSON, binary plan, provider output, secret,
+    path, or endpoint. ``pending_approval`` is the sole non-terminal state: a create-only change set
+    was recorded and awaits its SEPARATE exact-hash human approval (a
+    :class:`ProvisioningChangeSetApproval`). ``no_changes`` records a plan that proposed nothing.
+    ``superseded`` marks a former result replaced by a newer plan for the same operation. Approval
+    NEVER happens automatically and is never inferred from this status.
+    """
+
+    pending_approval = "pending_approval"
+    no_changes = "no_changes"
+    superseded = "superseded"
+
+
+class PlanExecutionLeaseStatus(str, Enum):
+    """Durable state of one plan-only execution lease/claim (B1B-PR5B, ADR-022 §8).
+
+    Exactly one ``active`` lease may exist per operation key at a time; it carries the bounded
+    durable attempt budget across worker identities and restarts. ``consumed`` — a plan-only run
+    reached a durable result (globally single-use; further attempts are replay). ``expired`` — the
+    bounded budget is exhausted; terminal until a new authorization version mints a fresh operation
+    key. ``recovery_required`` — an execution left residue (a workspace or transient plan that could
+    not be deleted); terminal and human-gated. The lease stores no secret, reference, endpoint,
+    workspace path, or plan content.
+    """
+
+    active = "active"
+    consumed = "consumed"
+    expired = "expired"
+    recovery_required = "recovery_required"
+
+
+class PlanExecutionReason(str, Enum):
+    """Closed, secret-free reason codes for the B1B-PR5B plan-only execution phase (ADR-022).
+
+    Every execution refusal/failure maps to exactly one of these bounded codes — never free text,
+    an argv, cwd, path, endpoint, credential, provider output, plan content, or exception text. They
+    are distinct from :class:`ReadinessReason` (which covers the pre-execution combined gate).
+    """
+
+    # --- pre-execution seal / capability / lease -------------------------------------------------
+    plan_only_sealed = "plan_only_sealed"
+    lease_unavailable = "lease_unavailable"
+    lease_contended = "lease_contended"
+    lease_budget_exhausted = "lease_budget_exhausted"
+    capability_invalid = "capability_invalid"
+    capability_binding_drift = "capability_binding_drift"
+    # --- fresh execution-time re-attestation ------------------------------------------------------
+    reattestation_failed = "reattestation_failed"
+    reattestation_drifted = "reattestation_drifted"
+    # --- controlled-live adapter / render ---------------------------------------------------------
+    adapter_not_controlled_live = "adapter_not_controlled_live"
+    provider_source_not_reviewed = "provider_source_not_reviewed"
+    provider_version_not_pinned = "provider_version_not_pinned"
+    render_refused = "render_refused"
+    unsupported_guest_shape = "unsupported_guest_shape"
+    # --- ephemeral workspace safety ---------------------------------------------------------------
+    workspace_root_untrusted = "workspace_root_untrusted"
+    workspace_unsafe = "workspace_unsafe"
+    workspace_residue = "workspace_residue"
+    # --- JIT secret resolution --------------------------------------------------------------------
+    secret_resolution_failed = "secret_resolution_failed"
+    secret_env_contract_violation = "secret_env_contract_violation"
+    # --- the plan-only subprocess -----------------------------------------------------------------
+    command_grammar_refused = "command_grammar_refused"
+    executable_not_pinned = "executable_not_pinned"
+    process_timed_out = "process_timed_out"
+    process_output_too_large = "process_output_too_large"
+    process_nonzero_exit = "process_nonzero_exit"
+    init_failed = "init_failed"
+    plan_failed = "plan_failed"
+    show_failed = "show_failed"
+    # --- show / canonicalize / change policy ------------------------------------------------------
+    plan_json_malformed = "plan_json_malformed"
+    change_policy_refused = "change_policy_refused"
+    # --- durable result / recovery ----------------------------------------------------------------
+    result_persist_conflict = "result_persist_conflict"
+    recovery_required = "recovery_required"
+    internal = "internal"
 
 
 class ResolutionLeaseStatus(str, Enum):

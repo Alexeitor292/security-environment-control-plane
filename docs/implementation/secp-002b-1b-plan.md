@@ -27,6 +27,16 @@ code change. **No configuration flag alone advances a capability.**
 | B1B-PR7 | destroy + zero-residue | Proxmox destroy + read | destroy of that lab | destroy unsealed |
 | B1B-PR8 | closeout | none | none | reviewed defaults |
 
+**Realized status (current truth).** PR1–PR5A are implemented; **PR5B is now activated**: the
+dedicated plan-only code seal is `_PLAN_ONLY_PROCESS_SEALED = False` and the reviewed executor
+identity was advanced `v1 → v2`. Consistent with the "Both B1-A seals after" column, **both B1-A
+subprocess seals remain `True`** and apply/destroy remain impossible; only `init` / non-destroy
+`plan` / `show` are executable. Flipping the seal did not arm production — the shipped
+`PlanExecutionComposition` is still disabled, so ordinary `run_plan_generation` refuses at the
+composition gate before any I/O. **No real Proxmox host/provider/state backend/secret manager has
+been contacted, no real plan exists, and no deployment-local composition is committed.** PR6 has not
+begun and does not begin until the first reviewed exact-hash real plan and PR5B merge.
+
 ---
 
 ## B1B-PR1 — Architecture lock (this PR)
@@ -257,6 +267,39 @@ status **as of the PR5A boundary** is:
 - **Rollback:** re-seal the plan-only constant; revert.
 - **Evidence:** real plan generated/refused; change set approved/rejected (redacted).
 - **Completion:** one reviewed real plan + exact approval; **no apply**.
+
+> **Implementation progress (build-out state — superseded by the "Realized status" note above, which
+> records the final activation: the plan-only seal is now `_PLAN_ONLY_PROCESS_SEALED = False`, the
+> executor identity is `v2`, both B1-A seals stay `True`, and the shipped composition stays disabled
+> so production still refuses).** The COMPLETE plan-only execution path was implemented and proven
+> end-to-end against a tiny **inert local fixture**. **Mechanism:** the separate controlled-live
+> `bpg/proxmox` renderer + render-safety scanner (one LXC container; the fake adapter can never reach
+> it), capability-bound argv derivation, the hardened `PlanOnlyProcessExecutor.run` (reachable while
+> sealed only via an explicit token-gated **test-only** path no shipped module references), the safe
+> ephemeral workspace, the create-only `PlanChangePolicyEvaluator`, and `PlanOnlyOpenTofuRunner`
+> (no apply/destroy method). **Durable orchestration (now wired):** the immutable append-only
+> `RealPlanGenerationResult` + the CAS `PlanGenerationExecutionLease` (single active lease per
+> operation fingerprint, fixed shared budget never reset on recovery, `begin_attempt` before any
+> secret contact, `recovery_required` terminal) + the extended attempt lifecycle, on a new migration
+> at the single Alembic head (`c4e2f9a1b7d3`, `ENABLE ALWAYS` triggers, partial-unique CAS index,
+> closed-status CHECKs, truthful downgrade) with ORM immutability guards; a ~50-binding
+> non-serializable `PlanOnlyCapability` bound to the exact reviewed process/renderer implementation
+> digests; a worker-only, fully-sealed-by-default `PlanExecutionComposition` (no env flag/URL/target
+> row/PATH/binary/boolean can activate it; classification bound to the actual executor factory);
+> FRESH execution-time re-attestation via the real `RealToolchainVerifier` (POSIX for controlled-live;
+> paths from the verified layout, never PATH); a SEPARATE two-credential JIT resolver seam (never the
+> generic `secret_ref` fallback); typed HTTPS-only runtime inputs + the exact explicit child
+> environment; the upgraded `run_plan_generation` ordering (production refuses at the sealed
+> composition gate before any filesystem/secret/render/executor/process); and the exactly-once durable
+> result wired to a PENDING, human-only, exact-hash `ProvisioningChangeSetApproval` for a PROSPECTIVE
+> apply — never auto-approved, and approving it enqueues no PR6, calls no apply/destroy, and issues no
+> apply capability. A 24-vector adversarial review found **0 confirmed breaks**. **No real Proxmox
+> host has been contacted; no provider plugin has been downloaded or run; no real OpenTofu process has
+> run against any endpoint; no plan against real infrastructure exists.** The "real target" execution
+> named above is a later, human-supervised operator validation — it has NOT occurred. The POSIX
+> inert-subprocess tests are designed for GitHub CI and have not yet produced authoritative CI
+> evidence (nothing is pushed). The seal flip is the deliberate, reviewed LAST step (ADR-022 §9),
+> performed only once operator validation is authorized, and is out of scope for the current change.
 
 ## B1B-PR6 — First apply and verification
 

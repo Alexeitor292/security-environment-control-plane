@@ -72,8 +72,12 @@ def test_orchestration_refuses_when_not_ready_and_records_a_refused_attempt(sess
     attempt = attempts[0]
     assert attempt.status == PlanGenerationAttemptStatus.refused
     assert attempt.provisioning_manifest_id == env.manifest.id
-    # There is NO 'completed' status in the enum — the attempt can only be requested/refused.
-    assert {s.value for s in PlanGenerationAttemptStatus} == {"requested", "refused"}
+    # THIS unreadiness refusal path never reaches 'running' or 'completed' — it terminates at
+    # 'refused'. (B1B-PR5B expanded the global lifecycle enum to
+    # requested/running/completed/refused/failed/recovery_required; the exact closed set is asserted
+    # in the dedicated PR5B attempt-lifecycle test, test_plan_execution_lease.py.)
+    assert result.outcome != PlanGenerationAttemptStatus.completed.value
+    assert result.outcome == PlanGenerationAttemptStatus.refused.value
 
 
 def test_orchestration_emits_started_and_refused_audits_but_never_completed(session, lab_env):
@@ -90,7 +94,8 @@ def test_orchestration_emits_started_and_refused_audits_but_never_completed(sess
     }
     assert AuditAction.plan_generation_started.value in actions
     assert AuditAction.plan_generation_refused.value in actions
-    # No 'completed' audit action exists for plan generation in PR5A.
+    # This refusal path emits NO completion audit (only started + refused). B1B-PR5B added
+    # plan-execution completion audit actions to the enum, but none is emitted on a refusal.
     assert not any("plan_generation" in a and "completed" in a for a in actions)
 
 
