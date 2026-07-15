@@ -34,6 +34,7 @@ from secp_api.routers import (
 )
 from secp_api.routers import environment_publication as environment_publication_router
 from secp_api.routers import onboarding as onboarding_router
+from secp_api.routers import plan_activation as plan_activation_router
 from secp_api.routers import provisioning as provisioning_router
 from secp_api.routers import readiness as readiness_router
 from secp_api.routers import readonly_preflight as readonly_preflight_router
@@ -65,6 +66,10 @@ _REDACTED_VALIDATION_ROUTES: tuple[tuple[str, str], ...] = (
     # ``purpose``). The provisioning-manifest base has no other body-accepting route.
     ("/api/v1/plan-secret-authorizations", "invalid_readiness_input"),
     ("/api/v1/provisioning-manifests", "invalid_readiness_input"),
+    # B1B-PR5A: the dossier + plan-generation-authorization body routes (owner proofs, evidence
+    # proof/issuer, an apply/destroy purpose) return only this safe code — never a rejected value.
+    ("/api/v1/activation-dossiers", "invalid_plan_activation_input"),
+    ("/api/v1/plan-generation-authorizations", "invalid_plan_activation_input"),
     ("/api/v1/worker-identity", "invalid_worker_identity_input"),
     # PR C: the publication route is the only /api/v1/environment-versions endpoint; a malformed
     # request (bad UUID/hash, unknown/missing field, caller idempotency key) returns only this code.
@@ -198,6 +203,7 @@ def create_app() -> FastAPI:
     app.include_router(readonly_preflight_router.router)
     app.include_router(resolver_activation_router.router)
     app.include_router(readiness_router.router)
+    app.include_router(plan_activation_router.router)
     app.include_router(worker_identity_router.router)
     # Internal worker-only admission route (SECP-B6 MB-1) — NOT under /api/v1; inert unless the
     # deployment-local controlled-integration profile is enabled. Worker admission uses CA-validated

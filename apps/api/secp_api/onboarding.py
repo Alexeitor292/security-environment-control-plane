@@ -403,9 +403,17 @@ def build_evidence_package(
     collector identity, monotonic evidence version, and every redacted check field. It
     contains NO secrets, endpoints, credentials, raw inventories, or unredacted output.
     """
+    # Preserve the per-dimension evidence SOURCE when the caller supplies it (B1B-PR5A amendment
+    # §2), so it is folded into the canonical evidence hash — tampering with either a result OR a
+    # source changes the durable hash. Callers that omit ``source`` are unaffected (no key added).
     canonical_checks = sorted(
         (
-            {"check": c["check"], "status": c["status"], "detail": c.get("detail", "")}
+            {
+                "check": c["check"],
+                "status": c["status"],
+                "detail": c.get("detail", ""),
+                **({"source": c["source"]} if "source" in c else {}),
+            }
             for c in checks
         ),
         key=lambda c: c["check"],

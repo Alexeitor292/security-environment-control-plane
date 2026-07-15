@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
-from secp_api.enums import AuditAction, Permission, TargetStatus
+from secp_api.enums import AuditAction, CredentialPurposeClass, Permission, TargetStatus
 from secp_api.errors import NotFoundError, ValidationFailedError
 from secp_api.models import AddressSpacePolicy, ExecutionTarget
 from secp_api.secret_refs import (
@@ -160,6 +160,21 @@ def _validate_address_spaces(address_spaces: list[dict] | None) -> list[tuple[st
     return normalized
 
 
+def _validate_opaque_ref(ref: str | None, *, label: str) -> None:
+    """Reject a plaintext secret and enforce the opaque ``<scheme>:<locator>`` grammar."""
+    if ref is None:
+        return
+    if looks_like_plaintext_secret(ref):
+        raise ValidationFailedError(
+            f"{label} must be an opaque reference (e.g. 'env:SECP_PROVIDER_SECRET__X'),"
+            " never a plaintext secret"
+        )
+    try:
+        validate_secret_ref_syntax(ref)
+    except InvalidSecretRefError as exc:
+        raise ValidationFailedError(f"invalid {label} syntax", errors=[str(exc)]) from exc
+
+
 def register_target(
     session: Session,
     actor: Principal,
@@ -168,6 +183,8 @@ def register_target(
     plugin_name: str,
     config: dict,
     secret_ref: str | None = None,
+    provider_plan_secret_ref: str | None = None,
+    state_backend_secret_ref: str | None = None,
     scope_policy: dict | None = None,
     address_spaces: list[dict] | None = None,
 ) -> ExecutionTarget:
@@ -183,16 +200,9 @@ def register_target(
         _validate_proxmox_target(config, scope_policy)
     normalized_address_spaces = _validate_address_spaces(address_spaces)
 
-    if secret_ref is not None:
-        if looks_like_plaintext_secret(secret_ref):
-            raise ValidationFailedError(
-                "secret_ref must be an opaque reference (e.g. 'env:SECP_PROVIDER_SECRET__X'),"
-                " never a plaintext secret"
-            )
-        try:
-            validate_secret_ref_syntax(secret_ref)
-        except InvalidSecretRefError as exc:
-            raise ValidationFailedError("invalid secret_ref syntax", errors=[str(exc)]) from exc
+    _validate_opaque_ref(secret_ref, label="secret_ref")
+    _validate_opaque_ref(provider_plan_secret_ref, label="provider_plan_secret_ref")
+    _validate_opaque_ref(state_backend_secret_ref, label="state_backend_secret_ref")
 
     target = ExecutionTarget(
         organization_id=actor.organization_id,
@@ -201,6 +211,8 @@ def register_target(
         config=config,
         config_hash=content_hash(config),
         secret_ref=secret_ref,
+        provider_plan_secret_ref=provider_plan_secret_ref,
+        state_backend_secret_ref=state_backend_secret_ref,
         status=TargetStatus.active,
         scope_policy=scope_policy,
         created_by=actor.user_id,
@@ -208,12 +220,14 @@ def register_target(
     session.add(target)
     session.flush()
 
-    # B1B-PR4: give the target's credential SELECTION an opaque, versioned identity. It stores no
-    # reference and no hash of one; changing ``secret_ref`` later ROTATES it (unavoidably), which
-    # invalidates every prior readiness authorization/record through the operation fingerprint.
-    from secp_api.credential_binding import ensure_credential_binding
+    # B1B-PR4/PR5A: give each of the target's credential SELECTIONS an opaque, versioned identity.
+    # It
+    # stores no reference and no hash of one; changing a reference later ROTATES only its matching
+    # binding (unavoidably), invalidating every prior readiness authorization/record it was folded
+    # into through the operation fingerprint.
+    from secp_api.credential_binding import ensure_all_credential_bindings
 
-    ensure_credential_binding(session, target, created_by=actor.user_id)
+    ensure_all_credential_bindings(session, target, created_by=actor.user_id)
 
     for cidr_block, subnet_prefix in normalized_address_spaces:
         session.add(
@@ -237,6 +251,8 @@ def register_target(
             "plugin_name": plugin_name,
             "config_hash": target.config_hash,
             "has_secret_ref": secret_ref is not None,
+            "has_provider_plan_secret_ref": provider_plan_secret_ref is not None,
+            "has_state_backend_secret_ref": state_backend_secret_ref is not None,
         },
     )
     return target
@@ -299,36 +315,29 @@ def rotate_target_credential(
     *,
     secret_ref: str | None,
 ) -> ExecutionTarget:
-    """The SUPPORTED path for replacing a target's opaque credential reference (B1B-PR4 §2).
+    """The SUPPORTED path for replacing a target's GENERIC opaque credential reference (B1B-PR4 §2).
 
     It validates the new reference's syntax, writes it, and — through the ORM rotation hook —
-    ROTATES the target's opaque credential binding to the next version. The reference itself is
-    never persisted anywhere but ``ExecutionTarget.secret_ref`` (an opaque pointer, never a secret)
-    and is never hashed.
+    ROTATES the target's ``provider_plan_read`` opaque credential binding to the next version (the
+    generic ``secret_ref`` is that purpose's fallback source). The reference itself is never
+    persisted anywhere but ``ExecutionTarget.secret_ref`` (an opaque pointer, never a secret) and is
+    never hashed.
 
-    Rotating the binding invalidates every prior plan-secret authorization and readiness record
-    (their operation fingerprints bind the old binding id + version) **without modifying any
-    historical evidence**.
+    Rotating the binding invalidates every prior authorization and readiness record (their operation
+    fingerprints bind the old binding id + version) **without modifying any historical evidence**.
     """
     from secp_api.credential_binding import active_credential_binding
 
     actor.require(Permission.credential_binding_manage)
     target = get_target(session, actor, target_id)
-    if secret_ref is not None:
-        if looks_like_plaintext_secret(secret_ref):
-            raise ValidationFailedError(
-                "secret_ref must be an opaque reference (e.g. 'env:SECP_PROVIDER_SECRET__X'),"
-                " never a plaintext secret"
-            )
-        try:
-            validate_secret_ref_syntax(secret_ref)
-        except InvalidSecretRefError as exc:
-            raise ValidationFailedError("invalid secret_ref syntax", errors=[str(exc)]) from exc
+    _validate_opaque_ref(secret_ref, label="secret_ref")
 
     target.secret_ref = secret_ref
-    session.flush()  # the ORM before_flush hook rotates the credential binding
+    session.flush()  # the ORM before_flush hook rotates the provider_plan_read binding
 
-    binding = active_credential_binding(session, target.id)
+    binding = active_credential_binding(
+        session, target.id, CredentialPurposeClass.provider_plan_read
+    )
     audit.record(
         session,
         action=AuditAction.target_credential_rotated,
@@ -339,6 +348,62 @@ def rotate_target_credential(
         data={
             # OPAQUE ids only: never the reference, never a hash of it.
             "has_secret_ref": secret_ref is not None,
+            "purpose_class": CredentialPurposeClass.provider_plan_read.value,
+            "credential_binding_id": str(binding.id) if binding is not None else None,
+            "credential_binding_version": binding.binding_version if binding is not None else None,
+        },
+    )
+    return target
+
+
+def rotate_target_operation_credential(
+    session: Session,
+    actor: Principal,
+    target_id: uuid.UUID,
+    *,
+    purpose_class: CredentialPurposeClass,
+    secret_ref: str | None,
+) -> ExecutionTarget:
+    """Replace an OPERATION-SPECIFIC opaque credential reference (B1B-PR5A, ADR-022).
+
+    ``provider_plan_read`` writes ``provider_plan_secret_ref``; ``state_backend_plan`` writes
+    ``state_backend_secret_ref``. The ORM rotation hook (and the PostgreSQL trigger for a raw
+    UPDATE)
+    rotates ONLY the matching opaque binding — so the two credentials rotate independently. The
+    reference is never persisted anywhere but its opaque column and is never hashed. A rotation
+    invalidates every prior activation dossier, readiness record, and plan-generation authorization
+    that folded the old binding version — while historical evidence stays immutable.
+    """
+    from secp_api.credential_binding import active_credential_binding
+
+    actor.require(Permission.credential_binding_manage)
+    if purpose_class not in (
+        CredentialPurposeClass.provider_plan_read,
+        CredentialPurposeClass.state_backend_plan,
+    ):  # pragma: no cover - unrepresentable purposes cannot reach here
+        raise ValidationFailedError("unsupported credential purpose")
+    target = get_target(session, actor, target_id)
+    _validate_opaque_ref(secret_ref, label="operation credential reference")
+
+    if purpose_class is CredentialPurposeClass.provider_plan_read:
+        target.provider_plan_secret_ref = secret_ref
+        action = AuditAction.target_credential_rotated
+    else:
+        target.state_backend_secret_ref = secret_ref
+        action = AuditAction.target_state_credential_rotated
+    session.flush()  # the ORM before_flush hook rotates only the matching binding
+
+    binding = active_credential_binding(session, target.id, purpose_class)
+    audit.record(
+        session,
+        action=action,
+        resource_type="execution_target",
+        resource_id=target.id,
+        organization_id=target.organization_id,
+        actor=str(actor.user_id),
+        data={
+            "has_reference": secret_ref is not None,
+            "purpose_class": purpose_class.value,
             "credential_binding_id": str(binding.id) if binding is not None else None,
             "credential_binding_version": binding.binding_version if binding is not None else None,
         },

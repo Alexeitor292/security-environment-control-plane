@@ -223,6 +223,7 @@ _CREDENTIAL_BINDING_PROTECTED = (
     "execution_target_id",
     "purpose_class",
     "binding_version",
+    "binding_source",
     "created_at",
 )
 # Per-session key: set on the flush in which the SUPPORTED ORM rotation path announced itself to
@@ -546,6 +547,215 @@ _PLAN_SECRET_AUTHORIZATION_ALLOWED_TRANSITIONS = {
     (PlanSecretAuthorizationStatus.approved, PlanSecretAuthorizationStatus.revoked),
     (PlanSecretAuthorizationStatus.approved, PlanSecretAuthorizationStatus.expired),
 }
+
+
+# B1B-PR5A (ADR-022): the activation dossier + plan-generation authorization bind facts immutably;
+# approval/revocation/supersession metadata + the evidence fingerprint are set-once; only the closed
+# lifecycle transitions are allowed. Services mutate via Core CAS (which the migration guards with a
+# PostgreSQL trigger); this ORM guard is the portable defence-in-depth layer.
+_ACTIVATION_DOSSIER_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "target_onboarding_id",
+    "deployment_plan_id",
+    "environment_version_id",
+    "provisioning_manifest_id",
+    "toolchain_profile_id",
+    "toolchain_attestation_id",
+    "worker_identity_registration_id",
+    "worker_identity_version",
+    "provider_credential_binding_id",
+    "provider_credential_binding_version",
+    "state_credential_binding_id",
+    "state_credential_binding_version",
+    "environment_version_content_hash",
+    "deployment_plan_content_hash",
+    "provisioning_manifest_content_hash",
+    "target_config_hash",
+    "onboarding_boundary_hash",
+    "toolchain_profile_hash",
+    "toolchain_attestation_hash",
+    "state_namespace_hash",
+    "recovery_owner_proof",
+    "emergency_stop_owner_proof",
+    "operation_kind",
+    "dossier_revision",
+    "dossier_hash",
+    "authorization_expiry",
+    "created_by",
+    "created_at",
+)
+_ACTIVATION_DOSSIER_SET_ONCE = (
+    "evidence_fingerprint",
+    "approved_by",
+    "approved_at",
+    "revoked_by",
+    "revoked_at",
+    "superseded_by",
+    "superseded_at",
+    "revocation_reason_code",
+)
+_PLAN_GENERATION_AUTHORIZATION_PROTECTED = (
+    "organization_id",
+    "execution_target_id",
+    "target_onboarding_id",
+    "deployment_plan_id",
+    "provisioning_manifest_id",
+    "toolchain_profile_id",
+    "activation_dossier_id",
+    "eligibility_preflight_id",
+    "toolchain_attestation_id",
+    "remote_state_readiness_id",
+    "plan_secret_readiness_id",
+    "provider_credential_binding_id",
+    "provider_credential_binding_version",
+    "state_credential_binding_id",
+    "state_credential_binding_version",
+    "worker_identity_registration_id",
+    "worker_identity_version",
+    "provisioning_manifest_content_hash",
+    "target_config_hash",
+    "onboarding_boundary_hash",
+    "eligibility_evidence_hash",
+    "toolchain_profile_hash",
+    "toolchain_attestation_hash",
+    "remote_state_evidence_hash",
+    "plan_secret_evidence_hash",
+    "activation_dossier_hash",
+    "dossier_evidence_fingerprint",
+    "purpose",
+    "plan_only_capability_contract_version",
+    "readiness_policy_version",
+    "operation_fingerprint",
+    "authorization_expiry",
+    "authorization_version",
+    "created_by",
+    "created_at",
+)
+_PLAN_GENERATION_AUTHORIZATION_SET_ONCE = (
+    "evidence_fingerprint",
+    "approved_by",
+    "approved_at",
+    "revoked_by",
+    "revoked_at",
+    "consumed_by",
+    "consumed_at",
+    "revocation_reason_code",
+)
+
+
+def _dossier_parent_status(session: Session, evidence):  # noqa: ANN001, ANN202
+    from secp_api.plan_activation_models import RealLabActivationDossier
+
+    parent = session.get(RealLabActivationDossier, evidence.dossier_id)
+    if parent is None:
+        parent = getattr(evidence, "dossier", None)
+    return None if parent is None else parent.status
+
+
+def _guard_dossier_evidence(session: Session, evidence, verb: str) -> None:  # noqa: ANN001
+    from secp_api.enums import ActivationDossierStatus
+
+    status = _dossier_parent_status(session, evidence)
+    if status is not None and status != ActivationDossierStatus.draft:
+        raise ImmutableResourceError(
+            f"RealLabActivationDossierEvidence may not be {verb} once the dossier is "
+            f"{getattr(status, 'value', status)!r}; evidence is managed only while draft"
+        )
+
+
+def _guard_plan_activation_mutation(session: Session, obj: object) -> None:
+    """B1B-PR5A dirty-mutation guard for the dossier, its evidence, and the plan-gen auth."""
+    from secp_api.enums import (
+        ActivationDossierStatus,
+        PlanGenerationAuthorizationStatus,
+    )
+    from secp_api.plan_activation_models import (
+        RealLabActivationDossier,
+        RealLabActivationDossierEvidence,
+        RealPlanGenerationAttempt,
+        RealPlanGenerationAuthorization,
+    )
+
+    _dossier_transitions = {
+        (ActivationDossierStatus.draft, ActivationDossierStatus.approved),
+        (ActivationDossierStatus.draft, ActivationDossierStatus.revoked),
+        (ActivationDossierStatus.draft, ActivationDossierStatus.expired),
+        (ActivationDossierStatus.draft, ActivationDossierStatus.superseded),
+        (ActivationDossierStatus.approved, ActivationDossierStatus.revoked),
+        (ActivationDossierStatus.approved, ActivationDossierStatus.expired),
+        (ActivationDossierStatus.approved, ActivationDossierStatus.superseded),
+    }
+    _authz_transitions = {
+        (PlanGenerationAuthorizationStatus.draft, PlanGenerationAuthorizationStatus.approved),
+        (PlanGenerationAuthorizationStatus.draft, PlanGenerationAuthorizationStatus.revoked),
+        (PlanGenerationAuthorizationStatus.draft, PlanGenerationAuthorizationStatus.expired),
+        (PlanGenerationAuthorizationStatus.approved, PlanGenerationAuthorizationStatus.consumed),
+        (PlanGenerationAuthorizationStatus.approved, PlanGenerationAuthorizationStatus.revoked),
+        (PlanGenerationAuthorizationStatus.approved, PlanGenerationAuthorizationStatus.expired),
+    }
+
+    def _immutable(name, protected, set_once, transitions):  # noqa: ANN001, ANN202
+        changed = [a for a in protected if _attr_changed(obj, a)]
+        if changed:
+            raise ImmutableResourceError(
+                f"{name} binding facts are immutable after creation; attempted to change {changed}"
+            )
+        repeated = [
+            a
+            for a in set_once
+            if _attr_changed(obj, a) and _previous_value(obj, a) not in (None, "")
+        ]
+        if repeated:
+            raise ImmutableResourceError(
+                f"{name} approval/lifecycle facts are set-once; attempted to change {repeated}"
+            )
+        if _attr_changed(obj, "status"):
+            previous = _previous_value(obj, "status")
+            current = getattr(obj, "status", None)
+            if previous is not None and (previous, current) not in transitions:
+                raise ImmutableResourceError(
+                    f"{name} status transition is not allowed: "
+                    f"{getattr(previous, 'value', previous)!r} -> "
+                    f"{getattr(current, 'value', current)!r}"
+                )
+
+    def _revocation_reason_only_on_revoke(name: str) -> None:
+        # B1B-PR5A amendment §4: the revocation reason may become non-empty ONLY on the transition
+        # to 'revoked' (the DB CHECK already forbids any value outside the closed set). This mirrors
+        # the PostgreSQL trigger on the portable/SQLite layer.
+        if _attr_changed(obj, "revocation_reason_code"):
+            previous = _previous_value(obj, "revocation_reason_code")
+            current = getattr(obj, "revocation_reason_code", "")
+            _status = getattr(obj, "status", None)
+            status_value = getattr(_status, "value", _status)
+            if previous in (None, "") and current not in (None, "") and status_value != "revoked":
+                raise ImmutableResourceError(
+                    f"{name} revocation_reason_code may be set only when revoking"
+                )
+
+    if isinstance(obj, RealLabActivationDossier):
+        _immutable(
+            "RealLabActivationDossier",
+            _ACTIVATION_DOSSIER_PROTECTED,
+            _ACTIVATION_DOSSIER_SET_ONCE,
+            _dossier_transitions,
+        )
+        _revocation_reason_only_on_revoke("RealLabActivationDossier")
+    elif isinstance(obj, RealPlanGenerationAuthorization):
+        _immutable(
+            "RealPlanGenerationAuthorization",
+            _PLAN_GENERATION_AUTHORIZATION_PROTECTED,
+            _PLAN_GENERATION_AUTHORIZATION_SET_ONCE,
+            _authz_transitions,
+        )
+        _revocation_reason_only_on_revoke("RealPlanGenerationAuthorization")
+    elif isinstance(obj, RealLabActivationDossierEvidence):
+        _guard_dossier_evidence(session, obj, "changed")
+    elif isinstance(obj, RealPlanGenerationAttempt):
+        raise ImmutableResourceError(
+            "RealPlanGenerationAttempt records are immutable after insert (append-only)"
+        )
 
 
 def _plan_secret_parent_status(
@@ -990,15 +1200,33 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
             RemoteStateReadinessRecord | PlanSecretReadinessRecord | ToolchainAttestationRecord,
         ):
             raise ImmutableResourceError(f"{type(obj).__name__} records are immutable after insert")
-        # B1B-PR4 amendment: an ExecutionTarget whose ``secret_ref`` changes MUST rotate its opaque
-        # credential binding. This is the portable (SQLite + PostgreSQL) ORM layer; the PR4
-        # migration additionally installs a PostgreSQL trigger for the raw/Core path. Rotation is
+        # B1B-PR4/PR5A: an ExecutionTarget whose credential reference changes MUST rotate the
+        # MATCHING opaque credential binding. This is the portable (SQLite + PostgreSQL) ORM layer;
+        # the migration additionally installs a PostgreSQL trigger for the raw/Core path. Rotation
+        # is
         # not a caller decision — a credential replacement can never be invisible.
-        if isinstance(obj, ExecutionTarget) and _attr_changed(obj, "secret_ref"):
+        #
+        # B1B-PR5A amendment §1 — rotate ONLY the matching binding, and ONLY when its OWN source
+        # reference actually changes:
+        #   * provider_plan_read rotates when the DEDICATED ``provider_plan_secret_ref`` changes
+        #     (which may flip the binding's source class dedicated<->legacy), OR when the generic
+        #     ``secret_ref`` changes WHILE no dedicated reference is set (so the resolved fallback
+        #     reference changed). A ``secret_ref`` change while a dedicated reference is present
+        #     does NOT rotate the (dedicated, real-plan) binding — a legacy ref cannot refresh it.
+        #   * state_backend_plan rotates ONLY when ``state_backend_secret_ref`` changes.
+        if isinstance(obj, ExecutionTarget):
             from secp_api.credential_binding import rotate_credential_binding
+            from secp_api.enums import CredentialPurposeClass as _CPC
 
-            session.info[_ROTATION_ANNOUNCED_KEY] = True
-            rotate_credential_binding(session, obj)
+            provider_dedicated_changed = _attr_changed(obj, "provider_plan_secret_ref")
+            secret_ref_changed = _attr_changed(obj, "secret_ref")
+            has_dedicated_provider = obj.provider_plan_secret_ref is not None
+            if provider_dedicated_changed or (secret_ref_changed and not has_dedicated_provider):
+                session.info[_ROTATION_ANNOUNCED_KEY] = True
+                rotate_credential_binding(session, obj, _CPC.provider_plan_read)
+            if _attr_changed(obj, "state_backend_secret_ref"):
+                session.info[_ROTATION_ANNOUNCED_KEY] = True
+                rotate_credential_binding(session, obj, _CPC.state_backend_plan)
         # B1B-PR4 amendment: a credential binding's OPAQUE identity is immutable; only the
         # lifecycle transition active -> rotated/revoked (+ rotated_at) may change.
         if isinstance(obj, CredentialBinding):
@@ -1041,6 +1269,9 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # PlanSecretReadinessEvidence: managed (changed) only while the authorization is draft.
         if isinstance(obj, PlanSecretReadinessEvidence):
             _guard_plan_secret_evidence(session, obj, "changed")
+        # B1B-PR5A: activation dossier + plan-generation authorization binding facts, set-once
+        # metadata, closed transitions; evidence managed only while draft; attempts append-only.
+        _guard_plan_activation_mutation(session, obj)
         # SECP-B4: content-addressed plans, approvals, and verification results are immutable.
         if isinstance(
             obj,
@@ -1071,8 +1302,32 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # PlanSecretReadinessEvidence: cannot be inserted once the authorization leaves draft.
         if isinstance(obj, PlanSecretReadinessEvidence):
             _guard_plan_secret_evidence(session, obj, "inserted")
+        # B1B-PR5A: dossier evidence cannot be inserted once the dossier leaves draft.
+        from secp_api.plan_activation_models import RealLabActivationDossierEvidence as _RLADE
+
+        if isinstance(obj, _RLADE):
+            _guard_dossier_evidence(session, obj, "inserted")
 
     for obj in session.deleted:
+        # B1B-PR5A: activation dossier + plan-generation authorization + attempts cannot be deleted;
+        # dossier evidence cannot be deleted once the dossier leaves draft.
+        from secp_api.plan_activation_models import (
+            RealLabActivationDossier as _RLAD,
+        )
+        from secp_api.plan_activation_models import (
+            RealLabActivationDossierEvidence as _RLADE2,
+        )
+        from secp_api.plan_activation_models import (
+            RealPlanGenerationAttempt as _RPGA,
+        )
+        from secp_api.plan_activation_models import (
+            RealPlanGenerationAuthorization as _RPGAuthz,
+        )
+
+        if isinstance(obj, _RLAD | _RPGAuthz | _RPGA):
+            raise ImmutableResourceError(f"{type(obj).__name__} records cannot be deleted")
+        if isinstance(obj, _RLADE2):
+            _guard_dossier_evidence(session, obj, "deleted")
         if isinstance(obj, StagingLab):
             raise ImmutableResourceError("StagingLab records cannot be deleted")
         if isinstance(obj, StagingLabWorkItem):

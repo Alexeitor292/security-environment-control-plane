@@ -29,8 +29,12 @@ from secp_plugin_proxmox.transport import ReadOnlyHttpTransport
 LIVE_READ_EVIDENCE_SOURCE = "live_readonly_proxmox"
 LIVE_READ_COLLECTOR_CONTRACT_VERSION = "secp-002b-1b-4/live-readonly-proxmox-collector/v1"
 
-# Cluster-scope canonical GET paths issued first (node list drives per-node reads).
-_CLUSTER_PATHS: tuple[str, ...] = ("/nodes", "/cluster/sdn/vnets")
+# Cluster-scope canonical GET paths issued first (node list drives per-node reads). Includes the
+# allowlisted ``/cluster/resources`` read (B1B-PR5A §6) so the collector observes the cluster's used
+# VM-IDs live and the policy can derive VM-ID collision from a real observation. All are
+# re-validated
+# by ``assert_request_allowed`` before every call.
+_CLUSTER_PATHS: tuple[str, ...] = ("/nodes", "/cluster/sdn/vnets", "/cluster/resources")
 
 
 class LiveReadOnlyProxmoxCollector:

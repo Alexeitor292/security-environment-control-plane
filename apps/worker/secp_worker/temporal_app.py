@@ -401,6 +401,50 @@ async def plan_secret_readiness_activity(arg: dict) -> str:
     return run_plan_secret_readiness_activity_body(arg)
 
 
+def run_real_plan_generation_activity_body(arg: dict) -> str:
+    """Durable worker-owned real-plan-generation body (B1B-PR5A, ADR-022 §11). It STOPS at the seal.
+
+    Opens a FRESH worker session and re-derives the complete authoritative binding itself — the
+    Temporal argument carries ONLY a manifest id and the workflow-run id (no endpoint, credential,
+    secret reference, dossier payload, authorization token, or capability). It evaluates combined
+    plan-readiness, then reaches the plan-only process SEAL, which refuses construction of any
+    executor in PR5A. It resolves NO credential, renders NO workspace, creates NO binary plan, runs
+    NO process, and NEVER returns ``completed``. Returns the closed refused outcome string.
+    """
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    from secp_api.db import session_scope
+    from secp_api.enums import PlanGenerationAttemptStatus, WorkflowStatus
+    from secp_api.models import WorkflowRun
+
+    from secp_worker.plan_gen.orchestration import run_plan_generation
+
+    manifest_id = _uuid.UUID(arg["manifest_id"])
+    run_id = _opt_uuid(arg.get("workflow_run_id"))
+    now = datetime.now(UTC)
+
+    with session_scope() as session:
+        if run_id is not None:
+            run = session.get(WorkflowRun, run_id)
+            if run is not None:
+                run.status = WorkflowStatus.running
+
+        # Cancellation / the deployment-local stop posture is checked BEFORE any authoritative load.
+        if _cancelled():
+            _finish_run(session, run_id, now)
+            return PlanGenerationAttemptStatus.refused.value
+
+        result = run_plan_generation(session, manifest_id=manifest_id, now=now)
+        _finish_run(session, run_id, now)
+        return result.outcome
+
+
+@activity.defn
+async def real_plan_generation_activity(arg: dict) -> str:
+    return run_real_plan_generation_activity_body(arg)
+
+
 def _activity_timeout():
     from datetime import timedelta
 
@@ -492,4 +536,21 @@ class PlanSecretReadinessWorkflow:
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
             plan_secret_readiness_activity, arg, start_to_close_timeout=_activity_timeout()
+        )
+
+
+@workflow.defn
+class RealPlanGenerationWorkflow:
+    """Durable, worker-only real plan generation (B1B-PR5A, ADR-022). It STOPS at the seal.
+
+    Every prerequisite readiness operation is a hard precondition, and this workflow triggers none
+    of them. It reaches the plan-only process seal and refuses in PR5A: it runs no OpenTofu,
+    resolves no credential, renders no workspace, and creates no plan. Completing it authorizes NO
+    apply and NO destroy — those seals are independent code constants that stay True.
+    """
+
+    @workflow.run
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        return await workflow.execute_activity(
+            real_plan_generation_activity, arg, start_to_close_timeout=_activity_timeout()
         )
