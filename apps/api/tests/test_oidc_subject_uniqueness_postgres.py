@@ -25,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 PG_URL = os.environ.get("SECP_TEST_POSTGRES_URL")
 # The current single Alembic head. This is a deliberate DRIFT GUARD: every new migration must
 # bump it, so a migration can never be added without a conscious decision.
-HEAD = "d6a1f3c8b902"
+HEAD = "b3d9f1a7c2e5"
 DOWN = "b2c9e5a1f4d7"
 INDEX_NAME = "uq_app_user_subject"
 

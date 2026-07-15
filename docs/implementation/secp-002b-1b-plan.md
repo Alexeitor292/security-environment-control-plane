@@ -21,7 +21,8 @@ code change. **No configuration flag alone advances a capability.**
 | B1B-PR2 | real on-disk toolchain attestation | worker filesystem only | none | `True` / `True` |
 | B1B-PR3 | real read-only eligibility preflight | read-only Proxmox | none | `True` / `True` |
 | B1B-PR4 | remote-state + JIT secret readiness | state backend + secret manager (read/validate) | none | `True` / `True` |
-| B1B-PR5 | real `init`/`plan`/`show` (plan-only) | Proxmox read + plan | none (plan only) | plan unsealed; **apply/destroy seals stay `True`** |
+| B1B-PR5A | **real plan activation prerequisites (no process)** | none | none | `True` / `True` (**plan-only seal also `True`**) |
+| B1B-PR5B | real `init`/`plan`/`show` (plan-only) | Proxmox read + plan | none (plan only) | plan-only unsealed; **generic subprocess + apply/destroy seals stay `True`** |
 | B1B-PR6 | first apply + verification | Proxmox apply + read | one disposable lab | apply unsealed; **destroy seal stays `True`** |
 | B1B-PR7 | destroy + zero-residue | Proxmox destroy + read | destroy of that lab | destroy unsealed |
 | B1B-PR8 | closeout | none | none | reviewed defaults |
@@ -146,8 +147,9 @@ purposes are **unrepresentable**, not merely rejected. The API is **enqueue-only
 dispatcher refuses with no fallback) and the shipped composition is fully **sealed** (no adapter, no
 self-test), so the durable path runs to completion yet refuses at the seal before any state backend or
 secret manager is contacted. No OpenTofu ran, nothing was mutated, both B1-A subprocess seals remain
-`True`, and **no real state backend, secret manager, or Proxmox host has been contacted**. B1B-PR5
-(real `init`/`plan`/`show`) remains next.
+`True`, and **no real state backend, secret manager, or Proxmox host has been contacted**. B1B-PR5A
+(real plan activation prerequisites — no process) remains next; B1B-PR5B (real `init`/`plan`/`show`)
+follows it.
 
 - **Allowed:** remote-state backend validation (remote only, encryption at rest, state locking,
   least-privileged access, tested backup/restore, exact workspace/state identity binding); worker-only
@@ -167,35 +169,92 @@ secret manager is contacted. No OpenTofu ran, nothing was mutated, both B1-A sub
   destroy. **A passing fixture is not operator deployment readiness** — the prerequisite-checklist
   boxes for remote state and least-privileged credentials remain unchecked.
 
-### Implementation prerequisites for B1B-PR5 surfaced by PR4 (documented, not fabricated)
+### Implementation prerequisites for B1B-PR5 surfaced by PR4 — current truth (updated by PR5A)
 
-1. **Operation-specific credential separation is not real yet.** `ExecutionTarget` has ONE generic
-   `secret_ref`, so PR4 binds a plan-read PURPOSE CLASS + a reviewed reference SCHEME — it makes **no
-   least-privilege claim about the credential itself**. Separate plan/apply/destroy credentials, and a
-   separate STATE-BACKEND credential (PR4 resolves none — the deployment-local adapter authenticates
-   itself), are a PR5 prerequisite.
-2. **No third independent credential-reference source exists** for provisioning (the manifest is
-   secret-free by design), so a genuine three-way reference comparison is a PR5 prerequisite.
-3. **PR2's toolchain attestation is in-memory only (not persisted)**, so PR4 binds the profile
-   identity + attestation policy version; a durable on-disk attestation record is a PR5 prerequisite.
-4. **The activation dossier is still a placeholder literal.**
-5. **Path B still cannot reach `eligible`** through the reviewed GET allowlist against a real target.
+PR4's readiness contracts left a defined set of prerequisites before any real plan may run. Their
+status **as of the PR5A boundary** is:
 
-## B1B-PR5 — Live plan-only execution
+1. **Operation-specific credential separation was not real at PR4.** `ExecutionTarget` had ONE
+   generic `secret_ref`, so PR4 bound a plan-read PURPOSE CLASS + a reviewed reference SCHEME and made
+   **no least-privilege claim about the credential itself**. **PR5A closes this**: two distinct
+   credential purposes now exist — `provider_plan_read` and `state_backend_plan` — each with its own
+   dedicated opaque reference and its own versioned credential binding; the generic `secret_ref`
+   remains only for simulated/dev compatibility and **cannot satisfy a real-plan gate**. Apply and
+   destroy credential purposes remain **absent / unrepresentable**. No least-privilege claim is made
+   from the purpose label alone — actual scope is backed by reviewed activation-dossier evidence.
+2. **No third independent credential-reference source existed** for provisioning at PR4 (the manifest
+   is secret-free by design). **PR5A closes this**: the opaque credential-binding id + version are now
+   bound in **three** independent authoritative places — the current target credential configuration,
+   the immutable `ProvisioningManifest`, and the approved activation dossier — for **both** purposes,
+   and the worker requires exact agreement (target == manifest == dossier). The actual reference is
+   still loaded only in worker memory after the identity comparison.
+3. **PR2's toolchain attestation is now durable (corrected).** The PR4 security amendment made the
+   worker-produced `ToolchainAttestationRecord` a durable, immutable evidence row (a matching profile
+   hash is a *declaration*, not evidence); both readiness operations already require the exact current
+   attestation record id + evidence hash. There is **no** remaining in-memory-only attestation gap.
+4. **The activation dossier now fails closed (corrected), and a real reviewed dossier is added by
+   PR5A.** The placeholder sentinel is refused everywhere (binding, readiness, capability, combined
+   status, audit). PR5A adds the **durable, explicit, human-reviewed activation-dossier lifecycle**
+   (draft → evidence → approved → revoked/expired/superseded) that persists only safe bindings and
+   proof metadata; **the detailed dossier remains deployment-local and outside source control**, and a
+   real reviewed dossier record is still required before any live plan.
+5. **Path B still cannot reach `eligible` through the reviewed GET allowlist alone.** PR5A closes this
+   **honestly** with a deterministic combined evaluation that distinguishes observed live evidence
+   from independently-approved deployment-control (dossier) evidence and from unsupported/unverifiable
+   claims — it does **not** widen the GET allowlist to force eligibility, add a third collector, or
+   promote simulated/test-only evidence. Reaching `eligible` against a real target still requires an
+   operator deployment.
+
+## B1B-PR5A — Real plan activation prerequisites (no process)
+
+- **Allowed:** close every remaining PR5 prerequisite **without executing any process**: the durable
+  reviewed activation-dossier lifecycle; operation-specific credential separation
+  (`provider_plan_read` + `state_backend_plan`); three-way target/manifest/dossier credential binding;
+  honest eligibility closure (deployment-control evidence + combined evaluator); a dedicated
+  `RealPlanGenerationAuthorization` (`plan_generation` purpose only); a pure `PlanGenerationReadiness`
+  helper; the **sealed** plan-only process seam design; the two-`SecretMaterial` projection contract;
+  and the durable enqueue-only `real_plan_generation` workflow skeleton that STOPS at the plan-only
+  seal.
+- **Forbidden:** executing OpenTofu / any subprocess; constructing `SubprocessProcessExecutor` or an
+  unsealed plan executor; contacting Proxmox / a state backend / a secret manager; loading a provider;
+  rendering a real workspace for execution; resolving a real credential; creating a binary plan;
+  mutating infrastructure; unsealing anything; beginning PR5B. **Both B1-A subprocess seals — and the
+  new plan-only process seal — stay `True`.**
+- **Activation before → after:** readiness → **prerequisites closed, still sealed** (no capability
+  unsealed).
+- **Live-contact:** **none.** **Mutation:** **none.**
+- **Required tests:** dossier placeholder/incomplete/wrong-binding/expired/tampered refusals and "no
+  live values"; credential purpose distinctness + three-way agreement + rotation invalidation + raw
+  UPDATE + replica-mode; eligibility combined-evaluation honesty; plan-generation authorization
+  lifecycle + dedicated permission; plan readiness requires every binding; the sealed plan-only
+  executor cannot be constructed or called and `plan -destroy`/apply/arbitrary flags are refused by
+  its grammar; the workflow is enqueue-only, inline-refused, ids-only, and STOPS at the seal; PostgreSQL
+  enforcement; both B1-A seals `True`.
+- **Human-review gate:** prerequisite-closure + threat-model review; confirm nothing is unsealed.
+- **Rollback:** revert the PR5A commit (no runtime capability change).
+- **Evidence:** dossier lifecycle events; plan-generation authorization events; `plan_generation`
+  requested/started/**refused** (never `completed` — no plan executes).
+- **Completion:** every PR5 prerequisite closed and the complete ordering proven up to (but not past)
+  the plan-only seal; **no process, no plan, no mutation**; both B1-A seals + the plan-only seal `True`.
+
+## B1B-PR5B — Live plan-only execution
 
 - **Allowed:** unseal **only** real `init`/`plan`/`show -json` for **one** disposable target (a
-  reviewed change to the **plan** seal constant only), producing the canonical redacted change set +
-  `change_set_hash`; human review + exact-hash approval flow end-to-end against the real target.
+  reviewed change to the **plan-only** seal constant only — the generic `SubprocessProcessExecutor`
+  seal and the apply/destroy seals stay `True`), through the operation-restricted plan-only process
+  capability, producing the canonical redacted change set + `change_set_hash`; human review +
+  exact-hash approval flow end-to-end against the real target.
 - **Forbidden:** apply and destroy (their seal constants **stay `True`** — technically incapable);
-  automatic plan→apply; fake fallback; runtime provider download; external connectivity; raw plan/
-  state persistence. **Apply/destroy subprocess capability remains sealed.**
-- **Activation before → after:** readiness → plan-only (apply/destroy still sealed).
+  the generic subprocess executor (its seal **stays `True`**); automatic plan→apply; fake fallback;
+  runtime provider download; external connectivity; raw plan/state persistence.
+- **Activation before → after:** prerequisites-closed → plan-only (generic subprocess + apply/destroy
+  still sealed).
 - **Live-contact:** Proxmox read + real plan. **Mutation:** **none** (plan only).
-- **Required tests:** real plan generates a redacted canonical change set; apply/destroy still refuse
-  (seals `True`); TOCTOU re-prepare/hash-match logic; no raw plan/state persisted; exact-hash approval
-  required.
+- **Required tests:** real plan generates a redacted canonical change set; apply/destroy + the generic
+  subprocess executor still refuse (their seals `True`); TOCTOU re-prepare/hash-match logic; no raw
+  plan/state persisted; exact-hash approval required.
 - **Human-review gate:** first real plan review; confirm apply/destroy remain impossible.
-- **Rollback:** re-seal the plan constant; revert.
+- **Rollback:** re-seal the plan-only constant; revert.
 - **Evidence:** real plan generated/refused; change set approved/rejected (redacted).
 - **Completion:** one reviewed real plan + exact approval; **no apply**.
 

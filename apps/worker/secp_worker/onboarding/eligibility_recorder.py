@@ -160,9 +160,16 @@ def record_live_eligibility_evidence(
     session.add(evidence_record)
     session.flush()
 
-    # 4. Build the preflight from the policy dimension checks (redacted closed codes only).
+    # 4. Build the preflight from the policy dimension checks (redacted closed codes only). The
+    #    per-dimension evidence SOURCE is persisted AND folded into the evidence package hash
+    #    (amendment §2), so tampering with either a result OR a source changes the durable hash.
     canonical_checks = [
-        {"check": c["check"], "status": _STATUS_TO_PREFLIGHT[c["status"]], "detail": c["detail"]}
+        {
+            "check": c["check"],
+            "status": _STATUS_TO_PREFLIGHT[c["status"]],
+            "detail": c["detail"],
+            "source": c["source"],
+        }
         for c in evaluation.as_preflight_checks()
     ]
     version = _next_evidence_version(session, onboarding.id)

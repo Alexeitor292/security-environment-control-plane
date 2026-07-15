@@ -23,6 +23,7 @@ from datetime import timedelta
 
 from secp_api.enums import (
     EligibilityDimension,
+    EligibilityEvidenceSource,
     EligibilityOutcome,
     EligibilityReasonCategory,
     EvidenceStatus,
@@ -45,7 +46,11 @@ from secp_api.target_evidence import (
 
 # Bump on ANY change to the dimension set or the deterministic decision rules. Persisted with the
 # evidence and folded into the idempotency fingerprint so a policy change invalidates old evidence.
-ELIGIBILITY_POLICY_VERSION = "secp-002b-1b-pr3/eligibility-policy/v1"
+# v2 (B1B-PR5A): every dimension now carries an explicit evidence SOURCE (observed-live / approved
+# deployment-control / unsupported); ``eligible`` additionally requires every mandatory dimension to
+# be proven by an ALLOWED source; and the VM-ID collision fact is derived from a live Path B
+# observation when present (never an unverified asserted boolean).
+ELIGIBILITY_POLICY_VERSION = "secp-002b-1b-pr5a/eligibility-policy/v2"
 
 # Conservative bounded TTL for a live eligibility evidence record (§6). Deliberately short: a live
 # target can drift, so evidence becomes ``expired`` well before any downstream real-lab consumption.
@@ -127,6 +132,59 @@ _DETAIL = {
 }
 
 
+# The evidence SOURCE that decides each dimension (B1B-PR5A §6). ``observed_live`` = proven on the
+# wire by the gated live read-only collection (nodes / storage ids / network from live inventory,
+# and the read capability proven by a real read call). ``approved_deployment_control`` = proven by
+# a server-derived gate fact or an approved, dedicated observation (target identity, disposability,
+# isolation, the VM-ID window, quotas, drift) — NEVER a caller flag and NEVER merely a dossier
+# label. A dimension that ends ``unverifiable`` is classified ``unsupported`` (nothing proved it).
+_OBSERVED = EligibilityEvidenceSource.observed_live
+_CONTROL = EligibilityEvidenceSource.approved_deployment_control
+_DIMENSION_SOURCE: dict[EligibilityDimension, EligibilityEvidenceSource] = {
+    EligibilityDimension.target_identity: _CONTROL,
+    EligibilityDimension.node_boundary: _OBSERVED,
+    EligibilityDimension.storage_boundary: _CONTROL,
+    EligibilityDimension.network_segments: _OBSERVED,
+    EligibilityDimension.route_isolation: _CONTROL,
+    EligibilityDimension.vmid_range: _CONTROL,
+    EligibilityDimension.quotas: _CONTROL,
+    EligibilityDimension.credential_read_capability: _OBSERVED,
+    EligibilityDimension.onboarding_drift: _CONTROL,
+}
+
+# Every dimension is mandatory: an ``eligible`` outcome requires ALL of them proven by an allowed
+# source. A missing mandatory dimension can never be eligible (fail closed to ``unverifiable``).
+MANDATORY_ELIGIBILITY_DIMENSIONS: tuple[EligibilityDimension, ...] = tuple(EligibilityDimension)
+
+# The CLOSED, VERSIONED per-dimension source policy (B1B-PR5A amendment §2). It declares which
+# evidence sources may PROVE a PASS for each dimension. An OBSERVED-LIVE-only dimension can never be
+# passed by an approved control-plane proof (a dossier can never relabel it); a control-only
+# dimension is a server-derived fact with no live wire observation; a both-permitted dimension is
+# proven live but MAY be supplemented by approved deployment-control evidence — while a LIVE FAILURE
+# on it still dominates (an observed-live failure is ``ineligible`` regardless of a control proof).
+# Bump the version on ANY change here; it is folded into the canonical evidence hash.
+ELIGIBILITY_SOURCE_POLICY_VERSION = "secp-002b-1b-pr5a/eligibility-source-policy/v1"
+
+_OBS_ONLY = frozenset({_OBSERVED})
+_CTL_ONLY = frozenset({_CONTROL})
+_BOTH_SOURCES = frozenset({_OBSERVED, _CONTROL})
+_DIMENSION_ALLOWED_SOURCES: dict[EligibilityDimension, frozenset[EligibilityEvidenceSource]] = {
+    # Observed-live REQUIRED — a control-plane proof can never satisfy these.
+    EligibilityDimension.node_boundary: _OBS_ONLY,
+    EligibilityDimension.network_segments: _OBS_ONLY,
+    EligibilityDimension.credential_read_capability: _OBS_ONLY,
+    # Server-derived control facts (no live wire observation exists for them).
+    EligibilityDimension.target_identity: _CTL_ONLY,
+    EligibilityDimension.onboarding_drift: _CTL_ONLY,
+    # Observed live, but MAY be supplemented by approved deployment-control evidence. A LIVE FAILURE
+    # (source observed_live) still dominates and yields ``ineligible``.
+    EligibilityDimension.storage_boundary: _BOTH_SOURCES,
+    EligibilityDimension.route_isolation: _BOTH_SOURCES,
+    EligibilityDimension.vmid_range: _BOTH_SOURCES,
+    EligibilityDimension.quotas: _BOTH_SOURCES,
+}
+
+
 @dataclass(frozen=True)
 class DimensionFinding:
     """One mandatory dimension's closed result. All fields are closed codes — never a raw value."""
@@ -134,6 +192,8 @@ class DimensionFinding:
     dimension: str  # EligibilityDimension value
     status: str  # EvidenceStatus value: pass / fail / unverifiable
     reason: str  # EligibilityReasonCategory value, or "" when passed
+    # The A/B/C evidence source that decided this dimension (EligibilityEvidenceSource value).
+    source: str = EligibilityEvidenceSource.unsupported.value
 
 
 @dataclass(frozen=True)
@@ -181,9 +241,24 @@ class EligibilityEvaluation:
         vocabulary (``passed``/``failed``/``unverifiable``) at the call site.
         """
         return [
-            {"check": f.dimension, "status": f.status, "detail": _DETAIL[f.status]}
+            {
+                "check": f.dimension,
+                "status": f.status,
+                "detail": _DETAIL[f.status],
+                "source": f.source,
+            }
             for f in self.dimensions
         ]
+
+    def dimension_source_result_hash(self) -> str:
+        """A canonical digest over EVERY dimension's (dimension, status, source) triple + the source
+        policy version (amendment §2). Folded into the persisted evidence hash so that tampering
+        with either a result OR a source — or OMITTING one — changes the durable evidence hash."""
+        canonical = "|".join(
+            [ELIGIBILITY_SOURCE_POLICY_VERSION]
+            + [f"{f.dimension}={f.status}:{f.source}" for f in self.dimensions]
+        )
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _status_of(findings: list[dict], check: str) -> str:
@@ -206,8 +281,52 @@ def _bool_observation(observed: dict, section: str, key: str) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _dimension(dim: EligibilityDimension, status: str, reason: str = "") -> DimensionFinding:
-    return DimensionFinding(dimension=dim.value, status=status, reason=reason)
+def _dimension(
+    dim: EligibilityDimension,
+    status: str,
+    reason: str = "",
+    *,
+    source: EligibilityEvidenceSource | None = None,
+) -> DimensionFinding:
+    # A dimension that could not be verified from any allowed source is 'unsupported'. Otherwise it
+    # carries the source that ACTUALLY decided it: an explicit ``source`` for branches where a live
+    # observation (or a control fact) drove the decision, else the dimension's intrinsic source.
+    if status == _UNVERIFIABLE:
+        resolved = EligibilityEvidenceSource.unsupported
+    elif source is not None:
+        resolved = source
+    else:
+        resolved = _DIMENSION_SOURCE[dim]
+    return DimensionFinding(
+        dimension=dim.value, status=status, reason=reason, source=resolved.value
+    )
+
+
+def _vmid_collision(
+    observed: dict, spec: OnboardingBoundarySpec | None
+) -> tuple[bool | None, EligibilityEvidenceSource]:
+    """The VM-ID collision fact + the SOURCE that decided it (§2/§6).
+
+    When the live read-only collection observed the cluster's used VM-IDs
+    (``observed.vmid_range.used_vmids``), collision is COMPUTED here as "any existing VM-ID falls
+    inside the declared range" — an honest, ``observed_live`` fact no asserted boolean can override.
+    Absent a live observation, the dedicated ``collision`` boolean (approved deployment-control) is
+    used; absent both, ``(None, unsupported)`` (unverifiable, fail closed).
+    """
+    node = observed.get("vmid_range")
+    if not isinstance(node, dict):
+        return None, EligibilityEvidenceSource.unsupported
+    used = node.get("used_vmids")
+    if isinstance(used, list) and spec is not None:
+        lo, hi = spec.vmid_range.start, spec.vmid_range.end
+        collision = any(
+            isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi for v in used
+        )
+        return collision, EligibilityEvidenceSource.observed_live
+    value = node.get("collision")
+    if isinstance(value, bool):
+        return value, EligibilityEvidenceSource.approved_deployment_control
+    return None, EligibilityEvidenceSource.unsupported
 
 
 def evaluate_eligibility(
@@ -259,14 +378,18 @@ def evaluate_eligibility(
     node_status = _status_of(findings, CHECK_NODES)
     declared_nodes = spec.nodes if spec is not None else []
     if len(declared_nodes) != 1:
+        # A declared-boundary control fact (not a wire observation).
         dims.append(
             _dimension(
                 EligibilityDimension.node_boundary,
                 _FAIL,
                 EligibilityReasonCategory.boundary_drift.value,
+                source=_CONTROL,
             )
         )
     else:
+        # Observed on the wire — a live node absence is an ``observed_live`` failure (the default
+        # source for this dimension), which dominates.
         dims.append(_dimension(EligibilityDimension.node_boundary, node_status))
 
     # C. Storage boundary + disposability — declared storage observed AND an explicit, dedicated
@@ -276,7 +399,10 @@ def evaluate_eligibility(
     storage_status = _status_of(findings, CHECK_STORAGE)
     disposable = _bool_observation(observed, "disposability", "storage")
     if storage_status != _PASS:
-        dims.append(_dimension(EligibilityDimension.storage_boundary, storage_status))
+        # A live storage FAILURE dominates as ``observed_live``; an unobserved storage id list is
+        # ``unsupported`` (auto). A control-plane proof can never override a live storage failure.
+        src = _OBSERVED if storage_status == _FAIL else None
+        dims.append(_dimension(EligibilityDimension.storage_boundary, storage_status, source=src))
     elif disposable is True:
         dims.append(_dimension(EligibilityDimension.storage_boundary, _PASS))
     elif disposable is False:
@@ -311,17 +437,23 @@ def evaluate_eligibility(
     # F. VM-ID range — declared range within the observed range AND no collision. The dedicated
     # ``collision`` observation must be explicitly False (absent → unverifiable, fail closed).
     vmid_status = _status_of(findings, CHECK_VMID_RANGE)
-    collision = _bool_observation(observed, "vmid_range", "collision")
+    collision, collision_source = _vmid_collision(observed, spec)
     if vmid_status != _PASS:
-        dims.append(_dimension(EligibilityDimension.vmid_range, vmid_status))
+        # The allocatable WINDOW is an approved deployment-control observation: a window FAIL is
+        # control-sourced; a missing window is ``unsupported`` (auto).
+        window_src = _CONTROL if vmid_status == _FAIL else None
+        dims.append(_dimension(EligibilityDimension.vmid_range, vmid_status, source=window_src))
     elif collision is False:
         dims.append(_dimension(EligibilityDimension.vmid_range, _PASS))
     elif collision is True:
+        # A live-observed collision (``observed_live``) dominates; an asserted dedicated collision
+        # is control-sourced. Either way it is a FAILURE → ``ineligible``.
         dims.append(
             _dimension(
                 EligibilityDimension.vmid_range,
                 _FAIL,
                 EligibilityReasonCategory.boundary_drift.value,
+                source=collision_source,
             )
         )
     else:
@@ -396,15 +528,19 @@ def _route_isolation_dimension(
 ) -> DimensionFinding:
     isolation_status = _status_of(findings, CHECK_ISOLATION)
     # The declared boundary must itself demand full segregation + deny-external; anything else is a
-    # boundary the first lab must not pass on.
+    # boundary control fact the first lab must not pass on.
     if spec is None or spec.isolation_profile != IsolationProfile.fully_segregated:
         return _dimension(
             EligibilityDimension.route_isolation,
             _FAIL,
             EligibilityReasonCategory.boundary_drift.value,
+            source=_CONTROL,
         )
     if isolation_status != _PASS:
-        return _dimension(EligibilityDimension.route_isolation, isolation_status)
+        # A live route/isolation violation is an ``observed_live`` FAILURE that dominates; a missing
+        # isolation observation is ``unsupported`` (auto).
+        src = _OBSERVED if isolation_status == _FAIL else None
+        return _dimension(EligibilityDimension.route_isolation, isolation_status, source=src)
     # The comparison proved profile+deny+route_to_protected==False; require the dedicated
     # ``no_default_route`` observation to also be explicitly True (absent → unverifiable).
     no_default_route = _bool_observation(observed, "isolation", "no_default_route")
@@ -423,18 +559,50 @@ def _route_isolation_dimension(
     )
 
 
+def dimension_allows_deployment_control(dimension_value: str) -> bool:
+    """True iff the given dimension's VERSIONED source policy permits an approved deployment-control
+    proof (i.e. it is supplementable). An observed-live-required dimension returns ``False`` — it
+    can only be proven by a live observation, so a dossier may not supplement it (§2/§3)."""
+    try:
+        dim = EligibilityDimension(dimension_value)
+    except ValueError:  # pragma: no cover - defensive; unknown dimension code
+        return False
+    return _CONTROL in _DIMENSION_ALLOWED_SOURCES.get(dim, frozenset())
+
+
 def _decide_outcome(dims: list[DimensionFinding], gate: EligibilityGateFacts) -> EligibilityOutcome:
-    """Deterministic closed decision. Precedence: expired > drifted > ineligible > unverifiable >
-    eligible. Every mandatory dimension must pass explicitly for ``eligible``."""
+    """Deterministic closed combined decision (B1B-PR5A §6).
+
+    Precedence: expired > drifted > ineligible > unverifiable > eligible. ``eligible`` requires
+    EVERY mandatory dimension to be present, to pass explicitly, AND to be proven by an ALLOWED
+    evidence source (observed-live or approved deployment-control) — a caller flag or a dossier
+    label alone can never satisfy a dimension, because it never sets an allowed source.
+    """
     if gate.authorization_expired:
         return EligibilityOutcome.expired
     if gate.config_drift or gate.boundary_drift:
         return EligibilityOutcome.drifted
+    by_dim = {d.dimension: d for d in dims}
+    # A missing mandatory dimension can never be eligible (fail closed).
+    if any(by_dim.get(dim.value) is None for dim in MANDATORY_ELIGIBILITY_DIMENSIONS):
+        return EligibilityOutcome.unverifiable
     statuses = {d.status for d in dims}
+    # An OBSERVED-LIVE (or any) failure dominates: any FAIL → ineligible, so no approved
+    # deployment-control proof can ever override a live failure (amendment §2).
     if _FAIL in statuses:
         return EligibilityOutcome.ineligible
     if _UNVERIFIABLE in statuses:
         return EligibilityOutcome.unverifiable
+    # Every PASS must rest on a source the dimension's VERSIONED policy permits — an
+    # observed-live-required dimension can never be satisfied by an approved deployment-control
+    # proof, and no dimension may pass on an 'unsupported' source. This makes it impossible for a
+    # dossier to relabel an observed dimension as control-plane.
+    for finding in dims:
+        allowed = _DIMENSION_ALLOWED_SOURCES.get(EligibilityDimension(finding.dimension))
+        if allowed is None:  # pragma: no cover - every mandatory dimension is in the policy
+            return EligibilityOutcome.unverifiable
+        if EligibilityEvidenceSource(finding.source) not in allowed:
+            return EligibilityOutcome.unverifiable
     return EligibilityOutcome.eligible
 
 

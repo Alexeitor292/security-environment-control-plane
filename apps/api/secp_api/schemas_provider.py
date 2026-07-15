@@ -12,6 +12,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from secp_api.enums import CredentialPurposeClass
+
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -27,17 +29,33 @@ class TargetCreate(BaseModel):
     plugin_name: str
     config: dict
     secret_ref: str | None = None
+    # B1B-PR5A operation-specific opaque references (never a secret; never echoed by a read model).
+    provider_plan_secret_ref: str | None = None
+    state_backend_secret_ref: str | None = None
     scope_policy: dict = {}
     address_spaces: list[AddressSpaceIn] = []
 
 
 class TargetCredentialRotate(BaseModel):
-    """Replace a target's OPAQUE credential reference through the supported rotation path.
+    """Replace a target's GENERIC opaque credential reference through the supported rotation path.
 
     ``secret_ref`` remains an opaque ``<scheme>:<locator>`` pointer — never a secret. Applying it
-    rotates the target's opaque credential binding to the next version (B1B-PR4 §2).
+    rotates the target's ``provider_plan_read`` opaque credential binding (B1B-PR4 §2).
     """
 
+    secret_ref: str | None = None
+
+
+class TargetOperationCredentialRotate(BaseModel):
+    """Replace one OPERATION-SPECIFIC opaque credential reference (B1B-PR5A, ADR-022).
+
+    ``purpose_class`` is a closed enum whose only members are ``provider_plan_read`` and
+    ``state_backend_plan`` — apply/destroy purposes are unrepresentable. The reference remains an
+    opaque pointer; rotating it invalidates every prior dossier/readiness/authorization that folded
+    the old binding version.
+    """
+
+    purpose_class: CredentialPurposeClass
     secret_ref: str | None = None
 
 

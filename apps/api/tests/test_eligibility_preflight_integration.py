@@ -114,6 +114,37 @@ def test_real_collector_complete_observable_inventory_is_unverifiable_not_eligib
     assert record.verification_level == "live_verified"
 
 
+def test_real_collector_records_a_live_vmid_observation_from_cluster_resources(session, principal):
+    """CASE A2 — the actual collector issues the allowlisted /cluster/resources GET and records the
+    cluster's used VM-IDs as a LIVE observation (PR5A §6). The observation is genuinely collected
+    and persisted (bare integer ids, redacted), yet the VM-ID dimension STILL stays unverifiable:
+    the allocatable WINDOW is an approved dedicated observation the shipped collector never
+    fabricates, so a live used-VM-ID list can prove collision but never makes the dimension pass."""
+    inventory = {
+        **_OBSERVABLE_INVENTORY,
+        "/cluster/resources": [
+            {"type": "qemu", "vmid": 105, "name": "existing-vm"},
+            {"type": "lxc", "vmid": 210},
+            {"type": "storage", "storage": "labstore"},  # non-VM rows are ignored
+        ],
+    }
+    chain = _build_chain(session)
+    result = run_real_eligibility_preflight(
+        session, request=chain.request(), composition=_real_composition(inventory), now=NOW
+    )
+    # Still not eligible: the VM-ID window is unobserved, so the dimension is unverifiable.
+    assert result.outcome == EligibilityOutcome.unverifiable.value
+    pf = session.get(TargetPreflight, result.preflight_id)
+    assert _dimension_status(pf)[EligibilityDimension.vmid_range.value] == "warning"
+
+    # But the LIVE VM-ID observation was genuinely collected and persisted (redacted to bare ids).
+    record = session.get(TargetEvidenceRecord, pf.target_evidence_id)
+    observed = record.evidence_payload["observed"]
+    assert observed["vmid_range"]["used_vmids"] == [105, 210]
+    # No VM name / node / status / config survived the normalizer's redaction.
+    assert set(observed["vmid_range"]) == {"used_vmids"}
+
+
 def test_real_collector_generic_inventory_is_ineligible_never_eligible_never_inferred(
     session, principal
 ):
@@ -172,6 +203,12 @@ def test_real_collector_issues_only_gets_on_the_reviewed_allowlist(session, prin
     )
     assert transport.calls, "the real collector must have issued reads"
     assert all(method == "GET" for method, _ in transport.calls)
-    # Only cluster-scope + per-node storage reads were issued (no write/action endpoints).
+    # Only cluster-scope + per-node storage reads were issued (no write/action endpoints). The
+    # cluster-scope set now includes the allowlisted /cluster/resources VM-ID observation (PR5A §6).
     for _method, path in transport.calls:
-        assert path in {"/nodes", "/cluster/sdn/vnets", "/nodes/labnode/storage"}
+        assert path in {
+            "/nodes",
+            "/cluster/sdn/vnets",
+            "/cluster/resources",
+            "/nodes/labnode/storage",
+        }

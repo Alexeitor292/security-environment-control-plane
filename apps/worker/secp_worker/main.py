@@ -122,6 +122,7 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
         DiscoverWorkflow,
         EligibilityPreflightWorkflow,
         PlanSecretReadinessWorkflow,
+        RealPlanGenerationWorkflow,
         RemoteStateReadinessWorkflow,
         ResetWorkflow,
         ToolchainAttestationWorkflow,
@@ -130,6 +131,7 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
         discover_activity,
         eligibility_preflight_activity,
         plan_secret_readiness_activity,
+        real_plan_generation_activity,
         remote_state_readiness_activity,
         reset_activity,
         toolchain_attestation_activity,
@@ -151,6 +153,8 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
             ToolchainAttestationWorkflow,
             RemoteStateReadinessWorkflow,
             PlanSecretReadinessWorkflow,
+            # B1B-PR5A real plan generation: worker-only, STOPS at the sealed plan-only boundary.
+            RealPlanGenerationWorkflow,
         ],
         activities=[
             deploy_activity,
@@ -161,6 +165,7 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
             toolchain_attestation_activity,
             remote_state_readiness_activity,
             plan_secret_readiness_activity,
+            real_plan_generation_activity,
         ],
     )
     logger.info("Temporal worker started on task queue %s", settings.temporal_task_queue)

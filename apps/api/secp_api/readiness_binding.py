@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from secp_api.enums import (
     CredentialBindingStatus,
+    CredentialPurposeClass,
     EligibilityOutcome,
     OnboardingStatus,
     PlanSecretAuthorizationStatus,
@@ -368,13 +369,17 @@ def load_readiness_binding(  # noqa: PLR0911,C901,PLR0912,PLR0915 - one refusal 
     ):
         return _refuse(_R.toolchain_attestation_drifted)
 
-    # The OPAQUE credential binding for the target's CURRENT credential selection. Rotating the
-    # target's secret_ref rotates the binding, which changes the fingerprint and invalidates every
+    # The OPAQUE credential binding for the target's CURRENT provider_plan_read credential
+    # selection.
+    # (PR5A introduced a second purpose, state_backend_plan, so this MUST filter by purpose — an
+    # unfiltered query would raise MultipleResultsFound once both bindings exist.) Rotating the
+    # provider reference rotates this binding, which changes the fingerprint and invalidates every
     # prior authorization and readiness record — while storing no reference and no hash of one.
     credential_binding = (
         session.execute(
             select(CredentialBinding).where(
                 CredentialBinding.execution_target_id == target.id,
+                CredentialBinding.purpose_class == CredentialPurposeClass.provider_plan_read,
                 CredentialBinding.status == CredentialBindingStatus.active,
             )
         )

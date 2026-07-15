@@ -22,6 +22,7 @@ from secp_api.schemas_provider import (
     SnapshotOut,
     TargetCreate,
     TargetCredentialRotate,
+    TargetOperationCredentialRotate,
     TargetOut,
 )
 from secp_api.services import inventory, reservations, targets
@@ -53,6 +54,8 @@ def register_target(
         plugin_name=body.plugin_name,
         config=body.config,
         secret_ref=body.secret_ref,
+        provider_plan_secret_ref=body.provider_plan_secret_ref,
+        state_backend_secret_ref=body.state_backend_secret_ref,
         scope_policy=body.scope_policy,
         address_spaces=[a.model_dump() for a in body.address_spaces],
     )
@@ -95,6 +98,31 @@ def rotate_target_credential(
     """
     return TargetOut.model_validate(
         targets.rotate_target_credential(session, principal, target_id, secret_ref=body.secret_ref)
+    )
+
+
+@router.post("/targets/{target_id}/rotate-operation-credential", response_model=TargetOut)
+def rotate_target_operation_credential(
+    target_id: uuid.UUID,
+    body: TargetOperationCredentialRotate,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> TargetOut:
+    """Replace an OPERATION-SPECIFIC opaque credential reference (B1B-PR5A, ADR-022).
+
+    Requires ``credential_binding:manage`` and rotates ONLY the matching opaque binding
+    (``provider_plan_read`` or ``state_backend_plan``), invalidating every prior activation dossier,
+    readiness record, and plan-generation authorization that folded the old binding version. Apply
+    and destroy purposes are unrepresentable.
+    """
+    return TargetOut.model_validate(
+        targets.rotate_target_operation_credential(
+            session,
+            principal,
+            target_id,
+            purpose_class=body.purpose_class,
+            secret_ref=body.secret_ref,
+        )
     )
 
 

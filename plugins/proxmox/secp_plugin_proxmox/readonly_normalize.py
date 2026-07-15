@@ -127,4 +127,27 @@ def normalize_proxmox_observations(
         if dedicated is not None and dedicated.get(key) is not None:
             observed[key] = _strip(dedicated[key])
 
+    # A LIVE Path B VM-ID observation (SECP-002B-1B-PR5A §6): the used VM-IDs actually present on
+    # the cluster, from the allowlisted ``/cluster/resources`` GET. Redacted to bare integer ids
+    # only (no name/node/status/config). Merged into any dedicated ``vmid_range`` window so
+    # the policy can derive collision LIVE rather than trusting an asserted boolean. The allocatable
+    # WINDOW itself is not inferred here (it is an approved dedicated observation), so the shipped
+    # collector alone still cannot make the VM-ID dimension pass — it can only prove collision.
+    raw_resources = path_responses.get("/cluster/resources")
+    if isinstance(raw_resources, list):
+        used_vmids = sorted(
+            {
+                int(r["vmid"])
+                for r in _as_list(raw_resources)
+                if isinstance(r.get("vmid"), int)
+                and not isinstance(r.get("vmid"), bool)
+                and r.get("type") in ("qemu", "lxc")
+            }
+        )
+        window = observed.get("vmid_range")
+        observed["vmid_range"] = {
+            **(window if isinstance(window, dict) else {}),
+            "used_vmids": used_vmids,
+        }
+
     return observed

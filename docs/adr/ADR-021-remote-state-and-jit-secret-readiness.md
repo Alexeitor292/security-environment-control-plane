@@ -480,6 +480,19 @@ honest fix is out of scope or forbidden. They are disclosed rather than hidden.
 
 ## Known implementation prerequisites for B1B-PR5 (stated, not fabricated)
 
+> **Forward reference (added when PR5A landed):** the prerequisites below were the PR4-completion
+> snapshot. **B1B-PR5A closes them without executing any process** — it adds the durable reviewed
+> activation-dossier lifecycle, operation-specific (`provider_plan_read` + `state_backend_plan`) and
+> three-way target/manifest/dossier credential bindings, an honest combined eligibility evaluation,
+> a dedicated plan-generation authorization, a pure combined plan-readiness helper, and the durable
+> enqueue-only `real_plan_generation` workflow skeleton that STOPS at a still-sealed plan-only process
+> boundary. The plan-only boundary is formalized in
+> [ADR-022](ADR-022-plan-only-activation-and-process-boundary.md). **This forward note weakens nothing
+> in this ADR:** both B1-A seals stay `True`, the shipped readiness composition stays sealed, and no
+> real backend/secret/plan is exercised. Two of the items below were already superseded by this ADR's
+> own security amendment and are annotated inline. Items 3 (durable attestation) and 4 (placeholder
+> now fails closed) are already reflected in §16 and §19 of this ADR.
+
 1. **Operation-specific credential separation is NOT yet real.** `ExecutionTarget` has exactly ONE
    generic `secret_ref`. PR4 therefore binds a **plan-read purpose class** and a reviewed reference
    **scheme** — it does **not** prove the underlying credential is actually least-privileged or

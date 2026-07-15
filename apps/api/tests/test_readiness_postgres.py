@@ -43,6 +43,14 @@ _READINESS_TABLES = (
     "plan_secret_readiness_record",
 )
 
+# Explicit revision pins for the migration-specific downgrade proof. The seven PR4 readiness tables
+# are CREATED by ``_PR4_REVISION`` and REMOVED by downgrading below it to ``_PR3_REVISION``. These
+# are pinned — never head-relative "-1" — so the proof stays correct as later migrations (PR5A and
+# beyond) stack on top of PR4 and move the head. (Same migration-pinning principle as
+# ``test_eligibility_preflight_postgres.py``.)
+_PR3_REVISION = "c7e1a9b3d5f2"
+_PR4_REVISION = "d6a1f3c8b902"
+
 _FORBIDDEN_COLUMN_FRAGMENTS = (
     "secret_ref",
     "credential_reference_hash",
@@ -213,14 +221,21 @@ def test_no_readiness_table_has_a_secret_or_backend_locator_column(pg_engine):
 
 
 def test_the_downgrade_is_truthful(pg_engine):
-    command.downgrade(_alembic_config(), "-1")
+    # The fixture upgraded to the branch's CURRENT head (PR5A sits above PR4). Downgrade EXPLICITLY
+    # to the pre-PR4 (PR3) revision — this removes PR5A first, then PR4 — so every PR4 readiness
+    # table is genuinely gone. A head-relative "-1" would only remove PR5A now and truthfully leave
+    # the PR4 tables in place, which is exactly the stale assumption this pinning replaces.
+    command.downgrade(_alembic_config(), _PR3_REVISION)
     tables = set(inspect(pg_engine).get_table_names())
     for table in _READINESS_TABLES:
         assert table not in tables, table
-    command.upgrade(_alembic_config(), "head")
+    # Upgrading exactly to PR4 recreates every PR4 readiness table (its downgrade is truthful) ...
+    command.upgrade(_alembic_config(), _PR4_REVISION)
     tables = set(inspect(pg_engine).get_table_names())
     for table in _READINESS_TABLES:
         assert table in tables, table
+    # ... then restore the branch's current head schema so the fixture teardown is consistent.
+    command.upgrade(_alembic_config(), "head")
 
 
 # --- trigger behaviour ---------------------------------------------------------------------------

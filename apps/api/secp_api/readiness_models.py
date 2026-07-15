@@ -41,6 +41,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from secp_api.enums import (
+    CredentialBindingSource,
     CredentialBindingStatus,
     CredentialPurposeClass,
     PlanSecretAuthorizationStatus,
@@ -169,6 +170,15 @@ class CredentialBinding(Base, TimestampMixin):
     status: Mapped[CredentialBindingStatus] = mapped_column(
         EnumType(CredentialBindingStatus, length=20),
         default=CredentialBindingStatus.active,
+        nullable=False,
+    )
+    # B1B-PR5A amendment §1: which authoritative reference sourced this binding. A binding sourced
+    # from the generic ``secret_ref`` (``legacy_generic``) can NEVER satisfy a real-plan gate; only
+    # ``dedicated_operation`` can. It is part of the binding's immutable identity. PR4 rows backfill
+    # to ``legacy_generic`` (the only source that existed then).
+    binding_source: Mapped[CredentialBindingSource] = mapped_column(
+        EnumType(CredentialBindingSource, length=40),
+        default=CredentialBindingSource.legacy_generic,
         nullable=False,
     )
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

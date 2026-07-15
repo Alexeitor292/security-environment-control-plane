@@ -397,6 +397,13 @@ class WorkflowKind(str, Enum):
     # real on-disk verification through the existing RealToolchainVerifier and STOPS. It executes no
     # binary, runs no subprocess, opens no socket, loads no provider, and renders no workspace.
     toolchain_attestation = "toolchain_attestation"
+    # B1B-PR5A — the durable, enqueue-only real-plan-generation workflow SKELETON. In PR5A the
+    # worker
+    # activity loads the authoritative records, evaluates combined plan-readiness, and REFUSES at
+    # the
+    # still-sealed plan-only process boundary — it constructs no executor and runs no process
+    # (ADR-022).
+    real_plan_generation = "real_plan_generation"
 
 
 class WorkflowStatus(str, Enum):
@@ -483,6 +490,17 @@ class Permission(str, Enum):
     # B1B-PR4 amendment: rotating a target's opaque credential BINDING is a target-admin action,
     # deliberately separate from readiness management. It stores no reference and no secret.
     credential_binding_manage = "credential_binding:manage"
+    # B1B-PR5A: the deployment-local activation dossier lifecycle. Creating/recording-evidence is a
+    # manage action; APPROVING a dossier is a DELIBERATELY SEPARATE permission that can never be
+    # inferred from topology, plan, onboarding, live-read, readiness, or change-set approval.
+    activation_dossier_manage = "activation_dossier:manage"
+    activation_dossier_approve = "activation_dossier:approve"
+    # B1B-PR5A: the SEPARATE explicit authorization to GENERATE a real plan (plan_generation only).
+    # Approval is its own dedicated permission. It authorizes NO apply, destroy, provider/state
+    # mutation, credential rotation, or dossier approval — and creating/approving it executes
+    # nothing.
+    plan_generation_manage = "plan_generation:manage"
+    plan_generation_approve = "plan_generation:approve"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -749,6 +767,24 @@ class EligibilityDimension(str, Enum):
     onboarding_drift = "onboarding_drift"
 
 
+class EligibilityEvidenceSource(str, Enum):
+    """The evidence SOURCE that decided one eligibility dimension (SECP-002B-1B-PR5A honesty §6).
+
+    An honest per-dimension classification of HOW a decision was reached — never a caller flag or a
+    dossier label. ``eligible`` requires every mandatory dimension to be proven by an *allowed*
+    source (``observed_live`` or ``approved_deployment_control``); an ``unsupported`` source can
+    never contribute to ``eligible`` (it fails closed to ``unverifiable``).
+    """
+
+    # A — proven on the wire by the gated live read-only collection (an actual observation).
+    observed_live = "observed_live"
+    # B — proven by an approved deployment-control fact: a server-derived gate fact or an approved,
+    # dedicated observation. NOT a caller assertion and NOT merely a dossier label.
+    approved_deployment_control = "approved_deployment_control"
+    # C — could not be proven by any allowed source (fails closed to ``unverifiable``).
+    unsupported = "unsupported"
+
+
 class EligibilityReasonCategory(str, Enum):
     """Closed catalog of secret-free eligibility refusal/invalidation reason categories.
 
@@ -997,6 +1033,28 @@ class AuditAction(str, Enum):
     # The supported credential-replacement path. Its audit carries OPAQUE binding ids only — never
     # the reference and never a hash of it.
     target_credential_rotated = "execution_target.credential_rotated"
+    # B1B-PR5A — the durable, human-reviewed activation-dossier lifecycle (ADR-022). Every payload
+    # is
+    # bounded and secret-free: ids, hashes, bounded categories, timestamps only.
+    activation_dossier_created = "activation_dossier.created"
+    activation_dossier_evidence = "activation_dossier.evidence"
+    activation_dossier_approved = "activation_dossier.approved"
+    activation_dossier_revoked = "activation_dossier.revoked"
+    activation_dossier_expired = "activation_dossier.expired"
+    activation_dossier_superseded = "activation_dossier.superseded"
+    # B1B-PR5A — the SEPARATE real-plan-generation authorization + the enqueue-only workflow. There
+    # is
+    # deliberately NO ``completed`` action: no plan executes in PR5A (it refuses at the plan-only
+    # seal).
+    plan_generation_authorization_created = "plan_generation.authorization_created"
+    plan_generation_authorized = "plan_generation.authorized"
+    plan_generation_authorization_revoked = "plan_generation.authorization_revoked"
+    plan_generation_authorization_expired = "plan_generation.authorization_expired"
+    plan_generation_requested = "plan_generation.requested"
+    plan_generation_started = "plan_generation.started"
+    plan_generation_refused = "plan_generation.refused"
+    # B1B-PR5A — the SEPARATE state-backend credential rotation (its own dedicated reference).
+    target_state_credential_rotated = "execution_target.state_credential_rotated"
 
 
 # --- SECP-002B-1B B1B-PR4: remote-state + plan-secret readiness ----------------------------------
@@ -1242,6 +1300,37 @@ class ReadinessReason(str, Enum):
     authoritative_reverification_missing = "authoritative_reverification_missing"
     jit_env_contract_violation = "jit_env_contract_violation"
     lease_refused = "lease_refused"
+    # --- B1B-PR5A plan-generation readiness (combined) + worker refusal (ADR-022) ---------------
+    plan_generation_sealed = "plan_generation_sealed"
+    plan_generation_authorization_missing = "plan_generation_authorization_missing"
+    plan_generation_authorization_not_approved = "plan_generation_authorization_not_approved"
+    plan_generation_authorization_expired = "plan_generation_authorization_expired"
+    plan_generation_authorization_drifted = "plan_generation_authorization_drifted"
+    plan_generation_authorization_consumed = "plan_generation_authorization_consumed"
+    activation_dossier_missing = "activation_dossier_missing"
+    activation_dossier_not_approved = "activation_dossier_not_approved"
+    activation_dossier_expired = "activation_dossier_expired"
+    activation_dossier_superseded = "activation_dossier_superseded"
+    activation_dossier_binding_invalid = "activation_dossier_binding_invalid"
+    activation_dossier_evidence_incomplete = "activation_dossier_evidence_incomplete"
+    # B1B-PR5A amendment §3: the dossier's bound live preflight is no longer the current one (a new
+    # or changed preflight invalidates the dossier for current use).
+    activation_dossier_preflight_drift = "activation_dossier_preflight_drift"
+    provider_credential_binding_missing = "provider_credential_binding_missing"
+    provider_credential_binding_drift = "provider_credential_binding_drift"
+    state_credential_binding_missing = "state_credential_binding_missing"
+    state_credential_binding_drift = "state_credential_binding_drift"
+    credential_binding_manifest_mismatch = "credential_binding_manifest_mismatch"
+    credential_binding_dossier_mismatch = "credential_binding_dossier_mismatch"
+    # B1B-PR5A amendment §1: a real-plan credential is not a dedicated, distinct selection (the
+    # generic secret_ref fallback / a shared reference / a legacy-sourced binding is refused).
+    real_plan_credentials_not_dedicated = "real_plan_credentials_not_dedicated"
+    remote_state_readiness_not_current = "remote_state_readiness_not_current"
+    provider_secret_readiness_not_current = "provider_secret_readiness_not_current"
+    state_secret_readiness_unproven = "state_secret_readiness_unproven"
+    plan_only_capability_contract_mismatch = "plan_only_capability_contract_mismatch"
+    eligibility_control_evidence_missing = "eligibility_control_evidence_missing"
+    combined_plan_readiness_incomplete = "combined_plan_readiness_incomplete"
 
 
 class ToolchainAttestationOutcome(str, Enum):
@@ -1271,13 +1360,40 @@ class CredentialBindingStatus(str, Enum):
 
 
 class CredentialPurposeClass(str, Enum):
-    """The credential purpose classes a binding may serve.
+    """The credential purpose classes a binding may serve (B1B-PR5A adds operation separation).
 
-    Only the PLAN-READ provider credential exists in B1B-PR4. Apply/destroy classes and a distinct
-    STATE-BACKEND credential class are unrepresentable here and remain PR5 prerequisites.
+    Two distinct real-plan purposes exist:
+
+    * ``provider_plan_read`` — the READ-ONLY provider (Proxmox) credential used to generate a plan.
+      By declared purpose it is non-mutating; least privilege is NOT claimed from the label alone —
+      the actual scope must be backed by reviewed activation-dossier evidence.
+    * ``state_backend_plan`` — the SEPARATE remote-state-backend credential. It is never the same
+      binding as the provider credential and never falls back to the generic ``secret_ref``.
+
+    **Apply and destroy credential purposes remain unrepresentable** — absent from this enum, so no
+    caller can mint an apply/destroy credential binding. Each purpose sources its own dedicated
+    opaque
+    reference and rotates independently.
     """
 
     provider_plan_read = "provider_plan_read"
+    state_backend_plan = "state_backend_plan"
+
+
+class CredentialBindingSource(str, Enum):
+    """Which authoritative reference SOURCED a credential binding (B1B-PR5A amendment §1).
+
+    The distinction is load-bearing for the real-plan gate: a binding derived from the generic
+    ``ExecutionTarget.secret_ref`` (dev/simulated fallback) can NEVER satisfy a real-plan
+    prerequisite, and can never be mistaken for a binding derived from a dedicated operation
+    reference. It is part of the binding's immutable identity.
+    """
+
+    # Sourced from the dedicated operation reference (``provider_plan_secret_ref`` /
+    # ``state_backend_secret_ref``). Only this source may satisfy a real-plan gate.
+    dedicated_operation = "dedicated_operation"
+    # Sourced from the generic ``secret_ref`` fallback (dev/simulated only). Refused by real-plan.
+    legacy_generic = "legacy_generic"
 
 
 class ReadinessCapabilityClass(str, Enum):
@@ -1290,6 +1406,88 @@ class ReadinessCapabilityClass(str, Enum):
 
     controlled_live = "controlled_live"
     test_only = "test_only"
+
+
+class ActivationDossierStatus(str, Enum):
+    """Lifecycle of one durable, human-reviewed activation dossier (B1B-PR5A, ADR-022).
+
+    ``draft`` → evidence recorded → ``approved`` → ``revoked`` / ``expired`` / ``superseded``.
+    The dossier persists only safe bindings and proof metadata — never any real deployment value.
+    Creating or approving it executes nothing, enqueues nothing, and contacts nothing.
+    """
+
+    draft = "draft"
+    approved = "approved"
+    revoked = "revoked"
+    expired = "expired"
+    superseded = "superseded"
+
+
+class ActivationDossierEvidenceKind(str, Enum):
+    """The complete human-review evidence set required before an activation dossier may be approved.
+
+    Every kind must be present and ``verified``. Each carries only an opaque UUID proof id, a
+    bounded
+    issuer label, a status, and timestamps — never any live deployment value or raw proof text.
+    """
+
+    target_boundary_reviewed = "target_boundary_reviewed"
+    isolated_network_reviewed = "isolated_network_reviewed"
+    dedicated_storage_reviewed = "dedicated_storage_reviewed"
+    protected_route_absence_reviewed = "protected_route_absence_reviewed"
+    resource_quotas_reviewed = "resource_quotas_reviewed"
+    provider_plan_credential_reviewed = "provider_plan_credential_reviewed"
+    state_backend_credential_reviewed = "state_backend_credential_reviewed"
+    remote_state_recovery_reviewed = "remote_state_recovery_reviewed"
+    emergency_stop_owner_assigned = "emergency_stop_owner_assigned"
+    manual_containment_owner_assigned = "manual_containment_owner_assigned"
+    plan_only_process_boundary_reviewed = "plan_only_process_boundary_reviewed"
+
+
+class ActivationDossierEvidenceStatus(str, Enum):
+    """Status of one activation-dossier evidence item."""
+
+    pending = "pending"
+    verified = "verified"
+
+
+class PlanGenerationPurpose(str, Enum):
+    """The SOLE representable real-plan authorization purpose (B1B-PR5A, ADR-022).
+
+    ``plan_generation`` authorizes generating a real plan and NOTHING else. Apply, destroy, provider
+    mutation, state mutation, credential rotation, and dossier approval are **unrepresentable**
+    here,
+    so pydantic refuses any other purpose before service code runs.
+    """
+
+    plan_generation = "plan_generation"
+
+
+class PlanGenerationAuthorizationStatus(str, Enum):
+    """Lifecycle of one real-plan-generation authorization (B1B-PR5A).
+
+    ``draft`` → ``approved`` → ``consumed`` / ``revoked`` / ``expired``. Creating or approving it
+    does
+    NOT enqueue execution. Consumption occurs only in PR5B after a durable plan result — which does
+    not exist in PR5A.
+    """
+
+    draft = "draft"
+    approved = "approved"
+    consumed = "consumed"
+    revoked = "revoked"
+    expired = "expired"
+
+
+class PlanGenerationAttemptStatus(str, Enum):
+    """Bounded status of one durable real-plan-generation ATTEMPT record (B1B-PR5A).
+
+    PR5A records only ``requested`` and ``refused`` — there is deliberately **no** ``completed``
+    because no plan executes: the worker refuses at the still-sealed plan-only process boundary.
+    """
+
+    requested = "requested"
+    refused = "refused"
 
 
 class ResolutionLeaseStatus(str, Enum):

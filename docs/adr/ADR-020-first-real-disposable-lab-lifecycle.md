@@ -104,7 +104,14 @@ code-and-review change plus the full runtime gate**.
   against real state, resolves no target provisioning credential, touches no state payload, creates no
   plan, and unseals nothing. Both B1-A seals remain `True`.)*
 - **Phase 4 — real OpenTofu `init`/`plan`/`show` only.** **Apply and destroy remain independently
-  impossible** (see the mechanism below).
+  impossible** (see the mechanism below). **Phase 4 is implemented as two independently reviewed
+  slices** — **B1B-PR5A** closes every remaining plan prerequisite (real reviewed activation dossier,
+  operation-specific + three-way credential bindings, honest eligibility closure, plan-generation
+  authorization, combined plan-readiness, the durable enqueue-only workflow skeleton) **and executes
+  no process**, keeping every seal `True`; **B1B-PR5B** then unseals **only** the operation-restricted
+  plan-only process capability. The plan-only process boundary and its per-operation seal mechanism
+  are formalized in [ADR-022](ADR-022-plan-only-activation-and-process-boundary.md), which extends
+  (and does not weaken) this ADR and ADR-013.
 - **Phase 5 — first apply.** Apply may be enabled **only for one exact approved prepared plan**,
   after a successful, reviewed Phase-4 plan.
 - **Phase 6 — destroy.** Destroy may be enabled **only through its own exact approved prepared destroy

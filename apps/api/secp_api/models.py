@@ -627,9 +627,11 @@ class EnvironmentTopologyEdge(Base, TimestampMixin):
 class ExecutionTarget(Base, TimestampMixin):
     """Approved, organization-scoped destination for a deployment (ADR-006).
 
-    Provider-neutral. ``config`` is immutable non-secret JSON; ``secret_ref`` is an
-    opaque pointer (NEVER a secret). ``config``/``config_hash``/``plugin_name`` are
-    immutable after creation — new configuration requires a new target record.
+    Provider-neutral. ``config`` is immutable non-secret JSON; ``secret_ref`` (and the two
+    operation-specific references below) are opaque pointers (NEVER a secret).
+    ``config``/``config_hash``/``plugin_name`` are immutable after creation — new configuration
+    requires a new target record. Every reference column is mutable; changing one ROTATES only its
+    matching opaque ``CredentialBinding`` (B1B-PR4/PR5A) — never persisting the reference or a hash.
     """
 
     __tablename__ = "execution_target"
@@ -642,7 +644,14 @@ class ExecutionTarget(Base, TimestampMixin):
     plugin_name: Mapped[str] = mapped_column(String(100), nullable=False)
     config: Mapped[dict] = mapped_column(JSON, nullable=False)
     config_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    # The GENERIC opaque reference (dev/simulated + the PR4 provider_plan_read fallback source).
     secret_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # B1B-PR5A operation-specific opaque references (ADR-022). Each is an opaque pointer, NEVER a
+    # secret and never hashed. The real-plan gate REQUIRES the dedicated provider + state
+    # references;
+    # the generic ``secret_ref`` alone can never satisfy it.
+    provider_plan_secret_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    state_backend_secret_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[TargetStatus] = mapped_column(
         EnumType(TargetStatus), default=TargetStatus.active, nullable=False
     )
@@ -1884,6 +1893,15 @@ class ProvisioningManifest(Base, TimestampMixin):
     effective_boundary_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     content: Mapped[dict] = mapped_column(JSON, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    # B1B-PR5A: the OPAQUE operation-specific credential bindings this manifest was PINNED to at
+    # generation (id + version only; never a reference or a hash of one). These are the SECOND
+    # of the
+    # three independent binding sources (target config, this manifest, approved dossier); the worker
+    # requires exact agreement. NULLABLE: existing/dev manifests have none and cannot plan for real.
+    provider_credential_binding_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    provider_credential_binding_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state_credential_binding_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    state_credential_binding_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
@@ -2005,6 +2023,14 @@ from secp_api.discovery_models import (  # noqa: E402,F401
     DiscoveryJob,
     DiscoverySnapshot,
     TargetDiscoveryEnrollment,
+)
+
+# SECP-002B-1B B1B-PR5A durable plan-activation models (dedicated module for a focused diff).
+from secp_api.plan_activation_models import (  # noqa: E402,F401
+    RealLabActivationDossier,
+    RealLabActivationDossierEvidence,
+    RealPlanGenerationAttempt,
+    RealPlanGenerationAuthorization,
 )
 
 # SECP-002B-1B B1B-PR4 durable readiness models (dedicated module for a focused diff).

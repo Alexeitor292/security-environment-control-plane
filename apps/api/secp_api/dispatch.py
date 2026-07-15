@@ -78,6 +78,10 @@ class WorkflowDispatcher(Protocol):
         self, session: Session, manifest_id: uuid.UUID
     ) -> WorkflowRun: ...
 
+    def dispatch_real_plan_generation(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun: ...
+
 
 class InlineDispatcher:
     """Runs orchestration synchronously in the caller's session/transaction."""
@@ -189,6 +193,21 @@ class InlineDispatcher:
             "plan-secret readiness is not permitted via the inline dispatcher; it runs only on "
             "the durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). The API never "
             "resolves a secret."
+        )
+
+    def dispatch_real_plan_generation(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun:
+        # Real plan generation is worker-owned and STOPS at the sealed plan-only process boundary
+        # (B1B-PR5A / ADR-022 §5, §11). It has NO inline-safe path: the API never opens the
+        # authoritative binding, resolves a credential, renders a workspace, constructs a process
+        # executor, or reaches the seal. Refuse inline BEFORE any record load or seam construction.
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            "real plan generation is not permitted via the inline dispatcher; it runs only on the "
+            "durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). The API never runs a "
+            "process; the operation stops at the sealed plan-only boundary in the worker."
         )
 
 
@@ -500,6 +519,22 @@ class TemporalDispatcher:
             manifest_id,
             kind=WorkflowKind.plan_secret_readiness,
             workflow="PlanSecretReadinessWorkflow",
+        )
+
+    def dispatch_real_plan_generation(
+        self, session: Session, manifest_id: uuid.UUID
+    ) -> WorkflowRun:
+        # ENQUEUE-ONLY: durably queue a WorkflowRun + outbox row for the worker-owned real plan
+        # generation. Same discipline as the readiness operations — the MANIFEST ID is the only
+        # identifier passed; the workflow argument carries no endpoint, credential, secret
+        # reference, dossier payload, authorization token, or capability. The worker activity opens
+        # a FRESH session, re-derives the complete authoritative binding, evaluates combined
+        # readiness, and STOPS at the sealed plan-only boundary (ADR-022 §11).
+        return self._queue_readiness(
+            session,
+            manifest_id,
+            kind=WorkflowKind.real_plan_generation,
+            workflow="RealPlanGenerationWorkflow",
         )
 
 
