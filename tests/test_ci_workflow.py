@@ -160,9 +160,101 @@ def test_frontend_name_is_stable(wf):
 def test_aggregate_gate_fails_unless_all_success(wf):
     run = _run_text(_jobs(wf)["backend"])
     # every backend job result is inspected and a non-success forces exit 1
-    for dep in ("backend-static", "backend-test-inventory", "backend-pytest", "backend-security"):
+    for dep in (
+        "backend-static",
+        "backend-test-inventory",
+        "backend-pytest",
+        "backend-realfs-root",
+        "backend-security",
+    ):
         assert f"needs.{dep}.result" in run
     assert "exit 1" in run
+
+
+# --- production RealFilesystem root job (executes the hardened openat backend) -----------------
+
+REALFS_MODULE = "apps/commissioning/tests/test_commissioning_realfs.py"
+
+
+def test_realfs_root_job_exists(wf):
+    assert "backend-realfs-root" in _jobs(wf), "the dedicated root RealFilesystem job must exist"
+
+
+def test_realfs_root_job_runs_exact_module_as_root(wf):
+    run = _run_text(_jobs(wf)["backend-realfs-root"])
+    # runs the EXACT production RealFilesystem module, under passwordless sudo (effective UID 0),
+    # through the absolute venv interpreter
+    assert REALFS_MODULE in run
+    assert "sudo" in run
+    assert ".venv/bin/python" in run
+    # it must not run any OTHER test module (the root elevation is scoped to the production backend)
+    assert "test_commissioning_install.py" not in run
+    assert "apps/api/tests" not in run
+
+
+def test_realfs_root_job_emits_and_validates_junit(wf):
+    job = _jobs(wf)["backend-realfs-root"]
+    run = _run_text(job)
+    assert "--junitxml=junit-realfs-root.xml" in run
+    # the JUnit is uploaded even on failure
+    upload = next(
+        s for s in _steps(job) if str(s.get("uses", "")).startswith("actions/upload-artifact")
+    )
+    assert upload.get("if") == "always()"
+    assert upload["with"]["path"] == "junit-realfs-root.xml"
+    # and it is parsed programmatically (not just trusting pytest's exit code)
+    assert "xml.etree" in run or "ElementTree" in run
+    assert "junit-realfs-root.xml" in run
+
+
+def test_realfs_root_job_refuses_skipped_tests(wf):
+    run = _run_text(_jobs(wf)["backend-realfs-root"])
+    # the gate fails closed if the module was skipped (a skipped module exits 0) or under-collected
+    assert "skipped" in run
+    assert "< 8" in run  # requires at least 8 production RealFilesystem tests collected
+    assert "sys.exit(1)" in run  # a non-executed / failing module forces failure
+    # the parse step runs even if the pytest step failed, so JUnit is always evaluated
+    parse_steps = [
+        s
+        for s in _steps(_jobs(wf)["backend-realfs-root"])
+        if "skipped" in str(s.get("run", "")) and s.get("if") == "always()"
+    ]
+    assert parse_steps, "the JUnit-enforcement step must run with if: always()"
+
+
+def test_realfs_root_job_does_not_use_continue_on_error(wf):
+    job = _jobs(wf)["backend-realfs-root"]
+    assert "continue-on-error" not in job
+    for step in _steps(job):
+        assert "continue-on-error" not in step
+
+
+def test_realfs_root_job_caches_uv_like_siblings(wf):
+    step = next(
+        s
+        for s in _steps(_jobs(wf)["backend-realfs-root"])
+        if str(s.get("uses", "")).startswith("astral-sh/setup-uv")
+    )
+    assert step["with"]["enable-cache"] is True
+    assert "uv.lock" in step["with"]["cache-dependency-glob"]
+
+
+def test_aggregate_depends_on_realfs_root_and_name_unchanged(wf):
+    jobs = _jobs(wf)
+    assert "backend-realfs-root" in jobs["backend"]["needs"]
+    # the externally visible required aggregate check name must be byte-for-byte stable
+    assert jobs["backend"]["name"] == BACKEND_AGG_NAME
+
+
+def test_realfs_root_job_does_not_weaken_existing_coverage(wf, suite):
+    # the dedicated root job is ADDITIVE: the sharded corpus + inventory proof are untouched, and
+    # the commissioning test root stays in the authoritative corpus (so the normal shard still
+    # collects the module — it merely skips it without root).
+    jobs = _jobs(wf)
+    assert jobs["backend-pytest"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
+    inv_run = _run_text(jobs["backend-test-inventory"])
+    assert "pytest_shards.py verify --collect" in inv_run
+    assert "apps/commissioning/tests" in suite["roots"]
 
 
 # --- security + frontend still required -------------------------------------------------------

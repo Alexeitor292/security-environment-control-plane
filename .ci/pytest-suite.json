@@ -9,7 +9,8 @@
   "roots": [
     "apps/api/tests",
     "tests",
-    "contracts/scenario-schema/tests"
+    "contracts/scenario-schema/tests",
+    "apps/commissioning/tests"
   ],
   "exclusions": [
     {
