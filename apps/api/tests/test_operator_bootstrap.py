@@ -21,6 +21,11 @@ import pytest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[3]
 _TEMPORAL_APP = _ROOT / "apps" / "worker" / "secp_worker" / "temporal_app.py"
+# The 9 workflow classes now live in the import-clean workflow-safe module (PR5B worker-startup
+# fix),
+# so the workflow ``execute_activity`` dispatch is scanned there, not in the host-only activity
+# module.
+_TEMPORAL_WORKFLOWS = _ROOT / "apps" / "worker" / "secp_worker" / "temporal_workflows.py"
 
 
 # --- helpers: build the exact controlled-live / sealed / test-only compositions -------------------
@@ -390,21 +395,26 @@ def test_workflow_arguments_and_activity_dispatch_remain_ids_only():
     from secp_worker import temporal_app
 
     assert temporal_app.REAL_PLAN_GENERATION_ACTIVITY_NAME == "real_plan_generation_activity"
-    src = _TEMPORAL_APP.read_text(encoding="utf-8")
+    # The workflow classes (and their execute_activity dispatch) live in the import-clean workflow
+    # module now; scan it. There must be at least one execute_activity call (guard against a vacuous
+    # pass if the classes ever move again).
+    src = _TEMPORAL_WORKFLOWS.read_text(encoding="utf-8")
     tree = ast.parse(src)
-    # Every workflow.execute_activity(...) first arg is a NAME constant/string (never a
-    # composition).
+    dispatch_calls = 0
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "execute_activity"
         ):
+            dispatch_calls += 1
+            # Every workflow.execute_activity(...) first arg is a NAME constant/string (never a
+            # composition, provider, or activity object that would drag I/O into the sandbox).
             first = node.args[0]
             assert isinstance(first, ast.Name | ast.Constant), ast.dump(first)
+    assert dispatch_calls == 9, dispatch_calls
     # No composition/provider symbol is passed into a workflow argument.
     for forbidden in ("composition", "provider", "PlanExecutionComposition"):
-        # Only NAME-constant dispatch appears in the workflow run bodies.
         assert f"execute_activity({forbidden}" not in src
 
 
@@ -461,7 +471,9 @@ def test_no_readiness_activity_triggers_plan_generation():
 
 
 def test_no_plan_operation_triggers_apply_and_no_apply_workflow_exists():
-    src = _TEMPORAL_APP.read_text(encoding="utf-8")
+    src = _TEMPORAL_APP.read_text(encoding="utf-8") + _TEMPORAL_WORKFLOWS.read_text(
+        encoding="utf-8"
+    )
     for forbidden in (
         "ApplyWorkflow",
         "apply_activity",

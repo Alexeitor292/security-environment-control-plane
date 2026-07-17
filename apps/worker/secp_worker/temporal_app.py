@@ -15,29 +15,6 @@ from __future__ import annotations
 import uuid
 from datetime import UTC
 
-try:  # temporalio is an optional dependency (the 'worker' extra).
-    from temporalio import activity, workflow
-
-    TEMPORAL_AVAILABLE = True
-except Exception:  # pragma: no cover - import guard
-    TEMPORAL_AVAILABLE = False
-
-    class _Stub:
-        def defn(self, *a, **k):  # type: ignore[no-untyped-def]
-            def deco(cls):
-                return cls
-
-            return deco
-
-        def __getattr__(self, _name):  # type: ignore[no-untyped-def]
-            def deco(fn=None, **_k):
-                return fn if fn else (lambda f: f)
-
-            return deco
-
-    activity = workflow = _Stub()  # type: ignore[assignment]
-
-
 # Worker-bootstrap composition providers. Importing the SEALED defaults here (never a live provider)
 # lets the shipped worker construct its default, always-sealed activity instances at import time.
 from secp_worker.onboarding.eligibility_provider import (  # noqa: E402 - after the temporal guard
@@ -50,23 +27,39 @@ from secp_worker.readiness.composition_provider import (  # noqa: E402 - after t
     SealedReadinessCompositionProvider,
 )
 
+# The Temporal guard is defined ONCE in a shared, import-clean module, and the stable activity NAMES
+# come from another. This module (temporal_app) is HOST-ONLY: it holds the I/O-capable activities
+# and
+# is NEVER imported by Temporal's workflow sandbox — the workflows live in the import-clean
+# secp_worker.temporal_workflows (which dispatches by these same NAME strings). This split is the
+# structural fix for the PR5B worker-startup sandbox failure (httpx -> urllib.request.Request).
+from secp_worker.temporal_activity_names import (  # noqa: E402 - after the temporal guard
+    DEPLOY_ACTIVITY_NAME,
+    DESTROY_ACTIVITY_NAME,
+    DISCOVER_ACTIVITY_NAME,
+    ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
+    PLAN_SECRET_READINESS_ACTIVITY_NAME,
+    REAL_PLAN_GENERATION_ACTIVITY_NAME,
+    REMOTE_STATE_READINESS_ACTIVITY_NAME,
+    RESET_ACTIVITY_NAME,
+    TOOLCHAIN_ATTESTATION_ACTIVITY_NAME,
+)
+from secp_worker.temporal_runtime import TEMPORAL_AVAILABLE, activity  # noqa: E402
+
 
 def _opt_uuid(value: str | None) -> uuid.UUID | None:
     return uuid.UUID(value) if value else None
 
 
-# --- Stable Temporal activity names ---------------------------------------------------------------
-# The workflow dispatches to its activity BY NAME (a string), so the same registered name is served
-# whether the shipped worker registers the SEALED-provider instance or a reviewed operator worker
-# registers a CONTROLLED-LIVE-provider instance. These constants are the single source of truth.
-REAL_PLAN_GENERATION_ACTIVITY_NAME = "real_plan_generation_activity"
-ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME = "eligibility_preflight_activity"
-TOOLCHAIN_ATTESTATION_ACTIVITY_NAME = "toolchain_attestation_activity"
-REMOTE_STATE_READINESS_ACTIVITY_NAME = "remote_state_readiness_activity"
-PLAN_SECRET_READINESS_ACTIVITY_NAME = "plan_secret_readiness_activity"
+# The stable activity NAME constants are imported above from secp_worker.temporal_activity_names
+# (the
+# single source of truth). Each activity registers UNDER its exact name and the workflow dispatches
+# BY that same name — so the shipped SEALED instance or a reviewed operator worker's CONTROLLED-LIVE
+# instance is served identically. The four legacy names equal the original implicit function names,
+# so pinning ``name=`` below changes no registration.
 
 
-@activity.defn
+@activity.defn(name=DEPLOY_ACTIVITY_NAME)
 async def deploy_activity(arg: dict) -> str:
     from secp_api.db import session_scope
 
@@ -82,7 +75,7 @@ async def deploy_activity(arg: dict) -> str:
         return run.correlation_id
 
 
-@activity.defn
+@activity.defn(name=RESET_ACTIVITY_NAME)
 async def reset_activity(arg: dict) -> str:
     from secp_api.db import session_scope
 
@@ -99,7 +92,7 @@ async def reset_activity(arg: dict) -> str:
         return run.correlation_id
 
 
-@activity.defn
+@activity.defn(name=DESTROY_ACTIVITY_NAME)
 async def destroy_activity(arg: dict) -> str:
     from secp_api.db import session_scope
 
@@ -115,7 +108,7 @@ async def destroy_activity(arg: dict) -> str:
         return run.correlation_id
 
 
-@activity.defn
+@activity.defn(name=DISCOVER_ACTIVITY_NAME)
 async def discover_activity(arg: dict) -> str:
     from secp_api.db import session_scope
     from secp_api.enums import WorkflowStatus
@@ -576,137 +569,62 @@ remote_state_readiness_activity = _SEALED_REMOTE_STATE_ACTIVITY.run
 plan_secret_readiness_activity = _SEALED_PLAN_SECRET_ACTIVITY.run
 real_plan_generation_activity = _SEALED_REAL_PLAN_GENERATION_ACTIVITY.run
 
+# --- Re-exports: the 9 workflow classes (defined in the import-clean
+# secp_worker.temporal_workflows)
+# and the activity NAME constants. Backward-compatible for importers of
+# ``secp_worker.temporal_app``.
+# The re-export does NOT change the workflow classes' ``__module__`` (still
+# ``secp_worker.temporal_workflows``), so Temporal's workflow sandbox still imports ONLY that clean
+# module — never this host-only activity module. ``_activity_timeout`` moved there with the
+# workflows.
+from secp_worker.temporal_workflows import (  # noqa: E402 - re-export at module end
+    DeployWorkflow,
+    DestroyWorkflow,
+    DiscoverWorkflow,
+    EligibilityPreflightWorkflow,
+    PlanSecretReadinessWorkflow,
+    RealPlanGenerationWorkflow,
+    RemoteStateReadinessWorkflow,
+    ResetWorkflow,
+    ToolchainAttestationWorkflow,
+)
 
-def _activity_timeout():
-    from datetime import timedelta
-
-    return timedelta(minutes=10)
-
-
-@workflow.defn
-class DeployWorkflow:
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        return await workflow.execute_activity(
-            deploy_activity, arg, start_to_close_timeout=_activity_timeout()
-        )
-
-
-@workflow.defn
-class ResetWorkflow:
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        return await workflow.execute_activity(
-            reset_activity, arg, start_to_close_timeout=_activity_timeout()
-        )
-
-
-@workflow.defn
-class DestroyWorkflow:
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        return await workflow.execute_activity(
-            destroy_activity, arg, start_to_close_timeout=_activity_timeout()
-        )
-
-
-@workflow.defn
-class DiscoverWorkflow:
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        return await workflow.execute_activity(
-            discover_activity, arg, start_to_close_timeout=_activity_timeout()
-        )
-
-
-@workflow.defn
-class EligibilityPreflightWorkflow:
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        # Dispatch BY the stable activity NAME, so the worker's registered instance (sealed on the
-        # shipped worker, controlled-live on a reviewed operator worker) is served; the workflow
-        # neither constructs nor imports the composition/provider.
-        return await workflow.execute_activity(
-            ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
-            arg,
-            result_type=str,
-            start_to_close_timeout=_activity_timeout(),
-        )
-
-
-@workflow.defn
-class ToolchainAttestationWorkflow:
-    """Durable, worker-only PR2 toolchain attestation (B1B-PR4 §1). It STOPS at the record.
-
-    A hard PREREQUISITE of both readiness operations — and it triggers neither. It runs no OpenTofu.
-    """
-
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        return await workflow.execute_activity(
-            TOOLCHAIN_ATTESTATION_ACTIVITY_NAME,
-            arg,
-            result_type=str,
-            start_to_close_timeout=_activity_timeout(),
-        )
-
-
-@workflow.defn
-class RemoteStateReadinessWorkflow:
-    """Durable, worker-only remote-state readiness (B1B-PR4). It STOPS at readiness.
-
-    It never dispatches a plan, an apply, or a destroy: completing readiness triggers nothing.
-    """
-
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        return await workflow.execute_activity(
-            REMOTE_STATE_READINESS_ACTIVITY_NAME,
-            arg,
-            result_type=str,
-            start_to_close_timeout=_activity_timeout(),
-        )
-
-
-@workflow.defn
-class PlanSecretReadinessWorkflow:
-    """Durable, worker-only plan-secret readiness (B1B-PR4). It STOPS at readiness.
-
-    A SEPARATE operation from remote-state readiness: neither workflow invokes the other, and
-    completing both never creates a plan.
-    """
-
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        return await workflow.execute_activity(
-            PLAN_SECRET_READINESS_ACTIVITY_NAME,
-            arg,
-            result_type=str,
-            start_to_close_timeout=_activity_timeout(),
-        )
-
-
-@workflow.defn
-class RealPlanGenerationWorkflow:
-    """Durable, worker-only real plan generation (B1B-PR5B, ADR-022).
-
-    Every prerequisite readiness operation is a hard precondition, and this workflow triggers none
-    of
-    them. It dispatches the ``real_plan_generation_activity`` BY NAME (never constructing or
-    importing a composition/provider). On the shipped worker the registered activity injects the
-    SEALED composition, so the orchestration refuses at the composition gate before any OpenTofu,
-    credential,
-    workspace, or plan; on a reviewed operator worker it injects a controlled-live composition and
-    the
-    activity STOPS at a redacted change set + a pending human approval. Completing it authorizes NO
-    apply and NO destroy — those seals are independent code constants that stay True.
-    """
-
-    @workflow.run
-    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
-        return await workflow.execute_activity(
-            REAL_PLAN_GENERATION_ACTIVITY_NAME,
-            arg,
-            result_type=str,
-            start_to_close_timeout=_activity_timeout(),
-        )
+__all__ = [
+    "DEPLOY_ACTIVITY_NAME",
+    "DESTROY_ACTIVITY_NAME",
+    "DISCOVER_ACTIVITY_NAME",
+    "ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME",
+    "PLAN_SECRET_READINESS_ACTIVITY_NAME",
+    "REAL_PLAN_GENERATION_ACTIVITY_NAME",
+    "REMOTE_STATE_READINESS_ACTIVITY_NAME",
+    "RESET_ACTIVITY_NAME",
+    "TOOLCHAIN_ATTESTATION_ACTIVITY_NAME",
+    "DeployWorkflow",
+    "DestroyWorkflow",
+    "DiscoverWorkflow",
+    "EligibilityPreflightWorkflow",
+    "PlanSecretReadinessWorkflow",
+    "RealPlanGenerationWorkflow",
+    "RemoteStateReadinessWorkflow",
+    "ResetWorkflow",
+    "ToolchainAttestationWorkflow",
+    "EligibilityPreflightActivity",
+    "ToolchainAttestationActivity",
+    "RemoteStateReadinessActivity",
+    "PlanSecretReadinessActivity",
+    "RealPlanGenerationActivity",
+    "deploy_activity",
+    "reset_activity",
+    "destroy_activity",
+    "discover_activity",
+    "eligibility_preflight_activity",
+    "toolchain_attestation_activity",
+    "remote_state_readiness_activity",
+    "plan_secret_readiness_activity",
+    "real_plan_generation_activity",
+    "run_eligibility_preflight_activity_body",
+    "run_toolchain_attestation_activity_body",
+    "run_remote_state_readiness_activity_body",
+    "run_plan_secret_readiness_activity_body",
+    "run_real_plan_generation_activity_body",
+]
