@@ -46,6 +46,7 @@ packages = [
     "apps/api/secp_api",
     "apps/worker/secp_worker",
     "apps/commissioning/secp_commissioning",
+    "apps/deployment/secp_operator_deployment",
     "contracts/scenario-schema/secp_scenario_schema",
     "contracts/plugin-api/secp_plugin_api",
     "plugins/simulator/secp_plugin_simulator",
@@ -66,12 +67,13 @@ pythonpath = [
     "apps/api",
     "apps/worker",
     "apps/commissioning",
+    "apps/deployment",
     "contracts/scenario-schema",
     "contracts/plugin-api",
     "plugins/simulator",
     "plugins/proxmox",
 ]
-testpaths = ["apps/api/tests", "tests", "apps/commissioning/tests"]
+testpaths = ["apps/api/tests", "tests", "apps/commissioning/tests", "apps/deployment/tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
 addopts = "-ra"
 
@@ -95,6 +97,7 @@ mypy_path = [
     "apps/api",
     "apps/worker",
     "apps/commissioning",
+    "apps/deployment",
     "contracts/scenario-schema",
     "contracts/plugin-api",
     "plugins/simulator",
