@@ -166,10 +166,45 @@ def test_aggregate_gate_fails_unless_all_success(wf):
         "backend-pytest",
         "backend-realfs-root",
         "backend-deployment-root",
+        "backend-management-root",
         "backend-security",
     ):
         assert f"needs.{dep}.result" in run
     assert "exit 1" in run
+
+
+def test_management_root_job_exists_and_is_fail_closed(wf):
+    jobs = _jobs(wf)
+    assert "backend-management-root" in jobs, "the management root-security job must exist"
+    job = jobs["backend-management-root"]
+    run = _run_text(job)
+    # runs the management root module under passwordless sudo through the absolute venv interpreter
+    assert "apps/management/tests/test_management_root.py" in run
+    assert "sudo" in run and ".venv/bin/python" in run
+    # root-only trusted base + fail-closed ancestor preflight (uid + group/other write, sys.exit)
+    assert "/root/secp-mgmt-roottest" in run and "/opt/secp-roottest" not in run
+    assert "os.lstat" in run and "0o020" in run and "0o002" in run and "st_uid" in run
+    assert "sys.exit(1)" in run
+    # JUnit parsed programmatically; fail closed on skip / under-collection
+    assert "--junitxml=junit-management-root.xml" in run
+    assert "< 3" in run and "skipped" in run
+    upload = next(
+        s for s in _steps(job) if str(s.get("uses", "")).startswith("actions/upload-artifact")
+    )
+    assert upload.get("if") == "always()" and upload["with"]["if-no-files-found"] == "error"
+    assert "continue-on-error" not in job
+    # in the aggregate gate
+    assert "backend-management-root" in jobs["backend"]["needs"]
+    assert "needs.backend-management-root.result" in _run_text(jobs["backend"])
+
+
+def test_management_root_job_does_not_weaken_existing_root_jobs(wf):
+    jobs = _jobs(wf)
+    # the deployment + realfs root jobs keep their exact modules + minimum-collection gates
+    dep = _run_text(jobs["backend-deployment-root"])
+    assert "apps/deployment/tests/test_deployment_root_manifest.py" in dep and "< 20" in dep
+    realfs = _run_text(jobs["backend-realfs-root"])
+    assert "test_commissioning_realfs.py" in realfs and "< 8" in realfs
 
 
 # --- production RealFilesystem root job (executes the hardened openat backend) -----------------

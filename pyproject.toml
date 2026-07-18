@@ -25,6 +25,11 @@ dependencies = [
     "cryptography>=49.0.0",
 ]
 
+# The customer-facing management-plane installer console command (SECP-PR5E). Same engine as
+# `python -m secp_management`.
+[project.scripts]
+secpctl = "secp_management.cli:main"
+
 [project.optional-dependencies]
 # Temporal is only needed to run the durable worker path. Tests and the inline
 # dispatcher do not require it (see ADR-005).
@@ -47,6 +52,7 @@ packages = [
     "apps/worker/secp_worker",
     "apps/commissioning/secp_commissioning",
     "apps/deployment/secp_operator_deployment",
+    "apps/management/secp_management",
     "contracts/scenario-schema/secp_scenario_schema",
     "contracts/plugin-api/secp_plugin_api",
     "plugins/simulator/secp_plugin_simulator",
@@ -68,12 +74,19 @@ pythonpath = [
     "apps/worker",
     "apps/commissioning",
     "apps/deployment",
+    "apps/management",
     "contracts/scenario-schema",
     "contracts/plugin-api",
     "plugins/simulator",
     "plugins/proxmox",
 ]
-testpaths = ["apps/api/tests", "tests", "apps/commissioning/tests", "apps/deployment/tests"]
+testpaths = [
+    "apps/api/tests",
+    "tests",
+    "apps/commissioning/tests",
+    "apps/deployment/tests",
+    "apps/management/tests",
+]
 filterwarnings = ["ignore::DeprecationWarning"]
 addopts = "-ra"
 
@@ -98,6 +111,7 @@ mypy_path = [
     "apps/worker",
     "apps/commissioning",
     "apps/deployment",
+    "apps/management",
     "contracts/scenario-schema",
     "contracts/plugin-api",
     "plugins/simulator",
