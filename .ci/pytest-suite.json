@@ -11,7 +11,8 @@
     "tests",
     "contracts/scenario-schema/tests",
     "apps/commissioning/tests",
-    "apps/deployment/tests"
+    "apps/deployment/tests",
+    "apps/management/tests"
   ],
   "exclusions": [
     {
