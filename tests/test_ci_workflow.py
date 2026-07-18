@@ -165,6 +165,7 @@ def test_aggregate_gate_fails_unless_all_success(wf):
         "backend-test-inventory",
         "backend-pytest",
         "backend-realfs-root",
+        "backend-deployment-root",
         "backend-security",
     ):
         assert f"needs.{dep}.result" in run
@@ -255,6 +256,177 @@ def test_realfs_root_job_does_not_weaken_existing_coverage(wf, suite):
     inv_run = _run_text(jobs["backend-test-inventory"])
     assert "pytest_shards.py verify --collect" in inv_run
     assert "apps/commissioning/tests" in suite["roots"]
+
+
+# --- deployment package root-security job (trusted dir-fd manifest + pinned exec) --------------
+
+DEPLOY_ROOT_MODULES = (
+    "apps/deployment/tests/test_deployment_root_manifest.py",
+    "apps/deployment/tests/test_deployment_pinned_exec.py",
+    "apps/deployment/tests/test_deployment_realproc.py",
+)
+# A genuinely root-only hierarchy: / and /root are root-owned + non-group/other-writable on a hosted
+# runner. /opt has a group/other-writable ancestor and is (correctly) rejected by the trust walk.
+DEPLOY_ROOT_DIR = "/root/secp-roottest"
+REJECTED_ROOT_DIR = "/opt/secp-roottest"
+
+
+def _deploy_root_step(wf, needle):
+    return next(
+        s for s in _steps(_jobs(wf)["backend-deployment-root"]) if needle in str(s.get("run", ""))
+    )
+
+
+def test_deployment_root_job_exists(wf):
+    assert "backend-deployment-root" in _jobs(wf), "the deployment root-security job must exist"
+
+
+def test_deployment_root_job_runs_exact_modules_as_root(wf):
+    run = _run_text(_jobs(wf)["backend-deployment-root"])
+    # runs the deployment root-security modules, under passwordless sudo (effective UID 0), through
+    # the absolute venv interpreter
+    for module in DEPLOY_ROOT_MODULES:
+        assert module in run, f"{module} must run in the deployment root job"
+    assert "sudo" in run
+    assert ".venv/bin/python" in run
+    # it must not elevate unrelated corpora to root
+    assert "apps/api/tests" not in run
+    assert "apps/commissioning/tests" not in run
+
+
+def test_deployment_root_job_uses_root_only_trusted_dir(wf):
+    run = _run_text(_jobs(wf)["backend-deployment-root"])
+    # the fixture base is the genuinely root-only /root/secp-roottest, NOT /opt (whose ancestor is
+    # group/other-writable and correctly rejected by the production trust walk)
+    assert DEPLOY_ROOT_DIR in run
+    assert REJECTED_ROOT_DIR not in run
+    assert f"SECP_ROOT_TEST_DIR={DEPLOY_ROOT_DIR}" in run
+    # explicit root:root ownership + a mode with no group/other write, and NO chmod of a broad
+    # system directory (/opt, /root, or /)
+    assert "chown root:root" in run
+    assert "chmod 700" in run
+    assert "chmod 755" not in run  # the previous group/other-readable base mode is gone
+    for broad in (
+        "chmod 700 /opt",
+        "chmod 700 /\n",
+        "chmod 777",
+        "chmod 755 /opt",
+        "chmod 700 /root\n",
+    ):
+        assert broad not in run, f"must not mutate a broad system directory: {broad!r}"
+
+
+def test_deployment_root_job_has_failclosed_ancestor_preflight(wf):
+    # A dedicated preflight validates the WHOLE ancestor chain of SECP_ROOT_TEST_DIR and exits
+    # nonzero on any trust failure — it does not merely chmod the leaf and continue.
+    step = _deploy_root_step(wf, "os.lstat")
+    run = str(step["run"])
+    assert f"SECP_ROOT_TEST_DIR={DEPLOY_ROOT_DIR}" in run  # the preflight validates the fixed dir
+    # builds the ancestor chain from the path (not just the leaf) and iterates it
+    assert ".split(" in run and "for comp in" in run
+    # checks uid == 0
+    assert "st_uid != 0" in run or "st_uid == 0" in run
+    # checks BOTH group-write and other-write bits
+    assert "0o020" in run  # group write
+    assert "0o002" in run  # other write
+    # rejects a symlink component (lstat, S_ISLNK) and requires a real directory
+    assert "S_ISLNK" in run
+    assert "S_ISDIR" in run
+    # fails CLOSED (exits nonzero) rather than print-and-continue
+    assert "sys.exit(1)" in run
+    # the preflight runs under sudo so it can lstat the child beneath 0700 /root
+    assert "sudo" in run
+
+
+def test_root_pytest_uses_the_same_preflighted_trusted_dir(wf):
+    # The root pytest invocation must use the SAME fixed trusted directory the preflight verified.
+    pytest_step = _deploy_root_step(wf, "-m pytest")
+    preflight_step = _deploy_root_step(wf, "os.lstat")
+    assert f"SECP_ROOT_TEST_DIR={DEPLOY_ROOT_DIR}" in str(pytest_step["run"])
+    assert f"SECP_ROOT_TEST_DIR={DEPLOY_ROOT_DIR}" in str(preflight_step["run"])
+
+
+def test_root_job_cannot_regress_to_child_under_unverified_writable_ancestor(wf):
+    # Regression: the job cannot silently regress to "chmod the final child + run under an
+    # unverified writable ancestor". The preflight must validate EVERY component (real dir, uid 0,
+    # no group/other write) and exit nonzero — so a child beneath a group/other-writable ancestor is
+    # caught before any test runs. Order: the preflight step must precede the pytest step.
+    steps = _steps(_jobs(wf)["backend-deployment-root"])
+    preflight_idx = next(i for i, s in enumerate(steps) if "os.lstat" in str(s.get("run", "")))
+    pytest_idx = next(i for i, s in enumerate(steps) if "-m pytest" in str(s.get("run", "")))
+    assert preflight_idx < pytest_idx, "the ancestor preflight must run BEFORE the root tests"
+    pre = str(steps[preflight_idx]["run"])
+    # the preflight rejects a writable component ANYWHERE in the chain (group OR other write), not
+    # just the leaf — the chain is derived from the path and every component is checked
+    assert "group-writable" in pre or "0o020" in pre
+    assert "other-writable" in pre or "0o002" in pre
+    assert "for comp in" in pre  # iterates the whole chain
+
+
+def test_deployment_root_job_emits_and_validates_junit(wf):
+    job = _jobs(wf)["backend-deployment-root"]
+    run = _run_text(job)
+    assert "--junitxml=junit-deployment-root.xml" in run
+    upload = next(
+        s for s in _steps(job) if str(s.get("uses", "")).startswith("actions/upload-artifact")
+    )
+    assert upload.get("if") == "always()"
+    assert upload["with"]["path"] == "junit-deployment-root.xml"
+    assert upload["with"]["if-no-files-found"] == "error"
+    # parsed programmatically (not just trusting pytest's exit code)
+    assert "xml.etree" in run or "ElementTree" in run
+    assert "junit-deployment-root.xml" in run
+
+
+def test_deployment_root_job_refuses_skipped_tests(wf):
+    job = _jobs(wf)["backend-deployment-root"]
+    run = _run_text(job)
+    # fails closed if a root-security test was skipped (skipped module exits 0) or under-collected
+    assert "skipped" in run
+    assert "< 20" in run  # requires at least 20 deployment root-security tests collected
+    assert "sys.exit(1)" in run
+    # the parse step runs even if the pytest step failed
+    parse_steps = [
+        s for s in _steps(job) if "skipped" in str(s.get("run", "")) and s.get("if") == "always()"
+    ]
+    assert parse_steps, "the JUnit-enforcement step must run with if: always()"
+
+
+def test_deployment_root_job_no_continue_on_error(wf):
+    job = _jobs(wf)["backend-deployment-root"]
+    assert "continue-on-error" not in job
+    for step in _steps(job):
+        assert "continue-on-error" not in step
+
+
+def test_deployment_root_job_caches_uv_like_siblings(wf):
+    step = next(
+        s
+        for s in _steps(_jobs(wf)["backend-deployment-root"])
+        if str(s.get("uses", "")).startswith("astral-sh/setup-uv")
+    )
+    assert step["with"]["enable-cache"] is True
+    assert "uv.lock" in step["with"]["cache-dependency-glob"]
+
+
+def test_aggregate_depends_on_deployment_root_and_inspects_its_result(wf):
+    jobs = _jobs(wf)
+    # the aggregate gate cannot be green without this job
+    assert "backend-deployment-root" in jobs["backend"]["needs"]
+    run = _run_text(jobs["backend"])
+    assert "needs.backend-deployment-root.result" in run
+    assert "exit 1" in run
+    # the externally visible required aggregate check name is unchanged
+    assert jobs["backend"]["name"] == BACKEND_AGG_NAME
+
+
+def test_deployment_root_job_is_additive_not_weakening(wf, suite):
+    # the dedicated root job is ADDITIVE: the sharded corpus is untouched and the deployment test
+    # root stays in the authoritative corpus (so the normal shards still collect the modules — they
+    # merely skip the root-only tests without root).
+    jobs = _jobs(wf)
+    assert jobs["backend-pytest"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
+    assert "apps/deployment/tests" in suite["roots"]
 
 
 # --- security + frontend still required -------------------------------------------------------

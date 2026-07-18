@@ -22,6 +22,7 @@ _FORBIDDEN_IMPORT_ROOTS = frozenset(
         "http",
         "secp_worker",
         "secp_api",
+        "secp_operator_deployment",
         "psycopg",
         "sqlalchemy",
     }

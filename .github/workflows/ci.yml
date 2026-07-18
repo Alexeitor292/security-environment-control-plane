@@ -45,7 +45,7 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check apps contracts plugins scripts tests
       - name: Type check (mypy)
-        run: uv run mypy apps/api/secp_api apps/worker/secp_worker contracts plugins
+        run: uv run mypy apps/api/secp_api apps/worker/secp_worker apps/deployment/secp_operator_deployment contracts plugins
       - name: Schema validation (web-breach-101)
         run: |
           uv run python - <<'PY'
@@ -249,6 +249,140 @@ jobs:
           print("Production RealFilesystem backend executed as root: >= 8 tests, zero skipped/failed/errored.")
           PY
 
+  # --- deployment package root-security tests, executed AS ROOT --------------------------------
+  # The deployment package's trusted directory-fd manifest walk (open every ancestor from `/` with
+  # O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC and require each is a real dir, root-owned, non-world-writable),
+  # the executable-object pinning root-owner refusal, and the real pinned-exec subprocess seam only
+  # EXECUTE meaningfully as effective UID 0 — so the normal, non-root shards SKIP the root-only
+  # trust/ownership tests (a fully-skipped test still exits 0). This dedicated job runs the deployment
+  # root-security modules under passwordless sudo so the production trust checks actually run, then
+  # FAILS CLOSED by parsing the JUnit: green only if they truly ran (>= 20 collected, zero
+  # skipped/failed/errored). The pytest exit code alone is NOT trusted (an all-skipped run exits 0).
+  # No deployment infrastructure is contacted; every child process is a local, bounded, pinned probe.
+  backend-deployment-root:
+    name: Deployment package root-security (root, trusted dir-fd + pinned exec)
+    runs-on: ubuntu-latest
+    env:
+      SECP_APP_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Create venv and install project
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[dev]"
+      - name: Prepare a genuinely root-only trusted base directory
+        # Build the root test trees under /root/secp-roottest, whose ancestors (/ and /root) are
+        # root-owned and NON-group/other-writable on a hosted runner — unlike /opt, an ancestor of
+        # which is group/other-writable and is (correctly) rejected by the production trust walk.
+        # Only the dedicated child dir is created + chmod'd (0700); no broad system dir is mutated.
+        run: |
+          sudo mkdir -p /root/secp-roottest
+          sudo chown root:root /root/secp-roottest
+          sudo chmod 700 /root/secp-roottest
+      - name: Fail-closed ancestor-chain trust preflight
+        # Programmatically require every component of SECP_ROOT_TEST_DIR (/, /root,
+        # /root/secp-roottest) to be a REAL directory, root-owned (uid 0), NOT a symlink, and with NO
+        # group-write and NO other-write bit — and EXIT NONZERO if any fails (never print-and-continue).
+        # Runs under sudo so it can lstat the child beneath the 0700 /root. This guards the fixture the
+        # same way the production dir-fd walk guards the installed package.
+        run: |
+          sudo env "SECP_ROOT_TEST_DIR=/root/secp-roottest" "$(pwd)/.venv/bin/python" - <<'PY'
+          import os, stat, sys
+          base = os.environ["SECP_ROOT_TEST_DIR"]
+          if not os.path.isabs(base):
+              print("::error::SECP_ROOT_TEST_DIR must be an absolute path")
+              sys.exit(1)
+          parts = [p for p in base.split("/") if p]
+          chain = ["/"] + ["/" + "/".join(parts[: i + 1]) for i in range(len(parts))]
+          problems = []
+          for comp in chain:
+              try:
+                  st = os.lstat(comp)  # lstat: a symlink component is caught, not followed
+              except OSError as exc:
+                  problems.append(f"{comp}: not statable (errno {exc.errno})")
+                  continue
+              mode = st.st_mode
+              if stat.S_ISLNK(mode):
+                  problems.append(f"{comp}: is a symlink")
+                  continue
+              if not stat.S_ISDIR(mode):
+                  problems.append(f"{comp}: not a real directory")
+                  continue
+              if st.st_uid != 0:
+                  problems.append(f"{comp}: uid={st.st_uid} (not root-owned)")
+              perm = stat.S_IMODE(mode)
+              if perm & 0o020:
+                  problems.append(f"{comp}: group-writable (mode {oct(perm)})")
+              if perm & 0o002:
+                  problems.append(f"{comp}: other-writable (mode {oct(perm)})")
+          if problems:
+              for pr in problems:
+                  print(f"::error::untrusted ancestor {pr}")
+              sys.exit(1)
+          print(f"ancestor chain trusted (real dir, uid 0, no group/other write): {chain}")
+          PY
+      - name: Run deployment root-security tests as root (no skips)
+        # Absolute venv interpreter under passwordless sudo (effective UID 0) so the trusted dir-fd
+        # walk, the pinned-exec root-owner refusal, and the real subprocess seam actually execute. The
+        # fixtures build beneath the preflight-verified SECP_ROOT_TEST_DIR (same fixed trusted dir).
+        run: >-
+          sudo env "SECP_ROOT_TEST_DIR=/root/secp-roottest" "$(pwd)/.venv/bin/python" -m pytest
+          apps/deployment/tests/test_deployment_root_manifest.py
+          apps/deployment/tests/test_deployment_pinned_exec.py
+          apps/deployment/tests/test_deployment_realproc.py
+          -q -p no:cacheprovider
+          --junitxml=junit-deployment-root.xml
+      - name: Upload deployment root JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-backend-deployment-root
+          path: junit-deployment-root.xml
+          if-no-files-found: error
+      - name: Enforce the deployment root-security tests actually executed as root (no skips)
+        if: always()
+        # Parse the JUnit programmatically — do NOT trust pytest's exit code, since a fully-skipped
+        # module exits 0. Fail unless >= 20 collected and none skipped/failed/errored.
+        run: |
+          "$(pwd)/.venv/bin/python" - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          p = Path("junit-deployment-root.xml")
+          if not p.exists():
+              print("::error::junit-deployment-root.xml missing — the root test step produced no results")
+              sys.exit(1)
+          root = ET.parse(p).getroot()
+          tests = failures = errors = skipped = 0
+          for s in root.iter("testsuite"):
+              tests += int(s.get("tests", 0))
+              failures += int(s.get("failures", 0))
+              errors += int(s.get("errors", 0))
+              skipped += int(s.get("skipped", 0))
+          print(f"collected={tests} failures={failures} errors={errors} skipped={skipped}")
+          problems = []
+          if tests < 20:
+              problems.append(f"expected >= 20 deployment root tests, collected {tests}")
+          if skipped != 0:
+              problems.append(f"expected 0 skipped, got {skipped} (root-security tests NOT executed as root)")
+          if failures != 0:
+              problems.append(f"{failures} failing deployment root test(s)")
+          if errors != 0:
+              problems.append(f"{errors} errored deployment root test(s)")
+          if problems:
+              for pr in problems:
+                  print(f"::error::{pr}")
+              sys.exit(1)
+          print("Deployment root-security tests executed as root: >= 20 tests, zero skipped/failed/errored.")
+          PY
+
   # --- stable aggregate gate: green only if every backend job is green -------------------------
   # Retains the exact externally visible check name for branch-protection stability.
   backend:
@@ -260,23 +394,26 @@ jobs:
         backend-test-inventory,
         backend-pytest,
         backend-realfs-root,
+        backend-deployment-root,
         backend-security,
       ]
     if: always()
     steps:
       - name: Require every backend job to succeed
         run: |
-          echo "backend-static         = ${{ needs.backend-static.result }}"
-          echo "backend-test-inventory = ${{ needs.backend-test-inventory.result }}"
-          echo "backend-pytest         = ${{ needs.backend-pytest.result }}"
-          echo "backend-realfs-root    = ${{ needs.backend-realfs-root.result }}"
-          echo "backend-security       = ${{ needs.backend-security.result }}"
+          echo "backend-static          = ${{ needs.backend-static.result }}"
+          echo "backend-test-inventory  = ${{ needs.backend-test-inventory.result }}"
+          echo "backend-pytest          = ${{ needs.backend-pytest.result }}"
+          echo "backend-realfs-root     = ${{ needs.backend-realfs-root.result }}"
+          echo "backend-deployment-root = ${{ needs.backend-deployment-root.result }}"
+          echo "backend-security        = ${{ needs.backend-security.result }}"
           fail=0
           for r in \
             "${{ needs.backend-static.result }}" \
             "${{ needs.backend-test-inventory.result }}" \
             "${{ needs.backend-pytest.result }}" \
             "${{ needs.backend-realfs-root.result }}" \
+            "${{ needs.backend-deployment-root.result }}" \
             "${{ needs.backend-security.result }}"; do
             if [ "$r" != "success" ]; then fail=1; fi
           done
