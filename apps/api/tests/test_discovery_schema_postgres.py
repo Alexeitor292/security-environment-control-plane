@@ -11,9 +11,10 @@ from __future__ import annotations
 import copy
 import os
 import time
+import uuid
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
 PG_URL = os.environ.get("SECP_TEST_POSTGRES_URL")
@@ -139,6 +140,146 @@ def test_bootstrap_session_insert_succeeds_on_postgres(pg_engine):
         s.flush()
         assert sess.created_at is not None and sess.updated_at is not None
         s.rollback()
+
+
+def test_pr5f_legacy_worker_columns_keep_server_defaults(pg_engine):
+    """The pinned pre-PR5F images omit both new columns, so their defaults are permanent API."""
+
+    insp = inspect(pg_engine)
+    node_columns = {column["name"]: column for column in insp.get_columns("worker_discovery_node")}
+    snapshot_columns = {column["name"]: column for column in insp.get_columns("discovery_snapshot")}
+    assert node_columns["revision"]["default"] is not None
+    assert snapshot_columns["contact_state"]["default"] is not None
+
+
+def test_pr5f_postgres_advances_legacy_worker_key_revision(pg_engine):
+    """A write shaped like the pinned B8 worker advances revision and unlinks the old anchor."""
+
+    from secp_api.seed import bootstrap_dev
+
+    with Session(pg_engine) as session:
+        principal = bootstrap_dev(session)
+        session.flush()
+        node_id = uuid.uuid4()
+        linked_registration = uuid.uuid4()
+        session.execute(
+            text(
+                """
+                INSERT INTO worker_discovery_node
+                    (id, organization_id, node_label, ssh_public_key,
+                     ssh_public_key_fingerprint, admission_anchor_hex,
+                     admission_anchor_fingerprint, worker_identity_registration_id,
+                     created_by, created_at, updated_at)
+                VALUES
+                    (:id, :organization_id, 'legacy-worker', 'ssh-ed25519 AAAA-old',
+                     'SHA256:old', :old_anchor, 'sha256:old', :registration_id,
+                     NULL, now(), now())
+                """
+            ),
+            {
+                "id": node_id,
+                "organization_id": principal.organization_id,
+                "old_anchor": "a" * 64,
+                "registration_id": linked_registration,
+            },
+        )
+        assert (
+            session.execute(
+                text("SELECT revision FROM worker_discovery_node WHERE id = :id"), {"id": node_id}
+            ).scalar_one()
+            == 1
+        )
+
+        # The old image does not know about revision and therefore omits it from this UPDATE.
+        session.execute(
+            text(
+                """
+                UPDATE worker_discovery_node
+                SET ssh_public_key = 'ssh-ed25519 AAAA-new',
+                    ssh_public_key_fingerprint = 'SHA256:new',
+                    admission_anchor_hex = :new_anchor,
+                    admission_anchor_fingerprint = 'sha256:new',
+                    updated_at = now()
+                WHERE id = :id
+                """
+            ),
+            {"id": node_id, "new_anchor": "b" * 64},
+        )
+        row = session.execute(
+            text(
+                """
+                SELECT revision, worker_identity_registration_id
+                FROM worker_discovery_node WHERE id = :id
+                """
+            ),
+            {"id": node_id},
+        ).one()
+        assert row.revision == 2
+        assert row.worker_identity_registration_id is None
+        session.rollback()
+
+
+def test_pr5f_postgres_derives_contact_state_for_legacy_snapshot_writes(pg_engine):
+    """The pinned B8 worker's existing facts map to durable, closed contact evidence."""
+
+    import secp_api.immutability  # noqa: F401
+    from secp_api.discovery_models import DiscoveryJob
+    from secp_api.seed import bootstrap_dev
+    from secp_api.services import target_discovery as td
+
+    cases = (
+        (None, True, "unverifiable"),
+        ("probe_source_sealed", False, "sealed"),
+        ("enrollment_changed", False, "drift"),
+        ("bootstrap_unavailable", False, "bundle_unavailable"),
+        ("host_key_binding_unverified", True, "host_key_refused"),
+        ("probe_refused", True, "unverifiable"),
+        (None, False, "unverifiable"),
+    )
+    with Session(pg_engine) as session:
+        principal = bootstrap_dev(session)
+        session.flush()
+        target = _proxmox_target(session, principal)
+        enrollment = td.request_discovery(session, principal, execution_target_id=target.id)
+        session.flush()
+        job = session.execute(
+            select(DiscoveryJob).where(DiscoveryJob.enrollment_id == enrollment.id)
+        ).scalar_one()
+
+        for index, (reason_code, bundle_available, expected) in enumerate(cases):
+            snapshot_id = uuid.uuid4()
+            session.execute(
+                text(
+                    """
+                    INSERT INTO discovery_snapshot
+                        (id, enrollment_id, organization_id, job_id, enrollment_version,
+                         evidence, evidence_hash, capacity_snapshot_hash, eligibility,
+                         reason_code, worker_identity_version, bundle_available, created_by,
+                         created_at, updated_at)
+                    VALUES
+                        (:id, :enrollment_id, :organization_id, :job_id, :enrollment_version,
+                         '{}'::json, :evidence_hash, :capacity_hash, 'unverifiable',
+                         :reason_code, 1, :bundle_available, NULL, now(), now())
+                    """
+                ),
+                {
+                    "id": snapshot_id,
+                    "enrollment_id": enrollment.id,
+                    "organization_id": enrollment.organization_id,
+                    "job_id": job.id,
+                    "enrollment_version": enrollment.enrollment_version,
+                    "evidence_hash": f"sha256:legacy-{index}",
+                    "capacity_hash": f"sha256:capacity-{index}",
+                    "reason_code": reason_code,
+                    "bundle_available": bundle_available,
+                },
+            )
+            actual = session.execute(
+                text("SELECT contact_state FROM discovery_snapshot WHERE id = :id"),
+                {"id": snapshot_id},
+            ).scalar_one()
+            assert actual == expected
+        session.rollback()
 
 
 if __name__ == "__main__":  # pragma: no cover

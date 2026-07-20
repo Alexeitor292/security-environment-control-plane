@@ -41,14 +41,12 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# A random UUID injected into a parametrize *value* (e.g. ``str(uuid.uuid4())``) leaks into the
-# pytest node ID and makes it non-deterministic across separate collection runs — the same file,
-# in the same environment, collects differing node IDs. Canonicalizing the UUID token lets the
-# coverage proof compare the stable parametrized-CASE identity (the parameter name) instead of the
-# random data, without weakening the proof to a loose file-count comparison. See
-# tests/test_pytest_shards.py and docs/development/testing.md.
+# A random UUID appended to a stable parametrize case label (for example ``field-<uuid4>``) leaks
+# into the pytest node ID and makes it non-deterministic across collection runs. Canonicalize only a
+# UUID preceded by that stable ``-`` separator. A UUID that is the entire case ID is semantic test
+# data and MUST remain distinct; otherwise two literal invalid-UUID cases can collapse into one.
 _VOLATILE_UUID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"(?<=-)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
 

@@ -129,7 +129,7 @@ def _ed_worker(session, principal, *, label: str = "staging-worker-a") -> tuple[
     row = wi.register_worker_identity(
         session,
         principal,
-        mechanism=WorkerIdentityMechanism.mtls_workload_identity,
+        mechanism=WorkerIdentityMechanism.ed25519_signed_nonce,
         identity_label=label,
         deployment_binding=f"deploy-{label}",
         verification_anchor_fingerprint=compute_verification_anchor_fingerprint(pub),
@@ -563,8 +563,8 @@ def test_identity_no_approved_registration_fails_closed(session, principal, tmp_
 
 
 def test_identity_ambiguous_registration_fails_closed(session, principal, tmp_path):
-    _approve_worker_identity(session, principal, label="worker-a")
-    _approve_worker_identity(session, principal, label="worker-b")
+    _ed_worker(session, principal, label="worker-a")
+    _ed_worker(session, principal, label="worker-b")
     priv, pub = _dummy_keypair()
     target, onb, auth = _target_with_auth(session, principal)
     enrollment, job = _enroll(session, principal, target)
@@ -573,6 +573,27 @@ def test_identity_ambiguous_registration_fails_closed(session, principal, tmp_pa
     outcome = _run(session, _live_comp(session, mount, probe, priv, pub), job)
     assert outcome.ok is False and outcome.reason_code == "worker_identity_ambiguous"
     assert probe.calls == 0
+
+
+def test_unrelated_mtls_identity_does_not_ambiguous_ed_admission(session, principal, tmp_path):
+    _approve_worker_identity(session, principal, label="ordinary-worker-existing")
+    private_key, public_key = _ed_worker(session, principal, label="discovery-worker")
+    target, onboarding, authorization = _target_with_auth(session, principal)
+    enrollment, job = _enroll(session, principal, target)
+    mount = _full_mount(
+        tmp_path,
+        _valid_anchor(principal, target, onboarding, enrollment, authorization),
+    )
+    probe = _FakeProbe()
+
+    outcome = _run(
+        session,
+        _live_comp(session, mount, probe, private_key, public_key),
+        job,
+    )
+
+    assert outcome.ok is True
+    assert probe.calls > 0
 
 
 def test_identity_revoked_mid_run_blocks_plan(session, principal, tmp_path):
@@ -962,6 +983,9 @@ def test_item4_successful_admission_reads_key_material_after(session, principal,
 def _write_identity_files(tmp_path, priv, pub):
     (tmp_path / "id.key").write_text(priv)
     (tmp_path / "id.anchor").write_text(pub)
+    if os.name == "posix":
+        os.chmod(tmp_path / "id.key", 0o600)
+        os.chmod(tmp_path / "id.anchor", 0o600)
     return str(tmp_path / "id.key"), str(tmp_path / "id.anchor")
 
 

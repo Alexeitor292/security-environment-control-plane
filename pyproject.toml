@@ -25,10 +25,12 @@ dependencies = [
     "cryptography>=49.0.0",
 ]
 
-# The customer-facing management-plane installer console command (SECP-PR5E). Same engine as
-# `python -m secp_management`.
+# `secpctl` is the customer-facing management-plane installer (SECP-PR5E). The PR5F proxy entry is
+# internal to the separately pinned admission-proxy image; it is not a host activation CLI.
 [project.scripts]
 secpctl = "secp_management.cli:main"
+secp-admission-proxy = "secp_discovery_activation.proxy:main"
+secp-discovery-activation = "secp_discovery_activation.cli:main"
 
 [project.optional-dependencies]
 # Temporal is only needed to run the durable worker path. Tests and the inline
@@ -52,6 +54,7 @@ packages = [
     "apps/worker/secp_worker",
     "apps/commissioning/secp_commissioning",
     "apps/deployment/secp_operator_deployment",
+    "apps/deployment/secp_discovery_activation",
     "apps/management/secp_management",
     "contracts/scenario-schema/secp_scenario_schema",
     "contracts/plugin-api/secp_plugin_api",

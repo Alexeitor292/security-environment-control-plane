@@ -1,6 +1,6 @@
 import "./readonly-ops.css";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../api/client";
 import type {
@@ -39,6 +39,8 @@ import {
   WORKER_SIDE_PREREQUISITES,
   bootstrapStatusLabel,
   currentStep,
+  matchWorkerNodeByPublicKeyFingerprint,
+  validateNodeIdentityReview,
   validateFingerprint,
   validatePublicKey,
 } from "./read-only-bootstrap";
@@ -59,12 +61,23 @@ export function ReadOnlyBootstrap() {
   // SECP-B8: the worker OWNS + generates its keypair and publishes only the
   // PUBLIC key — the operator never runs ssh-keygen. This drives auto-populate.
   const workerNodes = useAsync<WorkerDiscoveryNode[]>(() => api.listWorkerNodes(), []);
+  const bootstrapSessions = useAsync<BootstrapSession[]>(
+    () => api.listBootstrapSessions(),
+    [],
+  );
   const [session, setSession] = useState<BootstrapSession | null>(null);
   const [script, setScript] = useState<BootstrapScript | null>(null);
   const [targetId, setTargetId] = useState("");
   const [publicKey, setPublicKey] = useState("");
   const [fingerprint, setFingerprint] = useState("");
   const [proof, setProof] = useState("");
+  const [selectedWorkerNodeId, setSelectedWorkerNodeId] = useState("");
+  const [deploymentBinding, setDeploymentBinding] = useState("");
+  const [reviewProofId, setReviewProofId] = useState("");
+  const [reviewIssuer, setReviewIssuer] = useState("");
+  const [deploymentBindingReviewed, setDeploymentBindingReviewed] = useState(false);
+  const [verificationAnchorReviewed, setVerificationAnchorReviewed] = useState(false);
+  const [rotationRevocationReviewed, setRotationRevocationReviewed] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const action = useAction({ codeText: BOOTSTRAP_ERROR_TEXT });
 
@@ -73,7 +86,43 @@ export function ReadOnlyBootstrap() {
   const fpCheck = validateFingerprint(fingerprint);
   const proxmoxTargets = (targets.data ?? []).filter((t) => t.plugin_name === "proxmox");
   const nodes = workerNodes.data ?? [];
+  const selectedWorkerNode = nodes.find((node) => node.id === selectedWorkerNodeId);
+  const sessionNodeMatch = session
+    ? matchWorkerNodeByPublicKeyFingerprint(
+        nodes,
+        session.worker_ssh_public_key_fingerprint,
+      )
+    : null;
+  const identityReview = {
+    deploymentBinding,
+    proofId: reviewProofId,
+    issuer: reviewIssuer,
+    deploymentBindingReviewed,
+    verificationAnchorReviewed,
+    rotationRevocationReviewed,
+  };
+  const identityReviewCheck = validateNodeIdentityReview(identityReview);
+  const resumableSessions = (bootstrapSessions.data ?? []).filter(
+    (candidate) => ["pending", "completed", "bound"].includes(candidate.status),
+  );
   const railItems = bootstrapStepItems(STEP_LABELS, session);
+
+  // A selected id is convenient while the page stays open. A resumed/reloaded server session is
+  // instead rebound from its authoritative SSH public-key fingerprint. Zero or multiple matches
+  // clear the selection and keep approval/binding disabled.
+  useEffect(() => {
+    if (!session || !workerNodes.data) return;
+    const match = matchWorkerNodeByPublicKeyFingerprint(
+      workerNodes.data,
+      session.worker_ssh_public_key_fingerprint,
+    );
+    if (match.ok) {
+      setSelectedWorkerNodeId(match.node.id);
+      setPublicKey(match.node.ssh_public_key);
+    } else {
+      setSelectedWorkerNodeId("");
+    }
+  }, [session, workerNodes.data]);
 
   const create = () =>
     action.run(async () => {
@@ -96,9 +145,36 @@ export function ReadOnlyBootstrap() {
       );
     });
 
+  const resume = (sessionId: string) =>
+    action.run(async () => {
+      const resumed = await api.getBootstrapSession(sessionId);
+      setScript(
+        resumed.status === "pending" ? await api.getBootstrapScript(resumed.id) : null,
+      );
+      setSession(resumed);
+    });
+
   const bind = () =>
     action.run(async () => {
       if (!session) return;
+      const match = matchWorkerNodeByPublicKeyFingerprint(
+        nodes,
+        session.worker_ssh_public_key_fingerprint,
+      );
+      if (!match.ok || !identityReviewCheck.ok) return;
+      const linked = await api.reviewAndLinkWorkerNode(match.node.id, {
+        expected_node_revision: match.node.revision,
+        expected_ssh_public_key_fingerprint: match.node.ssh_public_key_fingerprint,
+        expected_admission_anchor_fingerprint:
+          match.node.admission_anchor_fingerprint,
+        deployment_binding: deploymentBinding,
+        proof_id: reviewProofId,
+        issuer: reviewIssuer,
+        deployment_binding_review_confirmed: true,
+        verification_anchor_review_confirmed: true,
+        rotation_revocation_review_confirmed: true,
+      });
+      if (!linked.worker_identity_registration_id) return;
       setSession(await api.bindBootstrapSession(session.id));
     });
 
@@ -115,6 +191,7 @@ export function ReadOnlyBootstrap() {
     });
 
   function applyWorkerNode(node: WorkerDiscoveryNode) {
+    setSelectedWorkerNodeId(node.id);
     setPublicKey(node.ssh_public_key);
     setNotice(
       `Using the worker's published PUBLIC key (fingerprint ${node.ssh_public_key_fingerprint}). ` +
@@ -157,6 +234,22 @@ export function ReadOnlyBootstrap() {
                 <h3 style={{ margin: 0 }}>{STEP_LABELS.create}</h3>
                 <RespBadge who={BOOTSTRAP_RESPONSIBILITY.create} />
               </div>
+              {resumableSessions.length > 0 && (
+                <CyberSelect
+                  label="Resume an existing bootstrap session"
+                  value=""
+                  onChange={(event) => {
+                    if (event.target.value) void resume(event.target.value);
+                  }}
+                  options={[
+                    { value: "", label: "Select a session to resume..." },
+                    ...resumableSessions.map((candidate) => ({
+                      value: candidate.id,
+                      label: `${candidate.status} (${candidate.id.slice(0, 8)})`,
+                    })),
+                  ]}
+                />
+              )}
               <CyberSelect
                 label="Proxmox target"
                 value={targetId}
@@ -174,10 +267,15 @@ export function ReadOnlyBootstrap() {
               {nodes.length > 0 ? (
                 <CyberSelect
                   label="Use a published worker's public key"
-                  value=""
+                  value={selectedWorkerNodeId}
                   onChange={(e) => {
                     const n = nodes.find((x) => x.id === e.target.value);
-                    if (n) applyWorkerNode(n);
+                    if (n) {
+                      applyWorkerNode(n);
+                    } else {
+                      setSelectedWorkerNodeId("");
+                      setPublicKey("");
+                    }
                   }}
                   options={[
                     { value: "", label: "Select a worker node…" },
@@ -192,7 +290,7 @@ export function ReadOnlyBootstrap() {
                   No worker has published a public key yet. Enable the worker-managed
                   discovery profile (<code>SECP_DISCOVERY_WORKER_MANAGED_BUNDLE=true</code>)
                   — the worker will generate its keypair and publish its PUBLIC key here
-                  automatically. You can also paste a public key below.
+                  automatically. Binding remains unavailable until one published node is selected.
                 </SafetyNotice>
               )}
               <label className="rops-note" htmlFor="worker-public-key">
@@ -203,14 +301,16 @@ export function ReadOnlyBootstrap() {
                 rows={2}
                 value={publicKey}
                 placeholder="ssh-ed25519 AAAA... worker@secp"
-                onChange={(e) => setPublicKey(e.target.value)}
+                readOnly
               />
               {publicKey && !keyCheck.ok && (
                 <p className="ui-field__error">{keyCheck.message}</p>
               )}
               <div style={{ marginTop: 10 }}>
                 <CyberButton
-                  disabled={action.busy || !targetId || !keyCheck.ok}
+                  disabled={
+                    action.busy || !targetId || !selectedWorkerNode || !keyCheck.ok
+                  }
                   onClick={create}
                 >
                   Generate bootstrap script
@@ -298,11 +398,99 @@ export function ReadOnlyBootstrap() {
                 <RespBadge who={BOOTSTRAP_RESPONSIBILITY.bind} />
               </div>
               <p className="rops-note">
-                Endpoint binding digest computed. Create the separately-approved live-read
-                authorization for this exact endpoint.
+                Endpoint binding digest computed. First perform the explicit worker identity
+                review for the exact published node, then create the separately-approved
+                live-read authorization for this exact endpoint. Publication alone grants
+                nothing.
               </p>
-              <CyberButton variant="secondary" size="sm" disabled={action.busy} onClick={bind}>
-                Create live-read authorization
+              {sessionNodeMatch?.ok ? (
+                <SafetyNotice role="status" tone="info">
+                  Matched published node <strong>{sessionNodeMatch.node.node_label}</strong>
+                  {" at revision "}
+                  {sessionNodeMatch.node.revision}. Review its SSH public-key fingerprint{" "}
+                  <HashChip
+                    value={sessionNodeMatch.node.ssh_public_key_fingerprint}
+                    digits={18}
+                  />{" "}
+                  and admission-anchor fingerprint{" "}
+                  <HashChip
+                    value={sessionNodeMatch.node.admission_anchor_fingerprint}
+                    digits={18}
+                  />
+                  .
+                </SafetyNotice>
+              ) : (
+                <SafetyNotice role="alert" tone="warn">
+                  {sessionNodeMatch?.reason === "ambiguous"
+                    ? "More than one published node matches this session's public-key fingerprint. Binding is refused until the ambiguity is removed."
+                    : "No current published node matches this session's public-key fingerprint. Select or create a session for the current worker key."}
+                </SafetyNotice>
+              )}
+              <CyberInput
+                label="Deployment binding (opaque, non-secret)"
+                value={deploymentBinding}
+                placeholder="production-worker"
+                onChange={(event) => setDeploymentBinding(event.target.value)}
+              />
+              <CyberInput
+                label="Review proof ID (opaque, non-secret)"
+                value={reviewProofId}
+                placeholder="change-review-1234"
+                onChange={(event) => setReviewProofId(event.target.value)}
+              />
+              <CyberInput
+                label="Review issuer (opaque, non-secret)"
+                value={reviewIssuer}
+                placeholder="platform-operator"
+                onChange={(event) => setReviewIssuer(event.target.value)}
+              />
+              <div className="rops-checklist">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={deploymentBindingReviewed}
+                    onChange={(event) =>
+                      setDeploymentBindingReviewed(event.target.checked)
+                    }
+                  />{" "}
+                  I reviewed the opaque deployment binding for this worker node.
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={verificationAnchorReviewed}
+                    onChange={(event) =>
+                      setVerificationAnchorReviewed(event.target.checked)
+                    }
+                  />{" "}
+                  I reviewed the exact published admission-anchor fingerprint above.
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={rotationRevocationReviewed}
+                    onChange={(event) =>
+                      setRotationRevocationReviewed(event.target.checked)
+                    }
+                  />{" "}
+                  I reviewed key rotation. If a current same-label identity uses the old
+                  anchor, revoke it before approving this one.
+                </label>
+              </div>
+              {!identityReviewCheck.ok && (
+                <p className="ui-field__error">{identityReviewCheck.message}</p>
+              )}
+              <CyberButton
+                variant="secondary"
+                size="sm"
+                disabled={
+                  action.busy ||
+                  sessionNodeMatch?.ok !== true ||
+                  !identityReviewCheck.ok
+                }
+                onClick={bind}
+              >
+                Approve worker identity and create live-read authorization
               </CyberButton>
               <details className="rops-disclosure" data-testid="substrate-grant">
                 <summary>Target not staging-substrate eligible?</summary>
@@ -372,6 +560,20 @@ export function ReadOnlyBootstrap() {
                   ))}
                 </ul>
               </details>
+            </CyberCard>
+          )}
+
+          {session && step === "refused" && (
+            <CyberCard>
+              <div className="rops-step-head">
+                <h3 style={{ margin: 0 }}>{STEP_LABELS.refused}</h3>
+                <StatusBadge state={session.status} domain="bootstrap" />
+              </div>
+              <SafetyNotice role="alert" tone="warn">
+                This session is not authorized and cannot be used for discovery. Resume a
+                different current session or create a new one for the worker's latest published
+                public key.
+              </SafetyNotice>
             </CyberCard>
           )}
         </div>

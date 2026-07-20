@@ -146,6 +146,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
+        redirect_slashes=False,
         description=(
             "Security Environment Control Platform control plane for governed environment "
             "authoring, simulated execution, and controlled provider integration. The API "

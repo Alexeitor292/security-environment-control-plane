@@ -123,6 +123,7 @@ describe("Target discovery UI logic", () => {
       candidate_vmids: [9000, 9001],
       evidence_hash: "sha256:ee",
       bundle_available: false,
+      contact_state: "sealed",
       created_at: "2026-07-06T00:00:00Z",
     };
     const summary = evidenceSummary(ev).join(" ");

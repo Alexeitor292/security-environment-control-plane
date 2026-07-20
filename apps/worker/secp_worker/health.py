@@ -99,6 +99,24 @@ def readiness_status() -> tuple[bool, str]:
     return True, task_queue
 
 
+def readiness_process_id() -> int | None:
+    """Return the live PID bound to the current readiness marker, or ``None``.
+
+    This narrow projection lets another fixed, process-local marker bind itself to the same
+    ordinary worker without exposing marker contents or accepting a caller-selected path.
+    """
+
+    try:
+        with open(_ready_path(), encoding="utf-8") as fh:
+            parts = fh.read().split()
+        pid = int(parts[0])
+        if len(parts) < 2 or not _pid_alive(pid):
+            return None
+    except (FileNotFoundError, ValueError, IndexError):
+        return None
+    return pid
+
+
 def is_ready() -> bool:
     """True only if the readiness marker exists AND the recorded worker PID is still alive."""
     return readiness_status()[0]

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 from pathlib import Path
 
 import pytest
@@ -95,14 +96,19 @@ def test_live_composition_uses_http_admission_client_over_endpoint(tmp_path) -> 
     # the real HTTP client pointed at the internal admission endpoint — not a sealed/in-process one.
     from _admission_tls_util import write_ca_only
     from secp_api.config import Settings
+    from secp_api.worker_admission_contract import generate_ed25519_keypair
     from secp_worker.admission_http_transport import HttpxAdmissionTransport
     from secp_worker.target_discovery.admission_client import HttpWorkerAdmissionClient
     from secp_worker.target_discovery.composition import _build_admission_client
 
     key = tmp_path / "id.key"
     anchor = tmp_path / "id.anchor"
-    key.write_text("aa" * 32)
-    anchor.write_text("bb" * 32)
+    private_hex, public_hex = generate_ed25519_keypair()
+    key.write_text(private_hex)
+    anchor.write_text(public_hex)
+    if os.name == "posix":
+        os.chmod(key, 0o600)
+        os.chmod(anchor, 0o600)
     endpoint = "https://control-plane.example:8443"  # .example placeholder (no-real-endpoints)
     settings = Settings(
         discovery_controlled_integration_enabled=True,

@@ -113,6 +113,7 @@ class DiscoveryEvidenceOut(BaseModel):
     candidate_vmids: list[int]
     evidence_hash: str
     bundle_available: bool
+    contact_state: str
     created_at: datetime
 
 

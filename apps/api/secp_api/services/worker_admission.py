@@ -31,6 +31,7 @@ from secp_api.enums import (
     OnboardingStatus,
     TargetStatus,
     WorkerDiscoveryAdmissionStatus,
+    WorkerIdentityMechanism,
     WorkerIdentityStatus,
 )
 from secp_api.live_read_contract import connection_identity_hash
@@ -80,6 +81,8 @@ def _approved_registrations(
             select(WorkerIdentityRegistration).where(
                 WorkerIdentityRegistration.organization_id == org_id,
                 WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
+                WorkerIdentityRegistration.mechanism
+                == WorkerIdentityMechanism.ed25519_signed_nonce,
             )
         )
         .scalars()
@@ -95,6 +98,8 @@ def _verify_registration(
     reg = session.get(WorkerIdentityRegistration, registration_id)
     if reg is None or reg.status != WorkerIdentityStatus.approved:
         raise WorkerAdmissionRefused("worker_identity_unapproved")
+    if reg.mechanism != WorkerIdentityMechanism.ed25519_signed_nonce:
+        raise WorkerAdmissionRefused("worker_identity_mechanism_mismatch")
     if _aware(reg.expiry) <= now:
         raise WorkerAdmissionRefused("worker_identity_expired")
     if reg.identity_version != expected_version:

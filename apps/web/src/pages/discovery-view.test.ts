@@ -53,6 +53,7 @@ const evidence = (over: Partial<DiscoveryEvidence> = {}): DiscoveryEvidence =>
     candidate_vmids: [9000, 9001],
     evidence_hash: "sha256:abc",
     bundle_available: true,
+    contact_state: "contacted",
     created_at: "2026-07-10T09:00:00Z",
     ...over,
   }) as DiscoveryEvidence;

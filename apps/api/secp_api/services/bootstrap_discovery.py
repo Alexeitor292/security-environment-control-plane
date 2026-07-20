@@ -36,6 +36,7 @@ from secp_api.discovery_bootstrap_contract import (
 )
 from secp_api.enums import (
     AuditAction,
+    LiveReadAuthorizationStatus,
     OnboardingStatus,
     Permission,
     ProxmoxBootstrapStatus,
@@ -50,6 +51,7 @@ from secp_api.live_read_contract import (
 )
 from secp_api.models import (
     ExecutionTarget,
+    LiveReadAuthorization,
     ProxmoxReadOnlyBootstrapSession,
     StagingSubstrateEligibility,
     TargetDiscoveryEnrollment,
@@ -258,6 +260,45 @@ def bind_bootstrap_session(
         )
     if not row.endpoint_binding_hash:
         raise _fail("bootstrap session has no endpoint binding digest; complete it first")
+    if row.status == ProxmoxBootstrapStatus.bound:
+        # A retry is idempotent. Never mint a second authorization for the same session.
+        if row.live_read_authorization_id and row.authorization_version:
+            return row
+        raise _fail("bound bootstrap session has incomplete authorization metadata")
+
+    # A fresh post-activation worker key is adopted through THIS existing bootstrap contract. Lock
+    # and supersede any prior binding for the same target/onboarding, revoking its still-approved
+    # authorization before the replacement can become bound. The partial unique index is the
+    # concurrent-writer backstop; no caller ever selects an unordered stale binding.
+    prior_rows = list(
+        session.execute(
+            select(ProxmoxReadOnlyBootstrapSession)
+            .where(
+                ProxmoxReadOnlyBootstrapSession.execution_target_id == row.execution_target_id,
+                ProxmoxReadOnlyBootstrapSession.onboarding_id == row.onboarding_id,
+                ProxmoxReadOnlyBootstrapSession.status == ProxmoxBootstrapStatus.bound,
+                ProxmoxReadOnlyBootstrapSession.id != row.id,
+            )
+            .with_for_update()
+        ).scalars()
+    )
+    for prior in prior_rows:
+        if prior.live_read_authorization_id is not None:
+            authorization = session.get(LiveReadAuthorization, prior.live_read_authorization_id)
+            if (
+                authorization is not None
+                and authorization.status == LiveReadAuthorizationStatus.approved
+            ):
+                readonly_preflight.revoke_preflight_authorization(
+                    session,
+                    actor,
+                    authorization.id,
+                    reason_code="worker_key_rotated",
+                )
+        prior.status = ProxmoxBootstrapStatus.refused
+        prior.revision = prior.revision + 1
+        _audit(session, prior, AuditAction.readonly_bootstrap_session_refused, "worker_key_rotated")
+    session.flush()
     # Create + approve the live-read authorization bound to the exact endpoint digest. This reuses
     # the SECP-002B-1B-6 authorization pipeline (substrate-eligibility gated, endpoint-bound).
     authorization = readonly_preflight.create_preflight_authorization(
@@ -355,15 +396,18 @@ def get_bundle_descriptor(session: Session, actor: Principal, enrollment_id: uui
     return descriptor
 
 
-def resolve_ready_bundle_descriptors(session: Session) -> list[dict]:
+def resolve_ready_bundle_descriptors(session: Session, organization_id: uuid.UUID) -> list[dict]:
     """SECP-B8 worker/system-facing: build the SECRET-FREE bundle descriptor for EVERY enrollment
     whose bootstrap session is fully bound AND has the host public key captured. No principal — the
     worker process resolves its own bundle prep from the shared control-plane store, and every field
     is non-secret (IDs, endpoint digest, SSH host/port/account, host public key). Returns [] when
     nothing is ready. It contacts nothing and reads no private key."""
+    if not isinstance(organization_id, uuid.UUID):
+        return []
     rows = (
         session.execute(
             select(ProxmoxReadOnlyBootstrapSession).where(
+                ProxmoxReadOnlyBootstrapSession.organization_id == organization_id,
                 ProxmoxReadOnlyBootstrapSession.status == ProxmoxBootstrapStatus.bound,
                 ProxmoxReadOnlyBootstrapSession.host_public_key.is_not(None),
             )
@@ -387,7 +431,7 @@ def resolve_ready_bundle_descriptors(session: Session) -> list[dict]:
                 .where(
                     TargetDiscoveryEnrollment.execution_target_id == row.execution_target_id,
                     TargetDiscoveryEnrollment.onboarding_id == row.onboarding_id,
-                    TargetDiscoveryEnrollment.organization_id == row.organization_id,
+                    TargetDiscoveryEnrollment.organization_id == organization_id,
                 )
                 .order_by(TargetDiscoveryEnrollment.created_at.desc())
             )
@@ -396,7 +440,12 @@ def resolve_ready_bundle_descriptors(session: Session) -> list[dict]:
         )
         if enrollment is None:
             continue
-        target = session.get(ExecutionTarget, row.execution_target_id)
+        target = session.execute(
+            select(ExecutionTarget).where(
+                ExecutionTarget.id == row.execution_target_id,
+                ExecutionTarget.organization_id == organization_id,
+            )
+        ).scalar_one_or_none()
         if target is None:
             continue
         try:
@@ -409,6 +458,9 @@ def resolve_ready_bundle_descriptors(session: Session) -> list[dict]:
                 "execution_target_id": str(row.execution_target_id),
                 "onboarding_id": str(row.onboarding_id),
                 "enrollment_id": str(enrollment.id),
+                # Public binding proof used by the worker to refuse a bootstrap session that
+                # authorized a prior worker SSH key.  The private key never enters this descriptor.
+                "worker_ssh_public_key_fingerprint": row.worker_ssh_public_key_fingerprint,
                 "authorization_id": str(row.live_read_authorization_id),
                 "authorization_version": int(row.authorization_version),
                 "endpoint_binding_hash": row.endpoint_binding_hash,

@@ -100,6 +100,7 @@ def get_evidence(
             candidate_vmids=[],
             evidence_hash="",
             bundle_available=False,
+            contact_state="unverifiable",
             created_at=datetime.now(UTC),
         )
     ev = snap.evidence if isinstance(snap.evidence, dict) else {}
@@ -122,6 +123,11 @@ def get_evidence(
         candidate_vmids=list(ev.get("candidate_vmids", []) or []),
         evidence_hash=snap.evidence_hash,
         bundle_available=bool(snap.bundle_available),
+        contact_state=(
+            snap.contact_state.value
+            if hasattr(snap.contact_state, "value")
+            else str(snap.contact_state)
+        ),
         created_at=snap.created_at,
     )
 

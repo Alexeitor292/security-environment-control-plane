@@ -23,37 +23,54 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from sqlalchemy.orm import Session
 
 from secp_api.config import Settings
 from secp_api.deps import db_session, settings_dep
 from secp_api.models import DiscoveryJob, TargetDiscoveryEnrollment
 from secp_api.services import worker_admission
+from secp_api.worker_admission_origin import require_worker_admission_proxy_origin
 
-router = APIRouter(prefix="/internal/worker-discovery-admission", tags=["internal-worker"])
+router = APIRouter(
+    prefix="/internal/worker-discovery-admission",
+    tags=["internal-worker"],
+    dependencies=[Depends(require_worker_admission_proxy_origin)],
+    redirect_slashes=False,
+)
 
 
-class _BeginRequest(BaseModel):
+_ENDPOINT_BINDING = r"^sha256:[0-9a-f]{64}$"
+_ANCHOR = r"^[0-9a-f]{64}$"
+_SIGNATURE = r"^[0-9a-f]{128}$"
+
+
+class _StrictRequest(BaseModel):
+    # JSON UUIDs are strings by definition and must be parsed as UUIDs.  Individual numeric fields
+    # use StrictInt so booleans/strings still cannot be coerced across the admission boundary.
+    model_config = ConfigDict(extra="forbid")
+
+
+class _BeginRequest(_StrictRequest):
     discovery_job_id: uuid.UUID
     authorization_id: uuid.UUID
-    authorization_version: int
-    endpoint_binding_hash: str
+    authorization_version: StrictInt = Field(ge=1, le=2**31 - 1)
+    endpoint_binding_hash: str = Field(pattern=_ENDPOINT_BINDING, min_length=71, max_length=71)
 
 
-class _CompleteRequest(BaseModel):
+class _CompleteRequest(_StrictRequest):
     admission_id: uuid.UUID
-    public_anchor: str
-    signature: str
+    public_anchor: str = Field(pattern=_ANCHOR, min_length=64, max_length=64)
+    signature: str = Field(pattern=_SIGNATURE, min_length=128, max_length=128)
 
 
-class _BindingRequest(BaseModel):
+class _BindingRequest(_StrictRequest):
     """Shared shape for ``assert`` + ``consume``: the worker asserts only NON-secret IDs; the server
     re-derives the enrollment from the job and reruns the authoritative verifier at the server."""
 
     admission_id: uuid.UUID
     discovery_job_id: uuid.UUID
-    endpoint_binding_hash: str
+    endpoint_binding_hash: str = Field(pattern=_ENDPOINT_BINDING, min_length=71, max_length=71)
 
 
 def _require_internal_enabled(settings: Settings) -> None:

@@ -145,3 +145,35 @@ describe("api.publishEnvironmentVersion", () => {
     expect(sent).not.toHaveProperty("publication_fingerprint");
   });
 });
+
+describe("api.reviewAndLinkWorkerNode", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uses only the narrow worker-node subroute and reviewed non-secret fields", async () => {
+    const f = mockFetch(200, {});
+    vi.stubGlobal("fetch", f);
+    const body = {
+      expected_node_revision: 3,
+      expected_ssh_public_key_fingerprint: "SHA256:worker",
+      expected_admission_anchor_fingerprint: "sha256:" + "a".repeat(64),
+      deployment_binding: "production-worker",
+      proof_id: "change-review-1234",
+      issuer: "platform-operator",
+      deployment_binding_review_confirmed: true,
+      verification_anchor_review_confirmed: true,
+      rotation_revocation_review_confirmed: true,
+    } as const;
+
+    await api.reviewAndLinkWorkerNode("node-1", body);
+
+    const [url, init] = f.mock.calls[0] as unknown as [
+      string,
+      { method?: string; body?: string },
+    ];
+    expect(url).toContain(
+      "/read-only-bootstrap/worker-nodes/node-1/identity-approval-link",
+    );
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body ?? "{}")).toEqual(body);
+  });
+});

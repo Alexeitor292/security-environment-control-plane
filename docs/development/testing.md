@@ -11,10 +11,12 @@ machine-checked: the union of the shards is proven equal to the canonical unshar
   container per shard).
 - **Full-suite equivalence is machine-checked** by `scripts/ci/pytest_shards.py verify --collect`.
 
-The canonical corpus is declared in [`.ci/pytest-suite.json`](../../.ci/pytest-suite.json):
-roots (`apps/api/tests`, `tests`, `contracts/scenario-schema/tests`), the shard count (4), and the
-single narrow exclusion (`apps/worker/secp_worker/preflight/self_test.py`, a runtime worker module
-that matches the `*_test.py` glob but is not a pytest suite).
+The canonical corpus is declared in [`.ci/pytest-suite.json`](../../.ci/pytest-suite.json): roots
+(`apps/api/tests`, `tests`, `contracts/scenario-schema/tests`, `apps/commissioning/tests`,
+`apps/deployment/tests`, `apps/management/tests`), the shard count (4), and two narrow exclusions
+(`apps/worker/secp_worker/preflight/self_test.py` and
+`apps/worker/secp_worker/readiness/self_test.py`, runtime worker modules that match the `*_test.py`
+glob but are not pytest suites).
 
 All commands are cross-platform (pure Python + `uv run`); nothing depends on bash-only behaviour.
 
@@ -102,7 +104,9 @@ The complete corpus remains available as a single run — the authoritative equi
 
 ```bash
 uv run python scripts/ci/pytest_shards.py run-all -- -q
-# equivalent to: uv run pytest apps/api/tests tests contracts/scenario-schema/tests -q
+# equivalent to:
+# uv run pytest apps/api/tests tests contracts/scenario-schema/tests \
+#   apps/commissioning/tests apps/deployment/tests apps/management/tests -q
 ```
 
 ## Inventory verification (the completeness proof)
@@ -122,6 +126,25 @@ file is omitted, duplicated, or appears outside the managed roots without being 
 newly added test cannot silently disappear. A new test file placed under a canonical root is
 included automatically; a pytest-shaped file added elsewhere fails the inventory until it is either
 moved under a root or given a justified `exclusions` entry.
+
+## Dedicated Linux-root gates
+
+The canonical shards collect the root-only modules, but a normal non-root run legitimately skips
+their privileged cases. CI therefore has four additive Linux jobs that execute the production
+security backends under `sudo`:
+
+- `backend-realfs-root` runs `apps/commissioning/tests/test_commissioning_realfs.py`;
+- `backend-discovery-activation-root` runs
+  `tests/test_pr5f_discovery_activation_root.py` against the fixed production state layout;
+- `backend-deployment-root` runs the deployment manifest, pinned-executable, and real-process
+  root-security modules; and
+- `backend-management-root` runs `apps/management/tests/test_management_root.py`.
+
+Each job first proves its trusted ancestor/layout preconditions and then parses its JUnit artifact.
+It fails closed on a missing report, under-collection, any skip, failure, or error; a pytest exit code
+alone is not accepted as proof that privileged coverage ran. These jobs are required by the stable
+backend aggregate gate in addition to static checks, inventory, all four PostgreSQL-enabled shards,
+and `pip-audit`.
 
 ## Timing / rebalancing
 
@@ -152,6 +175,8 @@ fallback estimate, so they are balanced reasonably until the next rebalance.
 - The **`Backend (format, lint, types, tests, schema, boundary, security)`** aggregate check is the
   branch-protection gate: it is green only if **every** backend job — static, inventory, all four
   pytest shards, and security — succeeded.
+- The aggregate also requires all four dedicated Linux-root jobs described above; none is optional
+  or represented by a non-root shard skip.
 - If `backend-test-inventory` fails, the shards may all be green yet the corpus is
   incomplete/duplicated: read its output; it names the omitted/duplicated/unmanaged file.
 - JUnit XML for each shard is uploaded as an artifact (`junit-backend-shard-N`) even on failure.

@@ -7,11 +7,18 @@
 > workflow, runs OpenTofu, or contacts any infrastructure. See
 > [ADR-025](../adr/ADR-025-management-plane-bootstrap.md).
 
+> **PR5F roadmap correction:** PR5F is not a new generic browser-enrollment system and does not
+> replace this management bootstrap. B7/B8 already provide `WorkerDiscoveryNode`,
+> `ProxmoxReadOnlyBootstrapSession`, and the existing browser Read-Only Bootstrap wizard. PR5F adds a
+> separate narrow package for the ordinary worker's persistent B8 state and internal admission TLS.
+> Its repository implementation was not installed or exercised by this change.
+
 ## Planes
 
 - **Management plane** — the controller + site workers, management databases/API/UI/Temporal/MinIO/
   Keycloak, the ordinary worker, and the sealed operator. SECP runs FROM here.
-- **Infrastructure plane** — Proxmox (PR5G), vCenter, Kubernetes, cloud.
+- **Infrastructure plane** — Proxmox, vCenter, Kubernetes, cloud. PR5F activates only the existing
+  B8 read-only Proxmox discovery path; it does not make infrastructure mutation available.
 - **Scenario plane** — lab VMs/LXCs, scenario networks, vulnerable workloads.
 
 A lower plane may never mutate a higher one. The controller and workers are management-plane objects,
@@ -149,8 +156,11 @@ installed. It never restarts the ordinary worker and never removes controller pe
 
 `_OPERATOR_ACTIVATION_SEALED` = `True`; `_PLAN_ONLY_PROCESS_SEALED` = `False`; both
 `_B1A_SUBPROCESS_SEALED` = `True`; the ordinary worker never polls the operator queue; no operator
-`Worker` is constructed; no workflow is submitted; no OpenTofu runs; PR6 remains frozen. Browser
-enrollment is PR5F; Proxmox initialization is PR5G; operator activation is later.
+`Worker` is constructed; no workflow is submitted; no OpenTofu runs; PR6 remains frozen. The existing
+B8 wizard remains the sole browser enrollment/key-binding path. The real read-only Proxmox strap
+already exists; after PR5F persistent worker-key generation, its SECP-managed authorized key must be
+rotated only by running the existing idempotent wizard script. Operator package installation is the
+next separate deployment step; operator activation is later.
 
 ## Production requires reviewed adapters (shipped state fails closed)
 
@@ -168,3 +178,9 @@ plans, and a `BootstrapReceipt` + typed `CompensationResult` compensation path).
 adapters (which compose the PR5C/PR5D read-only host adapters, consume these exact typed inputs, wrap
 the pinned container-runtime / `systemctl` seams, and compensate partial effects without any generic
 path/subprocess surface) is a **later, separately reviewed milestone** out of scope for PR5E.
+
+PR5F does not make these general management-bootstrap adapters real. Its separate
+`secp_discovery_activation` package is fixed-purpose: ordinary-worker B8 state, strict internal HTTPS
+admission, and transactional ordinary-worker recreation only. It installs no operator and no
+controlled-live plan composition. No real OpenTofu plan has run; apply/destroy remain unavailable and
+PR6 remains frozen. See [the PR5F B8 activation runbook](pr5f-b8-production-activation.md).

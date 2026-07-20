@@ -176,3 +176,61 @@ def test_transactional_makedir_cleanup_failure_reason(sandbox, monkeypatch):
     # even with both fault injections active.
     fs.makedir(preexisting, uid=0, gid=0, mode=0o750)  # must NOT raise
     assert os.path.exists(preexisting)
+
+
+def test_exclusive_create_round_trip_never_replaces(sandbox):
+    from secp_commissioning.runtime import FilesystemError
+
+    fs = _fs()
+    path = sandbox + "/exclusive-key"
+    receipt = fs.exclusive_install(path, b"owned", uid=0, gid=0, mode=0o600)
+
+    assert fs.created_file_matches(receipt) is True
+    with pytest.raises(FilesystemError) as error:
+        fs.exclusive_install(path, b"replacement", uid=0, gid=0, mode=0o600)
+    assert error.value.reason_code == "fs_target_exists"
+    assert fs.safe_read(path, max_bytes=16, expected_uid=0) == b"owned"
+    assert fs.remove_created_file(receipt) is True
+    assert not os.path.lexists(path)
+
+
+def test_exclusive_cleanup_quarantines_and_restores_source_name_substitution(
+    sandbox,
+    monkeypatch,
+):
+    import secp_commissioning.runtime as runtime_module
+
+    fs = _fs()
+    victim = sandbox + "/victim"
+    retained = "owned-retained"
+    receipt = fs.exclusive_install(victim, b"owned", uid=0, gid=0, mode=0o600)
+    original = runtime_module._rename_noreplace_at
+    injected = False
+
+    def substitute(directory_fd: int, source: str, destination: str) -> None:
+        nonlocal injected
+        if not injected and source == "victim":
+            injected = True
+            os.rename(source, retained, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            fd = os.open(
+                source,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                os.write(fd, b"foreign")
+                os.fchown(fd, 0, 0)
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
+        original(directory_fd, source, destination)
+
+    monkeypatch.setattr(runtime_module, "_rename_noreplace_at", substitute)
+
+    assert fs.remove_created_file(receipt) is False
+    with open(victim, "rb") as handle:
+        assert handle.read() == b"foreign"
+    with open(sandbox + "/" + retained, "rb") as handle:
+        assert handle.read() == b"owned"
+    assert not any(name.startswith(".secp-created-") for name in os.listdir(sandbox))

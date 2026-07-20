@@ -19,14 +19,33 @@ exceptions, audit data, events, plans, or logs — only closed reason codes surf
 
 from __future__ import annotations
 
+import asyncio
+import json
+import math
 import re
 from urllib.parse import urlsplit
+
+from secp_worker.hardened_http import (
+    MAX_REQUEST_BYTES,
+    MAX_RESPONSE_BYTES,
+    HardenedTransportError,
+    parse_bounded_json,
+)
 
 # A conservative hostname / IPv4 literal (no userinfo/ports/whitespace/path/scheme chars).
 _SAFE_HOST_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9\-.]*[A-Za-z0-9])?$")
 
 # Bounded default request timeout (seconds).
 _DEFAULT_TIMEOUT = 10.0
+_MAX_TIMEOUT = 30.0
+_ALLOWED_PATHS = frozenset(
+    {
+        "/internal/worker-discovery-admission/begin",
+        "/internal/worker-discovery-admission/complete",
+        "/internal/worker-discovery-admission/assert",
+        "/internal/worker-discovery-admission/consume",
+    }
+)
 
 
 class AdmissionTransportError(Exception):
@@ -52,8 +71,8 @@ def _validate_admission_endpoint(base_url: str) -> str:
     raw = base_url.strip()
     try:
         parts = urlsplit(raw)
-    except ValueError as exc:
-        raise AdmissionTransportError("admission_endpoint_unparsable") from exc
+    except ValueError:
+        raise AdmissionTransportError("admission_endpoint_unparsable") from None
     if parts.scheme != "https":
         raise AdmissionTransportError("admission_endpoint_scheme_not_https")
     if parts.username is not None or parts.password is not None:
@@ -69,8 +88,8 @@ def _validate_admission_endpoint(base_url: str) -> str:
         raise AdmissionTransportError("admission_endpoint_host_invalid")
     try:
         port = parts.port  # ValueError if malformed / out of 1..65535
-    except ValueError as exc:
-        raise AdmissionTransportError("admission_endpoint_port_invalid") from exc
+    except ValueError:
+        raise AdmissionTransportError("admission_endpoint_port_invalid") from None
     netloc = host if port is None else f"{host}:{port}"
     return f"https://{netloc}"
 
@@ -90,9 +109,15 @@ class HttpxAdmissionTransport:
         if not (isinstance(ca_path, str) and ca_path.strip()):
             raise AdmissionTransportError("admission_ca_required")
         self._ca_path = ca_path
-        self._timeout = (
-            timeout if (isinstance(timeout, int | float) and timeout > 0) else (_DEFAULT_TIMEOUT)
-        )
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, int | float)
+            or timeout <= 0
+            or timeout > _MAX_TIMEOUT
+            or not math.isfinite(float(timeout))
+        ):
+            raise AdmissionTransportError("admission_timeout_invalid")
+        self._timeout = float(timeout)
 
     def __repr__(self) -> str:  # never expose the raw endpoint / CA path
         return "HttpxAdmissionTransport(<redacted>)"
@@ -102,37 +127,89 @@ class HttpxAdmissionTransport:
         """The normalized ``https://host[:port]`` origin (internal accessor for wiring checks)."""
         return self._base_url
 
-    def post(self, path: str, payload: dict) -> tuple[int, dict]:
+    async def _post_async(self, path: str, request_body: bytes) -> tuple[int, bytes]:
         import ssl
 
         import httpx
 
-        # Build the verifier from the EXACT deployment-local CA bundle (an SSLContext — provably
+        # Build the verifier from the EXACT deployment-local CA bundle (an SSLContext -- provably
         # never True/False, and no reliance on httpx's deprecated ``verify=<str>`` path). A CA that
-        # became unreadable/malformed since construction fails closed here.
-        try:
-            ssl_context = ssl.create_default_context(cafile=self._ca_path)
-        except (OSError, ssl.SSLError, ValueError):
-            raise AdmissionTransportError("admission_transport_failed") from None
-        try:
-            with httpx.Client(
+        # became unreadable or malformed since construction fails closed here.
+        ssl_context = ssl.create_default_context(cafile=self._ca_path)
+        async with asyncio.timeout(self._timeout):
+            async with httpx.AsyncClient(
                 verify=ssl_context,  # EXACT deployment-local CA; never system trust, never disabled
                 trust_env=False,  # ignore *_PROXY / SSL_CERT_* / ambient env networking
                 follow_redirects=False,  # a redirect is never a valid admission response
                 timeout=self._timeout,
             ) as client:
-                resp = client.post(self._base_url + path, json=payload)
+                async with client.stream(
+                    "POST",
+                    self._base_url + path,
+                    content=request_body,
+                    headers={
+                        "Accept": "application/json",
+                        "Accept-Encoding": "identity",
+                        "Content-Type": "application/json",
+                    },
+                ) as resp:
+                    if resp.is_redirect:
+                        raise AdmissionTransportError("admission_redirect_forbidden")
+                    encodings = resp.headers.get_list("content-encoding")
+                    if len(encodings) > 1 or any(
+                        value.strip().lower() != "identity" for value in encodings
+                    ):
+                        raise AdmissionTransportError("admission_response_invalid")
+                    status = resp.status_code
+                    response_body = bytearray()
+                    async for chunk in resp.aiter_raw():
+                        if len(chunk) > MAX_RESPONSE_BYTES - len(response_body):
+                            raise HardenedTransportError("response_too_large")
+                        response_body.extend(chunk)
+                    return status, bytes(response_body)
+
+    def post(self, path: str, payload: dict) -> tuple[int, dict]:
+        if path not in _ALLOWED_PATHS:
+            raise AdmissionTransportError("admission_path_forbidden")
+        try:
+            request_body = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        except (TypeError, ValueError, RecursionError):
+            raise AdmissionTransportError("admission_request_invalid") from None
+        if len(request_body) > MAX_REQUEST_BYTES:
+            raise AdmissionTransportError("admission_request_too_large")
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            # The public protocol is synchronous. Refuse explicitly instead of constructing an
+            # un-awaited coroutine or attempting a nested event loop.
+            raise AdmissionTransportError("admission_async_context_forbidden")
+        try:
+            status, raw = asyncio.run(self._post_async(path, request_body))
+        except AdmissionTransportError:
+            raise
+        except HardenedTransportError as exc:
+            reason = (
+                "admission_response_too_large"
+                if exc.reason_code == "response_too_large"
+                else "admission_response_invalid"
+            )
+            raise AdmissionTransportError(reason) from None
         except Exception:
             # A connect/TLS/timeout failure fails closed WITHOUT leaking the endpoint or CA path
             # (``from None`` drops the httpx exception chain, which can contain the host).
             raise AdmissionTransportError("admission_transport_failed") from None
         try:
-            body = resp.json()
-        except ValueError:
-            body = {}
+            body = parse_bounded_json(raw, max_bytes=MAX_RESPONSE_BYTES)
+        except HardenedTransportError:
+            raise AdmissionTransportError("admission_response_invalid") from None
         # Unwrap FastAPI's error envelope so callers see the closed reason code directly.
         if isinstance(body, dict) and isinstance(body.get("detail"), dict):
             body = body["detail"]
         if not isinstance(body, dict):
             body = {}
-        return resp.status_code, body
+        return status, body

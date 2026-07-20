@@ -606,14 +606,15 @@ class ResolverActivationErrorCode(str, Enum):
 
 
 class WorkerIdentityMechanism(str, Enum):
-    """Closed set of worker-identity mechanisms (SECP-B2-4.3). Initially only mTLS workload id.
+    """Closed set of worker-identity mechanisms (SECP-B2-4.3 / SECP-PR5F).
 
-    A label only — it stores/authorizes no certificate, key, CSR, CA, endpoint, or secret. This PR
-    performs NO real mTLS and constructs no attestation; it records only which mechanism a future
-    isolated staging worker will use.
+    A label only — it stores/authorizes no certificate, key, CSR, CA, endpoint, or secret.
+    ``ed25519_signed_nonce`` truthfully names the B6/B8 worker-discovery proof-of-possession
+    mechanism. It is deliberately distinct from X.509 client-certificate mTLS.
     """
 
     mtls_workload_identity = "mtls_workload_identity"
+    ed25519_signed_nonce = "ed25519_signed_nonce"
 
 
 class WorkerIdentityStatus(str, Enum):
@@ -984,6 +985,7 @@ class AuditAction(str, Enum):
     readonly_bootstrap_session_refused = "readonly_bootstrap_session.refused"
     # SECP-B8: a worker published its PUBLIC discovery key material (SSH public key + anchor).
     worker_discovery_node_published = "worker_discovery_node.published"
+    worker_discovery_node_identity_linked = "worker_discovery_node.identity_linked"
     # SECP-B9 — durable topology draft authoring (control-plane only; no infra contact).
     topology_draft_created = "topology_authoring.draft_created"
     topology_revision_created = "topology_authoring.revision_created"
@@ -1815,12 +1817,36 @@ class ProxmoxBootstrapStatus(str, Enum):
 
     ``pending`` (script issued, awaiting the operator's on-host run + bounded proof) →
     ``completed`` (proof accepted, endpoint-binding digest computed) → ``bound`` (a separately
-    approved live-read authorization exists for the exact endpoint). ``refused`` is terminal."""
+    approved live-read authorization exists for the exact endpoint). A later key-rotation session
+    moves the old binding to the pre-existing ``refused`` terminal state and revokes its
+    still-approved authorization before the new binding is committed. Reusing the established
+    value keeps a pre-PR5F controller able to read historical rows during a safe rollback."""
 
     pending = "pending"
     completed = "completed"
     bound = "bound"
     refused = "refused"
+
+
+class DiscoveryContactState(str, Enum):
+    """Closed, durable classification of whether a discovery attempt contacted its target.
+
+    This is evidence, not readiness inferred from flags. ``contacted`` is written only after the
+    read-only probe returned. ``legacy_unrecorded`` is the truthful migration value for snapshots
+    created before contact state was durable.
+    """
+
+    sealed = "sealed"
+    unverifiable = "unverifiable"
+    internal_error = "internal_error"
+    identity_refused = "identity_refused"
+    drift = "drift"
+    bundle_unavailable = "bundle_unavailable"
+    host_key_refused = "host_key_refused"
+    admission_refused = "admission_refused"
+    binding_refused = "binding_refused"
+    contacted = "contacted"
+    legacy_unrecorded = "legacy_unrecorded"
 
 
 class DiscoveryJobStatus(str, Enum):

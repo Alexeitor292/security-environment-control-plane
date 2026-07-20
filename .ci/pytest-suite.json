@@ -28,6 +28,7 @@
   "notes": [
     "roots is the authoritative corpus. It intentionally ADDS contracts/scenario-schema/tests, which the pre-acceleration workflow (`pytest apps/api/tests tests`) omitted — a coverage correction, not a scope expansion.",
     "No pytest suites exist under apps/worker, contracts/plugin-api, plugins, or other packages (verified against the Git-tracked file inventory).",
+    "The PR5F fixed-layout root transaction module lives under the canonical `tests` root. Its dedicated Linux-root no-skip job is additive; normal shards still collect it and observe its explicit non-root skip.",
     "Sharding is by FILE: every node in a file runs in the same shard, so the node-level union of shards equals the canonical collection with empty pairwise intersection.",
     "PostgreSQL-gated, migration, immutability, concurrency, boundary, schema, and security tests are all inside roots and are never excluded; each shard runs against its own real PostgreSQL service."
   ]

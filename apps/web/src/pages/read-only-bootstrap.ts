@@ -5,11 +5,15 @@
 // It NEVER accepts an SSH private key or a free-form command. Live deployment apply remains sealed.
 
 import { ApiClientError } from "../api/client";
-import type { BootstrapSession, BootstrapStatus } from "../api/types";
+import type {
+  BootstrapSession,
+  BootstrapStatus,
+  WorkerDiscoveryNode,
+} from "../api/types";
 
 export const READ_ONLY_BOOTSTRAP_INTRO =
   "This wizard provisions a scoped, audit-only read-only access path on your Proxmox host. " +
-  "You paste the worker's SSH PUBLIC key (never a private key), run one generated script on the " +
+  "You select the worker's published SSH PUBLIC key (never a private key), run one generated script on the " +
   "host, and the app automates the rest (endpoint binding, live-read authorization, binding " +
   "descriptor). Discovery is strictly read-only; the WORKER runs the probes, never the API.";
 
@@ -25,15 +29,15 @@ export type BootstrapStep =
   | "complete"
   | "bind"
   | "run-discovery"
-  | "done";
+  | "refused";
 
 export const STEP_LABELS: Record<BootstrapStep, string> = {
   create: "1. Provide the worker's public key",
   "run-script": "2. Run the generated bootstrap script on Proxmox",
   complete: "3. Confirm bootstrap (host key fingerprint + proof)",
-  bind: "4. Create the live-read authorization",
+  bind: "4. Review worker identity and create the live-read authorization",
   "run-discovery": "5. Run read-only discovery",
-  done: "Bound — ready for read-only discovery",
+  refused: "Session refused — create or resume a valid session",
 };
 
 /** Derive the current wizard step from a session (or null before one exists). */
@@ -46,6 +50,8 @@ export function currentStep(session: BootstrapSession | null): BootstrapStep {
       return "bind";
     case "bound":
       return "run-discovery";
+    case "refused":
+      return "refused";
     default:
       return "create";
   }
@@ -66,6 +72,53 @@ const SSH_PUBKEY = /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))\s+[A-Za
 export interface FieldValidation {
   ok: boolean;
   message?: string;
+}
+
+export interface NodeIdentityReviewDraft {
+  deploymentBinding: string;
+  proofId: string;
+  issuer: string;
+  deploymentBindingReviewed: boolean;
+  verificationAnchorReviewed: boolean;
+  rotationRevocationReviewed: boolean;
+}
+
+const SAFE_OPAQUE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
+
+/** Mirror the backend's secret-free opaque metadata grammar and require every human review. */
+export function validateNodeIdentityReview(review: NodeIdentityReviewDraft): FieldValidation {
+  if (!SAFE_OPAQUE_IDENTIFIER.test(review.deploymentBinding))
+    return {
+      ok: false,
+      message: "Provide a safe opaque deployment binding (letters, digits, dot, underscore, hyphen).",
+    };
+  if (!SAFE_OPAQUE_IDENTIFIER.test(review.proofId))
+    return { ok: false, message: "Provide a safe opaque review proof ID." };
+  if (!SAFE_OPAQUE_IDENTIFIER.test(review.issuer))
+    return { ok: false, message: "Provide a safe opaque review issuer." };
+  if (
+    !review.deploymentBindingReviewed ||
+    !review.verificationAnchorReviewed ||
+    !review.rotationRevocationReviewed
+  )
+    return { ok: false, message: "Explicitly confirm all three worker identity reviews." };
+  return { ok: true };
+}
+
+export type WorkerNodeFingerprintMatch =
+  | { ok: true; node: WorkerDiscoveryNode }
+  | { ok: false; reason: "missing" | "ambiguous" };
+
+/** Recover a session's node from its server-recorded public-key fingerprint, never list order. */
+export function matchWorkerNodeByPublicKeyFingerprint(
+  nodes: WorkerDiscoveryNode[],
+  fingerprint: string,
+): WorkerNodeFingerprintMatch {
+  const matches = nodes.filter(
+    (node) => node.ssh_public_key_fingerprint === fingerprint,
+  );
+  if (matches.length === 1) return { ok: true, node: matches[0] };
+  return { ok: false, reason: matches.length === 0 ? "missing" : "ambiguous" };
 }
 
 /** Client-side pre-check for the worker PUBLIC key. Rejects private keys before they leave the UI. */

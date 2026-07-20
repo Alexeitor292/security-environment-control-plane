@@ -7,6 +7,13 @@
 > OpenTofu, or contacts any infrastructure. Package installation is **not** activation. See
 > [ADR-024](../adr/ADR-024-operator-deployment-package.md).
 
+> **PR5F sequencing note:** the current deployment has not installed this operator package or an
+> operator service. PR5F adds a separate `secp_discovery_activation` package that transactionally
+> recreates only the ordinary worker to activate the existing B8 read-only discovery path. It does
+> not install/start the operator or supply a controlled-live plan composition. Installing this PR5D
+> operator package remains the next separately reviewed deployment step after B8 read-only discovery
+> activation.
+
 ## What PR5D adds
 
 The separately-reviewed, root-controlled package `secp_operator_deployment` that the PR5C operator
@@ -45,7 +52,7 @@ workflow is submitted; no OpenTofu runs; no Proxmox mutation occurs; and the con
 compositions are either separately ready or **truthfully unprovisioned** (the PR5D case — no reviewed
 runtime provider is installed).
 
-## The next operational gate (after PR5D merges)
+## The operator-package operational gate (still not exercised)
 
 Each step is a separate, explicit, human-supervised action. No step auto-triggers the next; the
 operator remains **disabled and not running** at the end.
@@ -89,5 +96,6 @@ operator remains **disabled and not running** at the end.
 
 `_OPERATOR_ACTIVATION_SEALED` stays `True`; `_PLAN_ONLY_PROCESS_SEALED` stays `False` (construction
 still token-gated, shipped composition disabled); both `_B1A_SUBPROCESS_SEALED` constants stay `True`;
-apply/destroy remain impossible; the ordinary worker is never modified or restarted; no workflow is
-submitted; no OpenTofu runs; PR6 remains frozen.
+apply/destroy remain impossible; within this PR5D operator-package sequence the ordinary worker is
+never modified or restarted; no workflow is submitted; no OpenTofu runs; PR6 remains frozen. PR5F's
+separate, receipt-bound ordinary-worker recreation does not weaken this operator-package contract.

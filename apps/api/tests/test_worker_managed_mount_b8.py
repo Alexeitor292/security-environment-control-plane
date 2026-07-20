@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import stat
 
 import pytest
 from secp_worker import bundle_manager as bm
@@ -49,8 +50,10 @@ def _write_worker_bundle(tmp_path) -> str:
     kd = str(tmp_path / "keys")
     bm.ensure_worker_keys(kd)
     host_line, fp = _host_public_key_and_fp()
-    bundle_dir = str(tmp_path / "state" / "discovery-bundle")
-    os.makedirs(os.path.dirname(bundle_dir), exist_ok=True)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(mode=0o700)
+    os.chmod(state_dir, 0o700)
+    bundle_dir = str(state_dir / "discovery-bundle")
     descriptor = {
         "organization_id": "11111111-1111-1111-1111-111111111111",
         "execution_target_id": "22222222-2222-2222-2222-222222222222",
@@ -65,6 +68,8 @@ def _write_worker_bundle(tmp_path) -> str:
         "host_key_fingerprint": fp,
         "host_public_key": host_line,
     }
+    if _POSIX:
+        assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
     bm.write_bundle(
         descriptor, bundle_dir=bundle_dir, ssh_private_key_path=bm.worker_ssh_private_key_path(kd)
     )
