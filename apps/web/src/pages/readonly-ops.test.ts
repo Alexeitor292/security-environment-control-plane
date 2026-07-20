@@ -145,6 +145,7 @@ describe("bootstrapStepItems", () => {
     expect(BOOTSTRAP_RESPONSIBILITY.create).toBe("App");
     expect(BOOTSTRAP_RESPONSIBILITY["run-script"]).toBe("Human operator");
     expect(BOOTSTRAP_RESPONSIBILITY["run-discovery"]).toBe("Worker");
+    expect(BOOTSTRAP_RESPONSIBILITY.refused).toBe("Human operator");
     expect(WORKER_BUNDLE_OWNERSHIP_NOTICE.toLowerCase()).toContain("worker");
     expect(WORKER_BUNDLE_OWNERSHIP_NOTICE).toContain("never handles worker private material");
     const items = bootstrapStepItems(STEP_LABELS, null);

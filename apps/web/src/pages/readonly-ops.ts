@@ -50,6 +50,8 @@ export const BOOTSTRAP_ERROR_TEXT: Record<string, string> = {
   ...READONLY_COMMON_CODES,
   invalid_bootstrap_input:
     "The submitted bootstrap values were rejected. Provide a valid worker SSH PUBLIC key (never a private key).",
+  invalid_worker_node_publication:
+    "The worker node identity review was refused. Reload the published node and review every required field again.",
   forbidden:
     "You are not permitted to perform this action (granting staging-substrate eligibility requires the staging_substrate:manage capability).",
 };
@@ -270,7 +272,7 @@ export const BOOTSTRAP_RESPONSIBILITY: Record<BootstrapStep, Responsibility> = {
   complete: "Human operator",
   bind: "App",
   "run-discovery": "Worker",
-  done: "Worker",
+  refused: "Human operator",
 };
 
 /** StepRail items for the bootstrap sequence. States derive from the pinned

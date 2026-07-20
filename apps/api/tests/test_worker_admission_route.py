@@ -13,10 +13,16 @@ import pytest
 from fastapi.testclient import TestClient
 from secp_api.config import Settings
 from secp_api.deps import settings_dep
+from secp_api.worker_admission_origin import (
+    WORKER_ADMISSION_PROXY_GATE_HEADER,
+    WorkerAdmissionProxyGateSecret,
+    worker_admission_proxy_gate_secret,
+)
 
 # Uppercase so the no-real-endpoints guard (which scans lowercase ``base_url`` lines) skips this
 # non-routable test host, matching the convention in the other discovery test modules.
 _BASE_URL = "https://pve-a.internal:8006"
+_TEST_PROXY_GATE = WorkerAdmissionProxyGateSecret(b"a" * 64)
 
 
 @pytest.fixture
@@ -73,7 +79,7 @@ def app_and_ctx(engine):
         row = wi.register_worker_identity(
             s,
             p,
-            mechanism=WorkerIdentityMechanism.mtls_workload_identity,
+            mechanism=WorkerIdentityMechanism.ed25519_signed_nonce,
             identity_label="worker-a",
             deployment_binding="deploy-a",
             verification_anchor_fingerprint=compute_verification_anchor_fingerprint(pub),
@@ -136,6 +142,21 @@ def _enabled_client(app) -> TestClient:
     app.dependency_overrides[settings_dep] = lambda: Settings(
         discovery_controlled_integration_enabled=True
     )
+    # Model the dedicated TLS proxy's authenticated final hop without requiring a root-owned
+    # production secret file in this hermetic ASGI test.  The route still exercises the real
+    # origin dependency, including exact-one raw-header validation.
+    app.dependency_overrides[worker_admission_proxy_gate_secret] = lambda: _TEST_PROXY_GATE
+    return TestClient(
+        app,
+        headers={WORKER_ADMISSION_PROXY_GATE_HEADER: _TEST_PROXY_GATE.header_value()},
+    )
+
+
+def _enabled_client_without_proxy_header(app) -> TestClient:
+    app.dependency_overrides[settings_dep] = lambda: Settings(
+        discovery_controlled_integration_enabled=True
+    )
+    app.dependency_overrides[worker_admission_proxy_gate_secret] = lambda: _TEST_PROXY_GATE
     return TestClient(app)
 
 
@@ -208,6 +229,35 @@ def test_route_handshake_and_body_spoof_refused(app_and_ctx):
         },
     )
     assert ok.status_code == 200 and ok.json()["status"] == "admitted"
+
+
+def test_enabled_route_hides_surface_without_authenticated_proxy_hop(app_and_ctx):
+    app, ctx = app_and_ctx
+    client = _enabled_client_without_proxy_header(app)
+    payload = {
+        "discovery_job_id": ctx["job_id"],
+        "authorization_id": ctx["authorization_id"],
+        "authorization_version": ctx["authorization_version"],
+        "endpoint_binding_hash": ctx["endpoint_binding_hash"],
+    }
+
+    missing = client.post("/internal/worker-discovery-admission/begin", json=payload)
+    wrong = client.post(
+        "/internal/worker-discovery-admission/begin",
+        json=payload,
+        headers={WORKER_ADMISSION_PROXY_GATE_HEADER: "b" * 64},
+    )
+    duplicate = client.post(
+        "/internal/worker-discovery-admission/begin",
+        json=payload,
+        headers=[
+            (WORKER_ADMISSION_PROXY_GATE_HEADER, _TEST_PROXY_GATE.header_value()),
+            (WORKER_ADMISSION_PROXY_GATE_HEADER, _TEST_PROXY_GATE.header_value()),
+        ],
+    )
+
+    assert missing.status_code == wrong.status_code == duplicate.status_code == 404
+    assert missing.json() == wrong.json() == duplicate.json() == {"detail": {"code": "not_found"}}
 
 
 class _TestClientAdmissionTransport:

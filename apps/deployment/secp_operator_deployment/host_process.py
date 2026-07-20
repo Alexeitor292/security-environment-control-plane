@@ -47,12 +47,16 @@ _REAP_SECONDS = 3.0
 _PROBE_INTERVAL_SECONDS = 0.02
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CommandResult:
     """The closed, bounded result of one local inspection command."""
 
     exit_code: int
     stdout: str
+
+    def __repr__(self) -> str:
+        stdout_bytes = len(self.stdout.encode("utf-8"))
+        return f"CommandResult(exit_code={self.exit_code}, stdout_bytes={stdout_bytes})"
 
 
 class CommandRunner(Protocol):

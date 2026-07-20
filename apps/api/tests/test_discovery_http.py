@@ -259,6 +259,7 @@ def test_discovery_lifecycle_and_safe_fields(client, engine):
     assert ev["eligibility"] == "eligible" and ev["node"] == "pve-a"
     assert ev["nested_available"] is True
     assert ev["cpu_total"] == 16 and ev["selected_storage"] == "local-lvm"
+    assert ev["bundle_available"] is True and ev["contact_state"] == "contacted"
 
     # Candidate plan: safe categories + node/storage labels + generated identifiers; non-executable.
     r = client.get(f"/api/v1/target-discovery/{enrollment_id}/candidate-plan")

@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from secp_api.enums import (
     WorkerIdentityEvidenceKind,
@@ -32,14 +32,18 @@ _ANCHOR_FP = r"^sha256:[0-9a-f]{64}$"
 
 
 class RegisterWorkerIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     mechanism: WorkerIdentityMechanism
     identity_label: str = Field(pattern=_SAFE)
     deployment_binding: str = Field(pattern=_SAFE)
     verification_anchor_fingerprint: str = Field(pattern=_ANCHOR_FP)
-    ttl_seconds: int = Field(default=3600, ge=1, le=86400)
+    ttl_seconds: StrictInt = Field(default=3600, ge=1, le=86400)
 
 
 class RecordWorkerIdentityEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: WorkerIdentityEvidenceKind
     status: WorkerIdentityEvidenceStatus
     proof_id: str = Field(pattern=_SAFE)

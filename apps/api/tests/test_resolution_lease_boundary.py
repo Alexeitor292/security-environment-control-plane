@@ -294,8 +294,11 @@ def test_lease_identity_gate_modules_add_no_backend_or_network_client():
 # interface. What the frontend must NEVER contain is a CONTROL surface capable
 # of acquiring a resolution lease, activating the worker-side resolver gate,
 # entering/resolving credentials, registering/approving/enrolling worker
-# identities, submitting worker-identity evidence, or constructing secret
-# material. The guard therefore bans precise IDENTIFIER forms (method / route /
+# identities through generic lifecycle endpoints, submitting raw worker-identity evidence, wiring
+# a verifier/attestation surface, or constructing secret material. PR5F permits exactly one narrow
+# browser action: a reviewed worker-node composite that atomically invokes the existing lifecycle
+# server-side. It may display the resulting registration-link UUID, but no registration/evidence
+# object. The guard therefore bans precise IDENTIFIER forms (method / route /
 # field / component names) — never generic words, prose, the display refusal
 # codes, or the sealed resolver-activation AUTHORIZATION governance surface
 # (createResolverActivation / approveResolverActivation / recordResolverActivation
@@ -352,8 +355,10 @@ _FORBIDDEN_FRONTEND_PATTERNS = (
     ),
     re.compile(
         r"worker[_/-]identity[_/-]"
+        r"(?!registration[_-]id\b)"
         r"(registration|register|approval|approve|management|enroll(ment)?|evidence|provision|create|admission)"
     ),
+    re.compile(r"(Registered|Denying|Sealed)?WorkerIdentity(Verifier|Attestation(Source)?|Claim)"),
     # (4) entering / resolving credentials or constructing secret material. Verb-
     #     anchored so "Credential resolution failed closed" prose and the
     #     credential_unavailable display code (no verb prefix) never match; the
@@ -411,7 +416,8 @@ def test_frontend_activation_guard_distinguishes_display_from_interface():
             'worker_identity_missing: "No worker identity is available to run discovery.",',
             'worker_identity_unapproved: "The worker identity has not been approved.",',
             'credential_unavailable: "Credential resolution failed closed.",',
-            "// The worker-identity registration linkage is deliberately NOT surfaced to the UI.",
+            "// Only the safe worker identity registration-link UUID is displayed.",
+            "worker_identity_registration_id: string | null;",
             "// worker identity refused; activation gate sealed; activation gates documented;",
             "// no lease is issued and no resolution occurs from this interface.",
             "const gates = resolverGates(newest);  // read-only posture view-model",
@@ -424,6 +430,8 @@ def test_frontend_activation_guard_distinguishes_display_from_interface():
             "const p = Promise.resolve([]); resolveClosedCodeCopy(code); resolveStatusTone(s);",
             "const payload = buildRegisterTargetPayload({}); const u = buildUrl(path);",
             "api.registerTarget(body); api.listWorkerNodes(); workerPostureRows(e);",
+            "api.reviewAndLinkWorkerNode(nodeId, explicitReview);",
+            'fetch("/read-only-bootstrap/worker-nodes/id/identity-approval-link");',
             "import { RiveWorkerBundle } from './rive'; type N = WorkerDiscoveryNode;",
             '<CyberButton type="button" /> <input type="number" /> <input type="checkbox" />',
             "const SECRETISH_KEY_RE = /(secret|token|password|credential|private|api_key|ssh)/i;",
@@ -452,6 +460,8 @@ def test_frontend_activation_guard_distinguishes_display_from_interface():
         "worker registration (no Identity token)": "await api.registerWorker(body);",
         "worker admission (backend vocab)": "await api.admitWorker(id);",
         "worker-identity kebab route": 'fetch("/api/v1/worker-identity/registrations");',
+        "worker verifier": "const v = new RegisteredWorkerIdentityVerifier(source);",
+        "worker attestation source": "const a: WorkerIdentityAttestationSource = source;",
         "credential resolution": "const c = await resolveCredential(ref);",
         "credential resolution (qualified)": "const c = await resolveProviderCredential(ref);",
         "secret reveal": "const s = revealSecret(ref);",

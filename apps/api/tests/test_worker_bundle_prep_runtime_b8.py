@@ -17,6 +17,8 @@ import base64
 import copy
 import hashlib
 import os
+import threading
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -52,7 +54,14 @@ def _host_key_and_fp() -> tuple[str, str]:
     return line, fp
 
 
-def _bound_enrollment(session_scope):
+def _worker_key_fingerprint(public_key: str) -> str:
+    from secp_api.discovery_bootstrap_contract import validate_public_ssh_key
+
+    _normalized, fingerprint = validate_public_ssh_key(public_key)
+    return fingerprint
+
+
+def _bound_enrollment(session_scope, *, worker_ssh_public_key: str | None = None):
     """Commit a proxmox target that is active-onboarded, substrate-eligible, bootstrap
     completed+bound with the host public key captured, and enrolled. Returns (host_line, fp)."""
     from conftest import VALID_PROVISIONING_SCOPE, onboard_and_activate
@@ -77,7 +86,10 @@ def _bound_enrollment(session_scope):
         onboard_and_activate(s, p, target)
         staging_labs.grant_substrate_eligibility(s, p, execution_target_id=target.id)
         sess = bootstrap_discovery.create_bootstrap_session(
-            s, p, execution_target_id=target.id, worker_ssh_public_key=_pubkey()
+            s,
+            p,
+            execution_target_id=target.id,
+            worker_ssh_public_key=worker_ssh_public_key or _pubkey(),
         )
         proof = f"selftest_ok=1\nhost_public_key={host_line}"
         bootstrap_discovery.complete_bootstrap_session(
@@ -103,8 +115,11 @@ def test_prepare_once_publishes_key_and_writes_bundle(engine, tmp_path):
     from secp_api.db import session_scope
     from secp_worker import bundle_manager, discovery_bundle_runtime
 
-    host_line, _fp = _bound_enrollment(session_scope)
     settings = _settings(tmp_path)
+    worker_public = bundle_manager.ensure_worker_keys(
+        settings.discovery_worker_key_dir
+    ).ssh_public_key
+    host_line, _fp = _bound_enrollment(session_scope, worker_ssh_public_key=worker_public)
 
     discovery_bundle_runtime.prepare_once(settings=settings, session_scope=session_scope)
 
@@ -130,12 +145,30 @@ def test_prepare_once_publishes_key_and_writes_bundle(engine, tmp_path):
     assert "PRIVATE KEY" in open(os.path.join(mount, "id_key")).read()
 
 
+def test_prepare_once_refuses_bootstrap_bound_to_prior_worker_key(engine, tmp_path, caplog):
+    from secp_api.db import session_scope
+    from secp_worker import bundle_manager, discovery_bundle_runtime
+
+    # This session authorized an unrelated prior worker key.  Preparing a fresh persistent key set
+    # may publish its public material, but must not combine its private key with the stale binding.
+    _bound_enrollment(session_scope, worker_ssh_public_key=_pubkey("old-worker@secp"))
+    settings = _settings(tmp_path)
+
+    discovery_bundle_runtime.prepare_once(settings=settings, session_scope=session_scope)
+
+    assert not bundle_manager.bundle_is_present(settings.discovery_bootstrap_mount)
+    assert "worker_ssh_binding_mismatch" in caplog.text
+
+
 def test_prepare_once_is_idempotent_and_stable(engine, tmp_path):
     from secp_api.db import session_scope
     from secp_worker import bundle_manager, discovery_bundle_runtime
 
-    _bound_enrollment(session_scope)
     settings = _settings(tmp_path)
+    worker_public = bundle_manager.ensure_worker_keys(
+        settings.discovery_worker_key_dir
+    ).ssh_public_key
+    _bound_enrollment(session_scope, worker_ssh_public_key=worker_public)
 
     discovery_bundle_runtime.prepare_once(settings=settings, session_scope=session_scope)
     pub1 = bundle_manager.ensure_worker_keys(settings.discovery_worker_key_dir).ssh_public_key
@@ -166,16 +199,185 @@ def test_prepare_once_writes_no_bundle_when_nothing_bound(engine, tmp_path):
     assert not bundle_manager.bundle_is_present(settings.discovery_bootstrap_mount)
 
 
+def test_malformed_explicit_organization_fails_closed_before_state_or_db(tmp_path, caplog):
+    from secp_worker import discovery_bundle_runtime
+
+    settings = _settings(tmp_path)
+    settings.discovery_worker_node_organization = "not-a-uuid"
+
+    def forbidden_scope():
+        raise AssertionError("malformed organization must not open a database session")
+
+    discovery_bundle_runtime.prepare_once(settings=settings, session_scope=forbidden_scope)
+
+    assert not os.path.lexists(settings.discovery_worker_key_dir)
+    assert not os.path.lexists(settings.discovery_bootstrap_mount)
+    assert "worker_node_organization_invalid" in caplog.text
+    assert "not-a-uuid" not in caplog.text
+
+
+def test_multiple_ready_descriptors_refuse_without_selecting_first(tmp_path, monkeypatch, caplog):
+    from contextlib import contextmanager
+
+    from secp_api.services import bootstrap_discovery, worker_nodes
+    from secp_worker import bundle_manager, discovery_bundle_runtime
+
+    settings = _settings(tmp_path)
+    organization_id = uuid.uuid4()
+    worker_fingerprint = _worker_key_fingerprint(_pubkey("current-worker@secp"))
+    descriptors = [
+        {
+            "organization_id": str(organization_id),
+            "enrollment_id": "first",
+            "worker_ssh_public_key_fingerprint": worker_fingerprint,
+        },
+        {
+            "organization_id": str(organization_id),
+            "enrollment_id": "second",
+            "worker_ssh_public_key_fingerprint": worker_fingerprint,
+        },
+    ]
+    monkeypatch.setattr(
+        bootstrap_discovery,
+        "resolve_ready_bundle_descriptors",
+        lambda _session, _organization_id: descriptors,
+    )
+    monkeypatch.setattr(
+        worker_nodes,
+        "resolve_publication_organizations",
+        lambda _session, _configured_org: [organization_id],
+    )
+
+    @contextmanager
+    def scope():
+        yield object()
+
+    def forbidden_write(*_args, **_kwargs):
+        raise AssertionError("ambiguous descriptors must not touch the mounted bundle")
+
+    monkeypatch.setattr(bundle_manager, "write_bundle", forbidden_write)
+    assert (
+        discovery_bundle_runtime._write_ready_bundles(
+            settings,
+            scope,
+            worker_ssh_public_key_fingerprint=worker_fingerprint,
+        )
+        == 0
+    )
+    assert "bundle_descriptor_ambiguous" in caplog.text
+    assert "first" not in caplog.text and "second" not in caplog.text
+    assert not os.path.lexists(settings.discovery_bootstrap_mount)
+
+
+def test_legacy_resolver_is_supported_but_worker_filters_exact_organization(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from secp_api.services import bootstrap_discovery, worker_nodes
+    from secp_worker import bundle_manager, discovery_bundle_runtime
+
+    settings = _settings(tmp_path)
+    organization_id = uuid.uuid4()
+    foreign_organization_id = uuid.uuid4()
+    worker_fingerprint = _worker_key_fingerprint(_pubkey("current-worker@secp"))
+    descriptors = [
+        {
+            "organization_id": str(foreign_organization_id),
+            "enrollment_id": "foreign",
+            "worker_ssh_public_key_fingerprint": worker_fingerprint,
+        },
+        {
+            "organization_id": str(organization_id),
+            "enrollment_id": "local",
+            "worker_ssh_public_key_fingerprint": worker_fingerprint,
+        },
+    ]
+    # The reviewed pinned worker image carries this legacy one-argument API helper.
+    monkeypatch.setattr(
+        bootstrap_discovery,
+        "resolve_ready_bundle_descriptors",
+        lambda _session: descriptors,
+    )
+    monkeypatch.setattr(
+        worker_nodes,
+        "resolve_publication_organizations",
+        lambda _session, _configured_org: [organization_id],
+    )
+
+    @contextmanager
+    def scope():
+        yield object()
+
+    written: list[dict] = []
+    monkeypatch.setattr(
+        bundle_manager,
+        "write_bundle",
+        lambda descriptor, **_kwargs: written.append(descriptor),
+    )
+
+    assert (
+        discovery_bundle_runtime._write_ready_bundles(
+            settings,
+            scope,
+            worker_ssh_public_key_fingerprint=worker_fingerprint,
+        )
+        == 1
+    )
+    assert [descriptor["enrollment_id"] for descriptor in written] == ["local"]
+
+
+def test_runtime_marker_lives_exactly_as_long_as_the_enabled_loop(monkeypatch):
+    from secp_api import config
+    from secp_worker import bundle_loop_marker, discovery_bundle_runtime
+
+    settings = SimpleNamespace(
+        discovery_worker_managed_bundle=True,
+        discovery_worker_bundle_poll_seconds=15.0,
+    )
+    stop_event = threading.Event()
+    stop_event.set()
+    calls: list[str] = []
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+    monkeypatch.setattr(bundle_loop_marker, "mark_started", lambda: calls.append("mark"))
+    monkeypatch.setattr(bundle_loop_marker, "clear_started", lambda: calls.append("clear"))
+
+    discovery_bundle_runtime.run_forever(stop_event)
+
+    assert calls == ["mark", "clear"]
+
+
+def test_disabled_runtime_clears_stale_marker_without_preparation(monkeypatch):
+    from secp_api import config
+    from secp_worker import bundle_loop_marker, discovery_bundle_runtime
+
+    settings = SimpleNamespace(discovery_worker_managed_bundle=False)
+    calls: list[str] = []
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+    monkeypatch.setattr(bundle_loop_marker, "clear_started", lambda: calls.append("clear"))
+    monkeypatch.setattr(
+        discovery_bundle_runtime,
+        "prepare_once",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("disabled loop must stay inert")),
+    )
+
+    discovery_bundle_runtime.run_forever(threading.Event())
+
+    assert calls == ["clear"]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="strict mounted-bundle validation is POSIX-only")
 def test_worker_written_bundle_passes_strict_worker_managed_validator(engine, tmp_path):
     """The closed loop: the worker's OWN output validates under the strict worker-managed mounted
     source — exactly what the live composition consumes (no more ``probe_source_sealed``)."""
     from secp_api.db import session_scope
+    from secp_worker import bundle_manager
     from secp_worker.discovery_bundle_runtime import prepare_once
     from secp_worker.mounted_bundle import MountedWorkerBootstrapBundleSource
 
-    _bound_enrollment(session_scope)
     settings = _settings(tmp_path)
+    worker_public = bundle_manager.ensure_worker_keys(
+        settings.discovery_worker_key_dir
+    ).ssh_public_key
+    _bound_enrollment(session_scope, worker_ssh_public_key=worker_public)
     prepare_once(settings=settings, session_scope=session_scope)
 
     src = MountedWorkerBootstrapBundleSource(

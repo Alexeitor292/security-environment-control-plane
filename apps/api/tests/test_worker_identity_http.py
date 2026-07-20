@@ -62,6 +62,30 @@ def test_register_malformed_anchor_fingerprint_is_redacted(client):
     assert MARKER not in resp.text
 
 
+@pytest.mark.parametrize(
+    "override",
+    (
+        {"ttl_seconds": True},
+        {"ttl_seconds": "3600"},
+        {"private_key": MARKER},
+    ),
+)
+def test_generic_registration_schema_rejects_coercion_and_unknown_material(client, override):
+    payload = {
+        "mechanism": "mtls_workload_identity",
+        "identity_label": "staging-worker-schema",
+        "deployment_binding": "deploy-schema",
+        "verification_anchor_fingerprint": "sha256:" + "ab" * 32,
+    }
+    payload.update(override)
+
+    resp = client.post("/api/v1/worker-identity/registrations", json=payload)
+
+    assert resp.status_code == 422
+    assert resp.json() == SAFE
+    assert MARKER not in resp.text
+
+
 def test_evidence_malformed_proof_is_redacted(client):
     resp = client.post(
         f"/api/v1/worker-identity/registrations/{uuid.uuid4()}/evidence",
@@ -72,6 +96,23 @@ def test_evidence_malformed_proof_is_redacted(client):
             "issuer": "rev",
         },
     )
+    assert resp.status_code == 422
+    assert resp.json() == SAFE
+    assert MARKER not in resp.text
+
+
+def test_generic_evidence_schema_rejects_unknown_material(client):
+    resp = client.post(
+        f"/api/v1/worker-identity/registrations/{uuid.uuid4()}/evidence",
+        json={
+            "kind": "deployment_binding_review",
+            "status": "verified",
+            "proof_id": "TKT-1",
+            "issuer": "reviewer",
+            "private_key": MARKER,
+        },
+    )
+
     assert resp.status_code == 422
     assert resp.json() == SAFE
     assert MARKER not in resp.text

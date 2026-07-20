@@ -99,6 +99,23 @@ def _next_identity_version(
     return int(current) + 1
 
 
+def _anchor_savepoint_to_request_transaction(session: Session) -> None:
+    """Keep the retry savepoint inside SQLite's real request transaction.
+
+    Python 3.11's sqlite3 driver uses legacy transaction control: a preceding SELECT does not emit
+    ``BEGIN``, so the first SAVEPOINT can otherwise become the database's top-level transaction.
+    Releasing that savepoint would make a newly inserted registration survive a later request
+    rollback. An empty DML statement starts the physical transaction without changing a row.
+    PostgreSQL already starts its transaction for the locking reads and needs no workaround.
+    """
+    if session.get_bind().dialect.name == "sqlite":
+        session.execute(
+            update(WorkerIdentityRegistration)
+            .where(WorkerIdentityRegistration.id.is_(None))
+            .values(revision=WorkerIdentityRegistration.revision)
+        )
+
+
 @_closed_errors
 def register_worker_identity(
     session: Session,
@@ -125,6 +142,7 @@ def register_worker_identity(
     # past its canonical UTC expiry is materialized as ``expired`` (audited once) BEFORE a
     # replacement draft can occupy the single active slot enforced by the partial unique index.
     _expire_active_if_due(session, actor, actor.organization_id, identity_label)
+    _anchor_savepoint_to_request_transaction(session)
     ttl = max(1, min(int(ttl_seconds), _MAX_TTL_SECONDS))
     for _attempt in range(5):
         version = _next_identity_version(session, actor.organization_id, identity_label)
@@ -141,11 +159,14 @@ def register_worker_identity(
             revision=0,
             created_by=actor.user_id,
         )
-        session.add(row)
         try:
-            session.flush()
+            # Keep the caller's outer transaction and row locks intact. A full session.rollback()
+            # here would release the composite worker-node review lock and permit a stale review to
+            # survive a version-insert race.
+            with session.begin_nested():
+                session.add(row)
+                session.flush()
         except IntegrityError:
-            session.rollback()
             continue
         audit.record(
             session,

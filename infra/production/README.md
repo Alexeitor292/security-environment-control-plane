@@ -1,25 +1,100 @@
-# SECP production OIDC deployment — reference guardrails (ADR-019 / OIDC-C)
+# SECP production deployment reference guardrails
 
 These are **reference deployment guardrails, not a turnkey production stack**. They describe the
-same-origin production authentication model and the environment guardrails a deployment must satisfy.
-Nothing here deploys anything, bundles an identity provider, introduces credentials, or unseals any
-infrastructure action. Real provisioning and the complete real disposable-lab lifecycle remain sealed
-or incomplete. See [ADR-019](../../docs/adr/ADR-019-production-oidc-deployment-operations.md) and the
-operations runbook at [`docs/runbooks/oidc-production.md`](../../docs/runbooks/oidc-production.md).
+same-origin OIDC model and the narrow PR5F production activation contract for the existing B8
+worker-owned read-only discovery path. Nothing in this directory deploys anything, bundles an identity
+provider, commits a deployment value/certificate/private key, installs an operator, or enables
+OpenTofu/apply/destroy. See
+[ADR-019](../../docs/adr/ADR-019-production-oidc-deployment-operations.md), the
+[OIDC operations runbook](../../docs/runbooks/oidc-production.md), and the
+[PR5F B8 activation runbook](../../docs/runbooks/pr5f-b8-production-activation.md).
 
 > **This does not make the whole SECP platform production-ready.** OIDC-C makes the *authentication
 > architecture* safely deployable and operationally understandable. Pre-provisioned internal
 > identities are still required, the development stack remains unsafe for production, and real
-> infrastructure execution remains sealed.
+> infrastructure mutation remains sealed. PR5F makes only the existing read-only discovery path
+> deployable through an explicit reviewed host action; its repository implementation has not been
+> installed or exercised by this change.
 
 ## Files
 
 - [`oidc.env.example`](./oidc.env.example) — placeholder-only environment guardrails. No secrets, no
   client secret, no private key, no token, no real hostname, no admin credentials. `DATABASE_URL` and
   all other credentials come from the deployment's secret manager and are intentionally omitted.
+- [`secp_discovery_activation`](../../apps/deployment/secp_discovery_activation/) — the importable
+  PR5F package renders/validates a separately reviewable
+  ordinary-worker Compose override and a narrowly allowlisted internal admission-listener artifact
+  from root-controlled deployment-local inputs. Rendered deployment artifacts, certificates, keys,
+  hostnames, IPs, organization ids, and certificate identities are intentionally not committed here.
 
-There is intentionally **no production Compose/Kubernetes stack and no production Keycloak container**
-here. A governing production deployment contract is out of scope for this slice; do not invent one.
+There is intentionally **no complete production Compose/Kubernetes stack and no production Keycloak
+container** here. PR5F's narrow rendered worker/admission overlay is not a full controller deployment
+and must not be treated as one. Do not invent unrelated services or broaden its route/mount scope.
+
+## PR5F B8 boundary
+
+- Host state is fixed at `/var/lib/secp/discovery-worker` and bind-mounted read-write only into the
+  ordinary worker at `/var/run/secp`.
+- The root-controlled activation profile/artifacts live beneath
+  `/etc/secp/discovery-activation`; authenticated evidence/journal lives beneath
+  `/var/lib/secp/discovery-activation`.
+- The narrow controller and worker overrides are composed only with the fixed root-owned base files
+  `/etc/secp/controller/docker-compose.yml` and `/etc/secp/worker/docker-compose.yml`. Their
+  content/uid/gid/mode bindings are journaled and compare-and-swap checked before every Compose
+  mutation and rollback.
+- The worker receives a read-only pinned CA certificate, never the admission server private key.
+- The listener exposes only the existing worker-discovery-admission routes. Worker identity is the
+  existing Ed25519 signed-nonce proof, **not client-certificate mTLS**.
+- The admission endpoint's DNS name is the exact certificate SNI/SAN identity, while the proxy binds
+  only the reviewed private listener IP. The worker has exactly one `extra_hosts` DNS-to-listener-IP
+  mapping; host probes connect to the IP while validating the DNS identity.
+- The ordinary worker retains its exact reviewed base image, health/hardening and sole queue
+  `secp-orchestration`, but that image is **not** the whole PR5F runtime. A complete deterministic
+  `secp_api` + `secp_worker` ZIP, pinned by digest, is imported at the fixed root-owned path, mounted
+  read-only at `/opt/secp/secp-pr5f-runtime-overlay.zip`, and made the exact `PYTHONPATH`. No partial
+  overlay or image-only readiness claim is valid.
+- Controller preflight binds the exact deployment-reviewed `controller_api_baseline_image_digest`
+  at head `c4e2f9a1b7d3`; the controller then uses a separately built, digest-qualified
+  `controller_api_image` containing PR5F, whose actual identity and head `d8f1a2b3c4e5` must verify.
+  The admission proxy is also
+  digest-pinned and its actual hardening, mounts, network ownership, and private listener are checked.
+- The `d8f1a2b3c4e5` PostgreSQL migration installs and validates a named `CHECK` fence that rejects new
+  `ed25519_signed_nonce` registrations throughout the signed two-host handoff. A runtime rollback
+  requires the exact current, complete role-local journal: its preliminary compatibility read must
+  pass, then the exact transaction-owned API container or worker overlay engages the durable fence;
+  internal compensation rebinds and re-engages it immediately before mutation. The controller
+  downgrade independently canonicalizes and retains the same fence for the pre-PR5F interval.
+- TLS production input is import-only: controller CA/certificate/key files and the worker's CA-only
+  copy use the exact `/etc/secp/discovery-activation/import/` paths and metadata described by the
+  runbook. The overlay import is exactly
+  `/etc/secp/discovery-activation/import/secp-pr5f-runtime-overlay.zip` (`root:root 0644`).
+- No operator service/queue/registration is installed.
+- Public runtime evidence contains only a redacted configuration-shape digest. The full Docker
+  configuration is bound by a domain-separated HMAC derived from the root-controlled evidence key,
+  kept only in the `root:root 0600` live rollback journal, and compared in constant time. Mount
+  isolation uses no-follow device/inode/type identities across two samples, so path aliases,
+  bind-mount/hardlink/symlink overlap, unresolvable sources, and identity drift refuse closed.
+- Controller and worker exchange only detached-signed fixed-path handoffs: controller outbox offer to
+  worker inbox, then worker outbox result to controller inbox. The operator transports each
+  payload/attestation pair unchanged as `root:root 0640`; only the controller's second explicit
+  install can finalize: it commits and independently authenticates aggregate evidence while the
+  exact live fence remains engaged, then releases the fence and freshly proves both the released
+  state and the complete aggregate chain. A crash after evidence commit resumes from
+  `awaiting-finalization`; a crash after release is reverified idempotently. `verify` and `status`
+  remain read-only and never engage or release the fence.
+- The existing read-only Proxmox strap is not replaced. After fresh persistent worker-key generation,
+  its key is rotated/bound solely by the existing idempotent Read-Only Bootstrap wizard script. The
+  wizard then requires the composite deployment-binding, verification-anchor, and
+  rotation/revocation reviews against the exact node revision and fingerprints before identity link;
+  an exact expired/revoked same-node link can be atomically renewed to a monotonic identity version,
+  while live-read authorization remains a separate approval/binding gate.
+- Worker bundle assembly additionally requires the bound session descriptor's recorded SSH
+  public-key fingerprint to equal the fingerprint freshly derived from the current local worker key;
+  stale or legacy descriptors are refused before the fixed bundle is touched. Live discovery scopes
+  identity uniqueness to Ed25519 signed-nonce registrations, while the composite same-label review
+  refuses and preserves any active non-Ed25519 identity rather than revoking it.
+- No controlled-live plan composition is installed, no real OpenTofu plan has run, apply/destroy are
+  unavailable, and PR6 remains frozen.
 
 ## Same-origin model (summary)
 

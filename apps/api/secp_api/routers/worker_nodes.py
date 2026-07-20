@@ -15,7 +15,11 @@ from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
 from secp_api.deps import current_principal, db_session
-from secp_api.schemas_worker_nodes import WorkerNodeOut, WorkerNodeRegisterRequest
+from secp_api.schemas_worker_nodes import (
+    WorkerNodeIdentityApprovalLinkRequest,
+    WorkerNodeOut,
+    WorkerNodeRegisterRequest,
+)
 from secp_api.services import worker_nodes as svc
 
 # Nested under the read-only-bootstrap prefix so the single-segment
@@ -56,3 +60,33 @@ def get_worker_node(
     principal: Principal = Depends(current_principal),
 ) -> WorkerNodeOut:
     return WorkerNodeOut.model_validate(svc.get_worker_node(session, principal, node_id))
+
+
+@router.post("/{node_id}/identity-approval-link", response_model=WorkerNodeOut)
+def approve_and_link_worker_identity(
+    node_id: uuid.UUID,
+    body: WorkerNodeIdentityApprovalLinkRequest,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> WorkerNodeOut:
+    """Perform one explicit reviewed registration/evidence/approval/link transaction.
+
+    This is a composition of the existing worker-identity lifecycle operations. It does not add a
+    second lifecycle, infer evidence, or silently approve publication.
+    """
+    return WorkerNodeOut.model_validate(
+        svc.approve_and_link_worker_node_identity(
+            session,
+            principal,
+            node_id=node_id,
+            expected_node_revision=body.expected_node_revision,
+            expected_ssh_public_key_fingerprint=body.expected_ssh_public_key_fingerprint,
+            expected_admission_anchor_fingerprint=body.expected_admission_anchor_fingerprint,
+            deployment_binding=body.deployment_binding,
+            proof_id=body.proof_id,
+            issuer=body.issuer,
+            deployment_binding_review_confirmed=body.deployment_binding_review_confirmed,
+            verification_anchor_review_confirmed=body.verification_anchor_review_confirmed,
+            rotation_revocation_review_confirmed=body.rotation_revocation_review_confirmed,
+        )
+    )

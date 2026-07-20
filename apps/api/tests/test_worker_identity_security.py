@@ -59,8 +59,10 @@ def test_api_cannot_import_worker_identity_verifier_or_attestation():
 
 
 def test_frontend_has_no_worker_identity_verifier_or_secret_field():
-    # Worker-identity-specific tokens that must never leak into the UI (this PR adds no frontend
-    # code). Generic words like "certificate" appear in existing benign prose and are not scanned.
+    # PR5F permits exactly one non-secret boolean proving the operator reviewed the published
+    # admission-anchor fingerprint. It still exposes no verifier, attestation, raw verification
+    # anchor, generic identity lifecycle route, or secret-entry field. Generic words like
+    # "certificate" appear in existing benign prose and are not scanned.
     forbidden = (
         'type="password"',
         "type='password'",
@@ -76,6 +78,9 @@ def test_frontend_has_no_worker_identity_verifier_or_secret_field():
             continue
         scanned += 1
         src = path.read_text(encoding="utf-8")
+        # Narrow reviewed exception: a literal-true confirmation only. Removing its exact field
+        # name must leave no other verification-anchor surface anywhere in frontend source.
+        src = src.replace("verification_anchor_review_confirmed", "")
         for token in forbidden:
             assert token not in src, f"frontend {path.name} references `{token}`"
     assert scanned >= 5

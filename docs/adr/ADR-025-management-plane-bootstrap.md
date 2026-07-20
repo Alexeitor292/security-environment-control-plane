@@ -12,12 +12,16 @@
   and rollback all **fail closed**, never reporting a false success.
 - **Date:** 2026-07-18
 - **Milestone:** SECP-002B-1B — **PR5E** (management-plane bootstrap foundation; follows PR5D
-  operator-deployment package). Browser enrollment is **PR5F**; Proxmox initialization is **PR5G**;
-  operator activation is a later milestone; **PR6 (first apply) remains frozen**.
+  operator-deployment package), with its roadmap corrected by **PR5F**. The B7/B8 browser Read-Only
+  Bootstrap enrollment already exists; PR5F is the narrow production activation of that existing
+  worker-owned read-only discovery flow. It is not a new generic browser-enrollment system and not a
+  new Proxmox bootstrap contract. Operator package installation/activation remains separate;
+  **PR6 (first apply) remains frozen**.
 - **Related:** [ADR-024](ADR-024-operator-deployment-package.md) (sealed operator deployment package,
   reused verbatim); [ADR-023](ADR-023-commissioning-automation-foundation.md) (commissioning engine,
   reused for evidence/hardened-fs idioms); [ADR-001](ADR-001-monorepo.md) (package layout); runbook
-  `docs/runbooks/pr5e-management-bootstrap.md`; STATUS `docs/STATUS.md`.
+  `docs/runbooks/pr5e-management-bootstrap.md`; PR5F runbook
+  `docs/runbooks/pr5f-b8-production-activation.md`; STATUS `docs/STATUS.md`.
 
 ## The three SECP planes (product decision)
 
@@ -46,6 +50,13 @@ mutation defaults to dry-run and requires BOTH `--write` and `--confirm`. There 
 default remote-root SSH**, no worker enrollment over the network, and no browser onboarding in PR5E.
 Container deployment IS automated (from verified image archives, never a registry pull). Adoption
 exists as a first-class operation for the already-deployed development installation.
+
+That statement is historical scope for PR5E, not a claim that enrollment was still missing. B7/B8
+already provide `WorkerDiscoveryNode`, `ProxmoxReadOnlyBootstrapSession`, and the browser Read-Only
+Bootstrap wizard. PR5F reuses those exact records and UI after the ordinary worker has generated its
+fresh persistent key. The currently strapped read-only Proxmox host must then adopt that public key
+only through the existing idempotent wizard-generated script; this is key rotation/binding, not a new
+generic browser flow or a second target-side initialization model.
 
 ## Signed offline release bundle
 
@@ -144,7 +155,8 @@ identities, digests, topology-safe path bindings (never a raw path), the install
 a **content-bound per-object ownership record** for each of the **five** documents (role/kind/binding/
 content-SHA-256/uid/gid/mode/created-or-adopted; the evidence and attestation records self-bind — their
 content is authenticated by re-canonicalization and the detached Ed25519 signature respectively),
-queue names, seal states, and effect booleans (`external_contacts_performed`/`workflows_submitted`/
+queue names, seal states, and narrowly scoped effect booleans
+(`forbidden_infrastructure_contacts_performed`/`workflows_submitted`/
 `run_plan_generation_called`/`opentofu_executed`/`proxmox_contacted`, all `false`).
 
 ## Revalidating status + real rollback
@@ -257,9 +269,25 @@ apply/destroy; no Proxmox mutation; no OpenBao contact. **PR5E adds no activatio
   CI job (sudo + fail-closed ancestor preflight + JUnit zero-skip gate) in the aggregate backend gate.
 - The lower planes stay decoupled: no scenario plugin or API file imports the bootstrap write adapters
   (boundary-tested).
-- Future work: browser enrollment (PR5F), Proxmox initialization + management-VM exclusion by exact VM
-  IDs bound in a deployment-local dossier (PR5G — PR5E invents no real Proxmox values), and — only much
-  later — operator activation.
+- PR5F adds the separate, narrow `secp_discovery_activation` package for production deployment of the
+  existing B8 read-only path. It supplies no new enrollment model and does not make the general PR5E
+  bootstrap adapters real. The externally completed Proxmox read-only strap is adopted by rotating
+  its SECP-managed key through the existing wizard script after persistent worker-key generation.
+- PR5F also resolves the deployed-code gap without pretending that the old worker image alone is the
+  final runtime: the exact old reviewed image remains the base, while a complete content-addressed
+  `secp_api` + `secp_worker` ZIP is mounted read-only under an exact `PYTHONPATH`. The controller uses
+  a new digest-qualified API image and must report Alembic head `d8f1a2b3c4e5`. Fixed controller and
+  worker base Compose inputs are content/metadata CAS-bound, actual API/proxy/worker runtime
+  projections are reobserved, and the two role-local transactions are joined only by detached-signed
+  fixed outbox/inbox handoffs.
+- The internal admission listener binds only the reviewed private IP, while TLS continues to verify
+  the exact endpoint DNS name as SNI/SAN; the worker's sole `extra_hosts` entry binds that DNS name to
+  the listener IP. The browser reuses the existing node/session records and performs an exact-node,
+  three-review identity approval/link before the separate live-read authorization/bind gate. This is
+  the roadmap replacement for the previously imagined generic browser enrollment.
+- After PR5F, installing the already-reviewed controlled-live operator package is the next separate
+  deployment step. A controlled-live plan composition and operator activation remain absent; no real
+  OpenTofu plan has run, apply/destroy remain unavailable, and PR6 remains frozen.
 
 ## Management-plane bootstrap: SUPPORTED, NOT EXERCISED
 
@@ -289,3 +317,12 @@ Nothing here has bootstrapped or adopted a real controller or worker, contacted 
 anything; no release has been signed with a production key (none exists). Documentation and fixtures
 use RFC-reserved / documentation values only — the real deployment-local controller/worker host
 addresses are never committed.
+
+PR5F does not retroactively change those PR5E claims. The general `secp_management` host adapters
+remain sealed and unexercised. `secp_discovery_activation` is a separate, fixed-purpose package for
+only the ordinary worker's B8 state/runtime overlay, the digest-qualified PR5F controller API and
+migration, internal admission TLS, signed cross-host coordination, and transactional worker
+recreation; its repository implementation likewise was not installed or exercised by PR5F. The
+existing Proxmox strap still requires post-activation key rotation through the existing idempotent
+wizard script. PR5F installs no operator, constructs no controlled-live plan composition, and
+authorizes no OpenTofu/apply/destroy action.

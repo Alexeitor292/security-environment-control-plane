@@ -33,6 +33,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from secp_api.enums import (
     DiscoveryCandidatePlanStatus,
+    DiscoveryContactState,
     DiscoveryDecisionCode,
     DiscoveryEligibility,
     DiscoveryJobStatus,
@@ -165,6 +166,13 @@ class DiscoverySnapshot(Base, UpdatedTimestampMixin):
     reason_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
     worker_identity_version: Mapped[int] = mapped_column(Integer, nullable=False)
     bundle_available: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Durable truth from the worker outcome. Never derive target contact from enablement flags or
+    # bundle presence.
+    contact_state: Mapped[DiscoveryContactState] = mapped_column(
+        EnumType(DiscoveryContactState, length=40),
+        default=DiscoveryContactState.unverifiable,
+        nullable=False,
+    )
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     def __repr__(self) -> str:

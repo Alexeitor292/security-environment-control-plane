@@ -114,6 +114,62 @@ def test_inventory_job_shares_shard_environment(wf):
     assert "SECP_TEST_POSTGRES_URL" in job["env"]
 
 
+PR5F_POSTGRES_JOB = "backend-pr5f-postgres-finalization"
+PR5F_POSTGRES_MODULE = "apps/api/tests/test_discovery_activation_rollback_migration_postgres.py"
+
+
+def test_pr5f_postgres_finalization_job_runs_real_exact_module(wf):
+    jobs = _jobs(wf)
+    assert PR5F_POSTGRES_JOB in jobs
+    job = jobs[PR5F_POSTGRES_JOB]
+    assert job["services"]["postgres"]["image"].startswith("postgres:16")
+    assert "SECP_TEST_POSTGRES_URL" in job["env"]
+    run = _run_text(job)
+    assert PR5F_POSTGRES_MODULE in run
+    assert "test_discovery_activation_split_engine.py" not in run
+    assert "test_pr5f_discovery_activation_root.py" not in run
+    for forbidden in ("ssh ", "opentofu", "terraform", "proxmox", "secp-operator"):
+        assert forbidden not in run.lower()
+
+
+def test_pr5f_postgres_finalization_job_has_failclosed_no_skip_junit_gate(wf):
+    job = _jobs(wf)[PR5F_POSTGRES_JOB]
+    run = _run_text(job)
+    assert "--junitxml=junit-pr5f-postgres-finalization.xml" in run
+    assert "tests < 1" in run
+    assert "skipped != 0" in run
+    assert "sys.exit(1)" in run
+    upload = next(
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+    )
+    assert upload.get("if") == "always()"
+    assert upload["with"]["path"] == "junit-pr5f-postgres-finalization.xml"
+    assert upload["with"]["if-no-files-found"] == "error"
+    parse_steps = [
+        step
+        for step in _steps(job)
+        if "skipped" in str(step.get("run", "")) and step.get("if") == "always()"
+    ]
+    assert parse_steps
+
+
+def test_pr5f_postgres_finalization_job_is_required_additive_and_cached(wf, suite):
+    jobs = _jobs(wf)
+    assert PR5F_POSTGRES_JOB in jobs["backend"]["needs"]
+    assert f"needs.{PR5F_POSTGRES_JOB}.result" in _run_text(jobs["backend"])
+    setup = next(
+        step
+        for step in _steps(jobs[PR5F_POSTGRES_JOB])
+        if str(step.get("uses", "")).startswith("astral-sh/setup-uv")
+    )
+    assert setup["with"]["enable-cache"] is True
+    assert "uv.lock" in setup["with"]["cache-dependency-glob"]
+    assert "apps/api/tests" in suite["roots"]
+    assert jobs["backend-pytest"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
+
+
 # --- no suppression ---------------------------------------------------------------------------
 
 
@@ -164,7 +220,9 @@ def test_aggregate_gate_fails_unless_all_success(wf):
         "backend-static",
         "backend-test-inventory",
         "backend-pytest",
+        "backend-pr5f-postgres-finalization",
         "backend-realfs-root",
+        "backend-discovery-activation-root",
         "backend-deployment-root",
         "backend-management-root",
         "backend-security",
@@ -291,6 +349,113 @@ def test_realfs_root_job_does_not_weaken_existing_coverage(wf, suite):
     inv_run = _run_text(jobs["backend-test-inventory"])
     assert "pytest_shards.py verify --collect" in inv_run
     assert "apps/commissioning/tests" in suite["roots"]
+
+
+# --- PR5F fixed-layout root transaction gate --------------------------------------------------
+
+PR5F_ROOT_MODULE = "tests/test_pr5f_discovery_activation_root.py"
+PR5F_ROOT_JOB = "backend-discovery-activation-root"
+PR5F_STATE_PARENT = "/var/lib/secp"
+PR5F_ROOT_SENTINEL = "SECP_DISCOVERY_ACTIVATION_ROOT_TEST=fixed-layout-ci-only"
+
+
+def test_pr5f_root_transaction_job_exists_and_runs_only_exact_module(wf):
+    jobs = _jobs(wf)
+    assert PR5F_ROOT_JOB in jobs
+    job = jobs[PR5F_ROOT_JOB]
+    run = _run_text(job)
+    assert PR5F_ROOT_MODULE in run
+    assert "sudo" in run and ".venv/bin/python" in run
+    assert PR5F_ROOT_SENTINEL in run
+    assert "apps/api/tests" not in run
+    assert "test_commissioning_realfs.py" not in run
+    assert "test_deployment_root_manifest.py" not in run
+    assert "services" not in job
+    for forbidden_runtime in (
+        "docker",
+        "podman",
+        "ssh ",
+        "opentofu",
+        "terraform",
+        "run_plan_generation",
+        "secp-controlled-live",
+        "secp-operator",
+    ):
+        assert forbidden_runtime not in run.lower()
+
+
+def test_pr5f_root_transaction_preflights_fixed_parent_and_absent_leaf(wf):
+    steps = _steps(_jobs(wf)[PR5F_ROOT_JOB])
+    job_run = _run_text(_jobs(wf)[PR5F_ROOT_JOB])
+    assert "install -d" not in job_run
+    assert "already exists and was left untouched" in job_run
+    assert 'Path("/var/lib")' in job_run
+    assert "group/other-writable" in job_run
+    preflight_index = next(
+        i
+        for i, step in enumerate(steps)
+        if "pre-existing path refuses the root gate" in str(step.get("run", ""))
+    )
+    pytest_index = next(
+        i for i, step in enumerate(steps) if PR5F_ROOT_MODULE in str(step.get("run", ""))
+    )
+    assert preflight_index < pytest_index
+    run = str(steps[preflight_index]["run"])
+    assert PR5F_STATE_PARENT in run
+    assert 'parent / "discovery-worker"' in run
+    assert "lstat" in run and "S_ISLNK" in run and "S_ISDIR" in run
+    assert "st_uid" in run and "st_gid" in run
+    assert "0o020" in run and "0o002" in run
+    assert "sys.exit(1)" in run
+
+
+def test_pr5f_root_transaction_junit_gate_refuses_skip_or_undercollection(wf):
+    job = _jobs(wf)[PR5F_ROOT_JOB]
+    run = _run_text(job)
+    assert "--junitxml=junit-discovery-activation-root.xml" in run
+    assert "< 9" in run
+    assert "skipped" in run and "sys.exit(1)" in run
+    upload = next(
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+    )
+    assert upload.get("if") == "always()"
+    assert upload["with"]["path"] == "junit-discovery-activation-root.xml"
+    assert upload["with"]["if-no-files-found"] == "error"
+    parse_steps = [
+        step
+        for step in _steps(job)
+        if "skipped" in str(step.get("run", "")) and step.get("if") == "always()"
+    ]
+    assert parse_steps
+
+
+def test_pr5f_root_transaction_job_is_required_additive_and_cached(wf, suite):
+    jobs = _jobs(wf)
+    assert PR5F_ROOT_JOB in jobs["backend"]["needs"]
+    assert f"needs.{PR5F_ROOT_JOB}.result" in _run_text(jobs["backend"])
+    assert jobs["backend"]["name"] == BACKEND_AGG_NAME
+    setup = next(
+        step
+        for step in _steps(jobs[PR5F_ROOT_JOB])
+        if str(step.get("uses", "")).startswith("astral-sh/setup-uv")
+    )
+    assert setup["with"]["enable-cache"] is True
+    assert "uv.lock" in setup["with"]["cache-dependency-glob"]
+    assert "tests" in suite["roots"]
+    excluded = {entry["path"] for entry in suite.get("exclusions", [])}
+    assert PR5F_ROOT_MODULE not in excluded
+    assert jobs["backend-pytest"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
+
+
+def test_static_gate_checks_pr5f_boundary_and_complete_mypy_scope(wf):
+    run = _run_text(_jobs(wf)["backend-static"])
+    assert "tests/test_pr5f_discovery_activation_boundary.py" in run
+    assert "apps/commissioning/secp_commissioning" in run
+    assert "apps/deployment/secp_discovery_activation" in run
+    assert "apps/deployment/secp_operator_deployment" in run
+    assert "apps/management/secp_management" in run
 
 
 # --- deployment package root-security job (trusted dir-fd manifest + pinned exec) --------------

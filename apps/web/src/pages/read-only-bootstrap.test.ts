@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiClientError } from "../api/client";
-import type { BootstrapSession } from "../api/types";
+import type { BootstrapSession, WorkerDiscoveryNode } from "../api/types";
 import {
   PREREQUISITE_LABELS,
   WORKER_SIDE_PREREQUISITES,
   bootstrapStatusLabel,
   currentStep,
   describeApiError,
+  matchWorkerNodeByPublicKeyFingerprint,
   prerequisiteLabel,
   validateFingerprint,
+  validateNodeIdentityReview,
   validatePublicKey,
 } from "./read-only-bootstrap";
 
@@ -32,6 +34,20 @@ const session = (status: BootstrapSession["status"]): BootstrapSession => ({
   updated_at: "",
 });
 
+const node = (id: string, fingerprint = "SHA256:worker-a"): WorkerDiscoveryNode => ({
+  id,
+  organization_id: "org-1",
+  node_label: `worker-${id}`,
+  ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabcdefghij worker@secp",
+  ssh_public_key_fingerprint: fingerprint,
+  admission_anchor_hex: "a".repeat(64),
+  admission_anchor_fingerprint: "sha256:" + "b".repeat(64),
+  revision: 1,
+  worker_identity_registration_id: null,
+  created_at: "",
+  updated_at: "",
+});
+
 describe("wizard step derivation", () => {
   it("starts at create before a session exists", () => {
     expect(currentStep(null)).toBe("create");
@@ -40,6 +56,7 @@ describe("wizard step derivation", () => {
     expect(currentStep(session("pending"))).toBe("run-script");
     expect(currentStep(session("completed"))).toBe("bind");
     expect(currentStep(session("bound"))).toBe("run-discovery");
+    expect(currentStep(session("refused"))).toBe("refused");
   });
 });
 
@@ -65,6 +82,52 @@ describe("validateFingerprint", () => {
   it("requires SHA256:", () => {
     expect(validateFingerprint("MD5:aa").ok).toBe(false);
     expect(validateFingerprint("SHA256:" + "A".repeat(43)).ok).toBe(true);
+  });
+});
+
+describe("explicit worker-node identity review", () => {
+  const completeReview = {
+    deploymentBinding: "production-worker",
+    proofId: "change-review-1234",
+    issuer: "platform-operator",
+    deploymentBindingReviewed: true,
+    verificationAnchorReviewed: true,
+    rotationRevocationReviewed: true,
+  };
+
+  it("requires safe opaque metadata and all three explicit confirmations", () => {
+    expect(validateNodeIdentityReview(completeReview).ok).toBe(true);
+    expect(
+      validateNodeIdentityReview({ ...completeReview, deploymentBinding: "vault:value" }).ok,
+    ).toBe(false);
+    expect(
+      validateNodeIdentityReview({ ...completeReview, verificationAnchorReviewed: false }).ok,
+    ).toBe(false);
+    expect(
+      validateNodeIdentityReview({ ...completeReview, rotationRevocationReviewed: false }).ok,
+    ).toBe(false);
+  });
+
+  it("reload-matches one node by the session's public-key fingerprint", () => {
+    const match = matchWorkerNodeByPublicKeyFingerprint(
+      [node("old", "SHA256:old"), node("current", "SHA256:session")],
+      "SHA256:session",
+    );
+    expect(match.ok).toBe(true);
+    if (match.ok) expect(match.node.id).toBe("current");
+  });
+
+  it("fails closed on missing or ambiguous fingerprint matches", () => {
+    expect(matchWorkerNodeByPublicKeyFingerprint([node("one")], "SHA256:missing")).toEqual({
+      ok: false,
+      reason: "missing",
+    });
+    expect(
+      matchWorkerNodeByPublicKeyFingerprint(
+        [node("one", "SHA256:same"), node("two", "SHA256:same")],
+        "SHA256:same",
+      ),
+    ).toEqual({ ok: false, reason: "ambiguous" });
   });
 });
 

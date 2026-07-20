@@ -53,7 +53,14 @@ def _endpoint_hash(*, ssh_host="pve-a.internal", ssh_port=22, fingerprint=_FP) -
     )
 
 
-def _register_worker(session, principal, *, pub_hex: str, label="staging-worker-a"):
+def _register_worker(
+    session,
+    principal,
+    *,
+    pub_hex: str,
+    label="staging-worker-a",
+    mechanism=WorkerIdentityMechanism.ed25519_signed_nonce,
+):
     from secp_api.services import worker_identity as wi
 
     fp = compute_verification_anchor_fingerprint(pub_hex)
@@ -61,7 +68,7 @@ def _register_worker(session, principal, *, pub_hex: str, label="staging-worker-
     row = wi.register_worker_identity(
         session,
         principal,
-        mechanism=WorkerIdentityMechanism.mtls_workload_identity,
+        mechanism=mechanism,
         identity_label=label,
         deployment_binding=f"deploy-{label}",
         verification_anchor_fingerprint=fp,
@@ -221,6 +228,62 @@ def test_admission_happy_path_issue_sign_complete_consume(session, principal):
             endpoint_binding_hash=ebh,
             now=now,
         )
+
+
+def test_mtls_registration_cannot_back_ed25519_admission(session, principal):
+    _private_key, public_key = generate_ed25519_keypair()
+    endpoint_hash = _endpoint_hash()
+    _register_worker(
+        session,
+        principal,
+        pub_hex=public_key,
+        mechanism=WorkerIdentityMechanism.mtls_workload_identity,
+    )
+    target, authorization = _target_auth(session, principal, endpoint_binding_hash=endpoint_hash)
+    _enrollment, job = _enroll(session, principal, target)
+
+    with pytest.raises(adm.WorkerAdmissionRefused) as exc:
+        adm.issue_discovery_admission_challenge(
+            session,
+            discovery_job_id=job.id,
+            authorization_id=authorization.id,
+            authorization_version=authorization.authorization_version,
+            endpoint_binding_hash=endpoint_hash,
+            now=datetime.now(UTC),
+        )
+
+    assert exc.value.reason_code == "worker_identity_unapproved"
+
+
+def test_admission_reverification_rejects_mechanism_drift(session, principal):
+    from secp_api.models import WorkerIdentityRegistration
+    from sqlalchemy import update
+
+    now = datetime.now(UTC)
+    private_key, public_key, endpoint_hash, authorization, _enrollment, job = _full_setup(
+        session, principal
+    )
+    admission = adm.issue_discovery_admission_challenge(
+        session,
+        discovery_job_id=job.id,
+        authorization_id=authorization.id,
+        authorization_version=authorization.authorization_version,
+        endpoint_binding_hash=endpoint_hash,
+        now=now,
+    )
+    # Simulate a legacy/malformed persisted row. The normal lifecycle correctly makes mechanism
+    # immutable; admission re-verification still must fail closed if stored state is inconsistent.
+    session.execute(
+        update(WorkerIdentityRegistration)
+        .where(WorkerIdentityRegistration.id == admission.worker_registration_id)
+        .values(mechanism=WorkerIdentityMechanism.mtls_workload_identity)
+    )
+    session.expire_all()
+
+    with pytest.raises(adm.WorkerAdmissionRefused) as exc:
+        _sign_and_complete(session, admission, private_key, public_key, now=now)
+
+    assert exc.value.reason_code == "worker_identity_mechanism_mismatch"
 
 
 def test_admission_wrong_signature_refused(session, principal):

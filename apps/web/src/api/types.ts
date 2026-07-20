@@ -539,7 +539,11 @@ export interface BootstrapAvailability {
 // SSH PUBLIC key, a port, a public host-key fingerprint, a bounded proof block, and the opaque
 // endpoint-binding digest. It NEVER accepts an SSH private key or a raw command.
 
-export type BootstrapStatus = "pending" | "completed" | "bound" | "refused";
+export type BootstrapStatus =
+  | "pending"
+  | "completed"
+  | "bound"
+  | "refused";
 
 export interface BootstrapSessionCreate {
   execution_target_id: string;
@@ -598,8 +602,7 @@ export interface BindingDescriptor {
 // --- SECP-B8: worker-owned discovery bundle automation ---
 
 /** A worker's self-published PUBLIC key material (the worker owns/generates its keys).
- *  The worker-identity registration linkage is deliberately NOT surfaced to the UI (worker-identity
- *  internals never leak to the frontend — see test_frontend_has_no_lease_or_activation_interface). */
+ *  Only its public facts and safe registration-link id are surfaced. */
 export interface WorkerDiscoveryNode {
   id: string;
   organization_id: string;
@@ -609,8 +612,25 @@ export interface WorkerDiscoveryNode {
   ssh_public_key_fingerprint: string;
   admission_anchor_hex: string;
   admission_anchor_fingerprint: string;
+  /** Monotonic revision of the public key material; advances on worker key rotation only. */
+  revision: number;
+  /** Safe linkage id only; approval/evidence internals stay behind the composite review action. */
+  worker_identity_registration_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Secret-free explicit review for one atomic node identity approval/link action. */
+export interface WorkerNodeIdentityApprovalLinkRequest {
+  expected_node_revision: number;
+  expected_ssh_public_key_fingerprint: string;
+  expected_admission_anchor_fingerprint: string;
+  deployment_binding: string;
+  proof_id: string;
+  issuer: string;
+  deployment_binding_review_confirmed: true;
+  verification_anchor_review_confirmed: true;
+  rotation_revocation_review_confirmed: true;
 }
 
 /** Precise readiness diagnostic for an enrollment's live discovery path (SECP-B8). */
@@ -712,6 +732,7 @@ export interface DiscoveryEvidence {
   candidate_vmids: number[];
   evidence_hash: string;
   bundle_available: boolean;
+  contact_state: string;
   created_at: string;
 }
 

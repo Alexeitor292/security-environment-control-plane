@@ -33,6 +33,7 @@ from secp_api.enums import (
     DiscoveryFailureCode,
     OnboardingStatus,
     TargetDiscoveryStatus,
+    WorkerIdentityMechanism,
     WorkerIdentityStatus,
 )
 from secp_api.models import (
@@ -78,9 +79,11 @@ _PROBE_CONTACT_STATE: dict[str, tuple[str, bool]] = {
     "probe_source_sealed": ("sealed", False),
     "bootstrap_unavailable": ("bundle_unavailable", False),
     "host_key_binding_unverified": ("host_key_refused", True),
-    "probe_timeout": ("contacted", True),
-    "probe_refused": ("contacted", True),
-    "malformed_probe_output": ("contacted", True),
+    # The child process ran, but none of these failures proves that a read-only response returned
+    # from the target. Bundle presence is recorded separately and must not upgrade this evidence.
+    "probe_timeout": ("unverifiable", True),
+    "probe_refused": ("unverifiable", True),
+    "malformed_probe_output": ("unverifiable", True),
 }
 
 # App-owned bounded policy (NOT host values): supported version floor, capacity requirements per
@@ -132,19 +135,20 @@ class DiscoveryOutcome:
     contact_state: str = "sealed"
 
 
-def _approved_registrations(session: Session, org_id: object) -> list[WorkerIdentityRegistration]:
-    """All approved worker-identity registrations for the org (0, 1, or ambiguous >1). Never raises
-    on multiplicity — the caller decides fail-closed policy (SECP-B6 F-IDENTITY)."""
-    return list(
-        session.execute(
-            select(WorkerIdentityRegistration).where(
-                WorkerIdentityRegistration.organization_id == org_id,
-                WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
-            )
-        )
-        .scalars()
-        .all()
+def _approved_registrations(
+    session: Session,
+    org_id: object,
+    *,
+    mechanism: WorkerIdentityMechanism | None = None,
+) -> list[WorkerIdentityRegistration]:
+    """Approved identities for the org, optionally scoped to one authentication mechanism."""
+    query = select(WorkerIdentityRegistration).where(
+        WorkerIdentityRegistration.organization_id == org_id,
+        WorkerIdentityRegistration.status == WorkerIdentityStatus.approved,
     )
+    if mechanism is not None:
+        query = query.where(WorkerIdentityRegistration.mechanism == mechanism)
+    return list(session.execute(query).scalars().all())
 
 
 def _active_onboarding(session: Session, target_id: object) -> TargetOnboarding | None:
@@ -265,6 +269,7 @@ def _fail(
             reason_code=reason,
             worker_identity_version=worker_identity_version,
             bundle_available=bundle_available,
+            contact_state=contact_state,
         )
     )
     enrollment.status = TargetDiscoveryStatus.failed
@@ -365,7 +370,11 @@ def _run_discovery_body(
 
     # SECP-B6 F-IDENTITY: an approved worker identity is MANDATORY before any live host contact.
     # Exactly one approved registration must exist; zero or ambiguous fails closed BEFORE probing.
-    registrations = _approved_registrations(session, enrollment.organization_id)
+    registrations = _approved_registrations(
+        session,
+        enrollment.organization_id,
+        mechanism=WorkerIdentityMechanism.ed25519_signed_nonce if live else None,
+    )
     identity = registrations[0] if len(registrations) == 1 else None
     if live and len(registrations) != 1:
         reason = (
@@ -493,7 +502,7 @@ def _run_discovery_body(
         facts = composition.probe_source.read_inventory()
     except ProbeSourceUnavailable as exc:
         contact_state, bundle_available = _PROBE_CONTACT_STATE.get(
-            exc.reason_code, ("contacted", True)
+            exc.reason_code, ("unverifiable", True)
         )
         return _fail(
             session,
@@ -568,7 +577,7 @@ def _run_discovery_body(
         presences = composition.probe_source.probe_candidate_presence(tuple(locators))
     except ProbeSourceUnavailable as exc:
         contact_state, bundle_available = _PROBE_CONTACT_STATE.get(
-            exc.reason_code, ("contacted", True)
+            exc.reason_code, ("unverifiable", True)
         )
         return _fail(
             session,
@@ -684,6 +693,7 @@ def _run_discovery_body(
         reason_code=None,
         worker_identity_version=worker_identity_version,
         bundle_available=True,
+        contact_state="contacted",
     )
     session.add(snapshot)
     session.flush()

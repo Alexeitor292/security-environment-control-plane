@@ -9,15 +9,22 @@ real ``HttpxAdmissionTransport`` + ``HttpWorkerAdmissionClient`` against a threa
 
 from __future__ import annotations
 
+import asyncio
+import gzip
+import os
 import secrets
+import ssl
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from _admission_tls_util import FakeAdmissionServer, IssuedTls, write_ca_only
 from secp_api.config import Settings
 from secp_api.worker_admission_contract import generate_ed25519_keypair
+from secp_worker import bundle_manager as bm
 from secp_worker.admission_http_transport import AdmissionTransportError, HttpxAdmissionTransport
+from secp_worker.hardened_http import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES
 from secp_worker.target_discovery.admission_client import (
     HttpWorkerAdmissionClient,
     SealedWorkerAdmissionClient,
@@ -90,6 +97,199 @@ def test_transport_repr_and_error_do_not_leak_endpoint():
     assert "secret-cp" not in str(exc.value)
 
 
+def test_transport_refuses_unreviewed_path_and_oversized_request_before_ca_read():
+    transport = HttpxAdmissionTransport(
+        base_url="https://control-plane.example:8443", ca_path="does-not-exist"
+    )
+    with pytest.raises(AdmissionTransportError) as path_exc:
+        transport.post("/api/v1/unrelated", {})
+    assert path_exc.value.reason_code == "admission_path_forbidden"
+
+    with pytest.raises(AdmissionTransportError) as size_exc:
+        transport.post(
+            "/internal/worker-discovery-admission/begin",
+            {"padding": "x" * MAX_REQUEST_BYTES},
+        )
+    assert size_exc.value.reason_code == "admission_request_too_large"
+
+
+def test_transport_refuses_invalid_or_unbounded_timeout():
+    for timeout in (True, 0, -1, 31, float("inf"), float("nan")):
+        with pytest.raises(AdmissionTransportError) as exc:
+            HttpxAdmissionTransport(
+                base_url="https://control-plane.example:8443",
+                ca_path="dummy-ca",
+                timeout=timeout,
+            )
+        assert exc.value.reason_code == "admission_timeout_invalid"
+
+
+class _AsyncBytesStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: tuple[bytes, ...]) -> None:
+        self._chunks = chunks
+        self.iterated = False
+        self.closed = False
+
+    async def __aiter__(self):  # noqa: ANN202
+        self.iterated = True
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _install_async_mock_client(monkeypatch, handler, captures):  # noqa: ANN001, ANN202
+    real_async_client = httpx.AsyncClient
+    mock_transport = httpx.MockTransport(handler)
+
+    def factory(**kwargs):  # noqa: ANN003, ANN202
+        captures.append(dict(kwargs))
+        return real_async_client(transport=mock_transport, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+def _install_mock_ssl_context(monkeypatch):  # noqa: ANN001, ANN202
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    seen: list[str] = []
+
+    def factory(*, cafile):  # noqa: ANN001, ANN202
+        seen.append(cafile)
+        return context
+
+    monkeypatch.setattr(ssl, "create_default_context", factory)
+    return context, seen
+
+
+def test_transport_enforces_total_deadline_on_a_slow_drip_response(monkeypatch):  # noqa: ANN001
+    class SlowDripStream(httpx.AsyncByteStream):
+        cancelled = False
+        closed = False
+
+        async def __aiter__(self):  # noqa: ANN202
+            try:
+                while True:
+                    await asyncio.sleep(0.001)
+                    yield b" "
+            finally:
+                self.cancelled = True
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = SlowDripStream()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get_list("Accept-Encoding") == ["identity"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=stream,
+        )
+
+    captures: list[dict[str, object]] = []
+    _install_async_mock_client(monkeypatch, handler, captures)
+    context, seen_ca_paths = _install_mock_ssl_context(monkeypatch)
+    transport = HttpxAdmissionTransport(
+        base_url="https://control-plane.example:8443",
+        ca_path="fixed-ca.pem",
+        timeout=0.02,
+    )
+
+    with pytest.raises(AdmissionTransportError) as exc:
+        transport.post("/internal/worker-discovery-admission/begin", {})
+
+    assert exc.value.reason_code == "admission_transport_failed"
+    assert stream.cancelled and stream.closed
+    assert seen_ca_paths == ["fixed-ca.pem"]
+    assert captures == [
+        {
+            "verify": context,
+            "trust_env": False,
+            "follow_redirects": False,
+            "timeout": 0.02,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "encoding_headers",
+    [
+        (("content-encoding", "gzip"),),
+        (("content-encoding", "identity"), ("content-encoding", "identity")),
+    ],
+)
+def test_transport_refuses_encoded_or_duplicate_encoding_without_reading_body(
+    monkeypatch,
+    encoding_headers,
+):  # noqa: ANN001
+    compressed = gzip.compress(b"x" * (MAX_RESPONSE_BYTES * 16))
+    assert len(compressed) < MAX_RESPONSE_BYTES
+    stream = _AsyncBytesStream((compressed,))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get_list("Accept-Encoding") == ["identity"]
+        return httpx.Response(
+            200,
+            headers=(("content-type", "application/json"), *encoding_headers),
+            stream=stream,
+        )
+
+    captures: list[dict[str, object]] = []
+    _install_async_mock_client(monkeypatch, handler, captures)
+    _install_mock_ssl_context(monkeypatch)
+    transport = HttpxAdmissionTransport(
+        base_url="https://control-plane.example:8443", ca_path="fixed-ca.pem"
+    )
+
+    with pytest.raises(AdmissionTransportError) as exc:
+        transport.post("/internal/worker-discovery-admission/begin", {})
+
+    assert exc.value.reason_code == "admission_response_invalid"
+    assert not stream.iterated
+    assert stream.closed
+
+
+def test_transport_accepts_explicit_identity_encoding_and_reads_raw_bytes(monkeypatch):  # noqa: ANN001
+    stream = _AsyncBytesStream((b'{"ok":', b"true}"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get_list("Accept-Encoding") == ["identity"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json", "content-encoding": "identity"},
+            stream=stream,
+        )
+
+    captures: list[dict[str, object]] = []
+    _install_async_mock_client(monkeypatch, handler, captures)
+    _install_mock_ssl_context(monkeypatch)
+    transport = HttpxAdmissionTransport(
+        base_url="https://control-plane.example:8443", ca_path="fixed-ca.pem"
+    )
+
+    assert transport.post("/internal/worker-discovery-admission/begin", {}) == (200, {"ok": True})
+    assert stream.iterated and stream.closed
+
+
+def test_sync_transport_refuses_calls_from_a_running_event_loop(monkeypatch):  # noqa: ANN001
+    def forbidden_context(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("CA material must not be read after the async-context refusal")
+
+    monkeypatch.setattr(ssl, "create_default_context", forbidden_context)
+    transport = HttpxAdmissionTransport(
+        base_url="https://control-plane.example:8443", ca_path="fixed-ca.pem"
+    )
+
+    async def invoke() -> None:
+        with pytest.raises(AdmissionTransportError) as exc:
+            transport.post("/internal/worker-discovery-admission/begin", {})
+        assert exc.value.reason_code == "admission_async_context_forbidden"
+
+    asyncio.run(invoke())
+
+
 # --- 3: composition requires an explicit, usable CA bundle -------------------
 
 
@@ -104,10 +304,9 @@ def _live_settings(*, endpoint, key, anchor, ca):
 
 
 def _write_identity(tmp_path):
-    priv, pub = generate_ed25519_keypair()
-    (tmp_path / "id.key").write_text(priv)
-    (tmp_path / "id.anchor").write_text(pub)
-    return str(tmp_path / "id.key"), str(tmp_path / "id.anchor")
+    key_dir = tmp_path / "worker-keys"
+    bm.ensure_worker_keys(str(key_dir))
+    return str(key_dir / "admission_key"), str(key_dir / "admission_anchor")
 
 
 def test_composition_valid_ca_and_https_builds_http_client(tmp_path):
@@ -148,6 +347,49 @@ def test_composition_seals_on_http_endpoint_even_with_valid_ca(tmp_path):
         endpoint="http://control-plane.example:8443", key=key, anchor=anchor, ca=ca
     )
     assert isinstance(_build_admission_client(settings), SealedWorkerAdmissionClient)
+
+
+def test_composition_validates_endpoint_before_identity_read(tmp_path, monkeypatch):
+    key, anchor = _write_identity(tmp_path)
+    ca = write_ca_only(tmp_path)
+    settings = _live_settings(
+        endpoint="http://control-plane.example:8443", key=key, anchor=anchor, ca=ca
+    )
+    called = False
+
+    def forbidden_read(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("identity files must not be read for an invalid endpoint")
+
+    monkeypatch.setattr(bm, "read_worker_admission_identity", forbidden_read)
+    assert isinstance(_build_admission_client(settings), SealedWorkerAdmissionClient)
+    assert called is False
+
+
+def test_composition_requires_colocated_bounded_identity_files(tmp_path):
+    key, anchor = _write_identity(tmp_path)
+    ca = write_ca_only(tmp_path)
+    alternate_dir = tmp_path / "alternate-keys"
+    alternate_dir.mkdir(mode=0o700)
+    alternate = alternate_dir / "alternate-name"
+    alternate.write_bytes((tmp_path / "worker-keys" / "admission_key").read_bytes())
+    if os.name == "posix":
+        os.chmod(alternate_dir, 0o700)
+        os.chmod(alternate, 0o600)
+    wrong_name = _live_settings(
+        endpoint="https://control-plane.example:8443",
+        key=str(alternate),
+        anchor=anchor,
+        ca=ca,
+    )
+    assert isinstance(_build_admission_client(wrong_name), SealedWorkerAdmissionClient)
+
+    (tmp_path / "worker-keys" / "admission_key").write_bytes(b"a" * 257)
+    oversized = _live_settings(
+        endpoint="https://control-plane.example:8443", key=key, anchor=anchor, ca=ca
+    )
+    assert isinstance(_build_admission_client(oversized), SealedWorkerAdmissionClient)
 
 
 def test_composition_seals_without_ca_setting(tmp_path):
@@ -259,6 +501,39 @@ def test_full_valid_handshake_over_real_tls(shared_tls):
         )
     assert grant.identity_version == 2
     assert consumed.registration_id == grant.registration_id
+
+
+def test_transport_streams_and_refuses_oversized_response(shared_tls):
+    tls = shared_tls
+
+    def responder(_path, _body):
+        return 200, {"padding": "x" * (MAX_RESPONSE_BYTES + 1)}
+
+    with FakeAdmissionServer(
+        responder=responder, certfile=tls.server_cert_path, keyfile=tls.server_key_path
+    ) as server:
+        transport = HttpxAdmissionTransport(base_url=server.base_url, ca_path=tls.ca_path)
+        with pytest.raises(AdmissionTransportError) as exc:
+            transport.post("/internal/worker-discovery-admission/begin", {})
+    assert exc.value.reason_code == "admission_response_too_large"
+
+
+def test_transport_refuses_overdeep_json_response(shared_tls):
+    tls = shared_tls
+    nested: dict = {"leaf": "ok"}
+    for _ in range(30):
+        nested = {"nested": nested}
+
+    def responder(_path, _body):
+        return 200, nested
+
+    with FakeAdmissionServer(
+        responder=responder, certfile=tls.server_cert_path, keyfile=tls.server_key_path
+    ) as server:
+        transport = HttpxAdmissionTransport(base_url=server.base_url, ca_path=tls.ca_path)
+        with pytest.raises(AdmissionTransportError) as exc:
+            transport.post("/internal/worker-discovery-admission/begin", {})
+    assert exc.value.reason_code == "admission_response_invalid"
 
 
 def test_wrong_ca_tls_fails_closed(tmp_path):

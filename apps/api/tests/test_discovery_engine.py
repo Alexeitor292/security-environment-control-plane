@@ -150,6 +150,7 @@ def test_sealed_probe_source_fails_closed_with_no_evidence(session, principal):
     snap = session.query(DiscoverySnapshot).one()
     assert snap.eligibility == DiscoveryEligibility.unverifiable
     assert snap.bundle_available is False
+    assert snap.contact_state.value == "sealed"
     assert session.query(DiscoveryCandidatePlan).count() == 0
 
 
@@ -174,6 +175,8 @@ def test_eligible_target_produces_candidate_plan(session, principal):
         session.query(DiscoverySnapshot).filter_by(eligibility=DiscoveryEligibility.eligible).one()
     )
     blob = str(snap.evidence)
+    assert snap.bundle_available is True
+    assert snap.contact_state.value == "contacted"
     for forbidden in ("ssh", "password", "token", "BEGIN", "known_hosts", "@", "/mnt", "http"):
         assert forbidden not in blob
 

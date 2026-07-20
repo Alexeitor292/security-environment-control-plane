@@ -110,22 +110,22 @@ def _build_admission_client(settings) -> WorkerAdmissionClient:
     # ALL FOUR are required: the privileged internal endpoint must be CA-pinned (no system trust).
     if not (endpoint and key_path and anchor_path and ca_path):
         return SealedWorkerAdmissionClient()
+    # Validate the endpoint before opening either identity file. A malformed/non-HTTPS URL never
+    # gets to trigger even a local private-key read.
+    try:
+        transport = HttpxAdmissionTransport(base_url=endpoint, ca_path=ca_path)
+    except AdmissionTransportError:
+        return SealedWorkerAdmissionClient()
     # The CA bundle must be a readable, parseable trust anchor BEFORE we build the live client.
     if not _ca_bundle_usable(ca_path):
         return SealedWorkerAdmissionClient()
     try:
-        with open(key_path, encoding="utf-8") as fh:
-            private_key_hex = fh.read().strip()
-        with open(anchor_path, encoding="utf-8") as fh:
-            public_anchor_hex = fh.read().strip()
-    except OSError:
-        return SealedWorkerAdmissionClient()
-    if not (private_key_hex and public_anchor_hex):
-        return SealedWorkerAdmissionClient()
-    try:
-        transport = HttpxAdmissionTransport(base_url=endpoint, ca_path=ca_path)
-    except AdmissionTransportError:
-        # A non-HTTPS / malformed / trick endpoint fails closed (no request, no key read).
+        from secp_worker import bundle_manager
+
+        private_key_hex, public_anchor_hex = bundle_manager.read_worker_admission_identity(
+            key_path, anchor_path
+        )
+    except bundle_manager.BundleManagerError:
         return SealedWorkerAdmissionClient()
     return HttpWorkerAdmissionClient(
         transport=transport,

@@ -13,7 +13,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secp_api.enums import ProxmoxBootstrapStatus
@@ -29,6 +40,16 @@ class ProxmoxReadOnlyBootstrapSession(Base, UpdatedTimestampMixin):
     it grants nothing on its own — a separately-approved live-read authorization is still needed."""
 
     __tablename__ = "proxmox_readonly_bootstrap_session"
+    __table_args__ = (
+        Index(
+            "uq_proxmox_bootstrap_bound_target",
+            "execution_target_id",
+            "onboarding_id",
+            unique=True,
+            sqlite_where=text("status = 'bound'"),
+            postgresql_where=text("status = 'bound'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -99,9 +120,15 @@ class WorkerDiscoveryNode(Base, UpdatedTimestampMixin):
     ssh_public_key_fingerprint: Mapped[str] = mapped_column(String(120), nullable=False)
     admission_anchor_hex: Mapped[str] = mapped_column(String(80), nullable=False)
     admission_anchor_fingerprint: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Monotonic PUBLIC-material revision. It advances only when either public key changes; an
+    # idempotent publication tick leaves it untouched. Deployment evidence binds this value.
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     # Set once an operator has registered/approved the worker identity for this anchor.
     worker_identity_registration_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     def __repr__(self) -> str:
-        return f"WorkerDiscoveryNode(id={self.id!s}, node_label={self.node_label!r})"
+        return (
+            f"WorkerDiscoveryNode(id={self.id!s}, node_label={self.node_label!r}, "
+            f"revision={self.revision})"
+        )

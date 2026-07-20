@@ -161,6 +161,14 @@ def test_normalize_node_id_preserves_distinct_case_names():
     assert a != b  # distinct parametrized cases stay distinct
 
 
+def test_normalize_node_id_preserves_distinct_literal_uuid_cases():
+    zero = ps.normalize_node_id("t/x.py::test_uuid[00000000-0000-0000-0000-000000000000]")
+    uppercase = ps.normalize_node_id("t/x.py::test_uuid[11111111-1111-4111-8111-11111111111A]")
+    assert zero.endswith("[00000000-0000-0000-0000-000000000000]")
+    assert uppercase.endswith("[11111111-1111-4111-8111-11111111111A]")
+    assert zero != uppercase
+
+
 # --- config + junit ---------------------------------------------------------------------------
 
 

@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import stat
+import sys
 from dataclasses import dataclass
 from typing import NoReturn, Protocol
 
@@ -50,12 +52,30 @@ class FileStat:
     nlink: int
 
 
+@dataclass(frozen=True, slots=True)
+class ExclusiveFileReceipt:
+    """Identity-bound receipt for one file created without replacing any destination."""
+
+    path: str
+    device: int
+    inode: int
+    uid: int
+    gid: int
+    mode: int
+    size: int
+
+
 class FilesystemBackend(Protocol):
     def lstat(self, path: str) -> FileStat | None: ...
     def safe_read(self, path: str, *, max_bytes: int, expected_uid: int) -> bytes: ...
     def sha256(self, path: str) -> str: ...
     def makedir(self, path: str, *, uid: int, gid: int, mode: int) -> None: ...
     def atomic_install(self, path: str, data: bytes, *, uid: int, gid: int, mode: int) -> None: ...
+    def exclusive_install(
+        self, path: str, data: bytes, *, uid: int, gid: int, mode: int
+    ) -> ExclusiveFileReceipt: ...
+    def created_file_matches(self, receipt: ExclusiveFileReceipt) -> bool: ...
+    def remove_created_file(self, receipt: ExclusiveFileReceipt) -> bool: ...
     def remove_file(self, path: str) -> None: ...
     def remove_dir(self, path: str) -> None: ...
     def list_dir(self, path: str) -> tuple[str, ...] | None: ...
@@ -121,6 +141,7 @@ class _Node:
     is_symlink: bool = False
     is_special: bool = False
     nlink: int = 1
+    inode: int = 0
 
 
 # The bootstrap-owned, root-controlled ancestor directories that MUST pre-exist for any managed
@@ -151,12 +172,39 @@ class InMemoryFilesystem:
 
     def __init__(self) -> None:
         self._nodes: dict[str, _Node] = {}
+        self._next_inode = 1
         for anc in _TRUSTED_ANCESTORS:
-            self._nodes[anc] = _Node(is_dir=True, uid=0, gid=0, mode=0o755)
+            self._nodes[anc] = self._new_node(is_dir=True, uid=0, gid=0, mode=0o755)
+
+    def _new_node(
+        self,
+        *,
+        is_dir: bool,
+        uid: int,
+        gid: int,
+        mode: int,
+        data: bytes = b"",
+        is_symlink: bool = False,
+        is_special: bool = False,
+        nlink: int = 1,
+    ) -> _Node:
+        inode = self._next_inode
+        self._next_inode += 1
+        return _Node(
+            is_dir=is_dir,
+            uid=uid,
+            gid=gid,
+            mode=mode,
+            data=data,
+            is_symlink=is_symlink,
+            is_special=is_special,
+            nlink=nlink,
+            inode=inode,
+        )
 
     # --- test seeding (not part of the protocol) ---
     def seed_dir(self, path: str, *, uid: int = 0, gid: int = 0, mode: int = 0o755) -> None:
-        self._nodes[path] = _Node(is_dir=True, uid=uid, gid=gid, mode=mode)
+        self._nodes[path] = self._new_node(is_dir=True, uid=uid, gid=gid, mode=mode)
 
     def seed_file(
         self,
@@ -168,13 +216,19 @@ class InMemoryFilesystem:
         mode: int = 0o640,
         nlink: int = 1,
     ) -> None:
-        self._nodes[path] = _Node(is_dir=False, uid=uid, gid=gid, mode=mode, data=data, nlink=nlink)
+        self._nodes[path] = self._new_node(
+            is_dir=False, uid=uid, gid=gid, mode=mode, data=data, nlink=nlink
+        )
 
     def seed_symlink(self, path: str, *, uid: int = 0, gid: int = 0) -> None:
-        self._nodes[path] = _Node(is_dir=False, uid=uid, gid=gid, mode=0o777, is_symlink=True)
+        self._nodes[path] = self._new_node(
+            is_dir=False, uid=uid, gid=gid, mode=0o777, is_symlink=True
+        )
 
     def seed_special(self, path: str, *, uid: int = 0, gid: int = 0) -> None:
-        self._nodes[path] = _Node(is_dir=False, uid=uid, gid=gid, mode=0o660, is_special=True)
+        self._nodes[path] = self._new_node(
+            is_dir=False, uid=uid, gid=gid, mode=0o660, is_special=True
+        )
 
     def paths(self) -> tuple[str, ...]:
         return tuple(sorted(self._nodes))
@@ -228,7 +282,7 @@ class InMemoryFilesystem:
             # An existing directory is left as-is (idempotent makedir); ownership/mode are the
             # installer's concern (it refuses a drifted dir before calling makedir).
             return
-        self._nodes[path] = _Node(is_dir=True, uid=uid, gid=gid, mode=mode)
+        self._nodes[path] = self._new_node(is_dir=True, uid=uid, gid=gid, mode=mode)
 
     def atomic_install(self, path: str, data: bytes, *, uid: int, gid: int, mode: int) -> None:
         self._assert_safe_ancestors(path)
@@ -242,7 +296,46 @@ class InMemoryFilesystem:
                 reject_fs("fs_target_special")
             if existing.nlink != 1:
                 reject_fs("fs_target_hardlinked")
-        self._nodes[path] = _Node(is_dir=False, uid=uid, gid=gid, mode=mode, data=data)
+        self._nodes[path] = self._new_node(is_dir=False, uid=uid, gid=gid, mode=mode, data=data)
+
+    def exclusive_install(
+        self, path: str, data: bytes, *, uid: int, gid: int, mode: int
+    ) -> ExclusiveFileReceipt:
+        """Create the destination exactly once; no existing object is adopted or replaced."""
+
+        self._assert_safe_ancestors(path)
+        if path in self._nodes:
+            reject_fs("fs_target_exists")
+        node = self._new_node(is_dir=False, uid=uid, gid=gid, mode=mode, data=data)
+        self._nodes[path] = node
+        return ExclusiveFileReceipt(
+            path=path,
+            device=1,
+            inode=node.inode,
+            uid=uid,
+            gid=gid,
+            mode=mode,
+            size=len(data),
+        )
+
+    def created_file_matches(self, receipt: ExclusiveFileReceipt) -> bool:
+        _require_exclusive_receipt(receipt)
+        self._assert_safe_ancestors(receipt.path)
+        node = self._nodes.get(receipt.path)
+        return bool(node is not None and _memory_node_matches_receipt(node, receipt))
+
+    def remove_created_file(self, receipt: ExclusiveFileReceipt) -> bool:
+        """Remove only the exact in-memory object named by an exclusive-create receipt."""
+
+        _require_exclusive_receipt(receipt)
+        self._assert_safe_ancestors(receipt.path)
+        node = self._nodes.get(receipt.path)
+        if node is None:
+            return True
+        if not _memory_node_is_created_inode(node, receipt):
+            return False
+        del self._nodes[receipt.path]
+        return True
 
     def safe_read(self, path: str, *, max_bytes: int, expected_uid: int) -> bytes:
         self._assert_safe_ancestors(path)
@@ -314,6 +407,108 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_EXCL = os.O_EXCL
 _AT_SYMLINK_NOFOLLOW = getattr(os, "AT_SYMLINK_NOFOLLOW", 0)
 _IS_POSIX = os.name == "posix"
+_RENAME_NOREPLACE = 1
+_QUARANTINE_ATTEMPTS = 4
+
+
+def _memory_node_matches_receipt(node: _Node, receipt: ExclusiveFileReceipt) -> bool:
+    return bool(
+        not node.is_dir
+        and not node.is_symlink
+        and not node.is_special
+        and node.nlink == 1
+        and node.inode == receipt.inode
+        and receipt.device == 1
+        and node.uid == receipt.uid
+        and node.gid == receipt.gid
+        and node.mode == receipt.mode
+        and len(node.data) == receipt.size
+    )
+
+
+def _memory_node_is_created_inode(node: _Node, receipt: ExclusiveFileReceipt) -> bool:
+    return bool(
+        not node.is_dir
+        and not node.is_symlink
+        and not node.is_special
+        and node.nlink == 1
+        and node.inode == receipt.inode
+        and receipt.device == 1
+    )
+
+
+def _require_exclusive_receipt(receipt: ExclusiveFileReceipt) -> None:
+    path_parts = _components(receipt.path) if type(receipt) is ExclusiveFileReceipt else []
+    if (
+        type(receipt) is not ExclusiveFileReceipt
+        or not receipt.path.startswith("/")
+        or receipt.path != "/" + "/".join(path_parts)
+        or any(part in {".", ".."} for part in path_parts)
+        or isinstance(receipt.device, bool)
+        or isinstance(receipt.inode, bool)
+        or receipt.device < 0
+        or receipt.inode <= 0
+        or isinstance(receipt.uid, bool)
+        or isinstance(receipt.gid, bool)
+        or receipt.uid < 0
+        or receipt.gid < 0
+        or isinstance(receipt.mode, bool)
+        or not (0 <= receipt.mode <= 0o7777)
+        or isinstance(receipt.size, bool)
+        or receipt.size < 0
+    ):
+        reject_fs("fs_created_receipt_invalid")
+
+
+def _real_stat_is_created_inode(st: os.stat_result, receipt: ExclusiveFileReceipt) -> bool:
+    return bool(
+        stat.S_ISREG(st.st_mode)
+        and st.st_nlink == 1
+        and st.st_dev == receipt.device
+        and st.st_ino == receipt.inode
+    )
+
+
+def _real_stat_matches_receipt(st: os.stat_result, receipt: ExclusiveFileReceipt) -> bool:
+    return bool(
+        _real_stat_is_created_inode(st, receipt)
+        and st.st_uid == receipt.uid
+        and st.st_gid == receipt.gid
+        and stat.S_IMODE(st.st_mode) == receipt.mode
+        and st.st_size == receipt.size
+    )
+
+
+def _rename_noreplace_at(directory_fd: int, source: str, destination: str) -> None:
+    """Linux atomic rename-without-replacement within one already-trusted directory."""
+
+    if not sys.platform.startswith("linux"):
+        raise OSError("atomic no-replace rename unavailable")
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+    except AttributeError:
+        raise OSError("atomic no-replace rename unavailable") from None
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        directory_fd,
+        os.fsencode(source),
+        directory_fd,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
 
 
 class RealFilesystem:
@@ -459,6 +654,142 @@ class RealFilesystem:
         except OSError:
             _silent_unlink(tmp, dir_fd)
             reject_fs("fs_install_failed")
+        finally:
+            os.close(dir_fd)
+
+    def exclusive_install(
+        self, path: str, data: bytes, *, uid: int, gid: int, mode: int
+    ) -> ExclusiveFileReceipt:
+        """Create a final file with O_EXCL and return its exact filesystem identity.
+
+        Unlike :meth:`atomic_install`, this primitive has no replace/adopt semantics.  If a later
+        step fails, cleanup goes through :meth:`remove_created_file`, which first atomically moves
+        the current name aside and deletes it only after the moved inode matches this receipt.
+        """
+
+        dir_fd, leaf = self._open_parent(path)
+        fd: int | None = None
+        receipt: ExclusiveFileReceipt | None = None
+        opened = False
+        try:
+            try:
+                fd = os.open(
+                    leaf,
+                    os.O_WRONLY | os.O_CREAT | _O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
+                    mode,
+                    dir_fd=dir_fd,
+                )
+                opened = True
+            except FileExistsError:
+                reject_fs("fs_target_exists")
+            except OSError:
+                reject_fs("fs_exclusive_install_failed")
+            created = os.fstat(fd)
+            receipt = ExclusiveFileReceipt(
+                path=path,
+                device=created.st_dev,
+                inode=created.st_ino,
+                uid=uid,
+                gid=gid,
+                mode=mode,
+                size=len(data),
+            )
+            _write_all(fd, data)
+            os.fchmod(fd, mode)  # type: ignore[attr-defined]
+            os.fchown(fd, uid, gid)  # type: ignore[attr-defined]
+            os.fsync(fd)
+            installed = os.fstat(fd)
+            if not _real_stat_matches_receipt(installed, receipt):
+                reject_fs("fs_exclusive_install_validation_failed")
+            os.fsync(dir_fd)
+            return receipt
+        except BaseException as exc:
+            if fd is not None:
+                os.close(fd)
+                fd = None
+            if opened:
+                cleaned = False
+                if receipt is not None:
+                    try:
+                        cleaned = self.remove_created_file(receipt)
+                    except Exception:
+                        cleaned = False
+                if not cleaned:
+                    raise FilesystemError("fs_exclusive_install_cleanup_failed") from None
+            if isinstance(exc, FilesystemError):
+                raise
+            raise FilesystemError("fs_exclusive_install_failed") from None
+        finally:
+            if fd is not None:
+                os.close(fd)
+            os.close(dir_fd)
+
+    def created_file_matches(self, receipt: ExclusiveFileReceipt) -> bool:
+        """Check the fixed name still resolves to the exact exclusively-created object."""
+
+        _require_exclusive_receipt(receipt)
+        dir_fd, leaf = self._open_parent(receipt.path)
+        fd: int | None = None
+        try:
+            try:
+                fd = os.open(
+                    leaf,
+                    os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC,
+                    dir_fd=dir_fd,
+                )
+            except OSError:
+                return False
+            return _real_stat_matches_receipt(os.fstat(fd), receipt)
+        except OSError:
+            return False
+        finally:
+            if fd is not None:
+                os.close(fd)
+            os.close(dir_fd)
+
+    def remove_created_file(self, receipt: ExclusiveFileReceipt) -> bool:
+        """Quarantine then remove only the exact inode created by ``exclusive_install``.
+
+        If a racer substituted the source name, its object is atomically moved to the quarantine,
+        identified as foreign, and restored without replacing any new occupant.  It is never
+        unlinked.  A restoration conflict or unavailable Linux no-replace rename fails closed and
+        may leave the foreign object quarantined for operator recovery.
+        """
+
+        _require_exclusive_receipt(receipt)
+        dir_fd, leaf = self._open_parent(receipt.path)
+        quarantine: str | None = None
+        try:
+            for _attempt in range(_QUARANTINE_ATTEMPTS):
+                candidate = f".secp-created-{secrets.token_hex(16)}"
+                try:
+                    _rename_noreplace_at(dir_fd, leaf, candidate)
+                except FileNotFoundError:
+                    return True
+                except FileExistsError:
+                    continue
+                except OSError:
+                    return False
+                quarantine = candidate
+                break
+            if quarantine is None:
+                return False
+            try:
+                moved = os.stat(quarantine, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError:
+                return False
+            if not _real_stat_is_created_inode(moved, receipt):
+                try:
+                    _rename_noreplace_at(dir_fd, quarantine, leaf)
+                except OSError:
+                    pass
+                return False
+            try:
+                os.unlink(quarantine, dir_fd=dir_fd)
+                os.fsync(dir_fd)
+            except OSError:
+                return False
+            return True
         finally:
             os.close(dir_fd)
 

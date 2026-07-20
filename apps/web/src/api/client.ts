@@ -52,6 +52,7 @@ import type {
   Version,
   WorkflowRun,
   WorkerDiscoveryNode,
+  WorkerNodeIdentityApprovalLinkRequest,
   DiscoveryReadiness,
   SubstrateEligibilityGrant,
 } from "./types";
@@ -519,6 +520,12 @@ export const api = {
     request<WorkerDiscoveryNode[]>(
       "GET",
       "/api/v1/target-discovery/read-only-bootstrap/worker-nodes",
+    ),
+  reviewAndLinkWorkerNode: (id: string, body: WorkerNodeIdentityApprovalLinkRequest) =>
+    request<WorkerDiscoveryNode>(
+      "POST",
+      `/api/v1/target-discovery/read-only-bootstrap/worker-nodes/${id}/identity-approval-link`,
+      body,
     ),
 
   // App-owned read-only staging preflight (SECP-B2-0). API queues only; a worker executes.
