@@ -446,12 +446,44 @@ jobs:
               sys.exit(1)
           print(f"trusted fixed parent and absent test paths proven: {parent}")
           PY
+      - name: Prepare the fixed trusted controller-config parent (PR5F.1 env file)
+        # The controller Compose environment file lives at the code-owned /etc/secp/controller/
+        # secp.env.  Create only the code-owned parents (root:root 0755); the test owns the leaf
+        # files and refuses if any pre-exist.  An existing parent is never chmod'd/chown'd/repaired.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" - <<'PY'
+          import os, stat, sys
+          from pathlib import Path
+          problems = []
+          for component in (Path("/"), Path("/etc")):
+              observed = component.lstat()
+              mode = observed.st_mode
+              if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                  problems.append(f"{component}: not a real directory")
+              if observed.st_uid != 0 or observed.st_gid != 0:
+                  problems.append(f"{component}: not root:root")
+              if stat.S_IMODE(mode) & 0o022:
+                  problems.append(f"{component}: group/other-writable")
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+          for directory in (Path("/etc/secp"), Path("/etc/secp/controller")):
+              if os.path.lexists(directory):
+                  print(f"fixed controller-config parent already exists, left untouched: {directory}")
+              else:
+                  os.mkdir(directory, 0o755)
+                  os.chown(directory, 0, 0, follow_symlinks=False)
+                  os.chmod(directory, 0o755, follow_symlinks=False)
+                  print(f"created fixed ephemeral controller-config parent: {directory}")
+          PY
       - name: Run PR5F fixed-layout root transaction tests (no skips)
         run: >-
           sudo env
           "SECP_DISCOVERY_ACTIVATION_ROOT_TEST=fixed-layout-ci-only"
           "$(pwd)/.venv/bin/python" -m pytest
           tests/test_pr5f_discovery_activation_root.py
+          tests/test_pr5f_controller_env_root.py
           -q -p no:cacheprovider
           --junitxml=junit-discovery-activation-root.xml
       - name: Upload PR5F root-transaction JUnit
@@ -480,8 +512,8 @@ jobs:
               skipped += int(suite.get("skipped", 0))
           print(f"collected={tests} failures={failures} errors={errors} skipped={skipped}")
           problems = []
-          if tests < 9:
-              problems.append(f"expected >= 9 PR5F root tests, collected {tests}")
+          if tests < 20:
+              problems.append(f"expected >= 20 PR5F root tests, collected {tests}")
           if skipped != 0:
               problems.append(f"expected 0 skipped, got {skipped} (root transaction did not run)")
           if failures != 0:

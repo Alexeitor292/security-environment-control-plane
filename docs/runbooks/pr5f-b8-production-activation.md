@@ -74,6 +74,48 @@ Each base file must be a nonempty, single-link, root-owned regular file with mod
 compare-and-swap checked before every Compose mutation and again before rollback. Any drift refuses;
 the package never guesses another Compose project or base path.
 
+The controller base Compose file interpolates fixed `${SECP_*}` variables. Because the production
+command runner uses a fixed child environment (`PATH`, `LC_ALL`) and never inherits the ambient
+process/shell environment or depends on the current working directory, those values are supplied
+explicitly with a single code-owned fixed environment file — never a profile-provided path:
+
+```text
+controller environment: /etc/secp/controller/secp.env   (always supplied with --env-file)
+```
+
+Every controller Compose invocation — initial activation, idempotent retry, compensation, and
+rollback to the baseline — runs with `--env-file /etc/secp/controller/secp.env`. The worker is
+unaffected: it keeps its existing service-level `env_file` contract and never receives the controller
+environment file. The environment file is a secret-bearing, immutable transaction input: it must be a
+nonempty, single-link, root-owned (`uid 0`) regular file with mode `0600` or `0640` under a
+root-controlled ancestor chain, and before any controller mutation the package proves it defines
+every `${SECP_*}` the base Compose file interpolates (an unsupported interpolation form refuses before
+staging). Its format is deliberately narrow and is proved sound against compose-go's dotenv
+semantics: only single-line `NAME=value` assignments (full-line `#` comments and blank lines are
+allowed; a leading UTF-8 BOM is tolerated). A value must resolve to a non-empty literal that Compose
+would use verbatim, so the following are refused before staging because Compose would otherwise
+silently produce an empty or altered value:
+
+- **empty** values (`NAME=`), and multi-line/quoted-spanning values;
+- values containing a `$` variable reference (`NAME=${OTHER}`, `NAME=$OTHER`, `NAME="${OTHER}"`) —
+  compose-go expands `$VAR`/`${VAR}` in unquoted **and** double-quoted values, and because the
+  runner uses a fixed child environment the reference resolves to the empty string;
+- unquoted values bearing `#` (an inline comment Compose would strip) or a stray quote;
+- `export NAME=…` and inline comments after a value.
+
+To carry a literal containing `$`, `#`, `"` or spaces, **single-quote** it (`NAME='p$a#s"s'`);
+compose-go treats single quotes as fully literal. A name is counted as covered only when the file
+defines it this way, so a name can never pass the gate while Compose blank-substitutes it. Multi-line
+secrets such as certificates are imported through the TLS import paths, not this file. Only the two
+repository-owned base Compose files, this environment file, and the fixed worker runtime-overlay
+import are the code-owned fixed paths the hardened reader may open; they are not deployment knobs. Only a private content-digest/uid/gid/mode binding is recorded in the root-owned `0600`
+journal — never the file bytes — and it is re-proven immediately before every controller Compose
+mutation and again before rollback; any change, disappearance, replacement, symlink, hardlink,
+owner/mode, or content drift refuses closed. The contents are never journaled, logged, echoed, or
+placed in any status, evidence, exception, or command line, and ambient environment and the working
+directory are irrelevant. Deployment must atomically copy the already-reviewed protected controller
+environment file to this canonical path before installation; that host operation is out of scope here.
+
 The fixed import and installed paths are:
 
 ```text

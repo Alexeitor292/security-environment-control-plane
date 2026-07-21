@@ -30,6 +30,8 @@ from secp_discovery_activation.evidence import WorkerGeneration
 from secp_discovery_activation.handoff import ControllerOffer, HandoffAttestation, WorkerResult
 from secp_discovery_activation.layout import PRODUCTION_LAYOUT
 from secp_discovery_activation.local_adapter import (
+    CONTROLLER_BASE_COMPOSE_PATH,
+    CONTROLLER_ENV_FILE_PATH,
     ArtifactPosture,
     LocalActivationAdapter,
     LocalHostRole,
@@ -70,6 +72,7 @@ _API_RESTORED_ID = "f" * 64
 _API_NAME = "secp-controller-api-1"
 _PROXY_ID = "c" * 64
 _BASE_COMPOSE = FixedInputBinding("sha256:" + "e" * 64, 0, 0, 0o640)
+_CONTROLLER_ENV = FixedInputBinding("sha256:" + "d" * 64, 0, 0, 0o600)
 
 
 def _identity_digest(value: str) -> str:
@@ -741,6 +744,8 @@ class FakeStore:
         self._runtime_after: tuple[ContainerRuntimeObservation, ...] | None = None
         self.base_compose_binding = _BASE_COMPOSE
         self.base_compose_drift = False
+        self.controller_env_binding = _CONTROLLER_ENV
+        self.controller_env_drift = False
         self.controller_prepared = True
         self.controller_override_preexisting = False
         self.worker_override_preexisting = False
@@ -781,6 +786,16 @@ class FakeStore:
         assert expected == self.base_compose_binding
         if self.base_compose_drift:
             raise ActivationAdapterError("base_compose_drift")
+
+    def transaction_controller_env_binding(self) -> FixedInputBinding:
+        self.operations.append("transaction_controller_env_binding")
+        return self.controller_env_binding
+
+    def assert_controller_env_unchanged(self, expected: FixedInputBinding) -> None:
+        self.operations.append("assert_controller_env_unchanged")
+        assert expected == self.controller_env_binding
+        if self.controller_env_drift:
+            raise ActivationAdapterError("controller_env_drift")
 
     def validated_runtime_overlay(self, expected_digest: str) -> _BoundFile:
         self.operations.append("validated_runtime_overlay")
@@ -953,6 +968,7 @@ class FakeStore:
             worker_config_changed=receipt.worker_config_changed,
             worker_recreated=receipt.worker_recreated,
             base_compose_binding=self.base_compose_binding,
+            controller_env_binding=self.controller_env_binding,
             profile=self.profile,
         )
 
@@ -2028,6 +2044,82 @@ def test_dormant_preexisting_overrides_are_not_activated_during_rollback(
     controller_rollback = [argv for _pin, argv, _timeout, _cap in runner.calls if "up" in argv][-1]
     assert PRODUCTION_LAYOUT.controller_compose_override_path not in controller_rollback
     assert ("rm", "--force", _PROXY_ID) in [argv for _pin, argv, _timeout, _cap in runner.calls]
+
+
+def _controller_compose_up_calls(runner: FakeRunner) -> list[tuple[str, ...]]:
+    return [
+        argv
+        for _pin, argv, _timeout, _cap in runner.calls
+        if "up" in argv and CONTROLLER_BASE_COMPOSE_PATH in argv
+    ]
+
+
+def test_controller_activation_and_rollback_bind_the_fixed_env_file(
+    tls_material: ValidatedTLSMaterial,
+) -> None:
+    # PR5F.1: both the activation Compose 'up' and the baseline rollback 'up' carry the code-owned
+    # fixed --env-file, and the binding is proven (assert_controller_env_unchanged) each time.
+    profile = _profile()
+    rendered = render_activation(profile, tls_material.metadata)
+    adapter, runner, store, _state, _tls = _adapter(profile, role=LocalHostRole.controller)
+    _set_controller_baseline(runner, store)
+    adapter.stage_controller_rollback(profile, rendered, adapter.observe_controller(profile))
+    store.operations.clear()
+    runner.calls.clear()
+    adapter.install_controller(profile, rendered, tls_material)
+    install_up = _controller_compose_up_calls(runner)
+    assert install_up
+    for argv in install_up:
+        assert argv[:2] == ("--env-file", CONTROLLER_ENV_FILE_PATH)
+    assert "assert_controller_env_unchanged" in store.operations
+
+    store.operations.clear()
+    runner.calls.clear()
+    assert adapter.compensate(adapter.receipt()).proven
+    rollback_up = _controller_compose_up_calls(runner)
+    assert rollback_up
+    for argv in rollback_up:
+        assert argv[:2] == ("--env-file", CONTROLLER_ENV_FILE_PATH)
+    assert "assert_controller_env_unchanged" in store.operations
+
+
+def test_controller_install_refuses_on_env_binding_drift_before_any_compose(
+    tls_material: ValidatedTLSMaterial,
+) -> None:
+    profile = _profile()
+    rendered = render_activation(profile, tls_material.metadata)
+    adapter, runner, store, _state, _tls = _adapter(profile, role=LocalHostRole.controller)
+    _set_controller_baseline(runner, store)
+    adapter.stage_controller_rollback(profile, rendered, adapter.observe_controller(profile))
+    store.controller_env_drift = True
+    runner.calls.clear()
+    with pytest.raises(ActivationAdapterError) as caught:
+        adapter.install_controller(profile, rendered, tls_material)
+    assert caught.value.reason_code == "controller_env_drift"
+    assert _controller_compose_up_calls(runner) == []  # refused before the mutation
+
+
+def test_worker_recreation_never_binds_or_asserts_the_controller_env_file(
+    tls_material: ValidatedTLSMaterial,
+) -> None:
+    # PR5F.1: the worker uses its own service-level env_file; it never receives the controller
+    # environment file and never runs the controller env-binding assertion.
+    profile = _profile()
+    rendered = render_activation(profile, tls_material.metadata)
+    adapter, runner, store, _state, _tls = _adapter(profile)
+    adapter.stage_rollback(
+        profile, rendered, adapter.observe(profile), state_receipt=_state_receipt()
+    )
+    runner.calls.clear()
+    store.operations.clear()
+    adapter.install_worker(
+        profile, render_worker_compose_override(profile), _worker_ca(tls_material)
+    )
+    adapter.recreate_worker(profile)
+    assert "assert_controller_env_unchanged" not in store.operations
+    for _pin, argv, _timeout, _cap in runner.calls:
+        assert "--env-file" not in argv
+        assert CONTROLLER_ENV_FILE_PATH not in argv
 
 
 def test_controller_downgrade_failure_reports_recovery_before_runtime_switch(

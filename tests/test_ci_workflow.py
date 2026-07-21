@@ -413,7 +413,7 @@ def test_pr5f_root_transaction_junit_gate_refuses_skip_or_undercollection(wf):
     job = _jobs(wf)[PR5F_ROOT_JOB]
     run = _run_text(job)
     assert "--junitxml=junit-discovery-activation-root.xml" in run
-    assert "< 9" in run
+    assert "< 20" in run
     assert "skipped" in run and "sys.exit(1)" in run
     upload = next(
         step
