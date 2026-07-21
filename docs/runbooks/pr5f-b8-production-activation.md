@@ -20,6 +20,20 @@ digest-qualified image containing the PR5F API surface and Alembic head `d8f1a2b
 pins both of those facts; neither an old worker image by itself nor a new API tag is an acceptable
 activation artifact.
 
+The shared repository Python image (`infra/dev/Dockerfile.python`), from which the controller API
+image is built, contains the **complete `pyproject.toml` local-package closure** required at runtime:
+the API (`secp_api`), the admission proxy (`secp-admission-proxy` → `secp_discovery_activation.proxy`),
+the discovery-activation CLI (`secp-discovery-activation` → `secp_discovery_activation.cli`), and the
+management (`secp_management`), commissioning (`secp_commissioning`), and deployment
+(`secp_operator_deployment`, `secp_discovery_activation`) package imports. A dedicated CI job builds
+the exact repository Dockerfile and, in a network-disabled, read-only, capability-dropped container,
+proves every production package imports, the console-script files resolve, the runtime user is
+`10001:10001`, the sole Alembic head is `d8f1a2b3c4e5`, and the runtime overlay builds
+deterministically. **This is a repository and CI correction only — no image has been built for or
+pushed to any environment, and nothing here has been deployed.** The ordinary worker's base-image
+deployment contract is unchanged: PR5F keeps it on its previously reviewed image plus the separately
+content-addressed runtime overlay; this correction does not replace the running worker image.
+
 ## Starting deployment truth
 
 At the time of this repository change, the ordinary worker still has both B8 flags false, no

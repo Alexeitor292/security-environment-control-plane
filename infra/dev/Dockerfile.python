@@ -12,19 +12,30 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Copy project metadata first for layer caching, then sources.
+# Copy project metadata first for layer caching, then sources.  Every local package root declared in
+# pyproject.toml's [tool.hatch.build.targets.wheel].packages must be present before the install so the
+# editable install resolves the complete package closure — the API, the admission proxy, the
+# discovery-activation CLI, and the management/commissioning/deployment packages.  A missing tree
+# yields a self-contained image that imports at build time but fails at runtime (ModuleNotFoundError).
 COPY pyproject.toml README.md ./
 COPY contracts ./contracts
 COPY plugins ./plugins
 COPY apps/api ./apps/api
 COPY apps/worker ./apps/worker
+COPY apps/commissioning ./apps/commissioning
+COPY apps/deployment ./apps/deployment
+COPY apps/management ./apps/management
 COPY docs ./docs
 
 # Install the project (with the optional worker extra for the durable path).
 RUN uv pip install --system -e ".[worker]"
 
-# Non-root runtime user.
-RUN useradd --create-home --uid 10001 secp && chown -R secp:secp /app
+# Non-root runtime user with an explicit, reviewed uid=gid=10001 (the identity the deployment and
+# commissioning packages pin for the ordinary runtime).  Pinning the group id avoids depending on the
+# distro's private-group id selection so the reviewed controller image is exactly 10001:10001.
+RUN groupadd --gid 10001 secp \
+    && useradd --create-home --uid 10001 --gid 10001 secp \
+    && chown -R secp:secp /app
 
 # SECP-B8: worker-owned discovery state root (key material + assembled mounted bundle). Created here
 # owned by the runtime user so a fresh named volume mounted at this path inherits secp ownership —

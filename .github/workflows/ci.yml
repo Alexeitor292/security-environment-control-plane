@@ -781,6 +781,77 @@ jobs:
 
   # --- stable aggregate gate: green only if every backend job is green -------------------------
   # Retains the exact externally visible check name for branch-protection stability.
+  # --- Real production Python image smoke (build + locked-down container) ----------------------
+  # Builds the exact repository production image and proves the installed image (not the host
+  # checkout) contains the full pyproject package closure, resolves the real console-script files,
+  # runs as the reviewed 10001:10001 user, pins the sole Alembic head, and produces a deterministic
+  # self-validating runtime overlay. The smoke container has no network, a read-only rootfs, a
+  # bounded /tmp tmpfs, all capabilities dropped, no-new-privileges, no Docker socket, no host
+  # secrets/env files, and no bind mount (the check script is fed over stdin). FAILS CLOSED by
+  # parsing the JUnit, so a fully-skipped or non-executing smoke can never pass.
+  backend-python-image-smoke:
+    name: Python production image smoke (build + locked-down container)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production Python image (repository root build context)
+        run: docker build -f infra/dev/Dockerfile.python -t secp-python-image-smoke:ci .
+      - name: Run the image smoke in a locked-down container (no network, read-only, cap-drop)
+        run: |
+          set -uo pipefail
+          # Capture the container exit non-fatally: the JUnit gate below is the sole authority (a
+          # smoke failure is reported per-check there), matching the "do not trust the exit code,
+          # parse the JUnit" pattern used by the other no-skip jobs.
+          status=0
+          docker run --rm -i \
+            --network none \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            secp-python-image-smoke:ci \
+            python - < infra/dev/image_smoke.py > junit-python-image-smoke.xml || status=$?
+          echo "smoke container exit: $status"
+      - name: Upload image-smoke JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-backend-python-image-smoke
+          path: junit-python-image-smoke.xml
+          if-no-files-found: error
+      - name: Enforce the image smoke executed every check (no skips, no failures)
+        if: always()
+        # Parse the JUnit — do NOT trust the container exit code. Green only if all checks ran and
+        # none were skipped or failed, proving the real built image passed every case.
+        run: |
+          python3 - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          p = Path("junit-python-image-smoke.xml")
+          if not p.exists() or p.stat().st_size == 0:
+              print("::error::junit-python-image-smoke.xml missing/empty — the smoke produced no result")
+              sys.exit(1)
+          root = ET.parse(p).getroot()
+          tests = failures = skipped = 0
+          for s in root.iter("testsuite"):
+              tests += int(s.get("tests", 0))
+              failures += int(s.get("failures", 0))
+              skipped += int(s.get("skipped", 0))
+          print(f"image-smoke checks={tests} failures={failures} skipped={skipped}")
+          problems = []
+          if tests < 5:
+              problems.append(f"expected >= 5 image-smoke checks, got {tests}")
+          if skipped != 0:
+              problems.append(f"expected 0 skipped, got {skipped}")
+          if failures != 0:
+              problems.append(f"{failures} image-smoke check(s) failed")
+          if problems:
+              for pr in problems:
+                  print(f"::error::{pr}")
+              sys.exit(1)
+          print("Image smoke green: full closure, scripts, 10001:10001, sole head, deterministic overlay.")
+          PY
+
   backend:
     name: Backend (format, lint, types, tests, schema, boundary, security)
     runs-on: ubuntu-latest
@@ -795,6 +866,7 @@ jobs:
         backend-deployment-root,
         backend-management-root,
         backend-security,
+        backend-python-image-smoke,
       ]
     if: always()
     steps:
@@ -809,6 +881,7 @@ jobs:
           echo "backend-deployment-root = ${{ needs.backend-deployment-root.result }}"
           echo "backend-management-root = ${{ needs.backend-management-root.result }}"
           echo "backend-security        = ${{ needs.backend-security.result }}"
+          echo "backend-image-smoke     = ${{ needs.backend-python-image-smoke.result }}"
           fail=0
           for r in \
             "${{ needs.backend-static.result }}" \
@@ -819,7 +892,8 @@ jobs:
             "${{ needs.backend-discovery-activation-root.result }}" \
             "${{ needs.backend-deployment-root.result }}" \
             "${{ needs.backend-management-root.result }}" \
-            "${{ needs.backend-security.result }}"; do
+            "${{ needs.backend-security.result }}" \
+            "${{ needs.backend-python-image-smoke.result }}"; do
             if [ "$r" != "success" ]; then fail=1; fi
           done
           if [ "$fail" -ne 0 ]; then
