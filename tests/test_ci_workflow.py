@@ -667,3 +667,44 @@ def test_uv_cache_is_keyed_on_dependency_sources(wf):
                 assert with_.get("enable-cache") is True, f"{name} setup-uv missing enable-cache"
                 glob = with_.get("cache-dependency-glob", "")
                 assert "uv.lock" in glob, f"{name} cache not keyed on uv.lock"
+
+
+# --- production Python image smoke job (SECP-PR5F.2) -------------------------------------------
+
+
+def test_python_image_smoke_job_exists_and_is_required(wf):
+    jobs = _jobs(wf)
+    assert "backend-python-image-smoke" in jobs, "the dedicated image smoke job must exist"
+    assert "backend-python-image-smoke" in jobs["backend"]["needs"]
+    assert "needs.backend-python-image-smoke.result" in _run_text(jobs["backend"])
+
+
+def test_python_image_smoke_builds_the_exact_repo_dockerfile(wf):
+    run = _run_text(_jobs(wf)["backend-python-image-smoke"])
+    assert "docker build -f infra/dev/Dockerfile.python -t secp-python-image-smoke:ci ." in run
+
+
+def test_python_image_smoke_container_is_fully_locked_down(wf):
+    run = _run_text(_jobs(wf)["backend-python-image-smoke"])
+    for flag in (
+        "--network none",
+        "--read-only",
+        "--cap-drop ALL",
+        "--security-opt no-new-privileges",
+        "--tmpfs /tmp",
+    ):
+        assert flag in run, f"image smoke must run with {flag}"
+    # the check script is fed over stdin (never bind-mounted); no volume/socket/env-file
+    assert "python - < infra/dev/image_smoke.py" in run
+    assert "-v " not in run
+    assert "--volume" not in run
+    assert "docker.sock" not in run
+    assert "--env-file" not in run
+
+
+def test_python_image_smoke_is_fail_closed_on_skip_or_failure(wf):
+    run = _run_text(_jobs(wf)["backend-python-image-smoke"])
+    assert "junit-python-image-smoke.xml" in run
+    assert "tests < 5" in run
+    assert "skipped != 0" in run
+    assert "failures != 0" in run
