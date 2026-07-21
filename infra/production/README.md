@@ -42,6 +42,20 @@ and must not be treated as one. Do not invent unrelated services or broaden its 
   `/etc/secp/controller/docker-compose.yml` and `/etc/secp/worker/docker-compose.yml`. Their
   content/uid/gid/mode bindings are journaled and compare-and-swap checked before every Compose
   mutation and rollback.
+- The controller base Compose file interpolates fixed `${SECP_*}` variables, supplied explicitly with
+  the single code-owned fixed environment file `/etc/secp/controller/secp.env` via `--env-file` on
+  every controller Compose op (activation, retry, compensation, rollback) — never a profile path,
+  ambient environment, or working-directory guess. It must be a nonempty single-link root-owned
+  (`uid 0`, mode `0600`/`0640`) regular file containing only single-line `NAME=value` assignments
+  that resolve to a non-empty literal. Empty, multi-line/quoted-spanning, `export`-prefixed,
+  inline-commented, and `$`-bearing values are refused before staging (compose-go expands `$VAR`
+  even inside double quotes, and the fixed child environment would resolve it to an empty string) —
+  single-quote a literal that must contain `$`/`#`/`"`/spaces. Before any controller mutation the
+  package proves it covers every interpolated `${SECP_*}`. Only a private digest/uid/gid/mode binding is journaled
+  (never the bytes) and re-proven before each controller Compose mutation and rollback; any drift
+  refuses closed. The worker never receives it (it keeps its service-level `env_file`). The contents
+  never appear in the journal, status, evidence, exceptions, or argv. **Deployment must atomically
+  copy the already-reviewed protected environment file to this canonical path before installation.**
 - The worker receives a read-only pinned CA certificate, never the admission server private key.
 - The listener exposes only the existing worker-discovery-admission routes. Worker identity is the
   existing Ed25519 signed-nonce proof, **not client-certificate mTLS**.

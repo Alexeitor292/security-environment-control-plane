@@ -147,6 +147,161 @@ _HMAC_SHA256 = re.compile(r"^hmac-sha256:[0-9a-f]{64}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:\d{2})$")
 _CONTAINER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+# --- PR5F.1 controller Compose environment (code-owned fixed path) ------------------------------
+# The controller base Compose file interpolates ${SECP_*} variables.  The production command runner
+# uses a fixed child environment and never inherits ambient process/shell state, so those values
+# must be supplied explicitly via --env-file.  This path is code-owned; no profile-provided value
+# is admitted.  The file is a secret-bearing, immutable transaction input: its bytes are never
+# journaled, echoed, or placed in any public evidence/status surface — only a private digest/owner/
+# mode binding proves the same file remains present through activation and rollback.
+CONTROLLER_ENV_FILE_PATH = "/etc/secp/controller/secp.env"
+_MAX_CONTROLLER_ENV_BYTES = 64 * 1024
+_MAX_CONTROLLER_ENV_LINES = 512
+_MAX_ENV_NAME_LENGTH = 128
+_MAX_ENV_LINE_LENGTH = 4096
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _assert_env_value_defines_name(value: str) -> None:
+    """Refuse any value that compose would not resolve to the same non-empty literal we see.
+
+    ``docker compose --env-file`` uses compose-go's dotenv parser, which (a) lets a double-quoted
+    value span multiple physical lines, so a later physical line that textually looks like
+    ``NAME=...`` can actually be the *continuation* of the previous value and define no new name;
+    (b) performs ``$VAR``/``${VAR}`` expansion inside unquoted *and* double-quoted values, resolving
+    an undefined reference to the empty string; and (c) strips an inline `` #`` comment from an
+    unquoted value.  Because the production runner spawns compose with a fixed child environment
+    (``PATH``/``LC_ALL`` only), a value such as ``${DATABASE_URL}`` or ``"$TOKEN"`` expands to the
+    empty string at runtime — a name our parser would otherwise count as defined while compose
+    blank-substitutes it.  To keep name coverage *sound* (parser returns a name ⇒ compose defines it
+    non-empty) we admit only values whose runtime result we can prove verbatim without modelling
+    expansion:
+
+    * a single-quoted ``'literal'`` — compose-go treats single quotes as fully literal (no
+      expansion, no comment), so any balanced non-empty interior is safe; this is the escape hatch
+      for values that must contain ``$``/``#``/``"``/spaces;
+    * a double-quoted ``"literal"`` with no ``$`` (would expand) and no backslash (an escape we do
+      not model), balanced on one line;
+    * an unquoted token with no ``$`` (expansion), no ``#`` (inline comment), and no quote
+      character.
+
+    Anything else — an empty value, an unbalanced/multi-line quote, or an unquoted value bearing
+    ``$``/``#``/quotes — refuses closed.  Values are never inspected beyond this structural check.
+    """
+    if not value:
+        _closed("controller_env_empty_value")
+    first = value[0]
+    if first == "'":
+        interior = value[1:-1]
+        if len(value) < 2 or value[-1] != "'" or not interior or "'" in interior:
+            _closed("controller_env_unparsable")
+    elif first == '"':
+        interior = value[1:-1]
+        if (
+            len(value) < 2
+            or value[-1] != '"'
+            or not interior
+            or '"' in interior
+            or "$" in interior
+            or "\\" in interior
+        ):
+            _closed("controller_env_unparsable")
+    elif "$" in value or "#" in value or "'" in value or '"' in value:
+        _closed("controller_env_unparsable")
+
+
+def _parse_controller_env_names(raw: bytes) -> frozenset[str]:
+    """Strictly parse the fixed controller environment file and return only its assigned names.
+
+    Bounded and fail-closed: reject NUL/invalid UTF-8, oversize, too many/too-long lines, malformed
+    assignments, empty/multi-line-quoted values (see :func:`_assert_env_value_defines_name`), and
+    duplicate names.  Blank lines and ``#`` comments are allowed.  Values are never returned,
+    interpreted, logged, or echoed — only the set of soundly assigned variable NAMES is exposed.
+    """
+    if not (0 < len(raw) <= _MAX_CONTROLLER_ENV_BYTES) or b"\x00" in raw:
+        _closed("controller_env_unparsable")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _closed("controller_env_unparsable")
+    if text.startswith("\ufeff"):  # compose-go strips a leading UTF-8 BOM; match it so an
+        text = text[1:]  # editor-added BOM (common on Windows) does not refuse a valid file
+    lines = text.split("\n")
+    if len(lines) > _MAX_CONTROLLER_ENV_LINES:
+        _closed("controller_env_unparsable")
+    names: set[str] = set()
+    for line in lines:
+        if len(line) > _MAX_ENV_LINE_LENGTH:
+            _closed("controller_env_unparsable")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        eq = stripped.find("=")
+        if eq <= 0:
+            _closed("controller_env_malformed")
+        name = stripped[:eq].strip()
+        if len(name) > _MAX_ENV_NAME_LENGTH or not _ENV_NAME.fullmatch(name):
+            _closed("controller_env_malformed")
+        _assert_env_value_defines_name(stripped[eq + 1 :])
+        if name in names:
+            _closed("controller_env_duplicate_name")
+        names.add(name)
+    return frozenset(names)
+
+
+def _required_compose_variables(raw: bytes) -> frozenset[str]:
+    """Return the variable names the base Compose file requires for interpolation.
+
+    Supports only the plain ``${NAME}`` and ``$NAME`` forms, with ``$$`` an escaped literal ``$``.
+    Any other interpolation syntax (default/alternate/error forms, or a bare ``$``) is unsupported
+    and refuses closed before staging — a defaulted variable must never silently blank-substitute.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _closed("controller_base_compose_unparsable")
+    required: set[str] = set()
+    index, length = 0, len(text)
+    while index < length:
+        if text[index] != "$":
+            index += 1
+            continue
+        if index + 1 >= length:
+            _closed("controller_base_compose_interpolation_unsupported")
+        nxt = text[index + 1]
+        if nxt == "$":  # escaped literal dollar sign, not an interpolation reference
+            index += 2
+            continue
+        if nxt == "{":
+            end = text.find("}", index + 2)
+            if end == -1:
+                _closed("controller_base_compose_interpolation_unsupported")
+            name = text[index + 2 : end]
+            if not _ENV_NAME.fullmatch(name):  # any modifier (:- - :? ? :+ +) is unsupported
+                _closed("controller_base_compose_interpolation_unsupported")
+            required.add(name)
+            index = end + 1
+            continue
+        if nxt.isalpha() or nxt == "_":
+            cursor = index + 1
+            while cursor < length and (text[cursor].isalnum() or text[cursor] == "_"):
+                cursor += 1
+            required.add(text[index + 1 : cursor])
+            index = cursor
+            continue
+        _closed("controller_base_compose_interpolation_unsupported")
+    return frozenset(required)
+
+
+def _assert_controller_env_coverage(base_compose: bytes, env: bytes) -> None:
+    """Prove the fixed controller environment file defines every variable the base Compose file
+    interpolates.  Values are never inspected — only names are compared — so which secrets are
+    present is never revealed; a missing required name refuses with one bounded reason code."""
+    if not _required_compose_variables(base_compose) <= _parse_controller_env_names(env):
+        _closed("controller_env_missing_required_variable")
+
+
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _SSH_FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 _PROXY_GATE_SECRET = re.compile(rb"^[0-9a-f]{64}\n$")
@@ -257,6 +412,21 @@ _ROLE_PATHS: dict[str, str] = {
         PRODUCTION_LAYOUT.controller_worker_result_inbox_attestation_path
     ),
 }
+# Repository-owned fixed files the hardened trusted-ancestor reader may open in addition to the
+# profile/artifact roles and the transaction journals: the two base Compose files, the code-owned
+# controller environment file, and the fixed worker runtime-overlay import.  These are fixed product
+# topology, never profile-provided, so the opener must admit them explicitly — otherwise a correctly
+# provisioned file refuses closed with ``activation_path_not_fixed`` and the corresponding
+# controller/worker install/rollback path is inoperative.  Every non-role path handed to
+# ``_read_absolute``/``_open_parent`` must be a member here (see the completeness test).
+_FIXED_CODE_OWNED_PATHS: frozenset[str] = frozenset(
+    {
+        CONTROLLER_BASE_COMPOSE_PATH,
+        WORKER_BASE_COMPOSE_PATH,
+        CONTROLLER_ENV_FILE_PATH,
+        PRODUCTION_LAYOUT.worker_runtime_overlay_import_path,
+    }
+)
 _COMMON_RESULT_ROLES = (
     "activation_evidence",
     "activation_evidence_attestation",
@@ -640,6 +810,7 @@ class RollbackContext:
     before_controller_observation: ControllerObservation | None = None
     before_worker_generation_digest: str | None = None
     base_compose_binding: FixedInputBinding | None = None
+    controller_env_binding: FixedInputBinding | None = None
 
 
 class ActivationArtifactStore(Protocol):
@@ -687,6 +858,10 @@ class ActivationArtifactStore(Protocol):
     ) -> None: ...
 
     def transaction_base_compose_binding(self) -> FixedInputBinding: ...
+
+    def assert_controller_env_unchanged(self, expected: FixedInputBinding) -> None: ...
+
+    def transaction_controller_env_binding(self) -> FixedInputBinding: ...
 
     def record_worker_tls_proof(
         self,
@@ -1122,6 +1297,13 @@ class LocalActivationAdapter:
     def _assert_transaction_base_compose(self) -> FixedInputBinding:
         expected = self._store.transaction_base_compose_binding()
         self._store.assert_base_compose_unchanged(self._host_role, expected)
+        return expected
+
+    def _assert_transaction_controller_env(self) -> FixedInputBinding:
+        """Prove the fixed controller environment file still matches the staged binding and still
+        covers every base-Compose variable, immediately before a controller Compose mutation."""
+        expected = self._store.transaction_controller_env_binding()
+        self._store.assert_controller_env_unchanged(expected)
         return expected
 
     def _container_snapshot(
@@ -2486,8 +2668,12 @@ class LocalActivationAdapter:
         if self._host_role is not LocalHostRole.controller:
             _closed("controller_host_role_required")
         self._assert_transaction_base_compose()
+        self._assert_transaction_controller_env()
         self._store.install_controller(rendered, tls_material)
         self._assert_transaction_base_compose()
+        # Prove the fixed base Compose file AND its fixed environment file are byte-identical to the
+        # staged bindings (and still fully cover interpolation) immediately before the mutation.
+        self._assert_transaction_controller_env()
         # Mark before Compose: a timeout or runner failure has unknown runtime effects and must
         # require the database compatibility gate before any attempted image rollback.
         self._store.note_controller_runtime_change()
@@ -3102,8 +3288,13 @@ class LocalActivationAdapter:
                 if result.exit_code != 0:
                     return False
             if context.controller_runtime_changed:
-                if context.base_compose_binding is None or context.profile is None:
+                if (
+                    context.base_compose_binding is None
+                    or context.profile is None
+                    or context.controller_env_binding is None
+                ):
                     return False
+                controller_env_binding = context.controller_env_binding
                 self._store.assert_base_compose_unchanged(
                     LocalHostRole.controller, context.base_compose_binding
                 )
@@ -3139,6 +3330,9 @@ class LocalActivationAdapter:
                 )
                 if removed.exit_code not in {0, 1}:
                     return False
+                # Prove the fixed environment file is byte-identical to the staged binding and still
+                # covers interpolation immediately before the rollback Compose runs it.
+                self._store.assert_controller_env_unchanged(controller_env_binding)
                 result = self._command(
                     context.compose_runtime,
                     # The controller baseline has no proxy and does not apply the dormant
@@ -3528,7 +3722,12 @@ def _worker_compose_args(*, with_override: bool, project_name: str) -> tuple[str
 def _controller_compose_args(*, with_override: bool, project_name: str) -> tuple[str, ...]:
     if not _CONTAINER_NAME.fullmatch(project_name):
         _closed("compose_project_invalid")
+    # Always supply the code-owned fixed controller environment file so ${SECP_*} interpolation is
+    # deterministic regardless of the fixed child environment and the process working directory.
+    # The worker compose args deliberately omit it: the worker uses its own service-level env_file.
     files: tuple[str, ...] = (
+        "--env-file",
+        CONTROLLER_ENV_FILE_PATH,
         "--project-name",
         project_name,
         "--file",
@@ -4009,6 +4208,7 @@ class PosixActivationArtifactStore:
         cls._require_posix()
         if path not in {
             *_ROLE_PATHS.values(),
+            *_FIXED_CODE_OWNED_PATHS,
             PRODUCTION_LAYOUT.controller_journal_path,
             PRODUCTION_LAYOUT.worker_journal_path,
         }:
@@ -4384,6 +4584,50 @@ class PosixActivationArtifactStore:
         journal, _bound = self._load_journal()
         return _fixed_input_from_journal(journal["base_compose"])
 
+    @classmethod
+    def _controller_env_record(cls) -> _BoundFile:
+        """Read the code-owned fixed controller environment file as a private content+metadata
+        binding.  The hardened trusted-ancestor read already enforces a real regular file, no
+        symlink, single hard link, a root-controlled ancestor chain, and bounded size; here we add
+        the secret-bearing owner/mode policy (root-owned, never world-accessible: 0600 or 0640)."""
+        record = cls._read_absolute(
+            CONTROLLER_ENV_FILE_PATH,
+            allow_missing=True,
+            max_bytes=_MAX_CONTROLLER_ENV_BYTES,
+        )
+        if record is None:
+            _closed("controller_env_missing")
+        if not record.content:
+            _closed("controller_env_missing_or_empty")
+        if record.uid != 0 or record.mode not in {0o600, 0o640}:
+            _closed("controller_env_metadata_unsafe")
+        return record
+
+    def assert_controller_env_unchanged(self, expected: FixedInputBinding) -> None:
+        """Re-read the fixed controller environment file, prove it is byte-identical to the staged
+        binding, and re-prove it still covers every base-Compose interpolation variable.  Any
+        disappearance, replacement, symlink, hardlink, owner/mode/content drift refuses closed.
+        The file bytes are never returned or logged — only its private binding + name coverage."""
+        if self._host_role is not LocalHostRole.controller:
+            _closed("controller_host_role_required")
+        if type(expected) is not FixedInputBinding:
+            _closed("controller_env_binding_invalid")
+        record = self._controller_env_record()
+        if record.fixed_input() != expected:
+            _closed("controller_env_drift")
+        _assert_controller_env_coverage(
+            self._base_compose_record(LocalHostRole.controller).content, record.content
+        )
+
+    def transaction_controller_env_binding(self) -> FixedInputBinding:
+        journal, _bound = self._load_journal()
+        if (
+            journal["host_role"] != LocalHostRole.controller.value
+            or "controller_env" not in journal
+        ):
+            _closed("controller_env_binding_missing")
+        return _fixed_input_from_journal(journal["controller_env"])
+
     def transaction_profile(self) -> DeploymentProfile:
         journal, _bound = self._load_journal()
         profile_record = self._read_role(ROLE_PROFILE, allow_missing=False)
@@ -4657,6 +4901,17 @@ class PosixActivationArtifactStore:
         )
         if observed_base is None or observed_base != base_compose_record.fixed_input():
             _closed("base_compose_changed_before_staging")
+        # Controller only: bind the code-owned fixed environment file and prove — before any host
+        # mutation — that it defines every ${SECP_*} variable the base Compose file interpolates.
+        # Only a private digest/owner/mode binding is journaled, never the bytes; the worker never
+        # receives it.  Missing coverage or an unsafe/absent file refuses here, before staging.
+        controller_env_journal: dict[str, object] | None = None
+        if host_role is LocalHostRole.controller:
+            controller_env_record = self._controller_env_record()
+            _assert_controller_env_coverage(
+                base_compose_record.content, controller_env_record.content
+            )
+            controller_env_journal = controller_env_record.safe()
         if host_role is LocalHostRole.worker:
             if not _valid_state_receipt(state_receipt) or before_worker is None:
                 _closed("worker_state_receipt_invalid")
@@ -4756,6 +5011,10 @@ class PosixActivationArtifactStore:
             "runtime_after": None,
             "worker_tls_proof": None,
         }
+        # Controller journals bind the fixed environment file (private digest/owner/mode only, never
+        # its bytes); worker journals deliberately never claim or require this controller binding.
+        if controller_env_journal is not None:
+            journal["controller_env"] = controller_env_journal
         self._write_journal(journal, expected=None)
         return self.receipt()
 
@@ -5264,6 +5523,16 @@ class PosixActivationArtifactStore:
         assert isinstance(effects, dict)
         base_compose_binding = _fixed_input_from_journal(journal["base_compose"])
         self.assert_base_compose_unchanged(host_role, base_compose_binding)
+        # A controller rollback re-binds and re-proves the fixed environment file before any
+        # mutation; a drifted/absent file refuses closed here.  Worker journals carry no such
+        # binding and never require one.
+        controller_env_binding = (
+            _fixed_input_from_journal(journal["controller_env"])
+            if host_role is LocalHostRole.controller and "controller_env" in journal
+            else None
+        )
+        if controller_env_binding is not None:
+            self.assert_controller_env_unchanged(controller_env_binding)
         # Bind every input needed for runtime restoration before changing a single managed
         # artifact.  In particular, profile drift must not be discovered after a partial restore.
         profile_record = self._read_role(ROLE_PROFILE, allow_missing=False)
@@ -5397,6 +5666,7 @@ class PosixActivationArtifactStore:
             before_controller_observation=controller_baseline,
             before_worker_generation_digest=worker_generation_digest,
             base_compose_binding=base_compose_binding,
+            controller_env_binding=controller_env_binding,
         )
 
     def finish_rollback(self, *, proven: bool) -> None:
@@ -5833,8 +6103,11 @@ def _valid_journal_digest_pairs(value: object, allowed_roles: set[str]) -> bool:
     )
 
 
-def _validate_journal(value: dict[str, Any]) -> None:
-    if set(value) != {
+# The base journal key set shared by every role.  A controller journal additionally carries exactly
+# one "controller_env" binding (the fixed environment file's private digest/uid/gid/mode); a worker
+# journal carries none.  Neither role admits any other key.
+_COMMON_JOURNAL_KEYS = frozenset(
+    {
         "schema",
         "transaction_id",
         "host_role",
@@ -5852,7 +6125,25 @@ def _validate_journal(value: dict[str, Any]) -> None:
         "before_controller",
         "runtime_after",
         "worker_tls_proof",
-    }:
+    }
+)
+
+
+def _validate_journal(value: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        _closed("transaction_journal_malformed")
+    # Determine the host role first so the exact key set is role-dependent: a controller journal
+    # MUST carry exactly one controller_env binding, a worker journal MUST NOT carry it at all.
+    # This lets the fixed controller environment binding survive staging while keeping the worker
+    # schema unchanged; no arbitrary extra key is admitted for either role.
+    try:
+        host_role = LocalHostRole(value["host_role"])
+    except (ValueError, TypeError, KeyError):
+        _closed("transaction_journal_malformed")
+    expected_keys = set(_COMMON_JOURNAL_KEYS)
+    if host_role is LocalHostRole.controller:
+        expected_keys.add("controller_env")
+    if set(value) != expected_keys:
         _closed("transaction_journal_malformed")
     if value["schema"] != _JOURNAL_SCHEMA or value["status"] not in {
         "staged",
@@ -5868,10 +6159,14 @@ def _validate_journal(value: dict[str, Any]) -> None:
         _closed("transaction_journal_malformed")
     if str(transaction) != value["transaction_id"] or transaction.version != 4:
         _closed("transaction_journal_malformed")
-    try:
-        host_role = LocalHostRole(value["host_role"])
-    except (ValueError, TypeError):
-        _closed("transaction_journal_malformed")
+    if host_role is LocalHostRole.controller:
+        # The controller environment binding is a private FixedInputBinding — digest/uid/gid/mode
+        # only, never the bytes.  _fixed_input_from_journal rejects any content_b64 or extra field
+        # and requires uid 0 with a valid sha256 digest and bounded integer fields; here we pin the
+        # secret-bearing mode to exactly 0600 or 0640 (never a world-readable 0644).
+        controller_env = _fixed_input_from_journal(value["controller_env"])
+        if controller_env.mode not in {0o600, 0o640}:
+            _closed("transaction_journal_malformed")
     if not isinstance(value["render_manifest_sha256"], str) or not _SHA256.fullmatch(
         value["render_manifest_sha256"]
     ):
