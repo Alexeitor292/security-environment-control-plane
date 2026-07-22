@@ -12,9 +12,11 @@ never hand-copies files between hosts.  This module owns the *provider-neutral* 
   explicit ``refused`` / ``recovery_required`` terminals.  Every transition is revision-guarded,
   sequence/predecessor-chained, transaction-bound, expiring, single-use and replay-refusing; an
   retry is idempotent, a conflicting or stale message refuses closed.
-* the signed handoff is verified at an injectable :class:`HandoffVerifier` boundary whose default
-  reuses the PR5F ``verify_handoff`` over the canonical ``ControllerOffer`` / ``WorkerResult``
-  records **verbatim** (bytes/signatures never altered); the state machine binds only the
+* the signed handoff is verified at an injectable :class:`HandoffVerifier` boundary; the concrete
+  PR5F-backed verifier (reusing ``verify_handoff`` over the canonical ``ControllerOffer`` /
+  ``WorkerResult`` records **verbatim**, bytes/signatures never altered) is supplied by the consumer
+  that wires enrollment (the PR5H transport layer), NEVER imported by this management module — that
+  crosses a reviewed plane boundary; the state machine binds only the
   :class:`HandoffFacts` (digest + transaction + signer key id).
 * the actual network exchange is an :class:`EnrollmentTransport` whose shipped default is **sealed**
   (``enrollment_transport_not_activated``) — the socket-level worker→controller HTTPS is SECP-PR5H.
@@ -235,7 +237,8 @@ class HandoffFacts:
 
 class HandoffVerifier(Protocol):
     """Verifies a canonical handoff record + attestation against a pinned signer key id and returns
-    the bound facts.  The default reuses the PR5F ``verify_handoff`` over the real records."""
+    the transaction id.  The concrete PR5F-backed implementation (wrapping ``verify_handoff``) is
+    injected by the consumer/wiring layer — this management module never imports it."""
 
     def verify_controller_offer(
         self, record: object, attestation: object, *, key_id: str
@@ -539,36 +542,16 @@ class SealedEnrollmentTransport:
         raise _closed("enrollment_transport_not_activated")
 
 
-# ----------------------------------------------------------------------- default handoff verifier
-
-
-def default_handoff_verifier() -> HandoffVerifier:
-    """The production verifier reuses PR5F ``verify_handoff`` over the real ``ControllerOffer`` /
-    ``WorkerResult`` records verbatim; imported lazily so this module has no hard dependency on the
-    discovery-activation package when only the state machine is exercised."""
-
-    from secp_discovery_activation.handoff import (
-        ControllerOffer,
-        WorkerResult,
-        verify_handoff,
-    )
-
-    def _verify(record: object, attestation: object, *, key_id: str, expected_type: type) -> str:
-        if type(record) is not expected_type:
-            raise _closed("enrollment_handoff_invalid")
-        verify_handoff(record, attestation, expected_key_id=key_id)  # type: ignore[arg-type]
-        return str(getattr(record, "transaction_id"))  # noqa: B009 - dynamic attr on a verified record
-
-    class _DiscoveryHandoffVerifier:
-        def verify_controller_offer(
-            self, record: object, attestation: object, *, key_id: str
-        ) -> str:
-            return _verify(record, attestation, key_id=key_id, expected_type=ControllerOffer)
-
-        def verify_worker_result(self, record: object, attestation: object, *, key_id: str) -> str:
-            return _verify(record, attestation, key_id=key_id, expected_type=WorkerResult)
-
-    return _DiscoveryHandoffVerifier()
+# ----------------------------------------------------------------------- handoff verifier boundary
+#
+# The CONCRETE PR5F-backed HandoffVerifier (wrapping ``secp_discovery_activation.verify_handoff``
+# over the real ``ControllerOffer`` / ``WorkerResult`` records) is deliberately NOT defined in this
+# module.  The management plane must never statically import the PR5F root deployment authority —
+# that crosses a reviewed plane boundary (tests/test_pr5f_discovery_activation_boundary.py).  The
+# consumer that wires enrollment (the PR5H transport layer) constructs it against the
+# ``HandoffVerifier`` protocol above and injects it into ``bind_controller_offer`` /
+# ``bind_worker_result``; tests provide their own.  This keeps ``secp_management`` free of any
+# lower-plane dependency.
 
 
 __all__ = [
@@ -590,7 +573,6 @@ __all__ = [
     "require_recovery",
     "EnrollmentTransport",
     "SealedEnrollmentTransport",
-    "default_handoff_verifier",
     "sha256_digest_of_hex",
     "INVITED",
     "WORKER_BOUND",

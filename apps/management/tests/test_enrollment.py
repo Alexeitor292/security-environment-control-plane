@@ -334,8 +334,31 @@ def test_bind_offer_propagates_verifier_refusal() -> None:
     assert _reason(e) == "handoff_signature_invalid"
 
 
-def test_default_handoff_verifier_rejects_a_non_offer_record() -> None:
-    v = en.default_handoff_verifier()
+def _discovery_handoff_verifier() -> en.HandoffVerifier:
+    """The concrete PR5F-backed HandoffVerifier.  It lives HERE, not in secp_management, because the
+    management plane must never import the PR5F root deployment authority (a plane boundary,
+    tests/test_pr5f_discovery_activation_boundary.py); the real consumer is the PR5H wiring layer,
+    for which this test stands in."""
+    from secp_discovery_activation.handoff import ControllerOffer, WorkerResult, verify_handoff
+
+    def _verify(record: object, attestation: object, *, key_id: str, expected: type) -> str:
+        if type(record) is not expected:
+            raise ManagementError("enrollment_handoff_invalid")
+        verify_handoff(record, attestation, expected_key_id=key_id)  # type: ignore[arg-type]
+        return str(getattr(record, "transaction_id"))  # noqa: B009
+
+    class _V:
+        def verify_controller_offer(self, record: object, att: object, *, key_id: str) -> str:
+            return _verify(record, att, key_id=key_id, expected=ControllerOffer)
+
+        def verify_worker_result(self, record: object, att: object, *, key_id: str) -> str:
+            return _verify(record, att, key_id=key_id, expected=WorkerResult)
+
+    return _V()
+
+
+def test_discovery_handoff_verifier_rejects_a_non_offer_record() -> None:
+    v = _discovery_handoff_verifier()
     with pytest.raises(ManagementError) as e:
         v.verify_controller_offer(object(), object(), key_id=_CTRL_KEY)
     assert _reason(e) == "enrollment_handoff_invalid"
