@@ -29,10 +29,16 @@ Real leaves are constructed ONLY by the fixed production composition (``producti
 from __future__ import annotations
 
 import hashlib
+import platform as _platform
+import re
 from dataclasses import dataclass
 
 from secp_commissioning.canonical import sha256_bytes
 from secp_commissioning.runtime import FilesystemBackend, FilesystemError
+from secp_operator_deployment.host_adapters import (
+    LocalServiceStateAdapter,
+    WorkerGenerationObservation,
+)
 from secp_operator_deployment.host_process import CommandRunner
 from secp_operator_deployment.pinned_exec import ExecutablePin
 
@@ -40,17 +46,40 @@ from secp_management import ManagementError
 from secp_management.adapters import (
     BootstrapReceipt,
     CompensationResult,
+    ControllerObservation,
+    PlatformFacts,
     ReviewedConfig,
     ReviewedUnit,
     VerifiedArtifact,
+    WorkerObservation,
+    controller_generation_marker,
+    worker_generation_marker,
 )
+from secp_management.evidence import health_command_identity
 from secp_management.layout import ManagementLocations
 from secp_management.signing import sign_ed25519, verify_ed25519
 from secp_management.topology import (
     CONTROLLER_MIGRATION_ARGV,
     EXPECTED_CONTROLLER_COMPONENTS,
+    OPERATOR_SERVICE_NAME,
+    OPERATOR_TASK_QUEUE,
     ORDINARY_CONTAINER_NAME,
+    ORDINARY_HEALTH_COMMAND,
+    read_seals,
 )
+
+_FULL_CID = re.compile(r"[0-9a-f]{64}")
+_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+_RESTART = re.compile(r"[0-9]{1,9}")
+_PID = re.compile(r"[0-9]{1,10}")
+_TS = re.compile(r"\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:\d{2})")
+_BOOL = {"true": True, "false": False}
+# management-only container-runtime formats (image id / privileged) — NOT the PR5D generation
+# grammar, so no PR5D-owned service/container generation parse is duplicated here.
+_CONTROLLER_INSPECT = (
+    "{{.Name}}|{{.Id}}|{{.State.Running}}|{{.RestartCount}}|{{.Image}}|{{.HostConfig.Privileged}}"
+)
+_MAX_OBS_OUTPUT = 256 * 1024
 
 _ROOT_UID = 0
 _ROOT_GID = 0
@@ -585,6 +614,280 @@ def sign_and_public(private_key_hex: str) -> str:
     )
 
 
+# --------------------------------------------------------------------------- host observer
+
+
+def _controller_container(component: str) -> str:
+    return f"secp-controller-{component}"
+
+
+def _component_of(name: str) -> str | None:
+    n = name.lstrip("/")  # docker `{{.Name}}` has a leading slash
+    prefix = "secp-controller-"
+    return n[len(prefix) :] if n.startswith(prefix) else None
+
+
+class RealManagementHostObserver:
+    """The read-only management host observer.
+
+    The WORKER generation observation is EXACTLY ONE PR5D
+    ``LocalServiceStateAdapter.observe_generation()`` call — never a second Docker/systemd
+    parse in ``secp_management``.  The complete raw generation tuple is validated, then hashed into
+    ONLY the opaque ``worker_generation_marker`` / ``controller_generation_marker``; the raw values
+    never appear in repr/exceptions/logs, and only the exact typed observation contract is returned.
+    Management-only facts (image ids, config/unit/package identities, queue containment) come from
+    the pinned container runtime / hardened filesystem — distinct queries, not the PR5D grammar.
+    A worker/controller is coherent only when the reviewed structural predicates pass; readiness is
+    never inferred from "container running" alone."""
+
+    def __init__(self, ctx: RealAdapterContext) -> None:
+        self._ctx = ctx
+        self._service = LocalServiceStateAdapter(
+            operator_service=OPERATOR_SERVICE_NAME,
+            ordinary_container=ORDINARY_CONTAINER_NAME,
+            ordinary_health_command=ORDINARY_HEALTH_COMMAND,
+            container_runtime=ctx.executables.container_runtime,
+            service_inspector=ctx.executables.service_manager,
+            runner=ctx.runner,
+        )
+
+    # --- platform ---
+    def _capability(self, pin: ExecutablePin, argv: tuple[str, ...]) -> str | None:
+        # the executable identity is ALREADY verified by the pinned runner; version output is only a
+        # bounded capability observation, never used as executable trust.
+        try:
+            out = self._ctx.run(
+                pin, argv, timeout=_INSPECT_TIMEOUT, reason="capability_unavailable"
+            )
+        except ManagementError:
+            return None
+        return out.strip()[:64]
+
+    def platform(self) -> PlatformFacts:
+        import os as _os
+
+        docker_v = self._capability(
+            self._ctx.executables.container_runtime, ("version", "--format", "{{.Server.Version}}")
+        )
+        compose_v = self._capability(self._ctx.executables.compose_runtime, ("version", "--short"))
+        is_root = _os.name == "posix" and getattr(_os, "geteuid", lambda: -1)() == 0
+        return PlatformFacts(
+            os_name=_platform.system() or "unknown",
+            arch=_platform.machine() or "unknown",
+            is_root=bool(is_root),
+            docker_present=docker_v is not None,
+            compose_present=compose_v is not None,
+            docker_version=docker_v or "",
+            compose_version=compose_v or "",
+        )
+
+    # --- shared reads ---
+    def _identity_of(self, path: str) -> str:
+        try:
+            data = self._ctx.fs.safe_read(
+                path, max_bytes=_MAX_ARTIFACT_BYTES, expected_uid=_ROOT_UID
+            )
+        except (FilesystemError, ManagementError):
+            return ""
+        return sha256_bytes(data)
+
+    def _container_image(self, container: str) -> str:
+        try:
+            out = self._ctx.run(
+                self._ctx.executables.container_runtime,
+                ("inspect", "--format", "{{.Image}}", container),
+                timeout=_INSPECT_TIMEOUT,
+                reason="image_query_failed",
+            )
+        except ManagementError:
+            return ""
+        image = out.strip()
+        return image if _IMAGE_ID.fullmatch(image) else ""
+
+    # --- worker ---
+    def _worker_generation_valid(self, gen: WorkerGenerationObservation) -> bool:
+        if not (gen.inspected and gen.coherent and gen.ordinary_present):
+            return False
+        if not _FULL_CID.fullmatch(gen.ordinary_container_id):
+            return False
+        if not _RESTART.fullmatch(gen.ordinary_restart_count):
+            return False
+        if not _TS.fullmatch(gen.ordinary_started_at):
+            return False
+        if gen.ordinary_running and (
+            not _PID.fullmatch(gen.ordinary_pid) or gen.ordinary_pid == "0"
+        ):
+            return False
+        return bool(gen.operator_present)
+
+    def _polls_operator_queue(self) -> bool:
+        # a bounded read-only probe reporting the ordinary worker's polled queues (one per line)
+        try:
+            out = self._ctx.run(
+                self._ctx.executables.container_runtime,
+                ("exec", ORDINARY_CONTAINER_NAME, *ORDINARY_HEALTH_COMMAND[:-1], "queues"),
+                timeout=_INSPECT_TIMEOUT,
+                reason="queue_probe_failed",
+            )
+        except ManagementError:
+            return True  # cannot prove containment → conservatively assume a breach (fail closed)
+        queues = {line.strip() for line in out.splitlines() if line.strip()}
+        return OPERATOR_TASK_QUEUE in queues
+
+    def observe_worker(self) -> WorkerObservation:
+        gen = self._service.observe_generation()  # THE single PR5D coherent worker observation
+        coherent = self._worker_generation_valid(gen)
+        marker = worker_generation_marker(
+            container_id=gen.ordinary_container_id,
+            running_pid=gen.ordinary_pid,
+            restart_count=gen.ordinary_restart_count,
+            started_at=gen.ordinary_started_at,
+            operator_invocation_id=gen.operator_invocation_id,
+        )
+        ordinary_image = (
+            self._container_image(ORDINARY_CONTAINER_NAME) if gen.ordinary_present else ""
+        )
+        config_id = self._identity_of(self._ctx.locations.worker_compose_path())
+        unit_id = self._identity_of(self._ctx.locations.operator_unit_path())
+        package_agg = self._identity_of(self._ctx.locations.worker_deployment_package_path())
+        polls_operator = (
+            self._polls_operator_queue()
+            if (gen.ordinary_present and gen.ordinary_running)
+            else False
+        )
+        package_trusted = package_agg != ""
+        prepared = bool(
+            coherent
+            and gen.ordinary_running
+            and gen.ordinary_healthy
+            and gen.operator_present
+            and not gen.operator_enabled
+            and not gen.operator_running
+            and not polls_operator
+            and ordinary_image != ""
+            and config_id != ""
+        )
+        sealed = bool(prepared and package_trusted and read_seals().safe)
+        return WorkerObservation(
+            coherent=coherent,
+            ordinary_present=gen.ordinary_present,
+            ordinary_container_id=gen.ordinary_container_id,
+            ordinary_running=gen.ordinary_running,
+            ordinary_image_digest=ordinary_image,
+            ordinary_restart_count=gen.ordinary_restart_count,
+            ordinary_started_at=gen.ordinary_started_at,
+            ordinary_pid=gen.ordinary_pid,
+            ordinary_healthy=gen.ordinary_healthy,
+            ordinary_config_identity=config_id,
+            ordinary_health_command_identity=health_command_identity(ORDINARY_HEALTH_COMMAND),
+            operator_present=gen.operator_present,
+            operator_enabled=gen.operator_enabled,
+            operator_running=gen.operator_running,
+            operator_invocation_id=gen.operator_invocation_id,
+            operator_unit_identity=unit_id,
+            operator_image_digest="",  # the prepared operator is stopped; no running image
+            deployment_package_aggregate=package_agg,
+            ordinary_polls_operator_queue=polls_operator,
+            package_trusted=package_trusted,
+            commissioning_status="prepared" if prepared else "not_prepared",
+            deployment_status="sealed_prepared" if sealed else "not_prepared",
+            generation_marker=marker,
+        )
+
+    # --- controller ---
+    def _controller_sample(
+        self, expected: tuple[str, ...]
+    ) -> (
+        tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, bool], dict[str, bool]]
+        | None
+    ):
+        names = tuple(_controller_container(c) for c in expected)
+        try:
+            out = self._ctx.runner.run(
+                self._ctx.executables.container_runtime,
+                ("inspect", "--format", _CONTROLLER_INSPECT, *names),
+                timeout_seconds=_INSPECT_TIMEOUT,
+                max_output_bytes=_MAX_OBS_OUTPUT,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if out.exit_code != 0:
+            return None
+        lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+        if len(lines) != len(expected):
+            return None  # missing/extra component
+        ids: dict[str, str] = {}
+        restarts: dict[str, str] = {}
+        images: dict[str, str] = {}
+        running: dict[str, bool] = {}
+        privileged: dict[str, bool] = {}
+        for line in lines:
+            parts = line.split("|")
+            if len(parts) != 6:
+                return None  # malformed
+            name, cid, run, restart, image, priv = parts
+            comp = _component_of(name)
+            if comp is None or comp not in expected or comp in ids:
+                return None  # renamed / unexpected / duplicate
+            if not _FULL_CID.fullmatch(cid) or not _RESTART.fullmatch(restart):
+                return None
+            if not _IMAGE_ID.fullmatch(image) or run not in _BOOL or priv not in _BOOL:
+                return None
+            ids[comp] = cid
+            restarts[comp] = restart
+            images[comp] = image
+            running[comp] = _BOOL[run]
+            privileged[comp] = _BOOL[priv]
+        if set(ids) != set(expected):  # exact component-key equality
+            return None
+        return ids, restarts, images, running, privileged
+
+    def _migration_identity(self) -> str:
+        try:
+            out = self._ctx.run(
+                self._ctx.executables.container_runtime,
+                ("exec", _controller_container("api"), CONTROLLER_MIGRATION_ARGV[0], "current"),
+                timeout=_INSPECT_TIMEOUT,
+                reason="migration_query_failed",
+            )
+        except ManagementError:
+            return ""
+        match = re.search(r"\b([0-9a-f]{12})\b", out.strip())
+        return match.group(1) if match else ""
+
+    def observe_controller(self) -> ControllerObservation:
+        expected = tuple(EXPECTED_CONTROLLER_COMPONENTS)
+        before = self._controller_sample(expected)
+        config_id = self._identity_of(self._ctx.locations.controller_compose_path())
+        unit_id = self._identity_of(self._ctx.locations.controller_unit_path())
+        migration = self._migration_identity()
+        after = self._controller_sample(expected)
+        if before is None or after is None or before != after:
+            return ControllerObservation(
+                coherent=False
+            )  # incomplete / before-after generation drift
+        ids, restarts, images, running, privileged = before
+        unknown_priv = tuple(sorted(c for c, p in privileged.items() if p))
+        marker = controller_generation_marker(
+            container_ids=ids, restart_counts=restarts, images=images, migration_identity=migration
+        )
+        return ControllerObservation(
+            coherent=not unknown_priv,  # an unknown privileged component fails closed
+            container_image_digests=images,
+            running=running,
+            healthy=dict(
+                running
+            ),  # health folded into running for the bounded controller observation
+            unknown_privileged=unknown_priv,
+            migration_identity=migration,
+            config_identity=config_id,
+            unit_identity=unit_id,
+            container_ids=ids,
+            restart_counts=restarts,
+            generation_marker=marker,
+        )
+
+
 __all__ = [
     "PinnedExecutables",
     "RealAdapterContext",
@@ -592,4 +895,5 @@ __all__ = [
     "RealWorkerBootstrapAdapter",
     "RealManagementRollbackAdapter",
     "LocalManagementEvidenceAuthenticator",
+    "RealManagementHostObserver",
 ]
