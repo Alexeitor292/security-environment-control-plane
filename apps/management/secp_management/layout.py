@@ -39,6 +39,16 @@ _FORBIDDEN_ROOTS: tuple[str, ...] = (
 )
 
 
+# Exact, code-owned, closed unit/config file names (never descriptor-selected, never a wildcard).
+# The controller runs under a management wrapper unit; the worker's operator unit name matches the
+# reviewed topology (secp-operator-worker.service) and is installed DISABLED + STOPPED.
+_CONTROLLER_UNIT_NAME = "secp-controller-stack.service"
+_OPERATOR_UNIT_NAME = "secp-operator-worker.service"
+_CONTROLLER_COMPOSE_NAME = "docker-compose.yml"
+_WORKER_COMPOSE_NAME = "docker-compose.yml"
+_WORKER_DEPLOYMENT_PACKAGE_NAME = "secp-operator-deployment-package.zip"
+
+
 def _is_clean_absolute(path: str) -> bool:
     if not isinstance(path, str) or not path.startswith("/") or len(path) > 512:
         return False
@@ -67,6 +77,10 @@ class ManagementLocations:
     controller_config: str = "/etc/secp/controller"
     worker_config: str = "/etc/secp/worker"
     operator_deployment_config: str = "/etc/secp/operator-deployment"  # reused from PR5D
+    # The single, fixed systemd unit directory.  /usr/lib/systemd and /run/systemd are forbidden
+    # ancestors; /etc/secp/... roots are not systemd-managed, so the reviewed system unit dir is the
+    # one binding.  Only the two EXACT unit paths below are ever writable (assert_unit_writable).
+    systemd_dir: str = "/etc/systemd/system"
     bootstrap_state: str = "/var/lib/secp/bootstrap"
     commissioning_state: str = "/var/lib/secp/commissioning"  # reused from PR5C
     forbidden_roots: tuple[str, ...] = field(default=_FORBIDDEN_ROOTS)
@@ -80,6 +94,7 @@ class ManagementLocations:
             "controller_config",
             "worker_config",
             "operator_deployment_config",
+            "systemd_dir",
             "bootstrap_state",
             "commissioning_state",
         ):
@@ -131,9 +146,43 @@ class ManagementLocations:
             return f"{self.bootstrap_state}/{role_value}-evidence.attestation.json"
         raise ManagementError("role_invalid")
 
+    def controller_unit_path(self) -> str:
+        """The EXACT controller management wrapper unit path (a fixed constant, never selected)."""
+        return f"{self.systemd_dir}/{_CONTROLLER_UNIT_NAME}"
+
+    def operator_unit_path(self) -> str:
+        """The EXACT prepared operator unit path — installed DISABLED + STOPPED (fixed constant)."""
+        return f"{self.systemd_dir}/{_OPERATOR_UNIT_NAME}"
+
+    def controller_compose_path(self) -> str:
+        return f"{self.controller_config}/{_CONTROLLER_COMPOSE_NAME}"
+
+    def worker_compose_path(self) -> str:
+        return f"{self.worker_config}/{_WORKER_COMPOSE_NAME}"
+
+    def worker_deployment_package_path(self) -> str:
+        return f"{self.operator_deployment_config}/{_WORKER_DEPLOYMENT_PACKAGE_NAME}"
+
+    def unit_path(self, role_value: str) -> str:
+        """The single fixed unit path installed by each role's bootstrap (controller wrapper /
+        worker operator).  There is no ``unit_path(path)`` — the caller selects a ROLE, never a
+        path or filename, so a unit-path injection is structurally impossible."""
+        if role_value == "controller":
+            return self.controller_unit_path()
+        if role_value == "worker":
+            return self.operator_unit_path()
+        raise ManagementError("role_invalid")
+
+    def assert_unit_writable(self, path: str) -> None:
+        """The strict unit write authority: a unit target must be EXACTLY one of the two fixed
+        code-owned unit paths — never a prefix, wildcard, or caller filename in the systemd dir."""
+        if path not in (self.controller_unit_path(), self.operator_unit_path()):
+            raise ManagementError("layout_unit_path_not_fixed")
+
     def assert_writable(self, path: str) -> None:
         """The single write authority: a managed write target must be a clean absolute path under a
-        role/bootstrap root and never under a forbidden system root."""
+        role/bootstrap/config root and never under a forbidden system root.  Systemd units are NOT
+        writable here — they go only through the stricter ``assert_unit_writable``."""
         if not _is_clean_absolute(path):
             raise ManagementError("layout_path_unclean")
         for forbidden in self.forbidden_roots:
@@ -146,6 +195,7 @@ class ManagementLocations:
             self.bootstrap_state,
             self.controller_config,
             self.worker_config,
+            self.operator_deployment_config,
         )
         if not any(_under(path, root) for root in owned):
             raise ManagementError("layout_path_not_owned")

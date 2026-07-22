@@ -172,6 +172,74 @@ def _unavailable_snapshot() -> ServiceStateSnapshot:
     return _unavailable_evidence().to_service_state_snapshot()
 
 
+@dataclass(frozen=True)
+class WorkerGenerationObservation:
+    """A narrowly-scoped INTERNAL projection of ONE coherent host observation.
+
+    ``HostObservationEvidence`` intentionally exposes only booleans; this projection additionally
+    carries the raw generation facts (ordinary container id / running / RestartCount / StartedAt /
+    FinishedAt / Pid / health + the operator systemd InvocationID and states) so an out-of-package
+    coherent observer (the SECP-PR5G management host observer) can derive its opaque ABA generation
+    marker WITHOUT running a second Docker/systemd parser.  It is NEVER serialized into any public
+    evidence/status/API model: it has no ``canonical()`` and the management observer hashes these
+    facts into an opaque marker, exposing only that marker.  ``evidence()`` re-derives the exact
+    ``HostObservationEvidence`` so the two observations stay byte-identical."""
+
+    inspected: bool
+    coherent: bool
+    operator_present: bool
+    operator_enabled: bool
+    operator_running: bool
+    ordinary_running: bool
+    ordinary_present: bool
+    ordinary_container_id: str
+    ordinary_restart_count: str
+    ordinary_started_at: str
+    ordinary_finished_at: str
+    ordinary_pid: str
+    ordinary_healthy: bool
+    operator_invocation_id: str
+    operator_load_state: str
+    operator_active_state: str
+    operator_unit_file_state: str
+    operator_state_change_monotonic: str
+
+    def evidence(self) -> HostObservationEvidence:
+        return HostObservationEvidence(
+            inspected=self.inspected,
+            coherent=self.coherent,
+            operator_present=self.operator_present,
+            operator_enabled=self.operator_enabled,
+            operator_running=self.operator_running,
+            ordinary_running=self.ordinary_running,
+        )
+
+
+def _unavailable_generation() -> WorkerGenerationObservation:
+    # Same fail-closed posture as _unavailable_evidence (operator conservatively ACTIVE, ordinary
+    # DOWN, not coherent) with empty raw generation facts.
+    return WorkerGenerationObservation(
+        inspected=False,
+        coherent=False,
+        operator_present=True,
+        operator_enabled=True,
+        operator_running=True,
+        ordinary_running=False,
+        ordinary_present=False,
+        ordinary_container_id="",
+        ordinary_restart_count="",
+        ordinary_started_at="",
+        ordinary_finished_at="",
+        ordinary_pid="",
+        ordinary_healthy=False,
+        operator_invocation_id="",
+        operator_load_state="",
+        operator_active_state="",
+        operator_unit_file_state="",
+        operator_state_change_monotonic="",
+    )
+
+
 # --------------------------------------------------------------------------- service-state adapter
 
 
@@ -262,7 +330,7 @@ class LocalServiceStateAdapter:
         )
         return result.exit_code == 0
 
-    def observe(self) -> HostObservationEvidence:
+    def _coherent(self) -> WorkerGenerationObservation:
         start = time.monotonic()
         try:
             # --- primary observation (operator + container, each ONE bounded call) ---
@@ -276,35 +344,54 @@ class LocalServiceStateAdapter:
             op_after = self._operator_observation()
             ct_after = self._container_observation()
         except DeploymentPackageError:
-            return _unavailable_evidence()
+            return _unavailable_generation()
 
         if time.monotonic() - start > self.window_seconds:
-            return _unavailable_evidence()  # observation window exceeded → not coherent
+            return _unavailable_generation()  # observation window exceeded → not coherent
         if op_before != op_after:
-            return (
-                _unavailable_evidence()
-            )  # operator unit (or its generation) changed mid-collection
+            return _unavailable_generation()  # operator unit/generation changed mid-collection
         if ct_before != ct_after:
-            return _unavailable_evidence()  # ordinary container (or its generation) changed → ABA
+            return _unavailable_generation()  # ordinary container (or its generation) changed → ABA
 
         operator_present = _classify_load(op_before.load_state)
         operator_running = _classify_active(op_before.active_state)
         operator_enabled = _classify_unit_file_state(op_before.unit_file_state)
         if None in (operator_present, operator_running, operator_enabled):
-            return _unavailable_evidence()
+            return _unavailable_generation()
 
         # The health probe ran against ct_before's generation; because ct_before == ct_after, that
         # generation is unchanged, so the health result validly applies to the observed container.
         ordinary_running = ct_before.present and ct_before.running and healthy
 
-        return HostObservationEvidence(
+        return WorkerGenerationObservation(
             inspected=True,
             coherent=True,
             operator_present=bool(operator_present),
             operator_enabled=bool(operator_enabled),
             operator_running=bool(operator_running),
             ordinary_running=bool(ordinary_running),
+            ordinary_present=ct_before.present,
+            ordinary_container_id=ct_before.container_id,
+            ordinary_restart_count=ct_before.restart_count,
+            ordinary_started_at=ct_before.started_at,
+            ordinary_finished_at=ct_before.finished_at,
+            ordinary_pid=ct_before.pid,
+            ordinary_healthy=healthy,
+            operator_invocation_id=op_before.invocation_id,
+            operator_load_state=op_before.load_state,
+            operator_active_state=op_before.active_state,
+            operator_unit_file_state=op_before.unit_file_state,
+            operator_state_change_monotonic=op_before.state_change_monotonic,
         )
+
+    def observe(self) -> HostObservationEvidence:
+        return self._coherent().evidence()
+
+    def observe_generation(self) -> WorkerGenerationObservation:
+        """ONE coherent observation exposing the internal generation projection (raw facts + the
+        derived ``HostObservationEvidence`` booleans) for the management host observer — so it never
+        runs a second Docker/systemd parser."""
+        return self._coherent()
 
     def snapshot(self) -> ServiceStateSnapshot:
         # Derived 5-bool snapshot for the reused commissioning ``inspect_host`` seam.
