@@ -151,19 +151,23 @@ def real_ctx():  # noqa: ANN201
         shutil.rmtree(base, ignore_errors=True)
 
 
-def _load_artifact(image_ref: str, image_digest: str):  # noqa: ANN202
-    """A VerifiedArtifact wrapping a real `docker save` tar of ``image_ref``, carrying the given
-    signed loaded-image digest."""
-    from secp_management.adapters import VerifiedArtifact
-
+def _save_tar(image_ref: str) -> bytes:
+    """Bytes of a real ``docker save`` tar of ``image_ref`` (captured while the image exists)."""
     tar = tempfile.NamedTemporaryFile(suffix=".tar", delete=False)
     tar.close()
     try:
         _docker("save", image_ref, "-o", tar.name)
         with open(tar.name, "rb") as fh:
-            data = fh.read()
+            return fh.read()
     finally:
         os.unlink(tar.name)
+
+
+def _image_artifact(data: bytes, image_digest: str):  # noqa: ANN202
+    """A VerifiedArtifact over captured save-tar bytes carrying the given signed loaded-image
+    digest."""
+    from secp_management.adapters import VerifiedArtifact
+
     return VerifiedArtifact(
         role="worker",
         kind="image_archive",
@@ -194,17 +198,18 @@ def test_real_image_load_and_wrong_digest_refusal(real_ctx) -> None:
     _docker("pull", _LOAD_IMAGE)
     image_id = _docker("image", "inspect", "--format", "{{.Id}}", _LOAD_IMAGE)
     assert image_id.startswith("sha256:")
+    data = _save_tar(_LOAD_IMAGE)  # capture the archive WHILE the image exists
     _docker("image", "rm", "-f", _LOAD_IMAGE)  # prove the adapter's load actually restores it
 
     # wrong signed digest -> the loaded image is not the signed one -> refuse
     bad = RealWorkerBootstrapAdapter(real_ctx)
     with pytest.raises(ManagementError):
-        bad.load_image(_load_artifact(_LOAD_IMAGE, image_digest="sha256:" + "0" * 64))
+        bad.load_image(_image_artifact(data, image_digest="sha256:" + "0" * 64))
     _docker("image", "rm", "-f", _LOAD_IMAGE, check=False)
 
     # correct signed digest -> loads and verifies the LOADED image digest
     good = RealWorkerBootstrapAdapter(real_ctx)
-    good.load_image(_load_artifact(_LOAD_IMAGE, image_digest=image_id))
+    good.load_image(_image_artifact(data, image_digest=image_id))
     present = _docker("image", "inspect", "--format", "{{.Id}}", image_id)
     assert present == image_id
     assert good.receipt().loaded_images == (image_id,)
@@ -249,6 +254,8 @@ def test_real_operator_unit_disabled_and_stopped(real_ctx) -> None:
 
 
 def _run_ordinary(script_dir: str) -> None:
+    # the fake python3 is the docker bind-mount source; it lives OUTSIDE the hardened root tree so
+    # the daemon can mount it and its perms are independent of the layout's ancestor-trust rules.
     py3 = os.path.join(script_dir, "python3")
     with open(py3, "w") as fh:
         fh.write(_FAKE_PY3)
@@ -271,8 +278,7 @@ def _run_ordinary(script_dir: str) -> None:
 def test_real_ordinary_observed_prepared_and_marker_opaque(real_ctx) -> None:
     from secp_management.real_adapters import RealManagementHostObserver
 
-    scripts = os.path.join(real_ctx.locations.bootstrap_root, "scripts")
-    os.makedirs(scripts, exist_ok=True)
+    scripts = tempfile.mkdtemp(prefix="secp-py3-")  # /tmp: docker-mountable, outside the root tree
     try:
         _run_ordinary(scripts)
         adapter = _install_operator_unit(real_ctx)  # operator present, disabled
@@ -286,10 +292,10 @@ def test_real_ordinary_observed_prepared_and_marker_opaque(real_ctx) -> None:
         assert obs.operator_present and not obs.operator_enabled and not obs.operator_running
         assert obs.ordinary_image_digest.startswith("sha256:")
         assert obs.commissioning_status == "prepared"
-        # the opaque marker never embeds the raw container id / pid
+        # the opaque marker never embeds the raw container id (a 64-hex id inside the digest would
+        # require an astronomically unlikely collision)
         assert obs.generation_marker.startswith("sha256:")
         assert obs.ordinary_container_id not in obs.generation_marker
-        assert obs.ordinary_pid not in obs.generation_marker
 
         # status reobservation is stable (same generation -> same opaque marker)
         assert observer.observe_worker().generation_marker == obs.generation_marker
@@ -299,6 +305,7 @@ def test_real_ordinary_observed_prepared_and_marker_opaque(real_ctx) -> None:
         if os.path.exists(up):
             os.remove(up)
             _sh("systemctl", "daemon-reload", check=False)
+        shutil.rmtree(scripts, ignore_errors=True)
 
 
 # --- partial-bootstrap compensation + zero residual ------------------------------------------

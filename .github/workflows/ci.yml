@@ -818,13 +818,21 @@ jobs:
           test -f /usr/bin/docker && test -f /usr/bin/systemctl
           docker pull hello-world:latest
           docker pull busybox:latest
+      - name: Prepare a genuinely root-only trusted base directory
+        # The hardened filesystem refuses to write unless EVERY ancestor is root-owned and not
+        # group/other-writable; /opt on the runner has a world-writable ancestor, so the sandbox
+        # layout roots live under a fresh root:root tree beneath /root (whose chain is trusted).
+        run: |
+          sudo mkdir -p /root/secp-mgmt-real
+          sudo chown root:root /root/secp-mgmt-real
+          sudo chmod 0755 /root/secp-mgmt-real
       - name: Run the real management adapter E2E as root (no skips)
         # Absolute venv interpreter under passwordless sudo (effective UID 0) so the pinned runner's
         # root-owned executable + hardened root-owned filesystem requirements are satisfied and the
-        # operator unit is installed into the real /etc/systemd/system. SECP_ROOT_TEST_DIR=/opt is a
+        # operator unit is installed into the real /etc/systemd/system. SECP_ROOT_TEST_DIR is a
         # root-owned, non-group/other-writable ancestor for the sandbox layout roots.
         run: >-
-          sudo env "SECP_ROOT_TEST_DIR=/opt" "$(pwd)/.venv/bin/python" -m pytest
+          sudo env "SECP_ROOT_TEST_DIR=/root/secp-mgmt-real" "$(pwd)/.venv/bin/python" -m pytest
           apps/management/tests/test_management_real_adapters_root.py
           -q -p no:cacheprovider
           --junitxml=junit-management-real-adapters-root.xml
