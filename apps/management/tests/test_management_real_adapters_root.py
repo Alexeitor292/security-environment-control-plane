@@ -42,10 +42,11 @@ _OPERATOR_UNIT = "secp-operator-worker.service"  # must equal topology.OPERATOR_
 _LOAD_IMAGE = "hello-world:latest"  # tiny disposable image for the load/digest-verify proof
 _BASE_IMAGE = "busybox:latest"  # disposable base for the observable ordinary container
 
-# A fake `/usr/bin/python3` honoring ONLY the fixed ordinary health contract
-# (`python3 -m secp_worker.health <check|queues>`): check -> exit 0, queues -> print the
-# ordinary task queue.  Lets a stock busybox container satisfy the observer's health/queue probes
-# without a bespoke image build.
+# A fake `/usr/bin/python3` mirroring the REAL secp_worker.health exec contract
+# (`python3 -m secp_worker.health <check|queues>`): check -> exit 0 when ready; queues -> print
+# the recorded ordinary task queue (one per line), exit 0.  See apps/worker/secp_worker/health.py;
+# the real contract is proven hermetically in test_worker_health.py.  Lets a stock busybox
+# container satisfy the observer's health/queue probes without a bespoke image build.
 _FAKE_PY3 = """#!/bin/sh
 for a in "$@"; do last="$a"; done
 case "$last" in

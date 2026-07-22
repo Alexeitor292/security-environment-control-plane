@@ -75,6 +75,27 @@ def _bound(state: en.EnrollmentState, *, now: str = _NOW) -> en.EnrollmentState:
 # --- lifecycle -------------------------------------------------------------------------------
 
 
+def test_refusal_reason_must_be_a_bounded_code_never_a_path_or_endpoint() -> None:
+    s = _bound(en.open_enrollment(_invitation(), now=_NOW))
+    # a free-form reason carrying a host path / endpoint / IP is refused at the boundary, so it can
+    # never ride into refusal_reason and out through public_view
+    for leaky in (
+        "cannot reach https://10.0.0.5:8443/x",
+        "/etc/secp/worker/key",
+        "Failed: 192.168.1.9",
+    ):
+        with pytest.raises(ManagementError) as e:
+            en.refuse(s, leaky)
+        assert _reason(e) == "enrollment_reason_code_invalid"
+    with pytest.raises(ManagementError):
+        en.require_recovery(s, "/opt/secp/leak")
+    refused = en.refuse(s, "handoff_verification_failed")  # a bounded snake_case code is accepted
+    assert refused.state == en.REFUSED
+    view = refused.public_view()
+    assert view["refusal_reason"] == "handoff_verification_failed"
+    assert ":" not in view["refusal_reason"] and "/" not in view["refusal_reason"]
+
+
 def test_full_lifecycle_invited_to_healthy() -> None:
     s = en.open_enrollment(_invitation(), now=_NOW)
     assert s.state == en.INVITED and s.revision == 0 and s.sequence == 0

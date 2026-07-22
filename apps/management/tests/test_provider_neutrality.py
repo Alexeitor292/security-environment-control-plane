@@ -21,9 +21,12 @@ from pathlib import Path
 import secp_management
 
 # Infrastructure-provider / IaC-tool tokens that must never name a management data surface.  Matched
-# case-insensitively on WORD boundaries so 'aws' never matches 'flaws' and 'gce' never matches a
-# larger identifier.  Controller-stack COMPONENTS (postgres/minio/keycloak/temporal/web) are the
-# environment's own services, not infrastructure providers, and are intentionally NOT listed.
+# by SEGMENT membership (see _forbidden_segment): an identifier/dict-key is split into its
+# snake_case / kebab / camelCase segments, each compared to this set, so a token is caught however
+# it is glued
+# (aws_region, eksCluster, k8s-ns) while a benign word that only CONTAINS it as a substring (flaws,
+# gceometry) is not.  Controller-stack COMPONENTS (postgres/minio/keycloak/temporal/web) are the
+# environment's own services, not infrastructure providers, and are intentionally absent.
 _FORBIDDEN = (
     "proxmox",
     "vmware",
@@ -53,7 +56,28 @@ _FORBIDDEN = (
     "ansible",
     "openbao",
 )
-_TOKEN = re.compile(r"\b(" + "|".join(_FORBIDDEN) + r")\b", re.IGNORECASE)
+_FORBIDDEN_SET = frozenset(_FORBIDDEN)
+
+# Proof-of-ABSENCE safety seals (reviewed, pre-existing): these evidence/status booleans attest that
+# NO provider/IaC was contacted -- they ENFORCE neutrality, they are not a provider coupling.  They
+# are the ONLY names allowed to reference a provider/IaC token, and only as a negative safety seal.
+# (A future genuinely-multi-provider evolution should generalize them.)
+_PROOF_OF_ABSENCE = frozenset({"proxmox_contacted", "opentofu_executed"})
+
+# Split a snake_case / kebab / camelCase identifier (or dict key) into its lowercased segments, so a
+# provider token is caught however it is glued (aws_region, eksCluster, k8s-ns) while a benign word
+# that merely CONTAINS a token as a substring (flaws, gceometry) is not — segment membership, not
+# substring search, is the correct precision for identifiers.
+_SEG = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z0-9]+|[A-Z]+")
+
+
+def _forbidden_segment(name: str) -> str | None:
+    if name in _PROOF_OF_ABSENCE:
+        return None
+    for seg in _SEG.findall(name):
+        if seg.lower() in _FORBIDDEN_SET:
+            return seg.lower()
+    return None
 
 
 def _module_files() -> list[Path]:
@@ -80,13 +104,34 @@ def _data_surface_names(tree: ast.AST) -> list[tuple[str, str]]:
     return out
 
 
+def test_segment_matcher_catches_snake_and_camel_provider_tokens() -> None:
+    # regression guard for the matcher itself: \b would MISS underscore-glued tokens ('_' is a word
+    # char) and a substring search would false-positive on 'flaws'; segment membership is correct.
+    for name in (
+        "aws_region",
+        "proxmox_node",
+        "azure_tenant_id",
+        "gcp_project",
+        "vmware_dc",
+        "k8s_ns",
+        "eksCluster",
+        "providerAzure",
+    ):
+        assert _forbidden_segment(name), f"failed to flag {name!r}"
+    for benign in ("flaws", "gceometry", "release_digest", "installation_id", "workspace"):
+        assert _forbidden_segment(benign) is None, f"false-positive on {benign!r}"
+    for seal in _PROOF_OF_ABSENCE:  # proof-of-absence safety seals are the only exemptions
+        assert _forbidden_segment(seal) is None
+
+
 def test_no_provider_token_in_any_management_data_surface() -> None:
     offenders: list[str] = []
     for path in _module_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for kind, name in _data_surface_names(tree):
-            if _TOKEN.search(name):
-                offenders.append(f"{path.name}: {kind} {name!r}")
+            hit = _forbidden_segment(name)
+            if hit:
+                offenders.append(f"{path.name}: {kind} {name!r} (token {hit!r})")
     assert not offenders, "provider-specific tokens in management data surfaces: " + "; ".join(
         offenders
     )
@@ -102,7 +147,9 @@ def test_management_identity_fields_are_provider_neutral() -> None:
     # the reviewed neutral identity vocabulary — installation/release/source/role/plane only
     assert {"plane", "role", "installation_id", "release_digest", "source_sha"} <= fields
     for f in fields:
-        assert not _TOKEN.search(f), f"provider token in ManagementPlaneIdentity field {f!r}"
+        assert _forbidden_segment(f) is None, (
+            f"provider token in ManagementPlaneIdentity field {f!r}"
+        )
 
 
 def test_evidence_attestation_message_keys_are_provider_neutral() -> None:
@@ -123,7 +170,7 @@ def test_evidence_attestation_message_keys_are_provider_neutral() -> None:
     }
     assert keys, "expected the attestation message to build a keyed document"
     for k in keys:
-        assert not _TOKEN.search(k), f"provider token in attestation key {k!r}"
+        assert _forbidden_segment(k) is None, f"provider token in attestation key {k!r}"
 
 
 def test_enrollment_and_layout_surfaces_are_provider_neutral() -> None:
@@ -132,4 +179,4 @@ def test_enrollment_and_layout_surfaces_are_provider_neutral() -> None:
     for mod in (enrollment, layout):
         tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
         for kind, name in _data_surface_names(tree):
-            assert not _TOKEN.search(name), f"{mod.__name__}: provider token in {kind} {name!r}"
+            assert _forbidden_segment(name) is None, f"{mod.__name__}: {kind} {name!r}"

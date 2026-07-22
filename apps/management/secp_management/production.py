@@ -70,7 +70,10 @@ def _read_json(fs: Any, path: str) -> dict[str, Any]:
         raise ManagementError("production_input_malformed") from None
     if not isinstance(value, dict):
         raise ManagementError("production_input_malformed")
-    scan_forbidden(value)  # non-secret production inputs carry no credential-shaped field/value
+    try:
+        scan_forbidden(value)  # non-secret production inputs carry no credential-shaped field/value
+    except Exception:  # noqa: BLE001 - a forbidden/credential-shaped field seals production
+        raise ManagementError("production_input_forbidden") from None
     return value
 
 
@@ -80,6 +83,14 @@ def _is_digest(value: object) -> bool:
         and value.startswith(_SHA256)
         and len(value) == 71
         and all(c in "0123456789abcdef" for c in value[len(_SHA256) :])
+    )
+
+
+def _is_hex32(value: object) -> bool:
+    """A 32-byte lowercase-hex string (a raw ed25519 public key), validated WITHOUT bytes.fromhex so
+    a malformed value seals production instead of raising an uncaught ValueError."""
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
     )
 
 
@@ -110,7 +121,7 @@ def _load_trust_anchor(fs: Any, path: str) -> ReleaseTrustRoot:
     if set(doc) != {"key_id", "public_key_hex"}:
         raise ManagementError("production_trust_anchor_invalid")
     key_id, pub = doc["key_id"], doc["public_key_hex"]
-    if not _is_digest(key_id) or not (isinstance(pub, str) and len(bytes.fromhex(pub)) == 32):
+    if not _is_digest(key_id) or not _is_hex32(pub):
         raise ManagementError("production_trust_anchor_invalid")
     if _SHA256 + hashlib.sha256(bytes.fromhex(pub)).hexdigest() != key_id:
         raise ManagementError(

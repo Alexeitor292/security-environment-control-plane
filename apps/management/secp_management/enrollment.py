@@ -94,6 +94,16 @@ def _short_field(value: object, reason: str, *, pattern: re.Pattern[str] | None 
     return value
 
 
+# A refusal/recovery reason is a bounded lowercase snake_case CODE, never free-form prose: it cannot
+# contain a '/', ':', '.', space, or uppercase, so no host path, endpoint, IP, or secret can ride
+# into refusal_reason and out through public_view (which surfaces it).
+_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _reason_code(reason: str) -> str:
+    return _short_field(reason, "enrollment_reason_code_invalid", pattern=_REASON_CODE)
+
+
 # --------------------------------------------------------------------------- invitation contract
 
 
@@ -483,7 +493,7 @@ def mark_healthy(state: EnrollmentState, *, now: str) -> EnrollmentState:
 
 
 def refuse(state: EnrollmentState, reason: str) -> EnrollmentState:
-    _short_field(reason, "enrollment_state_invalid")
+    _reason_code(reason)
     if state.state in (REFUSED, RECOVERY_REQUIRED):
         return state
     return replace(
@@ -496,7 +506,7 @@ def refuse(state: EnrollmentState, reason: str) -> EnrollmentState:
 
 
 def require_recovery(state: EnrollmentState, reason: str) -> EnrollmentState:
-    _short_field(reason, "enrollment_state_invalid")
+    _reason_code(reason)
     if state.state == RECOVERY_REQUIRED:
         return state
     return replace(

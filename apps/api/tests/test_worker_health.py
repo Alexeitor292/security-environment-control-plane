@@ -95,3 +95,27 @@ def test_mark_ready_is_atomic_and_records_pid_and_queue(ready_file):
     content = ready_file.read_text(encoding="utf-8").split()
     assert int(content[0]) == os.getpid()
     assert content[1] == "secp-orchestration"
+
+
+def test_served_queues_projects_the_recorded_ordinary_queue(ready_file):
+    # The management observer (SECP-PR5G) proves ordinary-queue containment via this exact contract:
+    # `python -m secp_worker.health queues` prints the recorded queue(s), one per line, exit 0.
+    from secp_worker import health
+
+    assert health.served_queues() == []  # not serving -> no queue
+    assert health._main(["queues"]) == 0
+    health.mark_ready("secp-orchestration")
+    assert health.served_queues() == ["secp-orchestration"]
+    assert health._main(["queues"]) == 0
+    health.clear_ready()
+    assert health.served_queues() == []
+
+
+def test_queues_projects_the_operator_queue_when_misconfigured(ready_file, capsys):
+    # If the ordinary worker were misconfigured onto the operator queue, `queues` faithfully reports
+    # it so the observer detects the containment breach (never a false "contained").
+    from secp_worker import health
+
+    health.mark_ready("secp-controlled-live-v1")
+    assert health._main(["queues"]) == 0
+    assert capsys.readouterr().out.strip() == "secp-controlled-live-v1"

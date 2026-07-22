@@ -122,9 +122,26 @@ def is_ready() -> bool:
     return readiness_status()[0]
 
 
-def _main(argv: list[str]) -> int:  # pragma: no cover - exercised via __main__ / deployment probe
+def served_queues() -> list[str]:
+    """The ordinary task queue(s) this process recorded at :func:`mark_ready` (empty when it is not
+    serving a validated Worker).
+
+    A read-only projection of the SAME process-local readiness marker as :func:`is_ready` — a
+    management observer uses ``python -m secp_worker.health queues`` to PROVE the ordinary worker
+    serves only its ordinary queue and never polls the operator queue. Never a network listener and
+    never a caller-selected path.
+    """
+    _ready, task_queue = readiness_status()
+    return [task_queue] if task_queue else []
+
+
+def _main(argv: list[str]) -> int:
     if len(argv) >= 1 and argv[0] == "check":
         return 0 if is_ready() else 1
+    if len(argv) >= 1 and argv[0] == "queues":
+        for queue in served_queues():
+            print(queue)  # noqa: T201 - exec-probe stdout, one recorded queue per line
+        return 0
     return 2  # unknown command
 
 
