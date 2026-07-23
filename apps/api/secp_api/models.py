@@ -2050,3 +2050,11 @@ from secp_api.topology_authoring_models import (  # noqa: E402,F401
     TopologyRevision,
     TopologyValidationResult,
 )
+
+# SECP-PR5H-A durable worker-enrollment foundation (dedicated module for a focused diff).
+from secp_api.worker_enrollment_models import (  # noqa: E402,F401
+    WorkerEnrollmentInvitation,
+    WorkerEnrollmentRevision,
+    WorkerEnrollmentState,
+    WorkerEnrollmentStepReceipt,
+)

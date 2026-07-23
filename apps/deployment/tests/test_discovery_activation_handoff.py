@@ -145,7 +145,7 @@ def _offer() -> ControllerOffer:
             _runtime("controller_api", SHA_C, api_generation),
             _runtime("admission_proxy", SHA_D, proxy_generation),
         ),
-        controller_migration_head="d8f1a2b3c4e5",
+        controller_migration_head="b6e2f4a9c1d7",
         admission_tls=_tls(),
         installation_timestamp="2026-07-19T12:00:00Z",
         expires_at="2026-07-20T12:00:00Z",

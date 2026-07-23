@@ -50,6 +50,7 @@ from secp_discovery_activation.evidence import (
     WorkerPublicEvidence,
 )
 from secp_discovery_activation.layout import ORDINARY_TASK_QUEUE
+from secp_discovery_activation.migration_heads import ControllerMigrationHead
 
 CONTROLLER_OFFER_SCHEMA = "secp.discovery-activation.controller-offer/v1"
 WORKER_RESULT_SCHEMA = "secp.discovery-activation.worker-result/v1"
@@ -140,7 +141,11 @@ class ControllerOffer(_Strict):
     object_classifications: dict[str, str]
     controller_base_compose: FixedInputEvidence
     controller_runtimes: tuple[ContainerRuntimeEvidence, ...]
-    controller_migration_head: Literal["d8f1a2b3c4e5"]
+    # SECP-PR5H-A (ADR-027): the bounded rolling-upgrade window.  Validation accepts the legacy
+    # PR5F head so an ALREADY-ISSUED signed offer stays verifiable; ISSUANCE emits only the
+    # current head, and the declared head must still equal the OBSERVED controller head, so a
+    # downgrade substitution is refused rather than silently accepted.
+    controller_migration_head: ControllerMigrationHead
     admission_tls: AdmissionTLSEvidence
     installation_timestamp: str
     expires_at: str

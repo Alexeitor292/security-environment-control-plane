@@ -264,8 +264,10 @@ def test_sqlite_duplicate_refusal_preserves_schema_and_retryability(tmp_path, mo
         column["name"] for column in inspector.get_columns("discovery_snapshot")
     }
     with engine.connect() as connection:
+        # the retried upgrade runs through to the CURRENT sole head (SECP-PR5H-A adds
+        # b6e2f4a9c1d7 on top of the PR5F head), proving the fence is retryable end to end.
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-            "d8f1a2b3c4e5"
+            "b6e2f4a9c1d7"
         )
     engine.dispose()
     get_settings.cache_clear()

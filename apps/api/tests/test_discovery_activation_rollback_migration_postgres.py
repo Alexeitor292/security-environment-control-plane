@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 _PG_URL = os.environ.get("SECP_TEST_POSTGRES_URL")
-_HEAD = "d8f1a2b3c4e5"
+_HEAD = "b6e2f4a9c1d7"
 _BASELINE = "c4e2f9a1b7d3"
 _FENCE = "ck_worker_identity_pr5f_ed25519_rollback_fence"
 
