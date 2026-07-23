@@ -2029,3 +2029,51 @@ class EnvironmentPublicationErrorCode(str, Enum):
     # PR C: durable refusal auditing itself failed — the route returns this closed code as HTTP 500
     # and persists no version. The audit/database exception is never exposed.
     version_publish_audit_failure = "version_publish_audit_failure"
+
+
+class WorkerEnrollmentErrorCode(str, Enum):
+    """Closed catalog of durable worker-enrollment persistence/service codes (SECP-PR5H-A, ADR-027).
+
+    Every value is a bounded ``enrollment_*`` snake_case code carrying no free-form text, path,
+    endpoint, identity or secret.  The catalog is deliberately CLOSED and includes the pure
+    transition-contract codes as well, because ADR-027's "delegate, never pre-screen" rule means the
+    service surfaces the pure contract's own refusal verbatim rather than re-deriving a code — so
+    those codes must be enumerable here too.
+    """
+
+    # --- persistence / service layer ---
+    schema_unavailable = "enrollment_schema_unavailable"
+    not_found = "enrollment_not_found"
+    forbidden = "enrollment_forbidden"  # authenticated actor org != authoritative row org
+    scope_mismatch = "enrollment_scope_mismatch"  # worker-claimed org/site != authoritative binding
+    revision_conflict = "enrollment_revision_conflict"  # lost/stale CAS
+    state_corrupt = "enrollment_state_corrupt"  # a rehydration invariant failed
+    history_inconsistent = (
+        "enrollment_history_inconsistent"  # head/history disagree or chain broken
+    )
+    receipt_conflict = "enrollment_receipt_conflict"  # different input for a recorded step
+    invitation_not_found = "enrollment_invitation_not_found"
+    invitation_consumed = "enrollment_invitation_consumed"
+    invitation_revoked = "enrollment_invitation_revoked"
+    invitation_expired = "enrollment_invitation_expired"
+    invitation_conflict = "enrollment_invitation_conflict"  # concurrent consume lost
+    creation_conflict = "enrollment_creation_conflict"  # duplicate nonce/enrollment on creation
+    internal_failure = "enrollment_internal_failure"
+
+    # --- surfaced pure transition-contract codes (secp_api.worker_enrollment_contract) ---
+    invitation_invalid = "enrollment_invitation_invalid"
+    trust_anchor_invalid = "enrollment_trust_anchor_invalid"
+    origin_not_https = "enrollment_origin_not_https"
+    time_invalid = "enrollment_time_invalid"
+    state_invalid = "enrollment_state_invalid"
+    wrong_state = "enrollment_wrong_state"
+    expired = "enrollment_expired"
+    worker_mismatch = "enrollment_worker_mismatch"
+    controller_mismatch = "enrollment_controller_mismatch"
+    installation_mismatch = "enrollment_installation_mismatch"
+    transaction_mismatch = "enrollment_transaction_mismatch"
+    already_bound = "enrollment_already_bound"
+    handoff_invalid = "enrollment_handoff_invalid"
+    replay = "enrollment_replay"
+    release_mismatch = "enrollment_release_mismatch"
+    reason_code_invalid = "enrollment_reason_code_invalid"

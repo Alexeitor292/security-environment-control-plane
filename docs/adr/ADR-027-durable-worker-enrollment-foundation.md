@@ -178,14 +178,57 @@ binding time *and* on every later transition, via one pure helper
 exact-retry a binding nor advance, verify or become healthy. `refuse()` / `require_recovery()` stay
 deliberately unguarded so an operator can always drive a corrupted row to a truthful terminal.
 
-The repository therefore inherits a **non-negotiable requirement, to be satisfied when the
-persistence layer lands**: the load path must assert participant separation on the rehydrated state
-*before the state is used*, alongside the existing `digest == state_digest` verification. Delegating
-to the pure transition is not sufficient on its own — a row that is never transitioned (a read/status
-projection, a recovery-sweep candidate, an audit emission) would otherwise be trusted without the
-invariant ever being evaluated. A rehydrated row failing separation must be treated as corrupt: refuse
-closed with `enrollment_worker_mismatch` and leave the row eligible for `require_recovery`, never
-silently repair it.
+The repository therefore inherits a **non-negotiable requirement**: the load path must assert
+participant separation on the rehydrated state *before the state is used*, alongside the existing
+`digest == state_digest` verification. Delegating to the pure transition is not sufficient on its own
+— a row that is never transitioned (a read/status projection, a recovery-sweep candidate, an audit
+emission) would otherwise be trusted without the invariant ever being evaluated. A rehydrated row
+failing separation is treated as corrupt: refused closed and left in place, never silently repaired.
+
+## Decision — the repository, transactional service, and nonce ledger (Commit 4, delivered)
+
+`worker_enrollment_repository.py` is the only module that turns rows back into the pure
+`EnrollmentState`, and `_validate_rehydrated` is the single choke point every read/status/sweep path
+crosses. It refuses `enrollment_state_corrupt` unless *all* hold: contract version, closed state,
+non-negative `revision`/`sequence`; the structural `revision == 0 ⟺ state == invited ⟺ no
+predecessor` invariant; digest grammars; **participant separation on both the key ids and the
+installation ids**; installation-id and `deployment_site_label` grammars (neither is part of the
+digest, so a re-forged digest cannot smuggle a path/secret-shaped value that would later reach
+`public_view`); reason-code grammar and placement; per-state field-presence shape (no
+malformed/incomplete active row); the canonical `expires_at` text and the shadow `expires_at_ts`
+column proven to be the **same UTC instant**; and, decisively, the recomputed canonical digest equal
+to the persisted `state_digest`. `_cross_check_invitation` then re-derives the tenancy binding and
+identity from the **authoritative invitation row**: `organization_id` and `deployment_site_label`
+must agree between the state and invitation rows (a tampered state-row org can never silently become
+the tenancy boundary), the invitation must itself re-validate, and `invitation.digest()` must equal
+the `enrollment_id`. `verify_history_consistent` additionally proves contiguous revisions `0..N`,
+head == latest history row, and an intact predecessor chain (else `enrollment_history_inconsistent`).
+A corrupt row is **preserved for explicit recovery**, never repaired — even by code that would never
+call a transition. (These invariants beyond the bare digest check were hardened after an adversarial
+review reproduced tampered-org, path-shaped-label, secret-shaped-id, and structurally-impossible-row
+loads; a skeptic verified each fix.)
+
+`services/worker_enrollment.py` binds scope from the authenticated context: `organization_id` comes
+from the `Principal` (the only authorization boundary) and `deployment_site_label` from the
+authoritative persisted row. A worker-supplied org/site/transaction claim is **only compared** after
+selection by the opaque enrollment id (`enrollment_scope_mismatch`), never used to select a row.
+
+**Nonce consumption point.** The single-use invitation is consumed at the **first successful
+worker-identity binding** and nowhere else. That transaction verifies the invitation is unconsumed,
+unrevoked and unexpired, runs the pure `bind_worker_identity`, consumes the nonce with a conditional
+`UPDATE ... WHERE invitation_id = :nonce AND consumed IS false AND revoked IS false` (rowcount ≠ 1 →
+`enrollment_invitation_conflict`), CAS-updates the head, and writes the step receipt — all before a
+single commit. Neither the binding nor the consumption can survive without the other; a rolled-back
+transaction leaves no state, nonce, revision or receipt.
+
+**Transaction ordering** (state-changing op): assert live schema head → load+lock head row →
+authorize + scope → verify history → **serve step receipt if the exact input was already applied**
+(a legitimate at-least-once retry precedes the expected-revision check, since the retried request
+carries the same now-stale token it first sent) → verify the caller's declared
+`(revision, state_digest, sequence, predecessor_digest)` → run the pure transition → append the
+revision row → CAS the head → write the receipt → commit. Both a row lock **and** the conditional CAS
+predicate are used, so a stale/concurrent writer affects zero rows regardless of isolation level.
+Real-PostgreSQL tests prove one-winner outcomes with genuinely overlapping independent sessions.
 
 ## Decision — recovery (the database never expires a row on its own)
 
@@ -217,16 +260,19 @@ invitation with a **new** nonce.
 | Cross-site substitution | persisted `deployment_site_label` compared independently after identity load |
 | Downgrade / unknown migration head | bounded accepted-heads window for signatures; runtime head independently required |
 | Secret / metadata leakage | only bounded codes, safe fingerprints and opaque labels persist or project; no raw handoff bytes, key material, endpoints, paths or free-form failure text |
-| Controller enrolling as its own worker | installation-id separation **and** `worker_key_id != controller_key_id`, asserted at binding and on every later transition in both planes; rehydration must re-assert it |
+| Controller enrolling as its own worker | installation-id separation **and** `worker_key_id != controller_key_id`, asserted at binding and on every later transition in both planes; the repository re-asserts it on every rehydration (a persisted same-key row loads as `enrollment_state_corrupt`) |
+| Corrupted / tampered persisted row surfaced to a caller | `_validate_rehydrated` recomputes the digest and re-checks every invariant on every load; a read/status/sweep path can never return a corrupt row; the row is preserved, never repaired |
 | Contract fork between planes | exhaustive cross-plane byte-parity corpus + structural import guard |
 
 ## Explicitly NOT delivered by PR5H-A
 
 No network transport (the sealed `EnrollmentTransport` stays sealed and is *not* implemented); no
 enrollment API routes; no UI; no mutating supported production CLI; no host mutation reachable from a
-browser; no worker network enrollment; default `EngineDeps` stays sealed. The new schema may exist
-**unused** until PR5H-B. Operator activation, workflow submission, OpenTofu, provider contact and
-remote root SSH remain prohibited, and PR6 stays frozen.
+browser; no worker network enrollment; default `EngineDeps` stays sealed. The durable repository and
+transactional service now **exist** (Commit 4) but are an **inert foundation**: nothing outside the
+test suite calls them, because there is no route, transport or CLI wired to reach them. The new schema
+and service may exist **unused** until PR5H-B. Operator activation, workflow submission, OpenTofu,
+provider contact and remote root SSH remain prohibited, and PR6 stays frozen.
 
 **Automated enrollment and one-command installation are NOT complete after PR5H-A.** PR5H-B is the
 completion gate and must prove the end-to-end supported path (controller bootstrap, invitation
