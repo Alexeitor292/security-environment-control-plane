@@ -98,7 +98,7 @@ def test_mark_ready_is_atomic_and_records_pid_and_queue(ready_file):
 
 
 def test_served_queues_projects_the_recorded_ordinary_queue(ready_file):
-    # The management observer (SECP-PR5G) proves ordinary-queue containment via this exact contract:
+    # The management observer (SECP-PR5G) CHECKS ordinary-queue containment via this exact contract:
     # `python -m secp_worker.health queues` prints the recorded queue(s), one per line, exit 0.
     from secp_worker import health
 
@@ -108,6 +108,16 @@ def test_served_queues_projects_the_recorded_ordinary_queue(ready_file):
     assert health.served_queues() == ["secp-orchestration"]
     assert health._main(["queues"]) == 0
     health.clear_ready()
+    assert health.served_queues() == []
+
+
+def test_served_queues_is_empty_for_a_stale_dead_pid_marker(ready_file):
+    # served_queues() is gated on the SAME liveness as is_ready(): a stale marker whose recorded PID
+    # is dead projects [] (consistent with its docstring), never a phantom served queue.
+    from secp_worker import health
+
+    ready_file.write_text("2147483646 secp-orchestration\n", encoding="utf-8")
+    assert health.is_ready() is False
     assert health.served_queues() == []
 
 

@@ -34,9 +34,12 @@ _CID = "b" * 64
 _IMG = "sha256:" + "e" * 64
 
 
-def _op_show(*, enabled: bool = False, running: bool = False) -> str:
+def _op_show(*, enabled: bool = False, running: bool = False, unit_state: str | None = None) -> str:
     active = "active" if running else "inactive"
-    unit = "enabled" if enabled else "disabled"
+    # the SHIPPED sealed operator unit (render_operator_unit_disabled) has NO [Install], so systemd
+    # reports UnitFileState=static (not-enabled) — that is the production not-enabled shape here;
+    # 'enabled' is the breach case.
+    unit = unit_state if unit_state is not None else ("enabled" if enabled else "static")
     return (
         f"LoadState=loaded\nActiveState={active}\nUnitFileState={unit}\n"
         f"InvocationID={'f' * 32}\nStateChangeTimestampMonotonic=123\n"
@@ -70,7 +73,9 @@ class ObserverRunner:
             return CommandResult(
                 0,
                 _op_show(
-                    enabled=bool(self.k.get("op_enabled")), running=bool(self.k.get("op_running"))
+                    enabled=bool(self.k.get("op_enabled")),
+                    running=bool(self.k.get("op_running")),
+                    unit_state=self.k.get("unit_state"),  # type: ignore[arg-type]
                 ),
             )
         if head == "inspect" and len(a) >= 3 and a[1] == "--format":
@@ -184,6 +189,17 @@ def test_worker_operator_enabled_refused() -> None:
     obs = _observer(ObserverRunner(op_enabled=True)).observe_worker()
     assert obs.operator_enabled is True and obs.deployment_status == "not_prepared"
     assert obs.commissioning_status == "not_prepared"
+
+
+def test_worker_shipped_static_operator_unit_is_observed_prepared() -> None:
+    # regression: the SHIPPED sealed operator unit (render_operator_unit_disabled, no [Install])
+    # reports UnitFileState=static; it must classify as NOT enabled so a correctly prepared+disabled
+    # host is observable as prepared/sealed (a 'disabled' unit must also stay prepared).
+    for state in ("static", "disabled"):
+        obs = _observer(ObserverRunner(unit_state=state)).observe_worker()
+        assert obs.operator_enabled is False, state
+        assert obs.commissioning_status == "prepared", state
+        assert obs.deployment_status == "sealed_prepared", state
 
 
 def test_worker_operator_running_refused() -> None:
@@ -331,14 +347,18 @@ def test_platform_executable_pin_failure_reports_absent() -> None:
 def _prod_fs(**over: object) -> InMemoryFilesystem:
     fs = _fs(seed_worker_files=False)
     base = ManagementLocations().bootstrap_state
-    priv, pub = over.get("keypair") or generate_keypair()  # type: ignore[assignment]
+    priv, pub = over.get("keypair") or generate_keypair()  # type: ignore[assignment]  # evidence key K_e
     key_id = "sha256:" + hashlib.sha256(bytes.fromhex(pub)).hexdigest()
     execs = {
         "container_runtime": {"path": "/usr/bin/docker", "digest": "sha256:" + "1" * 64},
         "compose_runtime": {"path": "/usr/bin/docker-compose", "digest": "sha256:" + "2" * 64},
         "service_manager": {"path": "/usr/bin/systemctl", "digest": "sha256:" + "3" * 64},
     }
-    anchor_pub = str(over.get("anchor_pub", pub))
+    # production reality: the RELEASE anchor (K_r) is a DISTINCT key from the evidence key (K_e);
+    # release private half is never on the host.  Using one key for both here previously masked the
+    # evidence_trust_root mis-wiring.
+    _rel_priv, rel_pub = generate_keypair()
+    anchor_pub = str(over.get("anchor_pub", rel_pub))
     anchor_id = str(
         over.get("anchor_id") or "sha256:" + hashlib.sha256(bytes.fromhex(anchor_pub)).hexdigest()
     )
@@ -370,6 +390,20 @@ def test_production_happy_path_builds_real_deps() -> None:
     assert isinstance(deps.controller_adapter, ra.RealControllerBootstrapAdapter)
     assert isinstance(deps.worker_adapter, ra.RealWorkerBootstrapAdapter)
     assert deps.trust_root.test_only is False
+
+
+def test_production_evidence_trust_root_pins_the_authenticator_not_the_release_anchor() -> None:
+    # regression for the evidence_trust_root mis-wiring: the commit gate verifies the evidence
+    # attestation (signed by the authenticator's OWN key K_e) against evidence_trust_root, so it
+    # pin K_e.  With distinct release (K_r) and evidence (K_e) keys, wiring the release anchor here
+    # (the fixed bug) would fail every production commit closed.
+    deps = prod.production_engine_deps(fs=_prod_fs(), runner=ObserverRunner())
+    auth = deps.evidence_authenticator
+    msg = b"secp.management.evidence-attestation-regression"
+    sig = auth.attest(msg)
+    assert deps.evidence_trust_root.verify(key_id=auth.key_id(), message=msg, signature_hex=sig)
+    # the RELEASE trust root does NOT pin the evidence key — proving the two roots are distinct
+    assert not deps.trust_root.verify(key_id=auth.key_id(), message=msg, signature_hex=sig)
 
 
 def test_production_missing_input_seals() -> None:

@@ -191,6 +191,19 @@ def production_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
         filesystem, paths["evidence_key"], paths["evidence_pub"]
     )
 
+    # The evidence attestation is signed by the LOCAL evidence authenticator (its own key K_e), NOT
+    # by the release-signing key (K_r, whose private half is never on the host).  The commit gate
+    # verifies that attestation against evidence_trust_root, so the evidence root must pin the
+    # authenticator's OWN public identity — pinning the release anchor here would fail every commit
+    # closed (evidence_attestation_untrusted -> recovery_required).  They are distinct roots.
+    evidence_trust_root = ReleaseTrustRoot(
+        anchors=(
+            TrustAnchor(
+                key_id=authenticator.key_id(), public_key_hex=authenticator.public_key_hex()
+            ),
+        ),
+        test_only=False,
+    )
     ctx = RealAdapterContext(
         locations=locations,
         fs=filesystem,
@@ -205,7 +218,7 @@ def production_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
         worker_adapter=RealWorkerBootstrapAdapter(ctx),
         rollback_adapter=RealManagementRollbackAdapter(filesystem, locations),
         evidence_authenticator=authenticator,
-        evidence_trust_root=trust_root,
+        evidence_trust_root=evidence_trust_root,
         fs=filesystem,
     )
 

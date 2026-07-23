@@ -56,18 +56,17 @@ case "$last" in
 esac
 """
 
-# A valid, DISABLED operator unit: it HAS an [Install] section (so systemd reports
-# UnitFileState=disabled, classified not-enabled) but is NEVER `systemctl enable`d or started.
+# The REAL shipped sealed operator unit SHAPE (render_operator_unit_disabled): NO [Install],
+# so it can NEVER be enabled or auto-started and systemd reports UnitFileState=static.  The observer
+# must classify 'static' as NOT enabled (see _classify_unit_file_state) so a correctly prepared host
+# is observable as prepared — this exercises the exact production shape, never started.
 _OPERATOR_UNIT_CONTENT = b"""[Unit]
-Description=SECP operator worker (prepared, disabled, never started)
+Description=SECP operator worker (prepared, sealed, no [Install], never started)
 
 [Service]
 Type=oneshot
 ExecStart=/bin/true
 RemainAfterExit=no
-
-[Install]
-WantedBy=multi-user.target
 """
 
 
@@ -237,8 +236,9 @@ def test_real_operator_unit_disabled_and_stopped(real_ctx) -> None:
     from secp_management.real_adapters import RealManagementHostObserver
 
     _install_operator_unit(real_ctx)
-    # the real unit is present in the system search path, loaded, inactive, NOT enabled
-    assert _sh("systemctl", "is-enabled", _OPERATOR_UNIT, check=False).stdout.strip() == "disabled"
+    # the shipped no-[Install] unit reports is-enabled=static (it CANNOT be enabled) + inactive; the
+    # observer must classify that static unit as present + NOT enabled + not running.
+    assert _sh("systemctl", "is-enabled", _OPERATOR_UNIT, check=False).stdout.strip() == "static"
     assert _sh("systemctl", "is-active", _OPERATOR_UNIT, check=False).stdout.strip() == "inactive"
 
     obs = RealManagementHostObserver(real_ctx).observe_worker()
@@ -319,7 +319,8 @@ def test_real_partial_bootstrap_compensation_zero_residual(real_ctx) -> None:
     adapter = RealWorkerBootstrapAdapter(real_ctx)
     # a partial bootstrap: config + package + operator unit installed, then a failure before start
     adapter.install_ordinary_config(_reviewed(b"# ordinary compose\n", unit=False))
-    adapter.install_deployment_package(_deployment_pkg_artifact(), aggregate="sha256:" + "a" * 64)
+    pkg = _deployment_pkg_artifact()  # the reviewed aggregate IS the archive content digest
+    adapter.install_deployment_package(pkg, aggregate=pkg.digest)
     adapter.install_operator_unit_disabled(_reviewed(_OPERATOR_UNIT_CONTENT, unit=True))
     adapter.daemon_reload()
 

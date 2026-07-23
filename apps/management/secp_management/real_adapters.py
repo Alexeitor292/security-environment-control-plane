@@ -1,8 +1,13 @@
 """Production management-plane host adapters (SECP-PR5G).
 
 The engine performs NO host effect directly; these are the REAL leaves for the four closed, typed
-seams whose shipped defaults are sealed (see ``adapters.py``).  They are thin, closed orchestrations
-that COMPOSE already-reviewed primitives and never reimplement security-sensitive behavior:
+seams whose shipped defaults are sealed (see ``adapters.py``).  The MUTATION adapters are thin,
+closed orchestrations that COMPOSE already-reviewed primitives (the pinned runner, the hardened
+filesystem, ``verify_loaded_image``) and never reimplement that security-sensitive behavior.  The
+read-only ``RealManagementHostObserver`` derives an INDEPENDENT, deliberately NARROWER
+predicate (present/running/healthy/operator-disabled+stopped/queue-contained) from the one coherent
+PR5D observation — it does NOT invoke the full PR5C commissioning or PR5D deployment verification
+engines; the management ENGINE applies the authoritative expected-vs-observed verification.
 
 * every host command runs through the ONE reviewed subprocess seam
   :class:`~secp_operator_deployment.host_process.RealCommandRunner` via an object-pinned
@@ -427,7 +432,11 @@ class RealWorkerBootstrapAdapter:
     def install_deployment_package(self, package: VerifiedArtifact, *, aggregate: str) -> None:
         if package.purpose != "worker/deployment-package":
             raise ManagementError("bootstrap_image_purpose_mismatch")
-        data = package.read()
+        if aggregate != package.digest:
+            # the reviewed plan's package aggregate identity IS the archive content digest (the
+            # engine derives it from the same signed manifest); refuse a mismatch fail-closed.
+            raise ManagementError("bootstrap_package_aggregate_mismatch")
+        data = package.read()  # read() re-verifies sha256(data) == package.digest
         _install_file(
             self._ctx,
             self._ctx.locations.worker_deployment_package_path(),
@@ -436,7 +445,9 @@ class RealWorkerBootstrapAdapter:
             unit=False,
         )
         self._ops.append("install_deployment_package")
-        self._packages.append(aggregate)
+        # record the ON-DISK content identity so compensate removes ONLY unchanged content (a
+        # drifted/foreign file at the shared path is left in place, forcing recovery_required).
+        self._packages.append(package.digest)
 
     def install_operator_unit_disabled(self, unit: ReviewedUnit) -> None:
         unit.verify()
@@ -509,15 +520,13 @@ class RealWorkerBootstrapAdapter:
                 ctx, ctx.locations.operator_unit_path(), identity, unit=True
             ):
                 residual.append("operator_unit")
-        for _aggregate in receipt.installed_packages:
-            stat = None
-            try:
-                stat = ctx.fs.lstat(ctx.locations.worker_deployment_package_path())
-                if stat is not None:
-                    ctx.fs.remove_file(ctx.locations.worker_deployment_package_path())
-                if ctx.fs.lstat(ctx.locations.worker_deployment_package_path()) is not None:
-                    residual.append("deployment_package")
-            except FilesystemError:
+        for content_digest in receipt.installed_packages:
+            # verify the CURRENT on-disk content matches what the transaction installed before
+            # removing — a drifted/foreign package at the fixed shared path is left in place and
+            # forces residual -> recovery_required (identical to the config/unit removal contract).
+            if not _remove_created_file(
+                ctx, ctx.locations.worker_deployment_package_path(), content_digest, unit=False
+            ):
                 residual.append("deployment_package")
         for identity in receipt.installed_configs:
             if not _remove_created_file(
@@ -721,7 +730,9 @@ class RealManagementHostObserver:
         return bool(gen.operator_present)
 
     def _polls_operator_queue(self) -> bool:
-        # a bounded read-only probe reporting the ordinary worker's polled queues (one per line)
+        # a bounded read-only probe of the ordinary worker's SELF-DECLARED readiness queue (what it
+        # recorded at mark_ready) — a self-report used to CHECK ordinary-queue containment, not an
+        # independent enumeration of what the Temporal poller actually serves; fail-closed on error
         try:
             out = self._ctx.run(
                 self._ctx.executables.container_runtime,

@@ -1,17 +1,26 @@
-"""Durable worker-enrollment state machine + signed-handoff binding contracts (SECP-PR5G).
+"""Worker-enrollment state-machine + signed-handoff binding CONTRACTS (SECP-PR5G).
 
-The management plane automates the PR5F controller-offer / worker-result handoff so an administrator
-never hand-copies files between hosts.  This module owns the *provider-neutral* enrollment domain:
+The management plane's enrollment domain automates the PR5F controller-offer / worker-result handoff
+so an administrator never hand-copies files between hosts.  This module is the provider-neutral
+*contract*: pure, deterministic transition functions over immutable value objects.  It is NOT yet a
+durably-persisted enrollment workflow — there is NO datastore, NO transactional compare-and-swap on
+``revision``/``predecessor_digest``, NO single-use-nonce ledger, and NO restart recovery here; those
+are the deferred PR5H persistence layer.  Within a single in-memory sequence these functions enforce
+the transition semantics below, but a persistence layer MUST provide the durable CAS + nonce-ledger
+before enrollment can be called product-durable.
 
-* :class:`WorkerEnrollmentInvitation` — a short-lived, single-use, content-addressed, **non-secret**
-  invitation the controller issues (browser-displayable / downloadable).  It binds the controller
-  installation identity, HTTPS origin, pinned trust anchor, release digest, transaction, nonce and
-  expiry — and carries **no** provider (Proxmox/K8s/cloud) field, host path, private key, or secret.
-* :class:`EnrollmentState` — the durable state machine
+* :class:`WorkerEnrollmentInvitation` — a short-lived, content-addressed, **non-secret** invitation
+  the controller issues (browser-displayable / downloadable).  It binds the controller installation
+  identity, HTTPS origin, pinned trust anchor, release digest, transaction, nonce and expiry — and
+  carries **no** provider (Proxmox/K8s/cloud) field, host path, private key, or secret.  (Single-use
+  is a CONTRACT the durable nonce-ledger must enforce; these pure functions persist no ledger.)
+* :class:`EnrollmentState` — the transition contract
   ``invited → worker_bound → offer_transported → result_transported → verified → healthy`` with
-  explicit ``refused`` / ``recovery_required`` terminals.  Every transition is revision-guarded,
-  sequence/predecessor-chained, transaction-bound, expiring, single-use and replay-refusing; an
-  retry is idempotent, a conflicting or stale message refuses closed.
+  explicit ``refused`` / ``recovery_required`` terminals.  Each transition is revision-guarded,
+  sequence/predecessor-chained, transaction-bound, and expiring, and refuses a conflicting/stale
+  message closed; an exact retry is idempotent.  Replay/stale REFUSAL and single-use hold across a
+  persisted history only once the deferred PR5H layer stores state under a revision CAS + nonce
+  ledger — the pure functions define the checks, the persistence layer makes them durable.
 * the signed handoff is verified at an injectable :class:`HandoffVerifier` boundary; the concrete
   PR5F-backed verifier (reusing ``verify_handoff`` over the canonical ``ControllerOffer`` /
   ``WorkerResult`` records **verbatim**, bytes/signatures never altered) is supplied by the consumer

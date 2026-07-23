@@ -434,9 +434,16 @@ def _classify_active(value: str) -> bool | None:
 
 
 def _classify_unit_file_state(value: str) -> bool | None:
-    if value in ("enabled", "enabled-runtime", "alias", "static", "indirect"):
+    # "enabled" semantics = WILL auto-start on boot.  A ``static`` unit has NO [Install]/WantedBy,
+    # so it CANNOT be enabled and will NOT auto-start — it is not-enabled.  This is exactly the
+    # shape of
+    # the reviewed SEALED operator unit (render_operator_unit_disabled, no [Install]), which systemd
+    # reports as ``static``; classifying it as enabled would make a correctly prepared+disabled
+    # operator un-observable as prepared.  ``indirect`` stays conservative-True (it can be pulled in
+    # via another unit's Also=), so a possibly-auto-starting operator never reads as not-enabled.
+    if value in ("enabled", "enabled-runtime", "alias", "indirect"):
         return True
-    if value in ("disabled", "masked", "not-found", "linked", "generated", "transient"):
+    if value in ("disabled", "masked", "not-found", "linked", "generated", "transient", "static"):
         return False
     return None
 

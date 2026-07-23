@@ -2,12 +2,16 @@
 
 - **Status:** Accepted for SECP-PR5G. Closes the real host-adapter gap that [ADR-025](ADR-025-management-plane-bootstrap.md)
   deliberately deferred (PR5E shipped the engine + the closed typed adapter *contract* but SEALED every
-  production leaf), and adds the durable **worker-enrollment state machine** and the **signed
-  controller-offer / worker-result handoff protocol contracts** so a fresh controller and a fresh
-  worker can be bootstrapped from a signed release bundle without editing files, calculating digests,
-  or hand-copying handoff documents. The **network transport** for enrollment remains SEALED behind an
-  explicit adapter with a precise next-PR boundary (SECP-PR5H); this ADR does **not** claim automatic
-  cross-host enrollment is exercised end to end.
+  production leaf), and adds the provider-neutral **worker-enrollment state-machine transition
+  contract** (pure functions — NOT a durably-persisted workflow) and the **signed controller-offer /
+  worker-result handoff protocol contracts** so the primitives exist for a fresh controller and a
+  fresh worker to be bootstrapped from a signed release bundle without editing files, calculating
+  digests, or hand-copying handoff documents. Deferred to SECP-PR5H (and beyond) are the enrollment
+  **network transport** (SEALED behind an explicit adapter), durable enrollment persistence, the
+  transactional revision/nonce compare-and-swap, restart recovery, and a supported production CLI
+  entrypoint. This ADR does **not** claim automatic cross-host enrollment or a one-command customer
+  installation is exercised end to end; root-gated CI proves real adapter *mechanics* + real migration
+  *execution*, not a completed customer production rollout.
 - **Date:** 2026-07-21
 - **Milestone:** SECP-002B-1B — **PR5G** (automated management-plane bootstrap + enrollment), following
   PR5E (bootstrap foundation) and the PR5F/PR5F.1/PR5F.2 production-activation line. **PR6 (first apply)
@@ -39,10 +43,15 @@ reviewed seams:
 
 - **`RealHostObserver`** — `platform()` reports real `docker_present`/`compose_present`/versions via a
   pinned container-runtime/compose probe (never a shell); `observe_worker()`/`observe_controller()`
-  compose the **PR5C** commissioning status (`secp_commissioning.status.commissioning_status` →
-  `"prepared"`) and the **PR5D** deployment verifier (`secp_operator_deployment.verify.build_verification`
-  → `"sealed_prepared"`) and emit the mandatory **ABA generation marker** (`worker_generation_marker` /
-  `controller_generation_marker`) over the complete container-id/restart/pid/started/InvocationID tuple,
+  derive an **independent, deliberately narrower host-readiness predicate** (present + running +
+  healthy + operator present/disabled/stopped + ordinary-queue-contained →
+  `"prepared"`/`"sealed_prepared"` LABELS) directly from the one coherent PR5D observation.  This is
+  **not** a call into the full `secp_commissioning.status.commissioning_status` /
+  `secp_operator_deployment.verify.build_verification` engines — those enforce additional invariants
+  (evidence records, tool/contract identity, per-image snapshot digests, path bindings) that the
+  management **engine** applies authoritatively during adopt/commit; it never trusts these host-side
+  labels alone.  The observer emits the mandatory **ABA generation marker** (`worker_generation_marker`
+  / `controller_generation_marker`) over the complete container-id/restart/pid/started/InvocationID tuple,
   so a restart/replace between admission and commit is detected. It exposes **no** start/stop/restart
   verb (read-only, built on `secp_operator_deployment.host_adapters.LocalServiceStateAdapter` /
   `LocalContainerRuntimeAdapter`, and cross-checks an **independent** expected-identities pin — the
@@ -82,11 +91,15 @@ New module `secp_management/enrollment.py` defines the **provider-neutral** enro
   browser). It binds an exact controller identity/HTTPS origin, a pinned or enrollment-established trust
   anchor, an expiry, a nonce, and a monotonic sequence — no provider fields, no private key, no host
   path.
-- **`EnrollmentState`** state machine — `invited → worker_identity_bound → offer_transported →
+- **`EnrollmentState`** transition **contract** — `invited → worker_identity_bound → offer_transported →
   result_transported → verified → healthy` with explicit `refused` / `recovery_required` terminals.
-  Every transition is revision-guarded, replay-protected (nonce + sequence + predecessor binding),
-  transaction-bound, and expiring; wrong-controller / wrong-worker / wrong-transaction / wrong-release /
-  expired / replayed inputs refuse closed.
+  Each transition is revision-guarded, sequence/predecessor-chained, transaction-bound, and expiring;
+  wrong-controller / wrong-worker / wrong-transaction / wrong-release / expired / conflicting inputs
+  refuse closed. These are **pure functions over immutable value objects** — there is NO datastore, NO
+  transactional compare-and-swap on `revision`/`predecessor_digest`, NO single-use-nonce ledger, and NO
+  restart recovery in this PR. Durable replay-uniqueness and single-use therefore depend on the deferred
+  **PR5H persistence layer** (revision CAS + nonce ledger); until then this is a state-machine contract,
+  not a durably-persisted enrollment workflow.
 - **Handoff transport** — the PR5F canonical, detached-Ed25519 controller-offer / worker-result records
   are reused **verbatim** (`secp_discovery_activation.handoff`: `issue_handoff_attestation`,
   `verify_handoff`, sequence/predecessor/transaction/expiration binding). PR5G transports them through a
@@ -95,8 +108,12 @@ New module `secp_management/enrollment.py` defines the **provider-neutral** enro
 
 The actual **network contact** (worker → controller outbound HTTPS) is implemented behind an explicit
 `EnrollmentTransport` Protocol whose shipped default is **sealed** (`enrollment_transport_not_activated`).
-The state machine, invitation/authorization contracts, replay/expiry/sequence semantics, and their
-tests are complete and hermetic; only the socket-level exchange is deferred.
+The state-machine transition contract, invitation/authorization contracts, and replay/expiry/sequence
+transition *semantics* are complete and hermetically tested as **pure functions**.  Deferred to **PR5H**
+(and beyond) are: the socket-level worker→controller exchange; **durable persistence** of enrollment
+state; the **transactional revision/predecessor compare-and-swap** and **single-use-nonce ledger** that
+make replay-uniqueness durable across a persisted history; and **restart recovery**.  Enrollment is
+therefore a proven *contract* at this head, not yet a product-durable enrollment workflow.
 
 ## Provider neutrality (reviewed)
 
@@ -152,6 +169,11 @@ evidence/rollback gates. PR6 remains frozen.
 Activate the sealed `EnrollmentTransport`: the worker-initiated outbound HTTPS exchange (exact origin,
 pinned/enrollment-established trust, single-use short-lived authorization, no redirects, no ambient
 proxy, no system-trust fallback unless justified, bounded payloads, no private-key transport, no remote
-command execution), driven by the state machine and contracts delivered here, with an end-to-end
-two-host enrollment acceptance test. Only after that test passes may automatic enrollment be described
-as complete.
+command execution), driven by the state-machine contract delivered here. PR5H must ALSO make enrollment
+**durable**: persist enrollment state; enforce the transition contract under a transactional
+revision/`predecessor_digest` compare-and-swap and a single-use-nonce ledger (so replay-uniqueness and
+single-use hold across a persisted history, not only within one in-memory sequence); and provide
+restart recovery. A supported production CLI entrypoint that selects `production_engine_deps`, and the
+enrollment API/UI, are also future work. Only after an end-to-end two-host enrollment acceptance test
+passes over the durable, persisted path may automatic enrollment be described as complete; nothing at
+the PR5G head is a one-command customer installation.

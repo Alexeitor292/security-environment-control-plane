@@ -445,6 +445,21 @@ def test_worker_compensation_reverses_and_proves() -> None:
     assert "/etc/secp/operator-deployment/secp-operator-deployment-package.zip" not in fs.paths()
 
 
+def test_worker_compensation_drifted_package_is_not_removed_and_is_residual() -> None:
+    r = RecordingRunner()
+    r.present_images.update({_WORKER_IMG, _OP_IMG})
+    fs = _fs()
+    ad = _bootstrap_worker(_ctx(r, fs))
+    pkg = "/etc/secp/operator-deployment/secp-operator-deployment-package.zip"
+    # a PR5D writer replaces the SHARED deployment package with foreign bytes after the receipt
+    fs.atomic_install(pkg, b"FOREIGN", uid=0, gid=0, mode=0o640)
+    result = ad.compensate(ad.receipt())
+    assert result.proven is False and "deployment_package" in result.residual
+    assert (
+        pkg in fs.paths()
+    )  # the drifted (not-ours) package is left in place, never silently deleted
+
+
 # --- unit / service / container name injection is structurally impossible ---------------------
 
 

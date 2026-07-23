@@ -126,13 +126,16 @@ def served_queues() -> list[str]:
     """The ordinary task queue(s) this process recorded at :func:`mark_ready` (empty when it is not
     serving a validated Worker).
 
-    A read-only projection of the SAME process-local readiness marker as :func:`is_ready` — a
-    management observer uses ``python -m secp_worker.health queues`` to PROVE the ordinary worker
-    serves only its ordinary queue and never polls the operator queue. Never a network listener and
-    never a caller-selected path.
+    A read-only projection of the SAME process-local readiness marker as :func:`is_ready` (gated on
+    the same liveness: a stale/dead-PID marker projects ``[]``).  It reports the ordinary worker's
+    OWN self-declared readiness queue — the queue it recorded at :func:`mark_ready` — so a
+    management observer can CHECK ordinary-queue containment.  It is a self-report of the declared
+    queue, not an
+    independent enumeration of what the Temporal poller serves; never a network listener and never a
+    caller-selected path.
     """
-    _ready, task_queue = readiness_status()
-    return [task_queue] if task_queue else []
+    ready, task_queue = readiness_status()
+    return [task_queue] if (ready and task_queue) else []
 
 
 def _main(argv: list[str]) -> int:
