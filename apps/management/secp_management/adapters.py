@@ -243,10 +243,12 @@ class ControllerObservation:
 @dataclass(frozen=True)
 class WorkerObservation:
     """One coherent read-only observation of the worker topology, INCLUDING the installed artifact
-    identities (ordinary config, operator unit, deployment-package aggregate, health-command) and
-    the
-    real PR5C commissioning + PR5D deployment statuses the production observer composes (the engine
-    consumes these; it never reconstructs them from a boolean)."""
+    identities (ordinary config, operator unit, deployment-package aggregate, health-command) and an
+    INDEPENDENT host-readiness predicate the production observer derives directly from the single
+    coherent observation (present + running + healthy + operator present/disabled/stopped +
+    ordinary-queue-contained).  This is intentionally NARROWER than the full PR5C commissioning +
+    PR5D deployment verification engines; the management ENGINE applies the authoritative
+    expected-vs-observed verification during adopt/commit — never trusting these host-side hints."""
 
     coherent: bool
     ordinary_present: bool
@@ -270,10 +272,10 @@ class WorkerObservation:
     # containment breach; a prepared worker polls ONLY the ordinary queue.
     ordinary_polls_operator_queue: bool
     package_trusted: bool
-    commissioning_status: str  # from the real secp_commissioning engine ("prepared" / ...)
-    deployment_status: (
-        str  # from the real secp_operator_deployment verifier ("sealed_prepared"/...)
-    )
+    # host-side readiness LABELS derived by the observer's own predicate (NOT a call into the PR5C
+    # commissioning or PR5D deployment verification engines); the engine re-verifies for real.
+    commissioning_status: str  # observer predicate: "prepared" / "not_prepared"
+    deployment_status: str  # observer predicate: "sealed_prepared" / "not_prepared"
     # ABA generation marker over the ordinary container id/restart/start/pid + operator
     # InvocationID;
     # two adoption observations with the SAME marker prove nothing restarted between
