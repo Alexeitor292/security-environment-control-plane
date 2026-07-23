@@ -39,7 +39,6 @@ address, region, endpoint or provider value.
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime
 
@@ -57,6 +56,14 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secp_api.models import Base, TimestampMixin, _utcnow, _uuid
+
+# The opaque deployment-site grammar lives in the PURE contract module (one definition, no drift):
+# letters, digits, dot, underscore, hyphen — deliberately excluding ``/``, ``:``, ``@``, whitespace
+# and anything URL/host/path/provider shaped.  Re-exported here for the schema layer's convenience.
+from secp_api.worker_enrollment_contract import (
+    DEPLOYMENT_SITE_LABEL_PATTERN,
+    is_deployment_site_label,
+)
 
 # --- closed vocabularies + grammars (mirrors the pure contract; see ADR-027) ------------------
 
@@ -82,11 +89,6 @@ WORKER_ENROLLMENT_STEPS: tuple[str, ...] = (
     "mark_healthy",
 )
 
-#: An opaque deployment-site grouping label (ADR-027): letters, digits, dot, underscore, hyphen.
-#: Deliberately excludes ``/``, ``:``, ``@``, whitespace and anything URL/host/path/provider shaped.
-DEPLOYMENT_SITE_LABEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"
-_DEPLOYMENT_SITE_LABEL = re.compile(DEPLOYMENT_SITE_LABEL_PATTERN)
-
 # DB-level CHECKs are deliberately PORTABLE (shape/length/prefix only): the ORM builds the schema
 # on SQLite in unit tests via ``create_all`` while PostgreSQL runs the real migration, and a regex
 # (`~`)
@@ -109,11 +111,6 @@ def _bounded(column: str, low: int, high: int) -> str:
 
 def _bounded_or_empty(column: str, low: int, high: int) -> str:
     return f"({column} = '' OR {_bounded(column, low, high)})"
-
-
-def is_deployment_site_label(value: object) -> bool:
-    """The single shared grammar helper for the opaque deployment-site label (ADR-027)."""
-    return isinstance(value, str) and _DEPLOYMENT_SITE_LABEL.fullmatch(value) is not None
 
 
 def _site_check(column: str) -> CheckConstraint:

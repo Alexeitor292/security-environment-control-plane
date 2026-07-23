@@ -165,6 +165,28 @@ so the service always loads, calls the **pure** transition, and lets it decide t
 the service detects that and performs **no write** — writing anyway would inflate the revision and
 break the chain.
 
+**Rehydration must re-assert participant separation (repository requirement).** While mirroring the
+contract we found and proved a real defect: the self-enrolment guard checked only
+`worker_installation_id` against `controller_installation_id`, never the **key ids**. A worker
+declaring a *different* installation id while reusing the controller's key id bound cleanly and drove
+an enrollment all the way to `healthy`, collapsing both signature bindings
+(`record_controller_offer` → `controller_key_id`, `record_worker_result` → `worker_key_id`) onto a
+single key while every check reported success. Both planes now refuse
+`worker_key_id == controller_key_id` with the existing bounded `enrollment_worker_mismatch`, at
+binding time *and* on every later transition, via one pure helper
+(`_assert_participants_separated`) — so a corrupted or rehydrated same-key row can neither
+exact-retry a binding nor advance, verify or become healthy. `refuse()` / `require_recovery()` stay
+deliberately unguarded so an operator can always drive a corrupted row to a truthful terminal.
+
+The repository therefore inherits a **non-negotiable requirement, to be satisfied when the
+persistence layer lands**: the load path must assert participant separation on the rehydrated state
+*before the state is used*, alongside the existing `digest == state_digest` verification. Delegating
+to the pure transition is not sufficient on its own — a row that is never transitioned (a read/status
+projection, a recovery-sweep candidate, an audit emission) would otherwise be trusted without the
+invariant ever being evaluated. A rehydrated row failing separation must be treated as corrupt: refuse
+closed with `enrollment_worker_mismatch` and leave the row eligible for `require_recovery`, never
+silently repair it.
+
 ## Decision — recovery (the database never expires a row on its own)
 
 Expiry is evaluated **only** inside the pure transition from a caller-supplied `now`; the contract
@@ -195,6 +217,7 @@ invitation with a **new** nonce.
 | Cross-site substitution | persisted `deployment_site_label` compared independently after identity load |
 | Downgrade / unknown migration head | bounded accepted-heads window for signatures; runtime head independently required |
 | Secret / metadata leakage | only bounded codes, safe fingerprints and opaque labels persist or project; no raw handoff bytes, key material, endpoints, paths or free-form failure text |
+| Controller enrolling as its own worker | installation-id separation **and** `worker_key_id != controller_key_id`, asserted at binding and on every later transition in both planes; rehydration must re-assert it |
 | Contract fork between planes | exhaustive cross-plane byte-parity corpus + structural import guard |
 
 ## Explicitly NOT delivered by PR5H-A
