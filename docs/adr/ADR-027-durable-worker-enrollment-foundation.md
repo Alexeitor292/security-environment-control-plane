@@ -23,6 +23,13 @@ recover an interrupted enrollment by hand.
 PR5H-A supplies exactly that persistence foundation — and nothing that would prematurely expose a
 network or browser surface.
 
+## The implemented transition chain
+
+`invited → worker_bound → offer_transported → result_transported → verified → healthy`, plus
+`refused` and `recovery_required`. `healthy` is terminal success; `recovery_required` is the
+remediation terminal and the only absorbing state; `refused` may still move to `recovery_required`,
+so it is not unconditionally terminal.
+
 ## Corrections to ADR-026 (code is authoritative)
 
 ADR-026 contradicts itself and the code in ways that would produce a wrong schema if followed
@@ -201,7 +208,11 @@ to the persisted `state_digest`. `_cross_check_invitation` then re-derives the t
 identity from the **authoritative invitation row**: `organization_id` and `deployment_site_label`
 must agree between the state and invitation rows (a tampered state-row org can never silently become
 the tenancy boundary), the invitation must itself re-validate, and `invitation.digest()` must equal
-the `enrollment_id`. `verify_history_consistent` additionally proves contiguous revisions `0..N`,
+the `enrollment_id`. The state must also carry the invitation's controller binding, transaction,
+release **and `expires_at`** verbatim, and the invitation's **own** `expires_at_ts` must be that same
+instant — so **all three expiry representations** (state text, state shadow, invitation shadow) are
+pinned to one UTC instant. That matters because the sweep decides due-ness on expiry: tampering any
+one of the three refuses closed. `verify_history_consistent` additionally proves contiguous revisions `0..N`,
 head == latest history row, and an intact predecessor chain (else `enrollment_history_inconsistent`).
 A corrupt row is **preserved for explicit recovery**, never repaired — even by code that would never
 call a transition. (These invariants beyond the bare digest check were hardened after an adversarial
@@ -353,6 +364,20 @@ transactional service now **exist** (Commit 4) but are an **inert foundation**: 
 test suite calls them, because there is no route, transport or CLI wired to reach them. The new schema
 and service may exist **unused** until PR5H-B. Operator activation, workflow submission, OpenTofu,
 provider contact and remote root SSH remain prohibited, and PR6 stays frozen.
+
+## PostgreSQL acceptance gate (exact-head CI)
+
+A dedicated CI job, `backend-pr5h-postgres-enrollment`, provisions PostgreSQL and executes
+`test_worker_enrollment_postgres.py`, `test_worker_enrollment_recovery_postgres.py` and
+`test_worker_enrollment_migration_postgres.py` — **18** repository/concurrency + **15** restart/crash
+recovery + **4** real-migration proofs. It parses JUnit and **fails rather than skips**: any skip,
+fewer than 37 collected tests, or any failure/error fails the build, and a further step asserts the
+live Alembic head is exactly `b6e2f4a9c1d7`. The job is wired into the aggregate backend gate.
+
+Local validation ran the full non-PostgreSQL regression; a unified local PostgreSQL run was
+unavailable because Docker remained unavailable, though the individual real-PostgreSQL suites had
+previously passed against the final logic. **PR5H-A is therefore not fully PostgreSQL-qualified until
+that exact-head CI job passes.**
 
 **Automated enrollment and one-command installation are NOT complete after PR5H-A.** PR5H-B is the
 completion gate and must prove the end-to-end supported path (controller bootstrap, invitation
