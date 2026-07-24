@@ -43,6 +43,8 @@ from secp_api.enums import WorkerEnrollmentErrorCode as EC
 from secp_api.errors import WorkerEnrollmentError
 from secp_api.models import _utcnow
 from secp_api.worker_enrollment_contract import (
+    RECOVERY_REQUIRED,
+    REFUSED,
     EnrollmentState,
     HandoffFacts,
     WorkerEnrollmentContractError,
@@ -509,6 +511,8 @@ def refuse_enrollment(
         actor,
         enrollment_id=enrollment_id,
         transition=lambda state: refuse(state, reason),
+        target_state=REFUSED,
+        reason=reason,
         expected=expected,
         claimed_scope=claimed_scope,
     )
@@ -528,9 +532,82 @@ def recover_enrollment(
         actor,
         enrollment_id=enrollment_id,
         transition=lambda state: require_recovery(state, reason),
+        target_state=RECOVERY_REQUIRED,
+        reason=reason,
         expected=expected,
         claimed_scope=claimed_scope,
     )
+
+
+def _serve_lifecycle_retry(
+    session: Session,
+    loaded: LoadedEnrollment,
+    *,
+    target_state: str,
+    reason: str,
+    expected: ExpectedRevision,
+) -> TransitionOutcome | None:
+    """Explicit lost-response recovery for a LIFECYCLE transition (`refuse` / `require_recovery`).
+
+    Lifecycle transitions carry **no worker step receipt** by design: the step-receipt ledger is
+    at-least-once dedup for the five *externally delivered* worker protocol steps, while the durable
+    outcome record for an internal lifecycle transition (and for the expiry sweep) is the
+    append-only **revision-history row**. This narrowly-bounded path recognises an EXACT retry of
+    the same lifecycle request from that record, so a committed transition whose response was lost
+    resolves to a truthful no-op instead of a spurious conflict.
+
+    Returns a deduplicated outcome ONLY when every condition holds. Anything else returns ``None``
+    and falls through to the ordinary expected-revision check (bounded ``revision_conflict``), or
+    — where the append-only history itself disagrees — refuses ``history_inconsistent``. Being
+    terminal is never on its own sufficient.
+    """
+    current = loaded.state
+    # (1) the head is exactly the requested terminal target
+    # (2) the persisted reason is exactly the requested bounded reason code
+    # (3) the head is exactly ONE revision beyond the caller's expectation
+    # (4) the chain links the caller's expected state to the head
+    if (
+        current.state != target_state
+        or current.refusal_reason != reason
+        or current.revision != expected.revision + 1
+        or current.predecessor_digest != expected.state_digest
+    ):
+        return None
+
+    enrollment_id = current.enrollment_id
+    # (5) the history row at the EXPECTED revision exists and matches the caller's token exactly
+    prior_row = repo.revision_row(session, enrollment_id=enrollment_id, revision=expected.revision)
+    if prior_row is None:
+        # history is contiguous 0..N (already verified), so a missing predecessor row is corruption
+        raise WorkerEnrollmentError(EC.history_inconsistent)
+    if (
+        prior_row.revision != expected.revision
+        or prior_row.state_digest != expected.state_digest
+        or prior_row.predecessor_digest != expected.predecessor_digest
+    ):
+        return None  # the caller's token does not match what was actually recorded
+
+    # (6) the history row at the CURRENT revision matches the head digest, state and predecessor
+    current_row = repo.revision_row(session, enrollment_id=enrollment_id, revision=current.revision)
+    if (
+        current_row is None
+        or current_row.state_digest != current.digest()
+        or current_row.state != current.state
+        or current_row.predecessor_digest != current.predecessor_digest
+    ):
+        raise WorkerEnrollmentError(EC.history_inconsistent)
+
+    # (7) the head is still the IMMEDIATE result of that operation — no later revision occurred
+    highest = repo.max_revision(session, enrollment_id=enrollment_id)
+    if highest is None or highest != current.revision:
+        return None
+
+    # (8) organization, deployment_site_label, transaction, release and the controller/worker
+    #     identities are the authoritative persisted ones: ``_load_authorized`` bound the org and
+    #     compared the claimed scope, and the repository's invitation cross-check re-derived the
+    #     tenancy binding, transaction, release, controller identity and expiry from the
+    #     tamper-evident invitation. (9) The full rehydration + history invariants passed there too.
+    return TransitionOutcome(current, current.revision, deduplicated=True)
 
 
 def _lifecycle(
@@ -539,16 +616,27 @@ def _lifecycle(
     *,
     enrollment_id: str,
     transition: Callable[[EnrollmentState], EnrollmentState],
+    target_state: str,
+    reason: str,
     expected: ExpectedRevision,
     claimed_scope: ClaimedScope | None,
 ) -> TransitionOutcome:
     _assert_schema_ready(session)
     loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
+    # An exact lifecycle retry is recognised from the append-only history BEFORE the caller's
+    # now-stale expectation is rejected — the retried request legitimately carries the token it
+    # first sent (mirrors the step-receipt ordering for worker steps).
+    served = _serve_lifecycle_retry(
+        session, loaded, target_state=target_state, reason=reason, expected=expected
+    )
+    if served is not None:
+        return served
     _verify_expected(loaded, expected)
     new_state = _run_pure(lambda: transition(loaded.state))
     if new_state is loaded.state:  # already at that terminal — no write
         return TransitionOutcome(loaded.state, loaded.state.revision, deduplicated=True)
-    # refuse()/require_recovery() carry no step receipt (not at-least-once worker steps)
+    # refuse()/require_recovery() carry no step receipt (not at-least-once worker steps); the
+    # revision-history row is the durable lifecycle transition record.
     _commit(session, loaded, new_state, step=None, input_digest=None)
     return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
 

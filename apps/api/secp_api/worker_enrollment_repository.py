@@ -29,10 +29,12 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from secp_commissioning.canonical import is_sha256_digest
-from sqlalchemy import select, update
+from sqlalchemy import func, select, tuple_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from secp_api.worker_enrollment_contract import (
+    ACTIVE,
     ENROLLMENT_CONTRACT_VERSION,
     HEALTHY,
     INVITED,
@@ -299,6 +301,10 @@ def _cross_check_invitation(session: Session, row: StateRow, state: EnrollmentSt
         raise _refuse("enrollment_state_corrupt")
     if invitation_row.deployment_site_label != row.deployment_site_label:
         raise _refuse("enrollment_state_corrupt")
+    # the invitation's OWN shadow expiry must be the same instant as its canonical text, so all
+    # three expiry representations (state text, state shadow, invitation shadow) pin one instant
+    if not _same_instant(invitation_row.expires_at, invitation_row.expires_at_ts):
+        raise _refuse("enrollment_state_corrupt")
     # re-derive the enrollment id from the invitation and prove the relationship is exact
     invitation = WorkerEnrollmentInvitation(
         contract_version=ENROLLMENT_CONTRACT_VERSION,
@@ -319,12 +325,16 @@ def _cross_check_invitation(session: Session, row: StateRow, state: EnrollmentSt
         raise _refuse("enrollment_state_corrupt") from None
     if invitation.digest() != state.enrollment_id:
         raise _refuse("enrollment_state_corrupt")
-    # the state must carry the invitation's controller binding, transaction and release verbatim
+    # The state must carry the invitation's controller binding, transaction, release AND EXPIRY
+    # verbatim. ``expires_at`` is copied by ``open_enrollment`` and is immutable across every
+    # transition, and the expiry sweep decides due-ness on it — so it must be anchored to the
+    # tamper-evident invitation, not merely to the state's own (re-forgeable) digest.
     if (
         state.controller_installation_id != invitation.controller_installation_id
         or state.controller_key_id != invitation.controller_key_id
         or state.transaction_id != invitation.transaction_id
         or state.release_digest != invitation.release_digest
+        or state.expires_at != invitation.expires_at
     ):
         raise _refuse("enrollment_state_corrupt")
 
@@ -517,10 +527,36 @@ def commit_transition(
     """Persist one committed transition: append the revision-history row, compare-and-swap the head
     over the PRIOR ``(revision, state_digest)``, and (for a named step) write the step receipt.
     A stale or concurrent writer fails the CAS (rowcount != 1) and refuses closed. Flushes so the
-    unique/CAS effects fire now; the caller commits."""
-    enrollment_id = prior.state.enrollment_id
-    _insert_revision_row(session, new_state)
+    unique/CAS effects fire now; the caller commits.
 
+    The three durable effects are separate named stages so a crash injected between any two proves
+    (via a fresh verifying session) that a pre-commit failure leaves NOTHING behind: everything here
+    is one uncommitted transaction the caller owns."""
+    enrollment_id = prior.state.enrollment_id
+    _append_history(session, new_state)  # (1) append-only revision row
+    _cas_head(session, enrollment_id, prior, new_state)  # (2) compare-and-swap the head
+    _write_step_receipt(session, enrollment_id, step, input_digest, new_state)  # (3) step receipt
+    session.flush()
+
+
+def _append_history(session: Session, new_state: EnrollmentState) -> None:
+    """Append the revision row. ``UNIQUE(enrollment_id, revision)`` is a second, independent
+    conflict detector alongside the CAS: a stale or concurrent writer appending a revision that
+    already exists collides here (before its CAS runs) and surfaces the SAME bounded conflict code,
+    so the guarantee is uniform whichever guard trips first."""
+    _insert_revision_row(session, new_state)
+    try:
+        session.flush()
+    except IntegrityError:
+        raise _refuse("enrollment_revision_conflict") from None
+
+
+def _cas_head(
+    session: Session,
+    enrollment_id: str,
+    prior: LoadedEnrollment,
+    new_state: EnrollmentState,
+) -> None:
     result = session.execute(
         update(StateRow)
         .where(
@@ -546,19 +582,27 @@ def commit_transition(
     if result.rowcount != 1:  # type: ignore[attr-defined]
         raise _refuse("enrollment_revision_conflict")
 
-    if step is not None:
-        if step not in WORKER_ENROLLMENT_STEPS or input_digest is None:
-            raise _refuse("enrollment_internal_failure")
-        session.add(
-            ReceiptRow(
-                enrollment_id=enrollment_id,
-                step=step,
-                input_digest=input_digest,
-                resulting_revision=new_state.revision,
-                resulting_state_digest=new_state.digest(),
-            )
+
+def _write_step_receipt(
+    session: Session,
+    enrollment_id: str,
+    step: str | None,
+    input_digest: str | None,
+    new_state: EnrollmentState,
+) -> None:
+    if step is None:  # lifecycle transitions (refuse / require_recovery) carry no step receipt
+        return
+    if step not in WORKER_ENROLLMENT_STEPS or input_digest is None:
+        raise _refuse("enrollment_internal_failure")
+    session.add(
+        ReceiptRow(
+            enrollment_id=enrollment_id,
+            step=step,
+            input_digest=input_digest,
+            resulting_revision=new_state.revision,
+            resulting_state_digest=new_state.digest(),
         )
-    session.flush()
+    )
 
 
 # --------------------------------------------------------------------------- nonce consumption
@@ -607,6 +651,107 @@ def revision_state_digest(session: Session, *, enrollment_id: str, revision: int
     ).scalar_one_or_none()
 
 
+# ------------------------------------------------------------------------ expiry-sweep primitives
+
+#: The states a sweep may recover: the five ACTIVE contract states. ``healthy`` is deliberately not
+#: active; ``refused`` / ``recovery_required`` are terminals — none is ever a sweep candidate.
+_ACTIVE_STATES: Final[tuple[str, ...]] = ACTIVE
+
+
+def select_due_active_candidates(
+    session: Session,
+    *,
+    organization_id: uuid.UUID,
+    now_ts: _dt.datetime,
+    limit: int,
+    after: tuple[_dt.datetime, str] | None = None,
+) -> list[tuple[str, _dt.datetime]]:
+    """The bounded, deterministically-ordered batch of THIS organization's active enrollments whose
+    shadow expiry is due, as ``(enrollment_id, expires_at_ts)`` pairs.
+
+    Read-only; no caller-controlled SQL, table or sort key; hard ``limit``. Two properties matter
+    for FORWARD PROGRESS, because some candidates can never be recovered by design:
+
+    * a **revoked** invitation is excluded here in SQL — revocation is an ordinary operator
+      action, so those rows would otherwise sit at the head of the window forever and starve it;
+    * ``after`` is a keyset cursor over the same ``(expires_at_ts, enrollment_id)`` order, so a
+      caller draining the queue always advances past candidates a previous pass could not recover
+      (e.g. a corrupt row, which is preserved rather than repaired).
+
+    The shadow column drives the index scan; canonical-text equality with the authoritative
+    invitation is re-proven per row on rehydration.
+    """
+    revoked_invitation = (
+        select(InvitationRow.id)
+        .where(
+            InvitationRow.enrollment_id == StateRow.enrollment_id,
+            InvitationRow.revoked.is_(True),
+        )
+        .exists()
+    )
+    stmt = select(StateRow.enrollment_id, StateRow.expires_at_ts).where(
+        StateRow.organization_id == organization_id,
+        StateRow.state.in_(_ACTIVE_STATES),
+        StateRow.expires_at_ts <= now_ts,
+        ~revoked_invitation,
+    )
+    if after is not None:
+        after_ts, after_id = after
+        stmt = stmt.where(
+            tuple_(StateRow.expires_at_ts, StateRow.enrollment_id) > (after_ts, after_id)
+        )
+    stmt = stmt.order_by(StateRow.expires_at_ts, StateRow.enrollment_id).limit(limit)
+    return [(row[0], row[1]) for row in session.execute(stmt).all()]
+
+
+def revision_row(session: Session, *, enrollment_id: str, revision: int) -> RevisionRow | None:
+    """The append-only history row at ``revision``, or None."""
+    return session.execute(
+        select(RevisionRow).where(
+            RevisionRow.enrollment_id == enrollment_id,
+            RevisionRow.revision == revision,
+        )
+    ).scalar_one_or_none()
+
+
+def max_revision(session: Session, *, enrollment_id: str) -> int | None:
+    """The highest recorded history revision, or None when there is no history."""
+    return session.execute(
+        select(func.max(RevisionRow.revision)).where(RevisionRow.enrollment_id == enrollment_id)
+    ).scalar_one_or_none()
+
+
+def lock_and_load_sweep_candidate(
+    session: Session, *, enrollment_id: str, organization_id: uuid.UUID
+) -> LoadedEnrollment | None:
+    """Lock ONE active candidate for this org with ``FOR UPDATE SKIP LOCKED`` (PostgreSQL; a no-op
+    lock clause on SQLite, which serializes writers), then fully rehydrate + validate it.
+
+    Returns ``None`` when the row is absent, already non-active (a concurrent sweeper won), or
+    held by another sweeper (skipped). A present-but-corrupt row RAISES (never returned, never
+    repaired), so a poisoned row surfaces as a bounded corruption category, not as recovered."""
+    stmt = select(StateRow).where(
+        StateRow.enrollment_id == enrollment_id,
+        StateRow.organization_id == organization_id,
+        StateRow.state.in_(_ACTIVE_STATES),
+    )
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update(skip_locked=True)
+    row = session.execute(stmt).scalar_one_or_none()
+    if row is None:
+        return None
+    return _build_loaded(session, row)
+
+
+def invitation_is_revoked(session: Session, *, enrollment_id: str) -> bool:
+    """True when the enrollment's invitation is revoked — such a row is not an expiry-sweep target
+    (revocation is a separate lifecycle; a revoked-only invitation must never be swept)."""
+    revoked = session.execute(
+        select(InvitationRow.revoked).where(InvitationRow.enrollment_id == enrollment_id)
+    ).scalar_one_or_none()
+    return bool(revoked)
+
+
 __all__ = [
     "LoadedEnrollment",
     "RepositoryRefusal",
@@ -614,10 +759,15 @@ __all__ = [
     "consume_invitation",
     "create_invitation_and_open",
     "find_receipt",
+    "invitation_is_revoked",
     "load_for_update",
     "load_invitation_for_update",
     "load_read_only",
+    "lock_and_load_sweep_candidate",
     "parse_canonical_utc",
     "revision_state_digest",
+    "max_revision",
+    "revision_row",
+    "select_due_active_candidates",
     "verify_history_consistent",
 ]

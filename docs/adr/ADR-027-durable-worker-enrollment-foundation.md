@@ -248,6 +248,86 @@ instead of a spurious `enrollment_wrong_state`. Recovery moves a stuck enrollmen
 terminal an operator can act on; it never re-drives a transport, and re-enrollment requires a **new**
 invitation with a **new** nonce.
 
+### The sweep as implemented (Commit 5)
+
+`services/worker_enrollment_recovery.py` implements `recover_expired(session_factory, *,
+organization_id, now, batch_size)`. It is **entirely persistence-driven** — no correctness depends on
+process memory, caches, in-process locks or retained request objects, so a freshly constructed
+service on fresh sessions recovers identically (proved by tests that use a new session for every
+step).
+
+* **Bounded / deterministic / scoped**: a code-owned `DEFAULT_SWEEP_BATCH` (clamped, never
+  caller-raised), a stable `(expires_at_ts, enrollment_id)` order, and a hard `organization_id`
+  filter. No caller-controlled SQL, table, sort key, or unbounded scan.
+* **Per-row transactions**: the batch of candidate ids is read once, then each candidate is locked
+  with `FOR UPDATE SKIP LOCKED` and transitioned in its OWN transaction. This is what makes a
+  poisoned row roll back *only itself* — it can never mark unrelated valid rows recovered.
+* **Two independent conflict detectors**: the `(revision, state_digest)` CAS **and**
+  `UNIQUE(enrollment_id, revision)` on the history table. A stale or concurrent writer trips whichever
+  comes first and both surface the same bounded `enrollment_revision_conflict`, so the guarantee is
+  uniform. Because a sweeper holds its row lock for its whole transaction it cannot itself go stale;
+  the CAS is the authoritative backstop, proved directly by a test that constructs stale coordinates.
+* **Due-ness is decided twice**: the indexed shadow column narrows the batch, and the *authoritative*
+  decision is re-proven on the canonical `expires_at` text after rehydration (the two are already
+  proven to be the same instant by `_validate_rehydrated`). Canonical timestamp strings are never
+  rewritten.
+* **Never swept**: `healthy` (not active), `refused` / `recovery_required` (terminals), a revoked
+  invitation, a corrupt row, a not-yet-due row, or another organization's records.
+* **Reporting** is a bounded aggregate only — `examined / recovered / skipped / conflicts / corrupt`.
+  No enrollment id, reason string or row detail leaves the sweep.
+
+### The two durable records are deliberately different things
+
+The schema stays frozen at the sole head `b6e2f4a9c1d7`; no second migration is added and no recovery
+step is added to `worker_enrollment_step_receipt`. The two tables carry **different** responsibilities:
+
+| Table | Responsibility |
+|---|---|
+| `worker_enrollment_step_receipt` | at-least-once **deduplication for the five externally delivered worker enrollment protocol steps** (`bind_worker_identity`, `record_controller_offer`, `record_worker_result`, `mark_verified`, `mark_healthy`) |
+| `worker_enrollment_revision` | the **durable outcome record** for internal expiry sweeps and for lifecycle transitions (`refuse`, `require_recovery`) |
+
+A revision row is therefore *never* a worker step receipt; it is the **durable lifecycle / sweep
+transition record**. Lifecycle transitions and the sweep write no step receipt at all.
+
+**Lifecycle lost-response recovery** is served from that record by a narrowly bounded exact-retry
+path (`_serve_lifecycle_retry`), applied to `recover_enrollment` and — symmetrically —
+`refuse_enrollment`. It runs *after* authoritative load, authorization, scope validation, rehydration
+validation and history verification, and *before* the caller's now-stale `ExpectedRevision` is
+rejected. It returns `deduplicated=True` only when **all** hold: the head is exactly the requested
+terminal target; the persisted `refusal_reason` exactly equals the requested bounded reason code;
+`current.revision == expected.revision + 1`; `current.predecessor_digest == expected.state_digest`;
+the history row at `expected.revision` exists and matches that revision, digest and predecessor
+exactly; the history row at `current.revision` matches the head's digest, state and predecessor; no
+later revision exists (the head is still the immediate result of that operation); and the
+organization, `deployment_site_label`, transaction, release, controller and worker identities are the
+authoritative persisted ones (already re-derived from the tamper-evident invitation). Anything else
+falls through to the existing bounded `revision_conflict`, or refuses `history_inconsistent` where
+the append-only history itself disagrees. **Being terminal is never on its own sufficient** — a row
+driven to `recovery_required` by the sweep (a different reason) does not satisfy an operator's
+lifecycle request.
+
+**Sweep idempotency needs no receipt** and does not get one: `require_recovery` is an absorbing
+terminal and a recovered row is no longer *active*, so it leaves the sweep candidate set entirely. A
+second sweeper — in a fresh process — observes the committed result and creates no revision. CAS +
+the append-only history + removal from the active set are what prove it, and concurrent sweepers are
+tested to produce exactly one revision.
+
+**Forward progress.** Some candidates can never be recovered by design: a revoked invitation (a
+separate lifecycle) and a preserved corrupt row. Without care they would occupy the head of the
+ordered window forever and silently starve every valid due enrollment behind them. Two mechanisms
+prevent that: revoked invitations are excluded **in SQL** (revocation is an ordinary operator
+action), and `select_due_active_candidates` takes a **keyset cursor** over the same
+`(expires_at_ts, enrollment_id)` order, returned as `next_cursor`. `drain_expired` walks that cursor
+under a code-owned `DEFAULT_MAX_PASSES` bound, so draining is both guaranteed to progress and still
+bounded. An unexpected error is reported in its own `failed` category — never mislabelled as row
+corruption.
+
+Crash-point atomicity is proved by injecting a failure at each named stage of the transactional
+commit (`_append_history`, `_cas_head`, `_write_step_receipt`) plus before-lock / after-load /
+after-history-validation, and verifying through a **separate** session that a pre-commit failure
+leaves no state, history, receipt or nonce change. The post-commit "lost response" case is proved by
+retrying from a fresh session and observing an idempotent dedup with no new history row.
+
 ## Threat model (PR5H-A surface)
 
 | Threat | Control |
