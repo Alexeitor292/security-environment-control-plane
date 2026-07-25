@@ -144,3 +144,32 @@ def test_importing_the_full_image_closure_preserves_the_runtime_seals() -> None:
     assert process_executor._B1A_SUBPROCESS_SEALED is True
     assert process_boundary._PLAN_ONLY_PROCESS_SEALED is False
     assert ORDINARY_TASK_QUEUE == "secp-orchestration"
+
+
+def test_image_smoke_expected_alembic_head_tracks_the_actual_sole_head() -> None:
+    """Regression (found in exact-head CI run 30137230869): the in-container image smoke asserts
+    shipped image's sole Alembic head, but its ``_EXPECTED_ALEMBIC_HEAD`` constant is hardcoded and
+    was left at the PR5F head ``d8f1a2b3c4e5`` when SECP-PR5H-A introduced the new sole head
+    ``b6e2f4a9c1d7``. The smoke runs only inside the built container in CI, so this was invisible to
+    every local suite. This local pin fails the moment the constant drifts from the real head."""
+    import importlib.util
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    smoke_path = _REPO / "infra" / "dev" / "image_smoke.py"
+    spec = importlib.util.spec_from_file_location("pr5h_image_smoke_under_test", smoke_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    api_dir = _REPO / "apps" / "api"
+    cfg = Config(str(api_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(api_dir / "migrations"))
+    actual_heads = tuple(ScriptDirectory.from_config(cfg).get_heads())
+
+    assert actual_heads == ("b6e2f4a9c1d7",), actual_heads
+    assert module._EXPECTED_ALEMBIC_HEAD == actual_heads[0], (
+        f"image_smoke._EXPECTED_ALEMBIC_HEAD={module._EXPECTED_ALEMBIC_HEAD!r} drifted from the "
+        f"actual sole Alembic head {actual_heads[0]!r}"
+    )

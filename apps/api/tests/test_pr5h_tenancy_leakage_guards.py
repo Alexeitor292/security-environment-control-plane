@@ -189,6 +189,53 @@ def test_sweep_report_is_bounded_counts_with_no_identifiers(factory, actor) -> N
         assert field in rendered
 
 
+def test_full_batch_sweep_report_stringifies_identifier_free(factory, actor) -> None:
+    """Regression (found by the adversarial review): keyset pagination requires the cursor to carry
+    the last examined ``(expires_at_ts, enrollment_id)``, so a FULL batch populates ``next_cursor``
+    with an enrollment id. The earlier report test passed only because its single-candidate window
+    left the cursor ``None``. The cursor is a repr-excluded INTERNAL continuation token, so the
+    surfaceable/loggable report stays identifier-free even for a full batch — proven here."""
+    ids = []
+    for i in range(2):
+        invitation = contract.create_invitation(
+            controller_installation_id="controller-aaaaaaaa",
+            controller_key_id=CTRL_KEY,
+            controller_trust_anchor_hex=CTRL_HEX,
+            controller_origin="https://ctrl.example.com",
+            release_digest=RELEASE,
+            transaction_id=f"txn-{i}",
+            nonce="sha256:" + f"{i:064x}",
+            created_at="2026-07-21T00:00:00Z",
+            expires_at="2026-07-21T00:30:00Z",
+        )
+        with factory() as s:
+            st = svc.create_invitation_and_open(
+                s,
+                actor,
+                invitation=invitation,
+                invitation_created_at="2026-07-21T00:00:00Z",
+                deployment_site_label="rack-01.eu_a",
+                now=NOW,
+            ).state
+            s.commit()
+        ids.append(st.enrollment_id)
+
+    result = rec.recover_expired(
+        factory, organization_id=actor.organization_id, now=AFTER, batch_size=2
+    )
+    # the cursor IS populated with a real keyset position (design: pagination needs the last id)...
+    assert result.next_cursor is not None
+    assert result.next_cursor[1] in ids
+    # ...but the loggable/stringified report carries NO enrollment id
+    rendered = repr(result)
+    _scan_produced(rendered)
+    for enrollment_id in ids:
+        assert enrollment_id not in rendered, (
+            "an enrollment id reached the stringified sweep report"
+        )
+    assert "next_cursor" not in rendered  # the cursor is repr-excluded
+
+
 def test_every_persisted_enrollment_value_is_secret_free(factory, actor) -> None:
     _open_and_bind(factory, actor)
     for table in (

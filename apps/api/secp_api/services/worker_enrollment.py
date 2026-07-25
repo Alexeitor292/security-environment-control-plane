@@ -21,10 +21,10 @@ ADR-027 "delegate, never pre-screen": the service loads and calls the pure trans
 the transition's OWN bounded reason code rather than re-deriving one, so check order stays part of
 the observable contract.
 
-This module does NOT commit — the caller (router/test) owns the transaction boundary — except that a
-fail-closed refusal which also materialized a durable recovery transition is flagged so the caller
-commits it before re-raising. No network transport, API route, CLI, host mutation, provider contact,
-workflow, OpenTofu or operator activation lives here; PR5H-A stays an inert durable foundation.
+This module does NOT commit — the caller (router/test) owns the transaction boundary — and it never
+partially materializes a transition on a refusal: a refusal raises before any write, so the caller
+simply rolls back. No network transport, API route, CLI, host mutation, provider contact, workflow,
+OpenTofu or operator activation lives here; PR5H-A stays an inert durable foundation.
 """
 
 from __future__ import annotations

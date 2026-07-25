@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -62,8 +62,18 @@ DEFAULT_MAX_PASSES: Final = 64
 
 @dataclass(frozen=True)
 class RecoverySweepResult:
-    """Bounded aggregate outcome of one sweep pass. Carries only counts and safe categories — never
-    an enrollment id, a reason string, a row detail, or anything caller-identifying."""
+    """One sweep pass's outcome, in two clearly separated parts.
+
+    * The **aggregate report** — the six integer counts — is the surfaceable/loggable result. It
+      carries no enrollment id, reason string, row detail, or anything caller-identifying.
+    * ``next_cursor`` is an INTERNAL keyset continuation token, not report output. Keyset pagination
+      runs over the sort key ``(expires_at_ts, enrollment_id)``, so the cursor must carry the last
+      examined row's id — that is what lets a drain step past a corrupt or otherwise unrecoverable
+      row instead of restarting the same window forever. It is consumed only server-side by a
+      draining caller (which already holds that org's ids) and is ``repr``-excluded, so a naive
+      ``log.info(result)`` can never emit an id: the aggregate report stringifies id-free even for a
+      full batch.
+    """
 
     examined: int  # candidate ids fetched in this bounded batch
     recovered: int  # rows driven to recovery_required and committed (this sweeper won the CAS)
@@ -71,11 +81,10 @@ class RecoverySweepResult:
     conflicts: int  # CAS lost to a concurrent writer (the winner already committed)
     corrupt: int  # rehydration corruption — preserved, never repaired, never recovered
     failed: int = 0  # an UNEXPECTED error: rolled back, and deliberately NOT reported as corruption
-    #: Keyset position after the last examined candidate, or None when this window was the last one.
-    #: A draining caller passes it back as ``after`` so the next pass ALWAYS advances — otherwise
-    #: candidates that can never be recovered (a corrupt row is preserved, not repaired) would sit
-    #: at the head of the window forever and starve every valid due enrollment behind them.
-    next_cursor: tuple[_dt.datetime, str] | None = None
+    #: Internal keyset continuation token (last examined ``(expires_at_ts, enrollment_id)``), or
+    #: None when this window was the last one. ``repr=False`` keeps it out of the stringified/logged
+    #: form so the surfaceable report stays identifier-free; a draining caller reads it explicitly.
+    next_cursor: tuple[_dt.datetime, str] | None = field(default=None, repr=False)
 
     @property
     def total(self) -> int:
