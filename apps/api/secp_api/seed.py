@@ -108,7 +108,9 @@ def _seed_dev_controller_identity(session: Session) -> None:
     from secp_api.services import controller_identity
     from secp_api.worker_enrollment_contract import sha256_digest_of_hex
 
-    if not inspect(session.get_bind()).has_table("controller_enrollment_identity"):
+    # reflect on the session's OWN connection — never inspect(session.get_bind()), which opens a
+    # second connection to the in-memory SQLite singleton and aborts the pending bootstrap tx.
+    if not inspect(session.connection()).has_table("controller_enrollment_identity"):
         return
     active = session.execute(
         select(ControllerEnrollmentIdentity).where(
