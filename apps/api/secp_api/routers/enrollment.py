@@ -63,8 +63,11 @@ def create_enrollment_invitation(
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentInvitationOut:
-    now = _iso(_utc_now())
-    expires = _iso(_utc_now() + _dt.timedelta(seconds=body.ttl_seconds))
+    # one clock sample: created_at and expires_at derive from the SAME instant, so the effective TTL
+    # is exactly ttl_seconds and a requested 86400 can never truncate to 86401 across a boundary.
+    now_dt = _utc_now()
+    now = _iso(now_dt)
+    expires = _iso(now_dt + _dt.timedelta(seconds=body.ttl_seconds))
     invitation = svc.build_invitation(
         controller_installation_id=body.controller_installation_id,
         controller_key_id=body.controller_key_id,

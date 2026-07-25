@@ -37,8 +37,10 @@ from secp_commissioning.canonical import sha256_digest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from secp_api import audit
 from secp_api import worker_enrollment_repository as repo
 from secp_api.auth import Principal
+from secp_api.enums import AuditAction, Permission
 from secp_api.enums import WorkerEnrollmentErrorCode as EC
 from secp_api.errors import WorkerEnrollmentError
 from secp_api.models import _utcnow
@@ -272,7 +274,14 @@ def create_invitation_and_open(
     ``organization_id`` comes from the authenticated actor; ``deployment_site_label`` is fixed here
     and is immutable thereafter. A duplicate nonce or invitation collides on a UNIQUE/PK constraint
     and refuses ``creation_conflict``.
+
+    Creating an invitation is a manage-permission mutation and is enforced HERE (not only in the
+    router), so a direct service call cannot bypass RBAC. The invitation-created audit event is
+    appended in the SAME transaction as the durable rows, so state and audit commit or roll back
+    together; it carries only org, actor, action, enrollment id, site label, state and revision —
+    never the nonce, trust-anchor bytes, origin, transaction id or a full digest.
     """
+    actor.require(Permission.enrollment_manage)
     _assert_schema_ready(session)
     if not is_deployment_site_label(deployment_site_label):
         raise WorkerEnrollmentError(EC.scope_mismatch)
@@ -291,6 +300,20 @@ def create_invitation_and_open(
         raise _surface(exc) from None
     except IntegrityError:
         raise WorkerEnrollmentError(EC.creation_conflict) from None
+    audit.record(
+        session,
+        action=AuditAction.enrollment_invitation_created,
+        resource_type="worker_enrollment",
+        resource_id=loaded.state.enrollment_id,
+        actor=str(actor.user_id),
+        organization_id=actor.organization_id,
+        outcome="success",
+        data={
+            "deployment_site_label": deployment_site_label,
+            "state": loaded.state.state,
+            "revision": loaded.state.revision,
+        },
+    )
     return TransitionOutcome(state=loaded.state, committed_revision=0, deduplicated=False)
 
 
@@ -682,7 +705,11 @@ def load_public_view(
     claimed_scope: ClaimedScope | None = None,
 ) -> dict[str, object]:
     """A bounded, secret-free status projection. Fully rehydrates + validates, so a corrupt or
-    same-key row RAISES rather than being surfaced."""
+    same-key row RAISES rather than being surfaced.
+
+    Requires the read permission (enforced HERE so a direct service call cannot bypass RBAC);
+    organization isolation is still enforced independently by ``_authorize`` after the row loads."""
+    actor.require(Permission.enrollment_read)
     _assert_schema_ready(session)
     try:
         loaded = repo.load_read_only(session, enrollment_id)

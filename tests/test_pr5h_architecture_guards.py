@@ -410,7 +410,7 @@ def test_enrollment_api_router_is_registered_and_authenticated() -> None:
 def test_only_the_enrollment_router_reaches_the_service_and_recovery_stays_unwired() -> None:
     """The enrollment SERVICE is reachable from exactly one production entry point (the controller
     API router); nothing else — no operator, worker, provider, CLI or bootstrap module — may import
-    it, and the restart/recovery SWEEP service stays entirely unwired until its own PR5H-B1 slice."""
+    it, and the restart/recovery SWEEP service stays unwired until its own PR5H-B1 slice."""
     service_reachers: list[str] = []
     recovery_reachers: list[str] = []
     for root in (REPO / "apps", REPO / "plugins", REPO / "contracts"):

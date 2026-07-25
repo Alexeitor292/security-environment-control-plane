@@ -501,6 +501,12 @@ class Permission(str, Enum):
     # nothing.
     plan_generation_manage = "plan_generation:manage"
     plan_generation_approve = "plan_generation:approve"
+    # SECP-PR5H-B1 supported worker enrollment. read = status/list; manage = create/revoke.
+    # Provider-neutral and dedicated: NEVER inferred from worker_identity, target, onboarding,
+    # provisioning or any other permission. Worker-facing progression gets its own deliberate
+    # assignment in its slice.
+    enrollment_read = "enrollment:read"
+    enrollment_manage = "enrollment:manage"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -845,6 +851,7 @@ class AuditAction(str, Enum):
     destroy_completed = "destroy.completed"
     lifecycle_transition = "lifecycle.transition"
     authorization_denied = "authorization.denied"
+    enrollment_invitation_created = "enrollment.invitation_created"
     # SECP-002A — execution targets, discovery, reservations, secret resolution.
     target_created = "target.created"
     target_disabled = "target.disabled"
