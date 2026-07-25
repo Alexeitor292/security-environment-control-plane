@@ -54,6 +54,15 @@ class EnrollmentInvitationOut(BaseModel):
     revision: int
 
 
+class RevokeEnrollment(BaseModel):
+    """Operator revocation. ``expected_revision`` is the revision the client last observed (from the
+    status projection); a stale value on a live enrollment refuses a bounded conflict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+
+
 class EnrollmentStatusOut(BaseModel):
     """The bounded, secret-free enrollment status projection (mirror of the durable public view)."""
 

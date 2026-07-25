@@ -31,6 +31,7 @@ from secp_api.schemas_enrollment import (
     CreateEnrollmentInvitation,
     EnrollmentInvitationOut,
     EnrollmentStatusOut,
+    RevokeEnrollment,
 )
 from secp_api.services import worker_enrollment as svc
 
@@ -90,3 +91,16 @@ def get_enrollment_status(
 ) -> EnrollmentStatusOut:
     view = svc.load_public_view(session, principal, enrollment_id=enrollment_id)
     return EnrollmentStatusOut.model_validate(view)
+
+
+@router.post("/{enrollment_id}/revoke", response_model=EnrollmentStatusOut)
+def revoke_enrollment(
+    enrollment_id: str,
+    body: RevokeEnrollment,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentStatusOut:
+    outcome = svc.revoke_enrollment(
+        session, principal, enrollment_id=enrollment_id, expected_revision=body.expected_revision
+    )
+    return EnrollmentStatusOut.model_validate(outcome.state.public_view())

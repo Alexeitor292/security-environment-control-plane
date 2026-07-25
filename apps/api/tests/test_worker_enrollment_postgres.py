@@ -770,3 +770,38 @@ def test_concurrent_controller_identity_rotation_keeps_one_active(pg):
             text("SELECT count(*) FROM controller_enrollment_identity WHERE status='active'")
         ).scalar_one()
     assert active == 1  # the single-active invariant holds under concurrency
+
+
+def test_concurrent_revoke_yields_one_transition_and_one_audit(pg):
+    # revoke slice: overlapping operator revokes drive the enrollment to refused exactly once — the
+    # head CAS admits one transition; the other either conflicts or is an idempotent no-op. Exactly
+    # one revocation audit is recorded and the revision advances by exactly one.
+    factory, actor, _ = pg
+    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
+    barrier = Barrier(2)
+
+    def attempt(_i: int):
+        with factory() as s:
+            barrier.wait(timeout=15)
+            try:
+                svc.revoke_enrollment(
+                    s, actor, enrollment_id=state.enrollment_id, expected_revision=state.revision
+                )
+                s.commit()
+                return "ok"
+            except WorkerEnrollmentError as exc:
+                s.rollback()
+                return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, range(2)))
+    assert all(o == "ok" or o == "enrollment_revision_conflict" for o in outcomes), outcomes
+    with factory() as s:
+        row = s.execute(
+            text("SELECT state, revision FROM worker_enrollment_state WHERE enrollment_id=:e"),
+            {"e": state.enrollment_id},
+        ).one()
+        audits = s.execute(
+            text("SELECT count(*) FROM audit_event WHERE action='enrollment.revoked'")
+        ).scalar_one()
+    assert row == ("refused", 1) and audits == 1

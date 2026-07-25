@@ -419,3 +419,84 @@ def test_same_key_different_ttl_refuses_conflict(client):
     )
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "enrollment_idempotency_conflict"
+
+
+# --- revoke slice: POST /{enrollment_id}/revoke --------------------------------------------------
+
+
+def _revoked_audits(session) -> int:
+    from sqlalchemy import text
+
+    return session.execute(
+        text("SELECT count(*) FROM audit_event WHERE action='enrollment.revoked'")
+    ).scalar_one()
+
+
+def test_revoke_transitions_to_refused_and_audits_once(client, session):
+    from sqlalchemy import text
+
+    eid = client.post("/api/v1/enrollment/invitations", json=_create_body()).json()["enrollment_id"]
+    r = client.post(f"/api/v1/enrollment/{eid}/revoke", json={"expected_revision": 0})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["state"] == "refused"
+    # secret-free projection: fingerprints only, never the trust anchor / raw key material
+    assert "controller_trust_anchor_hex" not in body and "invitation_id" not in body
+    rows = session.execute(
+        text("SELECT resource_id FROM audit_event WHERE action='enrollment.revoked'")
+    ).all()
+    assert len(rows) == 1 and rows[0][0] == eid
+
+
+def test_revoke_is_idempotent_and_records_no_second_audit(client, session):
+    eid = client.post("/api/v1/enrollment/invitations", json=_create_body()).json()["enrollment_id"]
+    assert (
+        client.post(f"/api/v1/enrollment/{eid}/revoke", json={"expected_revision": 0}).status_code
+        == 200
+    )
+    # an exact retry stays refused and appends no second audit
+    r2 = client.post(f"/api/v1/enrollment/{eid}/revoke", json={"expected_revision": 0})
+    assert r2.status_code == 200 and r2.json()["state"] == "refused"
+    assert _revoked_audits(session) == 1
+
+
+def test_revoke_with_stale_revision_conflicts(client):
+    eid = client.post("/api/v1/enrollment/invitations", json=_create_body()).json()["enrollment_id"]
+    r = client.post(f"/api/v1/enrollment/{eid}/revoke", json={"expected_revision": 7})
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "enrollment_revision_conflict"
+
+
+def test_revoke_requires_manage_permission(client, principal):
+    eid = client.post("/api/v1/enrollment/invitations", json=_create_body()).json()["enrollment_id"]
+    _as(client, _principal(principal.organization_id, [Permission.enrollment_read]))
+    r = client.post(f"/api/v1/enrollment/{eid}/revoke", json={"expected_revision": 0})
+    assert r.status_code == 403
+
+
+def test_revoke_cross_org_is_forbidden(client, session, other_org_principal):
+    from secp_api.services import worker_enrollment as svc
+
+    invitation = create_invitation(
+        controller_installation_id="controller-aaaaaaaa",
+        controller_key_id=CTRL_KEY,
+        controller_trust_anchor_hex=CTRL_HEX,
+        controller_origin=ORIGIN,
+        release_digest=RELEASE,
+        transaction_id="txn-rev-cross",
+        nonce="sha256:" + "d" * 64,
+        created_at="2026-07-21T00:00:00Z",
+        expires_at="2026-07-21T01:00:00Z",
+    )
+    seeded = svc.create_invitation_and_open(
+        session,
+        other_org_principal,
+        invitation=invitation,
+        deployment_site_label=SITE,
+        now="2026-07-21T00:10:00Z",
+    )
+    session.commit()
+    r = client.post(
+        f"/api/v1/enrollment/{seeded.state.enrollment_id}/revoke", json={"expected_revision": 0}
+    )
+    assert r.status_code == 403

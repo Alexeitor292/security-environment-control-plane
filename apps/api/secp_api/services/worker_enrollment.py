@@ -748,6 +748,50 @@ def recover_enrollment(
     )
 
 
+#: The bounded refusal-reason code recorded when an operator revokes an enrollment invitation.
+_REVOKE_REASON = "operator_revoked"
+
+
+def revoke_enrollment(
+    session: Session,
+    actor: Principal,
+    *,
+    enrollment_id: str,
+    expected_revision: int,
+    claimed_scope: ClaimedScope | None = None,
+) -> TransitionOutcome:
+    """Operator revocation: drive an active enrollment to the ``refused`` terminal on the durable
+    CAS lifecycle. Requires ``enrollment_manage`` (enforced here, not only in the router) and the
+    organization boundary. **Idempotent**: an already-terminal enrollment returns its state with no
+    write and no new audit. A stale ``expected_revision`` on a live enrollment refuses
+    ``revision_conflict``; concurrent revokes collide on the head CAS so exactly one wins. Exactly
+    one bounded, secret-free audit event is recorded — only for the winning transition. Does NOT
+    commit — the caller owns the transaction boundary."""
+    actor.require(Permission.enrollment_manage)
+    _assert_schema_ready(session)
+    loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
+    state = loaded.state
+    if state.state in (REFUSED, RECOVERY_REQUIRED):
+        return TransitionOutcome(state, state.revision, deduplicated=True)  # already terminal
+    if state.revision != expected_revision:
+        raise WorkerEnrollmentError(EC.revision_conflict)
+    new_state = _run_pure(lambda: refuse(state, _REVOKE_REASON))
+    if new_state is state:  # defensive: the contract treated it as a no-op
+        return TransitionOutcome(state, state.revision, deduplicated=True)
+    _commit(session, loaded, new_state, step=None, input_digest=None)
+    audit.record(
+        session,
+        action=AuditAction.enrollment_revoked,
+        resource_type="worker_enrollment",
+        resource_id=enrollment_id,
+        actor=str(actor.user_id),
+        organization_id=actor.organization_id,
+        outcome="success",
+        data={"state": new_state.state, "revision": new_state.revision},
+    )
+    return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
+
+
 def _serve_lifecycle_retry(
     session: Session,
     loaded: LoadedEnrollment,

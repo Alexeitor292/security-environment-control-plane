@@ -852,6 +852,7 @@ class AuditAction(str, Enum):
     lifecycle_transition = "lifecycle.transition"
     authorization_denied = "authorization.denied"
     enrollment_invitation_created = "enrollment.invitation_created"
+    enrollment_revoked = "enrollment.revoked"
     # SECP-002A — execution targets, discovery, reservations, secret resolution.
     target_created = "target.created"
     target_disabled = "target.disabled"
