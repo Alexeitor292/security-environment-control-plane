@@ -95,7 +95,6 @@ def _open(factory, actor, *, nonce: str = "sha256:" + "b" * 64, site: str = SITE
             s,
             actor,
             invitation=_invitation(nonce, **inv),
-            invitation_created_at=CREATED,
             deployment_site_label=site,
             now=NOW,
         )

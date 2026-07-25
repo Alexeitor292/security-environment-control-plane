@@ -33,8 +33,9 @@ Two deliberate, load-bearing schema decisions:
    digest chain and invalidate the CAS.
 
 Tenancy: ``organization_id`` is the ONLY authorization boundary. ``deployment_site_label`` is an
-opaque, grammar-validated grouping label inside one organization (ADR-027) — never a tenant,
-address, region, endpoint or provider value.
+opaque, grammar-validated grouping label inside one organization (ADR-027) — never *interpreted* as
+a tenant, region, endpoint or provider, and every IP-address literal is rejected; a string that
+merely looks like one is permitted but carries no such meaning.
 """
 
 from __future__ import annotations
@@ -58,8 +59,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from secp_api.models import Base, TimestampMixin, _utcnow, _uuid
 
 # The opaque deployment-site grammar lives in the PURE contract module (one definition, no drift):
-# letters, digits, dot, underscore, hyphen — deliberately excluding ``/``, ``:``, ``@``, whitespace
-# and anything URL/host/path/provider shaped.  Re-exported here for the schema layer's convenience.
+# letters, digits, dot, underscore, hyphen — excluding ``/``, ``:``, ``@`` and whitespace (so no
+# URL/path/scheme), and ``is_deployment_site_label`` additionally rejects every IP-address literal.
+# Re-exported here for the schema layer's convenience.
 from secp_api.worker_enrollment_contract import (
     DEPLOYMENT_SITE_LABEL_PATTERN,
     is_deployment_site_label,

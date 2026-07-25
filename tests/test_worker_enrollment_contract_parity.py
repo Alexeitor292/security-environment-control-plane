@@ -161,7 +161,22 @@ def test_deployment_site_label_is_not_part_of_the_canonical_contract() -> None:
     assert not any("site" in key for key in a_state.canonical())
     assert not any("site" in key for key in a_inv.canonical())
     assert api.is_deployment_site_label("site-01.rack_2") is True
-    for bad in ["", "a" * 121, "site/01", "site:01", "a@b", "has space", "https://x", "10.0.0.5/x"]:
+    for bad in [
+        "",
+        "a" * 121,
+        "site/01",
+        "site:01",
+        "a@b",
+        "has space",
+        "https://x",
+        "10.0.0.5/x",
+        "10.0.0.5",  # bare IPv4 literal (private)
+        "127.0.0.1",  # loopback
+        "0.0.0.0",  # unspecified
+        "203.0.113.5",  # public-format IPv4 (RFC 5737 documentation range)
+        "::1",  # IPv6 loopback
+        "fe80::1",  # IPv6 link-local
+    ]:
         assert api.is_deployment_site_label(bad) is False, bad
 
 
@@ -207,6 +222,46 @@ def test_invitation_boundary_and_malformed_parity(label: str, over: dict) -> Non
     )
 
 
+# --- invitation freshness window (F1: created_at <= now < expires_at) ----------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "created_at", "expires_at", "now", "outcome"),
+    [
+        # a future-minted invitation with a bounded TTL is well-formed (validate passes) but must
+        # NOT be usable years before its created_at — otherwise the TTL cap is bypassed.
+        (
+            "future_created_before_now",
+            "2035-01-01T00:00:00Z",
+            "2035-01-01T01:00:00Z",
+            NOW,
+            "refused",
+        ),
+        ("exact_created_at", CREATED, EXPIRES, CREATED, "ok"),
+        ("one_second_before_created", CREATED, EXPIRES, "2026-07-20T23:59:59Z", "refused"),
+        ("mid_window", CREATED, EXPIRES, NOW, "ok"),
+        ("at_expiry_boundary", CREATED, EXPIRES, EXPIRES, "refused"),
+        ("one_second_before_expiry", CREATED, EXPIRES, "2026-07-21T00:59:59Z", "ok"),
+    ],
+)
+def test_invitation_freshness_window_parity(
+    label: str, created_at: str, expires_at: str, now: str, outcome: str
+) -> None:
+    over = {"created_at": created_at, "expires_at": expires_at}
+
+    def _open(mod):
+        return mod.open_enrollment(mod.create_invitation(**_invitation_kwargs(**over)), now=now)
+
+    # both planes must agree (same acceptance or same bounded refusal code)
+    assert_parity(f"freshness:{label}", lambda: _open(mgmt), lambda: _open(api))
+    if outcome == "refused":
+        # an out-of-window instant refuses with the existing bounded expiry code on both sides
+        assert _run(lambda: _open(api)) == ("refused", "enrollment_invitation_expired")
+        assert _run(lambda: _open(mgmt)) == ("refused", "enrollment_invitation_expired")
+    else:
+        assert _run(lambda: _open(api))[0] == "ok"
+
+
 # --- single-plane builders (one source of truth for the fixture path) ----------------------------
 
 
@@ -244,6 +299,78 @@ def _verify(mod):
 
 def _healthy_of(mod):
     return mod.mark_healthy(_verify(mod), now=NOW)
+
+
+# --- malformed handoff digest refuses before it can enter a durable state (F2) ------------------
+#
+# The bound handoff digest must be a well-formed sha256 digest BEFORE it enters a state.  The
+# portable DB CHECK only enforces length + ``sha256:`` prefix, so a shape-valid but non-hex digest
+# would otherwise flush and commit, then be refused by the next rehydration as corrupt state.
+
+_MALFORMED_DIGESTS = [
+    ("empty", ""),
+    ("no_prefix", "d" * 64),
+    ("too_short", "sha256:" + "d" * 63),
+    ("too_long", "sha256:" + "d" * 65),
+    ("non_hex_but_shape_valid", "sha256:" + "g" * 64),  # length 71 + prefix pass the portable CHECK
+    ("uppercase_hex", "sha256:" + "D" * 64),
+]
+
+
+@pytest.mark.parametrize(("label", "digest"), _MALFORMED_DIGESTS)
+def test_malformed_offer_digest_refuses_parity(label: str, digest: str) -> None:
+    def _rec(mod):
+        facts = mod.HandoffFacts("controller-offer", digest, TXN, CTRL_KEY)
+        return mod.record_controller_offer(_bind(mod), facts, now=NOW)
+
+    assert_parity(f"offer_digest:{label}", lambda: _rec(mgmt), lambda: _rec(api))
+    assert _run(lambda: _rec(api)) == ("refused", "enrollment_handoff_invalid")
+
+
+@pytest.mark.parametrize(("label", "digest"), _MALFORMED_DIGESTS)
+def test_malformed_result_digest_refuses_parity(label: str, digest: str) -> None:
+    def _rec(mod):
+        facts = mod.HandoffFacts("worker-result", digest, TXN, WORKER_KEY)
+        return mod.record_worker_result(_offer(mod), facts, now=NOW)
+
+    assert_parity(f"result_digest:{label}", lambda: _rec(mgmt), lambda: _rec(api))
+    assert _run(lambda: _rec(api)) == ("refused", "enrollment_handoff_invalid")
+
+
+# --- canonical timestamp width matches the persistence column width (F4) -------------------------
+#
+# The pure parser accepted timestamps up to 64 chars while the invitation/state timestamp columns
+# are VARCHAR(40); a value both planes accepted then failed on PostgreSQL persistence (SQLite does
+# not enforce the width).  The contract limit must match the column width on both planes.
+
+
+def _ts_of_length(n: int) -> str:
+    """A valid UTC timestamp (same instant as CREATED) padded with fractional zeros to exactly n."""
+    base, suffix = "2026-07-21T00:00:00.", "+00:00"
+    frac = n - len(base) - len(suffix)
+    assert frac >= 1
+    return base + ("0" * frac) + suffix
+
+
+@pytest.mark.parametrize(
+    ("label", "length", "outcome"),
+    [
+        ("at_limit_40", 40, "ok"),
+        ("one_over_limit_41", 41, "refused"),
+        ("long_fractional_46", 46, "refused"),
+    ],
+)
+def test_canonical_timestamp_width_parity(label: str, length: int, outcome: str) -> None:
+    over = {"created_at": _ts_of_length(length)}
+
+    def _make(mod):
+        return mod.create_invitation(**_invitation_kwargs(**over))
+
+    assert_parity(f"ts_width:{label}", lambda: _make(mgmt), lambda: _make(api))
+    if outcome == "refused":
+        assert _run(lambda: _make(api)) == ("refused", "enrollment_invitation_invalid")
+    else:
+        assert _run(lambda: _make(api))[0] == "ok"
 
 
 # --- golden digests: the security correction must not have moved any valid serialization ---------

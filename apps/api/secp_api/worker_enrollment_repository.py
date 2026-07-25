@@ -417,7 +417,6 @@ def create_invitation_and_open(
     *,
     organization_id: uuid.UUID,
     invitation: WorkerEnrollmentInvitation,
-    invitation_created_at: str,
     deployment_site_label: str,
     now: str,
 ) -> LoadedEnrollment:
@@ -425,6 +424,10 @@ def create_invitation_and_open(
     at revision 0 (INVITED) with its revision-0 history row, atomically. ``enrollment_id`` is the
     invitation digest, so a duplicate nonce OR a duplicate invitation collides on a UNIQUE/PK
     constraint and the second creation refuses.
+
+    The persisted ``invitation_created_at`` is ALWAYS ``invitation.created_at`` — the exact value
+    the enrollment id is derived from — so it can never diverge from the id-deriving timestamp and
+    self-corrupt the row on the next cross-check load.
 
     Does NOT commit — the caller owns the transaction boundary.
     """
@@ -446,7 +449,7 @@ def create_invitation_and_open(
             controller_origin=invitation.controller_origin,
             release_digest=invitation.release_digest,
             transaction_id=invitation.transaction_id,
-            invitation_created_at=invitation_created_at,
+            invitation_created_at=invitation.created_at,
             expires_at=invitation.expires_at,
             expires_at_ts=_shadow_of(invitation.expires_at),
             consumed=False,

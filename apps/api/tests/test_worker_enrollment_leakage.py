@@ -140,7 +140,6 @@ def _open_and_bind(session, actor):
         session,
         actor,
         invitation=inv,
-        invitation_created_at="2026-07-21T00:00:00Z",
         deployment_site_label="rack-01.eu_a",
         now=NOW,
     )

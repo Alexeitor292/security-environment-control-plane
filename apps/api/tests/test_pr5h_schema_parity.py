@@ -94,6 +94,26 @@ def test_migration_and_orm_define_the_same_four_tables(migrated_and_orm) -> None
         assert table in orm.get_table_names(), f"{table} missing from the ORM"
 
 
+def test_canonical_timestamp_columns_match_the_contract_limit(migrated_and_orm) -> None:
+    """F4: the pure timestamp parser's ``MAX_TS_LEN`` must equal the width of every canonical
+    timestamp column in BOTH schemas, so a value the contract accepts always fits the VARCHAR on
+    PostgreSQL (SQLite silently ignores the width, so this drift was previously invisible)."""
+    from secp_api.worker_enrollment_contract import MAX_TS_LEN
+
+    ts_columns = {
+        "worker_enrollment_invitation": ("invitation_created_at", "expires_at"),
+        "worker_enrollment_state": ("expires_at", "updated_at"),
+    }
+    for inspector in migrated_and_orm:
+        for table, cols in ts_columns.items():
+            by_name = {c["name"]: c for c in inspector.get_columns(table)}
+            for col in cols:
+                width = by_name[col]["type"].length
+                assert width == MAX_TS_LEN, (
+                    f"{table}.{col} is VARCHAR({width}) but the contract MAX_TS_LEN is {MAX_TS_LEN}"
+                )
+
+
 @pytest.mark.parametrize("table", ENROLLMENT_TABLES)
 def test_column_names_order_and_nullability_agree(migrated_and_orm, table: str) -> None:
     migrated, orm = migrated_and_orm

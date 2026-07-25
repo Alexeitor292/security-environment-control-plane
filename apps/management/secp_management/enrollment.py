@@ -56,6 +56,10 @@ _MAX_TTL_SECONDS = 24 * 3600
 _MIN_TTL_SECONDS = 1
 _MAX_FIELD_LEN = 512
 _MAX_ORIGIN_LEN = 253 + 16
+# The maximum canonical timestamp string length — MUST equal the VARCHAR(40) created_at/expires_at/
+# updated_at column width and the API mirror's MAX_TS_LEN (pinned by the PR5H contract/schema
+# guards).
+_MAX_TS_LEN = 40
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _INSTALLATION_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,63}")
 _HTTPS_ORIGIN = re.compile(r"https://[a-z0-9.-]{1,253}(?::[1-9][0-9]{0,4})?")
@@ -86,7 +90,7 @@ def _closed(reason: str) -> ManagementError:
 
 
 def _parse_ts(value: object, reason: str) -> _dt.datetime:
-    if not isinstance(value, str) or not (1 <= len(value) <= 64):
+    if not isinstance(value, str) or not (1 <= len(value) <= _MAX_TS_LEN):
         raise _closed(reason)
     try:
         parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -211,9 +215,13 @@ class WorkerEnrollmentInvitation:
         scan_forbidden(self.canonical())  # non-secret: no secret-like field name/value at any depth
 
     def assert_fresh(self, now: str) -> None:
-        if _parse_ts(now, "enrollment_time_invalid") >= _parse_ts(
-            self.expires_at, "enrollment_invitation_invalid"
-        ):
+        # Freshness is a CLOSED window on BOTH ends: created_at <= now < expires_at.  Bounding only
+        # the upper end let a future-minted invitation (a far-future created_at with a bounded TTL)
+        # be accepted years early, bypassing the TTL cap.  No clock-skew knob — the window is exact.
+        now_ts = _parse_ts(now, "enrollment_time_invalid")
+        created = _parse_ts(self.created_at, "enrollment_invitation_invalid")
+        expires = _parse_ts(self.expires_at, "enrollment_invitation_invalid")
+        if not (created <= now_ts < expires):
             raise _closed("enrollment_invitation_expired")
 
 
@@ -498,6 +506,12 @@ def record_controller_offer(
         raise _closed("enrollment_controller_mismatch")
     if facts.transaction_id != state.transaction_id:
         raise _closed("enrollment_transaction_mismatch")
+    # the bound handoff digest must be a well-formed sha256 digest BEFORE it enters a durable state:
+    # the portable DB CHECK only enforces length + prefix, so a shape-valid non-hex digest would
+    # otherwise commit and be refused by the next rehydration as corrupt.  Precedence is pinned:
+    # kind -> signer -> transaction -> digest-shape -> idempotent-retry/advance.
+    if not is_sha256_digest(facts.digest):
+        raise _closed("enrollment_handoff_invalid")
     if state.state == OFFER_TRANSPORTED:
         if state.offer_digest == facts.digest:
             return state  # idempotent exact retry
@@ -517,6 +531,10 @@ def record_worker_result(
         raise _closed("enrollment_worker_mismatch")
     if facts.transaction_id != state.transaction_id:
         raise _closed("enrollment_transaction_mismatch")
+    # digest-shape guard, same precedence as the offer path (kind -> signer -> transaction ->
+    # digest-shape -> retry/advance): a non-hex result digest must never enter a durable state.
+    if not is_sha256_digest(facts.digest):
+        raise _closed("enrollment_handoff_invalid")
     if state.state == RESULT_TRANSPORTED:
         if state.result_digest == facts.digest:
             return state  # idempotent exact retry

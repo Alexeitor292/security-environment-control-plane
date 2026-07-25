@@ -197,6 +197,15 @@ def test_grammars_align_between_the_planes() -> None:
     assert is_deployment_site_label("rack-01.eu_a")
 
 
+def test_canonical_timestamp_limit_aligns_between_planes() -> None:
+    # F4: the maximum canonical timestamp length must be identical on both planes and equal to the
+    # VARCHAR(40) column width (the schema-parity guard pins it to the actual columns).
+    import secp_management.enrollment as mgmt
+    from secp_api.worker_enrollment_contract import MAX_TS_LEN
+
+    assert MAX_TS_LEN == mgmt._MAX_TS_LEN == 40
+
+
 def test_digest_grammar_is_shared_not_reimplemented() -> None:
     from secp_api.worker_enrollment_repository import _digest_or_empty_ok
     from secp_commissioning.canonical import is_sha256_digest

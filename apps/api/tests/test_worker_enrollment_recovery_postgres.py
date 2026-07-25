@@ -117,7 +117,6 @@ def _open(factory, actor, *, nonce: str, site: str = SITE, **inv):
             s,
             actor,
             invitation=_invitation(nonce, **inv),
-            invitation_created_at=CREATED,
             deployment_site_label=site,
             now=NOW,
         )

@@ -134,7 +134,6 @@ def _open_and_bind(factory, actor):
             s,
             actor,
             invitation=invitation,
-            invitation_created_at="2026-07-21T00:00:00Z",
             deployment_site_label="rack-01.eu_a",
             now=NOW,
         ).state
@@ -213,7 +212,6 @@ def test_full_batch_sweep_report_stringifies_identifier_free(factory, actor) -> 
                 s,
                 actor,
                 invitation=invitation,
-                invitation_created_at="2026-07-21T00:00:00Z",
                 deployment_site_label="rack-01.eu_a",
                 now=NOW,
             ).state
@@ -355,7 +353,6 @@ def test_same_site_label_across_organizations_is_allowed(factory, actor) -> None
             s,
             actor2,
             invitation=invitation,
-            invitation_created_at="2026-07-21T00:00:00Z",
             deployment_site_label="rack-01.eu_a",
             now=NOW,
         ).state
@@ -422,3 +419,17 @@ def test_a_session_is_never_reused_across_sweep_candidates() -> None:
         )
     )
     assert "with session_factory() as session:" in rendered
+
+
+def test_every_contract_accepted_site_label_is_address_free() -> None:
+    """F5: the produced-output leakage invariant requires that no label the contract ACCEPTS can be
+    an IP-address literal — a private IP reaching a persisted deployment_site_label would violate
+    it.  Provider/region/hostname-SHAPED opaque labels stay accepted (they carry no endpoint
+    semantics) and every one of them passes the produced-value leakage scan."""
+    from secp_api.worker_enrollment_contract import is_deployment_site_label
+
+    for label in ("rack-01.eu_a", "site-01.rack_2", "aws-us-east-1", "proxmox", "dc1.rack-3_a"):
+        assert is_deployment_site_label(label), label
+        _scan_produced(label)  # an accepted label must be safe to persist/return
+    for ip in ("10.0.0.5", "127.0.0.1", "0.0.0.0", "203.0.113.5", "192.168.0.1", "::1", "fe80::1"):
+        assert not is_deployment_site_label(ip), ip

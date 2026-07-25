@@ -304,8 +304,10 @@ jobs:
           "$(pwd)/.venv/bin/python" - <<'PY'
           import sys, xml.etree.ElementTree as ET
           from pathlib import Path
-          # 18 repository/concurrency + 15 restart/crash recovery + 4 real-migration proofs.
-          EXPECTED_MINIMUM = 37
+          # 22 repository/concurrency + 15 restart/crash recovery + 4 real-migration proofs
+          # (the four added repository proofs are the F2 malformed-digest and F4 timestamp-width
+          # PostgreSQL regressions from the independent review).
+          EXPECTED_MINIMUM = 41
           path = Path("junit-pr5h-postgres-enrollment.xml")
           if not path.exists():
               print("::error::PR5H-A PostgreSQL JUnit missing - the test step produced no results")

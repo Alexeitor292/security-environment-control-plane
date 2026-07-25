@@ -117,13 +117,19 @@ future contract edit fails CI until both copies and the corpus are updated toget
 
 "Site" in PR5H is a **provider-neutral deployment-site label** that groups and binds a
 controller/worker installation *inside one Organization*. It is **not** a tenant, an authorization
-boundary, a physical address, a provider region, a network endpoint, or an infrastructure target.
+boundary, or an infrastructure target, and it is never *interpreted* as a physical address, a
+provider region, or a network endpoint — a label that merely looks like one carries no such meaning.
 
 - **Organization remains the only authorization and tenancy boundary.** PR5H introduces **no**
   per-site RBAC and **no** first-class `Site` entity; both remain future work.
 - `deployment_site_label` is a closed opaque identifier: 1–120 characters of letters, numbers, dot,
-  underscore and hyphen only — no slash, colon, `@`, whitespace, URL, hostname, IP, path, provider
-  name, region, credential or secret reference. One shared grammar helper validates it.
+  underscore and hyphen only — so no slash, colon, `@`, whitespace, URL, path, credential or secret
+  reference is representable. **Every IP-address literal (IPv4/IPv6, any scope — private, loopback,
+  link-local, multicast, unspecified or public) is additionally rejected by deterministic parsing**,
+  so no address can ride the label into persisted produced output. A provider/region/hostname-*shaped*
+  string is *permitted* but treated as an opaque group key with no endpoint or provider semantics
+  (provider-neutrality does not depend on an incomplete vendor-name denylist). One shared grammar
+  helper validates it.
 - It is persisted on the invitation, the durable enrollment state, the nonce ledger, and the
   installation binding, and is **immutable after invitation issuance**.
 - Lookups and mutations bind **both** the authoritative `organization_id` from the authenticated

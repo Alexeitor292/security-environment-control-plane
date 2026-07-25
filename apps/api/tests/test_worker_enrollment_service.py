@@ -115,7 +115,6 @@ def _open(session, actor, *, nonce: str = "sha256:" + "b" * 64, site: str = SITE
         session,
         actor,
         invitation=invitation,
-        invitation_created_at=CREATED,
         deployment_site_label=site,
         now=NOW,
     )
@@ -218,6 +217,86 @@ def test_revision_zero_is_recorded_at_creation(session, actor):
     assert n == 1
 
 
+def _durable_counts(session):
+    def _n(table: str) -> int:
+        return session.execute(text(f"SELECT count(*) FROM {table}")).scalar_one()
+
+    consumed = (
+        session.execute(text("SELECT consumed FROM worker_enrollment_invitation ORDER BY id"))
+        .scalars()
+        .all()
+    )
+    return (
+        _n("worker_enrollment_state"),
+        _n("worker_enrollment_revision"),
+        _n("worker_enrollment_step_receipt"),
+        tuple(consumed),
+    )
+
+
+@pytest.mark.parametrize("digest", ["sha256:" + "g" * 64, "sha256:" + "d" * 63, "d" * 64, ""])
+def test_malformed_offer_digest_writes_no_row_and_state_stays_loadable(
+    factory, session, actor, digest
+):
+    # F2: a malformed handoff digest must be refused before any durable write; the portable DB
+    # CHECK would accept "sha256:" + 64 non-hex chars, so the app-layer guard is the real defense.
+    state = _open(session, actor)
+    bound = _bind(session, actor, state).state
+    before = _durable_counts(session)
+    with pytest.raises(WorkerEnrollmentError) as ei:
+        svc.record_offer(
+            session,
+            actor,
+            enrollment_id=bound.enrollment_id,
+            facts=contract.HandoffFacts("controller-offer", digest, TXN, CTRL_KEY),
+            now=NOW,
+            expected=_expected(bound),
+        )
+    assert ei.value.code == "enrollment_handoff_invalid"
+    session.rollback()
+    # no head/history/receipt/nonce change survived the refusal
+    assert _durable_counts(session) == before
+    # ...and a FRESH session still loads the enrollment as valid at the pre-offer revision
+    with factory() as s2:
+        loaded = repo.load_read_only(s2, bound.enrollment_id)
+        assert loaded is not None
+        assert loaded.state.state == contract.WORKER_BOUND
+        assert loaded.state.revision == bound.revision
+
+
+def test_malformed_result_digest_writes_no_row_and_state_stays_loadable(factory, session, actor):
+    # F2 (worker-result symmetry): drive to offer_transported, then a non-hex result digest refuses
+    state = _open(session, actor)
+    bound = _bind(session, actor, state).state
+    offered = svc.record_offer(
+        session,
+        actor,
+        enrollment_id=bound.enrollment_id,
+        facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
+        now=NOW,
+        expected=_expected(bound),
+    ).state
+    session.commit()
+    before = _durable_counts(session)
+    with pytest.raises(WorkerEnrollmentError) as ei:
+        svc.record_result(
+            session,
+            actor,
+            enrollment_id=offered.enrollment_id,
+            facts=contract.HandoffFacts("worker-result", "sha256:" + "z" * 64, TXN, WORKER_KEY),
+            now=NOW,
+            expected=_expected(offered),
+        )
+    assert ei.value.code == "enrollment_handoff_invalid"
+    session.rollback()
+    assert _durable_counts(session) == before
+    with factory() as s2:
+        loaded = repo.load_read_only(s2, offered.enrollment_id)
+        assert loaded is not None
+        assert loaded.state.state == contract.OFFER_TRANSPORTED
+        assert loaded.state.revision == offered.revision
+
+
 def test_history_is_never_updated_or_deleted_by_service_operations(session, actor):
     state = _open(session, actor)
     _drive_to_healthy(session, actor, state)
@@ -276,12 +355,69 @@ def test_duplicate_nonce_on_creation_refuses(session, actor):
             session,
             actor,
             invitation=_invitation(nonce="sha256:" + "b" * 64, transaction_id="txn-9999"),
-            invitation_created_at=CREATED,
             deployment_site_label=SITE,
             now=NOW,
         )
     session.rollback()
     assert ei.value.code == "enrollment_creation_conflict"
+
+
+def test_future_dated_invitation_creation_refuses_and_persists_no_row(session, actor):
+    # F1: a future-minted invitation (created_at years ahead, bounded TTL) is well-formed but must
+    # not open before its created_at — and the refusal must leave the datastore untouched.
+    future = _invitation(
+        nonce="sha256:" + "e" * 64,
+        created_at="2035-01-01T00:00:00Z",
+        expires_at="2035-01-01T01:00:00Z",
+    )
+    with pytest.raises(WorkerEnrollmentError) as ei:
+        svc.create_invitation_and_open(
+            session,
+            actor,
+            invitation=future,
+            deployment_site_label=SITE,
+            now=NOW,
+        )
+    assert ei.value.code == "enrollment_invitation_expired"
+    session.rollback()
+    for table in (
+        "worker_enrollment_invitation",
+        "worker_enrollment_state",
+        "worker_enrollment_revision",
+        "worker_enrollment_step_receipt",
+    ):
+        count = session.execute(text(f"SELECT count(*) FROM {table}")).scalar_one()
+        assert count == 0, f"{table} had {count} rows after a refused future-dated creation"
+
+
+def test_creation_has_no_caller_controlled_duplicate_created_at():
+    # F3: the enrollment id is derived from invitation.created_at; a SEPARATE caller-supplied
+    # invitation_created_at could mismatch and self-corrupt the row on the next load.  The duplicate
+    # parameter must not exist on either the service or the repository creation function.
+    import inspect
+
+    svc_params = inspect.signature(svc.create_invitation_and_open).parameters
+    repo_params = inspect.signature(repo.create_invitation_and_open).parameters
+    assert "invitation_created_at" not in svc_params, "service still accepts a duplicate created_at"
+    assert "invitation_created_at" not in repo_params, "repository still accepts a duplicate"
+
+
+def test_persisted_created_at_round_trips_from_a_fresh_session(factory, session, actor):
+    # F3: a successful creation persists invitation.created_at verbatim, so a FRESH-session load
+    # reconstructs the same invitation digest == enrollment_id (the cross-check would refuse corrupt
+    # if the persisted created_at ever differed from the id-deriving value).
+    state = _open(session, actor)
+    with factory() as s2:
+        loaded = repo.load_read_only(s2, state.enrollment_id)
+        assert loaded is not None and loaded.state.revision == 0
+        persisted = s2.execute(
+            text(
+                "SELECT invitation_created_at FROM worker_enrollment_invitation"
+                " WHERE enrollment_id=:e"
+            ),
+            {"e": state.enrollment_id},
+        ).scalar_one()
+    assert persisted == CREATED  # the invitation's OWN created_at, not a separate caller value
 
 
 def test_revoked_invitation_refuses_bind(session, actor):

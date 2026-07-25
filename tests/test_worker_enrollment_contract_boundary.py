@@ -225,6 +225,7 @@ def test_mirror_does_not_import_the_management_or_deployment_plane() -> None:
         "__future__",
         "datetime",
         "hashlib",
+        "ipaddress",  # stdlib, pure/deterministic: rejects IP-literal deployment-site labels
         "re",
         "dataclasses",
         "secp_commissioning.canonical",

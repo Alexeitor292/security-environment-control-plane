@@ -123,7 +123,6 @@ def _open(factory, actor, *, nonce: str, site: str = SITE, **inv) -> contract.En
             s,
             actor,
             invitation=_invitation(nonce, **inv),
-            invitation_created_at=CREATED,
             deployment_site_label=site,
             now=NOW,
         )
@@ -268,7 +267,6 @@ def test_concurrent_creation_with_same_nonce_one_winner(pg):
                     s,
                     actor,
                     invitation=_invitation(nonce, transaction_id=txn),
-                    invitation_created_at=CREATED,
                     deployment_site_label=SITE,
                     now=NOW,
                 )
@@ -603,3 +601,93 @@ def test_rollback_of_failed_transition_leaves_no_partial_effects(pg):
             {"e": state.enrollment_id},
         ).scalar_one()
     assert not consumed and revs == 1 and receipts == 0
+
+
+def test_malformed_offer_digest_refused_by_app_and_nothing_commits(pg):
+    # F2: the app-layer digest-shape guard refuses a non-hex handoff digest before any durable write
+    factory, actor, _ = pg
+    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
+    bound = _bind(factory, actor, state)
+    with factory() as s:
+        with pytest.raises(WorkerEnrollmentError) as ei:
+            svc.record_offer(
+                s,
+                actor,
+                enrollment_id=bound.enrollment_id,
+                facts=contract.HandoffFacts(
+                    "controller-offer", "sha256:" + "g" * 64, TXN, CTRL_KEY
+                ),
+                now=NOW,
+                expected=_expected(bound),
+            )
+        assert ei.value.code == "enrollment_handoff_invalid"
+        s.rollback()
+    with factory() as s:
+        head = s.execute(
+            text("SELECT state, revision FROM worker_enrollment_state WHERE enrollment_id=:e"),
+            {"e": bound.enrollment_id},
+        ).one()
+        revs = s.execute(
+            text("SELECT count(*) FROM worker_enrollment_revision WHERE enrollment_id=:e"),
+            {"e": bound.enrollment_id},
+        ).scalar_one()
+    assert head == (contract.WORKER_BOUND, bound.revision) and revs == 2
+
+
+def test_non_hex_offer_digest_passes_portable_check_but_rehydration_refuses(pg):
+    # F2: proves the portable DB CHECK is NOT the sole defense.  A non-hex offer_digest of the form
+    # "sha256:" + 64 non-hex chars satisfies ck_wes_offer_digest (length 71 + 'sha256:' prefix), so
+    # a direct UPDATE COMMITS past the CHECK, and the next authoritative read refuses it as corrupt.
+    factory, actor, _ = pg
+    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
+    bound = _bind(factory, actor, state)
+    non_hex = "sha256:" + "g" * 64
+    _corrupt(factory, bound.enrollment_id, offer_digest=non_hex)  # commits => the CHECK accepted it
+    with factory() as s, pytest.raises(WorkerEnrollmentError) as ei:
+        svc.load_public_view(s, actor, enrollment_id=bound.enrollment_id)
+    assert ei.value.code == "enrollment_state_corrupt"
+
+
+def _ts_of_length(n: int) -> str:
+    base, suffix = "2026-07-21T00:00:00.", "+00:00"
+    return base + ("0" * (n - len(base) - len(suffix))) + suffix
+
+
+def test_max_width_timestamp_persists_and_reloads_on_pg(pg):
+    # F4: a canonical timestamp at exactly the column width (VARCHAR(40)) is accepted, persisted and
+    # reloaded cleanly on real PostgreSQL — the cross-check round-trips (id from created_at).
+    factory, actor, _ = pg
+    at_limit = _ts_of_length(40)
+    assert len(at_limit) == 40
+    state = _open(factory, actor, nonce="sha256:" + "b" * 64, created_at=at_limit)
+    with factory() as s:
+        view = svc.load_public_view(s, actor, enrollment_id=state.enrollment_id)
+    assert view is not None
+
+
+def test_over_width_transition_timestamp_refused_before_pg_persistence(pg):
+    # F4: a `now` longer than the column width is refused by the contract (enrollment_time_invalid)
+    # BEFORE it can reach the VARCHAR(40) updated_at column — never surfacing as a DB/String error.
+    factory, actor, _ = pg
+    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
+    too_long_now = _ts_of_length(46)  # > VARCHAR(40)
+    with factory() as s:
+        with pytest.raises(WorkerEnrollmentError) as ei:
+            svc.bind_worker(
+                s,
+                actor,
+                enrollment_id=state.enrollment_id,
+                worker_installation_id="worker-bbbbbbbb",
+                worker_key_id=WORKER_KEY,
+                transaction_id=TXN,
+                now=too_long_now,
+                expected=_expected(state),
+            )
+        assert ei.value.code == "enrollment_time_invalid"
+        s.rollback()
+    with factory() as s:
+        head = s.execute(
+            text("SELECT state, revision FROM worker_enrollment_state WHERE enrollment_id=:e"),
+            {"e": state.enrollment_id},
+        ).one()
+    assert head == (contract.INVITED, 0)

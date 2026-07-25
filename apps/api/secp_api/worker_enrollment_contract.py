@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import ipaddress as _ipaddress
 import re
 from dataclasses import dataclass, replace
 
@@ -46,6 +47,11 @@ MAX_TTL_SECONDS = 24 * 3600
 MIN_TTL_SECONDS = 1
 MAX_FIELD_LEN = 512
 MAX_ORIGIN_LEN = 253 + 16
+#: The maximum canonical timestamp string length.  It MUST equal the width of the VARCHAR(40)
+#: ``created_at`` / ``expires_at`` / ``updated_at`` columns: the pure parser once accepted up to 64
+#: characters, so a long fractional-second timestamp both planes accepted then failed on PostgreSQL
+#: persistence.  ``tests/test_pr5h_schema_parity.py`` pins this to the real column widths.
+MAX_TS_LEN = 40
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _INSTALLATION_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,63}")
 _HTTPS_ORIGIN = re.compile(r"https://[a-z0-9.-]{1,253}(?::[1-9][0-9]{0,4})?")
@@ -56,8 +62,10 @@ _HTTPS_ORIGIN = re.compile(r"https://[a-z0-9.-]{1,253}(?::[1-9][0-9]{0,4})?")
 _REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 #: An opaque deployment-site grouping label (ADR-027).  Organization remains the ONLY authorization
-#: boundary; this is a grouping/binding label, never a tenant, address, region, endpoint or
-#: provider.
+#: boundary; this is a grouping/binding label that is never *interpreted* as a tenant, address,
+#: region, endpoint or provider.  The grammar forbids '/', ':', '@' and whitespace (so no URL, path
+#: or scheme), and :func:`is_deployment_site_label` additionally rejects every IP-address literal;
+#: a string that merely LOOKS like a provider/region/hostname is permitted but carries no meaning.
 #: It is deliberately NOT part of the canonical contract, so it can never affect a digest.
 DEPLOYMENT_SITE_LABEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"
 _DEPLOYMENT_SITE_LABEL = re.compile(DEPLOYMENT_SITE_LABEL_PATTERN)
@@ -109,7 +117,7 @@ def _closed(reason: str) -> WorkerEnrollmentContractError:
 
 
 def _parse_ts(value: object, reason: str) -> _dt.datetime:
-    if not isinstance(value, str) or not (1 <= len(value) <= 64):
+    if not isinstance(value, str) or not (1 <= len(value) <= MAX_TS_LEN):
         raise _closed(reason)
     try:
         parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -163,9 +171,29 @@ def sha256_digest_of_hex(hex_value: str) -> str:
     return "sha256:" + hashlib.sha256(bytes.fromhex(hex_value)).hexdigest()
 
 
+def _is_ip_literal(value: str) -> bool:
+    """True if ``value`` parses as any IPv4/IPv6 address literal, using deterministic stdlib parsing
+    rather than a substring heuristic.  (IPv6 forms also fail the label grammar, which forbids ':',
+    but this parse is the authoritative, complete rejection for every representable form.)"""
+    try:
+        _ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 def is_deployment_site_label(value: object) -> bool:
-    """The single shared grammar helper for the opaque deployment-site label (ADR-027)."""
-    return isinstance(value, str) and _DEPLOYMENT_SITE_LABEL.fullmatch(value) is not None
+    """The single shared grammar helper for the opaque deployment-site label (ADR-027).
+
+    The label is treated as OPAQUE: organization is the only authorization boundary, and the label
+    is never interpreted as a hostname, provider, region or network endpoint — a string that merely
+    looks like one is permitted but confers no such meaning.  Every IP-address literal (IPv4/IPv6 of
+    any scope: private, loopback, link-local, multicast, unspecified or public) is rejected by
+    deterministic parsing, so no address can ride a grouping label into persisted produced output.
+    """
+    if not isinstance(value, str) or _DEPLOYMENT_SITE_LABEL.fullmatch(value) is None:
+        return False
+    return not _is_ip_literal(value)
 
 
 # --------------------------------------------------------------------------- invitation contract
@@ -240,9 +268,13 @@ class WorkerEnrollmentInvitation:
         scan_forbidden(self.canonical())  # non-secret: no secret-like field name/value at any depth
 
     def assert_fresh(self, now: str) -> None:
-        if _parse_ts(now, "enrollment_time_invalid") >= _parse_ts(
-            self.expires_at, "enrollment_invitation_invalid"
-        ):
+        # Freshness is a CLOSED window on BOTH ends: created_at <= now < expires_at.  Bounding only
+        # the upper end let a future-minted invitation (a far-future created_at with a bounded TTL)
+        # be accepted years early, bypassing the TTL cap.  No clock-skew knob — the window is exact.
+        now_ts = _parse_ts(now, "enrollment_time_invalid")
+        created = _parse_ts(self.created_at, "enrollment_invitation_invalid")
+        expires = _parse_ts(self.expires_at, "enrollment_invitation_invalid")
+        if not (created <= now_ts < expires):
             raise _closed("enrollment_invitation_expired")
 
 
@@ -476,6 +508,12 @@ def record_controller_offer(
         raise _closed("enrollment_controller_mismatch")
     if facts.transaction_id != state.transaction_id:
         raise _closed("enrollment_transaction_mismatch")
+    # the bound handoff digest must be a well-formed sha256 digest BEFORE it enters a durable state:
+    # the portable DB CHECK only enforces length + prefix, so a shape-valid non-hex digest would
+    # otherwise commit and be refused by the next rehydration as corrupt.  Precedence is pinned:
+    # kind -> signer -> transaction -> digest-shape -> idempotent-retry/advance.
+    if not is_sha256_digest(facts.digest):
+        raise _closed("enrollment_handoff_invalid")
     if state.state == OFFER_TRANSPORTED:
         if state.offer_digest == facts.digest:
             return state  # idempotent exact retry
@@ -494,6 +532,10 @@ def record_worker_result(
         raise _closed("enrollment_worker_mismatch")
     if facts.transaction_id != state.transaction_id:
         raise _closed("enrollment_transaction_mismatch")
+    # digest-shape guard, same precedence as the offer path (kind -> signer -> transaction ->
+    # digest-shape -> retry/advance): a non-hex result digest must never enter a durable state.
+    if not is_sha256_digest(facts.digest):
+        raise _closed("enrollment_handoff_invalid")
     if state.state == RESULT_TRANSPORTED:
         if state.result_digest == facts.digest:
             return state  # idempotent exact retry
@@ -554,6 +596,7 @@ __all__ = [
     "INVITED",
     "MAX_FIELD_LEN",
     "MAX_ORIGIN_LEN",
+    "MAX_TS_LEN",
     "MAX_TTL_SECONDS",
     "MIN_TTL_SECONDS",
     "OFFER_TRANSPORTED",

@@ -208,12 +208,18 @@ def test_closed_vocabularies_are_provider_neutral() -> None:
 
 
 def test_deployment_site_label_grammar_carries_no_provider_semantics() -> None:
-    """The site label is an OPAQUE grouping label: never a provider, region or address."""
+    """The site label is an OPAQUE grouping string.  Organization is the only authorization
+    boundary; the label is never *interpreted* as an endpoint, provider, region or tenant.  It is
+    not claimed to be lexically un-provider-like — a string that merely LOOKS like a provider,
+    region or hostname is permitted but confers no meaning.  What is deterministically rejected is
+    every IP-address literal, so no address can ride a grouping label into persisted output, plus
+    anything URL/path/scheme/whitespace shaped (the grammar forbids '/', ':', '@' and space)."""
     from secp_api.worker_enrollment_contract import is_deployment_site_label
 
-    # it accepts opaque labels...
-    assert is_deployment_site_label("rack-01.eu_a")
-    # ...and rejects anything URL/host/path/provider-address shaped
+    # opaque labels are accepted, INCLUDING provider/region/hostname-SHAPED strings (uninterpreted)
+    for good in ("rack-01.eu_a", "site-01.rack_2", "aws-us-east-1", "proxmox", "example.com"):
+        assert is_deployment_site_label(good), good
+    # URL/host/path/scheme/whitespace shapes are rejected by the grammar
     for bad in (
         "https://proxmox.example.com",
         "10.0.0.5/24",
@@ -223,6 +229,21 @@ def test_deployment_site_label_grammar_carries_no_provider_semantics() -> None:
         "a b",
     ):
         assert not is_deployment_site_label(bad), bad
+    # and every IP-address literal is rejected by deterministic parsing (not a substring heuristic)
+    for ip in (
+        "10.0.0.5",  # private IPv4
+        "127.0.0.1",  # loopback
+        "0.0.0.0",  # unspecified
+        "169.254.0.1",  # link-local
+        "198.51.100.7",  # public-format IPv4 (RFC 5737 TEST-NET-2 documentation range)
+        "203.0.113.5",  # public-format IPv4 (RFC 5737 TEST-NET-3 documentation range)
+        "192.168.1.1",  # private IPv4
+        "255.255.255.255",  # broadcast / reserved
+    ):
+        assert not is_deployment_site_label(ip), ip
+    # IPv6 literals in every representable form are rejected too (the grammar forbids ':')
+    for ip6 in ("::1", "::", "fe80::1", "2001:db8::1", "::ffff:10.0.0.5"):
+        assert not is_deployment_site_label(ip6), ip6
 
 
 # --- family 2: plane boundaries -------------------------------------------------------------------

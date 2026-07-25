@@ -232,7 +232,6 @@ def create_invitation_and_open(
     actor: Principal,
     *,
     invitation: WorkerEnrollmentInvitation,
-    invitation_created_at: str,
     deployment_site_label: str,
     now: str,
 ) -> TransitionOutcome:
@@ -250,7 +249,6 @@ def create_invitation_and_open(
             session,
             organization_id=actor.organization_id,
             invitation=invitation,
-            invitation_created_at=invitation_created_at,
             deployment_site_label=deployment_site_label,
             now=now,
         )
