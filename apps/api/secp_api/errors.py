@@ -356,6 +356,9 @@ class WorkerEnrollmentError(DomainError):
 
     _STATUS = {
         "enrollment_schema_unavailable": 503,
+        "enrollment_controller_identity_unavailable": 503,
+        "enrollment_idempotency_conflict": 409,
+        "enrollment_identity_conflict": 409,
         "enrollment_not_found": 404,
         "enrollment_forbidden": 403,
         "enrollment_scope_mismatch": 409,

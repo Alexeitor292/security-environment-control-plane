@@ -409,6 +409,14 @@ def load_invitation_for_update(session: Session, enrollment_id: str) -> Invitati
     return session.execute(stmt).scalar_one_or_none()
 
 
+def load_invitation_by_nonce(session: Session, invitation_id: str) -> InvitationRow | None:
+    """The invitation row for a single-use nonce (its ``invitation_id``), or None — used by the
+    idempotent-creation replay path to recover the ORIGINAL invitation on a nonce conflict."""
+    return session.execute(
+        select(InvitationRow).where(InvitationRow.invitation_id == invitation_id)
+    ).scalar_one_or_none()
+
+
 # --------------------------------------------------------------------------- creation
 
 

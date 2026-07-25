@@ -29,6 +29,8 @@ OpenTofu or operator activation lives here; PR5H-A stays an inert durable founda
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,6 +46,7 @@ from secp_api.enums import AuditAction, Permission
 from secp_api.enums import WorkerEnrollmentErrorCode as EC
 from secp_api.errors import WorkerEnrollmentError
 from secp_api.models import _utcnow
+from secp_api.services import controller_identity
 from secp_api.worker_enrollment_contract import (
     RECOVERY_REQUIRED,
     REFUSED,
@@ -64,6 +67,10 @@ from secp_api.worker_enrollment_contract import (
 from secp_api.worker_enrollment_models import WorkerEnrollmentStepReceipt as ReceiptRow
 from secp_api.worker_enrollment_repository import LoadedEnrollment, RepositoryRefusal
 from secp_api.worker_enrollment_schema import EnrollmentSchemaError, assert_enrollment_schema_ready
+
+#: Domain separator for the idempotency-key -> durable nonce digest (never reused for another
+#: purpose; bumping the suffix would intentionally invalidate all prior idempotency bindings).
+_IDEMPOTENCY_DOMAIN = b"secp:enrollment:invitation-idempotency:v1\x00"
 
 # --------------------------------------------------------------------------- request/response types
 
@@ -315,6 +322,155 @@ def create_invitation_and_open(
         },
     )
     return TransitionOutcome(state=loaded.state, committed_revision=0, deduplicated=False)
+
+
+# ------------------------------------------------------------------- supported idempotent creation
+
+
+@dataclass(frozen=True)
+class SupportedInvitationResult:
+    """The full, non-secret invitation response — identical whether freshly created or replayed."""
+
+    enrollment_id: str
+    invitation_id: str
+    controller_installation_id: str
+    controller_key_id: str
+    controller_trust_anchor_hex: str
+    controller_origin: str
+    release_digest: str
+    transaction_id: str
+    deployment_site_label: str
+    created_at: str
+    expires_at: str
+    state: str
+    revision: int
+    deduplicated: bool
+
+
+def _idempotency_nonce(organization_id: uuid.UUID, idempotency_key: str) -> str:
+    """A domain-separated, org-bound digest of the client idempotency key — the durable single-use
+    nonce (== invitation_id). The RAW key is never persisted or logged; only its digest is."""
+    digest = hashlib.sha256()
+    digest.update(_IDEMPOTENCY_DOMAIN)
+    digest.update(organization_id.bytes)
+    digest.update(b"\x00")
+    digest.update(idempotency_key.encode("utf-8"))
+    return "sha256:" + digest.hexdigest()
+
+
+def _duration_seconds(created_at: str, expires_at: str) -> int | None:
+    created = repo.parse_canonical_utc(created_at)
+    expires = repo.parse_canonical_utc(expires_at)
+    if created is None or expires is None:
+        return None
+    return int((expires - created).total_seconds())
+
+
+def create_supported_invitation(
+    session: Session,
+    actor: Principal,
+    *,
+    idempotency_key: str,
+    deployment_site_label: str,
+    ttl_seconds: int,
+    created_at: str,
+    expires_at: str,
+) -> SupportedInvitationResult:
+    """The supported, retry-safe invitation-creation path.
+
+    The controller identity is sourced from the authoritative ACTIVE record (never the caller). The
+    durable nonce is a domain-separated digest of the org + client idempotency key, so a retry
+    collides on ``UNIQUE(invitation_id)`` and returns the ORIGINAL invitation; the same key with
+    different bound input (site or TTL) refuses ``enrollment_idempotency_conflict``. No commit here.
+    """
+    actor.require(Permission.enrollment_manage)
+    _assert_schema_ready(session)
+    if not is_deployment_site_label(deployment_site_label):
+        raise WorkerEnrollmentError(EC.scope_mismatch)
+    identity = controller_identity.load_active_controller_identity(session)
+    nonce = _idempotency_nonce(actor.organization_id, idempotency_key)
+    invitation = build_invitation(
+        controller_installation_id=identity.controller_installation_id,
+        controller_key_id=identity.controller_key_id,
+        controller_trust_anchor_hex=identity.controller_trust_anchor_hex,
+        controller_origin=identity.controller_origin,
+        release_digest=identity.release_digest,
+        transaction_id="txn-" + secrets.token_hex(16),  # >= 128 bits of entropy
+        nonce=nonce,
+        created_at=created_at,
+        expires_at=expires_at,
+    )
+    try:
+        outcome = create_invitation_and_open(
+            session,
+            actor,
+            invitation=invitation,
+            deployment_site_label=deployment_site_label,
+            now=created_at,
+        )
+    except WorkerEnrollmentError as exc:
+        if exc.code != EC.creation_conflict.value:
+            raise
+        return _replay_or_conflict(session, actor, nonce, deployment_site_label, ttl_seconds)
+    state = outcome.state
+    return SupportedInvitationResult(
+        enrollment_id=state.enrollment_id,
+        invitation_id=invitation.invitation_id,
+        controller_installation_id=invitation.controller_installation_id,
+        controller_key_id=invitation.controller_key_id,
+        controller_trust_anchor_hex=invitation.controller_trust_anchor_hex,
+        controller_origin=invitation.controller_origin,
+        release_digest=invitation.release_digest,
+        transaction_id=invitation.transaction_id,
+        deployment_site_label=deployment_site_label,
+        created_at=invitation.created_at,
+        expires_at=invitation.expires_at,
+        state=state.state,
+        revision=state.revision,
+        deduplicated=False,
+    )
+
+
+def _replay_or_conflict(
+    session: Session,
+    actor: Principal,
+    nonce: str,
+    deployment_site_label: str,
+    ttl_seconds: int,
+) -> SupportedInvitationResult:
+    """Recover the ORIGINAL invitation on a UNIQUE-nonce collision. On PostgreSQL the losing INSERT
+    blocks until the winner commits, so the concurrent path also returns a byte-equivalent response;
+    a differing bound input (org/site/TTL) refuses ``enrollment_idempotency_conflict``."""
+    session.rollback()  # discard the failed INSERT and recover the session for a clean read
+    row = repo.load_invitation_by_nonce(session, nonce)
+    if row is None:  # the nonce is not (yet) durable — a non-idempotency conflict
+        raise WorkerEnrollmentError(EC.creation_conflict)
+    if (
+        row.organization_id != actor.organization_id
+        or row.deployment_site_label != deployment_site_label
+        or _duration_seconds(row.invitation_created_at, row.expires_at) != ttl_seconds
+    ):
+        raise WorkerEnrollmentError(EC.idempotency_conflict)
+    loaded = repo.load_read_only(session, row.enrollment_id)
+    if loaded is None:
+        raise WorkerEnrollmentError(EC.state_corrupt)
+    state = loaded.state
+    return SupportedInvitationResult(
+        enrollment_id=row.enrollment_id,
+        invitation_id=row.invitation_id,
+        controller_installation_id=row.controller_installation_id,
+        controller_key_id=row.controller_key_id,
+        controller_trust_anchor_hex=row.controller_trust_anchor_hex,
+        controller_origin=row.controller_origin,
+        release_digest=row.release_digest,
+        transaction_id=row.transaction_id,
+        deployment_site_label=row.deployment_site_label,
+        created_at=row.invitation_created_at,
+        expires_at=row.expires_at,
+        state=state.state,
+        revision=state.revision,
+        deduplicated=True,
+    )
 
 
 # --------------------------------------------------------------------------- state-changing steps

@@ -168,7 +168,7 @@ def test_image_smoke_expected_alembic_head_tracks_the_actual_sole_head() -> None
     cfg.set_main_option("script_location", str(api_dir / "migrations"))
     actual_heads = tuple(ScriptDirectory.from_config(cfg).get_heads())
 
-    assert actual_heads == ("b6e2f4a9c1d7",), actual_heads
+    assert actual_heads == ("c2f8e1a4b6d9",), actual_heads
     assert module._EXPECTED_ALEMBIC_HEAD == actual_heads[0], (
         f"image_smoke._EXPECTED_ALEMBIC_HEAD={module._EXPECTED_ALEMBIC_HEAD!r} drifted from the "
         f"actual sole Alembic head {actual_heads[0]!r}"

@@ -91,7 +91,43 @@ def bootstrap_dev(session: Session) -> Principal:
         session.add(UserRoleAssignment(organization_id=org.id, user_id=user.id, role_id=role.id))
         session.flush()
 
+    _seed_dev_controller_identity(session)
     return principal_from_user(session, user)
+
+
+def _seed_dev_controller_identity(session: Session) -> None:
+    """DEV/TEST ONLY: activate one verified controller enrollment identity so the supported
+    enrollment path works locally (production populates it from the real controller bootstrap in
+    PR5H-B2). Idempotent and robust: a no-op if the table is absent or an active identity exists."""
+    from sqlalchemy import inspect
+
+    from secp_api.controller_identity_models import (
+        CONTROLLER_IDENTITY_ACTIVE,
+        ControllerEnrollmentIdentity,
+    )
+    from secp_api.services import controller_identity
+    from secp_api.worker_enrollment_contract import sha256_digest_of_hex
+
+    if not inspect(session.get_bind()).has_table("controller_enrollment_identity"):
+        return
+    active = session.execute(
+        select(ControllerEnrollmentIdentity).where(
+            ControllerEnrollmentIdentity.status == CONTROLLER_IDENTITY_ACTIVE
+        )
+    ).first()
+    if active is not None:
+        return
+    anchor_hex = "11" * 32
+    controller_identity.activate_controller_identity(
+        session,
+        controller_installation_id="controller-dev0001",
+        controller_key_id=sha256_digest_of_hex(anchor_hex),
+        controller_trust_anchor_hex=anchor_hex,
+        controller_origin="https://controller.example.test",
+        release_digest="sha256:" + "a" * 64,
+        verified=True,
+    )
+    session.flush()
 
 
 def load_sample_definition() -> dict:

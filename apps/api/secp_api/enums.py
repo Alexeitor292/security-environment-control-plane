@@ -2084,3 +2084,7 @@ class WorkerEnrollmentErrorCode(str, Enum):
     replay = "enrollment_replay"
     release_mismatch = "enrollment_release_mismatch"
     reason_code_invalid = "enrollment_reason_code_invalid"
+    # SECP-PR5H-B1 F3/F5
+    controller_identity_unavailable = "enrollment_controller_identity_unavailable"
+    identity_conflict = "enrollment_identity_conflict"  # concurrent controller-identity rotation
+    idempotency_conflict = "enrollment_idempotency_conflict"  # same key, different bound input

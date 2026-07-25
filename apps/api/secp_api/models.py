@@ -2009,6 +2009,7 @@ class ProvisioningChangeSetApproval(Base, TimestampMixin):
 # first; importing ``secp_api.worker_enrollment_models`` directly then failed with a circular
 # ImportError. Binding the module is cycle-tolerant in both orders, and the import still has the
 # effect that matters: the four tables register themselves on ``Base.metadata``.
+import secp_api.controller_identity_models  # noqa: E402,F401
 import secp_api.worker_enrollment_models  # noqa: E402,F401
 from secp_api.bootstrap_models import (  # noqa: E402,F401
     ProxmoxReadOnlyBootstrapSession,

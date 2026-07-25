@@ -10,7 +10,7 @@ stale-revision / stale-digest / wrong-predecessor refusals; duplicate-nonce and 
 single-winner; exact-retry with no second history row; conflicting-retry refusal; cross-org / cross-
 site isolation; participant-key/installation collision and corrupt-digest/broken-chain rehydration
 refusals; rollback atomicity leaving no partial state/nonce/revision/receipt; and that the live
-schema head is exactly ``b6e2f4a9c1d7``.
+schema head is exactly ``c2f8e1a4b6d9``.
 """
 
 from __future__ import annotations
@@ -150,7 +150,7 @@ def test_live_schema_head_is_exactly_the_required_head(pg):
     factory, actor, _ = pg
     with factory() as s:
         head = s.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert head == RUNTIME_REQUIRED_MIGRATION_HEAD == "b6e2f4a9c1d7"
+    assert head == RUNTIME_REQUIRED_MIGRATION_HEAD == "c2f8e1a4b6d9"
 
 
 def test_two_concurrent_binds_exactly_one_commits(pg):
@@ -691,3 +691,82 @@ def test_over_width_transition_timestamp_refused_before_pg_persistence(pg):
             {"e": state.enrollment_id},
         ).one()
     assert head == (contract.INVITED, 0)
+
+
+def test_concurrent_idempotent_creation_yields_one_invitation(pg):
+    # F5: two overlapping retries with the SAME idempotency key produce exactly one invitation, one
+    # revision-0 state and one creation audit; both callers get a byte-equivalent response (on real
+    # PostgreSQL the losing INSERT blocks on the UNIQUE nonce until the winner commits, then
+    # replays)
+    factory, actor, _ = pg
+    key = "a" * 24
+    barrier = Barrier(2)
+
+    def attempt(_i: int):
+        with factory() as s:
+            barrier.wait(timeout=15)
+            try:
+                r = svc.create_supported_invitation(
+                    s,
+                    actor,
+                    idempotency_key=key,
+                    deployment_site_label=SITE,
+                    ttl_seconds=3600,
+                    created_at="2026-07-21T00:00:00Z",
+                    expires_at="2026-07-21T01:00:00Z",
+                )
+                s.commit()
+                return (r.enrollment_id, r.invitation_id, r.transaction_id)
+            except WorkerEnrollmentError as exc:
+                s.rollback()
+                return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, range(2)))
+    tuples = [o for o in outcomes if isinstance(o, tuple)]
+    assert len(tuples) == 2 and tuples[0] == tuples[1], outcomes  # byte-equivalent responses
+    with factory() as s:
+        states = s.execute(text("SELECT count(*) FROM worker_enrollment_state")).scalar_one()
+        audits = s.execute(
+            text("SELECT count(*) FROM audit_event WHERE action='enrollment.invitation_created'")
+        ).scalar_one()
+    assert states == 1 and audits == 1
+
+
+def test_concurrent_controller_identity_rotation_keeps_one_active(pg):
+    # F3: overlapping rotations never leave two active identities — the active_marker UNIQUE
+    # exactly one active globally; each attempt either commits or refuses a bounded conflict
+    from secp_api.services import controller_identity as ci
+    from secp_api.worker_enrollment_contract import sha256_digest_of_hex
+
+    factory, actor, _ = pg
+    barrier = Barrier(2)
+
+    def rotate(tag: str):
+        anchor = tag * 32
+        with factory() as s:
+            barrier.wait(timeout=15)
+            try:
+                ci.activate_controller_identity(
+                    s,
+                    controller_installation_id=f"controller-{tag}00001",
+                    controller_key_id=sha256_digest_of_hex(anchor),
+                    controller_trust_anchor_hex=anchor,
+                    controller_origin=f"https://c{tag}.example.test",
+                    release_digest="sha256:" + tag * 32,
+                    verified=True,
+                )
+                s.commit()
+                return "committed"
+            except WorkerEnrollmentError as exc:
+                s.rollback()
+                return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(rotate, ["33", "44"]))
+    assert all(o == "committed" or o == "enrollment_identity_conflict" for o in outcomes), outcomes
+    with factory() as s:
+        active = s.execute(
+            text("SELECT count(*) FROM controller_enrollment_identity WHERE status='active'")
+        ).scalar_one()
+    assert active == 1  # the single-active invariant holds under concurrency

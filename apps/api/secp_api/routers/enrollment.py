@@ -21,7 +21,6 @@ The worker-facing submission/progression endpoints, the outbound HTTPS transport
 from __future__ import annotations
 
 import datetime as _dt
-import secrets
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -48,15 +47,6 @@ def _iso(moment: _dt.datetime) -> str:
     return moment.astimezone(_dt.UTC).isoformat(timespec="seconds")
 
 
-def _new_nonce() -> str:
-    # a fresh single-use invitation id in the sha256 digest grammar (never a real content hash)
-    return "sha256:" + secrets.token_hex(32)
-
-
-def _new_transaction_id() -> str:
-    return "txn-" + secrets.token_hex(8)
-
-
 @router.post("/invitations", response_model=EnrollmentInvitationOut, status_code=201)
 def create_enrollment_invitation(
     body: CreateEnrollmentInvitation,
@@ -66,41 +56,29 @@ def create_enrollment_invitation(
     # one clock sample: created_at and expires_at derive from the SAME instant, so the effective TTL
     # is exactly ttl_seconds and a requested 86400 can never truncate to 86401 across a boundary.
     now_dt = _utc_now()
-    now = _iso(now_dt)
-    expires = _iso(now_dt + _dt.timedelta(seconds=body.ttl_seconds))
-    invitation = svc.build_invitation(
-        controller_installation_id=body.controller_installation_id,
-        controller_key_id=body.controller_key_id,
-        controller_trust_anchor_hex=body.controller_trust_anchor_hex,
-        controller_origin=body.controller_origin,
-        release_digest=body.release_digest,
-        transaction_id=_new_transaction_id(),
-        nonce=_new_nonce(),
-        created_at=now,
-        expires_at=expires,
-    )
-    outcome = svc.create_invitation_and_open(
+    result = svc.create_supported_invitation(
         session,
         principal,
-        invitation=invitation,
+        idempotency_key=body.idempotency_key,
         deployment_site_label=body.deployment_site_label,
-        now=now,
+        ttl_seconds=body.ttl_seconds,
+        created_at=_iso(now_dt),
+        expires_at=_iso(now_dt + _dt.timedelta(seconds=body.ttl_seconds)),
     )
-    state = outcome.state
     return EnrollmentInvitationOut(
-        enrollment_id=state.enrollment_id,
-        invitation_id=invitation.invitation_id,
-        controller_installation_id=invitation.controller_installation_id,
-        controller_key_id=invitation.controller_key_id,
-        controller_trust_anchor_hex=invitation.controller_trust_anchor_hex,
-        controller_origin=invitation.controller_origin,
-        release_digest=invitation.release_digest,
-        transaction_id=invitation.transaction_id,
-        deployment_site_label=body.deployment_site_label,
-        created_at=invitation.created_at,
-        expires_at=invitation.expires_at,
-        state=state.state,
-        revision=state.revision,
+        enrollment_id=result.enrollment_id,
+        invitation_id=result.invitation_id,
+        controller_installation_id=result.controller_installation_id,
+        controller_key_id=result.controller_key_id,
+        controller_trust_anchor_hex=result.controller_trust_anchor_hex,
+        controller_origin=result.controller_origin,
+        release_digest=result.release_digest,
+        transaction_id=result.transaction_id,
+        deployment_site_label=result.deployment_site_label,
+        created_at=result.created_at,
+        expires_at=result.expires_at,
+        state=result.state,
+        revision=result.revision,
     )
 
 

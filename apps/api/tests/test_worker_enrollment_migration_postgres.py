@@ -2,7 +2,7 @@
 
 The portable round-trip proof runs on SQLite; this module proves the same migration is a clean,
 reversible, retryable round trip on the engine that actually ships, and that the live Alembic head
-is exactly ``b6e2f4a9c1d7``. It is one of the three targets of the exact-head PostgreSQL no-skip CI
+is exactly ``c2f8e1a4b6d9``. It is one of the three targets of the exact-head PostgreSQL no-skip CI
 gate, so a PostgreSQL outage fails the build instead of silently skipping.
 """
 
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 API_DIR = Path(__file__).resolve().parents[1]
-HEAD = "b6e2f4a9c1d7"
+HEAD = "c2f8e1a4b6d9"
 DOWN_REVISION = "d8f1a2b3c4e5"
 ENROLLMENT_TABLES = {
     "worker_enrollment_invitation",
@@ -73,7 +73,7 @@ def test_upgrade_to_head_creates_the_four_tables_on_postgres(pg_config) -> None:
     assert _live_head(engine) == HEAD
 
 
-def test_live_alembic_head_is_exactly_b6e2f4a9c1d7(pg_config) -> None:
+def test_live_alembic_head_is_exactly_c2f8e1a4b6d9(pg_config) -> None:
     cfg, engine = pg_config
     command.upgrade(cfg, "head")
     assert _live_head(engine) == HEAD

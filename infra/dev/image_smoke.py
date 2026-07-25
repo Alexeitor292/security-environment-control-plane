@@ -38,7 +38,7 @@ _SCRIPTS = {
 }
 _EXPECTED_UID = 10001
 _EXPECTED_GID = 10001
-_EXPECTED_ALEMBIC_HEAD = "b6e2f4a9c1d7"  # SECP-PR5H-A sole head (was PR5F d8f1a2b3c4e5)
+_EXPECTED_ALEMBIC_HEAD = "c2f8e1a4b6d9"  # SECP-PR5H-B1 sole head (F3; linear from b6e2f4a9c1d7)
 _API_DIR = "/app/apps/api"
 
 
