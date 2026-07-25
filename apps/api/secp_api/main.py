@@ -32,6 +32,7 @@ from secp_api.routers import (
     providers,
     system,
 )
+from secp_api.routers import enrollment as enrollment_router
 from secp_api.routers import environment_publication as environment_publication_router
 from secp_api.routers import onboarding as onboarding_router
 from secp_api.routers import plan_activation as plan_activation_router
@@ -188,6 +189,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(auth_config_router.router)
     app.include_router(catalog.router)
+    app.include_router(enrollment_router.router)
     app.include_router(environment_publication_router.router)
     app.include_router(exercises.router)
     app.include_router(plans.router)

@@ -50,6 +50,7 @@ from secp_api.worker_enrollment_contract import (
     WorkerEnrollmentContractError,
     WorkerEnrollmentInvitation,
     bind_worker_identity,
+    create_invitation,
     is_deployment_site_label,
     mark_healthy,
     mark_verified,
@@ -225,6 +226,37 @@ def _run_pure(fn: Callable[[], EnrollmentState]) -> EnrollmentState:
 
 
 # --------------------------------------------------------------------------- creation
+
+
+def build_invitation(
+    *,
+    controller_installation_id: str,
+    controller_key_id: str,
+    controller_trust_anchor_hex: str,
+    controller_origin: str,
+    release_digest: str,
+    transaction_id: str,
+    nonce: str,
+    created_at: str,
+    expires_at: str,
+) -> WorkerEnrollmentInvitation:
+    """Build + validate a controller invitation from raw caller fields, surfacing any pure-contract
+    refusal as a bounded ``WorkerEnrollmentError`` so an API caller receives a closed code (e.g.
+    ``enrollment_origin_not_https``) rather than an unhandled internal error."""
+    try:
+        return create_invitation(
+            controller_installation_id=controller_installation_id,
+            controller_key_id=controller_key_id,
+            controller_trust_anchor_hex=controller_trust_anchor_hex,
+            controller_origin=controller_origin,
+            release_digest=release_digest,
+            transaction_id=transaction_id,
+            nonce=nonce,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+    except WorkerEnrollmentContractError as exc:
+        raise _surface(exc) from None
 
 
 def create_invitation_and_open(
