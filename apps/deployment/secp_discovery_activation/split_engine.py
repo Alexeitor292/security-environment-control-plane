@@ -73,6 +73,10 @@ from secp_discovery_activation.handoff import (
     attestation_bytes as handoff_attestation_bytes,
 )
 from secp_discovery_activation.layout import ORDINARY_TASK_QUEUE, PRODUCTION_LAYOUT
+from secp_discovery_activation.migration_heads import (
+    ACCEPTED_CONTROLLER_MIGRATION_HEADS,
+    ISSUED_CONTROLLER_MIGRATION_HEAD,
+)
 from secp_discovery_activation.profile import DeploymentProfile
 from secp_discovery_activation.render import (
     ActivationRender,
@@ -115,7 +119,12 @@ from secp_discovery_activation.tls import (
 )
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$")
-_API_MIGRATION_HEAD: Literal["d8f1a2b3c4e5"] = "d8f1a2b3c4e5"
+# SECP-PR5H-A (ADR-027): ISSUANCE is single-valued (always the current head, and the live
+# controller must already be at it); VALIDATION accepts the bounded window so an ALREADY-ISSUED
+# PR5F offer stays verifiable.  The declared head must still equal the OBSERVED head everywhere,
+# so a downgrade substitution refuses closed.
+_ISSUED_MIGRATION_HEAD = ISSUED_CONTROLLER_MIGRATION_HEAD
+_ACCEPTED_MIGRATION_HEADS = ACCEPTED_CONTROLLER_MIGRATION_HEADS
 _CONTROLLER_ROLES = frozenset(
     {
         ROLE_PROFILE,
@@ -472,7 +481,7 @@ def _controller_transaction_effects(
         or observation.proxy_running
         or observation.tls_ready
         or observation.activation_route_enabled
-        or observation.migration_head == _API_MIGRATION_HEAD
+        or observation.migration_head in _ACCEPTED_MIGRATION_HEADS
         or (
             api_runtime is not None
             and api_runtime.image_digest == profile.controller_api_runtime_image_digest
@@ -536,7 +545,10 @@ def _controller_postcondition(
         return "controller_postconditions_incomplete"
     if dict(observation.configuration_artifact_digests) != expected_digests:
         return "controller_configuration_drift"
-    if not observation.migration_head_ready or observation.migration_head != _API_MIGRATION_HEAD:
+    if (
+        not observation.migration_head_ready
+        or observation.migration_head not in _ACCEPTED_MIGRATION_HEADS
+    ):
         return "controller_migration_head_unverified"
     try:
         _controller_runtime_evidence(profile, observation)
@@ -702,7 +714,7 @@ def _validate_live_controller_offer(
         offer.controller_base_compose != base
         or offer.controller_runtimes != runtimes
         or offer.controller_migration_head != observation.migration_head
-        or observation.migration_head != _API_MIGRATION_HEAD
+        or observation.migration_head not in _ACCEPTED_MIGRATION_HEADS
         or not observation.migration_head_ready
     ):
         raise SplitActivationEngineError("controller_runtime_offer_drift")
@@ -771,7 +783,7 @@ def _validate_worker_offer(
         or proxy_digest is None
         or controller_runtimes["controller_api"].image_digest != api_digest
         or controller_runtimes["admission_proxy"].image_digest != proxy_digest
-        or offer.controller_migration_head != _API_MIGRATION_HEAD
+        or offer.controller_migration_head not in _ACCEPTED_MIGRATION_HEADS
     ):
         raise SplitActivationEngineError("controller_offer_binding_mismatch")
     if now is not None:
@@ -1006,7 +1018,9 @@ def _build_controller_offer(
     controller_base_compose, controller_runtimes = _controller_runtime_evidence(
         profile, observation
     )
-    if not observation.migration_head_ready or observation.migration_head != _API_MIGRATION_HEAD:
+    # ISSUANCE requires the CURRENT head on the live controller: accepting an old signed offer must
+    # never imply the new schema exists, so a new offer is only issued from a migrated controller.
+    if not observation.migration_head_ready or observation.migration_head != _ISSUED_MIGRATION_HEAD:
         raise SplitActivationEngineError("controller_migration_head_unverified")
     issued = _handoff_time(timestamp)
     return ControllerOffer(
@@ -1028,7 +1042,7 @@ def _build_controller_offer(
         object_classifications=classifications,
         controller_base_compose=controller_base_compose,
         controller_runtimes=controller_runtimes,
-        controller_migration_head=_API_MIGRATION_HEAD,
+        controller_migration_head=_ISSUED_MIGRATION_HEAD,
         admission_tls=_admission_tls(tls_material.metadata),
         installation_timestamp=timestamp,
         expires_at=_timestamp(issued + timedelta(hours=24)),
@@ -1997,7 +2011,7 @@ def _bound_api_rollback_fence_state(
         or fence.state not in {"engaged", "released"}
         or generation is None
         or fence.api_container_id != generation.container_id
-        or fence.migration_head != _API_MIGRATION_HEAD
+        or fence.migration_head not in _ACCEPTED_MIGRATION_HEADS
         or fence.migration_head != controller_observation.migration_head
     ):
         raise SplitActivationEngineError("api_rollback_fence_unverified")

@@ -31,8 +31,15 @@ PR5E's engine performs **no** host effect directly — it drives four injected, 
 `Sealed*` and fail closed, so on the shipped repository bootstrap/adoption/status/rollback all refuse.
 That is safe but not yet a product: a fresh host cannot actually be brought up. PR5G supplies the
 **real** leaves by *composition* of already-reviewed primitives (never duplicating security-sensitive
-behavior), plus the durable enrollment/handoff machinery that removes the remaining manual steps
-(hand-copying the controller-offer / worker-result documents between hosts).
+behavior), plus the **pure enrollment/handoff contracts** that a later working product path will use.
+
+**Correction (truth pass).** PR5G supplied real host adapters **and pure enrollment/handoff
+contracts**. It did **not** supply durable enrollment persistence, and it did **not** activate a
+network transport — so it did **not** remove hand-copying of the controller-offer / worker-result
+documents through a working product path. Durable persistence, CAS, the single-use nonce ledger and
+restart/expiry recovery arrived in **PR5H-A**
+([ADR-027](ADR-027-durable-worker-enrollment-foundation.md)); the transport that actually removes the
+manual copy is **PR5H-B**.
 
 ## Decision — real adapters by composition (this PR)
 
@@ -82,7 +89,7 @@ reviewed seams:
   `evidence_attestation_message` the engine derives (never arbitrary caller bytes). Production commits
   no private key; a reviewed public trust anchor is pinned for verification.
 
-## Decision — durable enrollment state machine + handoff protocol contracts (this PR)
+## Decision — enrollment state-machine + handoff protocol CONTRACTS (this PR; NOT durable)
 
 New module `secp_management/enrollment.py` defines the **provider-neutral** enrollment domain:
 
@@ -91,20 +98,29 @@ New module `secp_management/enrollment.py` defines the **provider-neutral** enro
   browser). It binds an exact controller identity/HTTPS origin, a pinned or enrollment-established trust
   anchor, an expiry, a nonce, and a monotonic sequence — no provider fields, no private key, no host
   path.
-- **`EnrollmentState`** transition **contract** — `invited → worker_identity_bound → offer_transported →
-  result_transported → verified → healthy` with explicit `refused` / `recovery_required` terminals.
+- **`EnrollmentState`** transition **contract** — the implemented chain is
+  `invited → worker_bound → offer_transported → result_transported → verified → healthy`, plus
+  `refused` and `recovery_required`. (**Correction:** an earlier draft of this ADR wrote
+  `worker_identity_bound`; the implemented state constant is **`worker_bound`**, and the database
+  CHECK constraint enumerates that spelling.) `healthy` is **terminal success**;
+  `recovery_required` is the **remediation terminal** and the only absorbing state; `refused` is a
+  refusal state that the pure contract still permits to move to `recovery_required`, so it is **not**
+  unconditionally terminal.
   Each transition is revision-guarded, sequence/predecessor-chained, transaction-bound, and expiring;
   wrong-controller / wrong-worker / wrong-transaction / wrong-release / expired / conflicting inputs
-  refuse closed. These are **pure functions over immutable value objects** — there is NO datastore, NO
-  transactional compare-and-swap on `revision`/`predecessor_digest`, NO single-use-nonce ledger, and NO
-  restart recovery in this PR. Durable replay-uniqueness and single-use therefore depend on the deferred
-  **PR5H persistence layer** (revision CAS + nonce ledger); until then this is a state-machine contract,
-  not a durably-persisted enrollment workflow.
+  refuse closed. At the PR5G head these were **pure functions over immutable value objects** — no
+  datastore, no compare-and-swap, no single-use-nonce ledger and no restart recovery.
+
+  **Correction (truth pass).** PR5H-A implemented that persistence layer, and its compare-and-swap is
+  over **`revision` + `state_digest`** — those two columns are the UPDATE predicate.
+  `predecessor_digest` is the **append-only chain binding** recorded in the revision history, **not**
+  a CAS column; describing it as one would misstate the implementation.
 - **Handoff transport** — the PR5F canonical, detached-Ed25519 controller-offer / worker-result records
   are reused **verbatim** (`secp_discovery_activation.handoff`: `issue_handoff_attestation`,
-  `verify_handoff`, sequence/predecessor/transaction/expiration binding). PR5G transports them through a
-  management-plane protocol instead of hand-copied files, but does not alter their canonical bytes or
-  signatures.
+  `verify_handoff`, sequence/predecessor/transaction/expiration binding). PR5G reuses their
+  **canonical contracts** verbatim and does not alter their bytes or signatures. **Correction:** PR5G
+  does **not** transport them automatically — `EnrollmentTransport` remained **sealed**, so no
+  management-plane protocol exchange occurs at that head. Automatic transport is PR5H-B.
 
 The actual **network contact** (worker → controller outbound HTTPS) is implemented behind an explicit
 `EnrollmentTransport` Protocol whose shipped default is **sealed** (`enrollment_transport_not_activated`).
@@ -125,22 +141,35 @@ plugin uses the *same* bootstrap; provider onboarding is a separate later workfl
 plane. A static boundary test proves no provider string appears in the management identity/release/
 evidence/enrollment schemas.
 
-## Installer experience (this PR)
+## Installer experience (TARGET product experience — not delivered by PR5G or PR5H-A)
 
-`secpctl release verify --bundle <b>`, `secpctl bootstrap controller --bundle <b> --configuration
-<validated-nonsecret-config> --write --confirm`, and `secpctl bootstrap worker --bundle <b> --enrollment
-<short-lived-nonsecret-artifact> --write --confirm`. Dry-run remains the default (both `--write` and
-`--confirm` are required to mutate). No secrets on argv; no arbitrary path/host-effect knobs; no
-caller-selectable adapter; secrets enter only through a reviewed local secret source or the short-lived
-enrollment exchange. Non-secret configuration has a strict versioned schema (no arbitrary paths,
-commands, compose projects, service names, endpoints, or executable selection).
+**Correction (truth pass).** The commands below are the intended **target** experience. They are
+**not** delivered capabilities at the PR5G or PR5H-A head: no supported mutating production
+enrollment/bootstrap CLI entrypoint is registered, and the default CLI remains sealed. **PR5H-B** is
+expected to deliver commands *equivalent to* the following; the exact syntax is **not** irrevocably
+accepted here, because the code does not yet define it:
 
-## Browser surfaces (this PR: backend + minimal status)
+- `secpctl release verify`
+- `secpctl bootstrap controller`
+- `secpctl bootstrap worker`
+- status / recover / rollback operations
 
-A management API can create a worker-enrollment invitation, expose a downloadable **non-secret**
-enrollment artifact / short code, and report controller/worker installation status, signed-evidence
-identities + safe fingerprints, progress + refusal-reason categories, and `recovery_required` with retry/
-rollback guidance. The browser **never** receives a private key, executes a host command, accepts a host
+Whatever syntax PR5H-B settles on, these **safety properties are accepted and preserved**: dry-run is
+the default (both `--write` and `--confirm` are required to mutate); **no secrets on argv**; **no
+caller-selectable adapter**; and no arbitrary host, path, command, compose-project, service-name,
+endpoint or executable-selection controls. Secrets enter only through a reviewed local secret source
+or the short-lived enrollment exchange, and non-secret configuration has a strict versioned schema.
+
+## Browser surfaces (FUTURE PR5H-B browser/API boundary — not delivered)
+
+**Correction (truth pass).** Neither PR5G nor PR5H-A registers an enrollment API route or any browser
+UI; a guard test asserts no enrollment router is registered and that no enrollment router module
+exists. The following describes the **intended PR5H-B** boundary.
+
+A management API will be able to create a worker-enrollment invitation, expose a downloadable
+**non-secret** enrollment artifact / short code, and report controller/worker installation status,
+signed-evidence identities + safe fingerprints, progress + refusal-reason categories, and
+`recovery_required` with retry/rollback guidance. The browser **never** receives a private key, executes a host command, accepts a host
 path, selects an adapter, bypasses local administrative confirmation, activates the operator, submits an
 OpenTofu workflow, or contacts a provider. Root host operations are never executed from a browser
 request.
@@ -164,16 +193,32 @@ Proxmox/provider mutation; no provider-specific logic in the management bootstra
 privileged execution; no arbitrary shell/command endpoint; no weakening of approval/authorization/
 evidence/rollback gates. PR6 remains frozen.
 
-## Exact next PR (SECP-PR5H)
+## PR5H reconciliation — what shipped and what is next
 
-Activate the sealed `EnrollmentTransport`: the worker-initiated outbound HTTPS exchange (exact origin,
-pinned/enrollment-established trust, single-use short-lived authorization, no redirects, no ambient
-proxy, no system-trust fallback unless justified, bounded payloads, no private-key transport, no remote
-command execution), driven by the state-machine contract delivered here. PR5H must ALSO make enrollment
-**durable**: persist enrollment state; enforce the transition contract under a transactional
-revision/`predecessor_digest` compare-and-swap and a single-use-nonce ledger (so replay-uniqueness and
-single-use hold across a persisted history, not only within one in-memory sequence); and provide
-restart recovery. A supported production CLI entrypoint that selects `production_engine_deps`, and the
-enrollment API/UI, are also future work. Only after an end-to-end two-host enrollment acceptance test
-passes over the durable, persisted path may automatic enrollment be described as complete; nothing at
-the PR5G head is a one-command customer installation.
+**PR5H-A — implemented foundation** (see
+[ADR-027](ADR-027-durable-worker-enrollment-foundation.md)):
+
+- the enrollment **schema** (four provider-neutral tables) on the new sole head `b6e2f4a9c1d7`;
+- a **durable repository** with a single rehydration choke point that fully re-validates every row;
+- a transactional **compare-and-swap over `revision` + `state_digest`**, combined with row locking;
+- a durable single-use **nonce ledger**, consumed atomically at the first successful worker binding;
+- an **append-only revision history** chained by `predecessor_digest`;
+- **restart / lost-response recovery** and a bounded, deterministic **expiry sweep**;
+- consolidated provider-neutrality, plane-boundary, schema-parity, concurrency, inertness and leakage
+  **guards**;
+- a dedicated exact-head **PostgreSQL CI no-skip gate**.
+
+**PR5H-B — exact next product slice:**
+
+- the worker-initiated outbound HTTPS **`EnrollmentTransport`**, with exact origin and
+  pinned/enrollment-established trust, **no redirects**, **no ambient proxy**, **no silent
+  system-trust fallback**, bounded payloads and **no private-key transport**;
+- a **supported production CLI**;
+- an **authorization-gated, audited enrollment API**;
+- a **minimal UI**;
+- **full restart recovery across the transport boundary**;
+- a **two-host-equivalent automated-enrollment acceptance** test;
+- **zero-residual rollback**.
+
+Automatic enrollment becomes complete **only after PR5H-B's end-to-end acceptance passes**. Nothing at
+the PR5G or PR5H-A head is a one-command customer installation.

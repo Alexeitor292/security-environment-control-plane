@@ -1,15 +1,32 @@
 # ADR-025 — management-plane bootstrap foundation + the three-plane hierarchy
 
-- **Status:** Accepted for SECP-PR5E. Introduces the repository-owned management-plane bootstrap
-  package `secp_management` and the customer-facing `secpctl` command: a signed offline release-bundle
-  contract, closed controller/worker roles, local human-supervised controller + worker bootstrap, safe
-  adoption of already-deployed installations, strict nonsecret evidence, and revalidating status. It is
-  **local-first** — never a remote root-SSH deployment service — and it never activates the sealed
-  controlled-live operator, constructs a Temporal `Worker`, submits a workflow, runs OpenTofu, or
-  contacts any external infrastructure. Every host effect (observation and mutation) flows through
-  **closed, typed, role-specific adapters** whose SHIPPED defaults are **SEALED** — so in the shipped
-  repository (and on any host without reviewed real adapters installed) bootstrap, adoption, status,
-  and rollback all **fail closed**, never reporting a false success.
+- **Status:** Accepted for SECP-PR5E (historical, point-in-time). Introduces the repository-owned
+  management-plane bootstrap package `secp_management` and the `secpctl` command **contract and
+  surface** — a signed offline release-bundle contract, closed controller/worker roles, local
+  human-supervised controller + worker bootstrap, safe adoption of already-deployed installations,
+  strict nonsecret evidence, and revalidating status. It is **local-first** — never a remote root-SSH
+  deployment service — and it never activates the sealed controlled-live operator, constructs a
+  Temporal `Worker`, submits a workflow, runs OpenTofu, or contacts any external infrastructure. Every
+  host effect (observation and mutation) flows through **closed, typed, role-specific adapters** whose
+  SHIPPED defaults are **SEALED** — so in the shipped repository (and on any host without reviewed
+  real adapters installed) bootstrap, adoption, status, and rollback all **fail closed**, never
+  reporting a false success.
+
+  **This ADR does not describe a currently supported customer-facing mutating `secpctl` path.** To be
+  precise about what each milestone actually delivered:
+
+  - **PR5E** introduced the management engine plus the `secpctl` command **contract/surface**, with
+    shipped defaults **sealed** — no reviewed real adapter is reachable from the default CLI.
+  - **PR5G** ([ADR-026](ADR-026-automated-management-bootstrap-and-enrollment.md)) added
+    production-capable **real leaves**, constructed only by a fixed production composition
+    (`production.py`); the default `EngineDeps()` and default CLI remain sealed.
+  - **PR5H-A** ([ADR-027](ADR-027-durable-worker-enrollment-foundation.md)) added durable enrollment
+    **persistence, CAS, a single-use nonce ledger and restart/expiry recovery** — behind **no** API
+    route, **no** network transport and **no** supported mutating production entrypoint.
+  - **PR5H-B** will deliver the supported **customer-facing** enrollment/bootstrap entrypoints.
+
+  Nothing here permits a browser to execute root effects: the browser never receives a private key,
+  never executes a host command, and never selects a path, adapter or command.
 - **Date:** 2026-07-18
 - **Milestone:** SECP-002B-1B — **PR5E** (management-plane bootstrap foundation; follows PR5D
   operator-deployment package), with its roadmap corrected by **PR5F**. The B7/B8 browser Read-Only
@@ -21,7 +38,10 @@
   reused verbatim); [ADR-023](ADR-023-commissioning-automation-foundation.md) (commissioning engine,
   reused for evidence/hardened-fs idioms); [ADR-001](ADR-001-monorepo.md) (package layout); runbook
   `docs/runbooks/pr5e-management-bootstrap.md`; PR5F runbook
-  `docs/runbooks/pr5f-b8-production-activation.md`; STATUS `docs/STATUS.md`.
+  `docs/runbooks/pr5f-b8-production-activation.md`;
+  [ADR-026](ADR-026-automated-management-bootstrap-and-enrollment.md) (PR5G real adapters + pure
+  enrollment/handoff contracts); [ADR-027](ADR-027-durable-worker-enrollment-foundation.md) (PR5H-A
+  durable enrollment persistence/recovery foundation); STATUS `docs/STATUS.md`.
 
 ## The three SECP planes (product decision)
 

@@ -336,3 +336,53 @@ class LiveEvidenceSealedError(ValidationFailedError):
 
     http_status = 403
     code = "live_evidence_sealed"
+
+
+class WorkerEnrollmentError(DomainError):
+    """Closed-code, message-redacted error for durable worker enrollment (SECP-PR5H-A, ADR-027).
+
+    The HTTP layer serializes ONLY the closed ``code`` — never a free-form message, a rejected
+    input, key material, a host path, an endpoint, an identity or a raw internal exception. The code
+    is a bounded ``enrollment_*`` value; it may be a persistence/service code OR a surfaced pure
+    transition-contract code (ADR-027 "delegate, never pre-screen").
+
+    ``durable_transition`` marks a fail-closed refusal that ALSO materialized a durable,
+    revision-safe transition (e.g. driving a corrupted row to ``recovery_required``) which must be
+    committed even though the request errors; the router commits before re-raising.
+    """
+
+    redacted = True
+    durable_transition: bool = False
+
+    _STATUS = {
+        "enrollment_schema_unavailable": 503,
+        "enrollment_not_found": 404,
+        "enrollment_forbidden": 403,
+        "enrollment_scope_mismatch": 409,
+        "enrollment_revision_conflict": 409,
+        "enrollment_state_corrupt": 409,
+        "enrollment_history_inconsistent": 409,
+        "enrollment_receipt_conflict": 409,
+        "enrollment_invitation_not_found": 404,
+        "enrollment_invitation_consumed": 409,
+        "enrollment_invitation_revoked": 409,
+        "enrollment_invitation_expired": 409,
+        "enrollment_invitation_conflict": 409,
+        "enrollment_creation_conflict": 409,
+        "enrollment_internal_failure": 500,
+        # surfaced pure transition-contract codes: an invalid input is 422, a state/lifecycle
+        # conflict is 409 (the default for anything not explicitly listed)
+        "enrollment_invitation_invalid": 422,
+        "enrollment_trust_anchor_invalid": 422,
+        "enrollment_origin_not_https": 422,
+        "enrollment_time_invalid": 422,
+        "enrollment_handoff_invalid": 422,
+        "enrollment_reason_code_invalid": 422,
+    }
+
+    def __init__(self, code: object, *, durable_transition: bool = False) -> None:
+        code_value = getattr(code, "value", str(code))
+        super().__init__(code_value)
+        self.code = code_value
+        self.http_status = self._STATUS.get(code_value, 409)
+        self.durable_transition = durable_transition

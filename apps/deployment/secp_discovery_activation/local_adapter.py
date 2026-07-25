@@ -86,6 +86,10 @@ from secp_discovery_activation.layout import (
     ORDINARY_WORKER_SERVICE,
     PRODUCTION_LAYOUT,
 )
+from secp_discovery_activation.migration_heads import (
+    ACCEPTED_CONTROLLER_MIGRATION_HEADS,
+    CURRENT_CONTROLLER_MIGRATION_HEAD,
+)
 from secp_discovery_activation.profile import (
     DeploymentProfile,
     parse_https_endpoint,
@@ -328,7 +332,11 @@ _ACTIVATION_PROBE = ("python", "-m", "secp_worker.activation_probe")
 _WORKER_TLS_PROBE = ("python", "-m", "secp_worker.admission_tls_probe")
 _HEALTH_PROBE = ("python", "-m", "secp_worker.health", "check")
 _API_BASELINE_MIGRATION_HEAD = "c4e2f9a1b7d3"
-_API_MIGRATION_HEAD = "d8f1a2b3c4e5"
+# SECP-PR5H-A (ADR-027): a live controller is "migration ready" at EITHER head inside the bounded
+# window, so PR5F activation keeps working mid-rollout; the exact OBSERVED head is still bound
+# into the signed offer, so an old-head offer only validates against an old-head controller.
+_API_MIGRATION_HEAD = CURRENT_CONTROLLER_MIGRATION_HEAD
+_API_ACCEPTED_MIGRATION_HEADS = ACCEPTED_CONTROLLER_MIGRATION_HEADS
 _API_ALEMBIC_WORKDIR = "/app/apps/api"
 _API_ALEMBIC_CONFIG = "/app/apps/api/alembic.ini"
 _API_MIGRATION_PROBE = (
@@ -1666,7 +1674,7 @@ class LocalActivationAdapter:
         if result.exit_code != 0:
             return None
         raw = result.stdout.strip()
-        for recognized_head in (_API_BASELINE_MIGRATION_HEAD, _API_MIGRATION_HEAD):
+        for recognized_head in (_API_BASELINE_MIGRATION_HEAD, *_API_ACCEPTED_MIGRATION_HEADS):
             if raw == recognized_head or raw == f"{recognized_head} (head)":
                 return recognized_head
         if not raw or len(raw) > 128 or "\n" in raw or "\r" in raw:
@@ -2357,7 +2365,7 @@ class LocalActivationAdapter:
             tls_ready = False
             route_ready = False
             migration_head = self._migration_head(pin, api_identifier_before)
-            migration_ready = migration_head == _API_MIGRATION_HEAD
+            migration_ready = migration_head in _API_ACCEPTED_MIGRATION_HEADS
             controller_runtime_ready = bool(
                 proxy_public is not None
                 and proxy_public.verified()
@@ -3015,7 +3023,7 @@ class LocalActivationAdapter:
                 if (
                     receipt.controller_runtime_changed
                     and self._migration_head(self._container_pin(profile), runtime_identifier)
-                    != _API_MIGRATION_HEAD
+                    not in _API_ACCEPTED_MIGRATION_HEADS
                 ):
                     _closed("controller_migration_after_drift")
                 compatible = self._rollback_compatibility_probe(
@@ -3034,7 +3042,7 @@ class LocalActivationAdapter:
                     or self._migration_head(
                         self._container_pin(rebound_profile), rebound_identifier
                     )
-                    != _API_MIGRATION_HEAD
+                    not in _API_ACCEPTED_MIGRATION_HEADS
                 ):
                     _closed("controller_migration_after_drift")
                 if rebound_identifier is None:
