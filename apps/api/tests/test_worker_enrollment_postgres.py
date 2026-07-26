@@ -347,6 +347,43 @@ def test_exact_retry_returns_committed_revision_without_second_history_row(pg):
     assert after == before
 
 
+def test_delayed_bind_retry_after_revocation_returns_original_worker_bound(pg):
+    # T3 on real PostgreSQL: after the enrollment advances to a LATER terminal revision (revoked),
+    # replaying bind returns the ORIGINAL worker_bound result rehydrated from the immutable revision
+    # snapshot — never the current head — proven durably across independent sessions.
+    factory, actor, _ = pg
+    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
+    original = _bind(factory, actor, state)  # worker_bound at revision 1
+    assert original.state == contract.WORKER_BOUND and original.revision == 1
+    with factory() as s:
+        svc.revoke_enrollment(s, actor, enrollment_id=state.enrollment_id, expected_revision=1)
+        s.commit()
+        assert repo_load_state(s, state.enrollment_id) == contract.REFUSED  # head moved on
+    with factory() as s:
+        out = svc.bind_worker(
+            s,
+            actor,
+            enrollment_id=state.enrollment_id,
+            worker_installation_id="worker-bbbbbbbb",
+            worker_key_id=WORKER_KEY,
+            transaction_id=TXN,
+            now=NOW,
+            expected_revision=0,  # the ORIGINAL (now-stale) revision the worker first sent
+        )
+        s.commit()
+    assert out.deduplicated is True
+    assert out.committed_revision == 1
+    assert out.state.state == contract.WORKER_BOUND and out.state.revision == 1
+
+
+def repo_load_state(session, enrollment_id: str) -> str:
+    from secp_api import worker_enrollment_repository as repo
+
+    loaded = repo.load_read_only(session, enrollment_id)
+    assert loaded is not None
+    return loaded.state.state
+
+
 def test_conflicting_retry_refuses(pg):
     factory, actor, _ = pg
     state = _bind(factory, actor, _open(factory, actor, nonce="sha256:" + "b" * 64))
