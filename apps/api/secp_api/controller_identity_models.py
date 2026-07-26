@@ -53,6 +53,13 @@ class ControllerEnrollmentIdentity(Base, UpdatedTimestampMixin):
     controller_trust_anchor_hex: Mapped[str] = mapped_column(String(64), nullable=False)
     controller_origin: Mapped[str] = mapped_column(String(269), nullable=False)
     release_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    #: immutable source bindings proven at activation (never paths/keys/credentials/raw evidence):
+    #: the root-controlled management-plane identity digest, the attested bootstrap-evidence digest,
+    #: and a bounded public proof id for the DEDICATED enrollment key (distinct from the
+    #: management-evidence and release-signing keys).
+    management_identity_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    bootstrap_evidence_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    enrollment_key_proof_id: Mapped[str] = mapped_column(String(120), nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -71,6 +78,14 @@ class ControllerEnrollmentIdentity(Base, UpdatedTimestampMixin):
         ),
         CheckConstraint(_digest("controller_key_id"), name="ck_cei_key_digest"),
         CheckConstraint(_digest("release_digest"), name="ck_cei_release_digest"),
+        CheckConstraint(_digest("management_identity_digest"), name="ck_cei_mgmt_digest"),
+        CheckConstraint(_digest("bootstrap_evidence_digest"), name="ck_cei_evidence_digest"),
+        CheckConstraint(
+            "length(enrollment_key_proof_id) >= 8 AND length(enrollment_key_proof_id) <= 120",
+            name="ck_cei_enrollment_key_proof",
+        ),
+        # ACTIVE implies verified at the DB level: an unverified row can never be active.
+        CheckConstraint("status <> 'active' OR verified = true", name="ck_cei_active_verified"),
         CheckConstraint("length(controller_trust_anchor_hex) = 64", name="ck_cei_anchor_hex"),
         CheckConstraint(
             "(controller_origin LIKE 'https://%' AND length(controller_origin) <= 269)",

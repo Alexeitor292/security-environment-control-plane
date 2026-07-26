@@ -106,7 +106,6 @@ def _seed_dev_controller_identity(session: Session) -> None:
         ControllerEnrollmentIdentity,
     )
     from secp_api.services import controller_identity
-    from secp_api.worker_enrollment_contract import sha256_digest_of_hex
 
     # reflect on the session's OWN connection — never inspect(session.get_bind()), which opens a
     # second connection to the in-memory SQLite singleton and aborts the pending bootstrap tx.
@@ -119,15 +118,9 @@ def _seed_dev_controller_identity(session: Session) -> None:
     ).first()
     if active is not None:
         return
-    anchor_hex = "11" * 32
+    # DEV/TEST ONLY — the real verification bridge is PR5H-B2; use the named test/dev factory.
     controller_identity.activate_controller_identity(
-        session,
-        controller_installation_id="controller-dev0001",
-        controller_key_id=sha256_digest_of_hex(anchor_hex),
-        controller_trust_anchor_hex=anchor_hex,
-        controller_origin="https://controller.example.test",
-        release_digest="sha256:" + "a" * 64,
-        verified=True,
+        session, controller_identity.build_test_verified_controller_identity()
     )
     session.flush()
 

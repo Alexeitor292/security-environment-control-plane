@@ -43,6 +43,9 @@ def upgrade() -> None:
         sa.Column("controller_trust_anchor_hex", sa.String(length=64), nullable=False),
         sa.Column("controller_origin", sa.String(length=269), nullable=False),
         sa.Column("release_digest", sa.String(length=80), nullable=False),
+        sa.Column("management_identity_digest", sa.String(length=80), nullable=False),
+        sa.Column("bootstrap_evidence_digest", sa.String(length=80), nullable=False),
+        sa.Column("enrollment_key_proof_id", sa.String(length=120), nullable=False),
         sa.Column("verified", sa.Boolean(), nullable=False),
         sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("activated_at", sa.DateTime(timezone=True), nullable=False),
@@ -62,6 +65,13 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(_digest("controller_key_id"), name="ck_cei_key_digest"),
         sa.CheckConstraint(_digest("release_digest"), name="ck_cei_release_digest"),
+        sa.CheckConstraint(_digest("management_identity_digest"), name="ck_cei_mgmt_digest"),
+        sa.CheckConstraint(_digest("bootstrap_evidence_digest"), name="ck_cei_evidence_digest"),
+        sa.CheckConstraint(
+            "length(enrollment_key_proof_id) >= 8 AND length(enrollment_key_proof_id) <= 120",
+            name="ck_cei_enrollment_key_proof",
+        ),
+        sa.CheckConstraint("status <> 'active' OR verified = true", name="ck_cei_active_verified"),
         sa.CheckConstraint("length(controller_trust_anchor_hex) = 64", name="ck_cei_anchor_hex"),
         sa.CheckConstraint(
             "(controller_origin LIKE 'https://%' AND length(controller_origin) <= 269)",

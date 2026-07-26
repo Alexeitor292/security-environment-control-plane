@@ -2088,4 +2088,5 @@ class WorkerEnrollmentErrorCode(str, Enum):
     # SECP-PR5H-B1 F3/F5
     controller_identity_unavailable = "enrollment_controller_identity_unavailable"
     identity_conflict = "enrollment_identity_conflict"  # concurrent controller-identity rotation
+    identity_invalid = "enrollment_identity_invalid"  # malformed/mis-bound verified identity proof
     idempotency_conflict = "enrollment_idempotency_conflict"  # same key, different bound input

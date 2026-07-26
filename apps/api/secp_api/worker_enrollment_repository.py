@@ -417,6 +417,16 @@ def load_invitation_by_nonce(session: Session, invitation_id: str) -> Invitation
     ).scalar_one_or_none()
 
 
+def load_revision_row(session: Session, enrollment_id: str, revision: int) -> RevisionRow | None:
+    """One append-only revision-history row (immutable), or None. The idempotent-creation replay
+    uses revision 0 as the durable, unchangeable record of the ORIGINAL invited/rev-0 create."""
+    return session.execute(
+        select(RevisionRow).where(
+            RevisionRow.enrollment_id == enrollment_id, RevisionRow.revision == revision
+        )
+    ).scalar_one_or_none()
+
+
 # --------------------------------------------------------------------------- creation
 
 

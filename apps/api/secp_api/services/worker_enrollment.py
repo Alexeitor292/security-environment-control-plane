@@ -48,6 +48,8 @@ from secp_api.errors import WorkerEnrollmentError
 from secp_api.models import _utcnow
 from secp_api.services import controller_identity
 from secp_api.worker_enrollment_contract import (
+    ENROLLMENT_CONTRACT_VERSION,
+    INVITED,
     RECOVERY_REQUIRED,
     REFUSED,
     EnrollmentState,
@@ -59,11 +61,13 @@ from secp_api.worker_enrollment_contract import (
     is_deployment_site_label,
     mark_healthy,
     mark_verified,
+    open_enrollment,
     record_controller_offer,
     record_worker_result,
     refuse,
     require_recovery,
 )
+from secp_api.worker_enrollment_models import WorkerEnrollmentInvitation as InvitationRow
 from secp_api.worker_enrollment_models import WorkerEnrollmentStepReceipt as ReceiptRow
 from secp_api.worker_enrollment_repository import LoadedEnrollment, RepositoryRefusal
 from secp_api.worker_enrollment_schema import EnrollmentSchemaError, assert_enrollment_schema_ready
@@ -401,17 +405,22 @@ def create_supported_invitation(
         expires_at=expires_at,
     )
     try:
-        outcome = create_invitation_and_open(
-            session,
-            actor,
-            invitation=invitation,
-            deployment_site_label=deployment_site_label,
-            now=created_at,
-        )
+        # R3: isolate the speculative insert in a SAVEPOINT so a UNIQUE-nonce collision rolls back
+        # ONLY this insert — the caller's outer transaction (any unrelated staged rows) survives.
+        with session.begin_nested():
+            outcome = create_invitation_and_open(
+                session,
+                actor,
+                invitation=invitation,
+                deployment_site_label=deployment_site_label,
+                now=created_at,
+            )
     except WorkerEnrollmentError as exc:
         if exc.code != EC.creation_conflict.value:
             raise
-        return _replay_or_conflict(session, actor, nonce, deployment_site_label, ttl_seconds)
+        return _replay_or_conflict(
+            session, actor, identity, nonce, deployment_site_label, ttl_seconds
+        )
     state = outcome.state
     return SupportedInvitationResult(
         enrollment_id=state.enrollment_id,
@@ -434,14 +443,17 @@ def create_supported_invitation(
 def _replay_or_conflict(
     session: Session,
     actor: Principal,
+    identity: controller_identity.ActiveControllerIdentity,
     nonce: str,
     deployment_site_label: str,
     ttl_seconds: int,
 ) -> SupportedInvitationResult:
-    """Recover the ORIGINAL invitation on a UNIQUE-nonce collision. On PostgreSQL the losing INSERT
-    blocks until the winner commits, so the concurrent path also returns a byte-equivalent response;
-    a differing bound input (org/site/TTL) refuses ``enrollment_idempotency_conflict``."""
-    session.rollback()  # discard the failed INSERT and recover the session for a clean read
+    """Recover the ORIGINAL invitation on a UNIQUE-nonce collision. The caller's outer tx is
+    intact (only the savepoint rolled back — R3). The persisted invitation's ENTIRE bound input
+    must match the current request, INCLUDING the exact active identity/origin/release (R2), so
+    a key reused after rotation/origin/release change refuses ``enrollment_idempotency_conflict``.
+    The response is the IMMUTABLE original create (invited / revision 0), reconstructed + verified
+    the invitation + revision-zero history — never the current head, which may advance (R4)."""
     row = repo.load_invitation_by_nonce(session, nonce)
     if row is None:  # the nonce is not (yet) durable — a non-idempotency conflict
         raise WorkerEnrollmentError(EC.creation_conflict)
@@ -449,12 +461,14 @@ def _replay_or_conflict(
         row.organization_id != actor.organization_id
         or row.deployment_site_label != deployment_site_label
         or _duration_seconds(row.invitation_created_at, row.expires_at) != ttl_seconds
+        or row.controller_installation_id != identity.controller_installation_id
+        or row.controller_key_id != identity.controller_key_id
+        or row.controller_trust_anchor_hex != identity.controller_trust_anchor_hex
+        or row.controller_origin != identity.controller_origin
+        or row.release_digest != identity.release_digest
     ):
         raise WorkerEnrollmentError(EC.idempotency_conflict)
-    loaded = repo.load_read_only(session, row.enrollment_id)
-    if loaded is None:
-        raise WorkerEnrollmentError(EC.state_corrupt)
-    state = loaded.state
+    original = _reconstruct_original_create(session, row)
     return SupportedInvitationResult(
         enrollment_id=row.enrollment_id,
         invitation_id=row.invitation_id,
@@ -467,10 +481,39 @@ def _replay_or_conflict(
         deployment_site_label=row.deployment_site_label,
         created_at=row.invitation_created_at,
         expires_at=row.expires_at,
-        state=state.state,
-        revision=state.revision,
+        state=original.state,  # always INVITED
+        revision=original.revision,  # always 0
         deduplicated=True,
     )
+
+
+def _reconstruct_original_create(session: Session, row: InvitationRow) -> EnrollmentState:
+    """Rebuild the ORIGINAL revision-0 (INVITED) enrollment state from the immutable invitation row
+    and prove it against the append-only revision-zero history — independent of the current head."""
+    invitation = WorkerEnrollmentInvitation(
+        contract_version=ENROLLMENT_CONTRACT_VERSION,
+        invitation_id=row.invitation_id,
+        controller_installation_id=row.controller_installation_id,
+        controller_key_id=row.controller_key_id,
+        controller_trust_anchor_hex=row.controller_trust_anchor_hex,
+        controller_origin=row.controller_origin,
+        release_digest=row.release_digest,
+        transaction_id=row.transaction_id,
+        sequence=0,
+        created_at=row.invitation_created_at,
+        expires_at=row.expires_at,
+    )
+    original = _run_pure(lambda: open_enrollment(invitation, now=row.invitation_created_at))
+    rev0 = repo.load_revision_row(session, row.enrollment_id, 0)
+    if (
+        rev0 is None
+        or original.state != INVITED
+        or original.revision != 0
+        or original.enrollment_id != row.enrollment_id
+        or rev0.state_digest != original.digest()
+    ):
+        raise WorkerEnrollmentError(EC.state_corrupt)
+    return original
 
 
 # --------------------------------------------------------------------------- state-changing steps

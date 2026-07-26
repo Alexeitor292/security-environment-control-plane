@@ -737,25 +737,21 @@ def test_concurrent_controller_identity_rotation_keeps_one_active(pg):
     # F3: overlapping rotations never leave two active identities — the active_marker UNIQUE
     # exactly one active globally; each attempt either commits or refuses a bounded conflict
     from secp_api.services import controller_identity as ci
-    from secp_api.worker_enrollment_contract import sha256_digest_of_hex
 
     factory, actor, _ = pg
     barrier = Barrier(2)
 
     def rotate(tag: str):
-        anchor = tag * 32
+        proof = ci.build_test_verified_controller_identity(
+            controller_installation_id=f"controller-{tag}00001",
+            controller_trust_anchor_hex=tag * 32,
+            controller_origin=f"https://c{tag}.example.test",
+            release_digest="sha256:" + tag * 32,
+        )
         with factory() as s:
             barrier.wait(timeout=15)
             try:
-                ci.activate_controller_identity(
-                    s,
-                    controller_installation_id=f"controller-{tag}00001",
-                    controller_key_id=sha256_digest_of_hex(anchor),
-                    controller_trust_anchor_hex=anchor,
-                    controller_origin=f"https://c{tag}.example.test",
-                    release_digest="sha256:" + tag * 32,
-                    verified=True,
-                )
+                ci.activate_controller_identity(s, proof)
                 s.commit()
                 return "committed"
             except WorkerEnrollmentError as exc:

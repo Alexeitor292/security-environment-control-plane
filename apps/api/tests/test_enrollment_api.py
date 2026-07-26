@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from secp_api.auth import Principal
 from secp_api.deps import current_principal
 from secp_api.enums import Permission
+from secp_api.errors import WorkerEnrollmentError
 from secp_api.worker_enrollment_contract import create_invitation, sha256_digest_of_hex
 
 CTRL_HEX = (b"\x11" * 32).hex()
@@ -331,12 +332,17 @@ def test_creation_refused_when_no_active_controller_identity(client, session):
     assert _audit_rows(session) == []
 
 
-def test_creation_refused_when_active_identity_is_unverified(client, session):
+def test_creation_refused_when_active_identity_binding_is_inconsistent(client, session):
     from sqlalchemy import text
 
-    # verified/verified_at move together (the CHECK pairing enforces it)
+    # a persisted key id that no longer derives from the anchor (the DB CHECKs cannot compute
+    # sha256, so sourcing re-validates it and refuses) — the anchor stays a valid 64-hex string
     session.execute(
-        text("UPDATE controller_enrollment_identity SET verified = false, verified_at = NULL")
+        text(
+            "UPDATE controller_enrollment_identity SET controller_trust_anchor_hex = :h"
+            " WHERE status='active'"
+        ),
+        {"h": "99" * 32},
     )
     session.commit()
     r = client.post("/api/v1/enrollment/invitations", json=_create_body())
@@ -344,26 +350,172 @@ def test_creation_refused_when_active_identity_is_unverified(client, session):
     assert r.json()["error"]["code"] == "enrollment_controller_identity_unavailable"
 
 
-def test_response_tracks_the_active_identity_after_rotation(client, session):
+def _rotate(session, **over):
     from secp_api.services import controller_identity
-    from secp_api.worker_enrollment_contract import sha256_digest_of_hex
 
-    new_anchor = "22" * 32
-    new_key = sha256_digest_of_hex(new_anchor)
-    controller_identity.activate_controller_identity(
+    proof = controller_identity.build_test_verified_controller_identity(**over)
+    controller_identity.activate_controller_identity(session, proof)
+    session.commit()
+    return proof
+
+
+def test_response_tracks_the_active_identity_after_rotation(client, session):
+    proof = _rotate(
         session,
         controller_installation_id="controller-rot0002",
-        controller_key_id=new_key,
-        controller_trust_anchor_hex=new_anchor,
+        controller_trust_anchor_hex="22" * 32,
         controller_origin="https://controller2.example.test",
         release_digest="sha256:" + "b" * 64,
-        verified=True,
     )
-    session.commit()
     out = client.post("/api/v1/enrollment/invitations", json=_create_body()).json()
     # new invitations bind ONLY the current active identity
-    assert out["controller_key_id"] == new_key
+    assert out["controller_key_id"] == proof.controller_key_id
     assert out["controller_origin"] == "https://controller2.example.test"
+
+
+# --- R2: idempotency is bound to the exact active controller identity/release --------------------
+
+
+def test_replay_after_controller_rotation_conflicts(client, session):
+    key = secrets.token_urlsafe(24)
+    assert (
+        client.post(
+            "/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key)
+        ).status_code
+        == 201
+    )
+    _rotate(
+        session,
+        controller_installation_id="controller-rot0007",
+        controller_trust_anchor_hex="77" * 32,
+    )
+    r = client.post("/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key))
+    assert r.status_code == 409 and r.json()["error"]["code"] == "enrollment_idempotency_conflict"
+
+
+def test_replay_after_release_change_conflicts(client, session):
+    key = secrets.token_urlsafe(24)
+    assert (
+        client.post(
+            "/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key)
+        ).status_code
+        == 201
+    )
+    _rotate(session, release_digest="sha256:" + "d" * 64)  # same key/anchor/origin, new release
+    r = client.post("/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key))
+    assert r.status_code == 409 and r.json()["error"]["code"] == "enrollment_idempotency_conflict"
+
+
+def test_replay_after_origin_change_conflicts(client, session):
+    key = secrets.token_urlsafe(24)
+    assert (
+        client.post(
+            "/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key)
+        ).status_code
+        == 201
+    )
+    _rotate(session, controller_origin="https://controller-moved.example.test")
+    r = client.post("/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key))
+    assert r.status_code == 409 and r.json()["error"]["code"] == "enrollment_idempotency_conflict"
+
+
+# --- R3: the service must not roll back the caller's outer transaction ---------------------------
+
+
+def test_replay_preserves_the_callers_outer_transaction(client, session, principal):
+    from secp_api import audit
+    from secp_api.enums import AuditAction
+    from secp_api.services import worker_enrollment as svc
+    from sqlalchemy import text
+
+    key = secrets.token_urlsafe(24)
+    # a committed original so the next attempt collides
+    client.post("/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key))
+    # stage an unrelated audit row in the caller's tx, THEN trigger a replay via the service
+    audit.record(
+        session,
+        action=AuditAction.authorization_denied,
+        resource_type="unrelated",
+        resource_id="keep-me",
+        actor="t",
+        organization_id=principal.organization_id,
+    )
+    result = svc.create_supported_invitation(
+        session,
+        principal,
+        idempotency_key=key,
+        deployment_site_label=SITE,
+        ttl_seconds=3600,
+        created_at="2026-07-21T00:00:00Z",
+        expires_at="2026-07-21T01:00:00Z",
+    )
+    session.commit()
+    assert result.deduplicated is True  # exact replay
+    # the unrelated staged row survived (only the speculative insert's savepoint was rolled back)
+    n = session.execute(
+        text("SELECT count(*) FROM audit_event WHERE resource_id='keep-me'")
+    ).scalar_one()
+    assert n == 1
+
+
+def test_conflict_preserves_the_callers_outer_transaction(client, session, principal):
+    from secp_api import audit
+    from secp_api.enums import AuditAction
+    from secp_api.services import worker_enrollment as svc
+    from sqlalchemy import text
+
+    key = secrets.token_urlsafe(24)
+    client.post(
+        "/api/v1/enrollment/invitations",
+        json=_create_body(idempotency_key=key, deployment_site_label="rack-01.eu_a"),
+    )
+    audit.record(
+        session,
+        action=AuditAction.authorization_denied,
+        resource_type="unrelated",
+        resource_id="survivor",
+        actor="t",
+        organization_id=principal.organization_id,
+    )
+    with pytest.raises(WorkerEnrollmentError) as ei:
+        svc.create_supported_invitation(
+            session,
+            principal,
+            idempotency_key=key,
+            deployment_site_label="rack-99.elsewhere",  # different bound input -> conflict
+            ttl_seconds=3600,
+            created_at="2026-07-21T00:00:00Z",
+            expires_at="2026-07-21T01:00:00Z",
+        )
+    assert ei.value.code == "enrollment_idempotency_conflict"
+    session.commit()
+    n = session.execute(
+        text("SELECT count(*) FROM audit_event WHERE resource_id='survivor'")
+    ).scalar_one()
+    assert n == 1
+
+
+# --- R4: a delayed replay returns the IMMUTABLE original create response -------------------------
+
+
+def test_replay_after_progression_returns_the_original_invited_response(client):
+    key = secrets.token_urlsafe(24)
+    r1 = client.post(
+        "/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key)
+    ).json()
+    # advance the enrollment past invited (revoke -> refused/revision 1)
+    assert (
+        client.post(
+            f"/api/v1/enrollment/{r1['enrollment_id']}/revoke", json={"expected_revision": 0}
+        ).status_code
+        == 200
+    )
+    # a delayed replay STILL returns the byte-equivalent original invited/revision-0 response
+    r2 = client.post(
+        "/api/v1/enrollment/invitations", json=_create_body(idempotency_key=key)
+    ).json()
+    assert r2 == r1
+    assert r2["state"] == "invited" and r2["revision"] == 0
 
 
 # --- F5: idempotent creation across lost responses -----------------------------------------------
