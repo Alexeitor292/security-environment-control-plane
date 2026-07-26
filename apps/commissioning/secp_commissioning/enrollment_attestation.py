@@ -1,0 +1,219 @@
+"""Shared pure Ed25519 detached-attestation primitive for the worker-enrollment exchange (PR5H-B1).
+
+Both planes import this ONE pure primitive, so the signed bytes are byte-identical on both sides and
+the protocol is never loosely duplicated:
+
+* the WORKER (``secp_worker`` EnrollmentTransport) SIGNS its proof-of-possession binding and its
+  worker-result with its own locally-generated Ed25519 key, and
+* the CONTROLLER (``secp_api`` enrollment surface) VERIFIES those signatures using only the
+  presented PUBLIC key + the pinned key id — no private key ever crosses the boundary.
+
+Boundary-safe by construction: it imports only ``cryptography`` and the shared
+``secp_commissioning.canonical`` primitive — never any API / worker / management / deployment
+behavior — and the pure enrollment CONTRACT mirror (which forbids ``cryptography``) does not import
+it.
+
+The signed bytes are a DOMAIN-SEPARATED digest envelope (never the full record), byte-for-byte
+compatible with the deployment cross-host-handoff attestation (proven by a byte-parity test)::
+
+    canonical_json({"domain": D, "kind": K, "digest": <sha256>}).encode("ascii") + b"\\n"
+
+The enrollment exchange uses its OWN domain, so an enrollment attestation can never be replayed as a
+discovery-activation handoff (and vice versa), and the ``kind`` separates the binding-PoP from the
+worker-result within the exchange.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+
+from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_digest
+
+#: The enrollment exchange's own attestation domain (distinct from the discovery-activation one).
+ENROLLMENT_ATTESTATION_DOMAIN = "secp.worker-enrollment.exchange/v1"
+#: The two ``kind`` labels within the exchange (domain-separated within the domain).
+POP_KIND = "worker-enrollment-binding-pop"
+RESULT_KIND = "worker-enrollment-result"
+#: The canonical schema tags for the two structured claims.
+BINDING_SCHEMA = "secp.worker-enrollment.binding/v1"
+RESULT_SCHEMA = "secp.worker-enrollment.result/v1"
+
+_RAW = serialization.Encoding.Raw
+_PUBLIC = serialization.PublicFormat.Raw
+_PRIVATE = serialization.PrivateFormat.Raw
+_NO_ENCRYPTION = serialization.NoEncryption()
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_HEX128 = re.compile(r"[0-9a-f]{128}")
+
+
+class AttestationError(Exception):
+    """A bounded, closed attestation refusal — carries ONLY a reason code, never key material, a
+    signed message, a path, an endpoint or a raw exception."""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+@dataclass(frozen=True)
+class DetachedAttestation:
+    """A detached Ed25519 attestation over a domain-separated digest message. PUBLIC material only —
+    it carries no private key and no signed plaintext, only the public key, its key id and the
+    signature."""
+
+    algorithm: str  # always "Ed25519"
+    key_id: str  # sha256 of the RAW public key bytes
+    public_key_hex: str
+    signature: str
+
+
+def key_id_for(public_key_hex: str) -> str:
+    """The key id pinned to a raw 32-byte Ed25519 public key: sha256 of the RAW key BYTES (not the
+    ASCII hex), matching the controller identity's ``controller_key_id`` derivation."""
+    return "sha256:" + hashlib.sha256(bytes.fromhex(public_key_hex)).hexdigest()
+
+
+def attestation_message(*, domain: str, kind: str, digest: str) -> bytes:
+    """The exact bytes signed/verified: a domain-separated digest envelope (not the full record)."""
+    return (
+        canonical_json({"domain": domain, "kind": kind, "digest": digest}).encode("ascii") + b"\n"
+    )
+
+
+def sign_detached(
+    private_key_hex: str, *, domain: str, kind: str, digest: str
+) -> DetachedAttestation:
+    """Produce a detached attestation over ``(domain, kind, digest)``. Used by the worker (its own
+    locally-generated key) and by tests; production controllers commit NO private key (that signer
+    is the root-gated PR5H-B2 bootstrap)."""
+    if not is_sha256_digest(digest):
+        raise AttestationError("attestation_digest_invalid")
+    try:
+        key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_key_hex))
+    except (ValueError, TypeError):
+        raise AttestationError("attestation_key_invalid") from None
+    public_hex = key.public_key().public_bytes(_RAW, _PUBLIC).hex()
+    signature = key.sign(attestation_message(domain=domain, kind=kind, digest=digest)).hex()
+    return DetachedAttestation(
+        algorithm="Ed25519",
+        key_id=key_id_for(public_hex),
+        public_key_hex=public_hex,
+        signature=signature,
+    )
+
+
+def verify_detached(
+    attestation: DetachedAttestation, *, expected_key_id: str, domain: str, kind: str, digest: str
+) -> None:
+    """Verify a detached attestation against the pinned ``expected_key_id`` and the exact
+    ``(domain, kind, digest)``. Raises :class:`AttestationError` (bounded reason code) on ANY
+    failure — a malformed field, an unpinned key id, a mismatched key-id/public-key, or an invalid
+    signature — and never raises a raw exception or returns a partial result."""
+    if attestation.algorithm != "Ed25519":
+        raise AttestationError("attestation_algorithm_invalid")
+    if not is_sha256_digest(expected_key_id) or not is_sha256_digest(attestation.key_id):
+        raise AttestationError("attestation_signer_not_pinned")
+    if attestation.key_id != expected_key_id:
+        raise AttestationError("attestation_signer_not_pinned")
+    if not _HEX64.fullmatch(attestation.public_key_hex) or not _HEX128.fullmatch(
+        attestation.signature
+    ):
+        raise AttestationError("attestation_invalid")
+    # the pinned key id MUST derive from the presented public key — no free-floating trust anchor
+    if key_id_for(attestation.public_key_hex) != attestation.key_id:
+        raise AttestationError("attestation_key_id_mismatch")
+    if not is_sha256_digest(digest):
+        raise AttestationError("attestation_digest_invalid")
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(attestation.public_key_hex)).verify(
+            bytes.fromhex(attestation.signature),
+            attestation_message(domain=domain, kind=kind, digest=digest),
+        )
+    except Exception:
+        raise AttestationError("attestation_signature_invalid") from None
+
+
+def worker_binding_claim(
+    *,
+    enrollment_id: str,
+    invitation_id: str,
+    controller_installation_id: str,
+    controller_key_id: str,
+    controller_transaction_id: str,
+    worker_installation_id: str,
+    worker_key_id: str,
+    release_digest: str,
+    expires_at: str,
+) -> dict[str, str]:
+    """The canonical worker proof-of-possession binding claim. It binds the worker's presented key
+    to the EXACT enrollment, invitation, controller identity, transaction, release and expiry, so a
+    valid signature proves both key possession AND agreement to that exact context — a signature can
+    never be replayed for a different enrollment, controller or release. Both the worker (which
+    signs) and the controller (which reconstructs it from the authoritative invitation) build it
+    HERE, so the two sides never drift."""
+    return {
+        "schema": BINDING_SCHEMA,
+        "enrollment_id": enrollment_id,
+        "invitation_id": invitation_id,
+        "controller_installation_id": controller_installation_id,
+        "controller_key_id": controller_key_id,
+        "controller_transaction_id": controller_transaction_id,
+        "worker_installation_id": worker_installation_id,
+        "worker_key_id": worker_key_id,
+        "release_digest": release_digest,
+        "expires_at": expires_at,
+    }
+
+
+def worker_result_claim(
+    *,
+    enrollment_id: str,
+    controller_transaction_id: str,
+    worker_key_id: str,
+    predecessor_digest: str,
+    release_digest: str,
+    outcome: str,
+) -> dict[str, str]:
+    """The canonical signed worker-result claim: binds the result to the enrollment, transaction,
+    worker key, the predecessor state digest (chaining it to the exact prior state) and the exact
+    release, plus a bounded outcome token. No raw handoff bytes, host path or secret."""
+    return {
+        "schema": RESULT_SCHEMA,
+        "enrollment_id": enrollment_id,
+        "controller_transaction_id": controller_transaction_id,
+        "worker_key_id": worker_key_id,
+        "predecessor_digest": predecessor_digest,
+        "release_digest": release_digest,
+        "outcome": outcome,
+    }
+
+
+def claim_digest(claim: dict[str, str]) -> str:
+    """The ``sha256:`` content address of a canonical claim — the digest that is actually signed."""
+    return sha256_digest(claim)
+
+
+__all__ = [
+    "BINDING_SCHEMA",
+    "ENROLLMENT_ATTESTATION_DOMAIN",
+    "POP_KIND",
+    "RESULT_KIND",
+    "RESULT_SCHEMA",
+    "AttestationError",
+    "DetachedAttestation",
+    "attestation_message",
+    "claim_digest",
+    "key_id_for",
+    "sign_detached",
+    "verify_detached",
+    "worker_binding_claim",
+    "worker_result_claim",
+]

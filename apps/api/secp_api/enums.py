@@ -2102,3 +2102,6 @@ class WorkerEnrollmentErrorCode(str, Enum):
     # trusted exchange is the authenticated EnrollmentTransport); sealed closed unless a
     # deployment-local dev/test profile explicitly enables them, and refused in production.
     progression_sealed = "enrollment_progression_sealed"
+    # T2: a worker proof-of-possession / result attestation failed controller-side verification
+    # (bad signature, unpinned key, or a claim that disagrees with the authoritative invitation).
+    pop_invalid = "enrollment_pop_invalid"
