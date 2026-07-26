@@ -39,12 +39,18 @@ from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha25
 
 #: The enrollment exchange's own attestation domain (distinct from the discovery-activation one).
 ENROLLMENT_ATTESTATION_DOMAIN = "secp.worker-enrollment.exchange/v1"
-#: The two ``kind`` labels within the exchange (domain-separated within the domain).
+#: The ``kind`` labels within the exchange (domain-separated within the domain): the worker
+#: binding proof-of-possession, the controller-signed offer, and the signed worker result.
 POP_KIND = "worker-enrollment-binding-pop"
+OFFER_KIND = "worker-enrollment-controller-offer"
 RESULT_KIND = "worker-enrollment-result"
-#: The canonical schema tags for the two structured claims.
+#: The canonical schema tags for the three structured claims.
 BINDING_SCHEMA = "secp.worker-enrollment.binding/v1"
+OFFER_SCHEMA = "secp.worker-enrollment.offer/v1"
 RESULT_SCHEMA = "secp.worker-enrollment.result/v1"
+#: Domain separator for the dedicated-enrollment-key proof-of-possession handle (see
+#: ``enrollment_key_proof_id_for``) — distinct from any signed-message domain.
+_ENROLLMENT_KEY_PROOF_DOMAIN = b"secp/controller-enrollment-key-proof/v1"
 
 _RAW = serialization.Encoding.Raw
 _PUBLIC = serialization.PublicFormat.Raw
@@ -196,6 +202,53 @@ def worker_result_claim(
     }
 
 
+def controller_offer_claim(
+    *,
+    enrollment_id: str,
+    invitation_id: str,
+    controller_installation_id: str,
+    controller_key_id: str,
+    controller_origin: str,
+    controller_transaction_id: str,
+    worker_installation_id: str,
+    worker_key_id: str,
+    release_digest: str,
+    expires_at: str,
+    predecessor_digest: str,
+) -> dict[str, str]:
+    """The canonical controller offer claim the controller's dedicated enrollment key signs. It
+    commits the offer to the EXACT enrollment, invitation, active controller identity/origin,
+    transaction, the exact worker key proven at bind, the release and expiry, and chains to the
+    bind-PoP it answers via ``predecessor_digest`` (mirroring the worker-result chaining). Both the
+    controller (which signs) and the worker (which verifies against the invitation's pinned
+    controller key) build it HERE, so the two sides never drift."""
+    return {
+        "schema": OFFER_SCHEMA,
+        "enrollment_id": enrollment_id,
+        "invitation_id": invitation_id,
+        "controller_installation_id": controller_installation_id,
+        "controller_key_id": controller_key_id,
+        "controller_origin": controller_origin,
+        "controller_transaction_id": controller_transaction_id,
+        "worker_installation_id": worker_installation_id,
+        "worker_key_id": worker_key_id,
+        "release_digest": release_digest,
+        "expires_at": expires_at,
+        "predecessor_digest": predecessor_digest,
+    }
+
+
+def enrollment_key_proof_id_for(public_key_hex: str) -> str:
+    """A deterministic, bounded, PUBLIC proof-of-possession handle for the dedicated controller
+    enrollment key, derived from its public key with domain separation. It is the persisted
+    ``enrollment_key_proof_id``: the signer recomputes it from the loaded private key's public half
+    and compares it to the persisted identity, proving possession without transporting the key. The
+    ``enrkp:`` domain prefix guarantees it can never collide with a plain ``sha256:`` source digest
+    (so the controller-identity key-separation invariant always holds)."""
+    raw = bytes.fromhex(public_key_hex)
+    return "enrkp:" + hashlib.sha256(_ENROLLMENT_KEY_PROOF_DOMAIN + raw).hexdigest()
+
+
 def claim_digest(claim: dict[str, str]) -> str:
     """The ``sha256:`` content address of a canonical claim — the digest that is actually signed."""
     return sha256_digest(claim)
@@ -204,6 +257,8 @@ def claim_digest(claim: dict[str, str]) -> str:
 __all__ = [
     "BINDING_SCHEMA",
     "ENROLLMENT_ATTESTATION_DOMAIN",
+    "OFFER_KIND",
+    "OFFER_SCHEMA",
     "POP_KIND",
     "RESULT_KIND",
     "RESULT_SCHEMA",
@@ -211,6 +266,8 @@ __all__ = [
     "DetachedAttestation",
     "attestation_message",
     "claim_digest",
+    "controller_offer_claim",
+    "enrollment_key_proof_id_for",
     "key_id_for",
     "sign_detached",
     "verify_detached",
