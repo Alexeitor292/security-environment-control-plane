@@ -510,7 +510,9 @@ def test_receipt_pointing_to_missing_revision_refuses(pg):
             now=NOW,
             expected_revision=bound.revision,
         )
-    assert ei.value.code in ("enrollment_history_inconsistent", "enrollment_receipt_conflict")
+    # T3: a receipt pointing at a non-existent history revision is corruption of an append-only
+    # record — the historical state cannot be rehydrated, so it refuses enrollment_state_corrupt.
+    assert ei.value.code == "enrollment_state_corrupt"
 
 
 def test_receipt_with_wrong_recorded_digest_refuses(pg):
@@ -544,7 +546,8 @@ def test_receipt_with_wrong_recorded_digest_refuses(pg):
             now=NOW,
             expected_revision=bound.revision,
         )
-    assert ei.value.code == "enrollment_receipt_conflict"
+    # T3: the receipt's recorded digest disagrees with the rehydrated history state's digest.
+    assert ei.value.code == "enrollment_state_corrupt"
 
 
 def test_rollback_of_failed_transition_leaves_no_partial_effects(pg):
