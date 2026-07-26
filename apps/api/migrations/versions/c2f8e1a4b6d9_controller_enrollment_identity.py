@@ -100,5 +100,17 @@ def upgrade() -> None:
     )
 
 
+    # T3: make the append-only revision history a TRUE immutable snapshot — persist the exact
+    # canonical state committed at each revision so a delayed idempotent retry returns the ORIGINAL
+    # step result, never the current head. Nullable for a portable ADD COLUMN; the commit path
+    # always populates it and rehydration refuses a NULL/mismatched snapshot as state_corrupt.
+    op.add_column(
+        "worker_enrollment_revision",
+        sa.Column("state_snapshot", sa.Text(), nullable=True),
+    )
+
+
 def downgrade() -> None:
+    with op.batch_alter_table("worker_enrollment_revision") as batch:
+        batch.drop_column("state_snapshot")
     op.drop_table("controller_enrollment_identity")

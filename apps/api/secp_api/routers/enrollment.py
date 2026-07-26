@@ -14,12 +14,18 @@ no outbound connection, and transports no private key or raw handoff record — 
 pure transition through the PR5H-A CAS service. Bounded ``WorkerEnrollmentError`` codes map to HTTP
 via the domain-error handler; no rejected input, endpoint, path or secret is ever echoed.
 
-Beyond create/status/revoke this slice also exposes the durable worker-progression steps —
-worker bind, controller offer, worker result, release verified, healthy — each a thin adapter over
-the PR5H-A CAS service (service-layer ``enrollment:progress`` authorization, organization/site
-enforcement, exact-retry through the existing receipts). The endpoints consume ONLY already-bound
-facts (a digest + transaction + signer key id); no raw private key, handoff-record bytes, provider
-action or operator action crosses this surface, and no outbound EnrollmentTransport is opened yet.
+The worker-progression steps — worker bind, controller offer, worker result, release verified,
+healthy — exist as thin adapters over the PR5H-A CAS service, but they are **claim-only**: RBAC
+authorizes an actor to *request* an operation; it is not proof that a worker owns a key, that a
+handoff was signed, that the release is running, or that the worker is healthy. They are therefore
+**NOT a supported trusted exchange** and are **SEALED by default** — sealed closed in production
+(``SECP_ENABLE_ENROLLMENT_PROGRESSION`` is refused there) and returning ``enrollment_progression_
+sealed`` unless a deployment-local development/test profile explicitly enables them to exercise the
+durable primitives. The supported, evidence-driven surface is the authenticated worker-initiated
+EnrollmentTransport (delivered separately): worker proof-of-possession, an internally-signed
+controller offer, a verified signed worker result, and controller-side verified/healthy decisions.
+The claim-only handlers take ONLY the caller's last-observed ``expected_revision``; the durable CAS
+coordinates are derived server-side and never cross the public boundary.
 """
 
 from __future__ import annotations
@@ -30,13 +36,15 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.config import Settings
+from secp_api.deps import current_principal, db_session, settings_dep
+from secp_api.enums import WorkerEnrollmentErrorCode as EC
+from secp_api.errors import WorkerEnrollmentError
 from secp_api.schemas_enrollment import (
     BindWorkerRequest,
     CreateEnrollmentInvitation,
     EnrollmentInvitationOut,
     EnrollmentStatusOut,
-    ExpectedToken,
     MarkHealthyRequest,
     RecordHandoffRequest,
     RevokeEnrollment,
@@ -46,6 +54,15 @@ from secp_api.services import worker_enrollment as svc
 from secp_api.worker_enrollment_contract import HandoffFacts
 
 router = APIRouter(prefix="/api/v1/enrollment", tags=["enrollment"])
+
+
+def _require_progression_enabled(settings: Settings) -> None:
+    """The claim-only progression steps are a sealed, non-supported surface. They fail closed unless
+    a deployment-local development/test profile explicitly enables them; production refuses the flag
+    entirely (see config). A sealed request is a bounded, redacted ``enrollment_progression_sealed``
+    — the trusted exchange is the authenticated EnrollmentTransport, not these routes."""
+    if not settings.enable_enrollment_progression:
+        raise WorkerEnrollmentError(EC.progression_sealed)
 
 
 def _utc_now() -> _dt.datetime:
@@ -116,14 +133,10 @@ def revoke_enrollment(
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
 
-def _expected(token: ExpectedToken) -> svc.ExpectedRevision:
-    # the caller's observed CAS coordinates, passed through verbatim to the durable service
-    return svc.ExpectedRevision(
-        revision=token.revision,
-        state_digest=token.state_digest,
-        sequence=token.sequence,
-        predecessor_digest=token.predecessor_digest,
-    )
+# --- SEALED claim-only progression steps (not a supported trusted exchange; see module docstring) -
+# Each carries ONLY the caller's ``expected_revision``; the service derives the durable CAS
+# coordinates from the authoritative loaded state. Gated closed by default via
+# ``_require_progression_enabled`` — the supported path is the authenticated EnrollmentTransport.
 
 
 @router.post("/{enrollment_id}/bind", response_model=EnrollmentStatusOut)
@@ -132,7 +145,9 @@ def bind_worker(
     body: BindWorkerRequest,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
+    settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
+    _require_progression_enabled(settings)
     outcome = svc.bind_worker(
         session,
         principal,
@@ -141,7 +156,7 @@ def bind_worker(
         worker_key_id=body.worker_key_id,
         transaction_id=body.transaction_id,
         now=_iso(_utc_now()),
-        expected=_expected(body.expected),
+        expected_revision=body.expected_revision,
     )
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
@@ -152,7 +167,9 @@ def record_controller_offer(
     body: RecordHandoffRequest,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
+    settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
+    _require_progression_enabled(settings)
     outcome = svc.record_offer(
         session,
         principal,
@@ -164,7 +181,7 @@ def record_controller_offer(
             signer_key_id=body.signer_key_id,
         ),
         now=_iso(_utc_now()),
-        expected=_expected(body.expected),
+        expected_revision=body.expected_revision,
     )
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
@@ -175,7 +192,9 @@ def record_worker_result(
     body: RecordHandoffRequest,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
+    settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
+    _require_progression_enabled(settings)
     outcome = svc.record_result(
         session,
         principal,
@@ -187,7 +206,7 @@ def record_worker_result(
             signer_key_id=body.signer_key_id,
         ),
         now=_iso(_utc_now()),
-        expected=_expected(body.expected),
+        expected_revision=body.expected_revision,
     )
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
@@ -198,14 +217,16 @@ def verify_release(
     body: VerifyReleaseRequest,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
+    settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
+    _require_progression_enabled(settings)
     outcome = svc.verify_release(
         session,
         principal,
         enrollment_id=enrollment_id,
         release_digest=body.release_digest,
         now=_iso(_utc_now()),
-        expected=_expected(body.expected),
+        expected_revision=body.expected_revision,
     )
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
@@ -216,12 +237,14 @@ def mark_enrollment_healthy(
     body: MarkHealthyRequest,
     session: Session = Depends(db_session),
     principal: Principal = Depends(current_principal),
+    settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
+    _require_progression_enabled(settings)
     outcome = svc.mark_enrollment_healthy(
         session,
         principal,
         enrollment_id=enrollment_id,
         now=_iso(_utc_now()),
-        expected=_expected(body.expected),
+        expected_revision=body.expected_revision,
     )
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())

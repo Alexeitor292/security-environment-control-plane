@@ -147,7 +147,7 @@ def _open_and_bind(factory, actor):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=svc.ExpectedRevision(0, state.digest(), 0, ""),
+            expected_revision=0,
         ).state
         s.commit()
     return state

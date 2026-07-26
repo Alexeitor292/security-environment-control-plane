@@ -373,6 +373,9 @@ class WorkerEnrollmentError(DomainError):
         "enrollment_invitation_expired": 409,
         "enrollment_invitation_conflict": 409,
         "enrollment_creation_conflict": 409,
+        # sealed, non-supported surface — "the endpoint is not a supported exchange" (mirrors the
+        # worker_admission 404 seal precedent)
+        "enrollment_progression_sealed": 404,
         "enrollment_internal_failure": 500,
         # surfaced pure transition-contract codes: an invalid input is 422, a state/lifecycle
         # conflict is 409 (the default for anything not explicitly listed)

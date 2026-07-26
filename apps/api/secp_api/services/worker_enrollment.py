@@ -162,6 +162,16 @@ def _verify_expected(loaded: LoadedEnrollment, expected: ExpectedRevision) -> No
         raise WorkerEnrollmentError(EC.revision_conflict)
 
 
+def _verify_expected_revision(loaded: LoadedEnrollment, expected_revision: int) -> None:
+    """The PUBLIC optimistic pre-check for a progression step: the caller's last-observed revision
+    (all a customer/worker/UI ever sees or supplies) must equal the loaded head's revision. The
+    internal CAS ``state_digest`` / ``sequence`` / ``predecessor_digest`` are DERIVED from the exact
+    loaded state — never caller-supplied — and the durable repository CAS still compare-and-swaps on
+    the head's ``(revision, state_digest)``, so a lost update / concurrent advance still refuses."""
+    if expected_revision != loaded.state.revision:
+        raise WorkerEnrollmentError(EC.revision_conflict)
+
+
 def _load_authorized(
     session: Session, actor: Principal, enrollment_id: str, claimed: ClaimedScope | None
 ) -> LoadedEnrollment:
@@ -198,18 +208,24 @@ def _serve_receipt(
     )
     if receipt is None:
         return None
-    # the recorded result must still agree with the append-only history and the current head
-    recorded = repo.revision_state_digest(
-        session, enrollment_id=loaded.state.enrollment_id, revision=receipt.resulting_revision
-    )
-    if recorded is None:
-        raise WorkerEnrollmentError(EC.history_inconsistent)
-    if recorded != receipt.resulting_state_digest:
-        raise WorkerEnrollmentError(EC.receipt_conflict)
-    if loaded.state.revision < receipt.resulting_revision:
+    # T3: a delayed exact retry returns the ORIGINAL step result — rehydrate the IMMUTABLE history
+    # state the receipt recorded (its ``resulting_revision``), never the current head. After the
+    # enrollment later reaches (say) healthy or refused, replaying bind still returns worker_bound.
+    try:
+        historical = repo.load_revision_state(
+            session, loaded.state.enrollment_id, receipt.resulting_revision
+        )
+    except RepositoryRefusal as exc:  # missing / malformed / tampered history snapshot
+        raise _surface(exc) from None
+    if historical is None:  # a receipt pointing at a non-existent revision is corruption
+        raise WorkerEnrollmentError(EC.state_corrupt)
+    # the rehydrated history digest must equal the digest the receipt independently recorded
+    if historical.digest() != receipt.resulting_state_digest:
+        raise WorkerEnrollmentError(EC.state_corrupt)
+    if loaded.state.revision < receipt.resulting_revision:  # head behind a recorded result
         raise WorkerEnrollmentError(EC.history_inconsistent)
     return TransitionOutcome(
-        state=loaded.state, committed_revision=receipt.resulting_revision, deduplicated=True
+        state=historical, committed_revision=receipt.resulting_revision, deduplicated=True
     )
 
 
@@ -528,7 +544,7 @@ def bind_worker(
     worker_key_id: str,
     transaction_id: str,
     now: str,
-    expected: ExpectedRevision,
+    expected_revision: int,
     claimed_scope: ClaimedScope | None = None,
 ) -> TransitionOutcome:
     """The nonce-consumption point: the first successful worker-identity binding. Consumes the
@@ -553,7 +569,7 @@ def bind_worker(
     served = _serve_receipt(session, loaded, step, input_digest)
     if served is not None:
         return served
-    _verify_expected(loaded, expected)
+    _verify_expected_revision(loaded, expected_revision)
 
     # authoritative invitation gate (unconsumed / unrevoked / unexpired), selected by enrollment id
     invitation = repo.load_invitation_for_update(session, enrollment_id)
@@ -602,7 +618,7 @@ def record_offer(
     enrollment_id: str,
     facts: HandoffFacts,
     now: str,
-    expected: ExpectedRevision,
+    expected_revision: int,
     claimed_scope: ClaimedScope | None = None,
 ) -> TransitionOutcome:
     return _advance_step(
@@ -617,7 +633,7 @@ def record_offer(
             "signer_key_id": facts.signer_key_id,
         },
         transition=lambda state: record_controller_offer(state, facts, now=now),
-        expected=expected,
+        expected_revision=expected_revision,
         claimed_scope=claimed_scope,
     )
 
@@ -629,7 +645,7 @@ def record_result(
     enrollment_id: str,
     facts: HandoffFacts,
     now: str,
-    expected: ExpectedRevision,
+    expected_revision: int,
     claimed_scope: ClaimedScope | None = None,
 ) -> TransitionOutcome:
     return _advance_step(
@@ -644,7 +660,7 @@ def record_result(
             "signer_key_id": facts.signer_key_id,
         },
         transition=lambda state: record_worker_result(state, facts, now=now),
-        expected=expected,
+        expected_revision=expected_revision,
         claimed_scope=claimed_scope,
     )
 
@@ -656,7 +672,7 @@ def verify_release(
     enrollment_id: str,
     release_digest: str,
     now: str,
-    expected: ExpectedRevision,
+    expected_revision: int,
     claimed_scope: ClaimedScope | None = None,
 ) -> TransitionOutcome:
     return _advance_step(
@@ -666,7 +682,7 @@ def verify_release(
         step="mark_verified",
         input_payload={"release_digest": release_digest},
         transition=lambda state: mark_verified(state, release_digest=release_digest, now=now),
-        expected=expected,
+        expected_revision=expected_revision,
         claimed_scope=claimed_scope,
     )
 
@@ -677,7 +693,7 @@ def mark_enrollment_healthy(
     *,
     enrollment_id: str,
     now: str,
-    expected: ExpectedRevision,
+    expected_revision: int,
     claimed_scope: ClaimedScope | None = None,
 ) -> TransitionOutcome:
     return _advance_step(
@@ -687,7 +703,7 @@ def mark_enrollment_healthy(
         step="mark_healthy",
         input_payload={},
         transition=lambda state: mark_healthy(state, now=now),
-        expected=expected,
+        expected_revision=expected_revision,
         claimed_scope=claimed_scope,
     )
 
@@ -700,7 +716,7 @@ def _advance_step(
     step: str,
     input_payload: dict[str, object],
     transition: Callable[[EnrollmentState], EnrollmentState],
-    expected: ExpectedRevision,
+    expected_revision: int,
     claimed_scope: ClaimedScope | None,
 ) -> TransitionOutcome:
     actor.require(Permission.enrollment_progress)
@@ -712,7 +728,7 @@ def _advance_step(
     served = _serve_receipt(session, loaded, step, input_digest)
     if served is not None:
         return served
-    _verify_expected(loaded, expected)
+    _verify_expected_revision(loaded, expected_revision)
 
     new_state = _run_pure(lambda: transition(loaded.state))
     if new_state is loaded.state:  # idempotent at-target with a lost receipt

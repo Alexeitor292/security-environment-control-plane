@@ -51,6 +51,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     Uuid,
 )
@@ -267,6 +268,11 @@ class WorkerEnrollmentRevision(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    #: The exact canonical state JSON committed at this revision — an immutable, append-only
+    #: snapshot so a delayed idempotent retry can return the ORIGINAL step result rather than the
+    #: current head. Nullable at the schema level (portable ADD COLUMN), but the trusted commit path
+    #: ALWAYS populates it and rehydration refuses a NULL/mismatched snapshot as ``state_corrupt``.
+    state_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("enrollment_id", "revision", name="uq_worker_enrollment_revision"),

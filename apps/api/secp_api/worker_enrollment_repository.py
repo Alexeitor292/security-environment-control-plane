@@ -23,12 +23,13 @@ semantics; this module only persists and re-validates.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Final
 
-from secp_commissioning.canonical import is_sha256_digest
+from secp_commissioning.canonical import canonical_json, is_sha256_digest
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -530,8 +531,78 @@ def _insert_revision_row(session: Session, state: EnrollmentState) -> None:
             state=state.state,
             state_digest=state.digest(),
             predecessor_digest=state.predecessor_digest,
+            # the immutable canonical snapshot of THIS revision (T3): a delayed idempotent retry
+            # rehydrates the original step result from here, never from the current head
+            state_snapshot=canonical_json(state.canonical()),
         )
     )
+
+
+def _rehydrate_revision_snapshot(row: RevisionRow) -> EnrollmentState:
+    """Rebuild the EnrollmentState from a revision row's canonical snapshot. A NULL / non-JSON /
+    structurally wrong snapshot is corruption of an append-only record — refuse, never repair."""
+    if row.state_snapshot is None:
+        raise _refuse("enrollment_state_corrupt")
+    try:
+        data = json.loads(row.state_snapshot)
+    except (ValueError, TypeError):
+        raise _refuse("enrollment_state_corrupt") from None
+    if not isinstance(data, dict):
+        raise _refuse("enrollment_state_corrupt")
+    try:
+        return EnrollmentState(
+            contract_version=data["contract_version"],
+            enrollment_id=data["enrollment_id"],
+            state=data["state"],
+            revision=data["revision"],
+            sequence=data["sequence"],
+            predecessor_digest=data["predecessor_digest"],
+            controller_installation_id=data["controller_installation_id"],
+            controller_key_id=data["controller_key_id"],
+            worker_installation_id=data["worker_installation_id"],
+            worker_key_id=data["worker_key_id"],
+            release_digest=data["release_digest"],
+            transaction_id=data["transaction_id"],
+            offer_digest=data["offer_digest"],
+            result_digest=data["result_digest"],
+            expires_at=data["expires_at"],
+            updated_at=data["updated_at"],
+            refusal_reason=data["refusal_reason"],
+        )
+    except (KeyError, TypeError):
+        raise _refuse("enrollment_state_corrupt") from None
+
+
+def load_revision_state(
+    session: Session, enrollment_id: str, revision: int
+) -> EnrollmentState | None:
+    """Rehydrate the IMMUTABLE state committed at ``revision`` from its append-only canonical
+    snapshot, fully validated. Returns None ONLY if the revision does not exist; a present-but-
+    missing/malformed/digest-mismatched snapshot is corruption (``enrollment_state_corrupt``), never
+    silently repaired. The recomputed canonical digest MUST equal the persisted history digest, and
+    the redundant history columns must agree with the snapshot — so a tampered snapshot cannot load.
+    """
+    row = load_revision_row(session, enrollment_id, revision)
+    if row is None:
+        return None
+    state = _rehydrate_revision_snapshot(row)
+    if state.contract_version != ENROLLMENT_CONTRACT_VERSION:
+        raise _refuse("enrollment_state_corrupt")
+    if state.state not in WORKER_ENROLLMENT_STATES:
+        raise _refuse("enrollment_state_corrupt")
+    if not is_sha256_digest(state.enrollment_id) or state.enrollment_id != enrollment_id:
+        raise _refuse("enrollment_state_corrupt")
+    if (
+        state.state != row.state
+        or state.revision != row.revision
+        or state.revision != revision
+        or state.predecessor_digest != row.predecessor_digest
+    ):
+        raise _refuse("enrollment_state_corrupt")
+    # THE integrity compare: the recomputed canonical digest must equal the persisted history digest
+    if state.digest() != row.state_digest:
+        raise _refuse("enrollment_state_corrupt")
+    return state
 
 
 # --------------------------------------------------------------------------- transition write (CAS)

@@ -264,12 +264,14 @@ def test_invitation_consumption_is_conditional_and_inside_the_bind_transaction()
 
 
 def test_step_receipt_retry_precedes_stale_expected_token_rejection() -> None:
+    # T1: the public progression steps carry only ``expected_revision``; the revision pre-check is
+    # ``_verify_expected_revision``. The receipt-first ordering invariant is unchanged.
     for name in ("bind_worker", "_advance_step"):
         fn = _function(SERVICE, name)
         serve = _statement_index(fn, lambda s: _mentions(s, "_serve_receipt("))
-        verify = _statement_index(fn, lambda s: _mentions(s, "_verify_expected("))
+        verify = _statement_index(fn, lambda s: _mentions(s, "_verify_expected_revision("))
         assert serve is not None and verify is not None, name
-        assert serve < verify, f"{name}: receipt dedup must precede the expected-token check"
+        assert serve < verify, f"{name}: receipt dedup must precede the expected-revision check"
 
 
 def test_lifecycle_history_retry_precedes_stale_expected_token_rejection() -> None:

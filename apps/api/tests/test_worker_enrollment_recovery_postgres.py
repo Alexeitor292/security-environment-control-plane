@@ -134,7 +134,7 @@ def _bind(factory, actor, state):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         return out.state
@@ -148,7 +148,7 @@ def _offer(factory, actor, state):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         return out.state
@@ -162,7 +162,7 @@ def _result(factory, actor, state):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("worker-result", RESULT_D, TXN, WORKER_KEY),
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         return out.state
@@ -176,7 +176,7 @@ def _verify(factory, actor, state):
             enrollment_id=state.enrollment_id,
             release_digest=RELEASE,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         return out.state
@@ -218,7 +218,7 @@ def test_restart_after_each_step_sees_the_committed_state(pg):
 def _retry(factory, actor, step: str, prior):
     """Replay ``step`` exactly from a FRESH committed session, using the token first sent."""
     with factory() as s:
-        expected = _expected(prior)
+        expected_revision = prior.revision
         if step == "bind":
             out = svc.bind_worker(
                 s,
@@ -228,7 +228,7 @@ def _retry(factory, actor, step: str, prior):
                 worker_key_id=WORKER_KEY,
                 transaction_id=TXN,
                 now=NOW,
-                expected=expected,
+                expected_revision=expected_revision,
             )
         elif step == "offer":
             out = svc.record_offer(
@@ -237,7 +237,7 @@ def _retry(factory, actor, step: str, prior):
                 enrollment_id=prior.enrollment_id,
                 facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
                 now=NOW,
-                expected=expected,
+                expected_revision=expected_revision,
             )
         elif step == "result":
             out = svc.record_result(
@@ -246,7 +246,7 @@ def _retry(factory, actor, step: str, prior):
                 enrollment_id=prior.enrollment_id,
                 facts=contract.HandoffFacts("worker-result", RESULT_D, TXN, WORKER_KEY),
                 now=NOW,
-                expected=expected,
+                expected_revision=expected_revision,
             )
         else:
             out = svc.verify_release(
@@ -255,7 +255,7 @@ def _retry(factory, actor, step: str, prior):
                 enrollment_id=prior.enrollment_id,
                 release_digest=RELEASE,
                 now=NOW,
-                expected=expected,
+                expected_revision=expected_revision,
             )
         s.commit()
         return out
@@ -409,7 +409,7 @@ def test_healthy_and_terminal_rows_are_not_swept(pg):
     )
     with factory() as s:
         h = svc.mark_enrollment_healthy(
-            s, actor, enrollment_id=h.enrollment_id, now=NOW, expected=_expected(h)
+            s, actor, enrollment_id=h.enrollment_id, now=NOW, expected_revision=h.revision
         ).state
         s.commit()
     # already recovery_required (distinct nonce; transaction id may match — enrollment_id differs)

@@ -6,8 +6,9 @@ portable SQLite suite, every race here uses INDEPENDENT sessions on separate con
 "concurrency" would not prove the CAS / row-lock / unique-constraint guarantees.
 
 Proven here: exactly-one-winner for concurrent binds and concurrent transitions from one revision;
-stale-revision / stale-digest / wrong-predecessor refusals; duplicate-nonce and concurrent-nonce
-single-winner; exact-retry with no second history row; conflicting-retry refusal; cross-org / cross-
+stale-revision refusal (T1: the public boundary carries only ``expected_revision``); duplicate-nonce
+and concurrent-nonce single-winner; exact-retry with no second history row; conflicting-retry
+refusal; cross-org / cross-
 site isolation; participant-key/installation collision and corrupt-digest/broken-chain rehydration
 refusals; rollback atomicity leaving no partial state/nonce/revision/receipt; and that the live
 schema head is exactly ``c2f8e1a4b6d9``.
@@ -140,7 +141,7 @@ def _bind(factory, actor, state, **over) -> contract.EnrollmentState:
             worker_key_id=over.get("worker_key_id", WORKER_KEY),
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         return out.state
@@ -171,7 +172,7 @@ def test_two_concurrent_binds_exactly_one_commits(pg):
                     worker_key_id=key,
                     transaction_id=TXN,
                     now=NOW,
-                    expected=_expected(state),
+                    expected_revision=state.revision,
                 )
                 s.commit()
                 return "committed"
@@ -224,7 +225,7 @@ def test_two_concurrent_transitions_from_one_revision_exactly_one_commits(pg):
                         enrollment_id=state.enrollment_id,
                         facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
                         now=NOW,
-                        expected=_expected(state),
+                        expected_revision=state.revision,
                     )
                 else:
                     svc.refuse_enrollment(
@@ -299,46 +300,27 @@ def test_stale_revision_refuses(pg):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(state),  # stale rev-0 token
+            expected_revision=state.revision,  # stale rev-0 token
         )
     assert ei.value.code == "enrollment_revision_conflict"
     assert bound.revision == 1
 
 
-def test_stale_state_digest_refuses(pg):
+def test_stale_expected_revision_refuses(pg):
+    # T1: the public boundary carries ONLY expected_revision; the internal state_digest / sequence /
+    # predecessor are derived from the loaded head. A FRESH step (no receipt) with a stale
+    # expected_revision refuses a bounded revision_conflict (the durable head CAS is unchanged).
     factory, actor, _ = pg
     state = _open(factory, actor, nonce="sha256:" + "b" * 64)
-    bad = svc.ExpectedRevision(
-        revision=0, state_digest="sha256:" + "0" * 64, sequence=0, predecessor_digest=""
-    )
+    _bind(factory, actor, state)  # advances the head to revision 1
     with factory() as s, pytest.raises(WorkerEnrollmentError) as ei:
-        svc.bind_worker(
+        svc.record_offer(
             s,
             actor,
             enrollment_id=state.enrollment_id,
-            worker_installation_id="worker-bbbbbbbb",
-            worker_key_id=WORKER_KEY,
-            transaction_id=TXN,
+            facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=bad,
-        )
-    assert ei.value.code == "enrollment_revision_conflict"
-
-
-def test_wrong_predecessor_refuses(pg):
-    factory, actor, _ = pg
-    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
-    bad = replace(_expected(state), predecessor_digest="sha256:" + "e" * 64)
-    with factory() as s, pytest.raises(WorkerEnrollmentError) as ei:
-        svc.bind_worker(
-            s,
-            actor,
-            enrollment_id=state.enrollment_id,
-            worker_installation_id="worker-bbbbbbbb",
-            worker_key_id=WORKER_KEY,
-            transaction_id=TXN,
-            now=NOW,
-            expected=bad,
+            expected_revision=0,  # stale: the head is now at revision 1
         )
     assert ei.value.code == "enrollment_revision_conflict"
 
@@ -357,7 +339,7 @@ def test_exact_retry_returns_committed_revision_without_second_history_row(pg):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         after = s.execute(text("SELECT count(*) FROM worker_enrollment_revision")).scalar_one()
@@ -375,7 +357,7 @@ def test_conflicting_retry_refuses(pg):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         from secp_api import worker_enrollment_repository as repo
@@ -388,7 +370,7 @@ def test_conflicting_retry_refuses(pg):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", "sha256:" + "9" * 64, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(offered),
+            expected_revision=offered.revision,
         )
     assert ei.value.code in ("enrollment_replay", "enrollment_wrong_state")
 
@@ -526,7 +508,7 @@ def test_receipt_pointing_to_missing_revision_refuses(pg):
             enrollment_id=bound.enrollment_id,
             release_digest=RELEASE,
             now=NOW,
-            expected=_expected(bound),
+            expected_revision=bound.revision,
         )
     assert ei.value.code in ("enrollment_history_inconsistent", "enrollment_receipt_conflict")
 
@@ -560,7 +542,7 @@ def test_receipt_with_wrong_recorded_digest_refuses(pg):
             enrollment_id=bound.enrollment_id,
             release_digest=RELEASE,
             now=NOW,
-            expected=_expected(bound),
+            expected_revision=bound.revision,
         )
     assert ei.value.code == "enrollment_receipt_conflict"
 
@@ -579,7 +561,7 @@ def test_rollback_of_failed_transition_leaves_no_partial_effects(pg):
                 worker_key_id=CTRL_KEY,
                 transaction_id=TXN,
                 now=NOW,
-                expected=_expected(state),
+                expected_revision=state.revision,
             )
             s.commit()
             committed = True
@@ -618,7 +600,7 @@ def test_malformed_offer_digest_refused_by_app_and_nothing_commits(pg):
                     "controller-offer", "sha256:" + "g" * 64, TXN, CTRL_KEY
                 ),
                 now=NOW,
-                expected=_expected(bound),
+                expected_revision=bound.revision,
             )
         assert ei.value.code == "enrollment_handoff_invalid"
         s.rollback()
@@ -681,7 +663,7 @@ def test_over_width_transition_timestamp_refused_before_pg_persistence(pg):
                 worker_key_id=WORKER_KEY,
                 transaction_id=TXN,
                 now=too_long_now,
-                expected=_expected(state),
+                expected_revision=state.revision,
             )
         assert ei.value.code == "enrollment_time_invalid"
         s.rollback()

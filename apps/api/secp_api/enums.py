@@ -2098,3 +2098,7 @@ class WorkerEnrollmentErrorCode(str, Enum):
     identity_conflict = "enrollment_identity_conflict"  # concurrent controller-identity rotation
     identity_invalid = "enrollment_identity_invalid"  # malformed/mis-bound verified identity proof
     idempotency_conflict = "enrollment_idempotency_conflict"  # same key, different bound input
+    # SECP-PR5H-B1 T2: the claim-only progression steps are a sealed, non-supported surface (the
+    # trusted exchange is the authenticated EnrollmentTransport); sealed closed unless a
+    # deployment-local dev/test profile explicitly enables them, and refused in production.
+    progression_sealed = "enrollment_progression_sealed"

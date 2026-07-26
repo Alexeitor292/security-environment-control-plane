@@ -557,12 +557,13 @@ def test_same_key_different_site_refuses_conflict(client):
     assert r.json()["error"]["code"] == "enrollment_idempotency_conflict"
 
 
-# --- worker submission/progression slice: bind / offer / result / verify / healthy over HTTP ------
+# --- SEALED claim-only progression steps: bind / offer / result / verify / healthy over HTTP ------
 #
-# Each endpoint is a thin adapter over the PR5H-A durable CAS service: service-layer
-# ``enrollment:progress`` authorization, the organization boundary, and exact-retry through the
-# existing step receipts. Endpoints consume ONLY already-bound facts (a digest + transaction +
-# signer key id) — never raw handoff bytes or a private key — and open no outbound transport.
+# T1: the public boundary carries ONLY ``expected_revision`` (the small integer every response
+# already returns) — the durable CAS state_digest / sequence / predecessor are derived server-side.
+# A real worker/CLI/UI therefore drives the whole lifecycle from supported HTTP responses alone; NO
+# test helper below reads the database to CONSTRUCT a request (only verification reads do). The
+# routes are SEALED by default and enabled here via a deployment-local dev/test settings profile.
 
 WORKER_HEX = (b"\x22" * 32).hex()
 WORKER_KEY = sha256_digest_of_hex(WORKER_HEX)
@@ -571,157 +572,233 @@ RESULT_D = "sha256:" + "d" * 64
 WORKER_INSTALL = "worker-bbbbbbbb"
 
 
-def _fresh(engine):
+def _enable_progression(client: TestClient) -> TestClient:
+    """Enable the sealed progression routes via the deployment-local dev/test profile."""
+    from secp_api.config import Settings
+    from secp_api.deps import settings_dep
+
+    client.app.dependency_overrides[settings_dep] = lambda: Settings(
+        app_env="dev", enable_enrollment_progression=True
+    )
+    return client
+
+
+@pytest.fixture
+def pclient(client):
+    """A client with the sealed progression profile enabled (default ``client`` keeps it sealed)."""
+    return _enable_progression(client)
+
+
+def _db(engine):
+    # VERIFICATION-only fresh session (never used to build a request) — asserts durable invariants
     from sqlalchemy.orm import Session
 
     return Session(engine)
 
 
-def _create(client, **over) -> tuple[str, str]:
-    # returns (enrollment_id, transaction_id): the worker echoes the invitation's server-issued
-    # transaction id on every progression step — it is not a value the worker invents
+def _create(client, **over) -> tuple[str, str, int]:
+    # (enrollment_id, transaction_id, revision) from the create RESPONSE — the worker echoes the
+    # invitation's server-issued transaction id and drives from the response revision, not the DB
     out = client.post("/api/v1/enrollment/invitations", json=_create_body(**over)).json()
-    return out["enrollment_id"], out["transaction_id"]
+    return out["enrollment_id"], out["transaction_id"], out["revision"]
 
 
-def _token(engine, enrollment_id: str) -> dict:
-    # the caller's observed CAS coordinates, read from a fresh session so it always reflects the
-    # latest committed head (the secret-free status projection deliberately omits these)
-    from secp_api import worker_enrollment_repository as repo
-
-    with _fresh(engine) as s:
-        loaded = repo.load_read_only(s, enrollment_id)
-        assert loaded is not None, enrollment_id
-        st = loaded.state
-        return {
-            "revision": st.revision,
-            "state_digest": st.digest(),
-            "sequence": st.sequence,
-            "predecessor_digest": st.predecessor_digest,
-        }
-
-
-def _bind_body(engine, eid: str, txn: str) -> dict:
-    return {
+def _bind(client, eid, txn, expected_revision, **over):
+    body = {
         "worker_installation_id": WORKER_INSTALL,
         "worker_key_id": WORKER_KEY,
         "transaction_id": txn,
-        "expected": _token(engine, eid),
+        "expected_revision": expected_revision,
     }
+    body.update(over)
+    return client.post(f"/api/v1/enrollment/{eid}/bind", json=body)
 
 
-def _drive_to_healthy(client, engine, eid: str, txn: str) -> None:
-    assert (
-        client.post(f"/api/v1/enrollment/{eid}/bind", json=_bind_body(engine, eid, txn)).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            f"/api/v1/enrollment/{eid}/offer",
-            json={
-                "digest": OFFER_D,
-                "transaction_id": txn,
-                "signer_key_id": CTRL_KEY,
-                "expected": _token(engine, eid),
-            },
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            f"/api/v1/enrollment/{eid}/result",
-            json={
-                "digest": RESULT_D,
-                "transaction_id": txn,
-                "signer_key_id": WORKER_KEY,
-                "expected": _token(engine, eid),
-            },
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            f"/api/v1/enrollment/{eid}/verify",
-            json={"release_digest": RELEASE, "expected": _token(engine, eid)},
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            f"/api/v1/enrollment/{eid}/healthy",
-            json={"expected": _token(engine, eid)},
-        ).status_code
-        == 200
-    )
-
-
-def test_progression_bind_offer_result_verify_healthy_over_http(client, engine):
-    eid, txn = _create(client)
-
-    b = client.post(f"/api/v1/enrollment/{eid}/bind", json=_bind_body(engine, eid, txn))
-    assert b.status_code == 200, b.text
-    assert b.json()["state"] == "worker_bound" and b.json()["revision"] == 1
-    assert b.json()["worker_installation_id"] == WORKER_INSTALL
-    assert b.json()["worker_key_fingerprint"]  # a fingerprint, not the full key
-    assert "controller_trust_anchor_hex" not in b.json()  # projection stays secret-free
-
-    o = client.post(
+def _offer(client, eid, txn, expected_revision, *, digest=OFFER_D, signer=CTRL_KEY):
+    return client.post(
         f"/api/v1/enrollment/{eid}/offer",
         json={
-            "digest": OFFER_D,
+            "digest": digest,
             "transaction_id": txn,
-            "signer_key_id": CTRL_KEY,
-            "expected": _token(engine, eid),
+            "signer_key_id": signer,
+            "expected_revision": expected_revision,
         },
     )
-    assert (
-        o.status_code == 200
-        and o.json()["state"] == "offer_transported"
-        and o.json()["revision"] == 2
-    )
 
-    r = client.post(
+
+def _result(client, eid, txn, expected_revision):
+    return client.post(
         f"/api/v1/enrollment/{eid}/result",
         json={
             "digest": RESULT_D,
             "transaction_id": txn,
             "signer_key_id": WORKER_KEY,
-            "expected": _token(engine, eid),
+            "expected_revision": expected_revision,
         },
     )
-    assert (
-        r.status_code == 200
-        and r.json()["state"] == "result_transported"
-        and r.json()["revision"] == 3
+
+
+def _verify(client, eid, expected_revision):
+    return client.post(
+        f"/api/v1/enrollment/{eid}/verify",
+        json={"release_digest": RELEASE, "expected_revision": expected_revision},
     )
 
-    v = client.post(
-        f"/api/v1/enrollment/{eid}/verify",
-        json={"release_digest": RELEASE, "expected": _token(engine, eid)},
+
+def _healthy(client, eid, expected_revision):
+    return client.post(
+        f"/api/v1/enrollment/{eid}/healthy", json={"expected_revision": expected_revision}
     )
+
+
+def _drive_to_healthy(client, eid, txn) -> None:
+    # each next expected_revision comes from the PRIOR response — never the database
+    r = _bind(client, eid, txn, 0)
+    assert r.status_code == 200, r.text
+    r = _offer(client, eid, txn, r.json()["revision"])
+    assert r.status_code == 200, r.text
+    r = _result(client, eid, txn, r.json()["revision"])
+    assert r.status_code == 200, r.text
+    r = _verify(client, eid, r.json()["revision"])
+    assert r.status_code == 200, r.text
+    r = _healthy(client, eid, r.json()["revision"])
+    assert r.status_code == 200, r.text
+
+
+# --- seal ----------------------------------------------------------------------------------------
+
+
+def test_progression_is_sealed_by_default(client):
+    # default profile: the claim-only routes are NOT a supported trusted exchange
+    eid, txn, rev = _create(client)
+    r = _bind(client, eid, txn, rev)
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "enrollment_progression_sealed"
+
+
+def test_production_refuses_the_progression_flag():
+    import pytest as _pytest
+    from secp_api.config import Settings
+
+    with _pytest.raises(ValueError, match="ENABLE_ENROLLMENT_PROGRESSION"):
+        Settings(
+            app_env="production",
+            auth_dev_mode=False,
+            workflow_dispatch_mode="temporal",
+            enable_enrollment_progression=True,
+            oidc_issuer="https://issuer.example.com",
+            oidc_audience="secp",
+            public_origin="https://app.example.com",
+        )
+
+
+# --- T1: public contract carries only expected_revision ------------------------------------------
+
+
+def test_public_progression_schemas_expose_no_internal_cas_fields():
+    # a customer/worker/UI must never compute/store/manage the durable CAS coordinates
+    from secp_api import schemas_enrollment as s
+
+    forbidden = {"state_digest", "sequence", "predecessor_digest"}
+    for model in (
+        s.BindWorkerRequest,
+        s.RecordHandoffRequest,
+        s.VerifyReleaseRequest,
+        s.MarkHealthyRequest,
+    ):
+        fields = set(model.model_fields)
+        assert not (fields & forbidden), (model.__name__, fields)
+        assert "expected_revision" in fields, model.__name__
+    assert not hasattr(s, "ExpectedToken")  # the internal-coordinate request type is gone
+
+
+def test_progression_full_lifecycle_over_http_without_database_reads(pclient):
+    # drives bind->healthy using ONLY supported HTTP responses (this test imports no repository)
+    eid, txn, rev = _create(pclient)
+    assert rev == 0
+
+    b = _bind(pclient, eid, txn, rev)
+    assert b.status_code == 200, b.text
+    assert b.json()["state"] == "worker_bound" and b.json()["revision"] == 1
+    assert b.json()["worker_installation_id"] == WORKER_INSTALL
+    assert "controller_trust_anchor_hex" not in b.json()  # projection stays secret-free
+
+    o = _offer(pclient, eid, txn, b.json()["revision"])
+    assert o.status_code == 200 and o.json()["state"] == "offer_transported"
+    assert o.json()["revision"] == 2
+
+    r = _result(pclient, eid, txn, o.json()["revision"])
+    assert r.status_code == 200 and r.json()["state"] == "result_transported"
+    assert r.json()["revision"] == 3
+
+    v = _verify(pclient, eid, r.json()["revision"])
     assert v.status_code == 200 and v.json()["state"] == "verified" and v.json()["revision"] == 4
 
-    h = client.post(f"/api/v1/enrollment/{eid}/healthy", json={"expected": _token(engine, eid)})
+    h = _healthy(pclient, eid, v.json()["revision"])
     assert h.status_code == 200 and h.json()["state"] == "healthy" and h.json()["revision"] == 5
 
 
-def test_progression_requires_the_enrollment_progress_permission(client, engine, principal):
-    eid, txn = _create(client)
+def test_progression_stale_expected_revision_conflicts(pclient):
+    eid, txn, rev = _create(pclient)
+    assert _bind(pclient, eid, txn, rev).status_code == 200  # head advances to revision 1
+    # a FRESH step (no receipt) with the stale rev-0 value is a lost update: bounded conflict
+    r = _offer(pclient, eid, txn, 0)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "enrollment_revision_conflict"
+
+
+def test_internal_repository_cas_still_uses_revision_and_state_digest(pclient, engine):
+    # T1 removed the CAS coordinates from the PUBLIC boundary, not from persistence: the durable
+    # step receipt still records (resulting_revision, resulting_state_digest), and the head/history
+    # rows carry the state_digest the repository compare-and-swaps on.
+    from sqlalchemy import text
+
+    eid, txn, rev = _create(pclient)
+    assert _bind(pclient, eid, txn, rev).status_code == 200
+    with _db(engine) as s:
+        receipt = s.execute(
+            text(
+                "SELECT resulting_revision, resulting_state_digest FROM"
+                " worker_enrollment_step_receipt"
+                " WHERE enrollment_id=:e AND step='bind_worker_identity'"
+            ),
+            {"e": eid},
+        ).one()
+        head_digest = s.execute(
+            text("SELECT state_digest FROM worker_enrollment_state WHERE enrollment_id=:e"),
+            {"e": eid},
+        ).scalar_one()
+        hist_digest = s.execute(
+            text(
+                "SELECT state_digest FROM worker_enrollment_revision"
+                " WHERE enrollment_id=:e AND revision=1"
+            ),
+            {"e": eid},
+        ).scalar_one()
+    assert receipt.resulting_revision == 1
+    assert receipt.resulting_state_digest.startswith("sha256:")
+    assert receipt.resulting_state_digest == head_digest == hist_digest
+
+
+# --- RBAC + organization boundary ----------------------------------------------------------------
+
+
+def test_progression_requires_the_enrollment_progress_permission(pclient, principal):
+    eid, txn, rev = _create(pclient)
     org = principal.organization_id
-    body = _bind_body(engine, eid, txn)
 
     # read + manage but NOT progress: strictly separated, so progression is forbidden
-    _as(client, _principal(org, [Permission.enrollment_read, Permission.enrollment_manage]))
-    assert client.post(f"/api/v1/enrollment/{eid}/bind", json=body).status_code == 403
+    _as(pclient, _principal(org, [Permission.enrollment_read, Permission.enrollment_manage]))
+    assert _bind(pclient, eid, txn, rev).status_code == 403
 
     # the dedicated progress permission authorizes it (same org, still revision 0)
-    _as(client, _principal(org, [Permission.enrollment_progress]))
-    ok = client.post(f"/api/v1/enrollment/{eid}/bind", json=body)
+    _as(pclient, _principal(org, [Permission.enrollment_progress]))
+    ok = _bind(pclient, eid, txn, rev)
     assert ok.status_code == 200, ok.text
     assert ok.json()["revision"] == 1
 
 
-def test_progression_is_organization_scoped(client, session, engine, other_org_principal):
+def test_progression_is_organization_scoped(pclient, session, other_org_principal):
     from secp_api.services import worker_enrollment as svc
 
     invitation = create_invitation(
@@ -744,49 +821,163 @@ def test_progression_is_organization_scoped(client, session, engine, other_org_p
     )
     session.commit()
     eid = seeded.state.enrollment_id
-    # the authenticated dev principal (a DIFFERENT org) cannot progress it — refused on the org
-    # boundary before the invitation/CAS logic is reached
-    r = client.post(
-        f"/api/v1/enrollment/{eid}/bind", json=_bind_body(engine, eid, "txn-prog-cross")
-    )
+    # the dev principal (a DIFFERENT org) is refused on the org boundary before any CAS logic
+    r = _bind(pclient, eid, "txn-prog-cross", 0)
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "enrollment_forbidden"
 
 
-def test_progression_exact_retry_is_idempotent_through_receipts(client, engine):
+# --- receipt-first exact retry + T3 delayed-retry returns the ORIGINAL step result ----------------
+
+
+def test_exact_retry_with_the_original_expected_revision_succeeds(pclient, engine):
     from sqlalchemy import text
 
-    eid, txn = _create(client)
-    body = _bind_body(engine, eid, txn)  # a rev-0 token
-    a = client.post(f"/api/v1/enrollment/{eid}/bind", json=body)
+    eid, txn, rev = _create(pclient)
+    a = _bind(pclient, eid, txn, rev)
     assert a.status_code == 200 and a.json()["revision"] == 1
-
-    # replay the SAME request (the retry legitimately carries the now-stale rev-0 token): the step
-    # receipt short-circuits it to the identical result — never a second advance or a conflict
-    b = client.post(f"/api/v1/enrollment/{eid}/bind", json=body)
+    # replay the SAME request carrying the ORIGINAL (now-stale) expected_revision: the step receipt
+    # short-circuits it to the identical result — never a second advance or a conflict
+    b = _bind(pclient, eid, txn, rev)
     assert b.status_code == 200
     assert b.json() == a.json()
-
-    with _fresh(engine) as s:
-        n = s.execute(
+    with _db(engine) as s:
+        audits = s.execute(
             text(
                 "SELECT count(*) FROM audit_event"
                 " WHERE action='enrollment.worker_bound' AND resource_id=:e"
             ),
             {"e": eid},
         ).scalar_one()
-    assert n == 1  # exactly one winning-transition audit; the dedup path records none
+        revs = s.execute(
+            text("SELECT count(*) FROM worker_enrollment_revision WHERE enrollment_id=:e"),
+            {"e": eid},
+        ).scalar_one()
+        receipts = s.execute(
+            text("SELECT count(*) FROM worker_enrollment_step_receipt WHERE enrollment_id=:e"),
+            {"e": eid},
+        ).scalar_one()
+    assert audits == 1  # exactly one winning-transition audit; the dedup path records none
+    assert revs == 2  # rev 0 (invited) + rev 1 (worker_bound); no second history row
+    assert receipts == 1  # one bind receipt
 
 
-def test_progression_audit_is_bounded_and_secret_free(client, engine):
+def test_bind_retry_after_healthy_returns_the_original_worker_bound_result(pclient):
+    eid, txn, rev = _create(pclient)
+    original = _bind(pclient, eid, txn, rev).json()
+    assert original["state"] == "worker_bound" and original["revision"] == 1
+    # advance the enrollment all the way to healthy...
+    o = _offer(pclient, eid, txn, 1)
+    _result(pclient, eid, txn, o.json()["revision"])
+    v = _verify(pclient, eid, 3)
+    _healthy(pclient, eid, v.json()["revision"])
+    # ...a delayed bind retry STILL returns the ORIGINAL worker_bound result, not the healthy head
+    replay = _bind(pclient, eid, txn, rev)
+    assert replay.status_code == 200
+    assert replay.json() == original
+    assert replay.json()["state"] == "worker_bound" and replay.json()["revision"] == 1
+
+
+def test_offer_retry_after_healthy_returns_the_original_offer_transported_result(pclient):
+    eid, txn, _ = _create(pclient)
+    _bind(pclient, eid, txn, 0)
+    original = _offer(pclient, eid, txn, 1).json()
+    assert original["state"] == "offer_transported" and original["revision"] == 2
+    _result(pclient, eid, txn, 2)
+    _verify(pclient, eid, 3)
+    _healthy(pclient, eid, 4)
+    replay = _offer(pclient, eid, txn, 1)
+    assert replay.status_code == 200 and replay.json() == original
+
+
+def test_result_retry_after_verification_returns_the_original_result_transported_result(pclient):
+    eid, txn, _ = _create(pclient)
+    _bind(pclient, eid, txn, 0)
+    _offer(pclient, eid, txn, 1)
+    original = _result(pclient, eid, txn, 2).json()
+    assert original["state"] == "result_transported" and original["revision"] == 3
+    _verify(pclient, eid, 3)
+    _healthy(pclient, eid, 4)
+    replay = _result(pclient, eid, txn, 2)
+    assert replay.status_code == 200 and replay.json() == original
+
+
+def test_retry_after_revocation_returns_the_original_step_result(pclient):
+    eid, txn, _ = _create(pclient)
+    original = _bind(pclient, eid, txn, 0).json()
+    # revoke the enrollment (drives it to the refused terminal at a later revision)
+    assert (
+        pclient.post(f"/api/v1/enrollment/{eid}/revoke", json={"expected_revision": 1}).status_code
+        == 200
+    )
+    replay = _bind(pclient, eid, txn, 0)
+    assert replay.status_code == 200
+    assert replay.json() == original
+    assert replay.json()["state"] == "worker_bound"
+
+
+def test_retry_after_restart_returns_the_same_original_result(pclient, engine, principal):
+    eid, txn, _ = _create(pclient)
+    original = _bind(pclient, eid, txn, 0).json()
+    _drive_to_healthy_from(pclient, eid, txn, start_rev=1)
+    # simulate a full process restart: a brand-new app + client over the SAME persisted database
+    from secp_api.deps import current_principal
+    from secp_api.main import create_app
+
+    app = create_app()
+    app.router.on_startup.clear()
+    restarted = TestClient(app)
+    restarted.app.dependency_overrides[current_principal] = lambda: principal
+    _enable_progression(restarted)
+    replay = _bind(restarted, eid, txn, 0)
+    assert replay.status_code == 200
+    assert replay.json() == original
+
+
+def _drive_to_healthy_from(client, eid, txn, *, start_rev):
+    # offer..healthy after a bind already committed at start_rev
+    o = _offer(client, eid, txn, start_rev)
+    assert o.status_code == 200, o.text
+    r = _result(client, eid, txn, o.json()["revision"])
+    assert r.status_code == 200, r.text
+    v = _verify(client, eid, r.json()["revision"])
+    assert v.status_code == 200, v.text
+    assert _healthy(client, eid, v.json()["revision"]).status_code == 200
+
+
+def test_corrupt_historical_snapshot_refuses_closed(pclient, engine):
+    from sqlalchemy import text
+
+    eid, txn, _ = _create(pclient)
+    _bind(pclient, eid, txn, 0)
+    _offer(pclient, eid, txn, 1)  # advance so the bind retry cannot be an at-target no-op
+    # tamper the immutable revision-1 snapshot so its rehydrated digest no longer matches
+    with _db(engine) as s:
+        s.execute(
+            text(
+                "UPDATE worker_enrollment_revision SET state_snapshot='{\"tampered\": true}'"
+                " WHERE enrollment_id=:e AND revision=1"
+            ),
+            {"e": eid},
+        )
+        s.commit()
+    replay = _bind(pclient, eid, txn, 0)
+    assert replay.status_code == 409
+    assert replay.json()["error"]["code"] == "enrollment_state_corrupt"
+
+
+# --- bounded secret-free audit + no raw key/handoff bytes -----------------------------------------
+
+
+def test_progression_audit_is_bounded_and_secret_free(pclient, engine):
     import json as _json
 
     from sqlalchemy import text
 
-    eid, txn = _create(client)
-    _drive_to_healthy(client, engine, eid, txn)
+    eid, txn, _ = _create(pclient)
+    _drive_to_healthy(pclient, eid, txn)
 
-    with _fresh(engine) as s:
+    with _db(engine) as s:
         rows = s.execute(
             text(
                 "SELECT action, data FROM audit_event WHERE resource_id=:e"
@@ -795,7 +986,6 @@ def test_progression_audit_is_bounded_and_secret_free(client, engine):
             {"e": eid},
         ).all()
 
-    # exactly one bounded audit per winning transition (audit ids are uuids, so order is by content)
     assert sorted(r[0] for r in rows) == sorted(
         [
             "enrollment.worker_bound",
@@ -813,9 +1003,8 @@ def test_progression_audit_is_bounded_and_secret_free(client, engine):
             assert secret not in blob  # never a key, digest, anchor or transaction id
 
 
-def test_progression_rejects_raw_key_or_handoff_bytes(client, engine):
-    eid, txn = _create(client)
-    tok = _token(engine, eid)
+def test_progression_rejects_raw_key_or_handoff_bytes(pclient):
+    eid, txn, rev = _create(pclient)
 
     # extra="forbid": a caller cannot smuggle a private key or a raw handoff record through any step
     for extra in (
@@ -823,45 +1012,10 @@ def test_progression_rejects_raw_key_or_handoff_bytes(client, engine):
         {"handoff_record": "..."},
         {"worker_private_key_pem": "..."},
     ):
-        body = {
-            "worker_installation_id": WORKER_INSTALL,
-            "worker_key_id": WORKER_KEY,
-            "transaction_id": txn,
-            "expected": tok,
-            **extra,
-        }
-        assert client.post(f"/api/v1/enrollment/{eid}/bind", json=body).status_code == 422
+        assert _bind(pclient, eid, txn, rev, **extra).status_code == 422
 
     # a handoff step accepts ONLY an already-bound sha256 digest, never raw bytes / a bad value
-    bad_offer = {
-        "digest": "not-a-bound-digest",
-        "transaction_id": txn,
-        "signer_key_id": CTRL_KEY,
-        "expected": tok,
-    }
-    assert client.post(f"/api/v1/enrollment/{eid}/offer", json=bad_offer).status_code == 422
-
-
-def test_progression_stale_expected_token_conflicts(client, engine):
-    eid, txn = _create(client)
-    rev0 = _token(engine, eid)
-    assert (
-        client.post(f"/api/v1/enrollment/{eid}/bind", json=_bind_body(engine, eid, txn)).status_code
-        == 200
-    )
-
-    # a FRESH step (no receipt) carrying the stale rev-0 token is a lost-update: bounded conflict
-    r = client.post(
-        f"/api/v1/enrollment/{eid}/offer",
-        json={
-            "digest": OFFER_D,
-            "transaction_id": txn,
-            "signer_key_id": CTRL_KEY,
-            "expected": rev0,
-        },
-    )
-    assert r.status_code == 409
-    assert r.json()["error"]["code"] == "enrollment_revision_conflict"
+    assert _offer(pclient, eid, txn, rev, digest="not-a-bound-digest").status_code == 422
 
 
 def test_same_key_different_ttl_refuses_conflict(client):

@@ -65,17 +65,10 @@ class RevokeEnrollment(BaseModel):
 
 _DIGEST = r"^sha256:[0-9a-f]{64}$"
 
-
-class ExpectedToken(BaseModel):
-    """The caller's observed CAS coordinates for a progression step; a stale token refuses a
-    bounded ``enrollment_revision_conflict``."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    revision: int = Field(ge=0)
-    state_digest: str = Field(pattern=_DIGEST)
-    sequence: int = Field(ge=0)
-    predecessor_digest: str = Field(max_length=80)
+# Progression requests carry ONLY the caller's last-observed ``expected_revision`` (a small integer
+# from the status projection) — never internal CAS coordinates. The service loads the authoritative
+# row and DERIVES ``state_digest`` / ``sequence`` / ``predecessor_digest`` from that exact state, so
+# a customer, worker CLI or UI never has to compute, store or manage the durable CAS material.
 
 
 class BindWorkerRequest(BaseModel):
@@ -84,7 +77,7 @@ class BindWorkerRequest(BaseModel):
     worker_installation_id: str = Field(min_length=1, max_length=64)
     worker_key_id: str = Field(pattern=_DIGEST)
     transaction_id: str = Field(min_length=1, max_length=512)
-    expected: ExpectedToken
+    expected_revision: int = Field(ge=0)
 
 
 class RecordHandoffRequest(BaseModel):
@@ -96,20 +89,20 @@ class RecordHandoffRequest(BaseModel):
     digest: str = Field(pattern=_DIGEST)
     transaction_id: str = Field(min_length=1, max_length=512)
     signer_key_id: str = Field(pattern=_DIGEST)
-    expected: ExpectedToken
+    expected_revision: int = Field(ge=0)
 
 
 class VerifyReleaseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     release_digest: str = Field(pattern=_DIGEST)
-    expected: ExpectedToken
+    expected_revision: int = Field(ge=0)
 
 
 class MarkHealthyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected: ExpectedToken
+    expected_revision: int = Field(ge=0)
 
 
 class EnrollmentStatusOut(BaseModel):
