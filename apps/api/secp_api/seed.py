@@ -101,6 +101,7 @@ def _seed_dev_controller_identity(session: Session) -> None:
     PR5H-B2). Idempotent and robust: a no-op if the table is absent or an active identity exists."""
     from sqlalchemy import inspect
 
+    from secp_api import controller_identity_dev
     from secp_api.controller_identity_models import (
         CONTROLLER_IDENTITY_ACTIVE,
         ControllerEnrollmentIdentity,
@@ -120,7 +121,7 @@ def _seed_dev_controller_identity(session: Session) -> None:
         return
     # DEV/TEST ONLY — the real verification bridge is PR5H-B2; use the named test/dev factory.
     controller_identity.activate_controller_identity(
-        session, controller_identity.build_test_verified_controller_identity()
+        session, controller_identity_dev.build_test_verified_controller_identity()
     )
     session.flush()
 

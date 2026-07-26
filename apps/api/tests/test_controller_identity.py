@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from secp_api.controller_identity_dev import build_test_verified_controller_identity
 from secp_api.controller_identity_models import (
     CONTROLLER_IDENTITY_ACTIVE,
     CONTROLLER_IDENTITY_SUPERSEDED,
@@ -24,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 
 
 def _proof(**over: str) -> ci.VerifiedControllerIdentity:
-    return ci.build_test_verified_controller_identity(**over)
+    return build_test_verified_controller_identity(**over)
 
 
 A = _proof()

@@ -13,8 +13,8 @@ bootstrap evidence, the exact installation/release/origin agreement, and a DEDIC
 seam. The production writer that constructs this proof from the root-gated bootstrap path is
 **PR5H-B2** and is deliberately not present yet, so production population stays unavailable (the
 enrollment API then refuses ``enrollment_controller_identity_unavailable``, fail-closed). The dev
-seed and tests construct proofs through the explicitly named
-:func:`build_test_verified_controller_identity` TEST/DEV-only factory.
+seed and tests construct proofs through ``controller_identity_dev.build_test_verified_controller_
+identity`` — a TEST/DEV-only factory kept OUTSIDE this production service module.
 """
 
 from __future__ import annotations
@@ -200,31 +200,9 @@ def activate_controller_identity(
     return new_row
 
 
-def build_test_verified_controller_identity(**over: str) -> VerifiedControllerIdentity:
-    """TEST/DEV-ONLY factory for a well-formed :class:`VerifiedControllerIdentity`. It stands in for
-    the PR5H-B2 root-gated bootstrap verification, which is the only production producer. NEVER call
-    this from a production activation path."""
-    anchor = over.get("controller_trust_anchor_hex", "11" * 32)
-    fields = dict(
-        controller_installation_id="controller-dev0001",
-        controller_key_id=sha256_digest_of_hex(anchor),
-        controller_trust_anchor_hex=anchor,
-        controller_origin="https://controller.example.test",
-        release_digest="sha256:" + "a" * 64,
-        management_identity_digest="sha256:" + "e" * 64,
-        bootstrap_evidence_digest="sha256:" + "f" * 64,
-        enrollment_key_proof_id="enrollkeyproof-0001",
-    )
-    fields.update(over)
-    if "controller_trust_anchor_hex" in over and "controller_key_id" not in over:
-        fields["controller_key_id"] = sha256_digest_of_hex(over["controller_trust_anchor_hex"])
-    return VerifiedControllerIdentity(**fields)  # type: ignore[arg-type]
-
-
 __all__ = [
     "ActiveControllerIdentity",
     "VerifiedControllerIdentity",
     "activate_controller_identity",
-    "build_test_verified_controller_identity",
     "load_active_controller_identity",
 ]

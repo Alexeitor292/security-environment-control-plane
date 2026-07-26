@@ -351,9 +351,10 @@ def test_creation_refused_when_active_identity_binding_is_inconsistent(client, s
 
 
 def _rotate(session, **over):
+    from secp_api.controller_identity_dev import build_test_verified_controller_identity
     from secp_api.services import controller_identity
 
-    proof = controller_identity.build_test_verified_controller_identity(**over)
+    proof = build_test_verified_controller_identity(**over)
     controller_identity.activate_controller_identity(session, proof)
     session.commit()
     return proof

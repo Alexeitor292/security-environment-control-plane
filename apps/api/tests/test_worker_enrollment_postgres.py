@@ -736,13 +736,14 @@ def test_concurrent_idempotent_creation_yields_one_invitation(pg):
 def test_concurrent_controller_identity_rotation_keeps_one_active(pg):
     # F3: overlapping rotations never leave two active identities — the active_marker UNIQUE
     # exactly one active globally; each attempt either commits or refuses a bounded conflict
+    from secp_api.controller_identity_dev import build_test_verified_controller_identity
     from secp_api.services import controller_identity as ci
 
     factory, actor, _ = pg
     barrier = Barrier(2)
 
     def rotate(tag: str):
-        proof = ci.build_test_verified_controller_identity(
+        proof = build_test_verified_controller_identity(
             controller_installation_id=f"controller-{tag}00001",
             controller_trust_anchor_hex=tag * 32,
             controller_origin=f"https://c{tag}.example.test",
