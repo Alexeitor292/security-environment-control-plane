@@ -14,8 +14,12 @@ no outbound connection, and transports no private key or raw handoff record — 
 pure transition through the PR5H-A CAS service. Bounded ``WorkerEnrollmentError`` codes map to HTTP
 via the domain-error handler; no rejected input, endpoint, path or secret is ever echoed.
 
-The worker-facing submission/progression endpoints, the outbound HTTPS transport, revocation and the
-``secpctl`` commands are the subsequent PR5H-B1 slices (see the PR description).
+Beyond create/status/revoke this slice also exposes the durable worker-progression steps —
+worker bind, controller offer, worker result, release verified, healthy — each a thin adapter over
+the PR5H-A CAS service (service-layer ``enrollment:progress`` authorization, organization/site
+enforcement, exact-retry through the existing receipts). The endpoints consume ONLY already-bound
+facts (a digest + transaction + signer key id); no raw private key, handoff-record bytes, provider
+action or operator action crosses this surface, and no outbound EnrollmentTransport is opened yet.
 """
 
 from __future__ import annotations
@@ -28,12 +32,18 @@ from sqlalchemy.orm import Session
 from secp_api.auth import Principal
 from secp_api.deps import current_principal, db_session
 from secp_api.schemas_enrollment import (
+    BindWorkerRequest,
     CreateEnrollmentInvitation,
     EnrollmentInvitationOut,
     EnrollmentStatusOut,
+    ExpectedToken,
+    MarkHealthyRequest,
+    RecordHandoffRequest,
     RevokeEnrollment,
+    VerifyReleaseRequest,
 )
 from secp_api.services import worker_enrollment as svc
+from secp_api.worker_enrollment_contract import HandoffFacts
 
 router = APIRouter(prefix="/api/v1/enrollment", tags=["enrollment"])
 
@@ -102,5 +112,116 @@ def revoke_enrollment(
 ) -> EnrollmentStatusOut:
     outcome = svc.revoke_enrollment(
         session, principal, enrollment_id=enrollment_id, expected_revision=body.expected_revision
+    )
+    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+
+
+def _expected(token: ExpectedToken) -> svc.ExpectedRevision:
+    # the caller's observed CAS coordinates, passed through verbatim to the durable service
+    return svc.ExpectedRevision(
+        revision=token.revision,
+        state_digest=token.state_digest,
+        sequence=token.sequence,
+        predecessor_digest=token.predecessor_digest,
+    )
+
+
+@router.post("/{enrollment_id}/bind", response_model=EnrollmentStatusOut)
+def bind_worker(
+    enrollment_id: str,
+    body: BindWorkerRequest,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentStatusOut:
+    outcome = svc.bind_worker(
+        session,
+        principal,
+        enrollment_id=enrollment_id,
+        worker_installation_id=body.worker_installation_id,
+        worker_key_id=body.worker_key_id,
+        transaction_id=body.transaction_id,
+        now=_iso(_utc_now()),
+        expected=_expected(body.expected),
+    )
+    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+
+
+@router.post("/{enrollment_id}/offer", response_model=EnrollmentStatusOut)
+def record_controller_offer(
+    enrollment_id: str,
+    body: RecordHandoffRequest,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentStatusOut:
+    outcome = svc.record_offer(
+        session,
+        principal,
+        enrollment_id=enrollment_id,
+        facts=HandoffFacts(
+            kind="controller-offer",
+            digest=body.digest,
+            transaction_id=body.transaction_id,
+            signer_key_id=body.signer_key_id,
+        ),
+        now=_iso(_utc_now()),
+        expected=_expected(body.expected),
+    )
+    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+
+
+@router.post("/{enrollment_id}/result", response_model=EnrollmentStatusOut)
+def record_worker_result(
+    enrollment_id: str,
+    body: RecordHandoffRequest,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentStatusOut:
+    outcome = svc.record_result(
+        session,
+        principal,
+        enrollment_id=enrollment_id,
+        facts=HandoffFacts(
+            kind="worker-result",
+            digest=body.digest,
+            transaction_id=body.transaction_id,
+            signer_key_id=body.signer_key_id,
+        ),
+        now=_iso(_utc_now()),
+        expected=_expected(body.expected),
+    )
+    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+
+
+@router.post("/{enrollment_id}/verify", response_model=EnrollmentStatusOut)
+def verify_release(
+    enrollment_id: str,
+    body: VerifyReleaseRequest,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentStatusOut:
+    outcome = svc.verify_release(
+        session,
+        principal,
+        enrollment_id=enrollment_id,
+        release_digest=body.release_digest,
+        now=_iso(_utc_now()),
+        expected=_expected(body.expected),
+    )
+    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+
+
+@router.post("/{enrollment_id}/healthy", response_model=EnrollmentStatusOut)
+def mark_enrollment_healthy(
+    enrollment_id: str,
+    body: MarkHealthyRequest,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentStatusOut:
+    outcome = svc.mark_enrollment_healthy(
+        session,
+        principal,
+        enrollment_id=enrollment_id,
+        now=_iso(_utc_now()),
+        expected=_expected(body.expected),
     )
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())

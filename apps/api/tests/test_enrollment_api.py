@@ -557,6 +557,313 @@ def test_same_key_different_site_refuses_conflict(client):
     assert r.json()["error"]["code"] == "enrollment_idempotency_conflict"
 
 
+# --- worker submission/progression slice: bind / offer / result / verify / healthy over HTTP ------
+#
+# Each endpoint is a thin adapter over the PR5H-A durable CAS service: service-layer
+# ``enrollment:progress`` authorization, the organization boundary, and exact-retry through the
+# existing step receipts. Endpoints consume ONLY already-bound facts (a digest + transaction +
+# signer key id) — never raw handoff bytes or a private key — and open no outbound transport.
+
+WORKER_HEX = (b"\x22" * 32).hex()
+WORKER_KEY = sha256_digest_of_hex(WORKER_HEX)
+OFFER_D = "sha256:" + "c" * 64
+RESULT_D = "sha256:" + "d" * 64
+WORKER_INSTALL = "worker-bbbbbbbb"
+
+
+def _fresh(engine):
+    from sqlalchemy.orm import Session
+
+    return Session(engine)
+
+
+def _create(client, **over) -> tuple[str, str]:
+    # returns (enrollment_id, transaction_id): the worker echoes the invitation's server-issued
+    # transaction id on every progression step — it is not a value the worker invents
+    out = client.post("/api/v1/enrollment/invitations", json=_create_body(**over)).json()
+    return out["enrollment_id"], out["transaction_id"]
+
+
+def _token(engine, enrollment_id: str) -> dict:
+    # the caller's observed CAS coordinates, read from a fresh session so it always reflects the
+    # latest committed head (the secret-free status projection deliberately omits these)
+    from secp_api import worker_enrollment_repository as repo
+
+    with _fresh(engine) as s:
+        loaded = repo.load_read_only(s, enrollment_id)
+        assert loaded is not None, enrollment_id
+        st = loaded.state
+        return {
+            "revision": st.revision,
+            "state_digest": st.digest(),
+            "sequence": st.sequence,
+            "predecessor_digest": st.predecessor_digest,
+        }
+
+
+def _bind_body(engine, eid: str, txn: str) -> dict:
+    return {
+        "worker_installation_id": WORKER_INSTALL,
+        "worker_key_id": WORKER_KEY,
+        "transaction_id": txn,
+        "expected": _token(engine, eid),
+    }
+
+
+def _drive_to_healthy(client, engine, eid: str, txn: str) -> None:
+    assert (
+        client.post(f"/api/v1/enrollment/{eid}/bind", json=_bind_body(engine, eid, txn)).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/v1/enrollment/{eid}/offer",
+            json={
+                "digest": OFFER_D,
+                "transaction_id": txn,
+                "signer_key_id": CTRL_KEY,
+                "expected": _token(engine, eid),
+            },
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/v1/enrollment/{eid}/result",
+            json={
+                "digest": RESULT_D,
+                "transaction_id": txn,
+                "signer_key_id": WORKER_KEY,
+                "expected": _token(engine, eid),
+            },
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/v1/enrollment/{eid}/verify",
+            json={"release_digest": RELEASE, "expected": _token(engine, eid)},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/v1/enrollment/{eid}/healthy",
+            json={"expected": _token(engine, eid)},
+        ).status_code
+        == 200
+    )
+
+
+def test_progression_bind_offer_result_verify_healthy_over_http(client, engine):
+    eid, txn = _create(client)
+
+    b = client.post(f"/api/v1/enrollment/{eid}/bind", json=_bind_body(engine, eid, txn))
+    assert b.status_code == 200, b.text
+    assert b.json()["state"] == "worker_bound" and b.json()["revision"] == 1
+    assert b.json()["worker_installation_id"] == WORKER_INSTALL
+    assert b.json()["worker_key_fingerprint"]  # a fingerprint, not the full key
+    assert "controller_trust_anchor_hex" not in b.json()  # projection stays secret-free
+
+    o = client.post(
+        f"/api/v1/enrollment/{eid}/offer",
+        json={
+            "digest": OFFER_D,
+            "transaction_id": txn,
+            "signer_key_id": CTRL_KEY,
+            "expected": _token(engine, eid),
+        },
+    )
+    assert (
+        o.status_code == 200
+        and o.json()["state"] == "offer_transported"
+        and o.json()["revision"] == 2
+    )
+
+    r = client.post(
+        f"/api/v1/enrollment/{eid}/result",
+        json={
+            "digest": RESULT_D,
+            "transaction_id": txn,
+            "signer_key_id": WORKER_KEY,
+            "expected": _token(engine, eid),
+        },
+    )
+    assert (
+        r.status_code == 200
+        and r.json()["state"] == "result_transported"
+        and r.json()["revision"] == 3
+    )
+
+    v = client.post(
+        f"/api/v1/enrollment/{eid}/verify",
+        json={"release_digest": RELEASE, "expected": _token(engine, eid)},
+    )
+    assert v.status_code == 200 and v.json()["state"] == "verified" and v.json()["revision"] == 4
+
+    h = client.post(f"/api/v1/enrollment/{eid}/healthy", json={"expected": _token(engine, eid)})
+    assert h.status_code == 200 and h.json()["state"] == "healthy" and h.json()["revision"] == 5
+
+
+def test_progression_requires_the_enrollment_progress_permission(client, engine, principal):
+    eid, txn = _create(client)
+    org = principal.organization_id
+    body = _bind_body(engine, eid, txn)
+
+    # read + manage but NOT progress: strictly separated, so progression is forbidden
+    _as(client, _principal(org, [Permission.enrollment_read, Permission.enrollment_manage]))
+    assert client.post(f"/api/v1/enrollment/{eid}/bind", json=body).status_code == 403
+
+    # the dedicated progress permission authorizes it (same org, still revision 0)
+    _as(client, _principal(org, [Permission.enrollment_progress]))
+    ok = client.post(f"/api/v1/enrollment/{eid}/bind", json=body)
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["revision"] == 1
+
+
+def test_progression_is_organization_scoped(client, session, engine, other_org_principal):
+    from secp_api.services import worker_enrollment as svc
+
+    invitation = create_invitation(
+        controller_installation_id="controller-aaaaaaaa",
+        controller_key_id=CTRL_KEY,
+        controller_trust_anchor_hex=CTRL_HEX,
+        controller_origin=ORIGIN,
+        release_digest=RELEASE,
+        transaction_id="txn-prog-cross",
+        nonce="sha256:" + "e" * 64,
+        created_at="2026-07-21T00:00:00Z",
+        expires_at="2026-07-21T01:00:00Z",
+    )
+    seeded = svc.create_invitation_and_open(
+        session,
+        other_org_principal,
+        invitation=invitation,
+        deployment_site_label=SITE,
+        now="2026-07-21T00:10:00Z",
+    )
+    session.commit()
+    eid = seeded.state.enrollment_id
+    # the authenticated dev principal (a DIFFERENT org) cannot progress it — refused on the org
+    # boundary before the invitation/CAS logic is reached
+    r = client.post(
+        f"/api/v1/enrollment/{eid}/bind", json=_bind_body(engine, eid, "txn-prog-cross")
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "enrollment_forbidden"
+
+
+def test_progression_exact_retry_is_idempotent_through_receipts(client, engine):
+    from sqlalchemy import text
+
+    eid, txn = _create(client)
+    body = _bind_body(engine, eid, txn)  # a rev-0 token
+    a = client.post(f"/api/v1/enrollment/{eid}/bind", json=body)
+    assert a.status_code == 200 and a.json()["revision"] == 1
+
+    # replay the SAME request (the retry legitimately carries the now-stale rev-0 token): the step
+    # receipt short-circuits it to the identical result — never a second advance or a conflict
+    b = client.post(f"/api/v1/enrollment/{eid}/bind", json=body)
+    assert b.status_code == 200
+    assert b.json() == a.json()
+
+    with _fresh(engine) as s:
+        n = s.execute(
+            text(
+                "SELECT count(*) FROM audit_event"
+                " WHERE action='enrollment.worker_bound' AND resource_id=:e"
+            ),
+            {"e": eid},
+        ).scalar_one()
+    assert n == 1  # exactly one winning-transition audit; the dedup path records none
+
+
+def test_progression_audit_is_bounded_and_secret_free(client, engine):
+    import json as _json
+
+    from sqlalchemy import text
+
+    eid, txn = _create(client)
+    _drive_to_healthy(client, engine, eid, txn)
+
+    with _fresh(engine) as s:
+        rows = s.execute(
+            text(
+                "SELECT action, data FROM audit_event WHERE resource_id=:e"
+                " AND action LIKE 'enrollment.%' AND action <> 'enrollment.invitation_created'"
+            ),
+            {"e": eid},
+        ).all()
+
+    # exactly one bounded audit per winning transition (audit ids are uuids, so order is by content)
+    assert sorted(r[0] for r in rows) == sorted(
+        [
+            "enrollment.worker_bound",
+            "enrollment.offer_recorded",
+            "enrollment.result_recorded",
+            "enrollment.verified",
+            "enrollment.healthy",
+        ]
+    )
+    for _action, data in rows:
+        d = data if isinstance(data, dict) else _json.loads(data)
+        assert set(d) == {"state", "revision"}  # bounded: only the resulting state + revision
+        blob = _json.dumps(d)
+        for secret in (WORKER_KEY, WORKER_HEX, OFFER_D, RESULT_D, RELEASE, CTRL_HEX, txn):
+            assert secret not in blob  # never a key, digest, anchor or transaction id
+
+
+def test_progression_rejects_raw_key_or_handoff_bytes(client, engine):
+    eid, txn = _create(client)
+    tok = _token(engine, eid)
+
+    # extra="forbid": a caller cannot smuggle a private key or a raw handoff record through any step
+    for extra in (
+        {"private_key": "x"},
+        {"handoff_record": "..."},
+        {"worker_private_key_pem": "..."},
+    ):
+        body = {
+            "worker_installation_id": WORKER_INSTALL,
+            "worker_key_id": WORKER_KEY,
+            "transaction_id": txn,
+            "expected": tok,
+            **extra,
+        }
+        assert client.post(f"/api/v1/enrollment/{eid}/bind", json=body).status_code == 422
+
+    # a handoff step accepts ONLY an already-bound sha256 digest, never raw bytes / a bad value
+    bad_offer = {
+        "digest": "not-a-bound-digest",
+        "transaction_id": txn,
+        "signer_key_id": CTRL_KEY,
+        "expected": tok,
+    }
+    assert client.post(f"/api/v1/enrollment/{eid}/offer", json=bad_offer).status_code == 422
+
+
+def test_progression_stale_expected_token_conflicts(client, engine):
+    eid, txn = _create(client)
+    rev0 = _token(engine, eid)
+    assert (
+        client.post(f"/api/v1/enrollment/{eid}/bind", json=_bind_body(engine, eid, txn)).status_code
+        == 200
+    )
+
+    # a FRESH step (no receipt) carrying the stale rev-0 token is a lost-update: bounded conflict
+    r = client.post(
+        f"/api/v1/enrollment/{eid}/offer",
+        json={
+            "digest": OFFER_D,
+            "transaction_id": txn,
+            "signer_key_id": CTRL_KEY,
+            "expected": rev0,
+        },
+    )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "enrollment_revision_conflict"
+
+
 def test_same_key_different_ttl_refuses_conflict(client):
     key = secrets.token_urlsafe(24)
     assert (

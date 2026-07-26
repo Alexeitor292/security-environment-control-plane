@@ -507,6 +507,9 @@ class Permission(str, Enum):
     # assignment in its slice.
     enrollment_read = "enrollment:read"
     enrollment_manage = "enrollment:manage"
+    # progression (bind/offer/result/verified/healthy) is a deliberately separate assignment from
+    # read/manage — the durable step transitions the worker exchange drives.
+    enrollment_progress = "enrollment:progress"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -853,6 +856,11 @@ class AuditAction(str, Enum):
     authorization_denied = "authorization.denied"
     enrollment_invitation_created = "enrollment.invitation_created"
     enrollment_revoked = "enrollment.revoked"
+    enrollment_worker_bound = "enrollment.worker_bound"
+    enrollment_offer_recorded = "enrollment.offer_recorded"
+    enrollment_result_recorded = "enrollment.result_recorded"
+    enrollment_verified = "enrollment.verified"
+    enrollment_healthy = "enrollment.healthy"
     # SECP-002A — execution targets, discovery, reservations, secret resolution.
     target_created = "target.created"
     target_disabled = "target.disabled"

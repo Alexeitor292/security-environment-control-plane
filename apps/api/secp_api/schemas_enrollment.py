@@ -63,6 +63,55 @@ class RevokeEnrollment(BaseModel):
     expected_revision: int = Field(ge=0)
 
 
+_DIGEST = r"^sha256:[0-9a-f]{64}$"
+
+
+class ExpectedToken(BaseModel):
+    """The caller's observed CAS coordinates for a progression step; a stale token refuses a
+    bounded ``enrollment_revision_conflict``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    state_digest: str = Field(pattern=_DIGEST)
+    sequence: int = Field(ge=0)
+    predecessor_digest: str = Field(max_length=80)
+
+
+class BindWorkerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_installation_id: str = Field(min_length=1, max_length=64)
+    worker_key_id: str = Field(pattern=_DIGEST)
+    transaction_id: str = Field(min_length=1, max_length=512)
+    expected: ExpectedToken
+
+
+class RecordHandoffRequest(BaseModel):
+    """A bound handoff fact (controller-offer or worker-result). The API consumes ALREADY-BOUND
+    facts — a digest + transaction + signer key id — never raw handoff bytes or a private key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    digest: str = Field(pattern=_DIGEST)
+    transaction_id: str = Field(min_length=1, max_length=512)
+    signer_key_id: str = Field(pattern=_DIGEST)
+    expected: ExpectedToken
+
+
+class VerifyReleaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    release_digest: str = Field(pattern=_DIGEST)
+    expected: ExpectedToken
+
+
+class MarkHealthyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected: ExpectedToken
+
+
 class EnrollmentStatusOut(BaseModel):
     """The bounded, secret-free enrollment status projection (mirror of the durable public view)."""
 

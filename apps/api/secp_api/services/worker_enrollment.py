@@ -533,6 +533,7 @@ def bind_worker(
 ) -> TransitionOutcome:
     """The nonce-consumption point: the first successful worker-identity binding. Consumes the
     single-use invitation and persists the first advanced revision in ONE transaction."""
+    actor.require(Permission.enrollment_progress)
     _assert_schema_ready(session)
     step = "bind_worker_identity"
     input_digest = _input_digest(
@@ -590,6 +591,7 @@ def bind_worker(
     except RepositoryRefusal as exc:
         raise _surface(exc) from None
     _commit(session, loaded, new_state, step, input_digest)
+    _audit_progress(session, actor, enrollment_id, step, new_state)
     return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
 
 
@@ -701,6 +703,7 @@ def _advance_step(
     expected: ExpectedRevision,
     claimed_scope: ClaimedScope | None,
 ) -> TransitionOutcome:
+    actor.require(Permission.enrollment_progress)
     _assert_schema_ready(session)
     input_digest = _input_digest(step, input_payload)
     loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
@@ -717,7 +720,35 @@ def _advance_step(
         return TransitionOutcome(loaded.state, loaded.state.revision, deduplicated=True)
 
     _commit(session, loaded, new_state, step, input_digest)
+    _audit_progress(session, actor, enrollment_id, step, new_state)
     return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
+
+
+#: step -> the bounded, secret-free audit action for a WINNING progression transition.
+_PROGRESS_AUDIT: dict[str, AuditAction] = {
+    "bind_worker_identity": AuditAction.enrollment_worker_bound,
+    "record_controller_offer": AuditAction.enrollment_offer_recorded,
+    "record_worker_result": AuditAction.enrollment_result_recorded,
+    "mark_verified": AuditAction.enrollment_verified,
+    "mark_healthy": AuditAction.enrollment_healthy,
+}
+
+
+def _audit_progress(
+    session: Session, actor: Principal, enrollment_id: str, step: str, state: EnrollmentState
+) -> None:
+    """One bounded, secret-free audit per WINNING progression transition — org, actor, action,
+    enrollment id, resulting state and revision. Never a nonce, key, handoff byte or path."""
+    audit.record(
+        session,
+        action=_PROGRESS_AUDIT[step],
+        resource_type="worker_enrollment",
+        resource_id=enrollment_id,
+        actor=str(actor.user_id),
+        organization_id=actor.organization_id,
+        outcome="success",
+        data={"state": state.state, "revision": state.revision},
+    )
 
 
 def _ensure_receipt(
