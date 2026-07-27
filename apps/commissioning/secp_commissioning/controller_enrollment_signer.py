@@ -68,6 +68,16 @@ CONTROLLER_ENROLLMENT_KEY_PATH = "/var/lib/secp/bootstrap/controller-enrollment-
 ENROLLMENT_SIGNER_SOCKET_DIR = "/run/secp"
 ENROLLMENT_SIGNER_SOCKET_PATH = "/run/secp/enrollment-signer.sock"
 
+#: The ONE fixed, code-owned transaction-level PostgreSQL advisory-lock key (C4) that serializes
+#: controller-identity ACTIVATION/ROTATION against signer-lease acquisition. BOTH the API activation
+#: path AND the management signer lease take ``pg_advisory_xact_lock(this)`` at the start of their
+#: transaction, so a rotation blocks until an in-flight signing lease's transaction exits and vice
+#: versa — WITHOUT the signer role needing any UPDATE privilege (a plain ``SELECT`` under the held
+#: advisory lock replaces the invalid ``SELECT ... FOR UPDATE`` least-privilege claim). It is a
+#: signed 64-bit constant shared by both planes through the commissioning plane. Advisory-lock
+#: functions are executable by PUBLIC, so the least-privilege role needs no extra grant to take it.
+ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY = 6820098723471290913
+
 _KEY_MODE = 0o600
 _MAX_KEY_BYTES = 1024
 _MAX_FIELD_LEN = 512
@@ -516,6 +526,7 @@ def rotate_controller_enrollment_key(
 
 __all__ = [
     "CONTROLLER_ENROLLMENT_KEY_PATH",
+    "ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY",
     "ENROLLMENT_SIGNER_SOCKET_DIR",
     "ENROLLMENT_SIGNER_SOCKET_PATH",
     "ActiveControllerSigningIdentityProvider",

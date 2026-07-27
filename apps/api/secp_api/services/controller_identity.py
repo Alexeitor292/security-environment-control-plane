@@ -22,7 +22,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from secp_commissioning.controller_enrollment_signer import ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -166,12 +167,19 @@ def activate_controller_identity(
     commit — the caller owns the transaction boundary."""
     _validate_proof(proof)  # refuse malformed input before touching the active set
     now = _utcnow()
-    # lock the current active set so a concurrent rotation serializes behind us (no-op on SQLite;
-    # the UNIQUE(active_marker) is the durable single-active guarantee regardless)
+    is_pg = session.get_bind().dialect.name == "postgresql"
+    # C4: take the SAME fixed transaction-level advisory lock the signer lease holds, so a rotation
+    # blocks until an in-flight signing lease's transaction exits (and vice versa) even though the
+    # SELECT-only signer role can take no row lock. Then lock the active set (belt-and-suspenders
+    # for concurrent rotations; the UNIQUE(active_marker) is the durable single-active guarantee).
     stmt = select(ControllerEnrollmentIdentity).where(
         ControllerEnrollmentIdentity.status == CONTROLLER_IDENTITY_ACTIVE
     )
-    if session.get_bind().dialect.name == "postgresql":
+    if is_pg:
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"),
+            {"k": ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY},
+        )
         stmt = stmt.with_for_update()
     for row in session.execute(stmt).scalars().all():
         row.status = CONTROLLER_IDENTITY_SUPERSEDED
