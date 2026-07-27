@@ -739,6 +739,23 @@ def find_receipt(
 # ----------------------------------------------------------------------- signed controller offer
 
 
+@dataclass(frozen=True)
+class SignedOfferRecord:
+    """The full persisted winning-bind record for an EXACT retry (C2), digest-verified on read: the
+    public offer envelope, the digest binding the winning bind request, the offer-claim digest, the
+    resulting revision + state digest, the bound worker installation/key, and the EXACT original
+    BindExchangeOut bytes returned verbatim (never rebuilt from the possibly-advanced head)."""
+
+    envelope: str
+    bind_input_digest: str
+    offer_claim_digest: str
+    resulting_revision: int
+    resulting_state_digest: str
+    worker_installation_id: str
+    worker_key_id: str
+    response_json: str
+
+
 def persist_signed_offer(
     session: Session,
     *,
@@ -747,12 +764,23 @@ def persist_signed_offer(
     offer_revision: int,
     signer_key_id: str,
     signed_offer: str,
+    bind_input_digest: str | None = None,
+    offer_claim_digest: str | None = None,
+    resulting_revision: int | None = None,
+    resulting_state_digest: str | None = None,
+    worker_installation_id: str | None = None,
+    worker_key_id: str | None = None,
+    response_json: str | None = None,
 ) -> None:
     """Persist the immutable public signed controller offer WRITE-ONCE (in the SAME transaction as
     the winning bind transition). A concurrent/duplicate bind collides on ``UNIQUE(enrollment_id)``
     and refuses the bounded ``enrollment_signed_offer_conflict`` — so exactly one offer is ever
-    minted per enrollment and a lost-response retry re-reads it rather than re-signing."""
+    minted per enrollment and a lost-response retry re-reads it rather than re-signing. The trusted
+    bind path ALWAYS supplies the C2 winning-bind bindings (so an exact retry can be proven byte-
+    for-byte); ``load_signed_offer_record`` refuses a row missing them."""
     if len(signed_offer) > 8192 or not is_sha256_digest(signer_key_id):
+        raise _refuse("enrollment_state_corrupt")
+    if response_json is not None and len(response_json) > 16384:
         raise _refuse("enrollment_state_corrupt")
     session.add(
         SignedOfferRow(
@@ -762,6 +790,16 @@ def persist_signed_offer(
             signer_key_id=signer_key_id,
             signed_offer=signed_offer,
             response_digest=sha256_bytes(signed_offer.encode("utf-8")),
+            bind_input_digest=bind_input_digest,
+            offer_claim_digest=offer_claim_digest,
+            resulting_revision=resulting_revision,
+            resulting_state_digest=resulting_state_digest,
+            worker_installation_id=worker_installation_id,
+            worker_key_id=worker_key_id,
+            response_json=response_json,
+            response_json_digest=(
+                sha256_bytes(response_json.encode("utf-8")) if response_json is not None else None
+            ),
         )
     )
     try:
@@ -771,8 +809,9 @@ def persist_signed_offer(
 
 
 def load_signed_offer(session: Session, enrollment_id: str) -> str | None:
-    """The exact persisted signed offer for a lost-response retry, digest-verified on read. Returns
-    None if none exists; a tampered / oversized row is corruption (refused, never repaired)."""
+    """The exact persisted signed offer ENVELOPE for the result-exchange binding, digest-verified on
+    read. Returns None if none exists; a tampered / oversized row is corruption (refused, never
+    repaired)."""
     row = session.execute(
         select(SignedOfferRow).where(SignedOfferRow.enrollment_id == enrollment_id)
     ).scalar_one_or_none()
@@ -783,6 +822,57 @@ def load_signed_offer(session: Session, enrollment_id: str) -> str | None:
     if sha256_bytes(row.signed_offer.encode("utf-8")) != row.response_digest:
         raise _refuse("enrollment_state_corrupt")
     return row.signed_offer
+
+
+def load_signed_offer_record(session: Session, enrollment_id: str) -> SignedOfferRecord | None:
+    """The full winning-bind record for an EXACT bind retry (C2), fully digest-verified on read.
+    Returns None if none exists; a tampered / oversized / NULL-binding row is corruption (refused as
+    ``enrollment_state_corrupt``, never returned or re-signed)."""
+    row = session.execute(
+        select(SignedOfferRow).where(SignedOfferRow.enrollment_id == enrollment_id)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    # (1) offer-envelope integrity
+    if len(row.signed_offer) > 8192 or not is_sha256_digest(row.response_digest):
+        raise _refuse("enrollment_state_corrupt")
+    if sha256_bytes(row.signed_offer.encode("utf-8")) != row.response_digest:
+        raise _refuse("enrollment_state_corrupt")
+    # (2) every C2 binding must be present and well-formed
+    if (
+        row.bind_input_digest is None
+        or row.offer_claim_digest is None
+        or row.resulting_revision is None
+        or row.resulting_state_digest is None
+        or row.worker_installation_id is None
+        or row.worker_key_id is None
+        or row.response_json is None
+        or row.response_json_digest is None
+    ):
+        raise _refuse("enrollment_state_corrupt")
+    if not (
+        is_sha256_digest(row.bind_input_digest)
+        and is_sha256_digest(row.offer_claim_digest)
+        and is_sha256_digest(row.resulting_state_digest)
+        and is_sha256_digest(row.worker_key_id)
+        and is_sha256_digest(row.response_json_digest)
+    ):
+        raise _refuse("enrollment_state_corrupt")
+    # (3) original-response integrity
+    if len(row.response_json) > 16384:
+        raise _refuse("enrollment_state_corrupt")
+    if sha256_bytes(row.response_json.encode("utf-8")) != row.response_json_digest:
+        raise _refuse("enrollment_state_corrupt")
+    return SignedOfferRecord(
+        envelope=row.signed_offer,
+        bind_input_digest=row.bind_input_digest,
+        offer_claim_digest=row.offer_claim_digest,
+        resulting_revision=row.resulting_revision,
+        resulting_state_digest=row.resulting_state_digest,
+        worker_installation_id=row.worker_installation_id,
+        worker_key_id=row.worker_key_id,
+        response_json=row.response_json,
+    )
 
 
 def revision_state_digest(session: Session, *, enrollment_id: str, revision: int) -> str | None:

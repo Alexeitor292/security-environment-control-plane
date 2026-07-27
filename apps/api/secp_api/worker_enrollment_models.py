@@ -108,6 +108,10 @@ def _digest_or_empty(column: str) -> str:
     return f"({column} = '' OR {_digest(column)})"
 
 
+def _digest_or_null(column: str) -> str:
+    return f"({column} IS NULL OR {_digest(column)})"
+
+
 def _bounded(column: str, low: int, high: int) -> str:
     return f"(length({column}) >= {low} AND length({column}) <= {high})"
 
@@ -335,10 +339,34 @@ class WorkerEnrollmentSignedOffer(Base):
     offer_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     #: the controller enrollment key id that signed (records WHICH key, so a rotation is auditable)
     signer_key_id: Mapped[str] = mapped_column(String(80), nullable=False)
-    #: the exact canonical response JSON: {"claim": {...}, "attestation": {...}} — public only
+    #: the exact canonical OFFER envelope: {"claim": {...}, "attestation": {...}} — public only.
+    #: This is the offer the worker verifies; ``_persisted_offer_bindings`` chains the result to it.
     signed_offer: Mapped[str] = mapped_column(Text, nullable=False)
-    #: sha256 of ``signed_offer``, re-verified on every read so a tampered row refuses closed
+    #: sha256 of ``signed_offer``, re-verified on every read so a tampered offer refuses closed
     response_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+
+    # --- C2 exact winning-bind replay bindings (nullable schema; ALWAYS populated by the trusted
+    # persist path; the repository refuses a NULL / mismatched row on read as state_corrupt) ---
+    #: digest binding the EXACT winning bind request (enrollment, invitation, verified worker
+    #: installation id, derived worker key id, PoP claim digest, attestation identity/signature,
+    #: expected initial revision, controller transaction, release). An exact retry recomputes this
+    #: and requires equality; a different worker/key/PoP/initial request conflicts.
+    bind_input_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    #: claim_digest of the persisted offer claim (re-verified against the envelope on read)
+    offer_claim_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    #: the resulting head revision of the winning bind exchange (offer_transported)
+    resulting_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: the head state digest at ``resulting_revision`` (re-proven against append-only history)
+    resulting_state_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    #: the bound worker installation id + key id (retry must present the SAME worker)
+    worker_installation_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    worker_key_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    #: the EXACT original BindExchangeOut bytes ({"signed_offer": envelope, "enrollment": status})
+    #: returned verbatim on an exact retry — never reconstructed from the (possibly advanced) head
+    response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: sha256 over ``response_json`` — re-verified on read so a tampered response refuses closed
+    response_json_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -350,6 +378,23 @@ class WorkerEnrollmentSignedOffer(Base):
         CheckConstraint(_digest("signer_key_id"), name="ck_weso_signer_key_id"),
         CheckConstraint(_digest("response_digest"), name="ck_weso_response_digest"),
         CheckConstraint("length(signed_offer) <= 8192", name="ck_weso_payload_bounded"),
+        CheckConstraint(_digest_or_null("bind_input_digest"), name="ck_weso_bind_input_digest"),
+        CheckConstraint(_digest_or_null("offer_claim_digest"), name="ck_weso_offer_claim_digest"),
+        CheckConstraint(
+            _digest_or_null("resulting_state_digest"), name="ck_weso_resulting_state_digest"
+        ),
+        CheckConstraint(
+            "(resulting_revision IS NULL OR resulting_revision >= 0)",
+            name="ck_weso_resulting_revision",
+        ),
+        CheckConstraint(_digest_or_null("worker_key_id"), name="ck_weso_worker_key_id"),
+        CheckConstraint(
+            _digest_or_null("response_json_digest"), name="ck_weso_response_json_digest"
+        ),
+        CheckConstraint(
+            "(response_json IS NULL OR length(response_json) <= 16384)",
+            name="ck_weso_response_json_bounded",
+        ),
     )
 
 

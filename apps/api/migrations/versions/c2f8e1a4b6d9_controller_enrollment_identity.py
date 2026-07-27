@@ -109,9 +109,13 @@ def upgrade() -> None:
         sa.Column("state_snapshot", sa.Text(), nullable=True),
     )
 
-    # Phase 3: the immutable, content-addressed public signed controller offer minted at the bind
-    # exchange, persisted write-once per enrollment so a lost-response retry returns the exact
-    # original signed offer even after the controller enrollment key rotates. Public material only.
+    # Phase 3 (+ C1/C2): the immutable, content-addressed public signed controller offer minted at
+    # the bind exchange, persisted write-once per enrollment so a lost-response retry returns the
+    # EXACT original BindExchangeOut even after healthy/revoke/restart/key-rotation. Public material
+    # only. The C2 winning-bind columns pin the exact winning request + resulting state + original
+    # response so an exact retry can be proven (never re-signed) and a different worker / key / PoP
+    # / initial request conflicts. They are nullable at the schema level (portable), but the trusted
+    # persist path ALWAYS populates them and the repository refuses a NULL/mismatched row on read.
     op.create_table(
         "worker_enrollment_signed_offer",
         sa.Column("id", sa.Uuid(), primary_key=True),
@@ -126,6 +130,15 @@ def upgrade() -> None:
         sa.Column("signer_key_id", sa.String(length=80), nullable=False),
         sa.Column("signed_offer", sa.Text(), nullable=False),
         sa.Column("response_digest", sa.String(length=80), nullable=False),
+        # --- C2 exact winning-bind replay bindings ---
+        sa.Column("bind_input_digest", sa.String(length=80), nullable=True),
+        sa.Column("offer_claim_digest", sa.String(length=80), nullable=True),
+        sa.Column("resulting_revision", sa.Integer(), nullable=True),
+        sa.Column("resulting_state_digest", sa.String(length=80), nullable=True),
+        sa.Column("worker_installation_id", sa.String(length=120), nullable=True),
+        sa.Column("worker_key_id", sa.String(length=80), nullable=True),
+        sa.Column("response_json", sa.Text(), nullable=True),
+        sa.Column("response_json_digest", sa.String(length=80), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("enrollment_id", name="uq_worker_enrollment_signed_offer"),
         sa.CheckConstraint("offer_revision >= 0", name="ck_weso_revision_nonnegative"),
@@ -138,6 +151,39 @@ def upgrade() -> None:
             name="ck_weso_response_digest",
         ),
         sa.CheckConstraint("length(signed_offer) <= 8192", name="ck_weso_payload_bounded"),
+        sa.CheckConstraint(
+            "(bind_input_digest IS NULL OR (length(bind_input_digest) = 71 "
+            "AND bind_input_digest LIKE 'sha256:%'))",
+            name="ck_weso_bind_input_digest",
+        ),
+        sa.CheckConstraint(
+            "(offer_claim_digest IS NULL OR (length(offer_claim_digest) = 71 "
+            "AND offer_claim_digest LIKE 'sha256:%'))",
+            name="ck_weso_offer_claim_digest",
+        ),
+        sa.CheckConstraint(
+            "(resulting_state_digest IS NULL OR (length(resulting_state_digest) = 71 "
+            "AND resulting_state_digest LIKE 'sha256:%'))",
+            name="ck_weso_resulting_state_digest",
+        ),
+        sa.CheckConstraint(
+            "(resulting_revision IS NULL OR resulting_revision >= 0)",
+            name="ck_weso_resulting_revision",
+        ),
+        sa.CheckConstraint(
+            "(worker_key_id IS NULL OR (length(worker_key_id) = 71 "
+            "AND worker_key_id LIKE 'sha256:%'))",
+            name="ck_weso_worker_key_id",
+        ),
+        sa.CheckConstraint(
+            "(response_json_digest IS NULL OR (length(response_json_digest) = 71 "
+            "AND response_json_digest LIKE 'sha256:%'))",
+            name="ck_weso_response_json_digest",
+        ),
+        sa.CheckConstraint(
+            "(response_json IS NULL OR length(response_json) <= 16384)",
+            name="ck_weso_response_json_bounded",
+        ),
     )
 
 

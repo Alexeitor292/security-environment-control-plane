@@ -433,3 +433,130 @@ def test_result_before_offer_is_refused(client, session):
     }
     r = _post_result(client, inv, _result_body(inv, wpriv, wpub, fake_offer))
     assert r.status_code in (409, 422)  # wrong_state (no bound worker / no offer)
+
+
+# --- C2: exact winning-bind replay ---------------------------------------------------------------
+
+
+def _bind_once(client, session):
+    _wire_signer(client, session)
+    inv = _create_invitation(client)
+    wpriv, wpub = generate_keypair()
+    wid = "worker-" + ea.key_id_for(wpub).split(":")[-1][:16]
+    body = _pop_body(inv, wpriv, wpub, worker_installation_id=wid)
+    first = _post_bind(client, inv, body)
+    assert first.status_code == 200, first.text
+    return inv, wpriv, wpub, wid, body, first.json()
+
+
+def test_exact_retry_after_healthy_returns_the_original_offer_transported_response(
+    client, session, engine
+):
+    """C2: after the enrollment has advanced to healthy (revision 5), an EXACT bind retry returns
+    the ORIGINAL offer_transported (revision 2) response bytes — never the current head."""
+    inv, wpriv, wpub, wid, body, first = _bind_once(client, session)
+    offer = first["signed_offer"]
+    res = _post_result(client, inv, _result_body(inv, wpriv, wpub, offer))
+    assert res.status_code == 200 and res.json()["enrollment"]["state"] == "healthy"
+    retry = _post_bind(client, inv, body)
+    assert retry.status_code == 200, retry.text
+    assert (
+        retry.json() == first
+    )  # byte-equivalent original BindExchangeOut (offer_transported/rev 2)
+    assert retry.json()["enrollment"]["revision"] == 2
+    assert _signed_offer_count(engine, inv["enrollment_id"]) == 1  # no duplicate offer row
+
+
+def test_exact_retry_after_revoke_returns_the_original_response(client, session):
+    inv, wpriv, wpub, wid, body, first = _bind_once(client, session)
+    revoke = client.post(
+        f"/api/v1/enrollment/{inv['enrollment_id']}/revoke", json={"expected_revision": 2}
+    )
+    assert revoke.status_code == 200 and revoke.json()["state"] == "refused"
+    retry = _post_bind(client, inv, body)
+    assert retry.status_code == 200, retry.text
+    assert retry.json() == first  # the original offer_transported response, not the revoked head
+
+
+def test_exact_retry_survives_controller_key_rotation(client, session):
+    inv, wpriv, wpub, wid, body, first = _bind_once(client, session)
+    # rotate the controller identity to a brand-new key and re-inject the matching signer
+    _wire_signer(client, session)
+    retry = _post_bind(client, inv, body)
+    assert retry.status_code == 200, retry.text
+    assert retry.json() == first  # re-read, never re-signed under the rotated key
+
+
+def test_exact_retry_needs_no_signer(client, session):
+    """C2: the replay path never calls the signer, so it succeeds even after the broker is gone /
+    the historical private key is removed (here: the signer override is dropped to the sealed
+    default)."""
+    from secp_api.deps import get_enrollment_offer_signer
+
+    inv, wpriv, wpub, wid, body, first = _bind_once(client, session)
+    client.app.dependency_overrides.pop(get_enrollment_offer_signer, None)  # sealed default now
+    retry = _post_bind(client, inv, body)
+    assert retry.status_code == 200, retry.text
+    assert retry.json() == first
+
+
+def test_exact_retry_survives_an_api_restart(client, session, engine):
+    """C2: a fresh app instance (simulated API restart) on the same database returns the original
+    response for an exact retry — the winning-bind record is durable."""
+    from fastapi.testclient import TestClient
+    from secp_api.main import create_app
+
+    inv, wpriv, wpub, wid, body, first = _bind_once(client, session)
+    restarted = create_app()
+    restarted.router.on_startup.clear()
+    with TestClient(restarted) as fresh:  # NO signer override wired on the restarted app
+        retry = fresh.post(f"/api/v1/enrollment/{inv['enrollment_id']}/exchange/bind", json=body)
+    assert retry.status_code == 200, retry.text
+    assert retry.json() == first
+
+
+def test_a_different_worker_on_retry_conflicts(client, session, engine):
+    """C2: a DIFFERENT worker (new key + a valid PoP for it) presenting the same non-secret
+    invitation gets a bounded idempotency conflict, not the original offer."""
+    inv, wpriv, wpub, wid, body, first = _bind_once(client, session)
+    other_priv, other_pub = generate_keypair()
+    other_wid = "worker-" + ea.key_id_for(other_pub).split(":")[-1][:16]
+    other_body = _pop_body(inv, other_priv, other_pub, worker_installation_id=other_wid)
+    r = _post_bind(client, inv, other_body)
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "enrollment_idempotency_conflict"
+    assert _signed_offer_count(engine, inv["enrollment_id"]) == 1  # still exactly one
+
+
+def test_a_tampered_winning_bind_record_refuses_closed(client, session, engine):
+    """C2: every winning-bind binding is re-verified on retry — a tampered persisted response
+    refuses closed (never returns a forged response or re-signs)."""
+    inv, wpriv, wpub, wid, body, first = _bind_once(client, session)
+    with Session(engine) as s:
+        s.execute(
+            text(
+                "UPDATE worker_enrollment_signed_offer SET response_json = "
+                "response_json || ' ' WHERE enrollment_id = :e"
+            ),
+            {"e": inv["enrollment_id"]},
+        )
+        s.commit()
+    retry = _post_bind(client, inv, body)
+    assert retry.status_code == 409
+    assert retry.json()["error"]["code"] == "enrollment_state_corrupt"
+
+
+def test_a_nulled_winning_bind_field_refuses_closed(client, session, engine):
+    inv, wpriv, wpub, wid, body, first = _bind_once(client, session)
+    with Session(engine) as s:
+        s.execute(
+            text(
+                "UPDATE worker_enrollment_signed_offer SET bind_input_digest = NULL "
+                "WHERE enrollment_id = :e"
+            ),
+            {"e": inv["enrollment_id"]},
+        )
+        s.commit()
+    retry = _post_bind(client, inv, body)
+    assert retry.status_code == 409
+    assert retry.json()["error"]["code"] == "enrollment_state_corrupt"

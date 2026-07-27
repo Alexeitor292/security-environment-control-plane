@@ -43,6 +43,7 @@ from secp_commissioning.enrollment_attestation import (
     DetachedAttestation,
     claim_digest,
     health_evidence_complete,
+    worker_binding_claim,
     worker_result_claim,
 )
 from sqlalchemy.exc import IntegrityError
@@ -731,19 +732,90 @@ def _offer_envelope(claim: dict[str, str], attestation: DetachedAttestation) -> 
     }
 
 
-def _replay_signed_offer(persisted: str, loaded: LoadedEnrollment) -> ExchangeOutcome:
+def _bind_input_digest(
+    *,
+    enrollment_id: str,
+    invitation_id: str,
+    worker_installation_id: str,
+    worker_key_id: str,
+    pop_claim_digest: str,
+    attestation: DetachedAttestation,
+    expected_revision: int,
+    transaction_id: str,
+    release_digest: str,
+) -> str:
+    """The digest binding the EXACT winning bind request (C2): the enrollment, invitation, the
+    VERIFIED worker installation id, the DERIVED worker key id, the PoP claim digest, the detached
+    attestation's identity + signature, the expected initial revision, the controller transaction,
+    and the release. An exact retry recomputes this and requires equality with the winning row; a
+    different worker / key / PoP / initial request produces a different digest and conflicts."""
+    return _input_digest(
+        "bind_exchange",
+        {
+            "enrollment_id": enrollment_id,
+            "invitation_id": invitation_id,
+            "worker_installation_id": worker_installation_id,
+            "worker_key_id": worker_key_id,
+            "pop_claim_digest": pop_claim_digest,
+            "attestation_key_id": attestation.key_id,
+            "attestation_public_key_hex": attestation.public_key_hex,
+            "attestation_signature": attestation.signature,
+            "expected_revision": expected_revision,
+            "controller_transaction_id": transaction_id,
+            "release_digest": release_digest,
+        },
+    )
+
+
+def _replay_bind_record(
+    session: Session,
+    record: repo.SignedOfferRecord,
+    *,
+    enrollment_id: str,
+    bind_input_digest: str,
+    worker_installation_id: str,
+    worker_key_id: str,
+) -> ExchangeOutcome:
+    """EXACT winning-bind replay (C2). The PoP was already re-verified by the caller. Requires the
+    recomputed ``bind_input_digest`` AND the presented worker installation/key to equal the winning
+    row; re-proves the offer-claim, resulting-state and history digests; then returns the EXACT
+    original BindExchangeOut bytes/status — never the (possibly advanced) current head, never the
+    signer. A different worker / key / PoP / initial request conflicts (bounded
+    ``enrollment_idempotency_conflict``)."""
+    # (3) require the winning bind input + the same worker identity — else a bounded conflict
+    if (
+        bind_input_digest != record.bind_input_digest
+        or worker_installation_id != record.worker_installation_id
+        or worker_key_id != record.worker_key_id
+    ):
+        raise WorkerEnrollmentError(EC.idempotency_conflict)
+    # (5) validate the offer-claim digest against the persisted envelope, and the resulting-state
+    #     digest against the append-only history at the recorded resulting revision
     try:
-        envelope = json.loads(persisted)
-    except Exception:  # noqa: BLE001 - a malformed persisted offer is corruption, never re-signed
+        envelope = json.loads(record.envelope)
+        response = json.loads(record.response_json)
+    except Exception:  # noqa: BLE001 - a malformed persisted row is corruption, never re-signed
         raise WorkerEnrollmentError(EC.state_corrupt) from None
     if (
         not isinstance(envelope, dict)
         or not isinstance(envelope.get("claim"), dict)
-        or not isinstance(envelope.get("attestation"), dict)
+        or claim_digest(envelope["claim"]) != record.offer_claim_digest
     ):
         raise WorkerEnrollmentError(EC.state_corrupt)
+    history_digest = repo.revision_state_digest(
+        session, enrollment_id=enrollment_id, revision=record.resulting_revision
+    )
+    if history_digest is None or history_digest != record.resulting_state_digest:
+        raise WorkerEnrollmentError(EC.state_corrupt)
+    if (
+        not isinstance(response, dict)
+        or not isinstance(response.get("signed_offer"), dict)
+        or not isinstance(response.get("enrollment"), dict)
+    ):
+        raise WorkerEnrollmentError(EC.state_corrupt)
+    # (6) return the EXACT original response/status (never the current head); no signer, no write
     return ExchangeOutcome(
-        signed_offer=envelope, status=loaded.state.public_view(), deduplicated=True
+        signed_offer=response["signed_offer"], status=response["enrollment"], deduplicated=True
     )
 
 
@@ -814,11 +886,46 @@ def bind_worker_exchange(
         expires_at=invitation.expires_at,
     )
 
-    # (3) lost-response durability: an already-persisted signed offer means this exchange completed;
-    #     return the byte-equivalent original WITHOUT re-signing or re-advancing.
-    persisted = repo.load_signed_offer(session, enrollment_id)
-    if persisted is not None:
-        return _replay_signed_offer(persisted, loaded)
+    # (2c) the digest binding this EXACT bind request (C2) — recomputed identically on a retry
+    pop_claim = worker_binding_claim(
+        enrollment_id=enrollment_id,
+        invitation_id=invitation.invitation_id,
+        controller_installation_id=invitation.controller_installation_id,
+        controller_key_id=invitation.controller_key_id,
+        controller_transaction_id=invitation.transaction_id,
+        worker_installation_id=worker_installation_id,
+        worker_key_id=verified.worker_key_id,
+        release_digest=invitation.release_digest,
+        expires_at=invitation.expires_at,
+    )
+    bind_input_digest = _bind_input_digest(
+        enrollment_id=enrollment_id,
+        invitation_id=invitation.invitation_id,
+        worker_installation_id=worker_installation_id,
+        worker_key_id=verified.worker_key_id,
+        pop_claim_digest=claim_digest(pop_claim),
+        attestation=pop_attestation,
+        expected_revision=expected_revision,
+        transaction_id=invitation.transaction_id,
+        release_digest=invitation.release_digest,
+    )
+
+    # (3) lost-response durability: an already-persisted winning offer means this exchange is done;
+    #     re-verify the SAME winning request and return the EXACT original response — no re-sign, no
+    #     re-advance. A different worker / key / PoP / initial request is a bounded conflict.
+    try:
+        record = repo.load_signed_offer_record(session, enrollment_id)
+    except RepositoryRefusal as exc:  # a tampered / NULL-binding row is corruption, never re-signed
+        raise _surface(exc) from None
+    if record is not None:
+        return _replay_bind_record(
+            session,
+            record,
+            enrollment_id=enrollment_id,
+            bind_input_digest=bind_input_digest,
+            worker_installation_id=worker_installation_id,
+            worker_key_id=verified.worker_key_id,
+        )
 
     # (4) bind the worker + atomically consume the single-use nonce (invited -> worker_bound)
     bound = bind_worker(
@@ -890,8 +997,11 @@ def bind_worker_exchange(
         claimed_scope=claimed_scope,
     )
 
-    # (8) persist the EXACT signed public offer WRITE-ONCE per enrollment (a lost race -> conflict)
+    # (8) persist the EXACT signed public offer WRITE-ONCE per enrollment (a lost race -> conflict),
+    #     pinning the C2 winning-bind bindings + the EXACT original response so a retry is provable.
     envelope = _offer_envelope(offer_claim, offer.attestation)
+    status_view = recorded.state.public_view()
+    response = {"signed_offer": envelope, "enrollment": status_view}
     try:
         repo.persist_signed_offer(
             session,
@@ -900,12 +1010,17 @@ def bind_worker_exchange(
             offer_revision=recorded.committed_revision,
             signer_key_id=offer.attestation.key_id,
             signed_offer=canonical_json(envelope),
+            bind_input_digest=bind_input_digest,
+            offer_claim_digest=claim_digest(offer_claim),
+            resulting_revision=recorded.committed_revision,
+            resulting_state_digest=recorded.state.digest(),
+            worker_installation_id=worker_installation_id,
+            worker_key_id=verified.worker_key_id,
+            response_json=canonical_json(response),
         )
     except RepositoryRefusal as exc:
         raise _surface(exc) from None
-    return ExchangeOutcome(
-        signed_offer=envelope, status=recorded.state.public_view(), deduplicated=False
-    )
+    return ExchangeOutcome(signed_offer=envelope, status=status_view, deduplicated=False)
 
 
 def record_offer(
