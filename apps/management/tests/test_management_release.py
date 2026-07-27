@@ -195,9 +195,15 @@ def test_oversized_artifact_size_field_refused():
 def test_signature_covers_the_whole_release():
     # the aggregate digest == the canonical manifest digest, so signing it signs every artifact
     m = ReleaseManifest.model_validate(manifest_dict("worker", default_artifacts("worker")))
-    from secp_management.release_bundle import manifest_aggregate_digest
+    from secp_management.release_bundle import _V1ALPHA2_MANIFEST_FIELDS, manifest_aggregate_digest
 
-    assert manifest_aggregate_digest(m) == sha256_bytes(
-        canonical_json(m.model_dump(mode="json")).encode()
-    )
-    assert manifest_signing_message(m) == m.canonical().encode()
+    # SECP-PR5H-B2 compatibility: a v1alpha1 manifest's canonical/signing form is BYTE-STABLE — the
+    # v1alpha2-only installation-profile fields are version-gated OUT — so a v1alpha1 signature made
+    # before B2 still verifies after those optional fields were added to the model.
+    canon = m.canonical()
+    assert all(f not in canon for f in _V1ALPHA2_MANIFEST_FIELDS)
+    dump = m.model_dump(mode="json")
+    for field in _V1ALPHA2_MANIFEST_FIELDS:
+        dump.pop(field, None)
+    assert manifest_aggregate_digest(m) == sha256_bytes(canonical_json(dump).encode())
+    assert manifest_signing_message(m) == canon.encode()

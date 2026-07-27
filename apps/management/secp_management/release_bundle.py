@@ -27,8 +27,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_bytes
 from secp_commissioning.descriptor import scan_forbidden
 
-from secp_management import BOOTSTRAP_CONTRACT_VERSION, PLANE_MANAGEMENT, ManagementError
+from secp_management import (
+    BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2,
+    PLANE_MANAGEMENT,
+    SUPPORTED_BOOTSTRAP_CONTRACT_VERSIONS,
+    ManagementError,
+)
 from secp_management.topology import EXPECTED_CONTROLLER_COMPONENTS
+
+#: The v1alpha2-only manifest fields, version-gated out of the v1alpha1 canonical/signing form.
+_V1ALPHA2_MANIFEST_FIELDS = ("platform_profile", "runtime_profile", "controller_tls_policy")
 
 MANIFEST_NAME = "release-manifest.json"
 SIGNATURE_NAME = "release-manifest.sig.json"
@@ -107,8 +115,85 @@ class ArtifactRecord(_Strict):
     purpose: _Str | None = None  # required for image_archive + python_wheel (closed taxonomy)
 
 
+# --- SECP-PR5H-B2: the v1alpha2 signed installation profile (provider-neutral; no deployment value)
+
+
+#: The closed supported platform matrix (OS -> supported architectures). Provider-neutral.
+_SUPPORTED_PLATFORMS: dict[str, frozenset[str]] = {"linux": frozenset({"amd64", "arm64"})}
+#: The closed set of host-runtime executable capabilities a controller install pins.
+_RUNTIME_CAPABILITIES = frozenset({"container_runtime", "compose", "service_manager"})
+#: The closed set of controller TLS modes the release policy may permit.
+TLS_MODE_GENERATED_LOCAL_CA = "generated_local_ca"
+TLS_MODE_IMPORTED_ENTERPRISE = "imported_enterprise_tls"
+_TLS_MODES = frozenset({TLS_MODE_GENERATED_LOCAL_CA, TLS_MODE_IMPORTED_ENTERPRISE})
+_TLS_KEY_ALGORITHMS = frozenset({"ecdsa-p256", "ecdsa-p384", "ed25519", "rsa-3072", "rsa-4096"})
+_TLS_MIN_VERSIONS = frozenset({"1.2", "1.3"})
+_ARGV_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+class PlatformProfile(_Strict):
+    """The signed, closed platform binding for a v1alpha2 release (provider-neutral)."""
+
+    os: _Str
+    arch: _Str
+    installation_profile_version: _Str
+
+
+class RuntimeExecutablePin(_Strict):
+    """A signed pin for one host-runtime executable capability: the exact absolute path + SHA-256 +
+    the closed invocation prefix + the closed allowed-subcommand surface. Models Docker Compose
+    truthfully — when Compose is ``docker compose`` the ``compose`` pin shares the docker path and
+    binds the ``compose`` subcommand; a standalone compose binary is pinned independently."""
+
+    capability: _Str
+    path: _Str
+    sha256: _Sha
+    invocation: tuple[_Str, ...]
+    allowed_subcommands: tuple[_Str, ...]
+
+    @field_validator("invocation", "allowed_subcommands", mode="before")
+    @classmethod
+    def _coerce_seq(cls, v: object) -> object:
+        return tuple(v) if isinstance(v, list) else v
+
+
+class RuntimeProfile(_Strict):
+    """The signed host-runtime profile: one pin per required capability."""
+
+    pins: tuple[RuntimeExecutablePin, ...]
+
+    @field_validator("pins", mode="before")
+    @classmethod
+    def _coerce_pins(cls, v: object) -> object:
+        return tuple(v) if isinstance(v, list) else v
+
+
+class ControllerTlsPolicy(_Strict):
+    """The signed, CLOSED controller-API TLS policy — NOT a deployment origin, private CA, key, or
+    certificate path. It bounds what the root installer may generate or import at deploy time."""
+
+    allowed_modes: tuple[_Str, ...]
+    key_algorithm: _Str
+    signature_algorithm: _Str
+    max_validity_days: Annotated[int, Field(ge=1, le=3660, strict=True)]
+    require_san: bool
+    server_auth_eku_required: bool
+    ca_pathlen_zero: bool
+    min_tls_version: _Str
+    allow_ip_origin: bool
+    allow_generated_local_ca: bool
+
+    @field_validator("allowed_modes", mode="before")
+    @classmethod
+    def _coerce_modes(cls, v: object) -> object:
+        return tuple(v) if isinstance(v, list) else v
+
+
 class ReleaseManifest(_Strict):
-    """The strict, canonical release manifest binding every artifact digest."""
+    """The strict, canonical release manifest binding every artifact digest. v1alpha2 additionally
+    carries the signed installation profile (platform / host-runtime pins / controller TLS policy);
+    those three fields are version-gated OUT of the v1alpha1 canonical/signing form so existing
+    v1alpha1 signatures reverify byte-for-byte."""
 
     bootstrap_contract_version: _Str
     plane: _Str
@@ -122,6 +207,10 @@ class ReleaseManifest(_Strict):
     bootstrap_package_identity: _Str
     signing_anchor_id: _Str
     artifacts: tuple[ArtifactRecord, ...]
+    # --- v1alpha2-only (None on v1alpha1; excluded from the v1alpha1 canonical form) ---
+    platform_profile: PlatformProfile | None = None
+    runtime_profile: RuntimeProfile | None = None
+    controller_tls_policy: ControllerTlsPolicy | None = None
 
     @field_validator("artifacts", mode="before")
     @classmethod
@@ -129,7 +218,13 @@ class ReleaseManifest(_Strict):
         return tuple(v) if isinstance(v, list) else v
 
     def canonical(self) -> str:
-        return canonical_json(self.model_dump(mode="json"))
+        dump = self.model_dump(mode="json")
+        if self.bootstrap_contract_version != BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2:
+            # v1alpha1 form: the v1alpha2-only fields are absent from the signed bytes, so an
+            # existing v1alpha1 signature verifies unchanged.
+            for field in _V1ALPHA2_MANIFEST_FIELDS:
+                dump.pop(field, None)
+        return canonical_json(dump)
 
 
 class ReleaseSignature(_Strict):
@@ -174,8 +269,10 @@ def parse_signature_bytes(raw: bytes) -> ReleaseSignature:
 
 def assert_manifest_wellformed(manifest: ReleaseManifest) -> None:
     """Fail closed on any semantic defect the schema alone cannot express (bounded reasons)."""
-    if manifest.bootstrap_contract_version != BOOTSTRAP_CONTRACT_VERSION:
+    if manifest.bootstrap_contract_version not in SUPPORTED_BOOTSTRAP_CONTRACT_VERSIONS:
+        # unknown / malformed / older-unsupported / future contract versions all refuse.
         raise ManagementError("release_contract_version_invalid")
+    _assert_installation_profile(manifest)
     if manifest.plane != PLANE_MANAGEMENT:
         raise ManagementError("release_plane_invalid")
     if manifest.role not in _ROLES:
@@ -214,6 +311,72 @@ def assert_manifest_wellformed(manifest: ReleaseManifest) -> None:
     # every REQUIRED purpose for this role must be present (missing → refused).
     if not _REQUIRED_PURPOSES[manifest.role].issubset(seen_purposes):
         raise ManagementError("release_purpose_set_incomplete")
+
+
+def _assert_installation_profile(manifest: ReleaseManifest) -> None:
+    """v1alpha1 MUST carry none of the v1alpha2 installation-profile fields; v1alpha2 MUST carry all
+    three, each well-formed. This keeps the two contract generations unambiguous and never lets a
+    v1alpha1 manifest smuggle an (unsigned-in-its-form) profile."""
+    present = [f for f in _V1ALPHA2_MANIFEST_FIELDS if getattr(manifest, f) is not None]
+    if manifest.bootstrap_contract_version != BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2:
+        if present:
+            raise ManagementError("release_v1alpha1_profile_unexpected")
+        return
+    if len(present) != len(_V1ALPHA2_MANIFEST_FIELDS):
+        raise ManagementError("release_v1alpha2_profile_incomplete")
+    _assert_platform_profile(manifest.platform_profile)  # type: ignore[arg-type]
+    _assert_runtime_profile(manifest.runtime_profile)  # type: ignore[arg-type]
+    _assert_controller_tls_policy(manifest.controller_tls_policy)  # type: ignore[arg-type]
+
+
+def _assert_platform_profile(p: PlatformProfile) -> None:
+    if p.os not in _SUPPORTED_PLATFORMS or p.arch not in _SUPPORTED_PLATFORMS[p.os]:
+        raise ManagementError("release_platform_unsupported")
+    if not _safe_name(p.installation_profile_version):
+        raise ManagementError("release_platform_profile_version_invalid")
+
+
+def _assert_runtime_profile(rp: RuntimeProfile) -> None:
+    seen: set[str] = set()
+    for pin in rp.pins:
+        if pin.capability not in _RUNTIME_CAPABILITIES:
+            raise ManagementError("release_runtime_capability_unknown")
+        if pin.capability in seen:
+            raise ManagementError("release_runtime_capability_duplicate")
+        seen.add(pin.capability)
+        if not (pin.path.startswith("/") and ".." not in pin.path.split("/")):
+            raise ManagementError("release_runtime_path_invalid")
+        if not is_sha256_digest(pin.sha256):
+            raise ManagementError("release_runtime_digest_invalid")
+        if not pin.invocation or any(not _ARGV_TOKEN.fullmatch(t) for t in pin.invocation):
+            raise ManagementError("release_runtime_invocation_invalid")
+        if any(not _ARGV_TOKEN.fullmatch(t) for t in pin.allowed_subcommands):
+            raise ManagementError("release_runtime_subcommand_invalid")
+    if seen != _RUNTIME_CAPABILITIES:
+        raise ManagementError("release_runtime_capabilities_incomplete")
+
+
+def _assert_controller_tls_policy(t: ControllerTlsPolicy) -> None:
+    if not t.allowed_modes or any(m not in _TLS_MODES for m in t.allowed_modes):
+        raise ManagementError("release_tls_mode_invalid")
+    if len(set(t.allowed_modes)) != len(t.allowed_modes):
+        raise ManagementError("release_tls_mode_duplicate")
+    if t.allow_generated_local_ca and TLS_MODE_GENERATED_LOCAL_CA not in t.allowed_modes:
+        raise ManagementError("release_tls_generated_ca_inconsistent")
+    if t.key_algorithm not in _TLS_KEY_ALGORITHMS:
+        raise ManagementError("release_tls_key_algorithm_invalid")
+    if t.min_tls_version not in _TLS_MIN_VERSIONS:
+        raise ManagementError("release_tls_min_version_invalid")
+    if not t.server_auth_eku_required or not t.ca_pathlen_zero:
+        # a controller-API server policy must require server-auth EKU and a non-CA leaf chain.
+        raise ManagementError("release_tls_policy_too_weak")
+
+
+def require_b2_installation_profile(manifest: ReleaseManifest) -> None:
+    """Refuse a clean-host SECP-PR5H-B2 installation from a bundle that lacks the v1alpha2
+    installation profile (a legacy v1alpha1 bundle), with a bounded reason rather than guessing."""
+    if manifest.bootstrap_contract_version != BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2:
+        raise ManagementError("release_b2_installation_profile_required")
 
 
 def _assert_artifact_purpose(role: str, art: ArtifactRecord, seen_purposes: set[str]) -> None:
