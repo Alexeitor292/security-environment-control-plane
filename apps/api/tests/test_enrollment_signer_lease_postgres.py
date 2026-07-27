@@ -25,6 +25,7 @@ import pytest
 from secp_api.controller_identity_dev import build_test_verified_controller_identity
 from secp_api.models import Base
 from secp_api.services.controller_identity import activate_controller_identity
+from secp_api.worker_enrollment_schema import RUNTIME_REQUIRED_MIGRATION_HEAD
 from secp_commissioning.controller_enrollment_signer import (
     ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY as LOCK_KEY,
 )
@@ -87,6 +88,17 @@ def pg():
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
     Base.metadata.create_all(admin)
+    # This fence step drops + recreates the schema, so RESTORE the alembic head marker the fence's
+    # subsequent "live Alembic head" proof reads (mirrors the sibling *_postgres.py fixtures) — its
+    # absence would fail that later step with a bare UndefinedTable, not a real regression.
+    with admin.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS alembic_version (version_num varchar(32) primary key)"
+        )
+        conn.exec_driver_sql("DELETE FROM alembic_version")
+        conn.exec_driver_sql(
+            f"INSERT INTO alembic_version VALUES ('{RUNTIME_REQUIRED_MIGRATION_HEAD}')"
+        )
     with ac.connect() as conn:
         # a plain LOGIN role: not a superuser, cannot create roles/dbs, owns nothing
         conn.exec_driver_sql(
