@@ -21,7 +21,7 @@ the signer; no origin / CA path / private material enters a log, error, or the r
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import NoReturn, Protocol
 
@@ -100,10 +100,25 @@ class WorkerEnrollmentStateStore(Protocol):
     def record(self, enrollment_id: str, step: str) -> None: ...
 
 
+class SealedWorkerEnrollmentStateStore:
+    """The SHIPPED DEFAULT restart-state store (C3): it persists NOTHING across restarts (``load``
+    is always ``None``, ``record`` is a no-op). Production composes a fixed-path HARDENED marker
+    store (following the ``secp_worker.health`` idiom) — until then the marker is simply absent, so
+    a restarted worker safely RE-DRIVES the idempotent exchange and reconciles against the
+    controller's authoritative state rather than trusting a local marker."""
+
+    def load(self, enrollment_id: str) -> str | None:
+        return None
+
+    def record(self, enrollment_id: str, step: str) -> None:
+        return None
+
+
 class InMemoryWorkerEnrollmentStateStore:
-    """A process-local restart-state store (the default). A production deployment injects a tmpfs
-    marker store following the ``secp_worker.health`` idiom; this keeps the driver runnable + tested
-    without a real filesystem."""
+    """A process-local restart-state store for TESTS (inspectable). It is never the shipped default;
+    production composes a fixed-path hardened marker store. It stores no key, offer, claim, or
+    attestation — only the last completed step per enrollment (a retry HINT, never trusted as the
+    authoritative outcome)."""
 
     def __init__(self) -> None:
         self._steps: dict[str, str] = {}
@@ -113,6 +128,111 @@ class InMemoryWorkerEnrollmentStateStore:
 
     def record(self, enrollment_id: str, step: str) -> None:
         self._steps[enrollment_id] = step
+
+
+# --- health evidence: OBSERVED, never fabricated (C3) --------------------------------------------
+
+
+@dataclass(frozen=True)
+class HealthObservationContext:
+    """The bounded, PUBLIC context an observer needs to bind its observations to THIS exchange — the
+    release digest to confirm running, the controller transaction and the verified offer's content
+    address to confirm the offer/transaction, and the worker key id to confirm the protected key.
+    All are public digests/ids; no path, secret or private key is present."""
+
+    enrollment_id: str
+    release_digest: str
+    controller_transaction_id: str
+    worker_key_id: str
+    offer_claim_digest: str
+
+
+@dataclass(frozen=True)
+class ObservedHealthEvidence:
+    """A strict, immutable health-evidence object built from ACTUAL bounded local observations.
+    Construction requires EXACTLY the ``REQUIRED_HEALTH_CHECKS`` keys with boolean values (a missing
+    key, extra key, or non-bool refuses closed), and it carries ONLY those booleans — never a path,
+    release digest, key id, or any secret. A failed/unavailable observation is a ``False`` check
+    (never a fabricated ``True``), so an unhealthy worker can never reach ``healthy``."""
+
+    checks: Mapping[str, bool]
+
+    def __post_init__(self) -> None:
+        if set(self.checks) != set(REQUIRED_HEALTH_CHECKS) or any(
+            not isinstance(v, bool) for v in self.checks.values()
+        ):
+            _reject("enrollment_worker_health_evidence_invalid")
+
+    def all_true(self) -> bool:
+        return all(self.checks[check] is True for check in REQUIRED_HEALTH_CHECKS)
+
+    def as_evidence(self) -> dict[str, bool]:
+        """The bounded booleans-only structure the worker signs (deterministic key order)."""
+        return {check: self.checks[check] for check in REQUIRED_HEALTH_CHECKS}
+
+
+class WorkerEnrollmentHealthObserver(Protocol):
+    """Produces the worker's health evidence from ACTUAL bounded local observations (the installed +
+    signature-trusted + running release, the protected enrollment-key identity, the verified
+    controller offer + transaction, the required bootstrap/service state, the operator worker
+    disabled+stopped, and the absence of any provider / OpenTofu / controlled-live / operator-queue
+    activity). It returns a strict :class:`ObservedHealthEvidence`; a failed observation is a
+    ``False`` check, never a fabricated ``True``."""
+
+    def observe(self, context: HealthObservationContext) -> ObservedHealthEvidence: ...
+
+
+class SealedWorkerEnrollmentHealthObserver:
+    """The SHIPPED DEFAULT: no host-local health observer is composed, so every attempt fails closed
+    (C3). The driver cannot reach ``healthy`` until a deployment wires a real observer — it never
+    falls back to fabricating an all-true evidence structure."""
+
+    def observe(self, context: HealthObservationContext) -> ObservedHealthEvidence:
+        _reject("enrollment_worker_health_observer_sealed")
+
+
+class WorkerHealthProbes(Protocol):
+    """The bounded, host-local probes a deployment wires into :class:`LocalWorkerHealthObserver` —
+    one per required check. Each returns a REAL ``True``/``False`` from an actual observation; a
+    probe that raises is treated as ``False`` (fail-closed). No probe returns or handles a
+    secret."""
+
+    def invitation_and_offer_verified(self, ctx: HealthObservationContext) -> bool: ...
+    def controller_key_pinned(self, ctx: HealthObservationContext) -> bool: ...
+    def expected_transaction(self, ctx: HealthObservationContext) -> bool: ...
+    def expected_predecessor(self, ctx: HealthObservationContext) -> bool: ...
+    def exact_release(self, ctx: HealthObservationContext) -> bool: ...
+    def worker_enrollment_key_protected(self, ctx: HealthObservationContext) -> bool: ...
+    def local_enrollment_state_present(self, ctx: HealthObservationContext) -> bool: ...
+    def operator_worker_disabled(self, ctx: HealthObservationContext) -> bool: ...
+    def no_provider_contact(self, ctx: HealthObservationContext) -> bool: ...
+    def no_opentofu_execution(self, ctx: HealthObservationContext) -> bool: ...
+    def no_controlled_live_submission(self, ctx: HealthObservationContext) -> bool: ...
+
+
+class LocalWorkerHealthObserver:
+    """The production observer: it calls the injected host-local :class:`WorkerHealthProbes` — one
+    real observation per required check — and returns a strict :class:`ObservedHealthEvidence`. A
+    probe that raises is a ``False`` observation (fail-closed), never a fabricated ``True``. The
+    deployment composes the concrete probes; this class only orchestrates and validates them."""
+
+    __slots__ = ("_probes",)
+
+    def __init__(self, probes: WorkerHealthProbes) -> None:
+        self._probes = probes
+
+    def __repr__(self) -> str:
+        return "LocalWorkerHealthObserver(<redacted>)"
+
+    def observe(self, context: HealthObservationContext) -> ObservedHealthEvidence:
+        checks: dict[str, bool] = {}
+        for check in REQUIRED_HEALTH_CHECKS:
+            probe = getattr(self._probes, check, None)
+            try:
+                checks[check] = probe(context) is True if callable(probe) else False
+            except Exception:  # noqa: BLE001 - an unavailable probe is a False observation
+                checks[check] = False
+        return ObservedHealthEvidence(checks=checks)
 
 
 def _sealed_transport_factory(_signer: WorkerEnrollmentSigner) -> _Transport:
@@ -134,7 +254,13 @@ class WorkerEnrollmentDriver:
     """Drives one worker enrollment to verified/healthy over the supported exchange. All
     collaborators are injected; the shipped defaults are sealed."""
 
-    __slots__ = ("_key_seam", "_transport_factory", "_state_store", "_max_attempts")
+    __slots__ = (
+        "_key_seam",
+        "_transport_factory",
+        "_state_store",
+        "_health_observer",
+        "_max_attempts",
+    )
 
     def __init__(
         self,
@@ -144,11 +270,15 @@ class WorkerEnrollmentDriver:
             [WorkerEnrollmentSigner], _Transport
         ] = _sealed_transport_factory,
         state_store: WorkerEnrollmentStateStore | None = None,
+        health_observer: WorkerEnrollmentHealthObserver | None = None,
         max_attempts: int = _MAX_ATTEMPTS,
     ) -> None:
         self._key_seam = key_seam or SealedWorkerEnrollmentKeySeam()
         self._transport_factory = transport_factory
-        self._state_store = state_store or InMemoryWorkerEnrollmentStateStore()
+        # sealed by default (C3): production composes a fixed-path hardened marker store + a real
+        # host-local health observer; the shipped defaults persist nothing and refuse to fabricate.
+        self._state_store = state_store or SealedWorkerEnrollmentStateStore()
+        self._health_observer = health_observer or SealedWorkerEnrollmentHealthObserver()
         self._max_attempts = max(1, max_attempts)
 
     def __repr__(self) -> str:
@@ -156,13 +286,11 @@ class WorkerEnrollmentDriver:
 
     def enroll(self, invitation: EnrollmentInvitationInputs, *, now: str) -> DriverOutcome:
         _validate_invitation(invitation, now=now)
-        # resume: a durable local marker short-circuits an already-completed enrollment without
-        # re-signing; anything else re-drives (the controller's durable state makes bind/result
-        # idempotent, so a mid-flight restart safely resends the identical requests).
-        if self._state_store.load(invitation.enrollment_id) == _STEP_HEALTHY:
-            return DriverOutcome(
-                invitation.enrollment_id, _STEP_HEALTHY, revision=5, already_healthy=True
-            )
+        # C3: the local marker is only a RETRY HINT — it is NEVER trusted as the outcome. The driver
+        # always re-drives the idempotent exchange and RECONCILES against the controller's
+        # AUTHORITATIVE reported state/revision; a revoked / refused / recovery-required / advanced
+        # controller state therefore overrides a stale "healthy" marker (no hard-coded revision).
+        prior_marker = self._state_store.load(invitation.enrollment_id)
 
         signer = (
             self._key_seam.load_or_create()
@@ -174,7 +302,22 @@ class WorkerEnrollmentDriver:
         offer_claim, offer_att = self._verify_offer(invitation, signer.worker_key_id, offer)
         self._state_store.record(invitation.enrollment_id, _STEP_OFFER_VERIFIED)
 
-        health_evidence = _local_health_evidence()
+        # OBSERVE (never fabricate) the health evidence from actual bounded local observations. A
+        # failed/unavailable observation is a False check, so the driver refuses locally rather than
+        # signing a healthy claim it cannot back — and the sealed default refuses outright.
+        evidence = self._health_observer.observe(
+            HealthObservationContext(
+                enrollment_id=invitation.enrollment_id,
+                release_digest=invitation.release_digest,
+                controller_transaction_id=invitation.controller_transaction_id,
+                worker_key_id=signer.worker_key_id,
+                offer_claim_digest=claim_digest(offer_claim),
+            )
+        )
+        if not evidence.all_true():
+            _reject("enrollment_worker_health_incomplete")
+        health_evidence = evidence.as_evidence()
+
         _status, result_body = self._retry(
             lambda: transport.submit_result(
                 invitation,
@@ -186,12 +329,17 @@ class WorkerEnrollmentDriver:
             )
         )
         enrollment = _require_enrollment(result_body)
-        self._state_store.record(invitation.enrollment_id, _STEP_HEALTHY)
+        # RECONCILE: the state + revision come from the controller's authoritative response — not a
+        # hard-coded value. Only record the healthy marker when the controller actually reports it.
+        state = str(enrollment.get("state"))
+        revision = int(enrollment.get("revision", 0))
+        if state == _STEP_HEALTHY:
+            self._state_store.record(invitation.enrollment_id, _STEP_HEALTHY)
         return DriverOutcome(
             invitation.enrollment_id,
-            str(enrollment.get("state")),
-            revision=int(enrollment.get("revision", 0)),
-            already_healthy=False,
+            state,
+            revision=revision,
+            already_healthy=(prior_marker == _STEP_HEALTHY and state == _STEP_HEALTHY),
         )
 
     def _retry(self, call: Callable[[], tuple[int, dict]]) -> tuple[int, dict]:
@@ -288,15 +436,6 @@ def _before(now: str, expires_at: str) -> bool:
     return now_dt is not None and exp_dt is not None and now_dt < exp_dt
 
 
-def _local_health_evidence() -> dict[str, bool]:
-    """The bounded, provider-neutral CHECKED FACTS this driver attests after driving the exchange.
-    Each is genuinely established: the offer was verified against the pinned controller key, the
-    worker key stayed protected in the non-serializable signer, and the driver performed NONE of the
-    forbidden operations (it imports and calls no provider / operator / OpenTofu / controlled-live
-    capability). It is never a caller convenience boolean."""
-    return {check: True for check in REQUIRED_HEALTH_CHECKS}
-
-
 def _require_offer(body: dict) -> dict:
     offer = body.get("signed_offer") if isinstance(body, dict) else None
     if not isinstance(offer, dict):
@@ -323,10 +462,17 @@ def _bounded_status_reason(body: object, *, default: str) -> str:
 
 __all__ = [
     "DriverOutcome",
+    "HealthObservationContext",
     "InMemoryWorkerEnrollmentStateStore",
+    "LocalWorkerHealthObserver",
+    "ObservedHealthEvidence",
+    "SealedWorkerEnrollmentHealthObserver",
     "SealedWorkerEnrollmentKeySeam",
+    "SealedWorkerEnrollmentStateStore",
     "WorkerEnrollmentDriver",
     "WorkerEnrollmentDriverError",
+    "WorkerEnrollmentHealthObserver",
     "WorkerEnrollmentKeySeam",
     "WorkerEnrollmentStateStore",
+    "WorkerHealthProbes",
 ]

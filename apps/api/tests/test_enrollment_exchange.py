@@ -560,3 +560,23 @@ def test_a_nulled_winning_bind_field_refuses_closed(client, session, engine):
     retry = _post_bind(client, inv, body)
     assert retry.status_code == 409
     assert retry.json()["error"]["code"] == "enrollment_state_corrupt"
+
+
+# --- C3: the result exchange returns the AUTHORITATIVE current head ------------------------------
+
+
+def test_result_exchange_after_revoke_reconciles_and_never_reports_healthy(client, session):
+    """C3: once an enrollment is revoked, re-submitting the identical worker result reconciles to
+    the AUTHORITATIVE current head (refused) — a stale healthy is never reported."""
+    inv, wpriv, wpub, offer = _drive_bind(client, session)
+    healthy = _post_result(client, inv, _result_body(inv, wpriv, wpub, offer))
+    assert healthy.status_code == 200 and healthy.json()["enrollment"]["state"] == "healthy"
+    revoke = client.post(
+        f"/api/v1/enrollment/{inv['enrollment_id']}/revoke", json={"expected_revision": 5}
+    )
+    assert revoke.status_code == 200 and revoke.json()["state"] == "refused"
+    retry = _post_result(client, inv, _result_body(inv, wpriv, wpub, offer))
+    if retry.status_code == 200:
+        assert retry.json()["enrollment"]["state"] != "healthy"  # authoritative head, not healthy
+    else:
+        assert retry.status_code in (409, 422)  # a bounded refusal is likewise "not healthy"

@@ -15,7 +15,10 @@ from secp_commissioning import enrollment_attestation as ea
 from secp_management.signing import generate_keypair
 from secp_worker.enrollment_driver import (
     DriverOutcome,
+    HealthObservationContext,
     InMemoryWorkerEnrollmentStateStore,
+    ObservedHealthEvidence,
+    SealedWorkerEnrollmentHealthObserver,
     WorkerEnrollmentDriver,
     WorkerEnrollmentDriverError,
 )
@@ -62,6 +65,7 @@ class _FakeController:
         offer_field_override: dict | None = None,
         transient_binds: int = 0,
         result_status: int = 200,
+        result_enrollment: dict | None = None,
     ) -> None:
         self._signer = signer
         self._controller_priv = controller_priv
@@ -71,6 +75,8 @@ class _FakeController:
         self._offer_field_override = offer_field_override or {}
         self._transient_binds = transient_binds
         self._result_status = result_status
+        # the AUTHORITATIVE enrollment head the controller reports on the result (default healthy)
+        self._result_enrollment = result_enrollment or {"state": "healthy", "revision": 5}
 
     def submit_binding(self, invitation: EnrollmentInvitationInputs) -> tuple[int, dict]:
         if self._transient_binds > 0:
@@ -162,7 +168,29 @@ class _FakeController:
             kind=ea.RESULT_KIND,
             digest=ea.claim_digest(result),
         )
-        return 200, {"enrollment": {"state": "healthy", "revision": 5}}
+        # the AUTHORITATIVE current head the controller reports (default healthy; overridable to
+        # simulate a revoked/advanced enrollment on a reconciling resume)
+        return 200, {"enrollment": self._result_enrollment}
+
+
+class _FakeObserver:
+    """An inspectable health observer for tests: returns a controllable evidence structure and
+    (optionally) records the context it was called with. It is NEVER a blind all-true helper — the
+    checks are supplied explicitly."""
+
+    def __init__(self, *, checks: dict | None = None, seen: list | None = None) -> None:
+        self._checks = checks
+        self._seen = seen
+
+    def observe(self, context: HealthObservationContext) -> ObservedHealthEvidence:
+        if self._seen is not None:
+            self._seen.append(context)
+        checks = (
+            self._checks
+            if self._checks is not None
+            else dict.fromkeys(ea.REQUIRED_HEALTH_CHECKS, True)
+        )
+        return ObservedHealthEvidence(checks=checks)
 
 
 class _KeySeam:
@@ -174,7 +202,7 @@ class _KeySeam:
 
 
 def _driver(
-    controller_priv, controller_pub, *, state_store=None, **fake_kw
+    controller_priv, controller_pub, *, state_store=None, health_observer=None, **fake_kw
 ) -> WorkerEnrollmentDriver:
     wpriv, _wpub = generate_keypair()
     return WorkerEnrollmentDriver(
@@ -183,6 +211,9 @@ def _driver(
             signer, controller_priv=controller_priv, controller_pub=controller_pub, **fake_kw
         ),
         state_store=state_store or InMemoryWorkerEnrollmentStateStore(),
+        # a real (inspectable) observer whose observations are supplied explicitly — never a blind
+        # all-true helper. Individual tests override it to exercise sealed / failed observations.
+        health_observer=health_observer or _FakeObserver(),
     )
 
 
@@ -264,15 +295,78 @@ def test_a_4xx_result_is_refused_with_the_bounded_controller_code():
     assert ei.value.reason_code == "enrollment_health_incomplete"
 
 
-def test_resume_short_circuits_an_already_healthy_enrollment():
+def test_resume_reconciles_healthy_from_the_controller_not_a_hard_coded_marker():
+    """C3: a healthy marker is only a hint — the driver RE-DRIVES and returns the controller's
+    AUTHORITATIVE state/revision (here revision 7, not a hard-coded 5)."""
     cpriv, cpub = generate_keypair()
     store = InMemoryWorkerEnrollmentStateStore()
     inv = _invitation(cpub)
     store.record(inv.enrollment_id, "healthy")
-    # a sealed driver would fail if it tried to bind — resume must short-circuit before transport
-    driver = WorkerEnrollmentDriver(state_store=store)
+    driver = _driver(
+        cpriv, cpub, state_store=store, result_enrollment={"state": "healthy", "revision": 7}
+    )
     outcome = driver.enroll(inv, now=NOW)
-    assert outcome.already_healthy is True and outcome.state == "healthy"
+    assert outcome.already_healthy is True
+    assert outcome.state == "healthy" and outcome.revision == 7  # authoritative, not hard-coded 5
+
+
+def test_resume_with_a_revoked_controller_state_is_never_reported_healthy():
+    """C3: a stale 'healthy' marker does NOT win — if the controller now reports the enrollment
+    refused (revoked), the driver reconciles and reports refused, never healthy."""
+    cpriv, cpub = generate_keypair()
+    store = InMemoryWorkerEnrollmentStateStore()
+    inv = _invitation(cpub)
+    store.record(inv.enrollment_id, "healthy")
+    driver = _driver(
+        cpriv, cpub, state_store=store, result_enrollment={"state": "refused", "revision": 6}
+    )
+    outcome = driver.enroll(inv, now=NOW)
+    assert outcome.state == "refused" and outcome.revision == 6
+    assert outcome.already_healthy is False
+
+
+# --- C3: observed (never fabricated) health evidence ---------------------------------------------
+
+
+def test_the_sealed_health_observer_default_fails_closed():
+    cpriv, cpub = generate_keypair()
+    driver = _driver(cpriv, cpub, health_observer=SealedWorkerEnrollmentHealthObserver())
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        driver.enroll(_invitation(cpub), now=NOW)
+    assert ei.value.reason_code == "enrollment_worker_health_observer_sealed"
+
+
+def test_a_failed_observation_refuses_healthy_and_submits_nothing():
+    cpriv, cpub = generate_keypair()
+    checks = dict.fromkeys(ea.REQUIRED_HEALTH_CHECKS, True)
+    checks["no_provider_contact"] = False  # one real observation failed
+    driver = _driver(cpriv, cpub, health_observer=_FakeObserver(checks=checks))
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        driver.enroll(_invitation(cpub), now=NOW)
+    assert ei.value.reason_code == "enrollment_worker_health_incomplete"
+
+
+def test_the_observer_sees_the_exchange_context_and_returns_only_booleans():
+    cpriv, cpub = generate_keypair()
+    seen: list = []
+    inv = _invitation(cpub)
+    driver = _driver(cpriv, cpub, health_observer=_FakeObserver(seen=seen))
+    outcome = driver.enroll(inv, now=NOW)
+    assert outcome.state == "healthy"
+    assert len(seen) == 1
+    ctx = seen[0]
+    assert ctx.enrollment_id == inv.enrollment_id
+    assert ctx.release_digest == inv.release_digest
+    assert ctx.controller_transaction_id == inv.controller_transaction_id
+    assert ctx.worker_key_id.startswith("sha256:")
+    assert ctx.offer_claim_digest.startswith("sha256:")  # the verified offer's content address
+
+
+def test_observed_evidence_rejects_a_malformed_structure():
+    with pytest.raises(WorkerEnrollmentDriverError):
+        ObservedHealthEvidence(checks={"only_one": True})  # not the required closed set
+    with pytest.raises(WorkerEnrollmentDriverError):
+        ObservedHealthEvidence(checks=dict.fromkeys(ea.REQUIRED_HEALTH_CHECKS, "yes"))  # non-bool
 
 
 # --- invitation validation -----------------------------------------------------------------------

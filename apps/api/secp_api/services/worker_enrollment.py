@@ -1263,10 +1263,12 @@ def record_worker_result_exchange(
         expected_revision=verified.committed_revision,
         claimed_scope=claimed_scope,
     )
-    return ResultExchangeOutcome(
-        status=healthy.state.public_view(),
-        deduplicated=recorded.deduplicated and verified.deduplicated and healthy.deduplicated,
-    )
+    dedup = recorded.deduplicated and verified.deduplicated and healthy.deduplicated
+    # C3: return the AUTHORITATIVE CURRENT HEAD, never the (possibly deduped-historical) step state,
+    # so a worker reconciling on restart observes a LATER revoke/refusal/recovery rather than a
+    # stale ``healthy``. On the fresh path this is the just-committed healthy head.
+    head = _load_for_exchange(session, enrollment_id, claimed_scope)
+    return ResultExchangeOutcome(status=head.state.public_view(), deduplicated=dedup)
 
 
 def _advance_step(
