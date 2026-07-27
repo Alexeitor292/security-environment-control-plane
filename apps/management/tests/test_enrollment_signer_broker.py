@@ -113,10 +113,12 @@ def _roundtrip(broker: EnrollmentSignerBroker, request: bytes) -> dict:
     return json.loads(raw.decode("utf-8"))
 
 
-def _broker(signer, *, peer_uid=_API_UID, peer_gid=_API_GID) -> EnrollmentSignerBroker:
+def _broker(
+    signer, *, peer_uid=_API_UID, peer_gid=_API_GID, allowed_peers=((_API_UID, _API_GID),)
+) -> EnrollmentSignerBroker:
     return EnrollmentSignerBroker(
         signer=signer,
-        peer_policy=PeerCredentialPolicy(allowed_uids=(_API_UID,), allowed_gids=(_API_GID,)),
+        peer_policy=PeerCredentialPolicy(allowed_peers=allowed_peers),
         peer_reader=lambda conn: PeerCredentials(pid=1, uid=peer_uid, gid=peer_gid),
     )
 
@@ -158,11 +160,34 @@ def test_an_unauthorized_peer_gid_is_refused_closed():
 
 def test_the_peer_policy_refuses_an_empty_or_root_allowlist():
     with pytest.raises(EnrollmentSignerBrokerError) as ei:
-        PeerCredentialPolicy(allowed_uids=(), allowed_gids=(1000,))
+        PeerCredentialPolicy(allowed_peers=())
     assert ei.value.reason_code == "enrollment_signer_peer_policy_empty"
     with pytest.raises(EnrollmentSignerBrokerError) as ei2:
-        PeerCredentialPolicy(allowed_uids=(0,), allowed_gids=(1000,))
+        PeerCredentialPolicy(allowed_peers=((0, 1000),))
     assert ei2.value.reason_code == "enrollment_signer_peer_policy_root_forbidden"
+    with pytest.raises(EnrollmentSignerBrokerError) as ei3:
+        PeerCredentialPolicy(allowed_peers=((1000, 0),))  # root gid is equally forbidden
+    assert ei3.value.reason_code == "enrollment_signer_peer_policy_root_forbidden"
+
+
+def test_a_crossed_uid_gid_pair_cannot_authenticate():
+    """C5: authorization is by the EXACT (uid, gid) pair. A peer presenting an allowlisted uid with
+    a DIFFERENT allowlisted gid (or vice versa) — a crossed combination that independent uid/gid
+    allowlists would have wrongly admitted — is refused closed."""
+    signer, identity = _prepared_signer()
+    peers = ((1000, 1000), (2000, 2000))
+    # crossed: uid 1000 (allowed in pair (1000,1000)) + gid 2000 (allowed in pair (2000,2000))
+    resp = _roundtrip(
+        _broker(signer, peer_uid=1000, peer_gid=2000, allowed_peers=peers),
+        _request(_context(identity)),
+    )
+    assert resp == {"error": "enrollment_signer_peer_unauthorized"}
+    # the exact pairs still authenticate
+    ok = _roundtrip(
+        _broker(signer, peer_uid=2000, peer_gid=2000, allowed_peers=peers),
+        _request(_context(identity)),
+    )
+    assert "error" not in ok
 
 
 def test_peer_credentials_unavailable_is_bounded():

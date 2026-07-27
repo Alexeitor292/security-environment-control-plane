@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from secp_commissioning.controller_enrollment_signer import (
+    ENROLLMENT_SIGNER_SOCKET_DIR,
+    ENROLLMENT_SIGNER_SOCKET_PATH,
     AuthorizedControllerOfferContext,
     ControllerEnrollmentSignerError,
     SignedControllerOffer,
@@ -45,10 +47,10 @@ from secp_commissioning.enrollment_attestation import (
 
 from secp_management import ManagementError
 
-#: The fixed, code-owned socket location. Root owns the directory; the socket is group-readable by
-#: the API's service group only. NOT caller-configurable and NOT a TCP endpoint.
-ENROLLMENT_SIGNER_SOCKET_DIR = "/run/secp"
-ENROLLMENT_SIGNER_SOCKET_PATH = "/run/secp/enrollment-signer.sock"
+# The fixed, code-owned socket location is the ONE shared commissioning-plane constant (C5): root
+# owns the directory; the socket is group-readable by the API's service group only. NOT
+# caller-configurable and NOT a TCP endpoint. Both names are re-exported via ``__all__`` so existing
+# importers of the broker module keep working while the value is owned in exactly one place.
 
 _MAX_REQUEST_BYTES = 8192
 _MAX_RESPONSE_BYTES = 16384
@@ -86,20 +88,26 @@ class PeerCredentials:
 
 @dataclass(frozen=True)
 class PeerCredentialPolicy:
-    """A fixed NON-ROOT allowlist of API uid/gid pairs permitted to request a signature. Root is
-    deliberately NOT allowlistable — the caller is the non-root API service, never root."""
+    """A fixed NON-ROOT allowlist of EXACT ``(uid, gid)`` peer pairs permitted to request a
+    signature (C5). Authorization is by the whole pair, never independent uid/gid membership, so a
+    CROSSED combination — an allowlisted uid presenting a different allowlisted gid, or vice versa —
+    cannot authenticate. Root is deliberately NOT allowlistable: the caller is the non-root API
+    service, never root."""
 
-    allowed_uids: tuple[int, ...]
-    allowed_gids: tuple[int, ...]
+    allowed_peers: tuple[tuple[int, int], ...]
 
     def __post_init__(self) -> None:
-        if not self.allowed_uids or not self.allowed_gids:
+        if not self.allowed_peers:
             raise EnrollmentSignerBrokerError("enrollment_signer_peer_policy_empty")
-        if any(u <= 0 for u in self.allowed_uids) or any(g <= 0 for g in self.allowed_gids):
-            raise EnrollmentSignerBrokerError("enrollment_signer_peer_policy_root_forbidden")
+        for peer in self.allowed_peers:
+            if len(peer) != 2:
+                raise EnrollmentSignerBrokerError("enrollment_signer_peer_policy_malformed")
+            uid, gid = peer
+            if uid <= 0 or gid <= 0:  # root (0) and negatives are never allowlistable
+                raise EnrollmentSignerBrokerError("enrollment_signer_peer_policy_root_forbidden")
 
     def authorize(self, creds: PeerCredentials) -> None:
-        if creds.uid not in self.allowed_uids or creds.gid not in self.allowed_gids:
+        if (creds.uid, creds.gid) not in self.allowed_peers:
             raise EnrollmentSignerBrokerError("enrollment_signer_peer_unauthorized")
 
 
@@ -268,15 +276,17 @@ def _assert_root_owned_dir(path: str) -> None:
         raise EnrollmentSignerBrokerError("enrollment_signer_socket_dir_unsafe")
 
 
-def bind_broker_socket(*, socket_group_gid: int, path: str = ENROLLMENT_SIGNER_SOCKET_PATH):
-    """Create the fixed broker socket under a validated root-owned directory (root-only, prod).
-    The parent dir must be a real, root-owned, non-group/other-writable directory (never a symlink);
-    a pre-existing path is removed ONLY when it is a root-owned socket; the bound socket is
-    ``root:<api-group>`` mode ``0o660`` so only the API service group can connect."""
+def bind_broker_socket(*, socket_group_gid: int):
+    """Create the ONE fixed broker socket (``ENROLLMENT_SIGNER_SOCKET_PATH``) under a validated
+    root-owned directory (root-only, prod). There is NO ``path`` override (C5): the location is a
+    code constant. The parent dir must be a real, root-owned, non-group/other-writable directory
+    (never a symlink); a pre-existing path is removed ONLY when it is a root-owned socket; the bound
+    socket is ``root:<api-group>`` mode ``0o660`` so only the API service group can connect."""
     import os
     import socket
     import stat
 
+    path = ENROLLMENT_SIGNER_SOCKET_PATH
     _assert_root_owned_dir(os.path.dirname(path))
     try:
         existing = os.lstat(path)
@@ -296,12 +306,13 @@ def bind_broker_socket(*, socket_group_gid: int, path: str = ENROLLMENT_SIGNER_S
 
 
 def build_production_broker(
-    *, engine: object, allowed_uids: tuple[int, ...], allowed_gids: tuple[int, ...]
+    *, engine: object, allowed_peers: tuple[tuple[int, int], ...]
 ) -> EnrollmentSignerBroker:
     """Compose the production broker (root only): the hardened root-controlled filesystem key reader
     + the DB least-privilege ACTIVE-identity lease provider + the commissioning-plane offer signer,
-    behind the fixed non-root peer-credential allowlist. Constructing the RealFilesystem refuses
-    off-POSIX, so this can never be built in a non-root/dev context by accident."""
+    behind the fixed non-root EXACT ``(uid, gid)`` peer-credential allowlist (C5). Constructing the
+    RealFilesystem refuses off-POSIX, so this can never be built in a non-root/dev context by
+    accident."""
     from secp_commissioning.controller_enrollment_signer import ControllerEnrollmentOfferSigner
     from secp_commissioning.runtime import RealFilesystem
 
@@ -313,7 +324,7 @@ def build_production_broker(
         RealFilesystem(),
         DbActiveControllerSigningIdentityProvider(engine),  # type: ignore[arg-type]
     )
-    policy = PeerCredentialPolicy(allowed_uids=allowed_uids, allowed_gids=allowed_gids)
+    policy = PeerCredentialPolicy(allowed_peers=allowed_peers)
     return EnrollmentSignerBroker(signer=signer, peer_policy=policy)
 
 

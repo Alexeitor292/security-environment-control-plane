@@ -13,6 +13,10 @@ or started by the bootstrap, mirroring the operator-activation seal.
 from __future__ import annotations
 
 from secp_commissioning.canonical import sha256_bytes
+from secp_commissioning.controller_enrollment_signer import (
+    CONTROLLER_ENROLLMENT_KEY_PATH,
+    ENROLLMENT_SIGNER_SOCKET_DIR,
+)
 
 from secp_management import ManagementError
 
@@ -80,8 +84,6 @@ _BROKER_HARDENING = tuple(
 def render_enrollment_signer_broker_service(
     *,
     exec_argv: tuple[str, ...],
-    socket_dir_name: str = "secp",
-    key_path: str = "/var/lib/secp/bootstrap/controller-enrollment-signing.key",
     wanted_by: str | None = None,
 ) -> str:
     """The SECP-PR5H-B1 root-gated controller-enrollment offer signer broker unit.
@@ -89,12 +91,18 @@ def render_enrollment_signer_broker_service(
     The ONLY unit that runs as ``root`` — it reads the 0600 enrollment key and signs one authorized
     offer per request over a Unix-domain socket (``AF_UNIX`` only; no TCP). ``RuntimeDirectory``
     creates the root-owned, non-group/other-writable socket directory the broker validates and binds
-    under. The private key is exposed READ-ONLY (never mounted into, or readable by, the non-root
-    API container). ``wanted_by=None`` (the default) renders it present-but-DISABLED — the
-    evidence-driven exchange stays sealed until an operator explicitly enables both this unit and
-    the API-side
-    progression flag; it is never enabled or started from an HTTP request."""
+    under. Both the socket directory and the read-only key path are CODE CONSTANTS (C5) derived from
+    the shared commissioning-plane locations — there is NO ``socket_dir_name`` / ``key_path``
+    override, so a rendered unit can never point the broker at another socket or key. The private
+    key is exposed READ-ONLY (never mounted into, or readable by, the non-root API container).
+    ``wanted_by=None`` (the default) renders it present-but-DISABLED — the evidence-driven exchange
+    stays sealed until an operator explicitly enables both this unit and the API-side progression
+    flag; it is never enabled or started from an HTTP request."""
     _validate(exec_argv, ())
+    # the RuntimeDirectory name is the basename of the fixed socket dir ("/run/secp" -> "secp"); the
+    # read-only key path is the fixed controller enrollment key location. Both are code constants.
+    socket_dir_name = ENROLLMENT_SIGNER_SOCKET_DIR.rsplit("/", 1)[-1]
+    key_path = CONTROLLER_ENROLLMENT_KEY_PATH
     if "/" in socket_dir_name or "\\" in socket_dir_name or not socket_dir_name:
         raise ManagementError("systemd_runtime_dir_unclean")
     if not key_path.startswith("/") or "\\" in key_path or ".." in key_path.split("/"):

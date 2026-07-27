@@ -57,6 +57,17 @@ from secp_commissioning.runtime import FilesystemBackend, FilesystemError
 #: evidence / release / admission / provider / operator key material.
 CONTROLLER_ENROLLMENT_KEY_PATH = "/var/lib/secp/bootstrap/controller-enrollment-signing.key"
 
+#: The fixed, code-owned runtime location of the root-gated signer broker's Unix-domain socket. It
+#: is a single code constant shared by ALL three participants — the broker that binds it, the
+#: systemd unit that provisions its ``RuntimeDirectory``, and the NON-ROOT API client that connects
+#: to it — so the two planes can never drift AND a deployment can never redirect the trusted client
+#: to another local socket. It is NEVER a config / env / HTTP / constructor input; production may
+#: only enable or disable the client. There is no TCP endpoint. This constant lives in the
+#: commissioning plane precisely because it is the ONE module both the API plane and the management
+#: plane may import (the API plane may not import the management-plane broker).
+ENROLLMENT_SIGNER_SOCKET_DIR = "/run/secp"
+ENROLLMENT_SIGNER_SOCKET_PATH = "/run/secp/enrollment-signer.sock"
+
 _KEY_MODE = 0o600
 _MAX_KEY_BYTES = 1024
 _MAX_FIELD_LEN = 512
@@ -505,6 +516,8 @@ def rotate_controller_enrollment_key(
 
 __all__ = [
     "CONTROLLER_ENROLLMENT_KEY_PATH",
+    "ENROLLMENT_SIGNER_SOCKET_DIR",
+    "ENROLLMENT_SIGNER_SOCKET_PATH",
     "ActiveControllerSigningIdentityProvider",
     "AuthorizedControllerOfferContext",
     "ControllerEnrollmentOfferSigner",

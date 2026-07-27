@@ -50,24 +50,34 @@ def test_sealed_default_fails_closed_and_is_non_serializable():
         pickle.dumps(sealed)
 
 
-def test_build_returns_sealed_without_a_configured_socket_path():
+def test_build_returns_sealed_when_the_client_is_disabled():
     signer = build_enrollment_offer_signer(Settings(app_env="dev"))
     assert isinstance(signer, SealedEnrollmentOfferSignerClient)
+    # disabled is the default; there is no socket-path setting to configure (C5)
+    assert not hasattr(Settings(app_env="dev"), "enrollment_signer_socket_path")
 
 
-def test_build_returns_the_uds_client_when_a_socket_path_is_configured():
-    signer = build_enrollment_offer_signer(
-        Settings(app_env="dev", enrollment_signer_socket_path="/run/secp/enrollment-signer.sock")
-    )
+def test_build_returns_the_uds_client_when_enabled():
+    signer = build_enrollment_offer_signer(Settings(app_env="dev", enrollment_signer_enabled=True))
     assert isinstance(signer, UnixSocketEnrollmentOfferSignerClient)
     assert "redacted" in repr(signer).lower()
     assert "/run/secp" not in repr(signer)  # the socket path never leaks
 
 
-def test_a_non_absolute_socket_path_is_refused():
-    with pytest.raises(WorkerEnrollmentError) as ei:
-        UnixSocketEnrollmentOfferSignerClient(socket_path="relative.sock")
-    assert ei.value.code == "enrollment_signer_unavailable"
+def test_the_uds_client_is_pinned_to_the_fixed_code_owned_socket():
+    """C5: the client takes NO socket/path argument and binds to the ONE code-owned constant."""
+    import inspect
+
+    from secp_commissioning.controller_enrollment_signer import ENROLLMENT_SIGNER_SOCKET_PATH
+
+    params = inspect.signature(UnixSocketEnrollmentOfferSignerClient.__init__).parameters
+    assert "socket_path" not in params, (
+        "the production UDS client must expose no socket_path override"
+    )
+    client = UnixSocketEnrollmentOfferSignerClient()
+    assert (
+        client._socket_path == ENROLLMENT_SIGNER_SOCKET_PATH == "/run/secp/enrollment-signer.sock"
+    )
 
 
 def test_parse_offer_response_reconstructs_a_signed_offer():
@@ -104,8 +114,14 @@ def test_parse_offer_response_fails_closed_on_any_non_offer(payload):
     assert ei.value.code == "enrollment_signer_unavailable"  # never surfaces the broker code
 
 
-def test_an_unreachable_broker_socket_fails_closed():
-    client = UnixSocketEnrollmentOfferSignerClient(socket_path="/nonexistent/secp/enroll.sock")
+def test_an_unreachable_broker_socket_fails_closed(monkeypatch):
+    # the location is a code constant; a test double may patch it, but no production surface can.
+    import secp_api.enrollment_signer_client as client_mod
+
+    monkeypatch.setattr(
+        client_mod, "ENROLLMENT_SIGNER_SOCKET_PATH", "/nonexistent/secp/enroll.sock"
+    )
+    client = UnixSocketEnrollmentOfferSignerClient()
     with pytest.raises(WorkerEnrollmentError) as ei:
         client.sign_offer(_context_stub(), now=NOW)
     assert ei.value.code == "enrollment_signer_unavailable"
@@ -136,7 +152,7 @@ def _context_stub(**over) -> AuthorizedControllerOfferContext:
     os.name != "posix" or getattr(os, "geteuid", lambda: 1)() == 0,
     reason="AF_UNIX server bind + SO_PEERCRED allowlist requires POSIX non-root",
 )
-def test_client_and_broker_roundtrip_over_a_real_uds(tmp_path):
+def test_client_and_broker_roundtrip_over_a_real_uds(tmp_path, monkeypatch):
     from contextlib import contextmanager
 
     from secp_management.enrollment_signer_broker import (
@@ -169,7 +185,7 @@ def test_client_and_broker_roundtrip_over_a_real_uds(tmp_path):
     signer = ControllerEnrollmentOfferSigner(fs, _Provider())
     broker = EnrollmentSignerBroker(
         signer=signer,
-        peer_policy=PeerCredentialPolicy(allowed_uids=(os.getuid(),), allowed_gids=(os.getgid(),)),
+        peer_policy=PeerCredentialPolicy(allowed_peers=((os.getuid(), os.getgid()),)),
     )
     sock_path = str(tmp_path / "s.sock")
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -186,7 +202,11 @@ def test_client_and_broker_roundtrip_over_a_real_uds(tmp_path):
     server = threading.Thread(target=_serve)
     server.start()
     try:
-        client = UnixSocketEnrollmentOfferSignerClient(socket_path=sock_path)
+        # the client binds the fixed code constant; a test double patches it to the temp socket.
+        import secp_api.enrollment_signer_client as client_mod
+
+        monkeypatch.setattr(client_mod, "ENROLLMENT_SIGNER_SOCKET_PATH", sock_path)
+        client = UnixSocketEnrollmentOfferSignerClient()
         offer = client.sign_offer(_context_stub(controller_key_id=identity["key_id"]), now=NOW)
     finally:
         server.join(timeout=5)

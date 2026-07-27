@@ -149,9 +149,92 @@ def test_the_api_signer_client_default_is_sealed() -> None:
         build_enrollment_offer_signer,
     )
 
-    assert Settings(app_env="dev").enrollment_signer_socket_path == ""
+    # C5: production may only ENABLE/DISABLE the client — there is NO socket-path setting to select.
+    assert not hasattr(Settings(app_env="dev"), "enrollment_signer_socket_path")
+    assert Settings(app_env="dev").enrollment_signer_enabled is False
     signer = build_enrollment_offer_signer(Settings(app_env="dev"))
     assert isinstance(signer, SealedEnrollmentOfferSignerClient)
+
+
+def test_the_signer_socket_location_is_one_fixed_code_owned_constant() -> None:
+    """C5: the API client, the broker, and the systemd unit all resolve the SAME fixed, code-owned
+    socket location from the ONE shared commissioning-plane constant — no configurable/env/argument
+    path and no per-instance override — so a deployment can never redirect the trusted client."""
+    import ast
+    import inspect
+    import sys
+
+    sys.path.insert(0, str(REPO / "apps" / "commissioning"))
+    sys.path.insert(0, str(REPO / "apps" / "api"))
+    sys.path.insert(0, str(REPO / "apps" / "management"))
+    from secp_commissioning.controller_enrollment_signer import (
+        CONTROLLER_ENROLLMENT_KEY_PATH,
+        ENROLLMENT_SIGNER_SOCKET_PATH,
+    )
+
+    assert ENROLLMENT_SIGNER_SOCKET_PATH == "/run/secp/enrollment-signer.sock"
+
+    # the API client is pinned to the shared constant and exposes NO socket_path argument
+    from secp_api import enrollment_signer_client as api_client
+
+    assert api_client.ENROLLMENT_SIGNER_SOCKET_PATH is ENROLLMENT_SIGNER_SOCKET_PATH
+    client_params = inspect.signature(
+        api_client.UnixSocketEnrollmentOfferSignerClient.__init__
+    ).parameters
+    assert "socket_path" not in client_params
+
+    # the broker re-exports the SAME constant and its bind helper exposes no path override
+    from secp_management import enrollment_signer_broker as broker
+
+    assert broker.ENROLLMENT_SIGNER_SOCKET_PATH is ENROLLMENT_SIGNER_SOCKET_PATH
+    assert "path" not in inspect.signature(broker.bind_broker_socket).parameters
+
+    # the systemd renderer exposes NO socket-directory / key-path override (they are code constants)
+    from secp_management import systemd
+
+    render_params = inspect.signature(systemd.render_enrollment_signer_broker_service).parameters
+    assert "socket_dir_name" not in render_params and "key_path" not in render_params
+    # and it renders the fixed key path derived from the shared commissioning constant
+    unit = systemd.render_enrollment_signer_broker_service(
+        exec_argv=("/usr/bin/python3", "-m", "x")
+    )
+    assert f"ReadOnlyPaths={CONTROLLER_ENROLLMENT_KEY_PATH}" in unit
+
+    # no environment/descriptor path selection anywhere in the API client module source
+    src = ast.parse((API_PKG / "enrollment_signer_client.py").read_text(encoding="utf-8"))
+    for node in ast.walk(src):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            assert not (node.value.id == "os" and node.attr == "environ"), "no env path selection"
+
+
+def test_the_peer_policy_authorizes_exact_uid_gid_pairs() -> None:
+    """C5: the broker peer policy authorizes the EXACT (uid, gid) pair, so a crossed allowlisted
+    uid/gid combination cannot authenticate, and root (uid or gid 0) is never allowlistable."""
+    import sys
+
+    sys.path.insert(0, str(REPO / "apps" / "management"))
+    from secp_management.enrollment_signer_broker import (
+        EnrollmentSignerBrokerError,
+        PeerCredentialPolicy,
+        PeerCredentials,
+    )
+
+    policy = PeerCredentialPolicy(allowed_peers=((1000, 1000), (2000, 2000)))
+    policy.authorize(PeerCredentials(pid=1, uid=1000, gid=1000))  # exact pair -> ok
+    for uid, gid in ((1000, 2000), (2000, 1000), (1000, 3000), (3000, 3000)):
+        try:
+            policy.authorize(PeerCredentials(pid=1, uid=uid, gid=gid))
+        except EnrollmentSignerBrokerError as exc:
+            assert exc.reason_code == "enrollment_signer_peer_unauthorized"
+        else:  # pragma: no cover - a crossed/unknown pair must never authorize
+            raise AssertionError(f"crossed pair ({uid},{gid}) wrongly authorized")
+    for bad in ((0, 1000), (1000, 0)):
+        try:
+            PeerCredentialPolicy(allowed_peers=(bad,))
+        except EnrollmentSignerBrokerError as exc:
+            assert exc.reason_code == "enrollment_signer_peer_policy_root_forbidden"
+        else:  # pragma: no cover
+            raise AssertionError(f"root pair {bad} wrongly accepted")
 
 
 # --- 4. HTTP cannot select a key / socket / path / domain / signer identity -----------------------

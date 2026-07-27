@@ -29,6 +29,7 @@ import socket
 from typing import NoReturn, Protocol
 
 from secp_commissioning.controller_enrollment_signer import (
+    ENROLLMENT_SIGNER_SOCKET_PATH,
     AuthorizedControllerOfferContext,
     SignedControllerOffer,
 )
@@ -100,17 +101,18 @@ def _parse_offer_response(payload: object) -> SignedControllerOffer:
 
 
 class UnixSocketEnrollmentOfferSignerClient(_NonSerializable):
-    """Concrete client bound to a FIXED broker socket path at construction. It uses ONLY a
-    Unix-domain stream socket (no TCP, no ambient proxy/env), enforces bounded deadlines and a
-    bounded response, exposes NO per-call socket/path override, and never leaks the path or a raw
-    exception."""
+    """Concrete client bound to the ONE FIXED, code-owned broker socket
+    (``ENROLLMENT_SIGNER_SOCKET_PATH``). It takes NO socket/path argument — there is no
+    per-instance, per-call, config, env, or descriptor way to point it at a different local socket
+    (C5). It uses ONLY a Unix-domain stream socket (no TCP, no ambient proxy/env), enforces bounded
+    deadlines and a bounded response, and never leaks the path or a raw exception."""
 
     __slots__ = ("_socket_path", "_timeout")
 
-    def __init__(self, *, socket_path: str, timeout: float = _DEFAULT_TIMEOUT) -> None:
-        if not (isinstance(socket_path, str) and socket_path.startswith("/")):
-            raise WorkerEnrollmentError(EC.signer_unavailable)
-        self._socket_path = socket_path
+    def __init__(self, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
+        # the location is a code constant, never a caller/config/env input — read it here so a test
+        # double may patch the module constant, but no production surface can select a path.
+        self._socket_path = ENROLLMENT_SIGNER_SOCKET_PATH
         self._timeout = timeout
 
     def __repr__(self) -> str:  # never the socket path
@@ -165,14 +167,13 @@ class UnixSocketEnrollmentOfferSignerClient(_NonSerializable):
 
 
 def build_enrollment_offer_signer(settings: object) -> EnrollmentOfferSignerClient:
-    """Production composition: return the fixed-UDS client ONLY when the reviewed deployment
-    contract is satisfied (a configured absolute broker socket path); otherwise the sealed default.
-    This is
-    the sole place the concrete client is constructed for production."""
-    path = getattr(settings, "enrollment_signer_socket_path", "") or ""
-    if not path:
+    """Production composition: return the fixed-UDS client (bound to the code-owned
+    ``ENROLLMENT_SIGNER_SOCKET_PATH``) ONLY when the reviewed deployment ENABLES it; otherwise the
+    sealed default. Production may enable/disable the client but can NEVER select its socket or key
+    location (C5). This is the sole place the concrete client is constructed for production."""
+    if not bool(getattr(settings, "enrollment_signer_enabled", False)):
         return SealedEnrollmentOfferSignerClient()
-    return UnixSocketEnrollmentOfferSignerClient(socket_path=path)
+    return UnixSocketEnrollmentOfferSignerClient()
 
 
 __all__ = [
