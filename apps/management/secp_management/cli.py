@@ -275,11 +275,34 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         return EnrollmentCliDeps()
 
 
+def _production_engine_deps() -> EngineDeps | None:
+    """Compose the production management-engine deps from the fixed root-controlled bootstrap inputs
+    (SECP-PR5H-B2). This is the supported production CLI entrypoint's composition: it wires the real
+    hardened adapters so ``secpctl bootstrap/adopt/status/evidence/rollback`` act on a real host.
+
+    Any missing / unsafe / mismatched / non-production input (e.g. an unprovisioned or non-POSIX
+    host) falls back to the SEALED default (``None`` → ``run`` builds a sealed ``EngineDeps()``), so
+    the command fails closed with a bounded reason code rather than crashing or acting on an
+    unverified adapter. No adapter is ever selected by a CLI flag, environment variable, or import —
+    ``production_engine_deps`` reads only the fixed code-owned inputs."""
+    try:
+        from secp_management.production import production_engine_deps
+
+        return production_engine_deps()
+    except Exception:  # noqa: BLE001 - fail closed to the sealed default; the command refuses, bounded
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
-    # the enrollment/worker groups get the production client composition; everything else does not
-    enr = _production_enrollment_deps() if _is_enrollment_group(args_list) else None
-    exit_code, payload = run(args_list, enrollment_deps=enr)
+    # the enrollment/worker groups get the production controller-client composition; every OTHER
+    # (engine) group gets the production management-engine deps. BOTH fall back to their SEALED
+    # default on any error, so an unprovisioned/non-POSIX host still fails closed with a bounded
+    # reason (unchanged) while a properly provisioned production host drives the real adapters.
+    is_enrollment = _is_enrollment_group(args_list)
+    enr = _production_enrollment_deps() if is_enrollment else None
+    deps = None if is_enrollment else _production_engine_deps()
+    exit_code, payload = run(args_list, deps=deps, enrollment_deps=enr)
     if "--json" in args_list:
         sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
     else:
