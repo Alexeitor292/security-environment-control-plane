@@ -412,7 +412,8 @@ def test_enrollment_models_can_be_imported_first_without_a_circular_import() -> 
     """Regression: ``secp_api.models`` re-exported the enrollment model CLASS NAMES, so importing
     ``secp_api.worker_enrollment_models`` first raised ImportError from a partially initialized
     module. The re-export is now a module import, which is cycle-tolerant in BOTH orders while still
-    registering the four tables on ``Base.metadata``."""
+    registering the enrollment tables on ``Base.metadata`` (five ``worker_enrollment_*`` tables:
+    the four PR5H-A tables plus the PR5H-B1 Phase 3 signed-offer store)."""
     import subprocess
 
     for first, second in (
@@ -423,7 +424,7 @@ def test_enrollment_models_can_be_imported_first_without_a_circular_import() -> 
             f"import {first}; import {second}\n"
             "from secp_api.models import Base\n"
             "names = sorted(t for t in Base.metadata.tables if t.startswith('worker_enrollment'))\n"
-            "assert len(names) == 4, names\n"
+            "assert len(names) == 5, names\n"
             "print('ok')\n"
         )
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-only
