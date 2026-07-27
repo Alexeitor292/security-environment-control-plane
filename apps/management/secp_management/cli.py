@@ -176,9 +176,14 @@ def run(
     *,
     enrollment_deps: EnrollmentCliDeps | None = None,
 ) -> tuple[int, dict]:
-    """Parse ``argv`` and execute the engine. Returns ``(exit_code, report_dict)``. Production
-    passes ``deps=None`` → a real :class:`EngineDeps`; the enrollment/worker commands take a
-    separate :class:`EnrollmentCliDeps` (SEALED default; tests inject fakes)."""
+    """Parse ``argv`` and execute the engine. Returns ``(exit_code, report_dict)``.
+
+    ``deps=None`` builds a SEALED :class:`EngineDeps` (every adapter fails closed) — it is NOT the
+    production path. The supported production composition lives in :func:`main`, which passes an
+    explicitly-composed ``deps`` (steady-state :func:`_production_engine_deps`, or — Phase 2b — the
+    clean-host root installation composition), falling back to this sealed default on any error.
+    Tests inject their own ``deps`` directly. The enrollment/worker commands take a separate
+    :class:`EnrollmentCliDeps` (SEALED default; tests inject fakes; ``main`` composes the real)."""
     args = build_parser().parse_args(argv)
     resolved = deps if deps is not None else EngineDeps()
     enr = enrollment_deps if enrollment_deps is not None else EnrollmentCliDeps()

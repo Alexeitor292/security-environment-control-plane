@@ -66,6 +66,28 @@ Repository convention uses `secpctl <verb> <role>`. B2 delivers:
 
 Every mutating verb keeps the `WriteGate` (`--write --confirm`, dry-run default). Root entrypoint is required only for install/upgrade/uninstall; the browser/API never performs a root install.
 
+### 2.1a Phase 2b clean-host installation blocker (authorized STOP — 2026-07-27)
+
+Implementability discovery over the merged code established that a **clean-host** root controller
+install cannot prepare all required production inputs from **authenticated / code-owned** sources
+with the merged release contract. Per the Phase-2b stop protocol (missing signed artifact / no
+code-owned API-TLS source / no reviewed DB-credential channel → **stop and report; never manufacture
+an unsigned value, env fallback, or manual operator step**), Phase 2b's *clean-host installation
+composition* is **paused pending the reviewed release-governance changes below**. The engine
+transaction extension and the enrollment-finalization *scaffolding* are implementable and unblocked,
+but they cannot yield a functioning clean-host install until the foundational inputs exist.
+
+| # | Required clean-host input | Exact existing source | Exact missing signed artifact / field | Smallest safe correction (authenticated only) | Stop-authorized |
+|---|---|---|---|---|---|
+| c | `release-trust-anchor.json` `{key_id, public_key_hex}` — the public key that **verifies** the signed bundle | `signing.py :: SHIPPED_TRUST_ROOT = ReleaseTrustRoot(anchors=(), test_only=False)` — **EMPTY**; manifest carries only `signing_anchor_id` (key_id) | the reviewed release-signing **public** anchor `{key_id, public_key_hex}` is committed **nowhere** | a **separately-reviewed** commit populating `SHIPPED_TRUST_ROOT.anchors=(TrustAnchor(key_id, public_key_hex),)` with the real reviewed release key | ✅ (release artifact missing) — also blocks `release verify` itself on a clean host, cascading to every bundle-derived input |
+| a | `production-executables.json` — path+digest pins for `container_runtime`/`compose_runtime`/`service_manager` | `production.py :: _load_executables/PinnedExecutables`; `release_bundle.py :: ARTIFACT_KINDS = {controller_compose_template, worker_compose_template, image_archive, python_wheel, sbom}` | **no** artifact kind or manifest field pins a host-executable path+digest | a net-new **signed** executable-pin manifest field/kind (a reviewed release-contract change) | ✅ (release artifact missing) — no bundle/host source exists |
+| e | Controller API-TLS leaf/chain/**CA** + canonical origin for the locator's required TLS verification | `controller_api_locator.py` (client-side only); `config.py :: public_origin ← SECP_PUBLIC_ORIGIN` (env only); API terminates no TLS (external edge, CA out-of-band); no `ManagementLocations` CA path | **no** `controller_api_tls`/CA/leaf/chain/x509/pem artifact kind, and **no** signed canonical-origin field | a net-new **signed** `controller_api_tls_ca` artifact kind + a signed canonical-origin field, verified under the shipped trust root; then a fixed `ManagementLocations` CA path | ✅ (cannot source the actual API TLS cert/CA) |
+| db | `secp_enrollment_signer` DB authentication for the root broker | `enrollment_signer_identity.py :: ENROLLMENT_SIGNER_DB_ROLE/GRANTS`; shipped Postgres is containerized TCP + DSN password; broker runs as root on host (not OS user `secp_enrollment_signer`) → **peer auth unachievable** | no code-owned mechanism mints/stores a LOGIN password, no 0600 layout path, no role-scoped DSN composition | **ELIMINATE the credential**: extend the sole head `c2f8e1a4b6d9` **in place** — `CREATE ROLE secp_enrollment_signer NOLOGIN` + `ENROLLMENT_SIGNER_DB_GRANTS` + grant the NOLOGIN role to the migration role, and have `DbActiveControllerSigningIdentityProvider` acquire it via `SET ROLE …` over the already-authenticated admin connection (no LOGIN/password/DSN/env) | ⚠️ has a safe in-scope fix, but it changes the reviewed PR5H-B1 C4 lease mechanism |
+
+**Unblocked (implementable now, but gated behind c/a/e):** the engine-transaction extension (a second closed typed `ControllerEnrollmentFinalizationPlan` driven by `_write_transaction`, a sealed-by-default `enrollment_adapter`, tuple-compensation, and a grown `ControllerObservation` — all pure code-owned, no missing artifact); `production-expected-identities.json` composable from the signed component→image-digest map + code-owned `topology.py` identities; the production `VerifiedControllerIdentity` producer's verification logic; and the `db` NOLOGIN + `SET ROLE` correction.
+
+**Decision:** do not proceed to a partial clean-host installer that cannot verify a release, cannot pin executables, or cannot verify the API TLS endpoint — that would require manufacturing an unsigned trust anchor / unsigned pins / an env-sourced origin, all forbidden. Corrections `c`, `a`, `e` are **reviewed release-governance changes** (they depend on the reviewed release-signing keypair, deliberately absent from the repo, and on extending the signed release contract). Once `c` (the reviewed anchor) lands and the release contract carries `a` + `e`, Phase 2b's clean-host composition proceeds as specified below.
+
 ### 2.2 Controller installation state machine
 
 ```

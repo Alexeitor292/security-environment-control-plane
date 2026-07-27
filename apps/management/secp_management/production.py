@@ -7,10 +7,19 @@ This is the ONLY place the five real leaves (``RealManagementHostObserver``,
 The composition is CLOSED: it consumes only fixed, code-owned, root-controlled deployment-local
 through hardened readers and independently reviewed identities.  There is no adapter-selection CLI
 flag, no environment variable selecting an implementation, no caller-supplied import, no mutable
-global registration, and no arbitrary path/command/Compose-project/service/container name.  The
-default ``EngineDeps()`` and the default CLI dependency construction stay sealed; a real adapter is
-reachable ONLY through :func:`production_engine_deps`, called by the future supported production CLI
-entrypoint.
+global registration, and no arbitrary path/command/Compose-project/service/container name.  A bare
+``EngineDeps()`` (e.g. the default when ``cli.run`` is called with ``deps=None``, or a test double)
+stays sealed; a real adapter is reachable ONLY through :func:`production_engine_deps`.
+
+This is the **STEADY-STATE** composer: it reads the fixed production inputs that a completed
+installation has ALREADY prepared. It is now wired into the supported CLI via
+``cli._production_engine_deps`` for the engine command groups (``bootstrap/adopt/status/evidence/
+rollback``), which falls back to the sealed default on any missing/unsafe input. It is deliberately
+NOT the clean-host installer: a fresh host has none of these inputs, so calling it there yields the
+sealed fallback. Preparing those inputs on a clean host (from the signed release bundle + host facts
++ code-owned identities) is the DISTINCT root-only installation composition (SECP-PR5H-B2, Phase
+2b); steady-state commands use this composer only AFTER that installation has committed and been
+independently revalidated.
 
 Importing this module performs NO I/O, process execution, filesystem mutation, Docker, or network
 contact — every read happens inside :func:`production_engine_deps`.  Any missing, partial, unsafe,
