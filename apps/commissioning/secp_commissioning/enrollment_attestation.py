@@ -187,10 +187,19 @@ def worker_result_claim(
     predecessor_digest: str,
     release_digest: str,
     outcome: str,
+    health_evidence_digest: str,
+    generation: str,
+    challenge: str,
 ) -> dict[str, str]:
     """The canonical signed worker-result claim: binds the result to the enrollment, transaction,
     worker key, the predecessor state digest (chaining it to the exact prior state) and the exact
-    release, plus a bounded outcome token. No raw handoff bytes, host path or secret."""
+    release, plus a bounded outcome token. It ALSO binds the ``sha256:`` content address of the
+    worker's bounded health-evidence structure (so the signed evidence cannot be swapped) and the
+    exchange ``generation`` + ``challenge`` — the offer revision and the ``sha256:`` claim digest of
+    the exact controller offer this result answers — so a signed result can never be replayed onto
+    a different exchange/offer. No raw handoff bytes, host path or secret. Both the worker (which
+    signs) and the controller (which rebuilds it from authoritative state + the received evidence)
+    build it HERE, so the two sides never drift."""
     return {
         "schema": RESULT_SCHEMA,
         "enrollment_id": enrollment_id,
@@ -199,6 +208,9 @@ def worker_result_claim(
         "predecessor_digest": predecessor_digest,
         "release_digest": release_digest,
         "outcome": outcome,
+        "health_evidence_digest": health_evidence_digest,
+        "generation": generation,
+        "challenge": challenge,
     }
 
 
@@ -254,20 +266,56 @@ def claim_digest(claim: dict[str, str]) -> str:
     return sha256_digest(claim)
 
 
+#: The bounded outcome token a worker result must carry to advance the enrollment to ``healthy``. A
+#: result attesting any other outcome is authenticated but never sufficient for healthy.
+WORKER_RESULT_OUTCOME_HEALTHY = "healthy"
+
+#: The closed set of CHECKED FACTS a worker's bounded, provider-neutral health-evidence structure
+#: must attest (each a boolean the worker sets only after actually performing the check). Every one
+#: must be present and ``True`` for the controller to mark the enrollment ``healthy`` — it is
+#: never a caller convenience boolean. The last three are inertness proofs: the worker did NOT
+#: contact a provider, run OpenTofu, or submit anything to the controlled-live path.
+REQUIRED_HEALTH_CHECKS = (
+    "invitation_and_offer_verified",
+    "controller_key_pinned",
+    "expected_transaction",
+    "expected_predecessor",
+    "exact_release",
+    "worker_enrollment_key_protected",
+    "local_enrollment_state_present",
+    "operator_worker_disabled",
+    "no_provider_contact",
+    "no_opentofu_execution",
+    "no_controlled_live_submission",
+)
+
+
+def health_evidence_complete(evidence: object) -> bool:
+    """True iff the bounded health-evidence structure attests EVERY required check as ``True``. A
+    missing key, a non-boolean, or any ``False`` fails closed (the enrollment cannot become
+    healthy)."""
+    if not isinstance(evidence, dict):
+        return False
+    return all(evidence.get(check) is True for check in REQUIRED_HEALTH_CHECKS)
+
+
 __all__ = [
     "BINDING_SCHEMA",
     "ENROLLMENT_ATTESTATION_DOMAIN",
     "OFFER_KIND",
     "OFFER_SCHEMA",
     "POP_KIND",
+    "REQUIRED_HEALTH_CHECKS",
     "RESULT_KIND",
     "RESULT_SCHEMA",
+    "WORKER_RESULT_OUTCOME_HEALTHY",
     "AttestationError",
     "DetachedAttestation",
     "attestation_message",
     "claim_digest",
     "controller_offer_claim",
     "enrollment_key_proof_id_for",
+    "health_evidence_complete",
     "key_id_for",
     "sign_detached",
     "verify_detached",

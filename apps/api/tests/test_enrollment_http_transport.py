@@ -130,7 +130,7 @@ def test_binding_submit_is_ca_pinned_no_proxy_no_redirects(patched):
     assert cap["trust_env"] is False
     assert cap["follow_redirects"] is False
     assert cap["timeout"] is not None
-    assert cap["url"] == ORIGIN + "/api/v1/enrollment/sha256:" + "a" * 64 + "/transport/bind"
+    assert cap["url"] == ORIGIN + "/api/v1/enrollment/sha256:" + "a" * 64 + "/exchange/bind"
     assert cap["req_headers"]["Content-Type"] == "application/json"
     assert cap["req_headers"]["Accept-Encoding"] == "identity"
 
@@ -168,7 +168,15 @@ def test_result_submit_signs_a_worker_result(patched):
 
     signer = _signer()
     t = HttpxWorkerEnrollmentTransport(controller_origin=ORIGIN, ca_path="ca", signer=signer)
-    t.submit_result(_invitation(signer), predecessor_digest="sha256:" + "e" * 64, outcome="ready")
+    health_evidence = {"schema": "secp.worker-enrollment.health/v1", "all_checks_passed": True}
+    t.submit_result(
+        _invitation(signer),
+        predecessor_digest="sha256:" + "e" * 64,
+        outcome="ready",
+        health_evidence=health_evidence,
+        generation="2",
+        challenge="sha256:" + "1" * 64,
+    )
     sent = json.loads(patched.captured["content"])
     ea.verify_detached(
         ea.DetachedAttestation(**sent["attestation"]),
@@ -177,6 +185,11 @@ def test_result_submit_signs_a_worker_result(patched):
         kind=ea.RESULT_KIND,
         digest=ea.claim_digest(sent["result"]),
     )
+    # the transported body carries the raw health-evidence structure, and the signed claim binds its
+    # sha256 digest so the controller can recompute it and a swapped body fails verification
+    assert sent["health_evidence"] == health_evidence
+    assert sent["result"]["health_evidence_digest"] == ea.sha256_digest(health_evidence)
+    assert sent["result"]["generation"] == "2"
 
 
 def test_redirect_response_fails_closed(patched):

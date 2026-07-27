@@ -317,12 +317,49 @@ class WorkerEnrollmentStepReceipt(Base):
     )
 
 
+class WorkerEnrollmentSignedOffer(Base):
+    """The IMMUTABLE, content-addressed public signed controller offer minted at the bind exchange
+    (SECP-PR5H-B1 Phase 3). Persisted write-once per enrollment so a lost-response retry returns the
+    byte-equivalent original signed offer even after the controller enrollment key rotates — the
+    signature can never be reconstructed from a digest, and re-signing under a rotated key would
+    differ or fail. Public material only (canonical claim + detached attestation: signature, public
+    key, key id) — never a private key, raw handoff bytes, host path or secret."""
+
+    __tablename__ = "worker_enrollment_signed_offer"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    enrollment_id: Mapped[str] = mapped_column(
+        String(80), ForeignKey("worker_enrollment_state.enrollment_id"), nullable=False
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    offer_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: the controller enrollment key id that signed (records WHICH key, so a rotation is auditable)
+    signer_key_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    #: the exact canonical response JSON: {"claim": {...}, "attestation": {...}} — public only
+    signed_offer: Mapped[str] = mapped_column(Text, nullable=False)
+    #: sha256 of ``signed_offer``, re-verified on every read so a tampered row refuses closed
+    response_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        # write-once per enrollment: the bind exchange mints exactly one offer; a retry returns it
+        UniqueConstraint("enrollment_id", name="uq_worker_enrollment_signed_offer"),
+        CheckConstraint("offer_revision >= 0", name="ck_weso_revision_nonnegative"),
+        CheckConstraint(_digest("signer_key_id"), name="ck_weso_signer_key_id"),
+        CheckConstraint(_digest("response_digest"), name="ck_weso_response_digest"),
+        CheckConstraint("length(signed_offer) <= 8192", name="ck_weso_payload_bounded"),
+    )
+
+
 __all__ = [
     "DEPLOYMENT_SITE_LABEL_PATTERN",
     "WORKER_ENROLLMENT_STATES",
     "WORKER_ENROLLMENT_STEPS",
     "WorkerEnrollmentInvitation",
     "WorkerEnrollmentRevision",
+    "WorkerEnrollmentSignedOffer",
     "WorkerEnrollmentState",
     "WorkerEnrollmentStepReceipt",
     "is_deployment_site_label",

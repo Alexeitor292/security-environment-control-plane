@@ -109,8 +109,40 @@ def upgrade() -> None:
         sa.Column("state_snapshot", sa.Text(), nullable=True),
     )
 
+    # Phase 3: the immutable, content-addressed public signed controller offer minted at the bind
+    # exchange, persisted write-once per enrollment so a lost-response retry returns the exact
+    # original signed offer even after the controller enrollment key rotates. Public material only.
+    op.create_table(
+        "worker_enrollment_signed_offer",
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column(
+            "enrollment_id",
+            sa.String(length=80),
+            sa.ForeignKey("worker_enrollment_state.enrollment_id"),
+            nullable=False,
+        ),
+        sa.Column("organization_id", sa.Uuid(), nullable=False),
+        sa.Column("offer_revision", sa.Integer(), nullable=False),
+        sa.Column("signer_key_id", sa.String(length=80), nullable=False),
+        sa.Column("signed_offer", sa.Text(), nullable=False),
+        sa.Column("response_digest", sa.String(length=80), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.UniqueConstraint("enrollment_id", name="uq_worker_enrollment_signed_offer"),
+        sa.CheckConstraint("offer_revision >= 0", name="ck_weso_revision_nonnegative"),
+        sa.CheckConstraint(
+            "(length(signer_key_id) = 71 AND signer_key_id LIKE 'sha256:%')",
+            name="ck_weso_signer_key_id",
+        ),
+        sa.CheckConstraint(
+            "(length(response_digest) = 71 AND response_digest LIKE 'sha256:%')",
+            name="ck_weso_response_digest",
+        ),
+        sa.CheckConstraint("length(signed_offer) <= 8192", name="ck_weso_payload_bounded"),
+    )
+
 
 def downgrade() -> None:
+    op.drop_table("worker_enrollment_signed_offer")
     with op.batch_alter_table("worker_enrollment_revision") as batch:
         batch.drop_column("state_snapshot")
     op.drop_table("controller_enrollment_identity")

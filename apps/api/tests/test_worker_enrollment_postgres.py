@@ -824,3 +824,78 @@ def test_concurrent_revoke_yields_one_transition_and_one_audit(pg):
             text("SELECT count(*) FROM audit_event WHERE action='enrollment.revoked'")
         ).scalar_one()
     assert row == ("refused", 1) and audits == 1
+
+
+# --- SECP-PR5H-B1 Phase 3: write-once signed controller offer -------------------------------------
+
+
+def test_two_concurrent_signed_offer_writes_exactly_one_wins(pg):
+    """The signed-offer store is write-once per enrollment: two genuinely-overlapping persists of
+    the same enrollment's offer produce exactly ONE row; the loser refuses a bounded conflict (the
+    durable single-winner guarantee behind a bind-exchange race)."""
+    from secp_api import worker_enrollment_repository as repo
+    from secp_api.worker_enrollment_repository import RepositoryRefusal
+
+    factory, actor, _ = pg
+    bound = _bind(factory, actor, _open(factory, actor, nonce="sha256:" + "e" * 64))
+    barrier = Barrier(2)
+
+    def attempt(_i: int) -> str:
+        with factory() as s:
+            barrier.wait(timeout=15)
+            try:
+                repo.persist_signed_offer(
+                    s,
+                    enrollment_id=bound.enrollment_id,
+                    organization_id=actor.organization_id,
+                    offer_revision=bound.revision,
+                    signer_key_id=CTRL_KEY,
+                    signed_offer='{"claim":{},"attestation":{}}',
+                )
+                s.commit()
+                return "committed"
+            except RepositoryRefusal as exc:
+                s.rollback()
+                return exc.reason_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, range(2)))
+    assert outcomes.count("committed") == 1, outcomes
+    assert [o for o in outcomes if o != "committed"] == ["enrollment_signed_offer_conflict"]
+    with factory() as s:
+        rows = s.execute(
+            text("SELECT count(*) FROM worker_enrollment_signed_offer WHERE enrollment_id=:e"),
+            {"e": bound.enrollment_id},
+        ).scalar_one()
+    assert rows == 1
+
+
+def test_a_tampered_signed_offer_row_refuses_on_load(pg):
+    """A stored signed offer whose payload no longer matches its recorded content digest is
+    corruption — ``load_signed_offer`` refuses closed; it is never returned or re-signed."""
+    from secp_api import worker_enrollment_repository as repo
+    from secp_api.worker_enrollment_repository import RepositoryRefusal
+
+    factory, actor, _ = pg
+    bound = _bind(factory, actor, _open(factory, actor, nonce="sha256:" + "f" * 64))
+    with factory() as s:
+        repo.persist_signed_offer(
+            s,
+            enrollment_id=bound.enrollment_id,
+            organization_id=actor.organization_id,
+            offer_revision=bound.revision,
+            signer_key_id=CTRL_KEY,
+            signed_offer='{"claim":{},"attestation":{}}',
+        )
+        s.commit()
+    with factory() as s:
+        s.execute(
+            text(
+                "UPDATE worker_enrollment_signed_offer SET signed_offer=:v WHERE enrollment_id=:e"
+            ),
+            {"v": '{"claim":{"tampered":"x"},"attestation":{}}', "e": bound.enrollment_id},
+        )
+        s.commit()
+    with factory() as s, pytest.raises(RepositoryRefusal) as ei:
+        repo.load_signed_offer(s, bound.enrollment_id)
+    assert ei.value.reason_code == "enrollment_state_corrupt"

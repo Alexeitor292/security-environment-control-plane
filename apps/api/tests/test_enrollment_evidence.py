@@ -124,6 +124,13 @@ def test_a_malformed_public_key_is_refused_without_raising_raw():
     assert ei.value.code == "enrollment_pop_invalid"
 
 
+_RESULT_EVIDENCE = dict(
+    health_evidence_digest="sha256:" + "f" * 64,
+    generation="2",
+    challenge="sha256:" + "1" * 64,
+)
+
+
 def test_a_signed_worker_result_verifies_and_rejects_a_wrong_bound_key():
     priv, pub = generate_keypair()
     kid = ea.key_id_for(pub)
@@ -134,6 +141,7 @@ def test_a_signed_worker_result_verifies_and_rejects_a_wrong_bound_key():
         predecessor_digest="sha256:" + "e" * 64,
         release_digest=INV["release_digest"],
         outcome="ready",
+        **_RESULT_EVIDENCE,
     )
     att = ea.sign_detached(
         priv,
@@ -151,6 +159,7 @@ def test_a_signed_worker_result_verifies_and_rejects_a_wrong_bound_key():
         bound_worker_key_id=kid,
         worker_public_key_hex=pub,
         attestation=att,
+        **_RESULT_EVIDENCE,
     )
     # a result signed by a worker whose key is NOT the bound key is refused
     with pytest.raises(WorkerEnrollmentError) as ei:
@@ -163,5 +172,98 @@ def test_a_signed_worker_result_verifies_and_rejects_a_wrong_bound_key():
             bound_worker_key_id="sha256:" + "7" * 64,
             worker_public_key_hex=pub,
             attestation=att,
+            **_RESULT_EVIDENCE,
         )
     assert ei.value.code == "enrollment_pop_invalid"
+
+
+def test_a_result_with_swapped_health_evidence_digest_is_refused():
+    # the worker signed over one health-evidence digest; the controller rebuilds the claim with the
+    # digest it recomputed from the RECEIVED evidence, so a swapped evidence body fails verification
+    priv, pub = generate_keypair()
+    kid = ea.key_id_for(pub)
+    claim = ea.worker_result_claim(
+        enrollment_id=INV["enrollment_id"],
+        controller_transaction_id=INV["controller_transaction_id"],
+        worker_key_id=kid,
+        predecessor_digest="sha256:" + "e" * 64,
+        release_digest=INV["release_digest"],
+        outcome="ready",
+        **_RESULT_EVIDENCE,
+    )
+    att = ea.sign_detached(
+        priv,
+        domain=ea.ENROLLMENT_ATTESTATION_DOMAIN,
+        kind=ea.RESULT_KIND,
+        digest=ea.claim_digest(claim),
+    )
+    with pytest.raises(WorkerEnrollmentError) as ei:
+        verify_worker_result(
+            enrollment_id=INV["enrollment_id"],
+            controller_transaction_id=INV["controller_transaction_id"],
+            predecessor_digest="sha256:" + "e" * 64,
+            release_digest=INV["release_digest"],
+            outcome="ready",
+            bound_worker_key_id=kid,
+            worker_public_key_hex=pub,
+            attestation=att,
+            health_evidence_digest="sha256:" + "0" * 64,  # controller recomputed a DIFFERENT digest
+            generation="2",
+            challenge="sha256:" + "1" * 64,
+        )
+    assert ei.value.code == "enrollment_pop_invalid"
+
+
+def _controller_offer(priv, pub, **override):
+    """A controller-signed offer under the pinned controller key ``pub``."""
+    fields = dict(
+        enrollment_id=INV["enrollment_id"],
+        invitation_id=INV["invitation_id"],
+        controller_installation_id=INV["controller_installation_id"],
+        controller_key_id=ea.key_id_for(pub),
+        controller_origin="https://controller.example.com",
+        controller_transaction_id=INV["controller_transaction_id"],
+        worker_installation_id="worker-bbbbbbbb",
+        worker_key_id="sha256:" + "9" * 64,
+        release_digest=INV["release_digest"],
+        expires_at=INV["expires_at"],
+        predecessor_digest="sha256:" + "e" * 64,
+    )
+    fields.update(override)
+    claim = ea.controller_offer_claim(**fields)
+    att = ea.sign_detached(
+        priv,
+        domain=ea.ENROLLMENT_ATTESTATION_DOMAIN,
+        kind=ea.OFFER_KIND,
+        digest=ea.claim_digest(claim),
+    )
+    return fields, att
+
+
+def test_a_genuine_controller_offer_reverifies_under_the_pinned_key():
+    from secp_api.enrollment_evidence import verify_controller_offer
+
+    priv, pub = generate_keypair()
+    fields, att = _controller_offer(priv, pub)
+    verified = verify_controller_offer(attestation=att, **fields)
+    assert verified.controller_key_id == ea.key_id_for(pub)
+    assert verified.claim["schema"] == ea.OFFER_SCHEMA
+
+
+def test_a_controller_offer_signed_by_the_wrong_key_is_signer_unavailable():
+    from secp_api.enrollment_evidence import verify_controller_offer
+
+    priv, pub = generate_keypair()
+    other_priv, _ = generate_keypair()
+    fields, _ = _controller_offer(priv, pub)
+    # sign the SAME claim with a different key than the pinned controller_key_id
+    claim = ea.controller_offer_claim(**fields)
+    forged = ea.sign_detached(
+        other_priv,
+        domain=ea.ENROLLMENT_ATTESTATION_DOMAIN,
+        kind=ea.OFFER_KIND,
+        digest=ea.claim_digest(claim),
+    )
+    with pytest.raises(WorkerEnrollmentError) as ei:
+        verify_controller_offer(attestation=forged, **fields)
+    assert ei.value.code == "enrollment_signer_unavailable"

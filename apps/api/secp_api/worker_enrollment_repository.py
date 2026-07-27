@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Final
 
-from secp_commissioning.canonical import canonical_json, is_sha256_digest
+from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_bytes
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -59,6 +59,9 @@ from secp_api.worker_enrollment_models import (
 )
 from secp_api.worker_enrollment_models import (
     WorkerEnrollmentRevision as RevisionRow,
+)
+from secp_api.worker_enrollment_models import (
+    WorkerEnrollmentSignedOffer as SignedOfferRow,
 )
 from secp_api.worker_enrollment_models import (
     WorkerEnrollmentState as StateRow,
@@ -731,6 +734,55 @@ def find_receipt(
             ReceiptRow.input_digest == input_digest,
         )
     ).scalar_one_or_none()
+
+
+# ----------------------------------------------------------------------- signed controller offer
+
+
+def persist_signed_offer(
+    session: Session,
+    *,
+    enrollment_id: str,
+    organization_id: uuid.UUID,
+    offer_revision: int,
+    signer_key_id: str,
+    signed_offer: str,
+) -> None:
+    """Persist the immutable public signed controller offer WRITE-ONCE (in the SAME transaction as
+    the winning bind transition). A concurrent/duplicate bind collides on ``UNIQUE(enrollment_id)``
+    and refuses the bounded ``enrollment_signed_offer_conflict`` — so exactly one offer is ever
+    minted per enrollment and a lost-response retry re-reads it rather than re-signing."""
+    if len(signed_offer) > 8192 or not is_sha256_digest(signer_key_id):
+        raise _refuse("enrollment_state_corrupt")
+    session.add(
+        SignedOfferRow(
+            enrollment_id=enrollment_id,
+            organization_id=organization_id,
+            offer_revision=offer_revision,
+            signer_key_id=signer_key_id,
+            signed_offer=signed_offer,
+            response_digest=sha256_bytes(signed_offer.encode("utf-8")),
+        )
+    )
+    try:
+        session.flush()
+    except IntegrityError:
+        raise _refuse("enrollment_signed_offer_conflict") from None
+
+
+def load_signed_offer(session: Session, enrollment_id: str) -> str | None:
+    """The exact persisted signed offer for a lost-response retry, digest-verified on read. Returns
+    None if none exists; a tampered / oversized row is corruption (refused, never repaired)."""
+    row = session.execute(
+        select(SignedOfferRow).where(SignedOfferRow.enrollment_id == enrollment_id)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    if len(row.signed_offer) > 8192 or not is_sha256_digest(row.response_digest):
+        raise _refuse("enrollment_state_corrupt")
+    if sha256_bytes(row.signed_offer.encode("utf-8")) != row.response_digest:
+        raise _refuse("enrollment_state_corrupt")
+    return row.signed_offer
 
 
 def revision_state_digest(session: Session, *, enrollment_id: str, revision: int) -> str | None:

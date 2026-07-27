@@ -33,21 +33,33 @@ from __future__ import annotations
 import datetime as _dt
 
 from fastapi import APIRouter, Depends
+from secp_commissioning.enrollment_attestation import DetachedAttestation
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
 from secp_api.config import Settings
-from secp_api.deps import current_principal, db_session, settings_dep
+from secp_api.deps import (
+    current_principal,
+    db_session,
+    get_enrollment_offer_signer,
+    settings_dep,
+)
+from secp_api.enrollment_signer_client import EnrollmentOfferSignerClient
 from secp_api.enums import WorkerEnrollmentErrorCode as EC
 from secp_api.errors import WorkerEnrollmentError
 from secp_api.schemas_enrollment import (
+    BindExchangeOut,
+    BindExchangeRequest,
     BindWorkerRequest,
     CreateEnrollmentInvitation,
     EnrollmentInvitationOut,
     EnrollmentStatusOut,
     MarkHealthyRequest,
     RecordHandoffRequest,
+    ResultExchangeOut,
+    ResultExchangeRequest,
     RevokeEnrollment,
+    SignedControllerOfferOut,
     VerifyReleaseRequest,
 )
 from secp_api.services import worker_enrollment as svc
@@ -133,13 +145,81 @@ def revoke_enrollment(
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
 
+# --- SUPPORTED evidence-driven exchange (SECP-PR5H-B1 Phase 3) ------------------------------------
+# The worker proves possession of its own key by signing a bound claim; the controller mints an
+# internally-signed offer through the root-gated broker (the non-root API never holds the key) and
+# returns it. This is the SUPPORTED progression surface — it is NOT gated by the claim-only
+# progression flag; it stays inert by default only through the SEALED signer client (which fails
+# closed until a broker socket is configured).
+
+
+@router.post("/{enrollment_id}/exchange/bind", response_model=BindExchangeOut)
+def bind_worker_exchange(
+    enrollment_id: str,
+    body: BindExchangeRequest,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+    signer: EnrollmentOfferSignerClient = Depends(get_enrollment_offer_signer),
+) -> BindExchangeOut:
+    outcome = svc.bind_worker_exchange(
+        session,
+        principal,
+        signer=signer,
+        enrollment_id=enrollment_id,
+        worker_installation_id=body.worker_installation_id,
+        worker_public_key_hex=body.worker_public_key_hex,
+        pop_attestation=DetachedAttestation(
+            algorithm=body.attestation.algorithm,
+            key_id=body.attestation.key_id,
+            public_key_hex=body.attestation.public_key_hex,
+            signature=body.attestation.signature,
+        ),
+        expected_revision=body.expected_revision,
+        now=_iso(_utc_now()),
+    )
+    return BindExchangeOut(
+        signed_offer=SignedControllerOfferOut.model_validate(outcome.signed_offer),
+        enrollment=EnrollmentStatusOut.model_validate(outcome.status),
+    )
+
+
+@router.post("/{enrollment_id}/exchange/result", response_model=ResultExchangeOut)
+def record_worker_result_exchange(
+    enrollment_id: str,
+    body: ResultExchangeRequest,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> ResultExchangeOut:
+    outcome = svc.record_worker_result_exchange(
+        session,
+        principal,
+        enrollment_id=enrollment_id,
+        worker_public_key_hex=body.worker_public_key_hex,
+        outcome=body.outcome,
+        attestation=DetachedAttestation(
+            algorithm=body.attestation.algorithm,
+            key_id=body.attestation.key_id,
+            public_key_hex=body.attestation.public_key_hex,
+            signature=body.attestation.signature,
+        ),
+        health_evidence=body.health_evidence,
+        expected_revision=body.expected_revision,
+        now=_iso(_utc_now()),
+    )
+    return ResultExchangeOut(enrollment=EnrollmentStatusOut.model_validate(outcome.status))
+
+
 # --- SEALED claim-only progression steps (not a supported trusted exchange; see module docstring) -
+# They are additionally hidden from the production OpenAPI schema (``include_in_schema=False``) so
+# the only DOCUMENTED progression surface is the supported evidence-driven exchange above; they stay
+# structurally present but sealed closed (404) unless a deployment-local dev/test profile enables
+# them to exercise the durable CAS primitives.
 # Each carries ONLY the caller's ``expected_revision``; the service derives the durable CAS
 # coordinates from the authoritative loaded state. Gated closed by default via
 # ``_require_progression_enabled`` — the supported path is the authenticated EnrollmentTransport.
 
 
-@router.post("/{enrollment_id}/bind", response_model=EnrollmentStatusOut)
+@router.post("/{enrollment_id}/bind", response_model=EnrollmentStatusOut, include_in_schema=False)
 def bind_worker(
     enrollment_id: str,
     body: BindWorkerRequest,
@@ -161,7 +241,7 @@ def bind_worker(
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
 
-@router.post("/{enrollment_id}/offer", response_model=EnrollmentStatusOut)
+@router.post("/{enrollment_id}/offer", response_model=EnrollmentStatusOut, include_in_schema=False)
 def record_controller_offer(
     enrollment_id: str,
     body: RecordHandoffRequest,
@@ -186,7 +266,7 @@ def record_controller_offer(
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
 
-@router.post("/{enrollment_id}/result", response_model=EnrollmentStatusOut)
+@router.post("/{enrollment_id}/result", response_model=EnrollmentStatusOut, include_in_schema=False)
 def record_worker_result(
     enrollment_id: str,
     body: RecordHandoffRequest,
@@ -211,7 +291,7 @@ def record_worker_result(
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
 
-@router.post("/{enrollment_id}/verify", response_model=EnrollmentStatusOut)
+@router.post("/{enrollment_id}/verify", response_model=EnrollmentStatusOut, include_in_schema=False)
 def verify_release(
     enrollment_id: str,
     body: VerifyReleaseRequest,
@@ -231,7 +311,9 @@ def verify_release(
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
 
-@router.post("/{enrollment_id}/healthy", response_model=EnrollmentStatusOut)
+@router.post(
+    "/{enrollment_id}/healthy", response_model=EnrollmentStatusOut, include_in_schema=False
+)
 def mark_enrollment_healthy(
     enrollment_id: str,
     body: MarkHealthyRequest,

@@ -30,6 +30,7 @@ ENROLLMENT_TABLES = {
     "worker_enrollment_revision",
     "worker_enrollment_step_receipt",
     "controller_enrollment_identity",  # PR5H-B1 F3 (added by c2f8e1a4b6d9, dropped on downgrade)
+    "worker_enrollment_signed_offer",  # PR5H-B1 Phase 3 (added by c2f8e1a4b6d9; dropped on down)
 }
 
 

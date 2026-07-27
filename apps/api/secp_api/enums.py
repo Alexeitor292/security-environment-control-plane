@@ -2105,3 +2105,12 @@ class WorkerEnrollmentErrorCode(str, Enum):
     # T2: a worker proof-of-possession / result attestation failed controller-side verification
     # (bad signature, unpinned key, or a claim that disagrees with the authoritative invitation).
     pop_invalid = "enrollment_pop_invalid"
+    # Phase 3: a concurrent/duplicate bind lost the write-once signed-offer insert
+    signed_offer_conflict = "enrollment_signed_offer_conflict"
+    # Phase 3: the root-gated controller-offer signer/broker is sealed, unreachable, or returned an
+    # offer that failed the controller's independent re-verification (signer availability/integrity
+    # — never a worker fault; the enrollment private key never enters the non-root API process)
+    signer_unavailable = "enrollment_signer_unavailable"
+    # Phase 3: the worker result was authenticated but did not attest a successful outcome + every
+    # required health check, so the enrollment cannot advance to verified/healthy
+    health_incomplete = "enrollment_health_incomplete"

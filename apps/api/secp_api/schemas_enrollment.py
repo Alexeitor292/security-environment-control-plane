@@ -15,6 +15,8 @@ field a 422 rather than a silently ignored value.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 _SITE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"
@@ -121,3 +123,86 @@ class EnrollmentStatusOut(BaseModel):
     expires_at: str
     updated_at: str
     refusal_reason: str
+
+
+# --- SECP-PR5H-B1 Phase 3: the supported evidence-driven exchange -------------------------------
+# The worker proves possession of its own key by SIGNING a bound claim; the controller mints an
+# internally-signed offer via the root-gated broker and returns it. Requests carry ONLY public
+# material (the worker's public key + detached attestation + the last-observed revision); the worker
+# key id is DERIVED from the presented public key and is never accepted from the wire.
+
+_HEX64 = r"^[0-9a-f]{64}$"
+_HEX128 = r"^[0-9a-f]{128}$"
+# a bounded worker installation label (the worker's claimed label, signature-bound into the PoP)
+_INSTALL = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"
+
+
+class DetachedAttestationIn(BaseModel):
+    """A detached Ed25519 attestation presented by the worker. PUBLIC material only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    algorithm: Literal["Ed25519"]
+    key_id: str = Field(pattern=_DIGEST)
+    public_key_hex: str = Field(pattern=_HEX64)
+    signature: str = Field(pattern=_HEX128)
+
+
+class DetachedAttestationOut(BaseModel):
+    """A detached Ed25519 attestation returned to the worker (the controller offer signature)."""
+
+    algorithm: str
+    key_id: str
+    public_key_hex: str
+    signature: str
+
+
+class SignedControllerOfferOut(BaseModel):
+    """The internally-signed controller offer: the canonical claim + its detached attestation. The
+    worker re-verifies it against the invitation-pinned controller key."""
+
+    claim: dict[str, str]
+    attestation: DetachedAttestationOut
+
+
+class BindExchangeRequest(BaseModel):
+    """The worker-initiated bind exchange (proof-of-possession). Carries ONLY the worker's presented
+    public key, its claimed installation label, the detached PoP attestation, and the last-observed
+    revision. ``worker_key_id`` is NEVER accepted — it is derived from ``worker_public_key_hex``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_installation_id: str = Field(pattern=_INSTALL)
+    worker_public_key_hex: str = Field(pattern=_HEX64)
+    attestation: DetachedAttestationIn
+    expected_revision: int = Field(ge=0)
+
+
+class BindExchangeOut(BaseModel):
+    """The bind-exchange response: the internally-signed controller offer + the bounded status."""
+
+    signed_offer: SignedControllerOfferOut
+    enrollment: EnrollmentStatusOut
+
+
+class ResultExchangeRequest(BaseModel):
+    """The worker-initiated result exchange. Carries the worker's presented public key, the bounded
+    outcome token, the detached worker-result attestation, the bounded health-evidence structure the
+    controller recomputes the digest from (CHECKED FACTS, never a caller boolean), and the
+    last-observed revision. The controller rebuilds the signed claim from AUTHORITATIVE state (the
+    result claim is never accepted from the wire); only an authenticated, fully-passing,
+    successful-outcome result advances the enrollment to verified then healthy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_public_key_hex: str = Field(pattern=_HEX64)
+    outcome: str = Field(min_length=1, max_length=64)
+    attestation: DetachedAttestationIn
+    health_evidence: dict[str, bool]
+    expected_revision: int = Field(ge=0)
+
+
+class ResultExchangeOut(BaseModel):
+    """The result-exchange response: the final bounded enrollment status (verified/healthy)."""
+
+    enrollment: EnrollmentStatusOut

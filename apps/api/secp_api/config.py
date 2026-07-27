@@ -281,6 +281,13 @@ class Settings(BaseSettings):
     # durable CAS primitives over HTTP in development/tests.
     enable_enrollment_progression: bool = False
 
+    # SECP-PR5H-B1 Phase 3: the fixed, code-owned Unix-domain socket of the root-gated controller
+    # enrollment offer signer BROKER. Empty (the default) => the API-side signer client is SEALED
+    # and every sign attempt fails closed (``enrollment_signer_unavailable``). A properly deployed
+    # controller sets this to the broker's absolute socket path; it is NEVER a caller/HTTP input, is
+    # not a provider/network endpoint, and the non-root API still never reads the enrollment key.
+    enrollment_signer_socket_path: str = ""
+
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 
     # OIDC-C (ADR-019): the ONE canonical public application origin. In production the web app and

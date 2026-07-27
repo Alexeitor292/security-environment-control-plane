@@ -72,6 +72,8 @@ _NO_ENCRYPTION = serialization.NoEncryption()
 _INSTALLATION_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,63}")
 _HTTPS_ORIGIN = re.compile(r"https://[a-z0-9.-]{1,253}(?::[1-9][0-9]{0,4})?")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_TRUST_ANCHOR_HEX = re.compile(r"[0-9a-f]{64}")
+_ENRKP_PROOF_ID = re.compile(r"enrkp:[0-9a-f]{64}")
 
 
 class ControllerEnrollmentSignerError(CommissioningError):
@@ -84,6 +86,17 @@ def _reject(reason_code: str) -> NoReturn:
 
 
 # --------------------------------------------------------------------------- S1: strict input
+
+
+class _NonSerializable:
+    """Refuses every serialization/copy path — an object that can carry the private key or the live
+    identity can never be pickled, copied, or asdict-ed into a log, plan, event or audit record."""
+
+    def __reduce__(self) -> NoReturn:
+        _reject("controller_enrollment_signer_not_serializable")
+
+    def __getstate__(self) -> NoReturn:
+        _reject("controller_enrollment_signer_not_serializable")
 
 
 def _no_control(value: str) -> None:
@@ -194,11 +207,35 @@ class AuthorizedControllerOfferContext:
 # --------------------------------------------------------------------------- S2: live signing lease
 
 
-@dataclass(frozen=True)
-class SigningIdentityLease:
+def _v_anchor(value: object) -> None:
+    if not isinstance(value, str) or not _TRUST_ANCHOR_HEX.fullmatch(value):
+        _reject("controller_enrollment_identity_malformed")
+
+
+def _v_proof_id(value: object) -> None:
+    if not isinstance(value, str) or not _ENRKP_PROOF_ID.fullmatch(value):
+        _reject("controller_enrollment_identity_malformed")
+
+
+def _v_bounded_identity(value: object) -> None:
+    if (
+        not isinstance(value, str)
+        or not (1 <= len(value) <= _MAX_FIELD_LEN)
+        or _CONTROL.search(value)
+    ):
+        _reject("controller_enrollment_identity_malformed")
+
+
+@dataclass(frozen=True, repr=False)
+class SigningIdentityLease(_NonSerializable):
     """The authoritative ACTIVE controller identity observed under a HELD lock at sign time, plus an
     immutable per-activation rotation token. The signer validates the loaded key against THIS live
-    identity — never a cached snapshot — so a signer that outlived rotation cannot keep signing."""
+    identity — never a cached snapshot — so a signer that outlived rotation cannot keep signing.
+
+    It is a STRICT validated type: construction proves each field's grammar / digest shape and
+    refuses a malformed / control-character value (a corrupt identity row can never yield a usable
+    lease). Its repr is a constant ``<redacted>`` and it refuses every serialization/copy path, so
+    identity material never lands in a log, plan, event, audit record or pickle."""
 
     row_id: str
     activation_token: str  # immutable per-activation token (row id + activated_at + generation)
@@ -211,6 +248,21 @@ class SigningIdentityLease:
     bootstrap_evidence_digest: str
     enrollment_key_proof_id: str
 
+    def __post_init__(self) -> None:
+        _v_bounded_identity(self.row_id)
+        _v_bounded_identity(self.activation_token)
+        _v_installation(self.controller_installation_id)
+        _v_digest(self.controller_key_id)
+        _v_anchor(self.controller_trust_anchor_hex)
+        _v_origin(self.controller_origin)
+        _v_digest(self.release_digest)
+        _v_digest(self.management_identity_digest)
+        _v_digest(self.bootstrap_evidence_digest)
+        _v_proof_id(self.enrollment_key_proof_id)
+
+    def __repr__(self) -> str:  # constant — never a key id / anchor / origin / proof id / token
+        return "SigningIdentityLease(<redacted>)"
+
 
 class ActiveControllerSigningIdentityProvider(Protocol):
     """Acquires the authoritative ACTIVE controller identity under a held identity/enrollment lock
@@ -219,17 +271,6 @@ class ActiveControllerSigningIdentityProvider(Protocol):
     a missing / ambiguous / superseded / revoked / unverified / malformed / changed identity."""
 
     def lease(self) -> AbstractContextManager[SigningIdentityLease]: ...
-
-
-class _NonSerializable:
-    """Refuses every serialization/copy path — a signer that can read a private key can never be
-    pickled, copied, or asdict-ed into a log, plan, event or audit record."""
-
-    def __reduce__(self) -> NoReturn:
-        _reject("controller_enrollment_signer_not_serializable")
-
-    def __getstate__(self) -> NoReturn:
-        _reject("controller_enrollment_signer_not_serializable")
 
 
 class SealedControllerEnrollmentSigner(_NonSerializable):

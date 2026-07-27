@@ -54,6 +54,9 @@ _ENROLLMENT_TABLES = (
     "worker_enrollment_state",
     "worker_enrollment_revision",
     "worker_enrollment_step_receipt",
+    # Phase 3: the write-once signed controller offer store holds PUBLIC material only (canonical
+    # claim + detached attestation); its column names must carry no secret-shaped fragment either.
+    "worker_enrollment_signed_offer",
 )
 # controller_origin is the ONE validated HTTPS-origin field the contract permits (not an arbitrary
 # URL); allow it explicitly so the broad ``url`` fragment does not false-positive.

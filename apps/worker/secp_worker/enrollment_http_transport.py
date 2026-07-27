@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import NoReturn
 from urllib.parse import urlsplit
 
+from secp_commissioning.canonical import sha256_digest
 from secp_commissioning.enrollment_attestation import (
     ENROLLMENT_ATTESTATION_DOMAIN,
     POP_KIND,
@@ -57,8 +58,8 @@ _SAFE_HOST_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9\-.]*[A-Za-z0
 _DEFAULT_TIMEOUT = 10.0
 _MAX_TIMEOUT = 30.0
 # The bounded, allow-listed worker-facing enrollment paths (per enrollment id, filled at call time).
-_BIND_PATH = "/api/v1/enrollment/{enrollment_id}/transport/bind"
-_RESULT_PATH = "/api/v1/enrollment/{enrollment_id}/transport/result"
+_BIND_PATH = "/api/v1/enrollment/{enrollment_id}/exchange/bind"
+_RESULT_PATH = "/api/v1/enrollment/{enrollment_id}/exchange/result"
 
 
 class EnrollmentTransportError(Exception):
@@ -233,8 +234,22 @@ class HttpxWorkerEnrollmentTransport(_NonSerializable):
         return self._post(_BIND_PATH.format(enrollment_id=invitation.enrollment_id), body)
 
     def submit_result(
-        self, invitation: EnrollmentInvitationInputs, *, predecessor_digest: str, outcome: str
+        self,
+        invitation: EnrollmentInvitationInputs,
+        *,
+        predecessor_digest: str,
+        outcome: str,
+        health_evidence: dict,
+        generation: str,
+        challenge: str,
     ) -> tuple[int, dict]:
+        """Build + sign the worker result and submit it with its bounded health-evidence structure.
+        The signed claim binds the ``sha256:`` digest of ``health_evidence`` (so the controller can
+        recompute it from the transported body and a swapped body fails verification) plus the
+        exchange ``generation`` + ``challenge`` chaining the result to the exact controller offer it
+        answers. ``health_evidence`` is an opaque bounded dict of CHECKED FACTS built by the driver;
+        the transport applies no policy to it."""
+        health_evidence_digest = sha256_digest(health_evidence)
         claim = worker_result_claim(
             enrollment_id=invitation.enrollment_id,
             controller_transaction_id=invitation.controller_transaction_id,
@@ -242,9 +257,16 @@ class HttpxWorkerEnrollmentTransport(_NonSerializable):
             predecessor_digest=predecessor_digest,
             release_digest=invitation.release_digest,
             outcome=outcome,
+            health_evidence_digest=health_evidence_digest,
+            generation=generation,
+            challenge=challenge,
         )
         attestation = self._signer.sign_result(claim_digest(claim))
-        body = {"result": claim, "attestation": _attestation_payload(attestation)}
+        body = {
+            "result": claim,
+            "attestation": _attestation_payload(attestation),
+            "health_evidence": health_evidence,
+        }
         return self._post(_RESULT_PATH.format(enrollment_id=invitation.enrollment_id), body)
 
     # --- the hardened outbound POST (mirrors HttpxAdmissionTransport) -----------------------------
@@ -339,7 +361,14 @@ class SealedEnrollmentTransport(_NonSerializable):
         raise EnrollmentTransportError("enrollment_transport_not_activated")
 
     def submit_result(
-        self, invitation: EnrollmentInvitationInputs, *, predecessor_digest: str, outcome: str
+        self,
+        invitation: EnrollmentInvitationInputs,
+        *,
+        predecessor_digest: str,
+        outcome: str,
+        health_evidence: dict,
+        generation: str,
+        challenge: str,
     ) -> tuple[int, dict]:
         raise EnrollmentTransportError("enrollment_transport_not_activated")
 

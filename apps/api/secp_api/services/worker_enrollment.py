@@ -30,18 +30,33 @@ OpenTofu or operator activation lives here; PR5H-A stays an inert durable founda
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from secp_commissioning.canonical import sha256_digest
+from secp_commissioning.canonical import canonical_json, sha256_digest
+from secp_commissioning.controller_enrollment_signer import AuthorizedControllerOfferContext
+from secp_commissioning.enrollment_attestation import (
+    WORKER_RESULT_OUTCOME_HEALTHY,
+    DetachedAttestation,
+    claim_digest,
+    health_evidence_complete,
+    worker_result_claim,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api import worker_enrollment_repository as repo
 from secp_api.auth import Principal
+from secp_api.enrollment_evidence import (
+    verify_controller_offer,
+    verify_worker_binding_pop,
+    verify_worker_result,
+)
+from secp_api.enrollment_signer_client import EnrollmentOfferSignerClient
 from secp_api.enums import AuditAction, Permission
 from secp_api.enums import WorkerEnrollmentErrorCode as EC
 from secp_api.errors import WorkerEnrollmentError
@@ -611,6 +626,188 @@ def bind_worker(
     return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
 
 
+@dataclass(frozen=True)
+class ExchangeOutcome:
+    """The bind-exchange result: the internally-signed controller offer envelope (public material
+    only), the bounded status projection, and whether this was a deduplicated lost-response
+    retry."""
+
+    signed_offer: dict[str, object]
+    status: dict[str, object]
+    deduplicated: bool
+
+
+def _offer_envelope(claim: dict[str, str], attestation: DetachedAttestation) -> dict[str, object]:
+    return {
+        "claim": claim,
+        "attestation": {
+            "algorithm": attestation.algorithm,
+            "key_id": attestation.key_id,
+            "public_key_hex": attestation.public_key_hex,
+            "signature": attestation.signature,
+        },
+    }
+
+
+def _replay_signed_offer(persisted: str, loaded: LoadedEnrollment) -> ExchangeOutcome:
+    try:
+        envelope = json.loads(persisted)
+    except Exception:  # noqa: BLE001 - a malformed persisted offer is corruption, never re-signed
+        raise WorkerEnrollmentError(EC.state_corrupt) from None
+    if (
+        not isinstance(envelope, dict)
+        or not isinstance(envelope.get("claim"), dict)
+        or not isinstance(envelope.get("attestation"), dict)
+    ):
+        raise WorkerEnrollmentError(EC.state_corrupt)
+    return ExchangeOutcome(
+        signed_offer=envelope, status=loaded.state.public_view(), deduplicated=True
+    )
+
+
+def bind_worker_exchange(
+    session: Session,
+    actor: Principal,
+    *,
+    signer: EnrollmentOfferSignerClient,
+    enrollment_id: str,
+    worker_installation_id: str,
+    worker_public_key_hex: str,
+    pop_attestation: DetachedAttestation,
+    expected_revision: int,
+    now: str,
+    claimed_scope: ClaimedScope | None = None,
+) -> ExchangeOutcome:
+    """The supported, evidence-driven bind exchange (SECP-PR5H-B1 Phase 3).
+
+    Verifies the worker's proof-of-possession against the controller's OWN authoritative invitation
+    (deriving the worker key id from the presented public key), binds the worker + consumes the
+    single-use nonce, mints an internally-signed controller offer via the injected ROOT-GATED signer
+    (the non-root API never holds the key), INDEPENDENTLY re-verifies that offer, records the
+    controller-offer transition, and persists the exact signed offer WRITE-ONCE — all inside the
+    caller's single transaction, so any refusal rolls back every effect (no consumed nonce, no bind,
+    no offer, no signed-offer row, no audit). A lost-response retry (an already-persisted signed
+    offer) re-verifies the repeated PoP and returns the BYTE-EQUIVALENT original offer without
+    calling the signer or advancing the state again — true even after the controller key rotates."""
+    actor.require(Permission.enrollment_progress)
+    _assert_schema_ready(session)
+    loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
+    invitation = repo.load_invitation_for_update(session, enrollment_id)
+    if invitation is None:
+        raise WorkerEnrollmentError(EC.invitation_not_found)
+
+    # (1) verify the worker PoP against the controller's authoritative invitation fields — this
+    #     DERIVES the worker key id from the presented public key (a wire id is impossible).
+    verified = verify_worker_binding_pop(
+        enrollment_id=enrollment_id,
+        invitation_id=invitation.invitation_id,
+        controller_installation_id=invitation.controller_installation_id,
+        controller_key_id=invitation.controller_key_id,
+        controller_transaction_id=invitation.transaction_id,
+        release_digest=invitation.release_digest,
+        expires_at=invitation.expires_at,
+        worker_installation_id=worker_installation_id,
+        worker_public_key_hex=worker_public_key_hex,
+        attestation=pop_attestation,
+    )
+    # (2) controller/worker key separation — a worker can never present the controller's own key
+    if verified.worker_key_id == invitation.controller_key_id:
+        raise WorkerEnrollmentError(EC.pop_invalid)
+
+    # (3) lost-response durability: an already-persisted signed offer means this exchange completed;
+    #     return the byte-equivalent original WITHOUT re-signing or re-advancing.
+    persisted = repo.load_signed_offer(session, enrollment_id)
+    if persisted is not None:
+        return _replay_signed_offer(persisted, loaded)
+
+    # (4) bind the worker + atomically consume the single-use nonce (invited -> worker_bound)
+    bound = bind_worker(
+        session,
+        actor,
+        enrollment_id=enrollment_id,
+        worker_installation_id=worker_installation_id,
+        worker_key_id=verified.worker_key_id,
+        transaction_id=invitation.transaction_id,
+        now=now,
+        expected_revision=expected_revision,
+        claimed_scope=claimed_scope,
+    )
+    predecessor_digest = bound.state.digest()
+
+    # (5) mint the internally-signed offer from the locked authoritative state via the injected
+    #     signer. The context's controller_* are the invitation's pinned identity; the signer
+    #     cross-checks them against the LIVE active identity and refuses a stale (rotated) offer.
+    context = AuthorizedControllerOfferContext(
+        enrollment_id=enrollment_id,
+        invitation_id=invitation.invitation_id,
+        controller_installation_id=invitation.controller_installation_id,
+        controller_key_id=invitation.controller_key_id,
+        controller_origin=invitation.controller_origin,
+        controller_transaction_id=invitation.transaction_id,
+        worker_installation_id=worker_installation_id,
+        worker_key_id=verified.worker_key_id,
+        release_digest=invitation.release_digest,
+        expires_at=invitation.expires_at,
+        predecessor_digest=predecessor_digest,
+    )
+    try:
+        offer = signer.sign_offer(context, now=now)
+    except WorkerEnrollmentError:
+        raise
+    except Exception:  # noqa: BLE001 - any signer/broker failure is a bounded closed refusal
+        raise WorkerEnrollmentError(EC.signer_unavailable) from None
+
+    # (6) INDEPENDENTLY re-verify the offer the signer/broker returned (defence in depth)
+    verified_offer = verify_controller_offer(
+        attestation=offer.attestation,
+        enrollment_id=enrollment_id,
+        invitation_id=invitation.invitation_id,
+        controller_installation_id=invitation.controller_installation_id,
+        controller_key_id=invitation.controller_key_id,
+        controller_origin=invitation.controller_origin,
+        controller_transaction_id=invitation.transaction_id,
+        worker_installation_id=worker_installation_id,
+        worker_key_id=verified.worker_key_id,
+        release_digest=invitation.release_digest,
+        expires_at=invitation.expires_at,
+        predecessor_digest=predecessor_digest,
+    )
+    offer_claim = verified_offer.claim
+
+    # (7) record the controller-offer transition (worker_bound -> offer_transported)
+    recorded = record_offer(
+        session,
+        actor,
+        enrollment_id=enrollment_id,
+        facts=HandoffFacts(
+            kind="controller-offer",
+            digest=claim_digest(offer_claim),
+            transaction_id=invitation.transaction_id,
+            signer_key_id=offer.attestation.key_id,
+        ),
+        now=now,
+        expected_revision=bound.committed_revision,
+        claimed_scope=claimed_scope,
+    )
+
+    # (8) persist the EXACT signed public offer WRITE-ONCE per enrollment (a lost race -> conflict)
+    envelope = _offer_envelope(offer_claim, offer.attestation)
+    try:
+        repo.persist_signed_offer(
+            session,
+            enrollment_id=enrollment_id,
+            organization_id=loaded.organization_id,
+            offer_revision=recorded.committed_revision,
+            signer_key_id=offer.attestation.key_id,
+            signed_offer=canonical_json(envelope),
+        )
+    except RepositoryRefusal as exc:
+        raise _surface(exc) from None
+    return ExchangeOutcome(
+        signed_offer=envelope, status=recorded.state.public_view(), deduplicated=False
+    )
+
+
 def record_offer(
     session: Session,
     actor: Principal,
@@ -705,6 +902,137 @@ def mark_enrollment_healthy(
         transition=lambda state: mark_healthy(state, now=now),
         expected_revision=expected_revision,
         claimed_scope=claimed_scope,
+    )
+
+
+@dataclass(frozen=True)
+class ResultExchangeOutcome:
+    """The result-exchange result: the final bounded status projection (verified/healthy) and
+    whether every step was a deduplicated lost-response retry."""
+
+    status: dict[str, object]
+    deduplicated: bool
+
+
+def _persisted_offer_bindings(session: Session, enrollment_id: str) -> tuple[str, str, str]:
+    """Derive the three retry-stable, worker-derivable result bindings from the persisted signed
+    offer: the predecessor (the offer's ``sha256:`` content address), the generation (the controller
+    signer key id that minted it), and the challenge (the exact offer signature). Together they
+    chain the result to THAT exact signed offer, so a result can never be replayed onto a different
+    exchange or a re-signed offer. An enrollment with no persisted offer cannot receive a result."""
+    persisted = repo.load_signed_offer(session, enrollment_id)
+    if persisted is None:
+        raise WorkerEnrollmentError(EC.wrong_state)
+    try:
+        envelope = json.loads(persisted)
+        offer_claim = envelope["claim"]
+        generation = envelope["attestation"]["key_id"]
+        challenge = envelope["attestation"]["signature"]
+    except (KeyError, TypeError, ValueError):
+        raise WorkerEnrollmentError(EC.state_corrupt) from None
+    if not isinstance(offer_claim, dict) or not isinstance(generation, str):
+        raise WorkerEnrollmentError(EC.state_corrupt)
+    return claim_digest(offer_claim), generation, challenge
+
+
+def record_worker_result_exchange(
+    session: Session,
+    actor: Principal,
+    *,
+    enrollment_id: str,
+    worker_public_key_hex: str,
+    outcome: str,
+    attestation: DetachedAttestation,
+    health_evidence: dict[str, bool],
+    expected_revision: int,
+    now: str,
+    claimed_scope: ClaimedScope | None = None,
+) -> ResultExchangeOutcome:
+    """The supported, evidence-driven result exchange (SECP-PR5H-B1 Phase 3).
+
+    Verifies the SIGNED worker result against the already-bound worker key and the authoritative
+    bindings (transaction, release, the persisted offer's content-address/generation/challenge, and
+    the ``sha256:`` digest the controller recomputes from the received health evidence), then — ONLY
+    because that authenticated evidence attests a successful outcome AND every required health check
+    — advances result_transported -> verified -> healthy as durable CAS transitions. A lost-response
+    retry re-verifies and dedups every step from its receipt (a stale token never conflicts). No
+    endpoint can set verified/healthy from an unsigned digest, a release digest alone, or an empty
+    health request: the signature + the complete health evidence are the sole authority."""
+    actor.require(Permission.enrollment_progress)
+    _assert_schema_ready(session)
+    loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
+    state = loaded.state
+    if not state.worker_key_id:  # a result requires an already-bound worker
+        raise WorkerEnrollmentError(EC.wrong_state)
+    predecessor_digest, generation, challenge = _persisted_offer_bindings(session, enrollment_id)
+    health_evidence_digest = sha256_digest(health_evidence)
+
+    # (a) verify the signed worker result — derives the worker key id from the presented public key
+    #     and requires it to equal the bound key; rebuilds the claim from authoritative bindings.
+    verify_worker_result(
+        enrollment_id=enrollment_id,
+        controller_transaction_id=state.transaction_id,
+        predecessor_digest=predecessor_digest,
+        release_digest=state.release_digest,
+        outcome=outcome,
+        health_evidence_digest=health_evidence_digest,
+        generation=generation,
+        challenge=challenge,
+        bound_worker_key_id=state.worker_key_id,
+        worker_public_key_hex=worker_public_key_hex,
+        attestation=attestation,
+    )
+    # (b) verified/healthy derive ONLY from authenticated evidence
+    if outcome != WORKER_RESULT_OUTCOME_HEALTHY or not health_evidence_complete(health_evidence):
+        raise WorkerEnrollmentError(EC.health_incomplete)
+
+    result_claim = worker_result_claim(
+        enrollment_id=enrollment_id,
+        controller_transaction_id=state.transaction_id,
+        worker_key_id=state.worker_key_id,
+        predecessor_digest=predecessor_digest,
+        release_digest=state.release_digest,
+        outcome=outcome,
+        health_evidence_digest=health_evidence_digest,
+        generation=generation,
+        challenge=challenge,
+    )
+    result_facts = HandoffFacts(
+        kind="worker-result",
+        digest=claim_digest(result_claim),
+        transaction_id=state.transaction_id,
+        signer_key_id=state.worker_key_id,
+    )
+    # (c) record result -> verified -> healthy (each a durable CAS step; receipts dedup a retry)
+    recorded = record_result(
+        session,
+        actor,
+        enrollment_id=enrollment_id,
+        facts=result_facts,
+        now=now,
+        expected_revision=expected_revision,
+        claimed_scope=claimed_scope,
+    )
+    verified = verify_release(
+        session,
+        actor,
+        enrollment_id=enrollment_id,
+        release_digest=state.release_digest,
+        now=now,
+        expected_revision=recorded.committed_revision,
+        claimed_scope=claimed_scope,
+    )
+    healthy = mark_enrollment_healthy(
+        session,
+        actor,
+        enrollment_id=enrollment_id,
+        now=now,
+        expected_revision=verified.committed_revision,
+        claimed_scope=claimed_scope,
+    )
+    return ResultExchangeOutcome(
+        status=healthy.state.public_view(),
+        deduplicated=recorded.deduplicated and verified.deduplicated and healthy.deduplicated,
     )
 
 
@@ -1040,15 +1368,19 @@ def _assert_invitation_unexpired(invitation: object, now: str) -> None:
 
 __all__ = [
     "ClaimedScope",
+    "ExchangeOutcome",
     "ExpectedRevision",
+    "ResultExchangeOutcome",
     "TransitionOutcome",
     "bind_worker",
+    "bind_worker_exchange",
     "create_invitation_and_open",
     "load_public_view",
     "mark_enrollment_healthy",
     "recover_enrollment",
     "record_offer",
     "record_result",
+    "record_worker_result_exchange",
     "refuse_enrollment",
     "verify_release",
 ]

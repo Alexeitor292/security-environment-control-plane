@@ -12,6 +12,10 @@ from sqlalchemy.orm import Session
 from secp_api.auth import Principal, dev_principal, principal_from_oidc_claims
 from secp_api.config import Settings, get_settings
 from secp_api.db import get_db
+from secp_api.enrollment_signer_client import (
+    EnrollmentOfferSignerClient,
+    build_enrollment_offer_signer,
+)
 from secp_api.errors import AuthenticationError, AuthenticationUnavailableError
 from secp_api.oidc import (
     CATEGORY_HEADER_INVALID,
@@ -36,6 +40,17 @@ def db_session() -> Iterator[Session]:
 
 def settings_dep() -> Settings:
     return get_settings()
+
+
+def get_enrollment_offer_signer(
+    settings: Settings = Depends(settings_dep),
+) -> EnrollmentOfferSignerClient:
+    """The injected controller-enrollment offer signer client (SECP-PR5H-B1 Phase 3). Sealed by
+    default (fails closed); the production composition returns the fixed-UDS broker client only when
+    the reviewed deployment contract is satisfied. Overridden in tests, exactly like
+    ``settings_dep`` and ``get_oidc_verifier``. The non-root API only ever holds this pure client
+    seam — never the concrete root signer, the filesystem reader, or the enrollment private key."""
+    return build_enrollment_offer_signer(settings)
 
 
 def _refuse(category: str) -> AuthenticationError:

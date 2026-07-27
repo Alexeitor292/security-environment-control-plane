@@ -31,6 +31,7 @@ ENROLLMENT_TABLES = (
     "worker_enrollment_revision",
     "worker_enrollment_step_receipt",
     "controller_enrollment_identity",
+    "worker_enrollment_signed_offer",
 )
 
 
