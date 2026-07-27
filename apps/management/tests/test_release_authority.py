@@ -1,20 +1,21 @@
-"""Offline release-authority tooling (SECP-PR5H-B2, commit 2b-1b).
+"""Offline release-authority tooling — hardened (SECP-PR5H-B2, commit 2b-1c).
 
 Ephemeral keys only (never a candidate production key), under pytest tmp dirs (outside the repo).
-Proves: init mints a protected out-of-repo key + emits the PUBLIC anchor (never the private key);
-build assembles a deterministic canonical v1alpha2 manifest and refuses a legacy/incomplete one;
-sign refuses a non-canonical manifest, a wrong signer, or drifted artifacts; verify verifies only
-under the SUPPLIED anchor; and no private material appears in any report.
+Production key ``init``/``sign`` are POSIX-only (they PROVE custody via no-follow open + fstat +
+nlink + fsync); on Windows/non-POSIX they fail closed. ``build``/``verify`` and the strict signature
+checks are platform-independent. Signing REQUIRES full TOCTOU-safe artifact verification.
 """
 
 from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
 
 import pytest
 from _mgmt_support import default_artifacts, manifest_dict
+from secp_commissioning.canonical import canonical_json, sha256_bytes
 from secp_management import BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2 as V2
 from secp_management import ManagementError
 from secp_management.release_authority import (
@@ -25,11 +26,18 @@ from secp_management.release_authority import (
     authority_verify,
     derive_key_id,
 )
+from secp_management.release_bundle import manifest_signing_message, parse_manifest_bytes
+from secp_management.signing import generate_keypair, sign_ed25519
+
+_POSIX = os.name == "posix"
+_posix_only = pytest.mark.skipif(
+    not _POSIX, reason="POSIX-only secure key custody (no-follow/fstat/fsync)"
+)
 
 _PROFILE = {
     "platform_profile": {
         "os": "linux",
-        "arch": "amd64",
+        "arch": "x86_64",
         "installation_profile_version": "secp.controller-install/v1",
     },
     "runtime_profile": {
@@ -38,21 +46,21 @@ _PROFILE = {
                 "capability": "container_runtime",
                 "path": "/usr/bin/docker",
                 "sha256": "sha256:" + "1" * 64,
-                "invocation": ["docker"],
-                "allowed_subcommands": ["load"],
+                "invocation": [],
+                "allowed_subcommands": ["load", "image"],
             },
             {
                 "capability": "compose",
                 "path": "/usr/bin/docker",
                 "sha256": "sha256:" + "1" * 64,
-                "invocation": ["docker", "compose"],
-                "allowed_subcommands": ["up"],
+                "invocation": ["compose"],
+                "allowed_subcommands": ["up", "down"],
             },
             {
                 "capability": "service_manager",
                 "path": "/usr/bin/systemctl",
                 "sha256": "sha256:" + "2" * 64,
-                "invocation": ["systemctl"],
+                "invocation": [],
                 "allowed_subcommands": ["daemon-reload"],
             },
         ]
@@ -81,152 +89,316 @@ def _v2(key_id: str, **over) -> dict:
     return d
 
 
-def _init(tmp_path: Path) -> tuple[str, dict]:
-    key_path = str(tmp_path / "release-signing.key")
-    code, report = authority_init(key_path=key_path, repo_root="/some/other/repo")
-    assert code == 0
-    return key_path, report
+def _canonical_v2(key_id: str) -> bytes:
+    return authority_build(spec_bytes=json.dumps(_v2(key_id)).encode())[1][
+        "manifest_bytes"
+    ].encode()
 
 
-# --- init ----------------------------------------------------------------------------------------
+def _manual_signed():
+    """A valid signed v2 manifest + anchor produced WITHOUT authority_sign (verify testable
+    off-POSIX): the anchor key_id == derive_key_id(pub)."""
+    priv, pub = generate_keypair()
+    key_id = derive_key_id(pub)
+    manifest_bytes = _canonical_v2(key_id)
+    msg = manifest_signing_message(parse_manifest_bytes(manifest_bytes))
+    envelope = canonical_json(
+        {"algorithm": "ed25519", "key_id": key_id, "signature": sign_ed25519(priv, msg)}
+    )
+    return manifest_bytes, envelope.encode(), {"key_id": key_id, "public_key_hex": pub}
 
 
+def _priv_dir(tmp_path: Path, name: str = "keys") -> str:
+    d = tmp_path / name
+    d.mkdir()
+    if _POSIX:
+        os.chmod(d, 0o700)
+    return str(d)
+
+
+def _real_artifacts(tmp_path: Path, key_id: str) -> tuple[bytes, str]:
+    """Write real artifact bytes whose sha256+size the manifest records, and return the canonical
+    manifest + the artifacts dir. The manifest keeps the signed controller purpose set intact."""
+    arts = default_artifacts("controller")
+    adir = tmp_path / "artifacts"
+    adir.mkdir(exist_ok=True)
+    real = []
+    for i, art in enumerate(arts):
+        data = (f"secp-artifact-{i}-{art['name']}".encode()) * 2
+        dest = adir / art["name"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        real.append({**art, "sha256": sha256_bytes(data), "size": len(data)})
+    d = _v2(key_id, artifacts=real)
+    manifest_bytes = authority_build(spec_bytes=json.dumps(d).encode())[1][
+        "manifest_bytes"
+    ].encode()
+    return manifest_bytes, str(adir)
+
+
+# --- platform-independent: build --------------------------------------------------------------
+
+
+def test_build_is_deterministic_and_signs_the_profile():
+    key_id = derive_key_id(generate_keypair()[1])
+    a = authority_build(spec_bytes=json.dumps(_v2(key_id)).encode())[1]
+    b = authority_build(spec_bytes=json.dumps(_v2(key_id)).encode())[1]
+    assert a["manifest_bytes"] == b["manifest_bytes"]
+    assert a["aggregate_digest"] == b["aggregate_digest"]
+    assert '"platform_profile"' in a["manifest_bytes"]
+
+
+def test_build_refuses_a_legacy_v1alpha1_bundle():
+    with pytest.raises(ManagementError) as e:
+        authority_build(
+            spec_bytes=json.dumps(
+                manifest_dict("controller", default_artifacts("controller"))
+            ).encode()
+        )
+    assert e.value.reason_code == "release_b2_installation_profile_required"
+
+
+# --- platform-independent: verify (strict) ----------------------------------------------------
+
+
+def test_verify_roundtrips_under_the_supplied_anchor():
+    manifest_bytes, sig_bytes, anchor = _manual_signed()
+    code, v = authority_verify(
+        manifest_bytes=manifest_bytes, signature_bytes=sig_bytes, anchor=anchor
+    )
+    assert code == 0 and v["verified"] is True
+
+
+def test_verify_refuses_a_different_anchor():
+    manifest_bytes, sig_bytes, _anchor = _manual_signed()
+    _, other_pub = generate_keypair()
+    wrong = {"key_id": derive_key_id(other_pub), "public_key_hex": other_pub}
+    with pytest.raises(AuthorityError) as e:
+        authority_verify(manifest_bytes=manifest_bytes, signature_bytes=sig_bytes, anchor=wrong)
+    assert e.value.reason_code == "release_authority_signature_mismatch"
+
+
+@pytest.mark.parametrize(
+    "mutate,prefix",
+    [
+        (
+            lambda s: b'{"algorithm":"ed25519","key_id":"x"}',
+            "release_signature_invalid",
+        ),  # missing field
+        (
+            lambda s: json.dumps({**json.loads(s), "extra": 1}).encode(),
+            "release_signature_invalid",
+        ),  # extra
+        (
+            lambda s: json.dumps({**json.loads(s), "algorithm": "rsa"}).encode(),
+            "release_signature_algorithm_unsupported",
+        ),
+        (
+            lambda s: (json.dumps(json.loads(s), indent=2)).encode(),
+            "release_authority_signature_noncanonical",
+        ),
+    ],
+)
+def test_verify_uses_the_strict_signature_parser(mutate, prefix):
+    manifest_bytes, sig_bytes, anchor = _manual_signed()
+    with pytest.raises(ManagementError) as e:
+        authority_verify(
+            manifest_bytes=manifest_bytes, signature_bytes=mutate(sig_bytes), anchor=anchor
+        )
+    assert e.value.reason_code.startswith(prefix)
+
+
+def test_verify_refuses_a_duplicate_key_signature():
+    manifest_bytes, sig_bytes, anchor = _manual_signed()
+    d = json.loads(sig_bytes)
+    dup = (
+        f'{{"algorithm":"ed25519","algorithm":"ed25519",'
+        f'"key_id":"{d["key_id"]}","signature":"{d["signature"]}"}}'
+    ).encode()
+    with pytest.raises(ManagementError) as e:
+        authority_verify(manifest_bytes=manifest_bytes, signature_bytes=dup, anchor=anchor)
+    assert e.value.reason_code == "release_signature_duplicate_key"
+
+
+# --- platform-independent: sign argument validation -------------------------------------------
+
+
+def test_sign_requires_an_artifacts_directory():
+    manifest_bytes, _sig, _anchor = _manual_signed()
+    with pytest.raises(AuthorityError) as e:
+        authority_sign(manifest_bytes=manifest_bytes, key_path="/x/k.key", artifacts_dir=None)
+    assert e.value.reason_code == "release_authority_artifacts_dir_required"
+
+
+def test_sign_refuses_a_relative_artifacts_directory():
+    manifest_bytes, _sig, _anchor = _manual_signed()
+    with pytest.raises(AuthorityError) as e:
+        authority_sign(manifest_bytes=manifest_bytes, key_path="/x/k.key", artifacts_dir="rel/dir")
+    assert e.value.reason_code == "release_authority_artifacts_dir_not_absolute"
+
+
+def test_sign_refuses_a_noncanonical_manifest():
+    manifest_bytes, _sig, _anchor = _manual_signed()
+    noncanonical = json.dumps(json.loads(manifest_bytes), indent=2).encode()
+    with pytest.raises(AuthorityError) as e:
+        authority_sign(manifest_bytes=noncanonical, key_path="/x/k.key", artifacts_dir="/abs/dir")
+    assert e.value.reason_code == "release_authority_manifest_noncanonical"
+
+
+# --- non-POSIX: production init/sign fail closed ----------------------------------------------
+
+
+@pytest.mark.skipif(_POSIX, reason="the non-POSIX secure-storage refusal")
+def test_production_init_and_sign_are_refused_off_posix(tmp_path):
+    with pytest.raises(AuthorityError) as e:
+        authority_init(key_path=str(tmp_path / "k.key"), repo_root="/other")
+    assert e.value.reason_code == "release_authority_unsupported_secure_key_storage"
+    manifest_bytes, _sig, _anchor = _manual_signed()
+    with pytest.raises(AuthorityError) as e2:  # past arg/canonical checks, the POSIX gate fires
+        authority_sign(
+            manifest_bytes=manifest_bytes, key_path="/x/k.key", artifacts_dir=str(tmp_path)
+        )
+    assert e2.value.reason_code == "release_authority_unsupported_secure_key_storage"
+
+
+# --- POSIX-only: full custody + transaction + TOCTOU ------------------------------------------
+
+
+@_posix_only
 def test_init_writes_protected_key_and_emits_only_the_public_anchor(tmp_path):
-    key_path, report = _init(tmp_path)
-    assert Path(key_path).is_file()
+    kp = os.path.join(_priv_dir(tmp_path), "release-signing.key")
+    code, report = authority_init(key_path=kp, repo_root="/other/repo")
+    assert code == 0
+    st = os.lstat(kp)
+    assert (st.st_mode & 0o777) == 0o600 and st.st_nlink == 1
     anchor = report["anchor"]
-    assert set(anchor) == {"key_id", "public_key_hex"}
     assert derive_key_id(anchor["public_key_hex"]) == anchor["key_id"]
-    # the private key file content is a 32-byte hex; it must NEVER appear in the report
-    private_hex = Path(key_path).read_text().strip()
-    assert len(bytes.fromhex(private_hex)) == 32
-    assert private_hex not in json.dumps(report)
-    # a separate public anchor file is emitted (public material only)
-    assert Path(key_path + ".pub.json").is_file()
+    priv = Path(kp).read_text()
+    assert len(priv) == 64 and priv not in json.dumps(report)  # private key never in the report
 
 
+@_posix_only
+def test_init_is_transactional_public_failure_compensates_the_private_key(tmp_path):
+    kp = os.path.join(_priv_dir(tmp_path), "release-signing.key")
+    Path(kp + ".pub.json").write_text("{}")  # pre-existing public target -> O_EXCL fails
+    with pytest.raises(AuthorityError) as e:
+        authority_init(key_path=kp, repo_root="/other")
+    assert e.value.reason_code == "release_authority_public_exists"
+    assert not os.path.lexists(kp)  # the private key was removed (no half-created authority)
+
+
+@_posix_only
+def test_init_refuses_a_non_private_parent(tmp_path):
+    d = tmp_path / "loose"
+    d.mkdir()
+    os.chmod(d, 0o755)  # group/other readable -> not private
+    with pytest.raises(AuthorityError) as e:
+        authority_init(key_path=str(d / "k.key"), repo_root="/other")
+    assert e.value.reason_code == "release_authority_key_parent_not_private"
+
+
+@_posix_only
 def test_init_refuses_a_destination_inside_the_repo(tmp_path):
     with pytest.raises(AuthorityError) as e:
         authority_init(key_path=str(tmp_path / "k.key"), repo_root=str(tmp_path))
     assert e.value.reason_code == "release_authority_key_inside_repo"
 
 
-def test_init_refuses_an_existing_key_and_a_relative_path(tmp_path):
-    key_path, _ = _init(tmp_path)
+@_posix_only
+def test_read_private_key_refuses_wrong_mode_and_a_symlink(tmp_path):
+    from secp_management.release_authority import _read_private_key
+
+    kp = os.path.join(_priv_dir(tmp_path), "k.key")
+    authority_init(key_path=kp, repo_root="/other")
+    os.chmod(kp, 0o640)  # loosen mode -> refuse (fstat on the descriptor)
     with pytest.raises(AuthorityError) as e:
-        authority_init(key_path=key_path, repo_root="/other")  # O_EXCL -> exists
-    assert e.value.reason_code == "release_authority_key_exists"
+        _read_private_key(kp)
+    assert e.value.reason_code == "release_authority_key_unsafe"
+    os.chmod(kp, 0o600)
+    link = os.path.join(_priv_dir(tmp_path, "keys2"), "link.key")
+    os.symlink(kp, link)  # a symlink target is refused by the no-follow open
     with pytest.raises(AuthorityError) as e2:
-        authority_init(key_path="relative.key", repo_root="/other")
-    assert e2.value.reason_code == "release_authority_key_path_not_absolute"
+        _read_private_key(link)
+    assert e2.value.reason_code == "release_authority_key_unreadable"
 
 
-# --- build ---------------------------------------------------------------------------------------
+@_posix_only
+def test_sign_then_verify_roundtrips_with_real_artifacts(tmp_path):
+    kp = os.path.join(_priv_dir(tmp_path), "k.key")
+    anchor = authority_init(key_path=kp, repo_root="/other")[1]["anchor"]
+    manifest_bytes, adir = _real_artifacts(tmp_path, anchor["key_id"])
+    s = authority_sign(manifest_bytes=manifest_bytes, key_path=kp, artifacts_dir=adir)[1]
+    v = authority_verify(
+        manifest_bytes=manifest_bytes, signature_bytes=s["signature_bytes"].encode(), anchor=anchor
+    )[1]
+    assert v["verified"] is True
+    assert Path(kp).read_text() not in json.dumps(s)  # no private material in the signature output
 
 
-def test_build_emits_a_deterministic_canonical_v1alpha2_manifest(tmp_path):
-    _, report = _init(tmp_path)
-    spec = json.dumps(_v2(report["anchor"]["key_id"])).encode()
-    code, out = authority_build(spec_bytes=spec)
-    assert code == 0
-    # deterministic: build again -> identical canonical bytes + aggregate digest
-    code2, out2 = authority_build(spec_bytes=spec)
-    assert out["manifest_bytes"] == out2["manifest_bytes"]
-    assert out["aggregate_digest"] == out2["aggregate_digest"]
-    assert '"platform_profile"' in out["manifest_bytes"]  # v1alpha2 signs the profile
-
-
-def test_build_refuses_a_legacy_v1alpha1_bundle():
-    spec = json.dumps(manifest_dict("controller", default_artifacts("controller"))).encode()
-    with pytest.raises(ManagementError) as e:  # release-contract-level bounded refusal
-        authority_build(spec_bytes=spec)
-    assert e.value.reason_code == "release_b2_installation_profile_required"
-
-
-# --- sign + verify -------------------------------------------------------------------------------
-
-
-def _built(tmp_path) -> tuple[str, dict, bytes]:
-    key_path, report = _init(tmp_path)
-    _, out = authority_build(spec_bytes=json.dumps(_v2(report["anchor"]["key_id"])).encode())
-    return key_path, report["anchor"], out["manifest_bytes"].encode()
-
-
-def test_sign_then_verify_roundtrips_under_the_supplied_anchor(tmp_path):
-    key_path, anchor, manifest_bytes = _built(tmp_path)
-    code, s = authority_sign(manifest_bytes=manifest_bytes, key_path=key_path)
-    assert code == 0
-    sig_bytes = s["signature_bytes"].encode()
-    code2, v = authority_verify(
-        manifest_bytes=manifest_bytes, signature_bytes=sig_bytes, anchor=anchor
-    )
-    assert code2 == 0 and v["verified"] is True
-    # the signature envelope carries no private material
-    assert Path(key_path).read_text().strip() not in json.dumps(s)
-
-
-def test_verify_refuses_a_different_anchor(tmp_path):
-    from secp_management.signing import generate_keypair
-
-    key_path, _anchor, manifest_bytes = _built(tmp_path)
-    _, s = authority_sign(manifest_bytes=manifest_bytes, key_path=key_path)
-    # a DIFFERENT (valid) anchor does not match the manifest's declared signer -> refused
-    _, other_pub = generate_keypair()
-    wrong = {"key_id": derive_key_id(other_pub), "public_key_hex": other_pub}
+@_posix_only
+def test_sign_refuses_a_wrong_signer(tmp_path):
+    kp = os.path.join(_priv_dir(tmp_path), "k.key")
+    authority_init(key_path=kp, repo_root="/other")
+    manifest_bytes, adir = _real_artifacts(tmp_path, derive_key_id(generate_keypair()[1]))
     with pytest.raises(AuthorityError) as e:
-        authority_verify(
-            manifest_bytes=manifest_bytes,
-            signature_bytes=s["signature_bytes"].encode(),
-            anchor=wrong,
-        )
-    # the manifest's declared signer is not the supplied (wrong) anchor -> untrusted, never verified
-    assert e.value.reason_code == "release_authority_signature_untrusted"
-
-
-def test_sign_refuses_a_noncanonical_manifest(tmp_path):
-    key_path, anchor, manifest_bytes = _built(tmp_path)
-    # re-emit the manifest with extra whitespace -> not canonical
-    noncanonical = json.dumps(json.loads(manifest_bytes), indent=2).encode()
-    with pytest.raises(AuthorityError) as e:
-        authority_sign(manifest_bytes=noncanonical, key_path=key_path)
-    assert e.value.reason_code == "release_authority_manifest_noncanonical"
-
-
-def test_sign_refuses_a_manifest_signed_for_a_different_key(tmp_path):
-    key_path, _init_report = _init(tmp_path)
-    # build a v2 manifest whose signing_anchor_id is a DIFFERENT key than key_path
-    from secp_management.signing import generate_keypair
-
-    _, other_pub = generate_keypair()
-    _, out = authority_build(spec_bytes=json.dumps(_v2(derive_key_id(other_pub))).encode())
-    with pytest.raises(AuthorityError) as e:
-        authority_sign(manifest_bytes=out["manifest_bytes"].encode(), key_path=key_path)
+        authority_sign(manifest_bytes=manifest_bytes, key_path=kp, artifacts_dir=adir)
     assert e.value.reason_code == "release_authority_signer_mismatch"
 
 
-def test_sign_refuses_drifted_artifacts(tmp_path):
-    key_path, anchor, manifest_bytes = _built(tmp_path)
-    # write an artifacts dir whose files do NOT match the manifest digests -> drift
-    manifest = json.loads(manifest_bytes)
-    adir = tmp_path / "artifacts"
-    adir.mkdir()
-    for art in manifest["artifacts"]:
-        dest = adir / art["name"]
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"tampered")
+@_posix_only
+def test_sign_refuses_a_drifted_artifact(tmp_path):
+    kp = os.path.join(_priv_dir(tmp_path), "k.key")
+    anchor = authority_init(key_path=kp, repo_root="/other")[1]["anchor"]
+    manifest_bytes, adir = _real_artifacts(tmp_path, anchor["key_id"])
+    first = json.loads(manifest_bytes)["artifacts"][0]["name"]
+    Path(adir, first).write_bytes(b"tampered")  # drift after the manifest was built
     with pytest.raises(AuthorityError) as e:
-        authority_sign(manifest_bytes=manifest_bytes, key_path=key_path, artifacts_dir=str(adir))
+        authority_sign(manifest_bytes=manifest_bytes, key_path=kp, artifacts_dir=adir)
     assert e.value.reason_code == "release_authority_artifact_drift"
 
 
-# --- posture guard -------------------------------------------------------------------------------
+@_posix_only
+def test_sign_refuses_a_symlinked_artifact(tmp_path):
+    # a symlink whose target is INSIDE the dir passes the beneath-check, so this isolates the
+    # no-follow open refusal (the artifact path itself is a symlink).
+    kp = os.path.join(_priv_dir(tmp_path), "k.key")
+    anchor = authority_init(key_path=kp, repo_root="/other")[1]["anchor"]
+    manifest_bytes, adir = _real_artifacts(tmp_path, anchor["key_id"])
+    first = json.loads(manifest_bytes)["artifacts"][0]["name"]
+    target = Path(adir, first)
+    sibling = Path(adir, "_original.bin")  # keep the real bytes beneath adir (no escape)
+    sibling.write_bytes(target.read_bytes())
+    target.unlink()
+    os.symlink(str(sibling), str(target))  # the artifact path is now a symlink -> no-follow refuses
+    with pytest.raises(AuthorityError) as e:
+        authority_sign(manifest_bytes=manifest_bytes, key_path=kp, artifacts_dir=adir)
+    assert e.value.reason_code == "release_authority_artifact_unreadable"
+
+
+@_posix_only
+def test_sign_refuses_an_artifact_symlink_escaping_the_dir(tmp_path):
+    # a symlink resolving OUTSIDE the artifacts dir is caught by the realpath-beneath check.
+    kp = os.path.join(_priv_dir(tmp_path), "k.key")
+    anchor = authority_init(key_path=kp, repo_root="/other")[1]["anchor"]
+    manifest_bytes, adir = _real_artifacts(tmp_path, anchor["key_id"])
+    first = json.loads(manifest_bytes)["artifacts"][0]["name"]
+    target = Path(adir, first)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(target.read_bytes())
+    target.unlink()
+    os.symlink(str(outside), str(target))
+    with pytest.raises(AuthorityError) as e:
+        authority_sign(manifest_bytes=manifest_bytes, key_path=kp, artifacts_dir=adir)
+    assert e.value.reason_code == "release_authority_artifact_escape"
+
+
+# --- posture guard ----------------------------------------------------------------------------
 
 
 def test_release_authority_reaches_no_network_or_subprocess_capability():
     src = Path("apps/management/secp_management/release_authority.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
     imported: set[str] = set()
-    for node in ast.walk(tree):
+    for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.Import):
             imported.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:

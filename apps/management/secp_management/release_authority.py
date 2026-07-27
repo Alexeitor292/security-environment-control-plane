@@ -39,6 +39,7 @@ from secp_management.release_bundle import (
     ReleaseManifest,
     manifest_signing_message,
     parse_manifest_bytes,
+    parse_signature_bytes,
     require_b2_installation_profile,
 )
 from secp_management.signing import (
@@ -102,82 +103,181 @@ def _assert_out_of_repo(path: str, repo_root: str | None) -> None:
         _reject("release_authority_key_inside_repo")
 
 
-def _assert_safe_key_parent(path: str) -> None:
+_SECURE_STORAGE_UNSUPPORTED = "release_authority_unsupported_secure_key_storage"
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _posix_uid() -> int:
+    """The current process uid (POSIX-only; every caller sits behind the secure-storage gate).
+    Reached via ``getattr`` so the module still type-checks on a non-POSIX developer host."""
+    return int(getattr(os, "getuid")())  # noqa: B009 — POSIX-only; type-safe on a Windows dev host
+
+
+def _require_posix_secure_storage() -> None:
+    """Production key ``init``/``sign`` require a POSIX host where custody can be PROVEN
+    (owner/mode/nlink + no-follow open + fstat-on-descriptor + fsync). On any other platform they
+    fail closed with a bounded reason rather than claim an unverified equivalent — e.g. Windows ACL
+    ownership/inheritance/link posture is NOT verified here. Windows may still run build/verify."""
+    if os.name != "posix":
+        _reject(_SECURE_STORAGE_UNSUPPORTED)
+
+
+def _assert_trusted_key_ancestors(path: str) -> None:
+    """The immediate parent must be a real, PRIVATE directory (mode 0700 or stricter); each ancestor
+    up to ``/`` must be a real, non-group/other-writable directory (no symlink)."""
     parent = os.path.dirname(os.path.abspath(path)) or os.sep
+    pst = os.lstat(parent)
+    if not stat.S_ISDIR(pst.st_mode) or stat.S_ISLNK(pst.st_mode):
+        _reject("release_authority_key_parent_unsafe")
+    if pst.st_mode & 0o077:  # no group/other access on the private parent
+        _reject("release_authority_key_parent_not_private")
+    cur = parent
+    while True:
+        st = os.lstat(cur)
+        # an ancestor is untrusted if it is a symlink, or group/other-writable WITHOUT the sticky
+        # bit (a sticky world-writable dir like /tmp is safe: only the owner can rename/delete).
+        if stat.S_ISLNK(st.st_mode) or ((st.st_mode & 0o022) and not (st.st_mode & stat.S_ISVTX)):
+            _reject("release_authority_key_ancestor_unsafe")
+        nxt = os.path.dirname(cur)
+        if nxt == cur:
+            return
+        cur = nxt
+
+
+def _fsync_dir(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
     try:
-        st = os.lstat(parent)
-    except OSError:
-        _reject("release_authority_key_parent_unsafe")
-    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
-        _reject("release_authority_key_parent_unsafe")
-    if os.name == "posix" and (st.st_mode & 0o022):  # no group/other write on the parent
-        _reject("release_authority_key_parent_unsafe")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _write_private_key(path: str, private_hex: str, *, repo_root: str | None) -> None:
+    """POSIX-only (caller has gated). Exclusive, no-follow create of a 0600 uid-owned single-link
+    regular file; fstat the OPENED descriptor (no lstat-then-open TOCTOU); write 64 lower-hex chars
+    hex; fsync the key and its parent directory."""
     if not os.path.isabs(path):
         _reject("release_authority_key_path_not_absolute")
     _assert_out_of_repo(path, repo_root)
-    _assert_safe_key_parent(path)
-    # O_EXCL refuses an existing target (regular OR symlink/dangling), so a hardlink/symlink swap or
-    # an overwrite is impossible; the key is created 0600 and re-chmod'd on POSIX.
+    _assert_trusted_key_ancestors(path)
+    if len(private_hex) != 64 or any(c not in "0123456789abcdef" for c in private_hex):
+        _reject("release_authority_key_malformed")
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
     except FileExistsError:
         _reject("release_authority_key_exists")
     except OSError:
         _reject("release_authority_key_write_failed")
     try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != _posix_uid() or st.st_nlink != 1:
+            _reject("release_authority_key_unsafe")
+        getattr(os, "fchmod")(fd, 0o600)  # noqa: B009 — POSIX-only, caller behind the gate
         os.write(fd, private_hex.encode("ascii"))
+        os.fsync(fd)
     finally:
         os.close(fd)
-    if os.name == "posix":
-        os.chmod(path, 0o600)
+    _fsync_dir(os.path.dirname(os.path.abspath(path)) or os.sep)
+
+
+def _decode_private_hex(raw: bytes) -> str:
+    """Accept EXACTLY 64 lowercase hex chars, plus at most one final newline — never a broad
+    ``.strip()``. Never expose bytes on failure."""
+    if raw.endswith(b"\n"):
+        raw = raw[:-1]
+    if len(raw) != 64 or any(c not in b"0123456789abcdef" for c in raw):
+        _reject("release_authority_key_malformed")
+    return raw.decode("ascii")
 
 
 def _read_private_key(path: str) -> str:
+    """POSIX-only (caller has gated). No-follow open + fstat-on-descriptor (no TOCTOU); require the
+    exact owner / mode 0600 / regular / nlink=1; decode 64 lower-hex (one optional newline)."""
     if not os.path.isabs(path):
         _reject("release_authority_key_path_not_absolute")
     try:
-        st = os.lstat(path)
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
     except OSError:
         _reject("release_authority_key_unreadable")
-    if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
-        _reject("release_authority_key_unsafe")
-    if os.name == "posix" and ((st.st_mode & 0o777) != 0o600 or st.st_nlink != 1):
-        _reject("release_authority_key_unsafe")
     try:
-        with open(path, "rb") as fh:
-            raw = fh.read(_MAX_KEY_BYTES + 1)
-    except OSError:
-        _reject("release_authority_key_unreadable")
-    text = raw.decode("ascii", errors="ignore").strip()
-    try:
-        key_bytes = bytes.fromhex(text)
-    except ValueError:
-        _reject("release_authority_key_malformed")
-    if len(key_bytes) != 32:
-        _reject("release_authority_key_malformed")
-    return text
+        st = os.fstat(fd)
+        if (
+            not stat.S_ISREG(st.st_mode)
+            or stat.S_ISLNK(st.st_mode)
+            or st.st_uid != _posix_uid()
+            or (st.st_mode & 0o777) != 0o600
+            or st.st_nlink != 1
+        ):
+            _reject("release_authority_key_unsafe")
+        raw = os.read(fd, _MAX_KEY_BYTES + 1)
+    finally:
+        os.close(fd)
+    return _decode_private_hex(raw)
 
 
 # ----------------------------------------------------------------- init / build / sign / verify
 
 
-def authority_init(*, key_path: str, repo_root: str | None) -> tuple[int, dict]:
-    """Generate a fresh Ed25519 release-signing keypair, write the PRIVATE key to a protected
-    out-of-repo 0600 file (write-once), and return the PUBLIC anchor. The private key is never
-    returned, logged, or written anywhere else."""
-    private_hex, public_hex = generate_keypair()
-    key_id = derive_key_id(public_hex)
-    _write_private_key(key_path, private_hex, repo_root=repo_root)
-    pub_path = key_path + ".pub.json"
-    anchor = {"key_id": key_id, "public_key_hex": public_hex}
+def _write_public_anchor(path: str, anchor: dict) -> None:
+    body = (canonical_json(anchor) + "\n").encode("ascii")
     try:
-        with open(pub_path, "w", encoding="ascii") as fh:
-            fh.write(canonical_json(anchor) + "\n")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644)
+    except FileExistsError:
+        _reject("release_authority_public_exists")
     except OSError:
         _reject("release_authority_public_write_failed")
+    try:
+        os.write(fd, body)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _verify_public_anchor(path: str, anchor: dict) -> None:
+    fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+    try:
+        raw = os.read(fd, 4096)
+    finally:
+        os.close(fd)
+    if raw != (canonical_json(anchor) + "\n").encode("ascii"):
+        _reject("release_authority_public_readback_mismatch")
+
+
+def _compensate_private_key(path: str) -> None:
+    """Remove a just-created private key and PROVE its absence; if that cannot be proven, surface a
+    bounded recovery-required state (never a half-created authority)."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        _reject("release_authority_recovery_required")
+    if os.path.lexists(path):
+        _reject("release_authority_recovery_required")
+
+
+def authority_init(*, key_path: str, repo_root: str | None) -> tuple[int, dict]:
+    """Generate a fresh Ed25519 release-signing keypair and write it TRANSACTIONALLY: the protected
+    0600 private key AND the 0644 public-anchor companion are both exclusive, no-follow creations,
+    fsync'd with their parent; the public anchor is read-back verified; and if the public side (or
+    the key read-back) fails, the just-created private key is removed and its absence proven (else
+    recovery-required). The private key is never returned, logged, or written anywhere else."""
+    _require_posix_secure_storage()
+    private_hex, public_hex = generate_keypair()
+    key_id = derive_key_id(public_hex)
+    pub_path = key_path + ".pub.json"
+    anchor = {"key_id": key_id, "public_key_hex": public_hex}
+    _write_private_key(key_path, private_hex, repo_root=repo_root)
+    try:
+        _write_public_anchor(pub_path, anchor)
+        _verify_public_anchor(pub_path, anchor)
+        _fsync_dir(os.path.dirname(os.path.abspath(pub_path)) or os.sep)
+        # prove the written key derives the emitted anchor (re-read through no-follow)
+        if derive_key_id(_keypair_public(_read_private_key(key_path))[1]) != key_id:
+            _reject("release_authority_key_readback_mismatch")
+    except ManagementError:
+        _compensate_private_key(key_path)
+        raise
     # report the PUBLIC anchor only — never private_hex
     return EXIT_OK, {"command": "init", "anchor": anchor, "public_anchor_path": pub_path}
 
@@ -199,40 +299,84 @@ def authority_build(*, spec_bytes: bytes) -> tuple[int, dict]:
     }
 
 
-def _reverify_artifacts(manifest: ReleaseManifest, artifacts_dir: str | None) -> None:
-    if artifacts_dir is None:
-        return
+def _read_exact(fd: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        block = os.read(fd, 1 << 16)
+        if not block:
+            break
+        chunks.append(block)
+        total += len(block)
+    return b"".join(chunks)
+
+
+def _verify_all_artifacts(manifest: ReleaseManifest, artifacts_dir: str) -> None:
+    """TOCTOU-safe verification of EVERY manifest artifact (POSIX-only; caller gated): the dir is
+    real; each artifact resolves BENEATH it (no traversal); each is opened no-follow (refusing a
+    symlink), fstat'd on the descriptor (regular + nlink==1, refusing a hardlink/non-regular); the
+    exact declared size + SHA-256 are enforced; and file identity is re-sampled AFTER the read to
+    refuse a file that changed during reading. A caller cannot select a subset — all verified."""
+    adir = os.path.realpath(artifacts_dir)
+    if not stat.S_ISDIR(os.lstat(adir).st_mode):
+        _reject("release_authority_artifacts_dir_invalid")
     for art in manifest.artifacts:
-        path = os.path.join(artifacts_dir, art.name)
+        target = os.path.join(adir, art.name)
+        real = os.path.realpath(target)
+        if real != adir and not real.startswith(adir + os.sep):
+            _reject("release_authority_artifact_escape")
         try:
-            with open(path, "rb") as fh:
-                data = fh.read(art.size + 1)
+            fd = os.open(target, os.O_RDONLY | _NOFOLLOW)
         except OSError:
             _reject("release_authority_artifact_unreadable")
+        try:
+            st1 = os.fstat(fd)
+            if not stat.S_ISREG(st1.st_mode) or st1.st_nlink != 1:
+                _reject("release_authority_artifact_unsafe")  # symlink/hardlink/non-regular
+            data = _read_exact(fd, art.size + 1)
+            st2 = os.fstat(fd)
+            if (st1.st_ino, st1.st_dev, st1.st_size, st1.st_mtime_ns) != (
+                st2.st_ino,
+                st2.st_dev,
+                st2.st_size,
+                st2.st_mtime_ns,
+            ):
+                _reject("release_authority_artifact_changed")  # changed during read
+        finally:
+            os.close(fd)
         if len(data) != art.size or sha256_bytes(data) != art.sha256:
             _reject("release_authority_artifact_drift")
 
 
 def authority_sign(
-    *, manifest_bytes: bytes, key_path: str, artifacts_dir: str | None = None
+    *, manifest_bytes: bytes, key_path: str, artifacts_dir: str | None
 ) -> tuple[int, dict]:
-    """Sign a v1alpha2 manifest under the private key at ``key_path``. Refuses a non-canonical
-    manifest, a manifest whose ``signing_anchor_id`` is not THIS signer, or drifted artifacts (when
-    an artifacts dir is given). Emits the detached signature envelope; no private material leaks."""
+    """Sign a v1alpha2 manifest under the private key at ``key_path``. The artifacts directory is
+    MANDATORY — no signature is produced without verifying EVERY release artifact (TOCTOU-safe).
+    Refuses a non-canonical manifest, a manifest whose ``signing_anchor_id`` is not THIS signer, or
+    any drifted/unsafe artifact. Emits the detached signature envelope; no private material leaks.
+    """
     if len(manifest_bytes) > _MAX_MANIFEST_BYTES:
         _reject("release_authority_manifest_too_large")
+    if artifacts_dir is None:
+        _reject("release_authority_artifacts_dir_required")
+    if not os.path.isabs(artifacts_dir):
+        _reject("release_authority_artifacts_dir_not_absolute")
     manifest = parse_manifest_bytes(manifest_bytes)
     require_b2_installation_profile(manifest)
     # the on-disk manifest MUST already be canonical (deterministic) — else the signature would not
     # cover the exact bytes a verifier reconstructs.
     if manifest_bytes.decode("utf-8", errors="ignore") != manifest.canonical():
         _reject("release_authority_manifest_noncanonical")
+    _require_posix_secure_storage()  # key + artifact TOCTOU-safe descriptor reads are POSIX-only
     private_hex = _read_private_key(key_path)
     _, public_hex = _keypair_public(private_hex)
     key_id = derive_key_id(public_hex)
     if manifest.signing_anchor_id != key_id:
         _reject("release_authority_signer_mismatch")
-    _reverify_artifacts(manifest, artifacts_dir)
+    _verify_all_artifacts(
+        manifest, artifacts_dir
+    )  # no signature without full artifact verification
     signature_hex = sign_ed25519(private_hex, manifest_signing_message(manifest))
     envelope = {"algorithm": "ed25519", "key_id": key_id, "signature": signature_hex}
     return EXIT_OK, {
@@ -269,23 +413,28 @@ def authority_verify(
     if not is_sha256_digest(key_id) or derive_key_id(public_hex) != key_id:
         _reject("release_authority_anchor_invalid")
     manifest = parse_manifest_bytes(manifest_bytes)
-    try:
-        sig = json.loads(signature_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        _reject("release_authority_signature_malformed")
-    if not isinstance(sig, dict) or sig.get("key_id") != manifest.signing_anchor_id:
+    # F: use the STRICT release-signature parser (closed fields, no duplicate keys, ed25519, exact
+    # hex grammar, no ignored extra fields) — never a permissive json.loads.
+    sig = parse_signature_bytes(signature_bytes)
+    canon = canonical_json(
+        {"algorithm": sig.algorithm, "key_id": sig.key_id, "signature": sig.signature}
+    )
+    body = signature_bytes[:-1] if signature_bytes.endswith(b"\n") else signature_bytes
+    if body != canon.encode("utf-8"):
+        _reject("release_authority_signature_noncanonical")
+    # the signature's key id AND the supplied anchor's key id must BOTH equal the manifest signer.
+    if sig.key_id != manifest.signing_anchor_id or key_id != manifest.signing_anchor_id:
         _reject("release_authority_signature_mismatch")
     trust = ReleaseTrustRoot(
         anchors=(TrustAnchor(key_id=key_id, public_key_hex=public_hex),), test_only=False
     )
-    ok = trust.verify(
-        key_id=manifest.signing_anchor_id,
+    if not trust.verify(
+        key_id=sig.key_id,
         message=manifest_signing_message(manifest),
-        signature_hex=str(sig.get("signature", "")),
-    )
-    if not ok:
+        signature_hex=sig.signature,
+    ):
         _reject("release_authority_signature_untrusted")
-    return EXIT_OK, {"command": "verify", "verified": True, "key_id": manifest.signing_anchor_id}
+    return EXIT_OK, {"command": "verify", "verified": True, "key_id": sig.key_id}
 
 
 # --------------------------------------------------------------------------- CLI

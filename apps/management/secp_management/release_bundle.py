@@ -118,17 +118,88 @@ class ArtifactRecord(_Strict):
 # --- SECP-PR5H-B2: the v1alpha2 signed installation profile (provider-neutral; no deployment value)
 
 
-#: The closed supported platform matrix (OS -> supported architectures). Provider-neutral.
-_SUPPORTED_PLATFORMS: dict[str, frozenset[str]] = {"linux": frozenset({"amd64", "arm64"})}
-#: The closed set of host-runtime executable capabilities a controller install pins.
+#: The CANONICAL supported platform matrix (OS -> canonical architectures). The signed profile MUST
+#: use these canonical names (aliases like ``amd64``/``aarch64`` are normalization INPUTS, refused
+#: the signed profile to avoid an implicit ``amd64``/``x86_64`` mismatch reaching installation).
+_SUPPORTED_PLATFORMS: dict[str, frozenset[str]] = {"linux": frozenset({"x86_64", "arm64"})}
+#: The ONE code-owned architecture-alias normalization boundary: raw ``platform.machine()`` values
+#: (and common aliases) -> the canonical name the signed profile uses. Parity-tested.
+_ARCH_ALIASES: dict[str, str] = {
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+    "arm64": "arm64",
+    "aarch64": "arm64",
+}
+
+# The CLOSED, code-owned host-runtime policy: the EXACT invocation shape + allowed-subcommand set
+# real management adapters (secp_management.real_adapters) use, and nothing more. A signed but
+# semantically-incompatible executable surface (extra/missing subcommand, wrong compose model, a
+# shell/interpreter, an arbitrary invocation) is refused. ``allowed_subcommands`` must equal the set
+# EXACTLY (no extra, no missing). ``invocation`` is the fixed argv PREFIX after the pinned exe
+# path: empty for a direct runtime/service-manager/standalone-compose, or ``("compose",)`` for the
+# docker-compose-plugin model.
 _RUNTIME_CAPABILITIES = frozenset({"container_runtime", "compose", "service_manager"})
+_RUNTIME_ALLOWED_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "container_runtime": frozenset({"load", "image"}),  # docker load -i … ; docker image inspect/rm
+    "compose": frozenset({"up", "down"}),  # compose up --detach ; compose down --remove-orphans
+    "service_manager": frozenset(
+        {"daemon-reload"}
+    ),  # systemctl daemon-reload (units run via compose)
+}
+#: Allowed fixed argv prefixes per capability (after the pinned executable path).
+_RUNTIME_INVOCATIONS: dict[str, frozenset[tuple[str, ...]]] = {
+    "container_runtime": frozenset({()}),
+    "compose": frozenset({(), ("compose",)}),  # standalone binary, or the docker-compose plugin
+    "service_manager": frozenset({()}),
+}
+#: Executable basenames that are never a valid host-runtime binary (a shell / interpreter surface).
+_FORBIDDEN_RUNTIME_BASENAMES = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "csh",
+        "fish",
+        "env",
+        "xargs",
+        "python",
+        "python2",
+        "python3",
+        "perl",
+        "ruby",
+        "node",
+        "awk",
+        "tclsh",
+        "lua",
+    }
+)
 #: The closed set of controller TLS modes the release policy may permit.
 TLS_MODE_GENERATED_LOCAL_CA = "generated_local_ca"
 TLS_MODE_IMPORTED_ENTERPRISE = "imported_enterprise_tls"
 _TLS_MODES = frozenset({TLS_MODE_GENERATED_LOCAL_CA, TLS_MODE_IMPORTED_ENTERPRISE})
-_TLS_KEY_ALGORITHMS = frozenset({"ecdsa-p256", "ecdsa-p384", "ed25519", "rsa-3072", "rsa-4096"})
+#: key algorithm -> the closed set of signature algorithms COMPATIBLE with it.
+_TLS_KEY_SIG_COMPAT: dict[str, frozenset[str]] = {
+    "ecdsa-p256": frozenset({"ecdsa-with-sha256"}),
+    "ecdsa-p384": frozenset({"ecdsa-with-sha384"}),
+    "ed25519": frozenset({"ed25519"}),
+    "rsa-3072": frozenset({"sha256-rsa", "sha384-rsa"}),
+    "rsa-4096": frozenset({"sha256-rsa", "sha384-rsa"}),
+}
 _TLS_MIN_VERSIONS = frozenset({"1.2", "1.3"})
+_TLS_MAX_VALIDITY_DAYS = 825  # closed upper bound (CA/Browser-Forum server-cert ceiling)
 _ARGV_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def normalize_arch(machine: str) -> str:
+    """The ONE code-owned normalization boundary: map a raw ``platform.machine()`` value (or a known
+    alias) to the CANONICAL architecture the signed profile uses. An unknown value refuses (never an
+    implicit alias mismatch). Parity-tested against ``_SUPPORTED_PLATFORMS``."""
+    canonical = _ARCH_ALIASES.get(machine.strip().lower())
+    if canonical is None:
+        raise ManagementError("release_platform_arch_unknown")
+    return canonical
 
 
 class PlatformProfile(_Strict):
@@ -330,8 +401,16 @@ def _assert_installation_profile(manifest: ReleaseManifest) -> None:
 
 
 def _assert_platform_profile(p: PlatformProfile) -> None:
-    if p.os not in _SUPPORTED_PLATFORMS or p.arch not in _SUPPORTED_PLATFORMS[p.os]:
+    if p.os not in _SUPPORTED_PLATFORMS:
         raise ManagementError("release_platform_unsupported")
+    # the signed profile MUST use the CANONICAL arch name (an alias like ``amd64`` is a
+    # normalization input, refused here so it can never reach installation as an implicit mismatch).
+    if p.arch not in _SUPPORTED_PLATFORMS[p.os]:
+        raise ManagementError(
+            "release_platform_arch_alias"
+            if p.arch in _ARCH_ALIASES
+            else "release_platform_unsupported"
+        )
     if not _safe_name(p.installation_profile_version):
         raise ManagementError("release_platform_profile_version_invalid")
 
@@ -346,13 +425,22 @@ def _assert_runtime_profile(rp: RuntimeProfile) -> None:
         seen.add(pin.capability)
         if not (pin.path.startswith("/") and ".." not in pin.path.split("/")):
             raise ManagementError("release_runtime_path_invalid")
+        if pin.path.rsplit("/", 1)[-1] in _FORBIDDEN_RUNTIME_BASENAMES:
+            raise ManagementError("release_runtime_interpreter_forbidden")  # no shell/interpreter
         if not is_sha256_digest(pin.sha256):
             raise ManagementError("release_runtime_digest_invalid")
-        if not pin.invocation or any(not _ARGV_TOKEN.fullmatch(t) for t in pin.invocation):
+        # the fixed invocation prefix must be a CLOSED, capability-specific shape (empty, or the
+        # docker-compose plugin ``("compose",)`` for the compose capability) — nothing arbitrary.
+        if any(not _ARGV_TOKEN.fullmatch(t) for t in pin.invocation):
             raise ManagementError("release_runtime_invocation_invalid")
-        if any(not _ARGV_TOKEN.fullmatch(t) for t in pin.allowed_subcommands):
-            raise ManagementError("release_runtime_subcommand_invalid")
-    if seen != _RUNTIME_CAPABILITIES:
+        if pin.invocation not in _RUNTIME_INVOCATIONS[pin.capability]:
+            raise ManagementError("release_runtime_invocation_incompatible")
+        # the allowed-subcommand set must EQUAL the exact set the real adapter uses (no drift).
+        if set(pin.allowed_subcommands) != _RUNTIME_ALLOWED_SUBCOMMANDS[pin.capability]:
+            raise ManagementError("release_runtime_subcommand_set_mismatch")
+        if len(set(pin.allowed_subcommands)) != len(pin.allowed_subcommands):
+            raise ManagementError("release_runtime_subcommand_duplicate")
+    if seen != _RUNTIME_CAPABILITIES:  # exactly one pin per required capability
         raise ManagementError("release_runtime_capabilities_incomplete")
 
 
@@ -361,14 +449,21 @@ def _assert_controller_tls_policy(t: ControllerTlsPolicy) -> None:
         raise ManagementError("release_tls_mode_invalid")
     if len(set(t.allowed_modes)) != len(t.allowed_modes):
         raise ManagementError("release_tls_mode_duplicate")
-    if t.allow_generated_local_ca and TLS_MODE_GENERATED_LOCAL_CA not in t.allowed_modes:
+    # generated_local_ca may appear IFF allow_generated_local_ca is true (both directions).
+    if (TLS_MODE_GENERATED_LOCAL_CA in t.allowed_modes) != bool(t.allow_generated_local_ca):
         raise ManagementError("release_tls_generated_ca_inconsistent")
-    if t.key_algorithm not in _TLS_KEY_ALGORITHMS:
+    if t.key_algorithm not in _TLS_KEY_SIG_COMPAT:
         raise ManagementError("release_tls_key_algorithm_invalid")
+    if t.signature_algorithm not in _TLS_KEY_SIG_COMPAT[t.key_algorithm]:
+        raise ManagementError(
+            "release_tls_signature_incompatible"
+        )  # key/sig combo must be compatible
     if t.min_tls_version not in _TLS_MIN_VERSIONS:
         raise ManagementError("release_tls_min_version_invalid")
-    if not t.server_auth_eku_required or not t.ca_pathlen_zero:
-        # a controller-API server policy must require server-auth EKU and a non-CA leaf chain.
+    if not (1 <= t.max_validity_days <= _TLS_MAX_VALIDITY_DAYS):
+        raise ManagementError("release_tls_validity_out_of_bounds")
+    # a controller-API server policy MUST require a SAN, server-auth EKU, and a non-CA leaf chain.
+    if not (t.require_san and t.server_auth_eku_required and t.ca_pathlen_zero):
         raise ManagementError("release_tls_policy_too_weak")
 
 
