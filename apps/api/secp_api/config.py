@@ -274,6 +274,22 @@ class Settings(BaseSettings):
     enable_real_provisioning: bool = False
     enable_opentofu_subprocess: bool = False
 
+    # SECP-PR5H-B1 T2: deployment-local dev/test gate for the SEALED, claim-only enrollment
+    # progression steps (bind/offer/result/verify/healthy). They are NOT a supported trusted
+    # exchange — the supported path is the authenticated EnrollmentTransport — so they are sealed
+    # closed by default and REFUSED in production (enforced below). Enable only to exercise the
+    # durable CAS primitives over HTTP in development/tests.
+    enable_enrollment_progression: bool = False
+
+    # SECP-PR5H-B1 Phase 3 (C5): the root-gated controller enrollment offer signer BROKER lives on a
+    # FIXED, code-owned Unix-domain socket (``ENROLLMENT_SIGNER_SOCKET_PATH`` in the commissioning
+    # plane) — production configuration may ENABLE or DISABLE the API-side client but can NEVER
+    # select its socket or key location (no path/env/descriptor override). ``False`` (the default)
+    # => the client is SEALED and every sign attempt fails closed (signer_unavailable); a properly
+    # deployed controller that has wired + enabled the root broker sets this to ``True``.
+    # The non-root API still never reads the enrollment key and never selects a local socket.
+    enrollment_signer_enabled: bool = False
+
     cors_allow_origins: list[str] = ["http://localhost:5173"]
 
     # OIDC-C (ADR-019): the ONE canonical public application origin. In production the web app and
@@ -361,6 +377,12 @@ class Settings(BaseSettings):
                 "SECP_ENABLE_OPENTOFU_SUBPROCESS must be false in production "
                 "(the real OpenTofu subprocess executor is not cleared for production "
                 "in SECP-002B-1A; it is armed only for a reviewed disposable lab in B1-B)"
+            )
+        if self.enable_enrollment_progression:
+            problems.append(
+                "SECP_ENABLE_ENROLLMENT_PROGRESSION must be false in production "
+                "(the claim-only enrollment progression routes are a sealed, non-supported "
+                "surface; the supported path is the authenticated EnrollmentTransport)"
             )
         # --- OIDC bearer verification must be safely configured in production (ADR-017) -------
         # The issuer is the sole root of trust: it must be a bare HTTPS origin+path with no

@@ -45,6 +45,10 @@ PR5H_MODULES = (
     API_PKG / "worker_enrollment_schema.py",
     SERVICE,
     API_PKG / "services" / "worker_enrollment_recovery.py",
+    # Phase 3: the controller-side offer/result verifier and the sealed signer client seam also
+    # return bounded codes only — never a printed/logged free-form value.
+    API_PKG / "enrollment_evidence.py",
+    API_PKG / "enrollment_signer_client.py",
 )
 
 CTRL_HEX = (b"\x11" * 32).hex()
@@ -99,7 +103,7 @@ def factory():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.exec_driver_sql("CREATE TABLE alembic_version (version_num varchar(32) primary key)")
-        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('b6e2f4a9c1d7')")
+        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('c2f8e1a4b6d9')")
     yield sessionmaker(bind=engine, future=True)
     engine.dispose()
 
@@ -147,7 +151,7 @@ def _open_and_bind(factory, actor):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=svc.ExpectedRevision(0, state.digest(), 0, ""),
+            expected_revision=0,
         ).state
         s.commit()
     return state
@@ -249,6 +253,70 @@ def test_every_persisted_enrollment_value_is_secret_free(factory, actor) -> None
             for key, value in row.items():
                 # controller_origin is the ONE validated HTTPS origin the contract permits
                 _scan_produced(str(value), allow_controller_origin=(key == "controller_origin"))
+
+
+def test_persisted_signed_offer_is_public_material_only(factory, actor) -> None:
+    """The Phase 3 write-once signed-offer store holds a canonical controller-offer claim + its
+    detached attestation — PUBLIC material. Every persisted value must be secret-free: it may
+    carries the https controller origin and hex key/signature, but never a private key, token, host
+    path, private IP, or raw exception."""
+    from secp_api import worker_enrollment_repository as repo
+    from secp_commissioning import enrollment_attestation as ea
+    from secp_commissioning.canonical import canonical_json
+    from secp_management.signing import generate_keypair
+
+    state = _open_and_bind(factory, actor)
+    cpriv, cpub = generate_keypair()
+    claim = ea.controller_offer_claim(
+        enrollment_id=state.enrollment_id,
+        invitation_id="sha256:" + "b" * 64,
+        controller_installation_id="controller-aaaaaaaa",
+        controller_key_id=ea.key_id_for(cpub),
+        controller_origin="https://ctrl.example.com",
+        controller_transaction_id=TXN,
+        worker_installation_id="worker-bbbbbbbb",
+        worker_key_id=WORKER_KEY,
+        release_digest=RELEASE,
+        expires_at="2026-07-21T01:00:00Z",
+        predecessor_digest="sha256:" + "c" * 64,
+    )
+    att = ea.sign_detached(
+        cpriv,
+        domain=ea.ENROLLMENT_ATTESTATION_DOMAIN,
+        kind=ea.OFFER_KIND,
+        digest=ea.claim_digest(claim),
+    )
+    envelope = {
+        "claim": claim,
+        "attestation": {
+            "algorithm": att.algorithm,
+            "key_id": att.key_id,
+            "public_key_hex": att.public_key_hex,
+            "signature": att.signature,
+        },
+    }
+    with factory() as s:
+        repo.persist_signed_offer(
+            s,
+            enrollment_id=state.enrollment_id,
+            organization_id=actor.organization_id,
+            offer_revision=1,
+            signer_key_id=att.key_id,
+            signed_offer=canonical_json(envelope),
+        )
+        s.commit()
+    with factory() as s:
+        rows = (
+            s.execute(
+                text("SELECT * FROM worker_enrollment_signed_offer")  # noqa: S608
+            )
+            .mappings()
+            .all()
+        )
+    assert rows
+    for row in rows:
+        for value in row.values():
+            _scan_produced(str(value), allow_controller_origin=True)
 
 
 def test_no_pr5h_module_prints_or_logs() -> None:

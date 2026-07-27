@@ -501,6 +501,15 @@ class Permission(str, Enum):
     # nothing.
     plan_generation_manage = "plan_generation:manage"
     plan_generation_approve = "plan_generation:approve"
+    # SECP-PR5H-B1 supported worker enrollment. read = status/list; manage = create/revoke.
+    # Provider-neutral and dedicated: NEVER inferred from worker_identity, target, onboarding,
+    # provisioning or any other permission. Worker-facing progression gets its own deliberate
+    # assignment in its slice.
+    enrollment_read = "enrollment:read"
+    enrollment_manage = "enrollment:manage"
+    # progression (bind/offer/result/verified/healthy) is a deliberately separate assignment from
+    # read/manage — the durable step transitions the worker exchange drives.
+    enrollment_progress = "enrollment:progress"
 
 
 class ReadonlyPreflightStatus(str, Enum):
@@ -845,6 +854,13 @@ class AuditAction(str, Enum):
     destroy_completed = "destroy.completed"
     lifecycle_transition = "lifecycle.transition"
     authorization_denied = "authorization.denied"
+    enrollment_invitation_created = "enrollment.invitation_created"
+    enrollment_revoked = "enrollment.revoked"
+    enrollment_worker_bound = "enrollment.worker_bound"
+    enrollment_offer_recorded = "enrollment.offer_recorded"
+    enrollment_result_recorded = "enrollment.result_recorded"
+    enrollment_verified = "enrollment.verified"
+    enrollment_healthy = "enrollment.healthy"
     # SECP-002A — execution targets, discovery, reservations, secret resolution.
     target_created = "target.created"
     target_disabled = "target.disabled"
@@ -2077,3 +2093,24 @@ class WorkerEnrollmentErrorCode(str, Enum):
     replay = "enrollment_replay"
     release_mismatch = "enrollment_release_mismatch"
     reason_code_invalid = "enrollment_reason_code_invalid"
+    # SECP-PR5H-B1 F3/F5
+    controller_identity_unavailable = "enrollment_controller_identity_unavailable"
+    identity_conflict = "enrollment_identity_conflict"  # concurrent controller-identity rotation
+    identity_invalid = "enrollment_identity_invalid"  # malformed/mis-bound verified identity proof
+    idempotency_conflict = "enrollment_idempotency_conflict"  # same key, different bound input
+    # SECP-PR5H-B1 T2: the claim-only progression steps are a sealed, non-supported surface (the
+    # trusted exchange is the authenticated EnrollmentTransport); sealed closed unless a
+    # deployment-local dev/test profile explicitly enables them, and refused in production.
+    progression_sealed = "enrollment_progression_sealed"
+    # T2: a worker proof-of-possession / result attestation failed controller-side verification
+    # (bad signature, unpinned key, or a claim that disagrees with the authoritative invitation).
+    pop_invalid = "enrollment_pop_invalid"
+    # Phase 3: a concurrent/duplicate bind lost the write-once signed-offer insert
+    signed_offer_conflict = "enrollment_signed_offer_conflict"
+    # Phase 3: the root-gated controller-offer signer/broker is sealed, unreachable, or returned an
+    # offer that failed the controller's independent re-verification (signer availability/integrity
+    # — never a worker fault; the enrollment private key never enters the non-root API process)
+    signer_unavailable = "enrollment_signer_unavailable"
+    # Phase 3: the worker result was authenticated but did not attest a successful outcome + every
+    # required health check, so the enrollment cannot advance to verified/healthy
+    health_incomplete = "enrollment_health_incomplete"

@@ -356,6 +356,10 @@ class WorkerEnrollmentError(DomainError):
 
     _STATUS = {
         "enrollment_schema_unavailable": 503,
+        "enrollment_controller_identity_unavailable": 503,
+        "enrollment_idempotency_conflict": 409,
+        "enrollment_identity_conflict": 409,
+        "enrollment_identity_invalid": 422,
         "enrollment_not_found": 404,
         "enrollment_forbidden": 403,
         "enrollment_scope_mismatch": 409,
@@ -369,6 +373,18 @@ class WorkerEnrollmentError(DomainError):
         "enrollment_invitation_expired": 409,
         "enrollment_invitation_conflict": 409,
         "enrollment_creation_conflict": 409,
+        # sealed, non-supported surface — "the endpoint is not a supported exchange" (mirrors the
+        # worker_admission 404 seal precedent)
+        "enrollment_progression_sealed": 404,
+        # a worker attestation failed controller-side verification (invalid input evidence)
+        "enrollment_pop_invalid": 422,
+        # the root-gated controller-offer signer/broker is sealed, unreachable, or returned an offer
+        # that failed the controller's independent re-verification — a signer-availability/integrity
+        # failure, never a worker fault (the private key never enters this process)
+        "enrollment_signer_unavailable": 503,
+        # an authenticated worker result did not attest a successful outcome + every required health
+        # check, so the enrollment cannot advance to healthy (bad input evidence)
+        "enrollment_health_incomplete": 422,
         "enrollment_internal_failure": 500,
         # surfaced pure transition-contract codes: an invalid input is 422, a state/lifecycle
         # conflict is 409 (the default for anything not explicitly listed)

@@ -71,7 +71,7 @@ def factory():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.exec_driver_sql("CREATE TABLE alembic_version (version_num varchar(32) primary key)")
-        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('b6e2f4a9c1d7')")
+        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('c2f8e1a4b6d9')")
     yield sessionmaker(bind=engine, future=True)
     engine.dispose()
 
@@ -112,7 +112,7 @@ def _bind(factory, actor, state):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         return out.state
@@ -127,7 +127,7 @@ def _drive_to_healthy(factory, actor, state):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         ).state
         s.commit()
     with factory() as s:
@@ -137,7 +137,7 @@ def _drive_to_healthy(factory, actor, state):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("worker-result", RESULT_D, TXN, WORKER_KEY),
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         ).state
         s.commit()
     with factory() as s:
@@ -147,12 +147,12 @@ def _drive_to_healthy(factory, actor, state):
             enrollment_id=state.enrollment_id,
             release_digest=RELEASE,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         ).state
         s.commit()
     with factory() as s:
         state = svc.mark_enrollment_healthy(
-            s, actor, enrollment_id=state.enrollment_id, now=NOW, expected=_expected(state)
+            s, actor, enrollment_id=state.enrollment_id, now=NOW, expected_revision=state.revision
         ).state
         s.commit()
     return state
@@ -451,7 +451,7 @@ def test_exact_retry_after_restart_recovers_via_receipt(factory, actor):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
     assert out.deduplicated and out.committed_revision == 1
@@ -472,7 +472,7 @@ def _retry_step(factory, actor, step: str, prior_state, current_state):
     """Replay ``step`` exactly, from a FRESH session, using the token the client first sent
     (``prior_state`` == the state before the step committed). Returns the outcome."""
     with factory() as s:
-        expected = _expected(prior_state)
+        expected_revision = prior_state.revision
         if step == "record_controller_offer":
             out = svc.record_offer(
                 s,
@@ -480,7 +480,7 @@ def _retry_step(factory, actor, step: str, prior_state, current_state):
                 enrollment_id=current_state.enrollment_id,
                 facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
                 now=NOW,
-                expected=expected,
+                expected_revision=expected_revision,
             )
         elif step == "record_worker_result":
             out = svc.record_result(
@@ -489,7 +489,7 @@ def _retry_step(factory, actor, step: str, prior_state, current_state):
                 enrollment_id=current_state.enrollment_id,
                 facts=contract.HandoffFacts("worker-result", RESULT_D, TXN, WORKER_KEY),
                 now=NOW,
-                expected=expected,
+                expected_revision=expected_revision,
             )
         elif step == "mark_verified":
             out = svc.verify_release(
@@ -498,11 +498,15 @@ def _retry_step(factory, actor, step: str, prior_state, current_state):
                 enrollment_id=current_state.enrollment_id,
                 release_digest=RELEASE,
                 now=NOW,
-                expected=expected,
+                expected_revision=expected_revision,
             )
         else:
             out = svc.mark_enrollment_healthy(
-                s, actor, enrollment_id=current_state.enrollment_id, now=NOW, expected=expected
+                s,
+                actor,
+                enrollment_id=current_state.enrollment_id,
+                now=NOW,
+                expected_revision=expected_revision,
             )
         s.commit()
         return out
@@ -527,7 +531,7 @@ def test_exact_retry_of_each_step_after_restart_is_idempotent(factory, actor, st
                 enrollment_id=prior.enrollment_id,
                 facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
                 now=NOW,
-                expected=_expected(prior),
+                expected_revision=prior.revision,
             ).state
             s.commit()
         prior = current
@@ -539,7 +543,7 @@ def test_exact_retry_of_each_step_after_restart_is_idempotent(factory, actor, st
                 enrollment_id=prior.enrollment_id,
                 facts=contract.HandoffFacts("worker-result", RESULT_D, TXN, WORKER_KEY),
                 now=NOW,
-                expected=_expected(prior),
+                expected_revision=prior.revision,
             ).state
             s.commit()
         prior = current
@@ -551,7 +555,7 @@ def test_exact_retry_of_each_step_after_restart_is_idempotent(factory, actor, st
                 enrollment_id=prior.enrollment_id,
                 release_digest=RELEASE,
                 now=NOW,
-                expected=_expected(prior),
+                expected_revision=prior.revision,
             ).state
             s.commit()
         prior = current
@@ -580,7 +584,7 @@ def _bind_call(session, actor, state):
         worker_key_id=WORKER_KEY,
         transaction_id=TXN,
         now=NOW,
-        expected=_expected(state),
+        expected_revision=state.revision,
     )
 
 
@@ -702,7 +706,7 @@ def test_postcommit_lost_response_recovers_idempotently(factory, actor):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
     assert out.deduplicated and out.committed_revision == 1

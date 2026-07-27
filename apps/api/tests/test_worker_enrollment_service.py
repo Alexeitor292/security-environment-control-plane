@@ -68,7 +68,7 @@ def factory():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.exec_driver_sql("CREATE TABLE alembic_version (version_num varchar(32) primary key)")
-        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('b6e2f4a9c1d7')")
+        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('c2f8e1a4b6d9')")
     yield sessionmaker(bind=engine, future=True)
     engine.dispose()
 
@@ -100,15 +100,6 @@ def _second_org(session) -> uuid.UUID:
     return org.id
 
 
-def _expected(state: contract.EnrollmentState) -> svc.ExpectedRevision:
-    return svc.ExpectedRevision(
-        revision=state.revision,
-        state_digest=state.digest(),
-        sequence=state.sequence,
-        predecessor_digest=state.predecessor_digest,
-    )
-
-
 def _open(session, actor, *, nonce: str = "sha256:" + "b" * 64, site: str = SITE, **inv):
     invitation = _invitation(nonce=nonce, **inv)
     out = svc.create_invitation_and_open(
@@ -131,7 +122,7 @@ def _bind(session, actor, state, *, worker_key=WORKER_KEY, worker_install="worke
         worker_key_id=worker_key,
         transaction_id=TXN,
         now=NOW,
-        expected=_expected(state),
+        expected_revision=state.revision,
     )
     session.commit()
     return out
@@ -146,7 +137,7 @@ def _drive_to_healthy(session, actor, state):
         enrollment_id=state.enrollment_id,
         facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
         now=NOW,
-        expected=_expected(state),
+        expected_revision=state.revision,
     )
     session.commit()
     state = out.state
@@ -156,7 +147,7 @@ def _drive_to_healthy(session, actor, state):
         enrollment_id=state.enrollment_id,
         facts=contract.HandoffFacts("worker-result", RESULT_D, TXN, WORKER_KEY),
         now=NOW,
-        expected=_expected(state),
+        expected_revision=state.revision,
     )
     session.commit()
     state = out.state
@@ -166,7 +157,7 @@ def _drive_to_healthy(session, actor, state):
         enrollment_id=state.enrollment_id,
         release_digest=RELEASE,
         now=NOW,
-        expected=_expected(state),
+        expected_revision=state.revision,
     )
     session.commit()
     state = out.state
@@ -175,7 +166,7 @@ def _drive_to_healthy(session, actor, state):
         actor,
         enrollment_id=state.enrollment_id,
         now=NOW,
-        expected=_expected(state),
+        expected_revision=state.revision,
     )
     session.commit()
     return out.state
@@ -250,7 +241,7 @@ def test_malformed_offer_digest_writes_no_row_and_state_stays_loadable(
             enrollment_id=bound.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", digest, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(bound),
+            expected_revision=bound.revision,
         )
     assert ei.value.code == "enrollment_handoff_invalid"
     session.rollback()
@@ -274,7 +265,7 @@ def test_malformed_result_digest_writes_no_row_and_state_stays_loadable(factory,
         enrollment_id=bound.enrollment_id,
         facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
         now=NOW,
-        expected=_expected(bound),
+        expected_revision=bound.revision,
     ).state
     session.commit()
     before = _durable_counts(session)
@@ -285,7 +276,7 @@ def test_malformed_result_digest_writes_no_row_and_state_stays_loadable(factory,
             enrollment_id=offered.enrollment_id,
             facts=contract.HandoffFacts("worker-result", "sha256:" + "z" * 64, TXN, WORKER_KEY),
             now=NOW,
-            expected=_expected(offered),
+            expected_revision=offered.revision,
         )
     assert ei.value.code == "enrollment_handoff_invalid"
     session.rollback()
@@ -340,7 +331,7 @@ def test_second_bind_with_a_different_worker_refuses_and_does_not_reconsume(sess
             worker_key_id=OTHER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
     session.rollback()
     # expected-revision mismatch (state advanced to rev1) OR invitation consumed — both closed codes
@@ -447,7 +438,7 @@ def test_expired_invitation_refuses_bind(session, actor):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now="2026-07-21T02:00:00Z",
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
     session.rollback()
     assert ei.value.code in ("enrollment_invitation_expired", "enrollment_expired")
@@ -467,53 +458,30 @@ def test_stale_expected_revision_refuses(session, actor):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
     session.rollback()
     assert ei.value.code == "enrollment_revision_conflict"
     assert out.state.revision == 1
 
 
-def test_wrong_expected_digest_refuses(session, actor):
+def test_wrong_expected_revision_refuses(session, actor):
+    # T1: the public boundary carries ONLY expected_revision. A FRESH step (no receipt) whose
+    # expected_revision differs from the loaded head refuses a bounded revision_conflict; the
+    # internal state_digest / sequence / predecessor are derived server-side from the loaded state.
     state = _open(session, actor)
-    bad = svc.ExpectedRevision(
-        revision=0, state_digest="sha256:" + "0" * 64, sequence=0, predecessor_digest=""
-    )
+    _bind(session, actor, state)  # advances the head to revision 1
     with pytest.raises(WorkerEnrollmentError) as ei:
-        svc.bind_worker(
+        svc.record_offer(
             session,
             actor,
             enrollment_id=state.enrollment_id,
-            worker_installation_id="worker-bbbbbbbb",
-            worker_key_id=WORKER_KEY,
-            transaction_id=TXN,
+            facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=bad,
+            expected_revision=0,  # stale: the head is now at revision 1
         )
     session.rollback()
     assert ei.value.code == "enrollment_revision_conflict"
-
-
-def test_wrong_expected_predecessor_refuses(session, actor):
-    state = _open(session, actor)
-    bad = replace_expected(_expected(state), predecessor_digest="sha256:" + "e" * 64)
-    with pytest.raises(WorkerEnrollmentError) as ei:
-        svc.bind_worker(
-            session,
-            actor,
-            enrollment_id=state.enrollment_id,
-            worker_installation_id="worker-bbbbbbbb",
-            worker_key_id=WORKER_KEY,
-            transaction_id=TXN,
-            now=NOW,
-            expected=bad,
-        )
-    session.rollback()
-    assert ei.value.code == "enrollment_revision_conflict"
-
-
-def replace_expected(expected: svc.ExpectedRevision, **over) -> svc.ExpectedRevision:
-    return replace(expected, **over)
 
 
 # --- step-receipt exact retry -------------------------------------------------------------------
@@ -533,7 +501,7 @@ def test_exact_retry_returns_the_committed_revision_without_a_second_history_row
         worker_key_id=WORKER_KEY,
         transaction_id=TXN,
         now=NOW,
-        expected=_expected(state),
+        expected_revision=state.revision,
     )
     session.commit()
     assert out2.deduplicated is True and out2.committed_revision == 1
@@ -551,7 +519,7 @@ def test_conflicting_input_for_same_step_refuses_as_replay(session, actor):
         enrollment_id=state.enrollment_id,
         facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
         now=NOW,
-        expected=_expected(state),
+        expected_revision=state.revision,
     )
     session.commit()
     offered = svc.load_public_view(session, actor, enrollment_id=state.enrollment_id)
@@ -565,7 +533,7 @@ def test_conflicting_input_for_same_step_refuses_as_replay(session, actor):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", "sha256:" + "9" * 64, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(fresh.state),
+            expected_revision=fresh.state.revision,
         )
     session.rollback()
     assert ei.value.code in ("enrollment_replay", "enrollment_wrong_state")
@@ -947,7 +915,7 @@ def test_failed_transition_leaves_no_partial_state_nonce_revision_or_receipt(ses
             worker_key_id=CTRL_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
     session.rollback()
     assert ei.value.code == "enrollment_worker_mismatch"

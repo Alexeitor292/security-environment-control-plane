@@ -36,6 +36,15 @@ from secp_management.engine import (
     status,
 )
 from secp_management.engine import rollback as engine_rollback
+from secp_management.enrollment_cli import (
+    EnrollmentCliDeps,
+    enrollment_revoke,
+    enrollment_status,
+    invite_create,
+    worker_enroll,
+    worker_retry,
+    worker_status,
+)
 from secp_management.transaction import EXIT_REFUSED, WriteGate
 
 _ROLES = ("controller", "worker")
@@ -80,7 +89,68 @@ def build_parser() -> argparse.ArgumentParser:
                 "--write", action="store_true", help="perform writes (default: dry-run)"
             )
             sub.add_argument("--confirm", action="store_true", help="confirm a real write")
+
+    _add_enrollment_parser(groups)
+    _add_worker_parser(groups)
     return parser
+
+
+def _add_write_confirm(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--write", action="store_true", help="perform writes (default: dry-run)")
+    parser.add_argument("--confirm", action="store_true", help="confirm a real write")
+
+
+def _add_enrollment_parser(groups) -> None:
+    """``secpctl enrollment invite create|status|revoke`` — the supported controller enrollment
+    commands, operated ONLY over the controller HTTPS API. No ``--url``/``--ca``/``--token`` and no
+    internal CAS coordinate (state_digest/sequence/predecessor_digest) is ever accepted."""
+    enr = groups.add_parser("enrollment", help="worker-enrollment controller operations")
+    actions = enr.add_subparsers(dest="action", required=True)
+
+    invite = actions.add_parser("invite", help="invitation operations").add_subparsers(
+        dest="invite_action", required=True
+    )
+    create = invite.add_parser("create", help="create a single-use worker-enrollment invitation")
+    create.add_argument("--site", required=True, help="opaque deployment-site label")
+    create.add_argument(
+        "--ttl-seconds", type=int, default=3600, help="invitation lifetime in seconds"
+    )
+    _add_write_confirm(create)
+
+    st = actions.add_parser("status", help="read the bounded public enrollment status")
+    st.add_argument("--enrollment-id", required=True, help="the enrollment id from the invitation")
+
+    revoke = actions.add_parser("revoke", help="revoke an enrollment")
+    revoke.add_argument("--enrollment-id", required=True, help="the enrollment id to revoke")
+    revoke.add_argument(
+        "--expected-revision", type=int, required=True, help="the last observed public revision"
+    )
+    _add_write_confirm(revoke)
+
+
+def _add_worker_parser(groups) -> None:
+    """``secpctl worker enroll|enrollment status|retry`` — the worker side of the exchange, driven
+    from the non-secret invitation FILE and authenticated by worker proof-of-possession + the signed
+    controller offer (NEVER the operator OIDC token)."""
+    worker = groups.add_parser("worker", help="worker-side enrollment operations")
+    actions = worker.add_subparsers(dest="action", required=True)
+
+    enroll = actions.add_parser("enroll", help="drive this worker's enrollment to healthy")
+    enroll.add_argument(
+        "--invitation", required=True, help="path to the non-secret invitation file"
+    )
+    _add_write_confirm(enroll)
+
+    enrollment = actions.add_parser(
+        "enrollment", help="worker enrollment status/retry"
+    ).add_subparsers(dest="worker_action", required=True)
+    wst = enrollment.add_parser("status", help="read-only local reconciliation")
+    wst.add_argument("--invitation", required=True, help="path to the non-secret invitation file")
+    wretry = enrollment.add_parser("retry", help="resume-safe re-drive")
+    wretry.add_argument(
+        "--invitation", required=True, help="path to the non-secret invitation file"
+    )
+    _add_write_confirm(wretry)
 
 
 def _gate(args: argparse.Namespace) -> WriteGate:
@@ -89,19 +159,38 @@ def _gate(args: argparse.Namespace) -> WriteGate:
     )
 
 
-def run(argv: list[str], deps: EngineDeps | None = None) -> tuple[int, dict]:
+_ENROLLMENT_GROUPS = ("enrollment", "worker")
+
+
+def _is_enrollment_group(argv: list[str]) -> bool:
+    for token in argv:
+        if token.startswith("-"):
+            continue
+        return token in _ENROLLMENT_GROUPS
+    return False
+
+
+def run(
+    argv: list[str],
+    deps: EngineDeps | None = None,
+    *,
+    enrollment_deps: EnrollmentCliDeps | None = None,
+) -> tuple[int, dict]:
     """Parse ``argv`` and execute the engine. Returns ``(exit_code, report_dict)``. Production
-    passes
-    ``deps=None`` → a real :class:`EngineDeps`; tests inject a fake one."""
+    passes ``deps=None`` → a real :class:`EngineDeps`; the enrollment/worker commands take a
+    separate :class:`EnrollmentCliDeps` (SEALED default; tests inject fakes)."""
     args = build_parser().parse_args(argv)
     resolved = deps if deps is not None else EngineDeps()
+    enr = enrollment_deps if enrollment_deps is not None else EnrollmentCliDeps()
     try:
-        return _dispatch(args, resolved)
+        return _dispatch(args, resolved, enr)
     except ManagementError as exc:  # any uncaught engine refusal → bounded reason, exit 2
         return EXIT_REFUSED, {"command": args.group, "reason_code": exc.reason_code}
 
 
-def _dispatch(args: argparse.Namespace, deps: EngineDeps) -> tuple[int, dict]:
+def _dispatch(
+    args: argparse.Namespace, deps: EngineDeps, enr: EnrollmentCliDeps
+) -> tuple[int, dict]:
     group = args.group
     if group == "release":
         return release_verify(args.bundle, deps)
@@ -117,12 +206,80 @@ def _dispatch(args: argparse.Namespace, deps: EngineDeps) -> tuple[int, dict]:
         return read_evidence(args.role, deps)
     if group == "rollback":
         return engine_rollback(args.role, _gate(args), deps)
+    if group == "enrollment":
+        return _dispatch_enrollment(args, enr)
+    if group == "worker":
+        return _dispatch_worker(args, enr)
     return EXIT_REFUSED, {"command": group, "reason_code": "unknown_command"}
+
+
+def _dispatch_worker(args: argparse.Namespace, enr: EnrollmentCliDeps) -> tuple[int, dict]:
+    if args.action == "enroll":
+        return worker_enroll(enr, invitation_file=args.invitation, gate=_gate(args))
+    if args.action == "enrollment" and args.worker_action == "status":
+        return worker_status(enr, invitation_file=args.invitation)
+    if args.action == "enrollment" and args.worker_action == "retry":
+        return worker_retry(enr, invitation_file=args.invitation, gate=_gate(args))
+    return EXIT_REFUSED, {"command": "worker", "reason_code": "unknown_command"}
+
+
+def _dispatch_enrollment(args: argparse.Namespace, enr: EnrollmentCliDeps) -> tuple[int, dict]:
+    if args.action == "invite" and args.invite_action == "create":
+        return invite_create(
+            enr, deployment_site_label=args.site, ttl_seconds=args.ttl_seconds, gate=_gate(args)
+        )
+    if args.action == "status":
+        return enrollment_status(enr, enrollment_id=args.enrollment_id)
+    if args.action == "revoke":
+        return enrollment_revoke(
+            enr,
+            enrollment_id=args.enrollment_id,
+            expected_revision=args.expected_revision,
+            gate=_gate(args),
+        )
+    return EXIT_REFUSED, {"command": "enrollment", "reason_code": "unknown_command"}
+
+
+def _production_enrollment_deps() -> EnrollmentCliDeps:
+    """Compose the real controller client from the bootstrap-recorded locator + the protected
+    operator token (POSIX/production). Any construction failure falls back to the SEALED default, so
+    an unconfigured or non-POSIX host fails closed with a bounded code rather than crashing."""
+    try:
+        import os
+
+        from secp_commissioning.runtime import RealFilesystem
+
+        from secp_management.controller_api_locator import FileControllerApiLocatorProvider
+        from secp_management.enrollment_controller_client import HttpsEnrollmentControllerClient
+        from secp_management.operator_auth import (
+            OPERATOR_TOKEN_FILE_ENV,
+            ProtectedTokenFileProvider,
+            SealedOperatorAccessTokenProvider,
+        )
+
+        fs = RealFilesystem()
+        token_path = os.environ.get(OPERATOR_TOKEN_FILE_ENV, "")
+        token_provider = (
+            ProtectedTokenFileProvider(token_path)
+            if token_path
+            else SealedOperatorAccessTokenProvider()
+        )
+        client = HttpsEnrollmentControllerClient(
+            locator_provider=FileControllerApiLocatorProvider(fs),
+            token_provider=token_provider,
+        )
+        from secp_management.worker_enroller import build_worker_enroller
+
+        return EnrollmentCliDeps(controller_client=client, worker_enroller=build_worker_enroller())
+    except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
+        return EnrollmentCliDeps()
 
 
 def main(argv: list[str] | None = None) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
-    exit_code, payload = run(args_list)
+    # the enrollment/worker groups get the production client composition; everything else does not
+    enr = _production_enrollment_deps() if _is_enrollment_group(args_list) else None
+    exit_code, payload = run(args_list, enrollment_deps=enr)
     if "--json" in args_list:
         sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
     else:

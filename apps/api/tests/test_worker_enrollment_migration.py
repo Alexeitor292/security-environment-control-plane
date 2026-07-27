@@ -25,7 +25,7 @@ from sqlalchemy import create_engine, inspect, text
 
 API_DIR = Path(__file__).resolve().parents[1]
 
-REVISION = "b6e2f4a9c1d7"
+REVISION = "c2f8e1a4b6d9"
 DOWN_REVISION = "d8f1a2b3c4e5"
 
 ENROLLMENT_TABLES = {

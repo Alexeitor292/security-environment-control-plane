@@ -54,6 +54,9 @@ _ENROLLMENT_TABLES = (
     "worker_enrollment_state",
     "worker_enrollment_revision",
     "worker_enrollment_step_receipt",
+    # Phase 3: the write-once signed controller offer store holds PUBLIC material only (canonical
+    # claim + detached attestation); its column names must carry no secret-shaped fragment either.
+    "worker_enrollment_signed_offer",
 )
 # controller_origin is the ONE validated HTTPS-origin field the contract permits (not an arbitrary
 # URL); allow it explicitly so the broad ``url`` fragment does not false-positive.
@@ -108,7 +111,7 @@ def session_actor():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.exec_driver_sql("CREATE TABLE alembic_version (version_num varchar(32) primary key)")
-        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('b6e2f4a9c1d7')")
+        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('c2f8e1a4b6d9')")
     factory = sessionmaker(bind=engine, future=True)
     session: Session = factory()
     p = bootstrap_dev(session)
@@ -153,7 +156,7 @@ def _open_and_bind(session, actor):
         worker_key_id=WORKER_KEY,
         transaction_id=TXN,
         now=NOW,
-        expected=svc.ExpectedRevision(0, state.digest(), 0, ""),
+        expected_revision=0,
     )
     session.commit()
     return out.state

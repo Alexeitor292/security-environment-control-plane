@@ -5,9 +5,9 @@ an Alembic migration cannot simply replace the pinned value: every already-issue
 stop validating and every controller would need a lockstep upgrade.  Instead the pin is widened into
 a **bounded rolling-upgrade window** — deliberately NOT an accept-any-head policy:
 
-* :data:`ACCEPTED_CONTROLLER_MIGRATION_HEADS` contains EXACTLY two values (the legacy PR5F head and
-  the current PR5H head) and is used ONLY to *validate* an already-issued signed artifact, or an
-  observed live controller, during the window;
+* :data:`ACCEPTED_CONTROLLER_MIGRATION_HEADS` contains the explicitly supported rolling heads (the
+  legacy PR5F head, the PR5H-A foundation head, and the current PR5H-B1 head) and is used ONLY to
+  *validate* an already-issued signed artifact, or an observed live controller, during the window;
 * :data:`ISSUED_CONTROLLER_MIGRATION_HEAD` is single-valued — a newly issued offer ALWAYS declares
   only the current head, and issuance additionally REQUIRES the observed live head to equal it;
 * anything else — an unknown, malformed, older, future or branched head — refuses closed.
@@ -32,22 +32,28 @@ from typing import Final, Literal, get_args
 
 #: The signed-record field type.  Declared FIRST so the constants below carry it (a Literal cannot
 #: be built from names); :func:`accepted_heads_match_literal` proves it never drifts from the tuple.
-ControllerMigrationHead = Literal["d8f1a2b3c4e5", "b6e2f4a9c1d7"]
+ControllerMigrationHead = Literal["d8f1a2b3c4e5", "b6e2f4a9c1d7", "c2f8e1a4b6d9"]
 
 #: SECP-PR5F (B8 production activation) — the legacy head, accepted only during the window.
 LEGACY_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "d8f1a2b3c4e5"
 
-#: SECP-PR5H-A (durable worker-enrollment foundation) — the current head.
-CURRENT_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "b6e2f4a9c1d7"
+#: SECP-PR5H-A (durable worker-enrollment foundation) — accepted during the window.
+PR5H_A_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "b6e2f4a9c1d7"
 
-#: The BOUNDED compatibility window: exactly the two heads above, in upgrade order.
+#: SECP-PR5H-B1 (controller-identity history, F3) — the current head.
+CURRENT_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "c2f8e1a4b6d9"
+
+#: The BOUNDED compatibility window: the explicitly supported rolling heads, in upgrade order.
+#: Retaining the legacy head is TEMPORARY — removing it still requires a later explicit deprecation
+#: change proving every corresponding signed offer has expired or been retired.
 ACCEPTED_CONTROLLER_MIGRATION_HEADS: Final[tuple[str, ...]] = (
     LEGACY_CONTROLLER_MIGRATION_HEAD,
+    PR5H_A_CONTROLLER_MIGRATION_HEAD,
     CURRENT_CONTROLLER_MIGRATION_HEAD,
 )
 
-#: A newly issued ControllerOffer declares ONLY this head (never the legacy one).
-ISSUED_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "b6e2f4a9c1d7"
+#: A newly issued ControllerOffer declares ONLY the current head (never an older one).
+ISSUED_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "c2f8e1a4b6d9"
 
 
 def is_accepted_controller_migration_head(value: object) -> bool:
@@ -65,6 +71,7 @@ __all__ = [
     "CURRENT_CONTROLLER_MIGRATION_HEAD",
     "ISSUED_CONTROLLER_MIGRATION_HEAD",
     "LEGACY_CONTROLLER_MIGRATION_HEAD",
+    "PR5H_A_CONTROLLER_MIGRATION_HEAD",
     "ControllerMigrationHead",
     "accepted_heads_match_literal",
     "is_accepted_controller_migration_head",

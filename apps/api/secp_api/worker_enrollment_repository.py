@@ -23,12 +23,13 @@ semantics; this module only persists and re-validates.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Final
 
-from secp_commissioning.canonical import is_sha256_digest
+from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_bytes
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -58,6 +59,9 @@ from secp_api.worker_enrollment_models import (
 )
 from secp_api.worker_enrollment_models import (
     WorkerEnrollmentRevision as RevisionRow,
+)
+from secp_api.worker_enrollment_models import (
+    WorkerEnrollmentSignedOffer as SignedOfferRow,
 )
 from secp_api.worker_enrollment_models import (
     WorkerEnrollmentState as StateRow,
@@ -409,6 +413,24 @@ def load_invitation_for_update(session: Session, enrollment_id: str) -> Invitati
     return session.execute(stmt).scalar_one_or_none()
 
 
+def load_invitation_by_nonce(session: Session, invitation_id: str) -> InvitationRow | None:
+    """The invitation row for a single-use nonce (its ``invitation_id``), or None — used by the
+    idempotent-creation replay path to recover the ORIGINAL invitation on a nonce conflict."""
+    return session.execute(
+        select(InvitationRow).where(InvitationRow.invitation_id == invitation_id)
+    ).scalar_one_or_none()
+
+
+def load_revision_row(session: Session, enrollment_id: str, revision: int) -> RevisionRow | None:
+    """One append-only revision-history row (immutable), or None. The idempotent-creation replay
+    uses revision 0 as the durable, unchangeable record of the ORIGINAL invited/rev-0 create."""
+    return session.execute(
+        select(RevisionRow).where(
+            RevisionRow.enrollment_id == enrollment_id, RevisionRow.revision == revision
+        )
+    ).scalar_one_or_none()
+
+
 # --------------------------------------------------------------------------- creation
 
 
@@ -512,8 +534,78 @@ def _insert_revision_row(session: Session, state: EnrollmentState) -> None:
             state=state.state,
             state_digest=state.digest(),
             predecessor_digest=state.predecessor_digest,
+            # the immutable canonical snapshot of THIS revision (T3): a delayed idempotent retry
+            # rehydrates the original step result from here, never from the current head
+            state_snapshot=canonical_json(state.canonical()),
         )
     )
+
+
+def _rehydrate_revision_snapshot(row: RevisionRow) -> EnrollmentState:
+    """Rebuild the EnrollmentState from a revision row's canonical snapshot. A NULL / non-JSON /
+    structurally wrong snapshot is corruption of an append-only record — refuse, never repair."""
+    if row.state_snapshot is None:
+        raise _refuse("enrollment_state_corrupt")
+    try:
+        data = json.loads(row.state_snapshot)
+    except (ValueError, TypeError):
+        raise _refuse("enrollment_state_corrupt") from None
+    if not isinstance(data, dict):
+        raise _refuse("enrollment_state_corrupt")
+    try:
+        return EnrollmentState(
+            contract_version=data["contract_version"],
+            enrollment_id=data["enrollment_id"],
+            state=data["state"],
+            revision=data["revision"],
+            sequence=data["sequence"],
+            predecessor_digest=data["predecessor_digest"],
+            controller_installation_id=data["controller_installation_id"],
+            controller_key_id=data["controller_key_id"],
+            worker_installation_id=data["worker_installation_id"],
+            worker_key_id=data["worker_key_id"],
+            release_digest=data["release_digest"],
+            transaction_id=data["transaction_id"],
+            offer_digest=data["offer_digest"],
+            result_digest=data["result_digest"],
+            expires_at=data["expires_at"],
+            updated_at=data["updated_at"],
+            refusal_reason=data["refusal_reason"],
+        )
+    except (KeyError, TypeError):
+        raise _refuse("enrollment_state_corrupt") from None
+
+
+def load_revision_state(
+    session: Session, enrollment_id: str, revision: int
+) -> EnrollmentState | None:
+    """Rehydrate the IMMUTABLE state committed at ``revision`` from its append-only canonical
+    snapshot, fully validated. Returns None ONLY if the revision does not exist; a present-but-
+    missing/malformed/digest-mismatched snapshot is corruption (``enrollment_state_corrupt``), never
+    silently repaired. The recomputed canonical digest MUST equal the persisted history digest, and
+    the redundant history columns must agree with the snapshot — so a tampered snapshot cannot load.
+    """
+    row = load_revision_row(session, enrollment_id, revision)
+    if row is None:
+        return None
+    state = _rehydrate_revision_snapshot(row)
+    if state.contract_version != ENROLLMENT_CONTRACT_VERSION:
+        raise _refuse("enrollment_state_corrupt")
+    if state.state not in WORKER_ENROLLMENT_STATES:
+        raise _refuse("enrollment_state_corrupt")
+    if not is_sha256_digest(state.enrollment_id) or state.enrollment_id != enrollment_id:
+        raise _refuse("enrollment_state_corrupt")
+    if (
+        state.state != row.state
+        or state.revision != row.revision
+        or state.revision != revision
+        or state.predecessor_digest != row.predecessor_digest
+    ):
+        raise _refuse("enrollment_state_corrupt")
+    # THE integrity compare: the recomputed canonical digest must equal the persisted history digest
+    if state.digest() != row.state_digest:
+        raise _refuse("enrollment_state_corrupt")
+    return state
 
 
 # --------------------------------------------------------------------------- transition write (CAS)
@@ -642,6 +734,145 @@ def find_receipt(
             ReceiptRow.input_digest == input_digest,
         )
     ).scalar_one_or_none()
+
+
+# ----------------------------------------------------------------------- signed controller offer
+
+
+@dataclass(frozen=True)
+class SignedOfferRecord:
+    """The full persisted winning-bind record for an EXACT retry (C2), digest-verified on read: the
+    public offer envelope, the digest binding the winning bind request, the offer-claim digest, the
+    resulting revision + state digest, the bound worker installation/key, and the EXACT original
+    BindExchangeOut bytes returned verbatim (never rebuilt from the possibly-advanced head)."""
+
+    envelope: str
+    bind_input_digest: str
+    offer_claim_digest: str
+    resulting_revision: int
+    resulting_state_digest: str
+    worker_installation_id: str
+    worker_key_id: str
+    response_json: str
+
+
+def persist_signed_offer(
+    session: Session,
+    *,
+    enrollment_id: str,
+    organization_id: uuid.UUID,
+    offer_revision: int,
+    signer_key_id: str,
+    signed_offer: str,
+    bind_input_digest: str | None = None,
+    offer_claim_digest: str | None = None,
+    resulting_revision: int | None = None,
+    resulting_state_digest: str | None = None,
+    worker_installation_id: str | None = None,
+    worker_key_id: str | None = None,
+    response_json: str | None = None,
+) -> None:
+    """Persist the immutable public signed controller offer WRITE-ONCE (in the SAME transaction as
+    the winning bind transition). A concurrent/duplicate bind collides on ``UNIQUE(enrollment_id)``
+    and refuses the bounded ``enrollment_signed_offer_conflict`` — so exactly one offer is ever
+    minted per enrollment and a lost-response retry re-reads it rather than re-signing. The trusted
+    bind path ALWAYS supplies the C2 winning-bind bindings (so an exact retry can be proven byte-
+    for-byte); ``load_signed_offer_record`` refuses a row missing them."""
+    if len(signed_offer) > 8192 or not is_sha256_digest(signer_key_id):
+        raise _refuse("enrollment_state_corrupt")
+    if response_json is not None and len(response_json) > 16384:
+        raise _refuse("enrollment_state_corrupt")
+    session.add(
+        SignedOfferRow(
+            enrollment_id=enrollment_id,
+            organization_id=organization_id,
+            offer_revision=offer_revision,
+            signer_key_id=signer_key_id,
+            signed_offer=signed_offer,
+            response_digest=sha256_bytes(signed_offer.encode("utf-8")),
+            bind_input_digest=bind_input_digest,
+            offer_claim_digest=offer_claim_digest,
+            resulting_revision=resulting_revision,
+            resulting_state_digest=resulting_state_digest,
+            worker_installation_id=worker_installation_id,
+            worker_key_id=worker_key_id,
+            response_json=response_json,
+            response_json_digest=(
+                sha256_bytes(response_json.encode("utf-8")) if response_json is not None else None
+            ),
+        )
+    )
+    try:
+        session.flush()
+    except IntegrityError:
+        raise _refuse("enrollment_signed_offer_conflict") from None
+
+
+def load_signed_offer(session: Session, enrollment_id: str) -> str | None:
+    """The exact persisted signed offer ENVELOPE for the result-exchange binding, digest-verified on
+    read. Returns None if none exists; a tampered / oversized row is corruption (refused, never
+    repaired)."""
+    row = session.execute(
+        select(SignedOfferRow).where(SignedOfferRow.enrollment_id == enrollment_id)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    if len(row.signed_offer) > 8192 or not is_sha256_digest(row.response_digest):
+        raise _refuse("enrollment_state_corrupt")
+    if sha256_bytes(row.signed_offer.encode("utf-8")) != row.response_digest:
+        raise _refuse("enrollment_state_corrupt")
+    return row.signed_offer
+
+
+def load_signed_offer_record(session: Session, enrollment_id: str) -> SignedOfferRecord | None:
+    """The full winning-bind record for an EXACT bind retry (C2), fully digest-verified on read.
+    Returns None if none exists; a tampered / oversized / NULL-binding row is corruption (refused as
+    ``enrollment_state_corrupt``, never returned or re-signed)."""
+    row = session.execute(
+        select(SignedOfferRow).where(SignedOfferRow.enrollment_id == enrollment_id)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    # (1) offer-envelope integrity
+    if len(row.signed_offer) > 8192 or not is_sha256_digest(row.response_digest):
+        raise _refuse("enrollment_state_corrupt")
+    if sha256_bytes(row.signed_offer.encode("utf-8")) != row.response_digest:
+        raise _refuse("enrollment_state_corrupt")
+    # (2) every C2 binding must be present and well-formed
+    if (
+        row.bind_input_digest is None
+        or row.offer_claim_digest is None
+        or row.resulting_revision is None
+        or row.resulting_state_digest is None
+        or row.worker_installation_id is None
+        or row.worker_key_id is None
+        or row.response_json is None
+        or row.response_json_digest is None
+    ):
+        raise _refuse("enrollment_state_corrupt")
+    if not (
+        is_sha256_digest(row.bind_input_digest)
+        and is_sha256_digest(row.offer_claim_digest)
+        and is_sha256_digest(row.resulting_state_digest)
+        and is_sha256_digest(row.worker_key_id)
+        and is_sha256_digest(row.response_json_digest)
+    ):
+        raise _refuse("enrollment_state_corrupt")
+    # (3) original-response integrity
+    if len(row.response_json) > 16384:
+        raise _refuse("enrollment_state_corrupt")
+    if sha256_bytes(row.response_json.encode("utf-8")) != row.response_json_digest:
+        raise _refuse("enrollment_state_corrupt")
+    return SignedOfferRecord(
+        envelope=row.signed_offer,
+        bind_input_digest=row.bind_input_digest,
+        offer_claim_digest=row.offer_claim_digest,
+        resulting_revision=row.resulting_revision,
+        resulting_state_digest=row.resulting_state_digest,
+        worker_installation_id=row.worker_installation_id,
+        worker_key_id=row.worker_key_id,
+        response_json=row.response_json,
+    )
 
 
 def revision_state_digest(session: Session, *, enrollment_id: str, revision: int) -> str | None:

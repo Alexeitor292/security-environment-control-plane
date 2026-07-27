@@ -354,14 +354,32 @@ def test_api_enrollment_surface_gains_no_privileged_capability() -> None:
         assert not offending, f"{path.name} gained privileged capability {sorted(offending)}"
 
 
-# --- family 3: PR5H-A inertness -------------------------------------------------------------------
+# --- family 3: PR5H-B1 activation boundary --------------------------------------------------------
 #
-# PR5H-A is a durable FOUNDATION. Nothing outside the test suite may reach it yet: no route, no UI,
-# no supported mutating production CLI, no transport, no host bootstrap, no workflow, no provider
-# call, no operator activation. These guards fail the moment any of that is wired.
+# PR5H-B1 activates the SUPPORTED controller enrollment path over the durable PR5H-A foundation. The
+# controller API route is now wired and authenticated, but the activation stays narrow: the outbound
+# transport stays sealed, the restart/recovery sweep stays unwired, no supported mutating production
+# CLI exists yet, and no operator / provider / controlled-live capability is reachable. These guards
+# fail the moment the activation widens past the controller API slice.
+
+# the single production entry point permitted to import the enrollment service (PR5H-B1 slice 1)
+_ALLOWED_ENROLLMENT_SERVICE_REACHERS = {"apps/api/secp_api/routers/enrollment.py"}
 
 
-def test_no_enrollment_api_router_is_registered() -> None:
+#: C1: the two SUPPORTED evidence-driven exchange routes authenticate by the worker's SIGNED
+#: EVIDENCE (verified against the authoritative persisted invitation), NOT a control-plane OIDC
+#: principal — a real worker transport sends no human bearer token — so they take NO
+#: ``current_principal``. Every OTHER enrollment route (operator create/status/revoke + the sealed
+#: claim-only routes) stays principal-authenticated.
+_EVIDENCE_AUTHENTICATED_ROUTES = {"bind_worker_exchange", "record_worker_result_exchange"}
+
+
+def test_enrollment_api_router_is_registered_and_authenticated() -> None:
+    """PR5H-B1 registers the controller enrollment router. Every operator/claim-only route must
+    require an authenticated principal (organization is the authorization boundary); the two
+    supported evidence-driven exchange routes instead authenticate by the worker's signed evidence
+    and must take NO principal (C1). The router must reach no operator, provider, controlled-live or
+    transport-activation capability."""
     main_py = API_PKG / "main.py"
     registered = [
         ast.unparse(node)
@@ -370,19 +388,48 @@ def test_no_enrollment_api_router_is_registered() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "include_router"
     ]
-    offending = [call for call in registered if "enrollment" in call.lower()]
-    assert not offending, f"an enrollment router is registered: {offending}"
-    # ...and no router module for enrollment exists at all
-    routers = API_PKG / "routers"
-    if routers.is_dir():
-        assert not [p.name for p in routers.glob("*enrollment*")], (
-            "an enrollment router module exists"
+    assert any("enrollment" in call.lower() for call in registered), (
+        "the PR5H-B1 controller enrollment router must be registered"
+    )
+    router = API_PKG / "routers" / "enrollment.py"
+    assert router.is_file(), "the enrollment router module must exist"
+
+    tree = _tree(router)
+    route_funcs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(dec, ast.Call)
+            and isinstance(dec.func, ast.Attribute)
+            and dec.func.attr in {"get", "post", "put", "delete", "patch"}
+            for dec in node.decorator_list
         )
+    ]
+    assert route_funcs, "the enrollment router must define at least one route"
+    for func in route_funcs:
+        args = ast.unparse(func.args)
+        if func.name in _EVIDENCE_AUTHENTICATED_ROUTES:
+            assert "current_principal" not in args, (
+                f"the evidence-driven exchange route {func.name} must NOT depend on "
+                "current_principal (it authenticates by the worker's signed evidence, C1)"
+            )
+        else:
+            assert "current_principal" in args, (
+                f"enrollment route {func.name} must require an authenticated principal"
+            )
+    forbidden = ("operator", "opentofu", "proxmox", "controlled_live", "temporalio")
+    router_imports = {m.lower() for m in _imports(router)}
+    offending = {m for m in router_imports if any(f in m for f in forbidden)}
+    assert not offending, f"the enrollment router reaches forbidden capability: {sorted(offending)}"
 
 
-def test_no_module_outside_tests_imports_the_enrollment_service_or_recovery() -> None:
-    """The foundation is inert: only the test layer may reach the service or the sweep."""
-    reachers: list[str] = []
+def test_only_the_enrollment_router_reaches_the_service_and_recovery_stays_unwired() -> None:
+    """The enrollment SERVICE is reachable from exactly one production entry point (the controller
+    API router); nothing else — no operator, worker, provider, CLI or bootstrap module — may import
+    it, and the restart/recovery SWEEP service stays unwired until its own PR5H-B1 slice."""
+    service_reachers: list[str] = []
+    recovery_reachers: list[str] = []
     for root in (REPO / "apps", REPO / "plugins", REPO / "contracts"):
         for path in sorted(root.rglob("*.py")):
             if "__pycache__" in path.parts or "tests" in path.parts:
@@ -393,12 +440,20 @@ def test_no_module_outside_tests_imports_the_enrollment_service_or_recovery() ->
             for node in ast.walk(_tree(path)):
                 if isinstance(node, ast.ImportFrom) and node.module:
                     names.update(f"{node.module}.{a.name}" for a in node.names)
-            if {
-                "secp_api.services.worker_enrollment",
-                "secp_api.services.worker_enrollment_recovery",
-            } & names:
-                reachers.append(str(path.relative_to(REPO)))
-    assert not reachers, f"the inert foundation is wired into {reachers}"
+            rel = str(path.relative_to(REPO)).replace("\\", "/")
+            if (
+                "secp_api.services.worker_enrollment" in names
+                and rel not in _ALLOWED_ENROLLMENT_SERVICE_REACHERS
+            ):
+                service_reachers.append(rel)
+            if "secp_api.services.worker_enrollment_recovery" in names:
+                recovery_reachers.append(rel)
+    assert not service_reachers, (
+        f"the enrollment service is wired into unexpected modules: {service_reachers}"
+    )
+    assert not recovery_reachers, (
+        f"the recovery sweep must stay unwired until its slice: {recovery_reachers}"
+    )
 
 
 def test_enrollment_transport_remains_sealed() -> None:

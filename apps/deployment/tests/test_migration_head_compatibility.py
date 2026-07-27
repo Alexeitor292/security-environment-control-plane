@@ -21,18 +21,26 @@ from secp_discovery_activation.migration_heads import (
     CURRENT_CONTROLLER_MIGRATION_HEAD,
     ISSUED_CONTROLLER_MIGRATION_HEAD,
     LEGACY_CONTROLLER_MIGRATION_HEAD,
+    PR5H_A_CONTROLLER_MIGRATION_HEAD,
     accepted_heads_match_literal,
     is_accepted_controller_migration_head,
 )
 
 
-def test_window_contains_exactly_the_two_reviewed_heads() -> None:
-    assert ACCEPTED_CONTROLLER_MIGRATION_HEADS == ("d8f1a2b3c4e5", "b6e2f4a9c1d7")
+def test_window_contains_the_supported_rolling_heads() -> None:
+    # the bounded window widened to the explicitly supported rolling heads (legacy PR5F is retained
+    # temporarily; its removal requires a later explicit deprecation change)
+    assert ACCEPTED_CONTROLLER_MIGRATION_HEADS == (
+        "d8f1a2b3c4e5",
+        "b6e2f4a9c1d7",
+        "c2f8e1a4b6d9",
+    )
     assert LEGACY_CONTROLLER_MIGRATION_HEAD == "d8f1a2b3c4e5"
-    assert CURRENT_CONTROLLER_MIGRATION_HEAD == "b6e2f4a9c1d7"
-    # the window is BOUNDED — exactly two, never open-ended
-    assert len(ACCEPTED_CONTROLLER_MIGRATION_HEADS) == 2
-    assert len(set(ACCEPTED_CONTROLLER_MIGRATION_HEADS)) == 2
+    assert PR5H_A_CONTROLLER_MIGRATION_HEAD == "b6e2f4a9c1d7"
+    assert CURRENT_CONTROLLER_MIGRATION_HEAD == "c2f8e1a4b6d9"
+    # the window stays BOUNDED and closed — never open-ended
+    assert len(ACCEPTED_CONTROLLER_MIGRATION_HEADS) == 3
+    assert len(set(ACCEPTED_CONTROLLER_MIGRATION_HEADS)) == 3
 
 
 def test_literal_and_tuple_never_drift() -> None:

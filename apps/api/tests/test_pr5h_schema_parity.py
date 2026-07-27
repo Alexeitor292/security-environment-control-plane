@@ -21,14 +21,17 @@ from secp_api.models import Base
 from sqlalchemy import create_engine, inspect
 
 API_DIR = Path(__file__).resolve().parents[1]
-HEAD = "b6e2f4a9c1d7"
-DOWN_REVISION = "d8f1a2b3c4e5"
+HEAD = "c2f8e1a4b6d9"  # PR5H-B1 sole head (controller-identity, F3)
+DOWN_REVISION = "b6e2f4a9c1d7"  # HEAD's immediate parent (PR5H-A enrollment foundation)
+PR5F_BASE = "d8f1a2b3c4e5"  # below all PR5H tables — the downgrade target that removes them
 
 ENROLLMENT_TABLES = (
     "worker_enrollment_invitation",
     "worker_enrollment_state",
     "worker_enrollment_revision",
     "worker_enrollment_step_receipt",
+    "controller_enrollment_identity",
+    "worker_enrollment_signed_offer",
 )
 
 
@@ -195,11 +198,13 @@ def test_tenancy_and_shadow_columns_exist_in_both(migrated_and_orm) -> None:
 # --- head chain ----------------------------------------------------------------------------
 
 
-def test_b6e2f4a9c1d7_is_the_sole_head_with_the_exact_down_revision() -> None:
+def test_c2f8e1a4b6d9_is_the_sole_head_with_the_linear_pr5h_chain() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite+pysqlite:///:memory:"))
     heads = tuple(script.get_heads())
     assert heads == (HEAD,), f"expected the sole head {HEAD}, found {heads}"
+    # linear chain: d8f1a2b3c4e5 -> b6e2f4a9c1d7 -> c2f8e1a4b6d9
     assert script.get_revision(HEAD).down_revision == DOWN_REVISION
+    assert script.get_revision(DOWN_REVISION).down_revision == PR5F_BASE
 
 
 def test_only_one_pr5h_migration_exists_and_it_adds_no_recovery_step() -> None:
@@ -229,8 +234,8 @@ def test_accepted_issued_and_runtime_heads_are_unchanged() -> None:
         ISSUED_CONTROLLER_MIGRATION_HEAD,
     )
 
-    # the bounded rolling window stays exactly two values
-    assert ACCEPTED_CONTROLLER_MIGRATION_HEADS == (DOWN_REVISION, HEAD)
+    # the bounded rolling window holds the explicitly supported heads, in upgrade order
+    assert ACCEPTED_CONTROLLER_MIGRATION_HEADS == (PR5F_BASE, DOWN_REVISION, HEAD)
     # issuance and live-schema readiness are new-head-only
     assert ISSUED_CONTROLLER_MIGRATION_HEAD == HEAD
     assert RUNTIME_REQUIRED_MIGRATION_HEAD == HEAD
@@ -244,7 +249,7 @@ def test_downgrade_removes_only_the_four_pr5h_tables(tmp_path, monkeypatch) -> N
     engine = create_engine(url, future=True)
     before = set(inspect(engine).get_table_names())
 
-    command.downgrade(cfg, DOWN_REVISION)
+    command.downgrade(cfg, PR5F_BASE)
     after = set(inspect(engine).get_table_names())
 
     assert before - after == set(ENROLLMENT_TABLES), "downgrade removed more than the PR5H tables"
@@ -260,7 +265,7 @@ def test_upgrade_downgrade_upgrade_round_trip_is_stable(tmp_path, monkeypatch) -
     engine = create_engine(url, future=True)
     first = sorted(inspect(engine).get_table_names())
 
-    command.downgrade(cfg, DOWN_REVISION)
+    command.downgrade(cfg, PR5F_BASE)
     command.upgrade(cfg, "head")
     assert sorted(inspect(engine).get_table_names()) == first
     engine.dispose()

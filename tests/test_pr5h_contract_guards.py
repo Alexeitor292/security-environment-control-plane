@@ -264,12 +264,14 @@ def test_invitation_consumption_is_conditional_and_inside_the_bind_transaction()
 
 
 def test_step_receipt_retry_precedes_stale_expected_token_rejection() -> None:
+    # T1: the public progression steps carry only ``expected_revision``; the revision pre-check is
+    # ``_verify_expected_revision``. The receipt-first ordering invariant is unchanged.
     for name in ("bind_worker", "_advance_step"):
         fn = _function(SERVICE, name)
         serve = _statement_index(fn, lambda s: _mentions(s, "_serve_receipt("))
-        verify = _statement_index(fn, lambda s: _mentions(s, "_verify_expected("))
+        verify = _statement_index(fn, lambda s: _mentions(s, "_verify_expected_revision("))
         assert serve is not None and verify is not None, name
-        assert serve < verify, f"{name}: receipt dedup must precede the expected-token check"
+        assert serve < verify, f"{name}: receipt dedup must precede the expected-revision check"
 
 
 def test_lifecycle_history_retry_precedes_stale_expected_token_rejection() -> None:
@@ -410,7 +412,8 @@ def test_enrollment_models_can_be_imported_first_without_a_circular_import() -> 
     """Regression: ``secp_api.models`` re-exported the enrollment model CLASS NAMES, so importing
     ``secp_api.worker_enrollment_models`` first raised ImportError from a partially initialized
     module. The re-export is now a module import, which is cycle-tolerant in BOTH orders while still
-    registering the four tables on ``Base.metadata``."""
+    registering the enrollment tables on ``Base.metadata`` (five ``worker_enrollment_*`` tables:
+    the four PR5H-A tables plus the PR5H-B1 Phase 3 signed-offer store)."""
     import subprocess
 
     for first, second in (
@@ -421,7 +424,7 @@ def test_enrollment_models_can_be_imported_first_without_a_circular_import() -> 
             f"import {first}; import {second}\n"
             "from secp_api.models import Base\n"
             "names = sorted(t for t in Base.metadata.tables if t.startswith('worker_enrollment'))\n"
-            "assert len(names) == 4, names\n"
+            "assert len(names) == 5, names\n"
             "print('ok')\n"
         )
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-only

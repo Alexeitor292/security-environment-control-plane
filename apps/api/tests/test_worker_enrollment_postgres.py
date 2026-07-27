@@ -6,11 +6,12 @@ portable SQLite suite, every race here uses INDEPENDENT sessions on separate con
 "concurrency" would not prove the CAS / row-lock / unique-constraint guarantees.
 
 Proven here: exactly-one-winner for concurrent binds and concurrent transitions from one revision;
-stale-revision / stale-digest / wrong-predecessor refusals; duplicate-nonce and concurrent-nonce
-single-winner; exact-retry with no second history row; conflicting-retry refusal; cross-org / cross-
+stale-revision refusal (T1: the public boundary carries only ``expected_revision``); duplicate-nonce
+and concurrent-nonce single-winner; exact-retry with no second history row; conflicting-retry
+refusal; cross-org / cross-
 site isolation; participant-key/installation collision and corrupt-digest/broken-chain rehydration
 refusals; rollback atomicity leaving no partial state/nonce/revision/receipt; and that the live
-schema head is exactly ``b6e2f4a9c1d7``.
+schema head is exactly ``c2f8e1a4b6d9``.
 """
 
 from __future__ import annotations
@@ -140,7 +141,7 @@ def _bind(factory, actor, state, **over) -> contract.EnrollmentState:
             worker_key_id=over.get("worker_key_id", WORKER_KEY),
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         return out.state
@@ -150,7 +151,7 @@ def test_live_schema_head_is_exactly_the_required_head(pg):
     factory, actor, _ = pg
     with factory() as s:
         head = s.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert head == RUNTIME_REQUIRED_MIGRATION_HEAD == "b6e2f4a9c1d7"
+    assert head == RUNTIME_REQUIRED_MIGRATION_HEAD == "c2f8e1a4b6d9"
 
 
 def test_two_concurrent_binds_exactly_one_commits(pg):
@@ -171,7 +172,7 @@ def test_two_concurrent_binds_exactly_one_commits(pg):
                     worker_key_id=key,
                     transaction_id=TXN,
                     now=NOW,
-                    expected=_expected(state),
+                    expected_revision=state.revision,
                 )
                 s.commit()
                 return "committed"
@@ -224,7 +225,7 @@ def test_two_concurrent_transitions_from_one_revision_exactly_one_commits(pg):
                         enrollment_id=state.enrollment_id,
                         facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
                         now=NOW,
-                        expected=_expected(state),
+                        expected_revision=state.revision,
                     )
                 else:
                     svc.refuse_enrollment(
@@ -299,46 +300,27 @@ def test_stale_revision_refuses(pg):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(state),  # stale rev-0 token
+            expected_revision=state.revision,  # stale rev-0 token
         )
     assert ei.value.code == "enrollment_revision_conflict"
     assert bound.revision == 1
 
 
-def test_stale_state_digest_refuses(pg):
+def test_stale_expected_revision_refuses(pg):
+    # T1: the public boundary carries ONLY expected_revision; the internal state_digest / sequence /
+    # predecessor are derived from the loaded head. A FRESH step (no receipt) with a stale
+    # expected_revision refuses a bounded revision_conflict (the durable head CAS is unchanged).
     factory, actor, _ = pg
     state = _open(factory, actor, nonce="sha256:" + "b" * 64)
-    bad = svc.ExpectedRevision(
-        revision=0, state_digest="sha256:" + "0" * 64, sequence=0, predecessor_digest=""
-    )
+    _bind(factory, actor, state)  # advances the head to revision 1
     with factory() as s, pytest.raises(WorkerEnrollmentError) as ei:
-        svc.bind_worker(
+        svc.record_offer(
             s,
             actor,
             enrollment_id=state.enrollment_id,
-            worker_installation_id="worker-bbbbbbbb",
-            worker_key_id=WORKER_KEY,
-            transaction_id=TXN,
+            facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=bad,
-        )
-    assert ei.value.code == "enrollment_revision_conflict"
-
-
-def test_wrong_predecessor_refuses(pg):
-    factory, actor, _ = pg
-    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
-    bad = replace(_expected(state), predecessor_digest="sha256:" + "e" * 64)
-    with factory() as s, pytest.raises(WorkerEnrollmentError) as ei:
-        svc.bind_worker(
-            s,
-            actor,
-            enrollment_id=state.enrollment_id,
-            worker_installation_id="worker-bbbbbbbb",
-            worker_key_id=WORKER_KEY,
-            transaction_id=TXN,
-            now=NOW,
-            expected=bad,
+            expected_revision=0,  # stale: the head is now at revision 1
         )
     assert ei.value.code == "enrollment_revision_conflict"
 
@@ -357,12 +339,49 @@ def test_exact_retry_returns_committed_revision_without_second_history_row(pg):
             worker_key_id=WORKER_KEY,
             transaction_id=TXN,
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         after = s.execute(text("SELECT count(*) FROM worker_enrollment_revision")).scalar_one()
     assert out.deduplicated and out.committed_revision == 1
     assert after == before
+
+
+def test_delayed_bind_retry_after_revocation_returns_original_worker_bound(pg):
+    # T3 on real PostgreSQL: after the enrollment advances to a LATER terminal revision (revoked),
+    # replaying bind returns the ORIGINAL worker_bound result rehydrated from the immutable revision
+    # snapshot — never the current head — proven durably across independent sessions.
+    factory, actor, _ = pg
+    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
+    original = _bind(factory, actor, state)  # worker_bound at revision 1
+    assert original.state == contract.WORKER_BOUND and original.revision == 1
+    with factory() as s:
+        svc.revoke_enrollment(s, actor, enrollment_id=state.enrollment_id, expected_revision=1)
+        s.commit()
+        assert repo_load_state(s, state.enrollment_id) == contract.REFUSED  # head moved on
+    with factory() as s:
+        out = svc.bind_worker(
+            s,
+            actor,
+            enrollment_id=state.enrollment_id,
+            worker_installation_id="worker-bbbbbbbb",
+            worker_key_id=WORKER_KEY,
+            transaction_id=TXN,
+            now=NOW,
+            expected_revision=0,  # the ORIGINAL (now-stale) revision the worker first sent
+        )
+        s.commit()
+    assert out.deduplicated is True
+    assert out.committed_revision == 1
+    assert out.state.state == contract.WORKER_BOUND and out.state.revision == 1
+
+
+def repo_load_state(session, enrollment_id: str) -> str:
+    from secp_api import worker_enrollment_repository as repo
+
+    loaded = repo.load_read_only(session, enrollment_id)
+    assert loaded is not None
+    return loaded.state.state
 
 
 def test_conflicting_retry_refuses(pg):
@@ -375,7 +394,7 @@ def test_conflicting_retry_refuses(pg):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", OFFER_D, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(state),
+            expected_revision=state.revision,
         )
         s.commit()
         from secp_api import worker_enrollment_repository as repo
@@ -388,7 +407,7 @@ def test_conflicting_retry_refuses(pg):
             enrollment_id=state.enrollment_id,
             facts=contract.HandoffFacts("controller-offer", "sha256:" + "9" * 64, TXN, CTRL_KEY),
             now=NOW,
-            expected=_expected(offered),
+            expected_revision=offered.revision,
         )
     assert ei.value.code in ("enrollment_replay", "enrollment_wrong_state")
 
@@ -526,9 +545,11 @@ def test_receipt_pointing_to_missing_revision_refuses(pg):
             enrollment_id=bound.enrollment_id,
             release_digest=RELEASE,
             now=NOW,
-            expected=_expected(bound),
+            expected_revision=bound.revision,
         )
-    assert ei.value.code in ("enrollment_history_inconsistent", "enrollment_receipt_conflict")
+    # T3: a receipt pointing at a non-existent history revision is corruption of an append-only
+    # record — the historical state cannot be rehydrated, so it refuses enrollment_state_corrupt.
+    assert ei.value.code == "enrollment_state_corrupt"
 
 
 def test_receipt_with_wrong_recorded_digest_refuses(pg):
@@ -560,9 +581,10 @@ def test_receipt_with_wrong_recorded_digest_refuses(pg):
             enrollment_id=bound.enrollment_id,
             release_digest=RELEASE,
             now=NOW,
-            expected=_expected(bound),
+            expected_revision=bound.revision,
         )
-    assert ei.value.code == "enrollment_receipt_conflict"
+    # T3: the receipt's recorded digest disagrees with the rehydrated history state's digest.
+    assert ei.value.code == "enrollment_state_corrupt"
 
 
 def test_rollback_of_failed_transition_leaves_no_partial_effects(pg):
@@ -579,7 +601,7 @@ def test_rollback_of_failed_transition_leaves_no_partial_effects(pg):
                 worker_key_id=CTRL_KEY,
                 transaction_id=TXN,
                 now=NOW,
-                expected=_expected(state),
+                expected_revision=state.revision,
             )
             s.commit()
             committed = True
@@ -618,7 +640,7 @@ def test_malformed_offer_digest_refused_by_app_and_nothing_commits(pg):
                     "controller-offer", "sha256:" + "g" * 64, TXN, CTRL_KEY
                 ),
                 now=NOW,
-                expected=_expected(bound),
+                expected_revision=bound.revision,
             )
         assert ei.value.code == "enrollment_handoff_invalid"
         s.rollback()
@@ -681,7 +703,7 @@ def test_over_width_transition_timestamp_refused_before_pg_persistence(pg):
                 worker_key_id=WORKER_KEY,
                 transaction_id=TXN,
                 now=too_long_now,
-                expected=_expected(state),
+                expected_revision=state.revision,
             )
         assert ei.value.code == "enrollment_time_invalid"
         s.rollback()
@@ -691,3 +713,189 @@ def test_over_width_transition_timestamp_refused_before_pg_persistence(pg):
             {"e": state.enrollment_id},
         ).one()
     assert head == (contract.INVITED, 0)
+
+
+def test_concurrent_idempotent_creation_yields_one_invitation(pg):
+    # F5: two overlapping retries with the SAME idempotency key produce exactly one invitation, one
+    # revision-0 state and one creation audit; both callers get a byte-equivalent response (on real
+    # PostgreSQL the losing INSERT blocks on the UNIQUE nonce until the winner commits, then
+    # replays)
+    factory, actor, _ = pg
+    key = "a" * 24
+    barrier = Barrier(2)
+
+    def attempt(_i: int):
+        with factory() as s:
+            barrier.wait(timeout=15)
+            try:
+                r = svc.create_supported_invitation(
+                    s,
+                    actor,
+                    idempotency_key=key,
+                    deployment_site_label=SITE,
+                    ttl_seconds=3600,
+                    created_at="2026-07-21T00:00:00Z",
+                    expires_at="2026-07-21T01:00:00Z",
+                )
+                s.commit()
+                return (r.enrollment_id, r.invitation_id, r.transaction_id)
+            except WorkerEnrollmentError as exc:
+                s.rollback()
+                return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, range(2)))
+    tuples = [o for o in outcomes if isinstance(o, tuple)]
+    assert len(tuples) == 2 and tuples[0] == tuples[1], outcomes  # byte-equivalent responses
+    with factory() as s:
+        states = s.execute(text("SELECT count(*) FROM worker_enrollment_state")).scalar_one()
+        audits = s.execute(
+            text("SELECT count(*) FROM audit_event WHERE action='enrollment.invitation_created'")
+        ).scalar_one()
+    assert states == 1 and audits == 1
+
+
+def test_concurrent_controller_identity_rotation_keeps_one_active(pg):
+    # F3: overlapping rotations never leave two active identities — the active_marker UNIQUE
+    # exactly one active globally; each attempt either commits or refuses a bounded conflict
+    from secp_api.controller_identity_dev import build_test_verified_controller_identity
+    from secp_api.services import controller_identity as ci
+
+    factory, actor, _ = pg
+    barrier = Barrier(2)
+
+    def rotate(tag: str):
+        proof = build_test_verified_controller_identity(
+            controller_installation_id=f"controller-{tag}00001",
+            controller_trust_anchor_hex=tag * 32,
+            controller_origin=f"https://c{tag}.example.test",
+            release_digest="sha256:" + tag * 32,
+        )
+        with factory() as s:
+            barrier.wait(timeout=15)
+            try:
+                ci.activate_controller_identity(s, proof)
+                s.commit()
+                return "committed"
+            except WorkerEnrollmentError as exc:
+                s.rollback()
+                return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(rotate, ["33", "44"]))
+    assert all(o == "committed" or o == "enrollment_identity_conflict" for o in outcomes), outcomes
+    with factory() as s:
+        active = s.execute(
+            text("SELECT count(*) FROM controller_enrollment_identity WHERE status='active'")
+        ).scalar_one()
+    assert active == 1  # the single-active invariant holds under concurrency
+
+
+def test_concurrent_revoke_yields_one_transition_and_one_audit(pg):
+    # revoke slice: overlapping operator revokes drive the enrollment to refused exactly once — the
+    # head CAS admits one transition; the other either conflicts or is an idempotent no-op. Exactly
+    # one revocation audit is recorded and the revision advances by exactly one.
+    factory, actor, _ = pg
+    state = _open(factory, actor, nonce="sha256:" + "b" * 64)
+    barrier = Barrier(2)
+
+    def attempt(_i: int):
+        with factory() as s:
+            barrier.wait(timeout=15)
+            try:
+                svc.revoke_enrollment(
+                    s, actor, enrollment_id=state.enrollment_id, expected_revision=state.revision
+                )
+                s.commit()
+                return "ok"
+            except WorkerEnrollmentError as exc:
+                s.rollback()
+                return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, range(2)))
+    assert all(o == "ok" or o == "enrollment_revision_conflict" for o in outcomes), outcomes
+    with factory() as s:
+        row = s.execute(
+            text("SELECT state, revision FROM worker_enrollment_state WHERE enrollment_id=:e"),
+            {"e": state.enrollment_id},
+        ).one()
+        audits = s.execute(
+            text("SELECT count(*) FROM audit_event WHERE action='enrollment.revoked'")
+        ).scalar_one()
+    assert row == ("refused", 1) and audits == 1
+
+
+# --- SECP-PR5H-B1 Phase 3: write-once signed controller offer -------------------------------------
+
+
+def test_two_concurrent_signed_offer_writes_exactly_one_wins(pg):
+    """The signed-offer store is write-once per enrollment: two genuinely-overlapping persists of
+    the same enrollment's offer produce exactly ONE row; the loser refuses a bounded conflict (the
+    durable single-winner guarantee behind a bind-exchange race)."""
+    from secp_api import worker_enrollment_repository as repo
+    from secp_api.worker_enrollment_repository import RepositoryRefusal
+
+    factory, actor, _ = pg
+    bound = _bind(factory, actor, _open(factory, actor, nonce="sha256:" + "e" * 64))
+    barrier = Barrier(2)
+
+    def attempt(_i: int) -> str:
+        with factory() as s:
+            barrier.wait(timeout=15)
+            try:
+                repo.persist_signed_offer(
+                    s,
+                    enrollment_id=bound.enrollment_id,
+                    organization_id=actor.organization_id,
+                    offer_revision=bound.revision,
+                    signer_key_id=CTRL_KEY,
+                    signed_offer='{"claim":{},"attestation":{}}',
+                )
+                s.commit()
+                return "committed"
+            except RepositoryRefusal as exc:
+                s.rollback()
+                return exc.reason_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, range(2)))
+    assert outcomes.count("committed") == 1, outcomes
+    assert [o for o in outcomes if o != "committed"] == ["enrollment_signed_offer_conflict"]
+    with factory() as s:
+        rows = s.execute(
+            text("SELECT count(*) FROM worker_enrollment_signed_offer WHERE enrollment_id=:e"),
+            {"e": bound.enrollment_id},
+        ).scalar_one()
+    assert rows == 1
+
+
+def test_a_tampered_signed_offer_row_refuses_on_load(pg):
+    """A stored signed offer whose payload no longer matches its recorded content digest is
+    corruption — ``load_signed_offer`` refuses closed; it is never returned or re-signed."""
+    from secp_api import worker_enrollment_repository as repo
+    from secp_api.worker_enrollment_repository import RepositoryRefusal
+
+    factory, actor, _ = pg
+    bound = _bind(factory, actor, _open(factory, actor, nonce="sha256:" + "f" * 64))
+    with factory() as s:
+        repo.persist_signed_offer(
+            s,
+            enrollment_id=bound.enrollment_id,
+            organization_id=actor.organization_id,
+            offer_revision=bound.revision,
+            signer_key_id=CTRL_KEY,
+            signed_offer='{"claim":{},"attestation":{}}',
+        )
+        s.commit()
+    with factory() as s:
+        s.execute(
+            text(
+                "UPDATE worker_enrollment_signed_offer SET signed_offer=:v WHERE enrollment_id=:e"
+            ),
+            {"v": '{"claim":{"tampered":"x"},"attestation":{}}', "e": bound.enrollment_id},
+        )
+        s.commit()
+    with factory() as s, pytest.raises(RepositoryRefusal) as ei:
+        repo.load_signed_offer(s, bound.enrollment_id)
+    assert ei.value.reason_code == "enrollment_state_corrupt"
