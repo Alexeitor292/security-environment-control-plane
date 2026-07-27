@@ -10,7 +10,6 @@ default fails closed; a forged PoP and a worker presenting the controller's own 
 
 from __future__ import annotations
 
-import uuid
 from contextlib import contextmanager
 
 import pytest
@@ -232,25 +231,94 @@ def test_a_worker_presenting_the_controller_key_is_refused(client, session):
     assert r.json()["error"]["code"] == "enrollment_pop_invalid"
 
 
-def test_the_exchange_requires_an_authenticated_progress_principal(client, session):
-    from secp_api.auth import Principal
-    from secp_api.deps import current_principal
-    from secp_api.enums import Permission
+# --- C1: cryptographic worker-exchange authentication --------------------------------------------
 
-    _wire_signer(client, session)
-    inv = _create_invitation(client)
-    # a principal with only read/manage (no progress) is refused authorization
-    reader = Principal(
-        user_id=uuid.uuid4(),
-        organization_id=uuid.uuid4(),
-        email="r@t",
-        permissions=frozenset({Permission.enrollment_read}),
-    )
-    client.app.dependency_overrides[current_principal] = lambda: reader
+
+def test_the_worker_exchange_authenticates_by_signed_evidence_not_a_principal(client, session):
+    """C1: the supported bind/result routes require NO control-plane OIDC principal — a real worker
+    transport (which sends no human bearer token) reaches them and authenticates purely by its
+    signed PoP. Operator endpoints stay principal-protected. Here we simulate a production posture
+    (dev auth disabled, no bearer) by making current_principal raise, and prove the bind still
+    succeeds while the operator invitation endpoint is refused 401."""
+    from secp_api.deps import current_principal
+    from secp_api.errors import AuthenticationError
+
+    pub_hex = _wire_signer(client, session)
+    inv = _create_invitation(client)  # operator create, before the auth posture is tightened
+
+    def _no_principal():
+        raise AuthenticationError("no bearer (production posture)")
+
+    client.app.dependency_overrides[current_principal] = _no_principal
     wpriv, wpub = generate_keypair()
     wid = "worker-" + ea.key_id_for(wpub).split(":")[-1][:16]
+    # the worker exchange succeeds WITHOUT any principal — signed evidence is the sole authenticator
     r = _post_bind(client, inv, _pop_body(inv, wpriv, wpub, worker_installation_id=wid))
-    assert r.status_code in (403, 401)
+    assert r.status_code == 200, r.text
+    assert r.json()["enrollment"]["state"] == "offer_transported"
+    # ...but an operator endpoint still requires the OIDC principal and is refused
+    denied = client.post(
+        "/api/v1/enrollment/invitations",
+        json={"idempotency_key": "z" * 24, "deployment_site_label": "rack-01.eu_a"},
+    )
+    assert denied.status_code == 401
+    assert pub_hex  # (used by _wire_signer)
+
+
+def test_the_supported_exchange_routes_declare_no_bearer_security(client):
+    """C1: because the bind/result routes take no ``current_principal``, they carry NO Bearer
+    security requirement in the OpenAPI schema, whereas the operator invitation route does."""
+    schema = client.app.openapi()
+    bind = schema["paths"]["/api/v1/enrollment/{enrollment_id}/exchange/bind"]["post"]
+    result = schema["paths"]["/api/v1/enrollment/{enrollment_id}/exchange/result"]["post"]
+    invitations = schema["paths"]["/api/v1/enrollment/invitations"]["post"]
+    assert not bind.get("security"), bind.get("security")
+    assert not result.get("security"), result.get("security")
+    assert invitations.get("security"), "the operator invitation route must stay Bearer-secured"
+
+
+def test_a_forged_pop_refuses_before_any_state_change(client, session, engine):
+    _wire_signer(client, session)
+    inv = _create_invitation(client)
+    wpriv, wpub = generate_keypair()
+    wid = "worker-" + ea.key_id_for(wpub).split(":")[-1][:16]
+    body = _pop_body(inv, wpriv, wpub, worker_installation_id=wid)
+    body["attestation"]["signature"] = "0" * 128  # forged: a valid actor can never be produced
+    r = _post_bind(client, inv, body)
+    assert r.status_code == 422 and r.json()["error"]["code"] == "enrollment_pop_invalid"
+    # no verified authority was minted, so nothing advanced and no signed offer was written
+    status = client.get(f"/api/v1/enrollment/{inv['enrollment_id']}").json()
+    assert status["state"] == "invited" and status["revision"] == 0
+    assert _signed_offer_count(engine, inv["enrollment_id"]) == 0
+
+
+def test_the_winning_audit_actor_is_a_bounded_worker_fingerprint(client, session, engine):
+    """C1: progression audits on the supported path record a bounded, code-owned worker fingerprint
+    (derived from the public worker key id) and the org bound from PERSISTENCE — never caller
+    free-text or a control-plane user id."""
+    inv, wpriv, wpub, offer = _drive_bind(client, session)
+    r = _post_result(client, inv, _result_body(inv, wpriv, wpub, offer))
+    assert r.status_code == 200, r.text
+    from secp_api.enums import AuditAction
+
+    progression = {
+        AuditAction.enrollment_worker_bound.value,
+        AuditAction.enrollment_offer_recorded.value,
+        AuditAction.enrollment_result_recorded.value,
+        AuditAction.enrollment_verified.value,
+        AuditAction.enrollment_healthy.value,
+    }
+    with Session(engine) as s:
+        rows = s.execute(
+            text("SELECT actor, organization_id, action FROM audit_event WHERE resource_id = :e"),
+            {"e": inv["enrollment_id"]},
+        ).all()
+    worker_rows = [(actor, org) for actor, org, action in rows if action in progression]
+    # every worker-driven progression audit is present and uses the bounded worker fingerprint
+    assert {action for _a, _o, action in rows} >= progression
+    for actor, org in worker_rows:
+        assert actor.startswith("worker-exchange:"), actor
+        assert org is not None
 
 
 # --- result exchange (verified -> healthy) -------------------------------------------------------

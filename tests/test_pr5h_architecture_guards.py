@@ -366,10 +366,20 @@ def test_api_enrollment_surface_gains_no_privileged_capability() -> None:
 _ALLOWED_ENROLLMENT_SERVICE_REACHERS = {"apps/api/secp_api/routers/enrollment.py"}
 
 
+#: C1: the two SUPPORTED evidence-driven exchange routes authenticate by the worker's SIGNED
+#: EVIDENCE (verified against the authoritative persisted invitation), NOT a control-plane OIDC
+#: principal — a real worker transport sends no human bearer token — so they take NO
+#: ``current_principal``. Every OTHER enrollment route (operator create/status/revoke + the sealed
+#: claim-only routes) stays principal-authenticated.
+_EVIDENCE_AUTHENTICATED_ROUTES = {"bind_worker_exchange", "record_worker_result_exchange"}
+
+
 def test_enrollment_api_router_is_registered_and_authenticated() -> None:
-    """PR5H-B1 registers the controller enrollment router; every route must require an authenticated
-    principal (organization is the authorization boundary) and the router must reach no operator,
-    provider, controlled-live or transport-activation capability."""
+    """PR5H-B1 registers the controller enrollment router. Every operator/claim-only route must
+    require an authenticated principal (organization is the authorization boundary); the two
+    supported evidence-driven exchange routes instead authenticate by the worker's signed evidence
+    and must take NO principal (C1). The router must reach no operator, provider, controlled-live or
+    transport-activation capability."""
     main_py = API_PKG / "main.py"
     registered = [
         ast.unparse(node)
@@ -398,9 +408,16 @@ def test_enrollment_api_router_is_registered_and_authenticated() -> None:
     ]
     assert route_funcs, "the enrollment router must define at least one route"
     for func in route_funcs:
-        assert "current_principal" in ast.unparse(func.args), (
-            f"enrollment route {func.name} must require an authenticated principal"
-        )
+        args = ast.unparse(func.args)
+        if func.name in _EVIDENCE_AUTHENTICATED_ROUTES:
+            assert "current_principal" not in args, (
+                f"the evidence-driven exchange route {func.name} must NOT depend on "
+                "current_principal (it authenticates by the worker's signed evidence, C1)"
+            )
+        else:
+            assert "current_principal" in args, (
+                f"enrollment route {func.name} must require an authenticated principal"
+            )
     forbidden = ("operator", "opentofu", "proxmox", "controlled_live", "temporalio")
     router_imports = {m.lower() for m in _imports(router)}
     offending = {m for m in router_imports if any(f in m for f in forbidden)}

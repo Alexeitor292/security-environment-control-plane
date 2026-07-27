@@ -145,12 +145,17 @@ def revoke_enrollment(
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())
 
 
-# --- SUPPORTED evidence-driven exchange (SECP-PR5H-B1 Phase 3) ------------------------------------
+# --- SUPPORTED evidence-driven exchange (SECP-PR5H-B1 Phase 3, C1) --------------------------------
 # The worker proves possession of its own key by signing a bound claim; the controller mints an
 # internally-signed offer through the root-gated broker (the non-root API never holds the key) and
-# returns it. This is the SUPPORTED progression surface — it is NOT gated by the claim-only
-# progression flag; it stays inert by default only through the SEALED signer client (which fails
-# closed until a broker socket is configured).
+# returns it. This is the SUPPORTED progression surface. It is authenticated by the WORKER'S SIGNED
+# EVIDENCE (the Ed25519 PoP / signed result verified against the authoritative persisted
+# invitation) — NOT a control-plane OIDC principal — so these two routes take NO principal
+# dependency, and a real worker transport (which sends no human bearer token) reaches them. The
+# service derives the verified worker authority (org/site/invitation/key/txn/release/expiry) from
+# persistence + the signed evidence; it never synthesizes a Principal or grants enrollment:progress
+# from HTTP fields. It is NOT gated by the claim-only progression flag and stays inert by default
+# only through the SEALED signer client (which fails closed until a broker socket is enabled).
 
 
 @router.post("/{enrollment_id}/exchange/bind", response_model=BindExchangeOut)
@@ -158,12 +163,10 @@ def bind_worker_exchange(
     enrollment_id: str,
     body: BindExchangeRequest,
     session: Session = Depends(db_session),
-    principal: Principal = Depends(current_principal),
     signer: EnrollmentOfferSignerClient = Depends(get_enrollment_offer_signer),
 ) -> BindExchangeOut:
     outcome = svc.bind_worker_exchange(
         session,
-        principal,
         signer=signer,
         enrollment_id=enrollment_id,
         worker_installation_id=body.worker_installation_id,
@@ -188,11 +191,9 @@ def record_worker_result_exchange(
     enrollment_id: str,
     body: ResultExchangeRequest,
     session: Session = Depends(db_session),
-    principal: Principal = Depends(current_principal),
 ) -> ResultExchangeOut:
     outcome = svc.record_worker_result_exchange(
         session,
-        principal,
         enrollment_id=enrollment_id,
         worker_public_key_hex=body.worker_public_key_hex,
         outcome=body.outcome,

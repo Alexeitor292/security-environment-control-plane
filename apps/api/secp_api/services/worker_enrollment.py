@@ -122,6 +122,62 @@ class TransitionOutcome:
     deduplicated: bool
 
 
+@dataclass(frozen=True)
+class VerifiedEnrollmentExchangeActor:
+    """A cryptographically-verified worker-exchange authority (C1).
+
+    Produced ONLY by the service AFTER it has (1) loaded the authoritative persisted
+    invitation/enrollment and (2) verified the worker's signed evidence (the bind proof-of-
+    possession, or the signed worker result against the already-bound key) against that
+    authoritative state. It is the security authority the evidence-driven mutation services require
+    — NOT a control-plane :class:`Principal`, and NEVER synthesized from HTTP fields.
+    ``enrollment:progress`` is never granted or inferred from the wire. Every field is bound from
+    PERSISTENCE
+    (organization / deployment site / invitation / transaction / release / expiry) or DERIVED from
+    the presented public key (the worker key id); a worker-supplied organization / site is only ever
+    COMPARED against the authoritative binding, never used to select a row or grant authority."""
+
+    enrollment_id: str
+    organization_id: uuid.UUID
+    deployment_site_label: str
+    invitation_id: str
+    worker_installation_id: str
+    worker_key_id: str
+    transaction_id: str
+    release_digest: str
+    expires_at: str
+
+    @property
+    def audit_actor(self) -> str:
+        """A bounded, code-owned worker fingerprint for the audit ``actor`` field — derived from
+        the PUBLIC worker key id (itself a sha256 digest), never caller free-text or a key byte."""
+        fingerprint = self.worker_key_id.split(":", 1)[-1][:16]
+        return f"worker-exchange:{fingerprint}"
+
+
+#: The authority a progression mutation runs under: either the cryptographically-verified worker
+#: exchange actor (the SUPPORTED evidence-driven path) or a control-plane :class:`Principal` (the
+#: SEALED claim-only routes, which stay RBAC-gated and refused in production).
+ExchangeAuthority = Principal | VerifiedEnrollmentExchangeActor
+
+
+def _require_progress(authority: ExchangeAuthority) -> None:
+    """A :class:`VerifiedEnrollmentExchangeActor` IS the cryptographic proof of an authorized worker
+    exchange, so it carries its own authority and needs no RBAC grant. A control-plane
+    :class:`Principal` (the sealed claim-only routes) must hold ``enrollment:progress`` — which is
+    NEVER granted or inferred from HTTP fields on the supported path."""
+    if isinstance(authority, Principal):
+        authority.require(Permission.enrollment_progress)
+
+
+def _audit_actor(authority: ExchangeAuthority) -> str:
+    """The bounded audit ``actor``: a Principal's user id, or the verified actor's code-owned worker
+    fingerprint — never worker-supplied free-text."""
+    if isinstance(authority, VerifiedEnrollmentExchangeActor):
+        return authority.audit_actor
+    return str(authority.user_id)
+
+
 # --------------------------------------------------------------------------- error mapping
 
 
@@ -146,8 +202,10 @@ def _assert_schema_ready(session: Session) -> None:
         raise WorkerEnrollmentError(EC.schema_unavailable) from None
 
 
-def _authorize(actor: Principal, loaded: LoadedEnrollment) -> None:
-    # organization is the ONLY authorization boundary, and it comes from the authenticated identity
+def _authorize(actor: ExchangeAuthority, loaded: LoadedEnrollment) -> None:
+    # organization is the ONLY authorization boundary. For a control-plane Principal it is the
+    # authenticated identity's org; for a VerifiedEnrollmentExchangeActor it is the org bound from
+    # persistence when the signed evidence was verified — either way it must equal the loaded row's.
     if actor.organization_id != loaded.organization_id:
         raise WorkerEnrollmentError(EC.forbidden)
 
@@ -188,7 +246,7 @@ def _verify_expected_revision(loaded: LoadedEnrollment, expected_revision: int) 
 
 
 def _load_authorized(
-    session: Session, actor: Principal, enrollment_id: str, claimed: ClaimedScope | None
+    session: Session, actor: ExchangeAuthority, enrollment_id: str, claimed: ClaimedScope | None
 ) -> LoadedEnrollment:
     try:
         loaded = repo.load_for_update(session, enrollment_id)
@@ -197,6 +255,30 @@ def _load_authorized(
     if loaded is None:
         raise WorkerEnrollmentError(EC.not_found)
     _authorize(actor, loaded)
+    _check_scope(loaded, claimed)
+    try:
+        repo.verify_history_consistent(session, enrollment_id, loaded.state)
+    except RepositoryRefusal as exc:
+        raise _surface(exc) from None
+    return loaded
+
+
+def _load_for_exchange(
+    session: Session, enrollment_id: str, claimed: ClaimedScope | None
+) -> LoadedEnrollment:
+    """Load + lock + history-verify the authoritative enrollment for a WORKER EXCHANGE (C1).
+
+    There is NO control-plane principal on the supported worker path — the worker authenticates by
+    signed evidence, not an OIDC bearer — so organization and deployment site are taken
+    AUTHORITATIVELY from the persisted row and never from a caller claim. A worker-supplied
+    ``claimed_scope`` is only COMPARED against the authoritative binding (``_check_scope``), never
+    used to select or authorize the row."""
+    try:
+        loaded = repo.load_for_update(session, enrollment_id)
+    except RepositoryRefusal as exc:
+        raise _surface(exc) from None
+    if loaded is None:
+        raise WorkerEnrollmentError(EC.not_found)
     _check_scope(loaded, claimed)
     try:
         repo.verify_history_consistent(session, enrollment_id, loaded.state)
@@ -552,7 +634,7 @@ def _reconstruct_original_create(session: Session, row: InvitationRow) -> Enroll
 
 def bind_worker(
     session: Session,
-    actor: Principal,
+    actor: ExchangeAuthority,
     *,
     enrollment_id: str,
     worker_installation_id: str,
@@ -564,7 +646,7 @@ def bind_worker(
 ) -> TransitionOutcome:
     """The nonce-consumption point: the first successful worker-identity binding. Consumes the
     single-use invitation and persists the first advanced revision in ONE transaction."""
-    actor.require(Permission.enrollment_progress)
+    _require_progress(actor)
     _assert_schema_ready(session)
     step = "bind_worker_identity"
     input_digest = _input_digest(
@@ -667,7 +749,6 @@ def _replay_signed_offer(persisted: str, loaded: LoadedEnrollment) -> ExchangeOu
 
 def bind_worker_exchange(
     session: Session,
-    actor: Principal,
     *,
     signer: EnrollmentOfferSignerClient,
     enrollment_id: str,
@@ -678,20 +759,23 @@ def bind_worker_exchange(
     now: str,
     claimed_scope: ClaimedScope | None = None,
 ) -> ExchangeOutcome:
-    """The supported, evidence-driven bind exchange (SECP-PR5H-B1 Phase 3).
+    """The supported, evidence-driven bind exchange (SECP-PR5H-B1 Phase 3, C1).
 
-    Verifies the worker's proof-of-possession against the controller's OWN authoritative invitation
-    (deriving the worker key id from the presented public key), binds the worker + consumes the
-    single-use nonce, mints an internally-signed controller offer via the injected ROOT-GATED signer
-    (the non-root API never holds the key), INDEPENDENTLY re-verifies that offer, records the
-    controller-offer transition, and persists the exact signed offer WRITE-ONCE — all inside the
-    caller's single transaction, so any refusal rolls back every effect (no consumed nonce, no bind,
-    no offer, no signed-offer row, no audit). A lost-response retry (an already-persisted signed
-    offer) re-verifies the repeated PoP and returns the BYTE-EQUIVALENT original offer without
-    calling the signer or advancing the state again — true even after the controller key rotates."""
-    actor.require(Permission.enrollment_progress)
+    This path is authenticated by the WORKER'S SIGNED EVIDENCE, not a control-plane OIDC principal:
+    it takes no :class:`Principal`. It verifies the worker's proof-of-possession against the
+    controller's OWN authoritative invitation (deriving the worker key id from the presented public
+    key), PRODUCES a :class:`VerifiedEnrollmentExchangeActor` whose organization / site / invitation
+    / transaction / release / expiry are bound from PERSISTENCE, then — authorized by that verified
+    actor — binds the worker + consumes the single-use nonce, mints an internally-signed controller
+    offer via the injected ROOT-GATED signer (the non-root API never holds the key), INDEPENDENTLY
+    re-verifies that offer, records the controller-offer transition, and persists the exact signed
+    offer WRITE-ONCE — all inside the caller's single transaction, so any refusal rolls back every
+    effect (no consumed nonce, no bind, no offer, no signed-offer row, no audit). A lost-response
+    retry (an already-persisted signed offer) re-verifies the repeated PoP and returns the
+    BYTE-EQUIVALENT original offer without calling the signer or advancing the state again — true
+    even after the controller key rotates."""
     _assert_schema_ready(session)
-    loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
+    loaded = _load_for_exchange(session, enrollment_id, claimed_scope)
     invitation = repo.load_invitation_for_update(session, enrollment_id)
     if invitation is None:
         raise WorkerEnrollmentError(EC.invitation_not_found)
@@ -713,6 +797,22 @@ def bind_worker_exchange(
     # (2) controller/worker key separation — a worker can never present the controller's own key
     if verified.worker_key_id == invitation.controller_key_id:
         raise WorkerEnrollmentError(EC.pop_invalid)
+
+    # (2b) ONLY NOW — after the signed PoP verified against the authoritative invitation — mint the
+    #      verified worker-exchange authority. Its org/site/invitation/transaction/release/expiry
+    #      are bound from PERSISTENCE; the worker key id is DERIVED from the presented key. This is
+    #      the authority every subsequent mutation runs under (never a synthesized Principal).
+    actor = VerifiedEnrollmentExchangeActor(
+        enrollment_id=enrollment_id,
+        organization_id=loaded.organization_id,
+        deployment_site_label=loaded.deployment_site_label,
+        invitation_id=invitation.invitation_id,
+        worker_installation_id=worker_installation_id,
+        worker_key_id=verified.worker_key_id,
+        transaction_id=invitation.transaction_id,
+        release_digest=invitation.release_digest,
+        expires_at=invitation.expires_at,
+    )
 
     # (3) lost-response durability: an already-persisted signed offer means this exchange completed;
     #     return the byte-equivalent original WITHOUT re-signing or re-advancing.
@@ -810,7 +910,7 @@ def bind_worker_exchange(
 
 def record_offer(
     session: Session,
-    actor: Principal,
+    actor: ExchangeAuthority,
     *,
     enrollment_id: str,
     facts: HandoffFacts,
@@ -837,7 +937,7 @@ def record_offer(
 
 def record_result(
     session: Session,
-    actor: Principal,
+    actor: ExchangeAuthority,
     *,
     enrollment_id: str,
     facts: HandoffFacts,
@@ -864,7 +964,7 @@ def record_result(
 
 def verify_release(
     session: Session,
-    actor: Principal,
+    actor: ExchangeAuthority,
     *,
     enrollment_id: str,
     release_digest: str,
@@ -886,7 +986,7 @@ def verify_release(
 
 def mark_enrollment_healthy(
     session: Session,
-    actor: Principal,
+    actor: ExchangeAuthority,
     *,
     enrollment_id: str,
     now: str,
@@ -937,7 +1037,6 @@ def _persisted_offer_bindings(session: Session, enrollment_id: str) -> tuple[str
 
 def record_worker_result_exchange(
     session: Session,
-    actor: Principal,
     *,
     enrollment_id: str,
     worker_public_key_hex: str,
@@ -948,22 +1047,27 @@ def record_worker_result_exchange(
     now: str,
     claimed_scope: ClaimedScope | None = None,
 ) -> ResultExchangeOutcome:
-    """The supported, evidence-driven result exchange (SECP-PR5H-B1 Phase 3).
+    """The supported, evidence-driven result exchange (SECP-PR5H-B1 Phase 3, C1).
 
-    Verifies the SIGNED worker result against the already-bound worker key and the authoritative
-    bindings (transaction, release, the persisted offer's content-address/generation/challenge, and
-    the ``sha256:`` digest the controller recomputes from the received health evidence), then — ONLY
-    because that authenticated evidence attests a successful outcome AND every required health check
-    — advances result_transported -> verified -> healthy as durable CAS transitions. A lost-response
-    retry re-verifies and dedups every step from its receipt (a stale token never conflicts). No
-    endpoint can set verified/healthy from an unsigned digest, a release digest alone, or an empty
-    health request: the signature + the complete health evidence are the sole authority."""
-    actor.require(Permission.enrollment_progress)
+    Authenticated by the WORKER'S SIGNED result, not a control-plane OIDC principal (it takes no
+    :class:`Principal`). Verifies the SIGNED worker result against the already-bound worker key and
+    the authoritative bindings (transaction, release, the persisted offer's content-address/
+    generation/challenge, and the ``sha256:`` digest the controller recomputes from the received
+    health evidence); then — ONLY because that authenticated evidence attests a successful outcome
+    AND every required health check — PRODUCES a :class:`VerifiedEnrollmentExchangeActor` from the
+    bound authoritative state and advances result_transported -> verified -> healthy as durable CAS
+    transitions under that authority. A lost-response retry re-verifies and dedups every step from
+    its receipt (a stale token never conflicts). No endpoint can set verified/healthy from an
+    unsigned digest, a release digest alone, or an empty health request: the signature + the
+    complete health evidence are the sole authority."""
     _assert_schema_ready(session)
-    loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
+    loaded = _load_for_exchange(session, enrollment_id, claimed_scope)
     state = loaded.state
     if not state.worker_key_id:  # a result requires an already-bound worker
         raise WorkerEnrollmentError(EC.wrong_state)
+    invitation = repo.load_invitation_for_update(session, enrollment_id)
+    if invitation is None:
+        raise WorkerEnrollmentError(EC.invitation_not_found)
     predecessor_digest, generation, challenge = _persisted_offer_bindings(session, enrollment_id)
     health_evidence_digest = sha256_digest(health_evidence)
 
@@ -985,6 +1089,20 @@ def record_worker_result_exchange(
     # (b) verified/healthy derive ONLY from authenticated evidence
     if outcome != WORKER_RESULT_OUTCOME_HEALTHY or not health_evidence_complete(health_evidence):
         raise WorkerEnrollmentError(EC.health_incomplete)
+
+    # (b2) ONLY NOW — after the signed result verified against the bound key + complete evidence —
+    #      mint the verified worker-exchange authority from the AUTHORITATIVE bound state.
+    actor = VerifiedEnrollmentExchangeActor(
+        enrollment_id=enrollment_id,
+        organization_id=loaded.organization_id,
+        deployment_site_label=loaded.deployment_site_label,
+        invitation_id=invitation.invitation_id,
+        worker_installation_id=state.worker_installation_id,
+        worker_key_id=state.worker_key_id,
+        transaction_id=state.transaction_id,
+        release_digest=state.release_digest,
+        expires_at=invitation.expires_at,
+    )
 
     result_claim = worker_result_claim(
         enrollment_id=enrollment_id,
@@ -1038,7 +1156,7 @@ def record_worker_result_exchange(
 
 def _advance_step(
     session: Session,
-    actor: Principal,
+    actor: ExchangeAuthority,
     *,
     enrollment_id: str,
     step: str,
@@ -1047,7 +1165,7 @@ def _advance_step(
     expected_revision: int,
     claimed_scope: ClaimedScope | None,
 ) -> TransitionOutcome:
-    actor.require(Permission.enrollment_progress)
+    _require_progress(actor)
     _assert_schema_ready(session)
     input_digest = _input_digest(step, input_payload)
     loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
@@ -1079,16 +1197,22 @@ _PROGRESS_AUDIT: dict[str, AuditAction] = {
 
 
 def _audit_progress(
-    session: Session, actor: Principal, enrollment_id: str, step: str, state: EnrollmentState
+    session: Session,
+    actor: ExchangeAuthority,
+    enrollment_id: str,
+    step: str,
+    state: EnrollmentState,
 ) -> None:
     """One bounded, secret-free audit per WINNING progression transition — org, actor, action,
-    enrollment id, resulting state and revision. Never a nonce, key, handoff byte or path."""
+    enrollment id, resulting state and revision. The ``actor`` is a Principal's user id or (on the
+    supported worker path) a bounded code-owned worker fingerprint — never caller free-text, a
+    nonce, key, handoff byte or path."""
     audit.record(
         session,
         action=_PROGRESS_AUDIT[step],
         resource_type="worker_enrollment",
         resource_id=enrollment_id,
-        actor=str(actor.user_id),
+        actor=_audit_actor(actor),
         organization_id=actor.organization_id,
         outcome="success",
         data={"state": state.state, "revision": state.revision},
@@ -1372,6 +1496,7 @@ __all__ = [
     "ExpectedRevision",
     "ResultExchangeOutcome",
     "TransitionOutcome",
+    "VerifiedEnrollmentExchangeActor",
     "bind_worker",
     "bind_worker_exchange",
     "create_invitation_and_open",
