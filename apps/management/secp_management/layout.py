@@ -154,6 +154,27 @@ class ManagementLocations:
         """The EXACT prepared operator unit path — installed DISABLED + STOPPED (fixed constant)."""
         return f"{self.systemd_dir}/{_OPERATOR_UNIT_NAME}"
 
+    def controller_tls_dir(self) -> str:
+        """The fixed controller-API TLS material directory (SECP-PR5H-B2)."""
+        return f"{self.controller_config}/tls"
+
+    def controller_ca_bundle_path(self) -> str:
+        """The EXACT CA-bundle path the installer writes and the locator records — the one CA
+        secpctl trusts for the controller HTTPS surface (never a caller-chosen path)."""
+        return f"{self.controller_config}/tls/ca-bundle.pem"
+
+    def controller_server_cert_path(self) -> str:
+        return f"{self.controller_config}/tls/server-cert.pem"
+
+    def controller_server_key_path(self) -> str:
+        """The controller-API server private key — installed root-owned 0600 (never readable)."""
+        return f"{self.controller_config}/tls/server-key.pem"
+
+    def enrollment_signer_credential_path(self) -> str:
+        """The fixed root-owned source file the installer writes the signer role's plaintext SCRAM
+        secret to; systemd ``LoadCredential`` copies it into the broker unit's credential dir."""
+        return f"{self.controller_config}/credentials/enrollment-signer-db"
+
     def controller_compose_path(self) -> str:
         return f"{self.controller_config}/{_CONTROLLER_COMPOSE_NAME}"
 

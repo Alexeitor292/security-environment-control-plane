@@ -26,6 +26,7 @@ from secp_commissioning.canonical import canonical_json
 from secp_commissioning.runtime import FilesystemBackend, FilesystemError
 
 from secp_management import ManagementError
+from secp_management.layout import ManagementLocations
 
 #: The fixed, code-owned path of the protected controller-API locator, recorded at controller
 #: bootstrap and read (never chosen by a CLI/env input) by secpctl's controller client.
@@ -182,6 +183,28 @@ def record_controller_api_locator(
     return FileControllerApiLocatorProvider(fs, path=path).locate()  # read-back confirmation
 
 
+def record_fixed_controller_api_locator(
+    fs: FilesystemBackend,
+    *,
+    canonical_origin: str,
+    write: bool,
+    confirm: bool,
+    locations: ManagementLocations | None = None,
+) -> ControllerApiLocator:
+    """SECP-PR5H-B2: record the locator with the CA-bundle path PINNED to the fixed, code-owned
+    controller CA-bundle location (the path the TLS producer writes). The origin is the operator's
+    ``--public-origin``; the CA path is NEVER caller-supplied, so a recorded locator can only trust
+    the installer-produced controller CA — not an arbitrary bundle. Dry-run unless write+confirm."""
+    loc = locations if locations is not None else ManagementLocations()
+    return record_controller_api_locator(
+        fs,
+        canonical_origin=canonical_origin,
+        ca_bundle_path=loc.controller_ca_bundle_path(),
+        write=write,
+        confirm=confirm,
+    )
+
+
 __all__ = [
     "CONTROLLER_API_LOCATOR_PATH",
     "ControllerApiLocator",
@@ -190,4 +213,5 @@ __all__ = [
     "FileControllerApiLocatorProvider",
     "SealedControllerApiLocatorProvider",
     "record_controller_api_locator",
+    "record_fixed_controller_api_locator",
 ]

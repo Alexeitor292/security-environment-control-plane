@@ -290,6 +290,7 @@ jobs:
           apps/api/tests/test_worker_enrollment_recovery_postgres.py
           apps/api/tests/test_worker_enrollment_migration_postgres.py
           apps/api/tests/test_enrollment_signer_lease_postgres.py
+          apps/api/tests/test_enrollment_signer_scram_postgres.py
           -q -p no:cacheprovider
           --junitxml=junit-pr5h-postgres-enrollment.xml
       - name: Upload PR5H-A PostgreSQL JUnit
@@ -310,8 +311,11 @@ jobs:
           # PR5H-B1 Phase 3 signed-offer proofs: write-once single-winner + tamper-refusal-on-load),
           # + 6 PR5H-B1 C4 least-privilege signer-lease proofs (real secp_enrollment_signer role:
           # advisory-lock lease succeeds, rotation serializes behind it, unrelated read + identity
-          # writes refuse, role is not superuser/owner).
-          EXPECTED_MINIMUM = 52
+          # writes refuse, role is not superuser/owner),
+          # + 5 PR5H-B2 2b-2 SCRAM dedicated-role provisioning proofs (locally-computed SCRAM verifier
+          # authenticates against real PostgreSQL, wrong password rejected, provisioned role is exactly
+          # least-privilege, role flags closed, provisioning idempotent).
+          EXPECTED_MINIMUM = 57
           path = Path("junit-pr5h-postgres-enrollment.xml")
           if not path.exists():
               print("::error::PR5H-A PostgreSQL JUnit missing - the test step produced no results")
