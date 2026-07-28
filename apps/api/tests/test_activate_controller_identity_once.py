@@ -100,17 +100,27 @@ def test_exact_replay_returns_byte_equivalent_receipt(engine):
 
 
 def test_exact_replay_after_rotation_and_rotation_back(engine):
-    _, r1 = _run(_handoff(_A, operation_id="op-A"))
+    _, r1 = _run(_handoff(_A, operation_id="op-A"))  # fresh install: generation 0
     row_a = r1["resulting_row_id"]
-    # rotate A -> B
+    # rotate A -> B (upgrade: generation must be predecessor + 1)
     _, r2 = _run(
-        _handoff(_B, operation_id="op-B", expected_row=row_a, expected_token=r1["activation_token"])
+        _handoff(
+            _B,
+            operation_id="op-B",
+            expected_row=row_a,
+            expected_token=r1["activation_token"],
+            generation=1,
+        )
     )
     row_b = r2["resulting_row_id"]
-    # rotate back B -> A' (fresh candidate _A again, new op)
+    # rotate back B -> A' (fresh candidate _A again, new op): next generation
     _run(
         _handoff(
-            _A, operation_id="op-A2", expected_row=row_b, expected_token=r2["activation_token"]
+            _A,
+            operation_id="op-A2",
+            expected_row=row_b,
+            expected_token=r2["activation_token"],
+            generation=2,
         )
     )
     # op-A replay still returns its ORIGINAL receipt (proves committed, not current)
@@ -120,6 +130,49 @@ def test_exact_replay_after_rotation_and_rotation_back(engine):
     assert code == mod.EXIT_OK
     assert canonical_json(replay) == canonical_json(r1)
     assert replay["resulting_row_id"] == row_a
+
+
+def test_fresh_install_with_nonzero_generation_refuses(engine):
+    # F6: a fresh install (no active predecessor) MUST be generation 0.
+    code, payload = _run(_handoff(_A, operation_id="op-fresh", generation=1))
+    assert code == mod.EXIT_OPERATION_CONFLICT
+    assert payload["reason_code"] == "activation_generation_not_fresh"
+    assert _receipt_count() == 0
+
+
+@pytest.mark.parametrize(
+    "generation,reason",
+    [
+        (0, "activation_generation_out_of_order"),  # stale (== predecessor's number)
+        (1, "activation_generation_out_of_order"),  # replay of predecessor's own number
+        (3, "activation_generation_out_of_order"),  # skipped a generation
+        (5, "activation_generation_out_of_order"),  # far ahead
+    ],
+)
+def test_upgrade_generation_must_be_exactly_predecessor_plus_one(engine, generation, reason):
+    # F6: fresh install is generation 0; the ONLY valid rotation number is predecessor + 1 (== 2
+    # here, after one prior rotation raises A's predecessor number to 1). Every other value refuses.
+    _, r1 = _run(_handoff(_A, operation_id="op-A"))  # generation 0
+    _, r2 = _run(
+        _handoff(
+            _B,
+            operation_id="op-B",
+            expected_row=r1["resulting_row_id"],
+            expected_token=r1["activation_token"],
+            generation=1,
+        )
+    )  # B now active, its predecessor number is 1 → next valid is 2
+    code, payload = _run(
+        _handoff(
+            _A,
+            operation_id="op-C",
+            expected_row=r2["resulting_row_id"],
+            expected_token=r2["activation_token"],
+            generation=generation,
+        )
+    )
+    assert code == mod.EXIT_OPERATION_CONFLICT
+    assert payload["reason_code"] == reason
 
 
 def test_stale_first_execution_refuses_but_stale_replay_succeeds(engine):

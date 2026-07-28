@@ -53,6 +53,32 @@ def test_makedir_install_read_list_roundtrip(sandbox):
     assert st.uid == 0 and st.gid == 0 and st.mode == 0o750
 
 
+def test_lstat_reports_is_socket_for_a_real_af_unix_socket(sandbox):
+    # F7: the broker-socket operational proof depends on RealFilesystem.lstat().is_socket being TRUE
+    # for an actual bound AF_UNIX socket (and FALSE for a regular file / FIFO). This backs the
+    # in-memory seed_socket parity the adapter tests rely on with a real S_ISSOCK observation.
+    import socket
+
+    fs = _fs()
+    sock_path = sandbox + "/enrollment-signer.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(sock_path)
+        st = fs.lstat(sock_path)
+        assert st is not None and st.is_socket is True and st.is_special is True
+    finally:
+        srv.close()
+    # a regular file is NOT a socket
+    reg = sandbox + "/plain"
+    fs.atomic_install(reg, b"x", uid=0, gid=0, mode=0o640)
+    assert fs.lstat(reg).is_socket is False
+    # a FIFO is special-but-not-a-socket
+    fifo = sandbox + "/fifo"
+    os.mkfifo(fifo, 0o600)
+    fifo_stat = fs.lstat(fifo)
+    assert fifo_stat.is_special is True and fifo_stat.is_socket is False
+
+
 def test_untrusted_owner_ancestor_is_refused(sandbox):
     from secp_commissioning.runtime import FilesystemError
 

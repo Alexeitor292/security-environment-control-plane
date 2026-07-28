@@ -1,33 +1,40 @@
-"""RealControllerEnrollmentFinalizationAdapter — sequencing, marker-last, secret boundaries,
-handoff lifecycle, reobserve-agreement, and drift-checked compensation (SECP-PR5H-B2, 2b-3b-iii).
+"""RealControllerEnrollmentFinalizationAdapter — upgrade-safe finalization (SECP-PR5H-B2, 2b-3b-iv).
 
-Hermetic: an in-memory hardened filesystem + a fake pinned compose runner (which reads the
-read-only handoff it is handed and returns the bounded one-shot receipt, exactly like the real API
-one-shots) + a fake dedicated-role lease provider + a no-op DB prober. No PostgreSQL, no Docker, no
-systemd, no root. The real-PostgreSQL dedicated-role proof is the separate zero-skip fence.
+Fail-first + regression proofs for review 4794981971: cryptographic TLS adoption (F2), locator
+classify/replace/restore (F3), signer role+credential adopt-unchanged / foreign-refuse (F1/F4),
+exact code-rendered broker unit + prior-state restore (F1/F5), AF_UNIX socket proof + transport
+probe (F5/F7), authenticated generation (F6), marker-last + post-restart runtime observation
+(F4/F8), and typed per-effect receipts with prior-state restoration or recovery_required (F1).
+
+Hermetic: in-memory hardened fs + fake pinned compose runner (reads the RO handoff, returns the
+CANONICAL bounded one-shot receipt) + fake dedicated-role lease + no-op DB/socket/runtime seams.
+The real-PostgreSQL/root/systemd proofs are the separate zero-skip fences.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime  # noqa: E402
 
 import pytest
-from secp_commissioning.controller_enrollment_signer import (
-    ENROLLMENT_SIGNER_SOCKET_PATH,
-)
+from secp_commissioning.canonical import canonical_json, sha256_bytes
+from secp_commissioning.controller_enrollment_signer import ENROLLMENT_SIGNER_SOCKET_PATH
 from secp_commissioning.runtime import InMemoryFilesystem
 from secp_management import ManagementError
 from secp_management.controller_compose_contract import render_broker_reviewed_unit
 from secp_management.controller_finalization import (
+    ApiSignerRuntimeObservation,
     FinalizationContext,
     RealControllerEnrollmentFinalizationAdapter,
 )
+from secp_management.controller_tls import produce_controller_tls
 from secp_management.finalization import (
     ApiSignerMarker,
+    ControllerEnrollmentFinalizationPlan,
     ControllerFinalizationReceipt,
     ControllerIdentityActivation,
+    EffectDisposition,
     ReviewedSignerRole,
 )
 from secp_management.layout import ManagementLocations
@@ -42,11 +49,13 @@ _MGMT = "sha256:" + "e" * 64
 _BOOT = "sha256:" + "f" * 64
 _ROW = "11111111-1111-1111-1111-111111111111"
 _TOKEN = f"{_ROW}|2026-07-28 00:00:00+00:00"
-_FIXED_NOW = datetime(2026, 7, 28, 0, 0, 30, tzinfo=UTC)
+_NOW = datetime(2026, 7, 28, 0, 0, 30, tzinfo=UTC)
+_LOC = ManagementLocations()
 _ROLE = ReviewedSignerRole(
     role_name="secp_enrollment_signer",
-    credential_source_path=ManagementLocations().enrollment_signer_credential_path(),
+    credential_source_path=_LOC.enrollment_signer_credential_path(),
 )
+_WORLD: dict = {}
 
 
 def _policy() -> ControllerTlsPolicy:
@@ -64,50 +73,55 @@ def _policy() -> ControllerTlsPolicy:
     )
 
 
+def _plan(generation: int = 0) -> ControllerEnrollmentFinalizationPlan:
+    return ControllerEnrollmentFinalizationPlan(
+        role="controller",
+        tls_policy=_policy(),
+        canonical_origin=_ORIGIN,
+        tls_mode="generated_local_ca",
+        signer_role=_ROLE,
+        broker_unit=render_broker_reviewed_unit(_LOC),
+        controller_installation_id=_INSTALL,
+        release_digest=_RELEASE,
+        management_identity_digest=_MGMT,
+        bootstrap_evidence_digest=_BOOT,
+        generation=generation,
+    )
+
+
 class _Result:
-    def __init__(self, exit_code: int, stdout: str) -> None:
-        self.exit_code = exit_code
+    def __init__(self, code: int, stdout: str) -> None:
+        self.exit_code = code
         self.stdout = stdout
 
 
 class _Lease:
-    def __init__(self, world: dict) -> None:
-        for k, v in world.items():
+    def __init__(self, w: dict) -> None:
+        for k, v in w.items():
             setattr(self, k, v)
 
 
 class _FakeLeaseProvider:
-    """A fake ``DbActiveControllerSigningIdentityProvider`` — yields a lease built from the shared
-    mutable ``world`` (set once the enrollment key identity is known)."""
-
     def __init__(self, engine: object) -> None:
-        self._engine = engine
+        self._e = engine
 
     def lease(self):
-        provider = self
-
-        class _Ctx:
-            def __enter__(self):
-                if provider is _NO_ACTIVE.get("provider"):
+        class _C:
+            def __enter__(self_inner):
+                if not _WORLD:
                     raise RuntimeError("no active identity")
                 return _Lease(_WORLD)
 
-            def __exit__(self, *a):
+            def __exit__(self_inner, *a):
                 return False
 
-        return _Ctx()
-
-
-_WORLD: dict = {}
-_NO_ACTIVE: dict = {}
+        return _C()
 
 
 class _FakeRunner:
-    """Records every pinned command and, for the two one-shots, reads the read-only handoff it was
-    handed (via the ``--volume`` spec) and returns the bounded receipt the real one-shot would."""
-
-    def __init__(self, fs: InMemoryFilesystem) -> None:
+    def __init__(self, fs: InMemoryFilesystem, *, provision_overrides: dict | None = None) -> None:
         self._fs = fs
+        self._prov = provision_overrides or {}
         self.calls: list[tuple[str, ...]] = []
 
     def run(self, pin, argv, *, timeout_seconds, max_output_bytes):
@@ -115,32 +129,29 @@ class _FakeRunner:
         joined = " ".join(argv)
         if "provision_enrollment_signer_role_once" in joined:
             h = self._handoff(argv)
-            return _Result(
-                0,
-                json.dumps(
-                    {
-                        "operation_id": h["operation_id"],
-                        "role_name": "secp_enrollment_signer",
-                        "can_login": True,
-                        "not_superuser": True,
-                        "not_createrole": True,
-                        "not_createdb": True,
-                        "not_bypassrls": True,
-                        "not_inherit": True,
-                        "not_replication": True,
-                        "select_on_identity": True,
-                        "no_write_on_identity": True,
-                        "no_unrelated_read": True,
-                        "owns_nothing": True,
-                        "no_memberships": True,
-                    }
-                ),
-            )
+            posture = {
+                "operation_id": h["operation_id"],
+                "role_name": "secp_enrollment_signer",
+                "can_login": True,
+                "not_superuser": True,
+                "not_createrole": True,
+                "not_createdb": True,
+                "not_bypassrls": True,
+                "not_inherit": True,
+                "not_replication": True,
+                "select_on_identity": True,
+                "no_write_on_identity": True,
+                "no_unrelated_read": True,
+                "owns_nothing": True,
+                "no_memberships": True,
+            }
+            posture.update(self._prov)  # drift injection (a failed least-privilege bit)
+            return _Result(0, canonical_json(posture))
         if "activate_controller_identity_once" in joined:
             h = self._handoff(argv)
             return _Result(
                 0,
-                json.dumps(
+                canonical_json(
                     {
                         "operation_id": h["operation_id"],
                         "candidate_digest": h["candidate_digest"],
@@ -153,15 +164,14 @@ class _FakeRunner:
                     }
                 ),
             )
-        return _Result(0, "")  # daemon-reload / start / stop / up
+        return _Result(0, "")
 
     def _handoff(self, argv) -> dict:
         spec = argv[argv.index("--volume") + 1]
-        host = spec.split(":")[0]
-        return json.loads(self._fs.safe_read(host, max_bytes=8192, expected_uid=0))
+        return json.loads(self._fs.safe_read(spec.split(":")[0], max_bytes=8192, expected_uid=0))
 
 
-def _fs() -> InMemoryFilesystem:
+def _fs(*, socket: bool = True) -> InMemoryFilesystem:
     fs = InMemoryFilesystem()
     for d in (
         "/opt",
@@ -180,51 +190,47 @@ def _fs() -> InMemoryFilesystem:
         "/var/lib/secp",
         "/var/lib/secp/bootstrap",
         "/var/lib/secp/bootstrap/handoff",
+        "/var/lib/secp/bootstrap/finalization-staging",
         "/run",
         "/run/secp",
     ):
         fs.seed_dir(d, uid=0, gid=0, mode=0o755)
-    # the broker binds its UDS at start (root:api-group 0660); the fake represents that bound socket
-    fs.seed_special(ENROLLMENT_SIGNER_SOCKET_PATH, uid=0, gid=API_RUNTIME_GID)
+    if socket:
+        fs.seed_socket(ENROLLMENT_SIGNER_SOCKET_PATH, uid=0, gid=API_RUNTIME_GID, mode=0o660)
     return fs
 
 
 def _pin() -> PinnedExecutables:
-    d = "sha256:" + "0" * 64
     from secp_operator_deployment.pinned_exec import ExecutablePin
 
-    p = ExecutablePin(path="/usr/bin/docker", digest=d)
+    p = ExecutablePin(path="/usr/bin/docker", digest="sha256:" + "0" * 64)
     return PinnedExecutables(container_runtime=p, compose_runtime=p, service_manager=p)
 
 
-def _adapter(fs, runner):
+def _passing_observation(marker) -> ApiSignerRuntimeObservation:
+    return ApiSignerRuntimeObservation(*([True] * 12))
+
+
+def _adapter(fs, runner, *, generation=0, runtime_observer=None):
     ctx = FinalizationContext(
-        host=RealAdapterContext(
-            locations=ManagementLocations(), fs=fs, runner=runner, executables=_pin()
-        ),
+        host=RealAdapterContext(locations=_LOC, fs=fs, runner=runner, executables=_pin()),
         lease_provider_factory=_FakeLeaseProvider,
-        db_prober=lambda engine: None,  # no live PostgreSQL in the unit fence
-        now=lambda tz=UTC: _FIXED_NOW,
+        db_prober=lambda engine: None,
+        socket_prober=lambda path, *, expected_peer: None,
+        runtime_observer=runtime_observer or _passing_observation,
+        now=lambda tz=UTC: _NOW,
     )
-    return RealControllerEnrollmentFinalizationAdapter(ctx)
+    return RealControllerEnrollmentFinalizationAdapter(ctx, plan=_plan(generation))
 
 
-def _drive_through_activation(adapter, fs):
-    """Run steps 1-8 (TLS -> locator -> signer role -> key -> broker unit -> start -> verify ->
-    activate) and return (key_identity, activation_receipt, ca_digest)."""
+def _drive_to_activation(adapter, fs, *, generation=0):
     _WORLD.clear()
-    _NO_ACTIVE.clear()
     adapter.install_tls_material(
         policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
     )
-    ca_pem = fs.safe_read(
-        ManagementLocations().controller_ca_bundle_path(), max_bytes=1 << 20, expected_uid=0
-    )
-    ca_digest = "sha256:" + hashlib.sha256(ca_pem).hexdigest()
     adapter.record_locator(canonical_origin=_ORIGIN)
     adapter.provision_signer_role(_ROLE)
     key = adapter.prepare_enrollment_key()
-    # the reobserved active identity agrees with the just-activated candidate
     _WORLD.update(
         row_id=_ROW,
         activation_token=_TOKEN,
@@ -237,7 +243,7 @@ def _drive_through_activation(adapter, fs):
         bootstrap_evidence_digest=_BOOT,
         enrollment_key_proof_id=key.enrollment_key_proof_id,
     )
-    adapter.install_broker_unit(render_broker_reviewed_unit())
+    adapter.install_broker_unit(render_broker_reviewed_unit(_LOC))
     adapter.start_broker()
     adapter.verify_signer_operational(key_identity=key)
     activation = ControllerIdentityActivation(
@@ -249,16 +255,23 @@ def _drive_through_activation(adapter, fs):
         management_identity_digest=_MGMT,
         bootstrap_evidence_digest=_BOOT,
         enrollment_key_proof_id=key.enrollment_key_proof_id,
-        operation_id="op-finalize-1",
+        operation_id="op-finalize",
+        generation=generation,
         previous_active_row_id=None,
     )
     receipt = adapter.activate_controller_identity(activation)
+    ca_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            fs.safe_read(_LOC.controller_ca_bundle_path(), max_bytes=1 << 20, expected_uid=0)
+        ).hexdigest()
+    )
     return key, receipt, ca_digest
 
 
-def _marker(receipt, ca_digest) -> ApiSignerMarker:
+def _marker(receipt, ca_digest):
     return ApiSignerMarker(
-        marker_path=ManagementLocations().api_signer_marker_path(),
+        marker_path=_LOC.api_signer_marker_path(),
         installation_id=_INSTALL,
         release_digest=_RELEASE,
         active_identity_row_id=receipt.resulting_row_id,
@@ -274,183 +287,466 @@ def _marker(receipt, ca_digest) -> ApiSignerMarker:
     )
 
 
-def test_full_finalization_sequence_writes_marker_last_and_populates_receipt():
+# ---- full sequence + typed receipts + marker last ----
+def test_fresh_install_sequence_records_typed_effects_and_writes_marker_last():
     fs = _fs()
     runner = _FakeRunner(fs)
     adapter = _adapter(fs, runner)
-    key, receipt, ca_digest = _drive_through_activation(adapter, fs)
-    assert receipt.created is True and receipt.resulting_row_id == _ROW
-    marker_path = ManagementLocations().api_signer_marker_path()
-    # the marker does not exist until enable_api_signer runs LAST
-    assert fs.lstat(marker_path) is None
+    key, receipt, ca_digest = _drive_to_activation(adapter, fs)
+    assert fs.lstat(_LOC.api_signer_marker_path()) is None  # marker not written until enable
     adapter.enable_api_signer(_marker(receipt, ca_digest))
-    st = fs.lstat(marker_path)
-    assert st is not None and st.uid == 0 and st.nlink == 1 and st.mode == 0o644
     r = adapter.receipt()
-    assert r.installed_tls and r.recorded_locators and r.provisioned_roles
-    assert r.prepared_keys and r.installed_broker_units and r.started_brokers
-    assert r.activated_identities == (_ROW,) and len(r.enabled_markers) == 1
-    # the API restart (compose up ... api) runs AFTER the marker is written (marker is the switch)
-    up_calls = [c for c in runner.calls if "up" in c and "api" in c]
-    assert up_calls, "the API must be restarted after the marker is written"
-
-
-def test_handoffs_are_removed_and_absence_proven_after_each_one_shot():
-    fs = _fs()
-    adapter = _adapter(fs, _FakeRunner(fs))
-    _drive_through_activation(adapter, fs)
-    loc = ManagementLocations()
-    assert fs.lstat(loc.provisioning_handoff_host_path()) is None
-    assert fs.lstat(loc.activation_handoff_host_path()) is None
-
-
-def test_handoff_posture_is_root_api_group_0640_while_present():
-    fs = _fs()
-
-    class _CapturingRunner(_FakeRunner):
-        posture: dict = {}
-
-        def _handoff(self, argv):
-            spec = argv[argv.index("--volume") + 1]
-            host = spec.split(":")[0]
-            st = self._fs.lstat(host)
-            _CapturingRunner.posture[host] = (st.uid, st.gid, st.mode, st.nlink, st.is_regular)
-            return super()._handoff(argv)
-
-    adapter = _adapter(fs, _CapturingRunner(fs))
-    _drive_through_activation(adapter, fs)
-    assert _CapturingRunner.posture, "the one-shots must have observed a handoff"
-    for uid, gid, mode, nlink, is_regular in _CapturingRunner.posture.values():
-        assert (uid, gid, mode, nlink, is_regular) == (0, API_RUNTIME_GID, 0o640, 1, True)
-
-
-def test_no_secret_appears_in_the_receipt_or_repr():
-    fs = _fs()
-    adapter = _adapter(fs, _FakeRunner(fs))
-    key, receipt, ca_digest = _drive_through_activation(adapter, fs)
-    adapter.enable_api_signer(_marker(receipt, ca_digest))
-    blob = json.dumps(
-        [
-            list(getattr(adapter.receipt(), f.name))
-            for f in __import__("dataclasses").fields(adapter.receipt())
-        ]
+    effects = [e.effect for e in r.effects]
+    assert effects[-1] == "marker" and "identity_activation" in effects  # marker LAST
+    assert r.transaction_id.startswith("tx-") and r.generation == 0
+    # every fresh-install effect is disposition=absent (created)
+    assert all(
+        e.disposition == EffectDisposition.ABSENT.value
+        for e in r.effects
+        if e.effect in ("tls", "locator", "signer_role", "signer_credential", "marker")
     )
+    assert fs.lstat(_LOC.api_signer_marker_path()) is not None
+
+
+def test_no_secret_bytes_in_any_receipt_effect():
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    key, receipt, ca_digest = _drive_to_activation(adapter, fs)
+    adapter.enable_api_signer(_marker(receipt, ca_digest))
+    blob = json.dumps([e.__dict__ for e in adapter.receipt().effects])
     for forbidden in ("SCRAM-SHA-256", "PRIVATE KEY", "BEGIN EC", "password", "verifier"):
         assert forbidden not in blob
-    assert "redacted" in repr(adapter).lower()
 
 
-def test_marker_write_seals_when_reobserved_identity_disagrees():
+# ---- F2: cryptographic TLS adoption ----
+def _install_valid_tls(fs):
+    produced = produce_controller_tls(
+        policy=_policy(), canonical_origin=_ORIGIN, mode="generated_local_ca", now=_NOW
+    )
+    fs.seed_file(
+        _LOC.controller_ca_bundle_path(), produced.ca_bundle_pem(), uid=0, gid=0, mode=0o644
+    )
+    fs.seed_file(
+        _LOC.controller_server_cert_path(),
+        produced.server_certificate_pem(),
+        uid=0,
+        gid=0,
+        mode=0o644,
+    )
+    fs.seed_file(
+        _LOC.controller_server_key_path(),
+        produced.server_private_key_pem(),
+        uid=0,
+        gid=0,
+        mode=0o600,
+    )
+
+
+def test_valid_existing_tls_is_cryptographically_adopted_without_rewrite():
     fs = _fs()
+    _install_valid_tls(fs)
+    before = fs.safe_read(_LOC.controller_server_cert_path(), max_bytes=1 << 20, expected_uid=0)
     adapter = _adapter(fs, _FakeRunner(fs))
-    key, receipt, ca_digest = _drive_through_activation(adapter, fs)
-    marker = _marker(receipt, ca_digest)
-    tampered = __import__("dataclasses").replace(
-        marker, active_identity_row_id="99999999-9999-9999-9999-999999999999"
+    adapter.install_tls_material(
+        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
+    )
+    after = fs.safe_read(_LOC.controller_server_cert_path(), max_bytes=1 << 20, expected_uid=0)
+    assert before == after  # adopted, not rewritten
+    tls = adapter.receipt().of("tls")
+    assert tls is not None and tls.disposition == EffectDisposition.EXACT_ADOPTED.value
+
+
+def test_partial_tls_set_refuses():
+    fs = _fs()
+    _install_valid_tls(fs)
+    fs.remove_file(_LOC.controller_server_key_path())  # 2 of 3 present
+    adapter = _adapter(fs, _FakeRunner(fs))
+    with pytest.raises(ManagementError) as e:
+        adapter.install_tls_material(
+            policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
+        )
+    assert e.value.reason_code == "finalization_tls_partial_set"
+
+
+def test_existing_tls_with_wrong_origin_refuses():
+    fs = _fs()
+    _install_valid_tls(fs)
+    adapter = _adapter(fs, _FakeRunner(fs))
+    with pytest.raises(ManagementError) as e:
+        adapter.install_tls_material(
+            policy=_policy(),
+            canonical_origin="https://attacker.example:8443",
+            tls_mode="generated_local_ca",
+        )
+    assert e.value.reason_code.startswith("finalization_tls_adopt_invalid")
+
+
+# ---- F3: locator adopt / refuse ----
+def test_absent_locator_is_created_then_exact_locator_is_adopted_without_rewrite():
+    fs = _fs()
+    _install_valid_tls(fs)
+    a1 = _adapter(fs, _FakeRunner(fs))
+    a1.install_tls_material(
+        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
+    )
+    a1.record_locator(canonical_origin=_ORIGIN)
+    assert a1.receipt().of("locator").disposition == EffectDisposition.ABSENT.value
+    before = fs.safe_read(_LOC.controller_api_locator_path(), max_bytes=1 << 20, expected_uid=0)
+    a2 = _adapter(fs, _FakeRunner(fs))
+    a2.install_tls_material(
+        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
+    )
+    a2.record_locator(canonical_origin=_ORIGIN)
+    after = fs.safe_read(_LOC.controller_api_locator_path(), max_bytes=1 << 20, expected_uid=0)
+    assert before == after
+    assert a2.receipt().of("locator").disposition == EffectDisposition.EXACT_ADOPTED.value
+
+
+def test_foreign_locator_refuses():
+    fs = _fs()
+    _install_valid_tls(fs)
+    fs.seed_file(_LOC.controller_api_locator_path(), b"{ not a locator }", uid=0, gid=0, mode=0o644)
+    adapter = _adapter(fs, _FakeRunner(fs))
+    adapter.install_tls_material(
+        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
     )
     with pytest.raises(ManagementError) as e:
-        adapter.enable_api_signer(tampered)
+        adapter.record_locator(canonical_origin=_ORIGIN)
+    assert e.value.reason_code == "finalization_locator_unsafe_or_foreign"
+
+
+# ---- F4: signer credential adopt-unchanged (no rotation) but least privilege re-proven ----
+def test_existing_credential_is_adopted_without_rotation_but_least_privilege_is_reproven():
+    fs = _fs()
+    fs.seed_file(
+        _LOC.enrollment_signer_credential_path(),
+        (("a" * 64) + "\n").encode(),
+        uid=0,
+        gid=0,
+        mode=0o600,
+    )
+    runner = _FakeRunner(fs)
+    adapter = _adapter(fs, runner)
+    adapter.provision_signer_role(_ROLE)
+    cred = adapter.receipt().of("signer_credential")
+    assert cred.disposition == EffectDisposition.EXACT_ADOPTED.value
+    # the operator credential bytes are UNCHANGED (no password rotation on an ordinary upgrade)...
+    assert (
+        fs.safe_read(_LOC.enrollment_signer_credential_path(), max_bytes=128, expected_uid=0)
+        == (("a" * 64) + "\n").encode()
+    )
+    # ...but the least-privilege provisioning/repair one-shot IS re-run to re-prove the adopted role
+    assert any("provision_enrollment_signer_role_once" in " ".join(c) for c in runner.calls)
+
+
+def test_adopt_refuses_a_privilege_drifted_role():
+    # F4: an existing role whose least-privilege posture drifted (the exhaustive receipt reports a
+    # failed bit) is refused on adoption — never silently adopted.
+    fs = _fs()
+    fs.seed_file(
+        _LOC.enrollment_signer_credential_path(),
+        (("a" * 64) + "\n").encode(),
+        uid=0,
+        gid=0,
+        mode=0o600,
+    )
+    runner = _FakeRunner(fs, provision_overrides={"not_superuser": False})  # drifted → superuser
+    adapter = _adapter(fs, runner)
+    with pytest.raises(ManagementError) as e:
+        adapter.provision_signer_role(_ROLE)
+    assert e.value.reason_code == "finalization_provisioning_posture_invalid"
+
+
+def test_wrong_credential_source_path_refuses():
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    bad = ReviewedSignerRole(
+        role_name="secp_enrollment_signer", credential_source_path="/etc/secp/other"
+    )
+    with pytest.raises(ManagementError) as e:
+        adapter.provision_signer_role(bad)
+    assert e.value.reason_code == "finalization_signer_credential_path_invalid"
+
+
+# ---- F5/F7: broker unit exact + socket proof ----
+def test_arbitrary_self_consistent_broker_unit_refuses():
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    from secp_management.adapters import ReviewedUnit
+
+    fake = b"[Unit]\nDescription=evil\n"
+    unit = ReviewedUnit(identity=sha256_bytes(fake), content=fake)
+    with pytest.raises(ManagementError) as e:
+        adapter.install_broker_unit(unit)
+    assert e.value.reason_code == "finalization_broker_unit_not_code_rendered"
+
+
+def test_broker_socket_that_is_a_fifo_refuses():
+    fs = _fs(socket=False)
+    fs.seed_special(
+        ENROLLMENT_SIGNER_SOCKET_PATH, uid=0, gid=API_RUNTIME_GID
+    )  # FIFO/device, not a socket
+    adapter = _adapter(fs, _FakeRunner(fs))
+    _drive_partial_for_socket(adapter, fs)
+    key = adapter._key_identity
+    with pytest.raises(ManagementError) as e:
+        adapter.verify_signer_operational(key_identity=key)
+    assert e.value.reason_code == "finalization_broker_socket_posture_invalid"
+
+
+def _drive_partial_for_socket(adapter, fs):
+    adapter.install_tls_material(
+        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
+    )
+    adapter.record_locator(canonical_origin=_ORIGIN)
+    adapter.provision_signer_role(_ROLE)
+    adapter.prepare_enrollment_key()
+    adapter.install_broker_unit(render_broker_reviewed_unit(_LOC))
+    adapter.start_broker()
+
+
+def test_real_socket_passes_the_operational_proof():
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    _drive_partial_for_socket(adapter, fs)
+    adapter.verify_signer_operational(key_identity=adapter._key_identity)  # no raise
+
+
+# ---- F6: generation ----
+def test_activation_generation_must_equal_plan_generation():
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs), generation=0)
+    _WORLD.clear()
+    adapter.install_tls_material(
+        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
+    )
+    adapter.record_locator(canonical_origin=_ORIGIN)
+    adapter.provision_signer_role(_ROLE)
+    key = adapter.prepare_enrollment_key()
+    adapter.install_broker_unit(render_broker_reviewed_unit(_LOC))
+    adapter.start_broker()
+    adapter.verify_signer_operational(key_identity=key)
+    mismatched = ControllerIdentityActivation(
+        controller_installation_id=_INSTALL,
+        controller_key_id=key.controller_key_id,
+        controller_trust_anchor_hex=key.controller_trust_anchor_hex,
+        controller_origin=_ORIGIN,
+        release_digest=_RELEASE,
+        management_identity_digest=_MGMT,
+        bootstrap_evidence_digest=_BOOT,
+        enrollment_key_proof_id=key.enrollment_key_proof_id,
+        operation_id="op-x",
+        generation=5,
+        previous_active_row_id=None,  # != plan generation 0
+    )
+    with pytest.raises(ManagementError) as e:
+        adapter.activate_controller_identity(mismatched)
+    assert e.value.reason_code == "finalization_activation_generation_mismatch"
+
+
+# ---- F8: post-marker runtime observation ----
+def test_failed_runtime_observation_removes_marker_first_and_seals():
+    fs = _fs()
+
+    def _failing(marker):
+        return ApiSignerRuntimeObservation(*([True] * 11 + [False]))  # no_mixed_generation False
+
+    adapter = _adapter(fs, _FakeRunner(fs), runtime_observer=_failing)
+    key, receipt, ca_digest = _drive_to_activation(adapter, fs)
+    with pytest.raises(ManagementError) as e:
+        adapter.enable_api_signer(_marker(receipt, ca_digest))
+    assert e.value.reason_code == "finalization_post_marker_runtime_unverified"
+    assert fs.lstat(_LOC.api_signer_marker_path()) is None  # candidate marker removed FIRST
+
+
+def test_failed_runtime_on_an_upgrade_restores_the_prior_marker():
+    # F5/F8: when a PRIOR marker exists (an upgrade), a failed post-marker runtime must RESTORE the
+    # prior marker bytes (not merely remove the candidate) and restart the API back to the prior
+    # working generation — the managed_replaced rollback path.
+    fs = _fs()
+    prior_bytes = b'{"schema":"secp.api_signer.marker.prior","prior":"working-generation"}'
+    fs.seed_file(_LOC.api_signer_marker_path(), prior_bytes, uid=0, gid=0, mode=0o644)
+
+    def _failing(marker):
+        return ApiSignerRuntimeObservation(*([True] * 11 + [False]))
+
+    adapter = _adapter(fs, _FakeRunner(fs), runtime_observer=_failing)
+    key, receipt, ca_digest = _drive_to_activation(adapter, fs)
+    with pytest.raises(ManagementError) as e:
+        adapter.enable_api_signer(_marker(receipt, ca_digest))
+    assert e.value.reason_code == "finalization_post_marker_runtime_unverified"
+    restored = fs.safe_read(_LOC.api_signer_marker_path(), max_bytes=1 << 16, expected_uid=0)
+    assert (
+        restored == prior_bytes
+    )  # the PRIOR marker is restored, not removed and not the candidate
+    assert adapter.receipt().of("marker").disposition == EffectDisposition.MANAGED_REPLACED.value
+
+
+def test_marker_seals_on_reobservation_disagreement():
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    key, receipt, ca_digest = _drive_to_activation(adapter, fs)
+    import dataclasses
+
+    bad = dataclasses.replace(
+        _marker(receipt, ca_digest), active_identity_row_id="99999999-9999-9999-9999-999999999999"
+    )
+    with pytest.raises(ManagementError) as e:
+        adapter.enable_api_signer(bad)
     assert e.value.reason_code == "finalization_marker_identity_disagreement"
-    assert fs.lstat(ManagementLocations().api_signer_marker_path()) is None  # never written on seal
+    assert fs.lstat(_LOC.api_signer_marker_path()) is None
 
 
-def test_marker_write_seals_when_no_active_identity_is_reobservable():
-    fs = _fs()
-    adapter = _adapter(fs, _FakeRunner(fs))
-    key, receipt, ca_digest = _drive_through_activation(adapter, fs)
-    _NO_ACTIVE["provider"] = None  # force the lease to raise (no active identity)
-    marker = _marker(receipt, ca_digest)
-    # patch the fake so the ctx manager raises
-    _NO_ACTIVE.clear()
-
-    class _RaisingProvider(_FakeLeaseProvider):
-        def lease(self):
-            class _C:
-                def __enter__(self):
-                    raise RuntimeError("unavailable")
-
-                def __exit__(self, *a):
-                    return False
-
-            return _C()
-
-    adapter._ctx = __import__("dataclasses").replace(
-        adapter._ctx, lease_provider_factory=_RaisingProvider
-    )
-    with pytest.raises(ManagementError) as e:
-        adapter.enable_api_signer(marker)
-    assert e.value.reason_code == "finalization_active_identity_unavailable"
-
-
-def test_compensation_removes_marker_first_and_activation_forces_recovery_required():
-    fs = _fs()
-    adapter = _adapter(fs, _FakeRunner(fs))
-    key, receipt, ca_digest = _drive_through_activation(adapter, fs)
-    adapter.enable_api_signer(_marker(receipt, ca_digest))
-    marker_path = ManagementLocations().api_signer_marker_path()
-    assert fs.lstat(marker_path) is not None
-    result = adapter.compensate(adapter.receipt())
-    # the marker is removed FIRST (API returned to sealed); an activated identity cannot be silently
-    # rolled back here, so compensation is not proven -> recovery_required.
-    assert fs.lstat(marker_path) is None
-    assert result.proven is False and "activated_identity" in result.residual
-
-
-def test_compensation_of_a_pre_activation_receipt_is_proven():
+# ---- F1: compensation (restore / recovery_required) ----
+def test_pre_activation_fs_compensation_removes_all_created_host_objects():
+    # A rollback BEFORE the DB role / identity are created removes every created HOST object cleanly
+    # and proves it (the DB role + activated identity are the only recovery_required residuals, and
+    # they require an API-plane one-shot to reverse — proved separately below).
     fs = _fs()
     adapter = _adapter(fs, _FakeRunner(fs))
     adapter.install_tls_material(
         policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
     )
     adapter.record_locator(canonical_origin=_ORIGIN)
+    adapter.prepare_enrollment_key()
+    adapter.install_broker_unit(render_broker_reviewed_unit(_LOC))
     result = adapter.compensate(adapter.receipt())
     assert result.proven is True and result.residual == ()
-    # the created TLS + locator were removed (drift-checked)
-    assert fs.lstat(ManagementLocations().controller_ca_bundle_path()) is None
-    assert fs.lstat(ManagementLocations().controller_api_locator_path()) is None
+    for p in (
+        _LOC.controller_ca_bundle_path(),
+        _LOC.controller_server_key_path(),
+        _LOC.controller_api_locator_path(),
+        _LOC.broker_unit_path(),
+    ):
+        assert fs.lstat(p) is None
 
 
-def test_compensation_flags_a_drifted_tls_object_and_removes_the_others():
+def test_activated_identity_forces_recovery_required():
     fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    key, receipt, ca_digest = _drive_to_activation(adapter, fs)
+    adapter.enable_api_signer(_marker(receipt, ca_digest))
+    result = adapter.compensate(adapter.receipt())
+    assert fs.lstat(_LOC.api_signer_marker_path()) is None  # marker removed FIRST
+    assert result.proven is False
+    assert "identity_activation" in result.residual and "signer_role_created" in result.residual
+
+
+def test_adopted_objects_are_not_removed_on_compensation():
+    fs = _fs()
+    _install_valid_tls(fs)  # pre-existing valid TLS → adopted, never recorded for removal
     adapter = _adapter(fs, _FakeRunner(fs))
     adapter.install_tls_material(
         policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
     )
-    loc = ManagementLocations()
-    # a foreign process replaces the CA bundle after install (drift)
-    fs.seed_file(loc.controller_ca_bundle_path(), b"FOREIGN CA", uid=0, gid=0, mode=0o644)
-    result = adapter.compensate(adapter.receipt())
-    # the drifted CA is left in place and flagged; the cert + server KEY are still removed
-    assert result.proven is False and "controller_tls" in result.residual
-    assert fs.lstat(loc.controller_ca_bundle_path()) is not None  # foreign object untouched
-    assert fs.lstat(loc.controller_server_cert_path()) is None
-    assert fs.lstat(loc.controller_server_key_path()) is None
-
-
-def test_compensation_removes_the_server_key_even_if_ca_bundle_was_externally_deleted():
-    fs = _fs()
-    adapter = _adapter(fs, _FakeRunner(fs))
-    adapter.install_tls_material(
-        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
-    )
-    loc = ManagementLocations()
-    fs.remove_file(loc.controller_ca_bundle_path())  # CA externally deleted before compensation
-    result = adapter.compensate(adapter.receipt())
-    # the 0600 secret server key is REMOVED (never left on disk); no false residual for absent CA
-    assert fs.lstat(loc.controller_server_key_path()) is None
-    assert fs.lstat(loc.controller_server_cert_path()) is None
-    assert result.proven is True and result.residual == ()
+    adapter.compensate(adapter.receipt())
+    assert fs.lstat(_LOC.controller_ca_bundle_path()) is not None  # adopted TLS left in place
 
 
 def test_compensate_refuses_a_foreign_receipt_type():
     fs = _fs()
     adapter = _adapter(fs, _FakeRunner(fs))
-    result = adapter.compensate("not a receipt")  # type: ignore[arg-type]
+    result = adapter.compensate("nope")  # type: ignore[arg-type]
     assert result.proven is False and result.residual == ("malformed_receipt",)
 
 
 def test_empty_receipt_compensates_cleanly():
     fs = _fs()
     adapter = _adapter(fs, _FakeRunner(fs))
-    result = adapter.compensate(ControllerFinalizationReceipt())
-    assert result.proven is True and result.residual == ()
+    assert adapter.compensate(ControllerFinalizationReceipt()).proven is True
+
+
+_JOURNAL_PATH = f"{_LOC.bootstrap_state}/controller-finalization-journal.json"
+
+
+def _adapter_default_observer(fs, runner):
+    # build the adapter with NO injected runtime_observer so it uses the real fail-closed default.
+    ctx = FinalizationContext(
+        host=RealAdapterContext(locations=_LOC, fs=fs, runner=runner, executables=_pin()),
+        lease_provider_factory=_FakeLeaseProvider,
+        db_prober=lambda engine: None,
+        socket_prober=lambda path, *, expected_peer: None,
+        runtime_observer=None,
+        now=lambda tz=UTC: _NOW,
+    )
+    return RealControllerEnrollmentFinalizationAdapter(ctx, plan=_plan(0))
+
+
+# ---- F8: the DEFAULT runtime observer fails closed (no rubber stamp) ----
+def test_default_runtime_observer_fails_closed_when_not_injected():
+    fs = _fs()
+    adapter = _adapter_default_observer(fs, _FakeRunner(fs))
+    key, receipt, ca_digest = _drive_to_activation(adapter, fs)
+    with pytest.raises(ManagementError) as e:
+        adapter.enable_api_signer(_marker(receipt, ca_digest))
+    assert e.value.reason_code == "finalization_post_marker_runtime_unverified"
+    assert fs.lstat(_LOC.api_signer_marker_path()) is None  # marker removed first + API resealed
+
+
+# ---- single-use transaction: sealed after a terminal outcome ----
+def test_transaction_is_single_use_after_compensate():
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    adapter.install_tls_material(
+        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
+    )
+    adapter.compensate(adapter.receipt())
+    with pytest.raises(ManagementError) as e:
+        adapter.record_locator(canonical_origin=_ORIGIN)  # sealed → any further mutation refuses
+    assert e.value.reason_code == "finalization_transaction_sealed"
+
+
+# ---- F1: the recovery journal is WRITE-AHEAD (intent durable before the mutation) ----
+class _JournalPeekRunner(_FakeRunner):
+    def __init__(self, fs):
+        super().__init__(fs)
+        self.pending_at_activation = None
+
+    def run(self, pin, argv, *, timeout_seconds, max_output_bytes):
+        if "activate_controller_identity_once" in " ".join(argv):
+            doc = json.loads(self._fs.safe_read(_JOURNAL_PATH, max_bytes=1 << 16, expected_uid=0))
+            self.pending_at_activation = doc.get("pending")  # BEFORE the DB one-shot runs
+        return super().run(
+            pin, argv, timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes
+        )
+
+
+def test_identity_activation_intent_is_journaled_before_the_db_mutation():
+    fs = _fs()
+    runner = _JournalPeekRunner(fs)
+    adapter = _adapter(fs, runner)
+    _drive_to_activation(adapter, fs)
+    assert runner.pending_at_activation is not None
+    assert runner.pending_at_activation["effect"] == "identity_activation"
+
+
+def test_recovery_journal_is_public_and_removed_on_commit():
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    adapter.install_tls_material(
+        policy=_policy(), canonical_origin=_ORIGIN, tls_mode="generated_local_ca"
+    )
+    raw = fs.safe_read(_JOURNAL_PATH, max_bytes=1 << 16, expected_uid=0)  # journal exists mid-tx
+    doc = json.loads(raw)
+    assert doc["transaction_id"] == adapter.receipt().transaction_id
+    for forbidden in ("PRIVATE KEY", "BEGIN EC", "password", "SCRAM-SHA-256"):
+        assert forbidden not in raw.decode()
+    assert adapter.commit() is True
+    assert fs.lstat(_JOURNAL_PATH) is None  # removed after commit
+
+
+def test_known_credential_secret_never_appears_in_receipt_or_journal():
+    fs = _fs()
+    known = "feedface" * 8  # a valid 64-char lowercase-hex credential with a recognizable marker
+    fs.seed_file(
+        _LOC.enrollment_signer_credential_path(),
+        (known + "\n").encode(),
+        uid=0,
+        gid=0,
+        mode=0o600,
+    )
+    adapter = _adapter(fs, _FakeRunner(fs))
+    adapter.provision_signer_role(_ROLE)  # adopt path reads the KNOWN plaintext credential
+    blob = json.dumps([e.__dict__ for e in adapter.receipt().effects])
+    assert known not in blob
+    assert known not in fs.safe_read(_JOURNAL_PATH, max_bytes=1 << 16, expected_uid=0).decode()

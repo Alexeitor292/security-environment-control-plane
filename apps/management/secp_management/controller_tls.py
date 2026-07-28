@@ -584,6 +584,40 @@ def produce_controller_tls(
     )
 
 
+def validate_controller_tls_material(
+    *,
+    ca_pem: bytes,
+    server_pem: bytes,
+    key_pem: bytes,
+    policy: ControllerTlsPolicy,
+    canonical_origin: str,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Strict cryptographic validation of an ADOPTED controller-API TLS set against the signed
+    policy — the exact chain / server-key pairing / SAN == canonical-origin / serverAuth EKU / key
+    usage / current validity / policy-conformance (key + signature algorithm, validity ceiling,
+    SAN + IP policy) checks ``produce_controller_tls`` applies to imported material, WITHOUT the
+    mode-permitted gate (adoption is mode-agnostic: an existing set must be policy-conformant no
+    matter how it was produced). Any mismatch raises :class:`ControllerTlsError`. Returns NON-SECRET
+    facts (dns identity, algorithms, validity days) for the adoption receipt."""
+    resolved_now = (datetime.now(UTC) if now is None else now).astimezone(UTC)
+    dns_identity = _origin_dns_identity(canonical_origin, allow_ip_origin=policy.allow_ip_origin)
+    ca, server, _norm_ca, _norm_server, _norm_key = _validate_material(
+        ca_pem=ca_pem,
+        server_pem=server_pem,
+        key_pem=key_pem,
+        identity=dns_identity,
+        now=resolved_now,
+    )
+    key_alg, sig_alg, validity_days = _assert_policy_conformant(ca, server, policy, dns_identity)
+    return {
+        "dns_identity": dns_identity,
+        "key_algorithm": key_alg,
+        "signature_algorithm": sig_alg,
+        "validity_days": validity_days,
+    }
+
+
 __all__ = [
     "CONTROLLER_CA_BUNDLE_PATH",
     "CONTROLLER_SERVER_CERT_PATH",
@@ -592,4 +626,5 @@ __all__ = [
     "ControllerTlsError",
     "ProducedControllerTls",
     "produce_controller_tls",
+    "validate_controller_tls_material",
 ]

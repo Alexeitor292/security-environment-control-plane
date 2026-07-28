@@ -294,6 +294,42 @@ def _exact_replay(
     return EXIT_OK, obj  # the EXACT stored receipt bytes (as the parsed object)
 
 
+def _latest_receipt_for_row(
+    session: Session, row_id: Any
+) -> ControllerIdentityActivationReceipt | None:
+    """The most recent durable receipt whose activation RESULTED IN ``row_id`` — the authoritative
+    source of that identity generation's number (F6). Ordered by ``recorded_at`` so the newest wins
+    even if a row was reactivated across a rollback."""
+    return (
+        session.execute(
+            select(ControllerIdentityActivationReceipt)
+            .where(ControllerIdentityActivationReceipt.resulting_row_id == row_id)
+            .order_by(ControllerIdentityActivationReceipt.recorded_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+
+
+def _validate_generation(
+    session: Session, h: _ActivationHandoff, current: ControllerEnrollmentIdentity | None
+) -> tuple[int, dict[str, Any]] | None:
+    """Independently validate the handoff generation against the DURABLE predecessor receipt (under
+    the advisory lock the caller holds): a fresh install (no active predecessor) MUST be generation
+    0; a rotation MUST be exactly the predecessor receipt's generation + 1 (a stale, skipped, or
+    downgrade generation refuses). Returns a conflict tuple, or ``None`` when the order is valid."""
+    if current is None:
+        if h.generation != 0:
+            return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_generation_not_fresh"}
+        return None
+    prev = _latest_receipt_for_row(session, current.id)
+    if prev is None:
+        return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_predecessor_receipt_missing"}
+    if h.generation != int(prev.generation) + 1:
+        return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_generation_out_of_order"}
+    return None
+
+
 def _first_execution(
     session: Session, h: _ActivationHandoff, op_digest: str, now: datetime
 ) -> tuple[int, dict[str, Any]]:
@@ -331,6 +367,9 @@ def _first_execution(
         or h.expected_predecessor_activation_token != actual_token
     ):
         return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_predecessor_conflict"}
+    gen_conflict = _validate_generation(session, h, current)
+    if gen_conflict is not None:
+        return gen_conflict
     proof = VerifiedControllerIdentity(**{f: getattr(h, f) for f in _IDENTITY_FIELDS})
     try:
         row = activate_controller_identity(session, proof)

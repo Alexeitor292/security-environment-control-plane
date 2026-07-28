@@ -41,6 +41,7 @@ The SHIPPED default is SEALED: every finalization op fails closed with
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
 from secp_management import ManagementError
@@ -116,6 +117,7 @@ class ControllerIdentityActivation:
     bootstrap_evidence_digest: str
     enrollment_key_proof_id: str
     operation_id: str
+    generation: int  # authenticated finalization generation (fresh=0; upgrade=prev+1; never reused)
     previous_active_row_id: str | None = None
 
 
@@ -149,26 +151,78 @@ class ControllerEnrollmentFinalizationPlan:
     release_digest: str
     management_identity_digest: str
     bootstrap_evidence_digest: str
+    generation: int  # the authenticated finalization generation this plan installs (F6)
 
 
 # --------------------------------------------------------------------- receipt + protocol
 
 
+class EffectDisposition(str, Enum):
+    """The pre-mutation classification of a fixed finalization object. ``UNSAFE_OR_FOREIGN`` REFUSES
+    before any mutation; the others drive compensation (created→remove, replaced→restore prior,
+    adopted/unchanged→leave)."""
+
+    ABSENT = "absent"
+    EXACT_ADOPTED = "exact_adopted"
+    MANAGED_REPLACED = "managed_replaced"
+    MANAGED_UNCHANGED = "managed_unchanged"
+    UNSAFE_OR_FOREIGN = "unsafe_or_foreign"
+
+
+#: The nine finalization effect kinds, in reviewed order. The single closed
+#: :class:`FinalizationEffectReceipt` (below) is the typed, discriminated equivalent of the named
+#: Tls/Locator/SignerCredential/SignerRole/EnrollmentKey/BrokerUnit/BrokerService/Identity/Marker
+#: mutation receipts — same closed bindings, one per effect, discriminated by ``effect``.
+FINALIZATION_EFFECTS: tuple[str, ...] = (
+    "tls",
+    "locator",
+    "signer_credential",
+    "signer_role",
+    "enrollment_key",
+    "broker_unit",
+    "broker_service",
+    "identity_activation",
+    "marker",
+)
+
+
+@dataclass(frozen=True)
+class FinalizationEffectReceipt:
+    """One closed, typed per-effect finalization receipt. It binds the transaction id, generation,
+    fixed object identity, pre-mutation disposition, prior + candidate PUBLIC digests/identities,
+    bounded ownership evidence, an OPAQUE restoration handle + public digest when a prior secret was
+    staged, whether the prior service/runtime state was active, and the exact compensation result.
+    It NEVER contains secret bytes (plaintext credential, private key, DSN) — only public facts and
+    opaque handles."""
+
+    effect: str  # one of FINALIZATION_EFFECTS
+    transaction_id: str
+    generation: int
+    object_identity: str  # the fixed path/name of the object
+    disposition: str  # an EffectDisposition value
+    candidate_digest: str = ""  # public digest/identity we installed (created / managed_replaced)
+    prior_digest: str = ""  # public digest/identity of the prior managed object (managed_replaced)
+    ownership_evidence: str = ""  # bounded proof the object is installer-owned (never secret)
+    restoration_handle: str = ""  # opaque staging handle for a captured prior SECRET (never bytes)
+    restoration_digest: str = ""  # public digest of the staged prior (verified on restore)
+    prior_active: bool = False  # whether the prior service/runtime state was active/running
+    compensation_result: str = ""  # set during compensate: removed|restored|adopted_left|residual:*
+
+
 @dataclass(frozen=True)
 class ControllerFinalizationReceipt:
-    """A record of ONLY the finalization objects the adapter actually created/changed, in reviewed
-    order, so it can compensate exactly those in reverse (marker FIRST). All default empty (empty
-    PROVES no effect)."""
+    """The ordered ledger of typed per-effect receipts the adapter accumulates, bound to ONE
+    transaction id + generation. Empty ``effects`` PROVES no effect occurred (the sealed default).
+    Compensation replays ``effects`` in REVERSE (marker FIRST → API sealed), driven by each effect's
+    disposition + restoration handle."""
 
-    installed_tls: tuple[str, ...] = ()
-    recorded_locators: tuple[str, ...] = ()
-    provisioned_roles: tuple[str, ...] = ()
-    written_credentials: tuple[str, ...] = ()
-    prepared_keys: tuple[str, ...] = ()
-    installed_broker_units: tuple[str, ...] = ()
-    started_brokers: tuple[str, ...] = ()
-    activated_identities: tuple[str, ...] = ()  # penultimate
-    enabled_markers: tuple[str, ...] = ()  # LAST → compensated FIRST
+    effects: tuple[FinalizationEffectReceipt, ...] = ()
+    transaction_id: str = ""
+    generation: int = 0
+
+    def of(self, effect: str) -> FinalizationEffectReceipt | None:
+        matches = [e for e in self.effects if e.effect == effect]
+        return matches[-1] if matches else None
 
 
 class ControllerEnrollmentFinalizationAdapter(Protocol):
@@ -242,13 +296,16 @@ class SealedControllerEnrollmentFinalizationAdapter:
 
 
 __all__ = [
+    "FINALIZATION_EFFECTS",
     "ActivationReceipt",
     "ApiSignerMarker",
     "ControllerEnrollmentFinalizationAdapter",
     "ControllerEnrollmentFinalizationPlan",
     "ControllerFinalizationReceipt",
     "ControllerIdentityActivation",
+    "EffectDisposition",
     "EnrollmentKeyIdentity",
+    "FinalizationEffectReceipt",
     "ReviewedSignerRole",
     "SealedControllerEnrollmentFinalizationAdapter",
 ]

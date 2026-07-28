@@ -15,6 +15,7 @@ from secp_management import ManagementError
 from secp_management.adapters import CompensationResult, ReviewedUnit
 from secp_management.engine import EngineDeps
 from secp_management.finalization import (
+    FINALIZATION_EFFECTS,
     ApiSignerMarker,
     ControllerEnrollmentFinalizationPlan,
     ControllerFinalizationReceipt,
@@ -42,6 +43,7 @@ _ACTIVATION = ControllerIdentityActivation(
     bootstrap_evidence_digest="sha256:" + "4" * 64,
     enrollment_key_proof_id="enrkp:" + "5" * 64,
     operation_id="op-0001",
+    generation=0,
     previous_active_row_id=None,
 )
 _MARKER = ApiSignerMarker(
@@ -83,20 +85,17 @@ def test_every_sealed_op_fails_closed():
 
 
 def test_reviewed_order_puts_activation_penultimate_and_marker_last():
-    # the receipt field order encodes the reviewed sequence; the marker is the LAST recorded object
-    # (so compensation removes it FIRST), and identity activation is the penultimate one.
-    fields = [f.name for f in dataclasses.fields(ControllerFinalizationReceipt)]
-    assert fields[-1] == "enabled_markers"
-    assert fields[-2] == "activated_identities"
+    # the effect order encodes the reviewed sequence; the marker is the LAST effect (so compensation
+    # removes it FIRST), and identity activation is the penultimate one.
+    assert FINALIZATION_EFFECTS[-1] == "marker"
+    assert FINALIZATION_EFFECTS[-2] == "identity_activation"
 
 
 def test_empty_receipt_proves_no_effect_and_compensation_is_proven():
     a = SealedControllerEnrollmentFinalizationAdapter()
     receipt = a.receipt()
     assert receipt == ControllerFinalizationReceipt()
-    assert all(
-        getattr(receipt, f.name) == () for f in dataclasses.fields(ControllerFinalizationReceipt)
-    )
+    assert receipt.effects == ()  # empty effects PROVES no host effect occurred
     assert a.compensate(receipt) == CompensationResult(proven=True)
 
 
