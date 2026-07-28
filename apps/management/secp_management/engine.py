@@ -57,10 +57,6 @@ from secp_management.adapters import (
     is_generation_marker,
     worker_generation_marker,
 )
-from secp_management.finalization import (
-    ControllerEnrollmentFinalizationAdapter,
-    SealedControllerEnrollmentFinalizationAdapter,
-)
 from secp_management.evidence import (
     CLASSIFICATION_ADOPTED,
     CLASSIFICATION_CREATED,
@@ -84,6 +80,10 @@ from secp_management.evidence import (
     identity_from_dict,
     parse_document_bytes,
     path_binding_digest,
+)
+from secp_management.finalization import (
+    ControllerEnrollmentFinalizationAdapter,
+    SealedControllerEnrollmentFinalizationAdapter,
 )
 from secp_management.hostview import HostProbe, LocalHostProbe
 from secp_management.layout import ManagementLocations
