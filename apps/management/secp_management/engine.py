@@ -57,6 +57,10 @@ from secp_management.adapters import (
     is_generation_marker,
     worker_generation_marker,
 )
+from secp_management.finalization import (
+    ControllerEnrollmentFinalizationAdapter,
+    SealedControllerEnrollmentFinalizationAdapter,
+)
 from secp_management.evidence import (
     CLASSIFICATION_ADOPTED,
     CLASSIFICATION_CREATED,
@@ -147,6 +151,11 @@ class EngineDeps:
     )
     worker_adapter: WorkerBootstrapAdapter = field(default_factory=SealedWorkerBootstrapAdapter)
     rollback_adapter: ManagementRollbackAdapter = field(default_factory=SealedRollbackAdapter)
+    # the controller-enrollment finalization seam (TLS/locator/signer-role/enrollment-key/broker/
+    # api-signer/identity-activation). SHIPPED sealed → finalization fails closed until composed.
+    finalization_adapter: ControllerEnrollmentFinalizationAdapter = field(
+        default_factory=SealedControllerEnrollmentFinalizationAdapter
+    )
     # the management signing seam that attests evidence, and the anchor that verifies the
     # attestation.
     # SHIPPED sealed / empty → production cannot attest or verify → bootstrap/status fail closed.
