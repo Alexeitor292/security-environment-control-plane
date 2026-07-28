@@ -25,6 +25,7 @@ import pytest
 from secp_api.controller_identity_dev import build_test_verified_controller_identity
 from secp_api.models import Base
 from secp_api.services.controller_identity import activate_controller_identity
+from secp_api.worker_enrollment_schema import RUNTIME_REQUIRED_MIGRATION_HEAD
 from secp_commissioning.controller_enrollment_signer import ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY
 from secp_management.enrollment_signer_db import (
     ENROLLMENT_SIGNER_DB_ROLE,
@@ -64,6 +65,16 @@ def pg():
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
     Base.metadata.create_all(admin)
+    with (
+        admin.begin() as conn
+    ):  # RESTORE the alembic-head marker the job's later "live head" step reads
+        conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS alembic_version (version_num varchar(32) primary key)"
+        )
+        conn.exec_driver_sql("DELETE FROM alembic_version")
+        conn.exec_driver_sql(
+            f"INSERT INTO alembic_version VALUES ('{RUNTIME_REQUIRED_MIGRATION_HEAD}')"
+        )
     password = generate_signer_db_password()
     with (
         ac.connect() as conn
