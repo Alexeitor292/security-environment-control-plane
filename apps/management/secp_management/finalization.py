@@ -89,7 +89,6 @@ class ApiSignerMarker:
     active_identity_row_id: str
     activation_token: str
     controller_key_id: str
-    broker_unit_identity: str
     uds_contract_identity: str
     api_uid: int
     api_gid: int

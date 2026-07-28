@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -36,6 +37,7 @@ from secp_commissioning.enrollment_signer_role import (
     EnrollmentSignerRoleError,
     render_signer_role_sql,
 )
+from secp_commissioning.hardened_handoff import HardenedHandoffError, read_hardened_fixed_handoff
 from sqlalchemy import Engine, text
 
 from secp_api.db import get_engine
@@ -95,12 +97,9 @@ def _parse_handoff(raw: bytes) -> _ProvisionHandoff:
     return handoff
 
 
-def _read_handoff(handoff_path: str) -> bytes:
-    try:
-        with open(handoff_path, "rb") as fh:
-            return fh.read(_MAX_HANDOFF_BYTES + 1)
-    except OSError:
-        raise _HandoffInvalid("provision_handoff_unreadable") from None
+def _production_reader() -> bytes:
+    gid = int(getattr(os, "getegid", lambda: -1)())
+    return read_hardened_fixed_handoff(HANDOFF_PATH, expected_gid=gid, max_bytes=_MAX_HANDOFF_BYTES)
 
 
 def _verify_role_posture(conn: Any, *, unrelated_table: str | None) -> dict[str, Any]:
@@ -109,20 +108,29 @@ def _verify_role_posture(conn: Any, *, unrelated_table: str | None) -> dict[str,
     flags = conn.execute(
         text(
             "SELECT rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolcanlogin, "
-            "rolreplication FROM pg_roles WHERE rolname = :r"
+            "rolreplication, rolinherit FROM pg_roles WHERE rolname = :r"
         ),
         {"r": ENROLLMENT_SIGNER_DB_ROLE},
     ).one_or_none()
     if flags is None:
         raise _RolePostureInvalid("provision_role_absent")
-    rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolcanlogin, rolreplication = flags
-    if (rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication) != (
-        False,
-        False,
-        False,
-        False,
-        False,
-    ) or rolcanlogin is not True:
+    (
+        rolsuper,
+        rolcreaterole,
+        rolcreatedb,
+        rolbypassrls,
+        rolcanlogin,
+        rolreplication,
+        rolinherit,
+    ) = flags
+    if (
+        rolsuper,
+        rolcreaterole,
+        rolcreatedb,
+        rolbypassrls,
+        rolreplication,
+        rolinherit,
+    ) != (False, False, False, False, False, False) or rolcanlogin is not True:
         raise _RolePostureInvalid("provision_role_attributes_invalid")
 
     def _priv(table: str, privilege: str) -> bool:
@@ -139,15 +147,45 @@ def _verify_role_posture(conn: Any, *, unrelated_table: str | None) -> dict[str,
         raise _RolePostureInvalid("provision_role_has_write")
     if unrelated_table is not None and _priv(unrelated_table, "SELECT"):
         raise _RolePostureInvalid("provision_role_reads_unrelated")
+    # unexpected sequence / function execution privileges
+    if unrelated_table is not None:
+        seq = conn.execute(
+            text(
+                "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid "
+                "WHERE c.relkind = 'S' AND n.nspname = 'public' LIMIT 1"
+            )
+        ).scalar()
+        if seq is not None and bool(
+            conn.execute(
+                text("SELECT has_sequence_privilege(:r, 'public.' || :s, 'USAGE')"),
+                {"r": ENROLLMENT_SIGNER_DB_ROLE, "s": seq},
+            ).scalar()
+        ):
+            raise _RolePostureInvalid("provision_role_has_sequence_privilege")
+    # no ownership of ANY object class (table/index/sequence/view), schema, or function
     owned = conn.execute(
         text(
-            "SELECT count(*) FROM pg_class c JOIN pg_roles o ON c.relowner = o.oid "
-            "WHERE o.rolname = :r"
+            "SELECT (SELECT count(*) FROM pg_class c JOIN pg_roles o ON c.relowner = o.oid"
+            " WHERE o.rolname = :r)"
+            " + (SELECT count(*) FROM pg_namespace ns JOIN pg_roles o ON ns.nspowner = o.oid"
+            " WHERE o.rolname = :r)"
+            " + (SELECT count(*) FROM pg_proc p JOIN pg_roles o ON p.proowner = o.oid"
+            " WHERE o.rolname = :r)"
         ),
         {"r": ENROLLMENT_SIGNER_DB_ROLE},
     ).scalar()
     if owned:
         raise _RolePostureInvalid("provision_role_owns_objects")
+    # no role membership in EITHER direction (a membership is a SET ROLE escalation path)
+    memberships = conn.execute(
+        text(
+            "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r "
+            "ON (m.member = r.oid OR m.roleid = r.oid) WHERE r.rolname = :r"
+        ),
+        {"r": ENROLLMENT_SIGNER_DB_ROLE},
+    ).scalar()
+    if memberships:
+        raise _RolePostureInvalid("provision_role_has_membership")
     return {
         "role_name": ENROLLMENT_SIGNER_DB_ROLE,
         "can_login": True,
@@ -155,10 +193,13 @@ def _verify_role_posture(conn: Any, *, unrelated_table: str | None) -> dict[str,
         "not_createrole": True,
         "not_createdb": True,
         "not_bypassrls": True,
+        "not_inherit": True,
+        "not_replication": True,
         "select_on_identity": True,
         "no_write_on_identity": True,
         "no_unrelated_read": unrelated_table is not None,
         "owns_nothing": True,
+        "no_memberships": True,
     }
 
 
@@ -168,15 +209,93 @@ class _RolePostureInvalid(Exception):
         self.reason_code = reason_code
 
 
+def _quote_ident(name: str) -> str:
+    """Double-quote a catalog-sourced role identifier (defensive doubling of any embedded quote)."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _repair_hostile_role(conn: Any) -> None:
+    """Normalize a pre-existing (possibly hostile) ``secp_enrollment_signer`` to the closed
+    least-privilege posture BEFORE the reviewed grants are applied. A prior installer, an operator,
+    or an attacker with prior DB-admin access could have left the role a member of a privileged
+    group, a grantable escalation target, an object owner, or the holder of sequence/function
+    privileges. This step enumerates the catalogs EXHAUSTIVELY (not one sample) and:
+
+    * revokes every role membership in BOTH directions — a membership either way is a ``SET ROLE``
+      escalation path;
+    * REFUSES (``provision_role_owns_objects``) if the role owns ANY object
+      (table/index/sequence/view, schema, or function) — an owned object is a persistence/escalation
+      foothold the closed installation ownership policy must not silently keep;
+    * strips any sequence / function / routine execution privilege.
+
+    Parent/child role names come from the catalog and are quoted; the signer role name is a fixed
+    code constant. The subsequent reviewed statements pin the closed attribute set + re-grant the
+    exact schema ``USAGE`` + identity ``SELECT``."""
+    role = ENROLLMENT_SIGNER_DB_ROLE
+    q = _quote_ident(role)
+    # 1) revoke every group the signer is a MEMBER of (SET ROLE <group> escalation).
+    parents = (
+        conn.execute(
+            text(
+                "SELECT g.rolname FROM pg_auth_members m "
+                "JOIN pg_roles g ON m.roleid = g.oid "
+                "JOIN pg_roles r ON m.member = r.oid WHERE r.rolname = :r"
+            ),
+            {"r": role},
+        )
+        .scalars()
+        .all()
+    )
+    for parent in parents:
+        conn.exec_driver_sql(f"REVOKE {_quote_ident(parent)} FROM {q};")
+    # 2) revoke every role the signer has been GRANTED TO (a grantee could SET ROLE into it).
+    children = (
+        conn.execute(
+            text(
+                "SELECT c.rolname FROM pg_auth_members m "
+                "JOIN pg_roles r ON m.roleid = r.oid "
+                "JOIN pg_roles c ON m.member = c.oid WHERE r.rolname = :r"
+            ),
+            {"r": role},
+        )
+        .scalars()
+        .all()
+    )
+    for child in children:
+        conn.exec_driver_sql(f"REVOKE {q} FROM {_quote_ident(child)};")
+    # 3) refuse ANY owned object (table/index/sequence/view, schema, function); never silently keep.
+    owned = conn.execute(
+        text(
+            "SELECT (SELECT count(*) FROM pg_class c JOIN pg_roles o ON c.relowner = o.oid"
+            " WHERE o.rolname = :r)"
+            " + (SELECT count(*) FROM pg_namespace ns JOIN pg_roles o ON ns.nspowner = o.oid"
+            " WHERE o.rolname = :r)"
+            " + (SELECT count(*) FROM pg_proc p JOIN pg_roles o ON p.proowner = o.oid"
+            " WHERE o.rolname = :r)"
+        ),
+        {"r": role},
+    ).scalar()
+    if owned:
+        raise _RolePostureInvalid("provision_role_owns_objects")
+    # 4) strip any sequence / function / routine privilege beyond the reviewed identity SELECT.
+    conn.exec_driver_sql(f"REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM {q};")
+    conn.exec_driver_sql(f"REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM {q};")
+    conn.exec_driver_sql(f"REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public FROM {q};")
+
+
 def run_provision(
-    *, handoff_path: str = HANDOFF_PATH, engine: Engine | None = None
+    *, read_handoff: Any = None, engine: Engine | None = None
 ) -> tuple[int, dict[str, Any]]:
-    """Read + validate the fixed verifier handoff, apply the code-owned provisioning SQL over the
-    admin connection, and verify the least-privilege posture. Returns ``(exit_code,
-    receipt/reason)``.
-    Role provisioning is PostgreSQL-only (the role attributes/grants are PostgreSQL semantics)."""
+    """Read + validate the fixed verifier handoff (via the plane-neutral HARDENED reader in
+    production), apply the code-owned provisioning SQL over the admin connection, and verify the
+    least-privilege posture. Returns ``(exit_code, receipt/reason)``. Role provisioning is
+    PostgreSQL-only. ``read_handoff`` defaults to the hardened fixed-path reader; tests inject a
+    verified-reader seam (never a production path override)."""
+    reader = read_handoff if read_handoff is not None else _production_reader
     try:
-        handoff = _parse_handoff(_read_handoff(handoff_path))
+        handoff = _parse_handoff(reader())
+    except HardenedHandoffError as exc:
+        return EXIT_HANDOFF_INVALID, {"reason_code": exc.reason_code}
     except _HandoffInvalid as exc:
         return EXIT_HANDOFF_INVALID, {"reason_code": exc.reason_code}
     eng = engine if engine is not None else get_engine()
@@ -185,7 +304,11 @@ def run_provision(
     statements = render_signer_role_sql(handoff.scram_verifier)
     try:
         with eng.begin() as conn:
-            for stmt in statements:
+            # 1) create/ensure the role, 2) NORMALIZE a pre-existing hostile role completely, then
+            # 3) pin the closed attributes + REVOKE table/schema privilege + GRANT reviewed reads.
+            conn.exec_driver_sql(statements[0])
+            _repair_hostile_role(conn)
+            for stmt in statements[1:]:
                 conn.exec_driver_sql(stmt)
             unrelated = conn.execute(
                 text(
@@ -209,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     ).parse_args(argv)
     code, payload = run_provision()
-    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))  # noqa: T201 - one-shot receipt
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))  # noqa: T201
     return code
 
 

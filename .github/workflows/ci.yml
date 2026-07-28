@@ -249,7 +249,7 @@ jobs:
   # The normal shards already collect these modules, but they SKIP without a database. This additive
   # gate proves the durable enrollment repository, the transactional CAS/nonce concurrency suite, the
   # restart/crash recovery suite and the real migration round trip all EXECUTE against a real
-  # PostgreSQL, and that the live Alembic head is exactly c2f8e1a4b6d9. It runs only against the
+  # PostgreSQL, and that the live Alembic head is exactly a1d4f7c2e9b6. It runs only against the
   # ephemeral job-local database and contacts no deployment infrastructure.
   backend-pr5h-postgres-enrollment:
     name: PR5H-A PostgreSQL enrollment/recovery fence (real DB, no skips)
@@ -291,6 +291,8 @@ jobs:
           apps/api/tests/test_worker_enrollment_migration_postgres.py
           apps/api/tests/test_enrollment_signer_lease_postgres.py
           apps/api/tests/test_enrollment_signer_scram_postgres.py
+          apps/api/tests/test_enrollment_signer_provision_postgres.py
+          apps/api/tests/test_activate_controller_identity_once_postgres.py
           -q -p no:cacheprovider
           --junitxml=junit-pr5h-postgres-enrollment.xml
       - name: Upload PR5H-A PostgreSQL JUnit
@@ -314,8 +316,17 @@ jobs:
           # writes refuse, role is not superuser/owner),
           # + 5 PR5H-B2 2b-2 SCRAM dedicated-role provisioning proofs (locally-computed SCRAM verifier
           # authenticates against real PostgreSQL, wrong password rejected, provisioned role is exactly
-          # least-privilege, role flags closed, provisioning idempotent).
-          EXPECTED_MINIMUM = 57
+          # least-privilege, role flags closed, provisioning idempotent),
+          # + 9 PR5H-B2 C4 provisioning one-shot + hostile-repair proofs (one-shot creates role +
+          # SCRAM plaintext authenticates, wrong plaintext rejected, credential rotation invalidates
+          # the old plaintext, role exactly least-privilege, attributes closed incl NOINHERIT +
+          # NOREPLICATION, SET ROLE refused + RESET cannot reveal admin, memberships repaired both
+          # directions, sequence/function privileges stripped, owned object refused not silently kept),
+          # + 5 PR5H-B2 C3 activation durable-idempotency proofs (first execution commits identity +
+          # receipt atomically, exact replay byte-equivalent after freshness expiry, UNIQUE(operation_id)
+          # race is a single winner, tampered receipt refuses state-corrupt, the write-once receipt
+          # table is unreachable by the least-privilege runtime role).
+          EXPECTED_MINIMUM = 71
           path = Path("junit-pr5h-postgres-enrollment.xml")
           if not path.exists():
               print("::error::PR5H-A PostgreSQL JUnit missing - the test step produced no results")
@@ -350,7 +361,7 @@ jobs:
               f"PR5H-A PostgreSQL proofs executed: {tests} tests, zero skipped/failed/errored."
           )
           PY
-      - name: Prove the live Alembic head is exactly c2f8e1a4b6d9
+      - name: Prove the live Alembic head is exactly a1d4f7c2e9b6
         run: |
           uv run python - <<'PY'
           import os, sys
@@ -360,10 +371,10 @@ jobs:
           with engine.connect() as conn:
               rows = conn.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
           engine.dispose()
-          if rows != ["c2f8e1a4b6d9"]:
-              print(f"::error::live Alembic head is {rows}, expected exactly ['c2f8e1a4b6d9']")
+          if rows != ["a1d4f7c2e9b6"]:
+              print(f"::error::live Alembic head is {rows}, expected exactly ['a1d4f7c2e9b6']")
               sys.exit(1)
-          print("live Alembic head verified: c2f8e1a4b6d9")
+          print("live Alembic head verified: a1d4f7c2e9b6")
           PY
 
   # --- dependency/security scan ----------------------------------------------------------------

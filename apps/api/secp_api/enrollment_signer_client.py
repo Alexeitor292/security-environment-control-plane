@@ -35,6 +35,10 @@ from secp_commissioning.controller_enrollment_signer import (
 )
 from secp_commissioning.enrollment_attestation import DetachedAttestation
 
+from secp_api.enrollment_signer_binding import (
+    EnrollmentSignerRuntimeBinding,
+    marker_matches_binding,
+)
 from secp_api.enrollment_signer_marker import MARKER_PATH, load_valid_marker
 from secp_api.enums import WorkerEnrollmentErrorCode as EC
 from secp_api.errors import WorkerEnrollmentError
@@ -168,18 +172,32 @@ class UnixSocketEnrollmentOfferSignerClient(_NonSerializable):
 
 
 def build_enrollment_offer_signer(
-    settings: object, *, marker_path: str = MARKER_PATH
+    settings: object,
+    *,
+    runtime_binding: EnrollmentSignerRuntimeBinding | None = None,
+    marker_path: str = MARKER_PATH,
 ) -> EnrollmentOfferSignerClient:
     """Production composition: return the fixed-UDS client (bound to the code-owned
     ``ENROLLMENT_SIGNER_SOCKET_PATH``) ONLY when the deployment ENABLES it; otherwise the sealed
     default. Production may never select the socket or key location (C5), and — SECP-PR5H-B2 — in
-    PRODUCTION the SOLE positive enabling authority is the root-owned enablement MARKER: no
-    environment variable / Compose value / database field / HTTP request can enable the signer, and
-    an absent / unsafe / malformed marker keeps it sealed. Off production (dev/test) the env flag
-    enables, for compatibility only. (``marker_path`` is overridable only for the tests.)"""
+    PRODUCTION the SOLE positive enabling authority is the root-owned enablement MARKER whose
+    complete binding EXACTLY equals the authoritative ``runtime_binding`` (built from the verified
+    active identity + process + fixed contracts + CA digest): no environment variable / Compose
+    value / database field / HTTP request can enable the signer, and an absent / unsafe / malformed
+    marker, an unavailable binding, or ANY binding mismatch (stale release / identity / key /
+    installation /
+    uid-gid / role / UDS / CA) keeps it sealed. Off production (dev/test) the env flag enables, for
+    compatibility only. (``marker_path`` is overridable only for the tests.)"""
     if bool(getattr(settings, "is_production", False)):
-        if load_valid_marker(path=marker_path) is None:
-            return SealedEnrollmentOfferSignerClient()  # marker is the sole prod authority
+        marker = load_valid_marker(path=marker_path)
+        if (
+            marker is None
+            or runtime_binding is None
+            or not marker_matches_binding(marker, runtime_binding)
+        ):
+            return (
+                SealedEnrollmentOfferSignerClient()
+            )  # marker + exact binding are the sole authority
         return UnixSocketEnrollmentOfferSignerClient()
     if not bool(getattr(settings, "enrollment_signer_enabled", False)):
         return SealedEnrollmentOfferSignerClient()

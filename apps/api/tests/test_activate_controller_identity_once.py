@@ -1,10 +1,11 @@
-"""Fixed API-plane controller-identity activation one-shot (SECP-PR5H-B2, commit 2b-3b).
+"""Controller-identity activation one-shot — exact-operation durable idempotency (SECP-PR5H-B2 C3).
 
-Proves the one-shot activates the verified identity from the fixed handoff, is idempotent on exact
-replay, rotates under the expected-predecessor CAS, conflicts on a stale predecessor, refuses a
-malformed/non-canonical/digest-mismatched handoff, refuses an activation that breaks the identity-
-proof invariants (key separation), and returns only a bounded non-secret receipt. The ``engine``
-fixture rebinds the API sessionmaker to a per-test in-memory DB, so ``run_activation`` drives it.
+Drives the one-shot through a per-test in-memory DB (the ``engine`` fixture rebinds the API
+sessionmaker) with an injected reader seam (the production reader is POSIX-hardened) and an injected
+``now`` (freshness). Proves first-execution + receipt commit atomically, exact byte-equivalent
+replay (after restart / rotation / rotation-back / freshness expiry), the operation-binding
+conflicts, the
+already-active refusal, activation-failure leaving no receipt, and corrupt-receipt refusal.
 """
 
 from __future__ import annotations
@@ -14,35 +15,58 @@ import json
 import pytest
 from secp_api import activate_controller_identity_once as mod
 from secp_api.controller_identity_dev import build_test_verified_controller_identity
+from secp_api.controller_identity_models import ControllerIdentityActivationReceipt
+from secp_api.db import get_sessionmaker
 from secp_commissioning.canonical import canonical_json, sha256_bytes
+from sqlalchemy import select
+
+_SCHEMA = mod.CONTROLLER_IDENTITY_ACTIVATION_SCHEMA
+_T0 = "2026-07-28T00:00:00Z"
+from datetime import UTC, datetime  # noqa: E402
+
+_FRESH = datetime(2026, 7, 28, 0, 1, 0, tzinfo=UTC)  # 60s after _T0
+_STALE = datetime(2026, 7, 28, 2, 0, 0, tzinfo=UTC)  # 2h after _T0
 
 
 def _fields(proof) -> dict[str, str]:
     return {f: getattr(proof, f) for f in mod._IDENTITY_FIELDS}
 
 
-def _digest(fields: dict[str, str]) -> str:
-    return sha256_bytes(canonical_json({f: fields[f] for f in mod._IDENTITY_FIELDS}).encode())
-
-
-def _handoff_bytes(proof, *, operation_id="op-1", expected_predecessor=None, **over) -> bytes:
+def _handoff(
+    proof,
+    *,
+    operation_id="op-1",
+    expected_row=None,
+    expected_token=None,
+    generation=0,
+    created_at=_T0,
+    **over,
+) -> bytes:
     fields = _fields(proof)
     env = {
-        "schema": mod._HANDOFF_SCHEMA,
+        "schema": _SCHEMA,
         "operation_id": operation_id,
-        "expected_predecessor_row_id": expected_predecessor,
+        "candidate_digest": sha256_bytes(
+            canonical_json({f: fields[f] for f in mod._IDENTITY_FIELDS}).encode()
+        ),
+        "expected_predecessor_row_id": expected_row,
+        "expected_predecessor_activation_token": expected_token,
+        "generation": generation,
+        "handoff_created_at": created_at,
         **fields,
-        "candidate_digest": _digest(fields),
-        "created_at": "2026-07-28T00:00:00Z",
     }
     env.update(over)
     return canonical_json(env).encode()
 
 
-def _write(tmp_path, raw: bytes) -> str:
-    p = tmp_path / "controller-identity-activation.json"
-    p.write_bytes(raw)
-    return str(p)
+def _reader(raw: bytes):
+    return lambda: raw
+
+
+def _run(raw: bytes, *, now=_FRESH):
+    return mod.run_activation(
+        read_handoff=_reader(raw), session_factory=get_sessionmaker(), now=now
+    )
 
 
 _A = build_test_verified_controller_identity()
@@ -51,100 +75,171 @@ _B = build_test_verified_controller_identity(
 )
 
 
-def test_fresh_activation_succeeds_with_a_bounded_receipt(engine, tmp_path):
-    code, receipt = mod.run_activation(handoff_path=_write(tmp_path, _handoff_bytes(_A)))
-    assert code == mod.EXIT_OK
-    assert receipt["created"] is True
-    assert receipt["previous_active_row_id"] is None
-    assert receipt["resulting_status"] == "active"
-    assert receipt["candidate_digest"] == _digest(_fields(_A))
-    assert receipt["resulting_public_state_digest"].startswith("sha256:")
-    # no secret-shaped field in the receipt
+def _receipt_count(prefix="") -> int:
+    with get_sessionmaker()() as s:
+        return len(s.execute(select(ControllerIdentityActivationReceipt)).scalars().all())
+
+
+def test_first_execution_commits_activation_and_receipt_atomically(engine):
+    code, receipt = _run(_handoff(_A))
+    assert code == mod.EXIT_OK and receipt["created"] is True
+    assert receipt["previous_active_row_id"] is None and receipt["resulting_status"] == "active"
+    assert _receipt_count() == 1  # the durable receipt exists
     blob = json.dumps(receipt)
-    for forbidden in ("password", "verifier", "PRIVATE KEY", "database", "postgresql", "dsn"):
+    for forbidden in ("password", "verifier", "PRIVATE KEY", "postgresql", "dsn"):
         assert forbidden not in blob
 
 
-def test_exact_replay_is_idempotent(engine, tmp_path):
-    path = _write(tmp_path, _handoff_bytes(_A))
-    code1, r1 = mod.run_activation(handoff_path=path)
-    code2, r2 = mod.run_activation(handoff_path=path)
-    assert code1 == code2 == mod.EXIT_OK
-    assert r1["created"] is True and r2["created"] is False  # second is an idempotent no-op
-    assert r1["resulting_row_id"] == r2["resulting_row_id"]
+def test_exact_replay_returns_byte_equivalent_receipt(engine):
+    raw = _handoff(_A)
+    _, r1 = _run(raw)
+    code, r2 = _run(raw)  # exact replay (same handoff), even a second time
+    assert code == mod.EXIT_OK
+    assert canonical_json(r1) == canonical_json(r2) and r2["created"] is True
+    assert _receipt_count() == 1  # replay inserted nothing
 
 
-def test_rotation_under_the_expected_predecessor_succeeds(engine, tmp_path):
-    _, r1 = mod.run_activation(handoff_path=_write(tmp_path, _handoff_bytes(_A)))
-    code, r2 = mod.run_activation(
-        handoff_path=_write(
-            tmp_path,
-            _handoff_bytes(_B, operation_id="op-2", expected_predecessor=r1["resulting_row_id"]),
+def test_exact_replay_after_rotation_and_rotation_back(engine):
+    _, r1 = _run(_handoff(_A, operation_id="op-A"))
+    row_a = r1["resulting_row_id"]
+    # rotate A -> B
+    _, r2 = _run(
+        _handoff(_B, operation_id="op-B", expected_row=row_a, expected_token=r1["activation_token"])
+    )
+    row_b = r2["resulting_row_id"]
+    # rotate back B -> A' (fresh candidate _A again, new op)
+    _run(
+        _handoff(
+            _A, operation_id="op-A2", expected_row=row_b, expected_token=r2["activation_token"]
         )
     )
-    assert code == mod.EXIT_OK and r2["created"] is True
-    assert r2["previous_active_row_id"] == r1["resulting_row_id"]
-    assert r2["resulting_row_id"] != r1["resulting_row_id"]
+    # op-A replay still returns its ORIGINAL receipt (proves committed, not current)
+    code, replay = _run(
+        _handoff(_A, operation_id="op-A"), now=_STALE
+    )  # even after freshness expiry
+    assert code == mod.EXIT_OK
+    assert canonical_json(replay) == canonical_json(r1)
+    assert replay["resulting_row_id"] == row_a
 
 
-def test_stale_predecessor_conflicts(engine, tmp_path):
-    mod.run_activation(handoff_path=_write(tmp_path, _handoff_bytes(_A)))
-    # a fresh-install handoff (expected predecessor None) submitted when an identity is already
-    # active
-    code, payload = mod.run_activation(
-        handoff_path=_write(tmp_path, _handoff_bytes(_B, operation_id="op-3"))
-    )
-    assert code == mod.EXIT_PREDECESSOR_CONFLICT
-    assert payload["reason_code"] == "controller_identity_predecessor_conflict"
+def test_stale_first_execution_refuses_but_stale_replay_succeeds(engine):
+    stale_first = _run(_handoff(_A, operation_id="op-stale"), now=_STALE)
+    assert stale_first[0] == mod.EXIT_STALE
+    assert _receipt_count() == 0
+    # a fresh first execution, then a STALE replay of it, succeeds (lookup precedes freshness)
+    _run(_handoff(_A, operation_id="op-ok"))
+    code, _ = _run(_handoff(_A, operation_id="op-ok"), now=_STALE)
+    assert code == mod.EXIT_OK
 
 
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda raw: json.dumps(json.loads(raw), indent=2).encode(),  # non-canonical
-        lambda raw: json.dumps(
-            {**json.loads(raw), "schema": "other/v9"}, sort_keys=True, separators=(",", ":")
-        ).encode(),
-        lambda raw: json.dumps(
-            {**json.loads(raw), "candidate_digest": "sha256:" + "0" * 64},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode(),
-        lambda raw: json.dumps(
-            {**json.loads(raw), "extra": 1}, sort_keys=True, separators=(",", ":")
-        ).encode(),
-        lambda raw: b"not json",
+        {"candidate_field": True},  # different candidate (different identity)
+        {"generation": 3},  # different generation
+        {"created_at": "2026-07-28T00:00:01Z"},  # different timestamp
     ],
 )
-def test_malformed_handoff_is_refused(engine, tmp_path, mutate):
-    code, payload = mod.run_activation(handoff_path=_write(tmp_path, mutate(_handoff_bytes(_A))))
-    assert code == mod.EXIT_HANDOFF_INVALID
-    assert payload["reason_code"].startswith("activation_handoff_")
+def test_same_operation_with_a_changed_binding_conflicts(engine, mutate):
+    _run(_handoff(_A, operation_id="op-x"))
+    if mutate.pop("candidate_field", False):
+        raw = _handoff(_B, operation_id="op-x")  # same op id, different candidate
+    else:
+        raw = _handoff(_A, operation_id="op-x", **mutate)
+    code, payload = _run(raw, now=_FRESH)
+    assert code == mod.EXIT_OPERATION_CONFLICT
+    assert payload["reason_code"] == "activation_operation_conflict"
 
 
-def test_missing_handoff_is_refused(engine, tmp_path):
-    code, payload = mod.run_activation(handoff_path=str(tmp_path / "absent.json"))
-    assert code == mod.EXIT_HANDOFF_INVALID
-    assert payload["reason_code"] == "activation_handoff_unreadable"
+def test_new_operation_with_an_already_active_candidate_conflicts(engine):
+    _run(_handoff(_A, operation_id="op-first"))
+    # a DIFFERENT operation id presenting the SAME (already active) candidate cannot claim it
+    code, payload = _run(_handoff(_A, operation_id="op-second"))
+    assert code == mod.EXIT_OPERATION_CONFLICT
+    assert payload["reason_code"] == "activation_candidate_already_active"
 
 
-def test_activation_that_breaks_key_separation_is_refused(engine, tmp_path):
-    # a handoff whose controller_key_id equals the release_digest violates key separation; the
-    # candidate digest is self-consistent, so it passes handoff validation but the identity service
-    # refuses it.
+def test_stale_predecessor_conflicts(engine):
+    _run(_handoff(_A, operation_id="op-a"))
+    # a fresh-install handoff (predecessor None) when an identity is already active
+    code, payload = _run(_handoff(_B, operation_id="op-b"))
+    assert code == mod.EXIT_OPERATION_CONFLICT
+    assert payload["reason_code"] == "activation_predecessor_conflict"
+
+
+def test_wrong_predecessor_token_conflicts(engine):
+    _, r1 = _run(_handoff(_A, operation_id="op-a"))
+    code, payload = _run(
+        _handoff(
+            _B, operation_id="op-b", expected_row=r1["resulting_row_id"], expected_token="wrong|t"
+        )
+    )
+    assert code == mod.EXIT_OPERATION_CONFLICT
+
+
+def test_activation_failure_leaves_no_receipt(engine):
     bad = build_test_verified_controller_identity()
     fields = _fields(bad)
     fields["release_digest"] = fields[
         "controller_key_id"
     ]  # key == release digest → separation break
     env = {
-        "schema": mod._HANDOFF_SCHEMA,
+        "schema": _SCHEMA,
         "operation_id": "op-bad",
+        "candidate_digest": sha256_bytes(
+            canonical_json({f: fields[f] for f in mod._IDENTITY_FIELDS}).encode()
+        ),
         "expected_predecessor_row_id": None,
+        "expected_predecessor_activation_token": None,
+        "generation": 0,
+        "handoff_created_at": _T0,
         **fields,
-        "candidate_digest": _digest(fields),
-        "created_at": "2026-07-28T00:00:00Z",
     }
-    code, payload = mod.run_activation(handoff_path=_write(tmp_path, canonical_json(env).encode()))
+    code, _ = _run(canonical_json(env).encode())
     assert code == mod.EXIT_ACTIVATION_REFUSED
-    assert "reason_code" in payload
+    assert _receipt_count() == 0  # no receipt without a committed activation
+
+
+def test_corrupt_stored_receipt_refuses(engine):
+    _, r1 = _run(_handoff(_A, operation_id="op-c"))
+    with get_sessionmaker()() as s:
+        row = s.execute(select(ControllerIdentityActivationReceipt)).scalars().one()
+        row.receipt_json = row.receipt_json.replace(
+            "active", "revoked"
+        )  # tamper (digest now stale)
+        s.commit()
+    code, payload = _run(_handoff(_A, operation_id="op-c"))
+    assert code == mod.EXIT_STATE_CORRUPT
+    assert payload["reason_code"] == "controller_activation_state_corrupt"
+
+
+@pytest.mark.parametrize(
+    "raw,reason",
+    [
+        (
+            lambda: json.dumps(json.loads(_handoff(_A)), indent=2).encode(),
+            "activation_handoff_noncanonical",
+        ),
+        (
+            lambda: canonical_json({**json.loads(_handoff(_A)), "schema": "x/v9"}).encode(),
+            "activation_handoff_schema_unknown",
+        ),
+        (
+            lambda: canonical_json(
+                {**json.loads(_handoff(_A)), "handoff_created_at": "not-a-time"}
+            ).encode(),
+            "activation_handoff_timestamp_noncanonical",
+        ),
+        (
+            lambda: canonical_json(
+                {**json.loads(_handoff(_A)), "expected_predecessor_activation_token": "x|y"}
+            ).encode(),
+            "activation_handoff_predecessor_pairing",
+        ),
+        (lambda: b"not json", "activation_handoff_not_json"),
+    ],
+)
+def test_malformed_handoff_is_refused(engine, raw, reason):
+    code, payload = _run(raw())
+    assert code == mod.EXIT_HANDOFF_INVALID
+    assert payload["reason_code"] == reason

@@ -46,7 +46,9 @@ class EnrollmentSignerMarker(BaseModel):
     active_identity_row_id: str = Field(min_length=1, max_length=64)
     activation_token: str = Field(min_length=1, max_length=128)
     controller_key_id: str = Field(min_length=71, max_length=71)
-    broker_unit_identity: str = Field(min_length=71, max_length=71)
+    # NOTE: broker_unit_identity is intentionally NOT in the marker — the API cannot independently
+    # authenticate it, so it is not a runtime-enablement binding; it lives only in management
+    # installation evidence. No decorative, never-validated field is left in the marker.
     uds_contract_identity: str = Field(min_length=1, max_length=128)
     api_uid: int = Field(ge=0, le=2**31 - 1)
     api_gid: int = Field(ge=0, le=2**31 - 1)

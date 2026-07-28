@@ -19,10 +19,25 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, String, UniqueConstraint, Uuid
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
-from secp_api.models import Base, UpdatedTimestampMixin, _uuid
+from secp_api.models import Base, UpdatedTimestampMixin, _utcnow, _uuid
+
+#: The one closed activation-operation schema/version the durable receipt binds to.
+CONTROLLER_IDENTITY_ACTIVATION_SCHEMA = "secp.controller-identity-activation/v1"
+#: Bounded upper limit for the stored canonical receipt bytes.
+CONTROLLER_ACTIVATION_RECEIPT_MAX_BYTES = 8192
 
 #: The closed, ordered identity lifecycle states.
 CONTROLLER_IDENTITY_ACTIVE = "active"
@@ -113,10 +128,95 @@ class ControllerEnrollmentIdentity(Base, UpdatedTimestampMixin):
     )
 
 
+class ControllerIdentityActivationReceipt(Base):
+    """The durable, append-only, WRITE-ONCE receipt of one controller-identity activation OPERATION
+    (SECP-PR5H-B2, 2b-3b C3). Keyed by ``operation_id`` (UNIQUE), it stores the EXACT canonical
+    public receipt bytes the winning first execution returned, so an exact replay returns them
+    verbatim even after process/API restart or an identity rotation (and rotation back) — an
+    operation's replay proves it COMMITTED, not that its identity is currently active. The complete
+    operation binding (schema, candidate, predecessor row+token or fresh-install absence,
+    installation, release, generation, handoff timestamp) is bound into ``operation_digest``, so the
+    SAME ``operation_id`` with ANY changed field conflicts, and a NEW ``operation_id`` cannot claim
+    replay. The trusted API path only INSERTs and SELECTs this table — no update/delete path."""
+
+    __tablename__ = "controller_identity_activation_receipt"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    operation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    operation_schema: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: sha256 over the complete canonical operation envelope (domain-separated); the binding key
+    operation_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    candidate_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    #: the expected predecessor active row + its activation token (both NULL for a fresh install)
+    expected_predecessor_row_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("controller_enrollment_identity.id"), nullable=True
+    )
+    expected_predecessor_activation_token: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    controller_installation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    release_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: the caller's canonical UTC first-execution timestamp from the handoff (preserved exactly)
+    handoff_created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    resulting_row_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("controller_enrollment_identity.id"), nullable=False
+    )
+    resulting_activation_token: Mapped[str] = mapped_column(String(128), nullable=False)
+    resulting_public_state_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    #: the EXACT canonical bounded public receipt bytes returned verbatim on an exact replay
+    receipt_json: Mapped[str] = mapped_column(Text, nullable=False)
+    #: sha256 over ``receipt_json``; re-verified on read so a tampered receipt refuses state-corrupt
+    receipt_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    #: when the winning activation + receipt committed (distinct from ``handoff_created_at``)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("operation_id", name="uq_controller_identity_activation_receipt"),
+        CheckConstraint(_digest("operation_digest"), name="ck_ciar_operation_digest"),
+        CheckConstraint(_digest("candidate_digest"), name="ck_ciar_candidate_digest"),
+        CheckConstraint(_digest("release_digest"), name="ck_ciar_release_digest"),
+        CheckConstraint(
+            _digest("resulting_public_state_digest"), name="ck_ciar_public_state_digest"
+        ),
+        CheckConstraint(_digest("receipt_digest"), name="ck_ciar_receipt_digest"),
+        CheckConstraint("generation >= 0", name="ck_ciar_generation_nonnegative"),
+        CheckConstraint(
+            f"length(receipt_json) <= {CONTROLLER_ACTIVATION_RECEIPT_MAX_BYTES}",
+            name="ck_ciar_receipt_bounded",
+        ),
+        CheckConstraint(
+            f"operation_schema = '{CONTROLLER_IDENTITY_ACTIVATION_SCHEMA}'",
+            name="ck_ciar_schema_closed",
+        ),
+        # predecessor row id + token are BOTH null (fresh install) or BOTH present (rotation)
+        CheckConstraint(
+            "(expected_predecessor_row_id IS NULL"
+            " AND expected_predecessor_activation_token IS NULL)"
+            " OR (expected_predecessor_row_id IS NOT NULL"
+            " AND expected_predecessor_activation_token IS NOT NULL)",
+            name="ck_ciar_predecessor_pairing",
+        ),
+        CheckConstraint(
+            "length(controller_installation_id) >= 8 AND length(controller_installation_id) <= 64",
+            name="ck_ciar_install_bounded",
+        ),
+        CheckConstraint(
+            "length(operation_id) >= 1 AND length(resulting_activation_token) >= 1",
+            name="ck_ciar_tokens_bounded",
+        ),
+    )
+
+
 __all__ = [
+    "CONTROLLER_ACTIVATION_RECEIPT_MAX_BYTES",
+    "CONTROLLER_IDENTITY_ACTIVATION_SCHEMA",
     "CONTROLLER_IDENTITY_ACTIVE",
     "CONTROLLER_IDENTITY_REVOKED",
     "CONTROLLER_IDENTITY_STATES",
     "CONTROLLER_IDENTITY_SUPERSEDED",
     "ControllerEnrollmentIdentity",
+    "ControllerIdentityActivationReceipt",
 ]

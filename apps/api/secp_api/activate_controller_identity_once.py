@@ -1,42 +1,59 @@
-"""Fixed API-plane controller-identity activation one-shot (SECP-PR5H-B2, commit 2b-3b).
+"""Fixed API-plane controller-identity activation one-shot (SECP-PR5H-B2, 2b-3b C2/C3).
 
-``python -m secp_api.activate_controller_identity_once`` — a NARROW local transaction participant
-the
-root management installer invokes (via a fixed code-owned ``compose run api`` one-shot) as the
-PENULTIMATE finalization step. It exists only because the API plane owns the controller-identity
-persistence invariants + the ORM transaction: the management plane never imports the API, so it
-hands
-off the verified identity through this one-shot instead of reimplementing activation as raw SQL.
+``python -m secp_api.activate_controller_identity_once`` — the narrow local transaction participant
+the root installer invokes (via a fixed ``compose run api`` one-shot) as the PENULTIMATE
+finalization step, because the API plane owns the controller-identity persistence invariants + the
+ORM transaction.
 
-It has NO HTTP route, NO browser access, NO generic module/command/SQL/DSN/file-path selection, and
-it
-NEVER receives the controller enrollment PRIVATE key — only the public anchor + derived key id +
-derived proof id, whose relationship the existing identity-proof logic re-validates. It reads ONLY
-the single fixed handoff (mounted read-only at a fixed path), verifies its canonical form / type /
-metadata / bounds and the self-consistent candidate digest, reconstructs the exact
-:class:`VerifiedControllerIdentity`, and activates it through the EXISTING
-:func:`activate_controller_identity` service (shared advisory lock; single-active ``UNIQUE`` marker;
-full proof + key-separation invariants preserved) under an expected-predecessor CAS binding. An
-exact
-re-run is idempotent; a different candidate under a stale predecessor conflicts. It returns ONLY a
-bounded, non-secret public receipt (never a private key, DSN, raw row, SQL, or exception).
+It reads ONLY the single fixed handoff through the plane-neutral HARDENED reader (root-owned, exact
+API-group, 0640, regular, single-link, no-follow, fstat, before/after identity sample), validates a
+strict CLOSED operation envelope, and applies EXACT-OPERATION idempotency backed by the durable
+``controller_identity_activation_receipt`` table:
 
-Exit codes: 0 activated (or idempotent replay); 1 handoff invalid; 2 predecessor conflict; 3
-activation refused by the identity-proof invariants; 4 ambiguous existing state.
+* the ``operation_id`` is bound (via a domain-separated ``operation_digest``) to the candidate, the
+  expected predecessor row + activation token (or explicit fresh-install absence), the installation,
+  release, generation, and the canonical-UTC handoff timestamp — the SAME ``operation_id`` with ANY
+  changed field conflicts, and a NEW ``operation_id`` cannot claim replay;
+* FIRST execution (no receipt): enforce a bounded freshness window, take the shared controller-
+  identity advisory lock, validate the exact predecessor CAS, refuse a new operation whose candidate
+  is merely already active, invoke the EXISTING ``activate_controller_identity`` (all proof +
+  key-separation invariants), read back, build the bounded receipt, INSERT it, and commit activation
+  + receipt in ONE transaction — no activation without receipt, no receipt without activation;
+* a UNIQUE(operation_id) race rolls the loser back and reloads + validates the winning receipt;
+* EXACT replay returns the byte-equivalent stored receipt (after restart / rotation / freshness
+  expiry) and performs NO mutation — a replay proves the operation committed, NOT that the identity
+  is currently active (the management adapter reobserves the active identity before writing the
+  marker);
+* corruption (bad digest, noncanonical, parse/history mismatch, impossible pairing) refuses state-
+  corrupt; the trusted path only INSERTs and SELECTs this write-once table.
+
+It NEVER receives the enrollment private key and returns ONLY a bounded non-secret receipt. Exit
+codes: 0 ok/replay; 1 handoff invalid; 2 operation conflict; 3 activation refused; 4 ambiguous
+state; 5 state corrupt; 6 stale first execution.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_bytes
-from sqlalchemy import select
+from secp_commissioning.controller_enrollment_signer import ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY
+from secp_commissioning.hardened_handoff import HardenedHandoffError, read_hardened_fixed_handoff
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from secp_api.controller_identity_models import ControllerEnrollmentIdentity
+from secp_api.controller_identity_models import (
+    CONTROLLER_IDENTITY_ACTIVATION_SCHEMA,
+    ControllerEnrollmentIdentity,
+    ControllerIdentityActivationReceipt,
+)
 from secp_api.db import get_sessionmaker
 from secp_api.errors import WorkerEnrollmentError
 from secp_api.services.controller_identity import (
@@ -44,17 +61,20 @@ from secp_api.services.controller_identity import (
     activate_controller_identity,
 )
 
-#: The single fixed path the handoff is mounted read-only at inside the one-shot container. NEVER a
-#: caller-supplied path — the ``handoff_path`` parameter exists only for the hermetic tests.
+#: The single fixed path the handoff is mounted read-only at inside the one-shot container.
 HANDOFF_PATH = "/run/secp/handoff/controller-identity-activation.json"
-_HANDOFF_SCHEMA = "secp.controller-identity-activation/v1"
 _MAX_HANDOFF_BYTES = 8 * 1024
+_OPERATION_DOMAIN = "secp.controller-identity-activation-operation/v1"
+_FRESHNESS_SECONDS = 900  # first-execution handoff must be within +/- 15 minutes of now
+_UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 
 EXIT_OK = 0
 EXIT_HANDOFF_INVALID = 1
-EXIT_PREDECESSOR_CONFLICT = 2
+EXIT_OPERATION_CONFLICT = 2
 EXIT_ACTIVATION_REFUSED = 3
 EXIT_AMBIGUOUS_STATE = 4
+EXIT_STATE_CORRUPT = 5
+EXIT_STALE = 6
 
 #: The eight identity fields, in the fixed order the candidate/public-state digests canonicalize.
 _IDENTITY_FIELDS = (
@@ -67,26 +87,38 @@ _IDENTITY_FIELDS = (
     "bootstrap_evidence_digest",
     "enrollment_key_proof_id",
 )
+_RECEIPT_FIELDS = (
+    "operation_id",
+    "candidate_digest",
+    "resulting_row_id",
+    "activation_token",
+    "previous_active_row_id",
+    "created",
+    "resulting_status",
+    "resulting_public_state_digest",
+)
 
 
 class _HandoffInvalid(Exception):
-    """A bounded, one-shot-authored refusal — only a closed reason code, never handoff bytes."""
-
     def __init__(self, reason_code: str) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
 
 
 class _ActivationHandoff(BaseModel):
-    """The strict, closed activation envelope the management installer writes. Extra fields, missing
-    fields, and wrong types are refused; every value is bounded."""
+    """The strict, closed activation-operation envelope. Extra/missing fields + wrong types refuse;
+    every value is bounded; the predecessor row + token are BOTH present (rotation) or BOTH null."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_id: str = Field(alias="schema", min_length=1, max_length=64)
     operation_id: str = Field(min_length=1, max_length=128)
+    candidate_digest: str = Field(min_length=71, max_length=71)
     expected_predecessor_row_id: str | None = Field(default=None, max_length=64)
-    controller_installation_id: str = Field(min_length=1, max_length=64)
+    expected_predecessor_activation_token: str | None = Field(default=None, max_length=128)
+    generation: int = Field(ge=0, le=2**31 - 1)
+    handoff_created_at: str = Field(min_length=1, max_length=40)
+    controller_installation_id: str = Field(min_length=8, max_length=64)
     controller_key_id: str = Field(min_length=71, max_length=71)
     controller_trust_anchor_hex: str = Field(min_length=64, max_length=64)
     controller_origin: str = Field(min_length=1, max_length=269)
@@ -94,12 +126,35 @@ class _ActivationHandoff(BaseModel):
     management_identity_digest: str = Field(min_length=71, max_length=71)
     bootstrap_evidence_digest: str = Field(min_length=71, max_length=71)
     enrollment_key_proof_id: str = Field(min_length=8, max_length=120)
-    candidate_digest: str = Field(min_length=71, max_length=71)
-    created_at: str = Field(min_length=1, max_length=40)
 
 
 def _identity_digest(values: dict[str, Any]) -> str:
     return sha256_bytes(canonical_json({f: values[f] for f in _IDENTITY_FIELDS}).encode("utf-8"))
+
+
+def _operation_digest(h: _ActivationHandoff) -> str:
+    envelope = {
+        "domain": _OPERATION_DOMAIN,
+        "schema": h.schema_id,
+        "operation_id": h.operation_id,
+        "candidate_digest": h.candidate_digest,
+        "expected_predecessor_row_id": h.expected_predecessor_row_id,
+        "expected_predecessor_activation_token": h.expected_predecessor_activation_token,
+        "controller_installation_id": h.controller_installation_id,
+        "release_digest": h.release_digest,
+        "generation": h.generation,
+        "handoff_created_at": h.handoff_created_at,
+    }
+    return sha256_bytes(canonical_json(envelope).encode("utf-8"))
+
+
+def _parse_utc(value: str) -> datetime | None:
+    if not _UTC.fullmatch(value):
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def _parse_handoff(raw: bytes) -> _ActivationHandoff:
@@ -116,22 +171,28 @@ def _parse_handoff(raw: bytes) -> _ActivationHandoff:
         handoff = _ActivationHandoff.model_validate(obj)
     except ValidationError:
         raise _HandoffInvalid("activation_handoff_malformed") from None
-    if handoff.schema_id != _HANDOFF_SCHEMA:
+    if handoff.schema_id != CONTROLLER_IDENTITY_ACTIVATION_SCHEMA:
         raise _HandoffInvalid("activation_handoff_schema_unknown")
     if not is_sha256_digest(handoff.candidate_digest):
         raise _HandoffInvalid("activation_handoff_candidate_digest_invalid")
-    values = handoff.model_dump()
-    if _identity_digest(values) != handoff.candidate_digest:
+    if _identity_digest(handoff.model_dump()) != handoff.candidate_digest:
         raise _HandoffInvalid("activation_handoff_candidate_digest_mismatch")
+    # predecessor row id + token are BOTH present (rotation) or BOTH null (fresh install)
+    if (handoff.expected_predecessor_row_id is None) != (
+        handoff.expected_predecessor_activation_token is None
+    ):
+        raise _HandoffInvalid("activation_handoff_predecessor_pairing")
+    if _parse_utc(handoff.handoff_created_at) is None:
+        raise _HandoffInvalid("activation_handoff_timestamp_noncanonical")
     return handoff
 
 
-def _read_handoff(handoff_path: str) -> bytes:
-    try:
-        with open(handoff_path, "rb") as fh:
-            return fh.read(_MAX_HANDOFF_BYTES + 1)
-    except OSError:
-        raise _HandoffInvalid("activation_handoff_unreadable") from None
+def _production_reader() -> bytes:
+    gid = int(getattr(os, "getegid", lambda: -1)())
+    return read_hardened_fixed_handoff(HANDOFF_PATH, expected_gid=gid, max_bytes=_MAX_HANDOFF_BYTES)
+
+
+# --------------------------------------------------------------------- receipt build + parse
 
 
 def _row_values(row: ControllerEnrollmentIdentity) -> dict[str, str]:
@@ -142,8 +203,8 @@ def _token(row: ControllerEnrollmentIdentity) -> str:
     return f"{row.id}|{row.activated_at}"
 
 
-def _receipt(
-    handoff: _ActivationHandoff,
+def _build_receipt(
+    h: _ActivationHandoff,
     *,
     row: ControllerEnrollmentIdentity,
     created: bool,
@@ -151,8 +212,8 @@ def _receipt(
 ) -> dict[str, Any]:
     public_state = {"resulting_row_id": str(row.id), **_row_values(row)}
     return {
-        "operation_id": handoff.operation_id,
-        "candidate_digest": handoff.candidate_digest,
+        "operation_id": h.operation_id,
+        "candidate_digest": h.candidate_digest,
         "resulting_row_id": str(row.id),
         "activation_token": _token(row),
         "previous_active_row_id": previous_active_row_id,
@@ -162,7 +223,83 @@ def _receipt(
     }
 
 
-def _activate(session: Session, handoff: _ActivationHandoff) -> tuple[int, dict[str, Any]]:
+class _StrictReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    operation_id: str
+    candidate_digest: str
+    resulting_row_id: str
+    activation_token: str
+    previous_active_row_id: str | None
+    created: bool
+    resulting_status: str
+    resulting_public_state_digest: str
+
+
+# --------------------------------------------------------------------- durable flow
+
+
+def _advisory_lock(session: Session) -> None:
+    if session.get_bind().dialect.name == "postgresql":
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY}
+        )
+
+
+def _load_receipt(
+    session: Session, operation_id: str
+) -> ControllerIdentityActivationReceipt | None:
+    return (
+        session.execute(
+            select(ControllerIdentityActivationReceipt).where(
+                ControllerIdentityActivationReceipt.operation_id == operation_id
+            )
+        )
+        .scalars()
+        .one_or_none()
+    )
+
+
+def _exact_replay(
+    session: Session, existing: ControllerIdentityActivationReceipt, op_digest: str
+) -> tuple[int, dict[str, Any]]:
+    """Return the exact stored receipt for a matching operation, conflict on any binding change, or
+    state-corrupt on a tampered/incoherent stored receipt. Performs NO mutation."""
+    if existing.operation_digest != op_digest:
+        return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_operation_conflict"}
+    raw = existing.receipt_json.encode("utf-8")
+    if sha256_bytes(raw) != existing.receipt_digest:
+        return EXIT_STATE_CORRUPT, {"reason_code": "controller_activation_state_corrupt"}
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return EXIT_STATE_CORRUPT, {"reason_code": "controller_activation_state_corrupt"}
+    if not isinstance(obj, dict) or canonical_json(obj).encode("utf-8") != raw:
+        return EXIT_STATE_CORRUPT, {"reason_code": "controller_activation_state_corrupt"}
+    try:
+        parsed = _StrictReceipt.model_validate(obj)
+    except ValidationError:
+        return EXIT_STATE_CORRUPT, {"reason_code": "controller_activation_state_corrupt"}
+    if (
+        parsed.operation_id != existing.operation_id
+        or parsed.resulting_row_id != str(existing.resulting_row_id)
+        or parsed.activation_token != existing.resulting_activation_token
+        or parsed.resulting_public_state_digest != existing.resulting_public_state_digest
+    ):
+        return EXIT_STATE_CORRUPT, {"reason_code": "controller_activation_state_corrupt"}
+    # the historical resulting identity row must still exist (not necessarily active)
+    hist = session.get(ControllerEnrollmentIdentity, existing.resulting_row_id)
+    if hist is None:
+        return EXIT_STATE_CORRUPT, {"reason_code": "controller_activation_state_corrupt"}
+    return EXIT_OK, obj  # the EXACT stored receipt bytes (as the parsed object)
+
+
+def _first_execution(
+    session: Session, h: _ActivationHandoff, op_digest: str, now: datetime
+) -> tuple[int, dict[str, Any]]:
+    delta = abs((now - _parse_utc(h.handoff_created_at)).total_seconds())  # type: ignore[operator]
+    if delta > _FRESHNESS_SECONDS:
+        return EXIT_STALE, {"reason_code": "activation_handoff_stale"}
     rows = (
         session.execute(
             select(ControllerEnrollmentIdentity).where(
@@ -172,66 +309,90 @@ def _activate(session: Session, handoff: _ActivationHandoff) -> tuple[int, dict[
         .scalars()
         .all()
     )
-    if len(rows) > 1:  # the UNIQUE(active_marker) makes this impossible; refuse if the DB disagrees
+    if len(rows) > 1:
         return EXIT_AMBIGUOUS_STATE, {"reason_code": "controller_identity_ambiguous"}
     current = rows[0] if rows else None
-
-    # idempotent replay: the current active identity IS exactly this candidate → no-op,
-    # created=False.
-    if current is not None and _identity_digest(_row_values(current)) == handoff.candidate_digest:
-        return EXIT_OK, _receipt(
-            handoff,
-            row=current,
-            created=False,
-            previous_active_row_id=handoff.expected_predecessor_row_id,
-        )
-
-    # CAS: the handoff's expected predecessor must equal the CURRENT active row (None for fresh).
-    actual_predecessor = str(current.id) if current is not None else None
-    if handoff.expected_predecessor_row_id != actual_predecessor:
-        return EXIT_PREDECESSOR_CONFLICT, {
-            "reason_code": "controller_identity_predecessor_conflict"
-        }
-
-    proof = VerifiedControllerIdentity(
-        controller_installation_id=handoff.controller_installation_id,
-        controller_key_id=handoff.controller_key_id,
-        controller_trust_anchor_hex=handoff.controller_trust_anchor_hex,
-        controller_origin=handoff.controller_origin,
-        release_digest=handoff.release_digest,
-        management_identity_digest=handoff.management_identity_digest,
-        bootstrap_evidence_digest=handoff.bootstrap_evidence_digest,
-        enrollment_key_proof_id=handoff.enrollment_key_proof_id,
-    )
+    # a NEW operation whose candidate is merely already active cannot claim the activation
+    if current is not None and _identity_digest(_row_values(current)) == h.candidate_digest:
+        return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_candidate_already_active"}
+    actual_row = str(current.id) if current is not None else None
+    actual_token = _token(current) if current is not None else None
+    if (
+        h.expected_predecessor_row_id != actual_row
+        or h.expected_predecessor_activation_token != actual_token
+    ):
+        return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_predecessor_conflict"}
+    proof = VerifiedControllerIdentity(**{f: getattr(h, f) for f in _IDENTITY_FIELDS})
     try:
-        row = activate_controller_identity(
-            session, proof
-        )  # preserves proof + key-separation + lock
+        row = activate_controller_identity(session, proof)
     except WorkerEnrollmentError as exc:
+        session.rollback()
         return EXIT_ACTIVATION_REFUSED, {"reason_code": str(exc.code)}
     session.flush()
-    return EXIT_OK, _receipt(
-        handoff, row=row, created=True, previous_active_row_id=actual_predecessor
+    session.refresh(row)  # use the DB-persisted activated_at so the token matches later re-reads
+    receipt = _build_receipt(h, row=row, created=True, previous_active_row_id=actual_row)
+    receipt_json = canonical_json(receipt)
+    session.add(
+        ControllerIdentityActivationReceipt(
+            operation_id=h.operation_id,
+            operation_schema=h.schema_id,
+            operation_digest=op_digest,
+            candidate_digest=h.candidate_digest,
+            expected_predecessor_row_id=(
+                current.id if current is not None else None  # UUID FK, never a string
+            ),
+            expected_predecessor_activation_token=h.expected_predecessor_activation_token,
+            controller_installation_id=h.controller_installation_id,
+            release_digest=h.release_digest,
+            generation=h.generation,
+            handoff_created_at=h.handoff_created_at,
+            resulting_row_id=row.id,
+            resulting_activation_token=receipt["activation_token"],
+            resulting_public_state_digest=receipt["resulting_public_state_digest"],
+            receipt_json=receipt_json,
+            receipt_digest=sha256_bytes(receipt_json.encode("utf-8")),
+        )
     )
+    try:
+        session.commit()  # activation + receipt commit atomically
+    except IntegrityError:
+        session.rollback()  # a concurrent winner took UNIQUE(operation_id)
+        winner = _load_receipt(session, h.operation_id)
+        if winner is None:
+            return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_operation_conflict"}
+        return _exact_replay(session, winner, op_digest)
+    return EXIT_OK, receipt
 
 
 def run_activation(
-    *, handoff_path: str = HANDOFF_PATH, session_factory: sessionmaker[Session] | None = None
+    *,
+    read_handoff: Any = None,
+    session_factory: sessionmaker[Session] | None = None,
+    now: datetime | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Read + validate the fixed handoff and activate the verified identity under the expected-
-    predecessor CAS. Returns ``(exit_code, bounded_receipt_or_reason)``; commits only on success."""
+    """Read + validate the fixed handoff and apply exact-operation idempotent activation. Returns
+    ``(exit_code, bounded_receipt_or_reason)``. ``read_handoff`` defaults to the production hardened
+    fixed-path reader; tests inject a verified-reader seam (never a production path override)."""
+    reader = read_handoff if read_handoff is not None else _production_reader
     try:
-        handoff = _parse_handoff(_read_handoff(handoff_path))
+        handoff = _parse_handoff(reader())
+    except HardenedHandoffError as exc:
+        return EXIT_HANDOFF_INVALID, {"reason_code": exc.reason_code}
     except _HandoffInvalid as exc:
         return EXIT_HANDOFF_INVALID, {"reason_code": exc.reason_code}
+    op_digest = _operation_digest(handoff)
+    resolved_now = (datetime.now(UTC) if now is None else now).astimezone(UTC)
     factory = session_factory if session_factory is not None else get_sessionmaker()
     session = factory()
     try:
-        code, payload = _activate(session, handoff)
-        if code == EXIT_OK:
-            session.commit()
+        _advisory_lock(session)
+        existing = _load_receipt(session, handoff.operation_id)
+        if existing is not None:
+            code, payload = _exact_replay(session, existing, op_digest)
         else:
-            session.rollback()
+            code, payload = _first_execution(session, handoff, op_digest, resolved_now)
+        if code != EXIT_OK:
+            session.rollback()  # a refusal/replay commits nothing new
         return code, payload
     except Exception:
         session.rollback()
@@ -249,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     ).parse_args(argv)
     code, payload = run_activation()
-    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))  # noqa: T201 - one-shot receipt
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))  # noqa: T201
     return code
 
 

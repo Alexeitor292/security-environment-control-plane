@@ -51,7 +51,6 @@ _MARKER = ApiSignerMarker(
     active_identity_row_id="row-1",
     activation_token="row-1|t",
     controller_key_id="sha256:" + "1" * 64,
-    broker_unit_identity="sha256:" + "0" * 64,
     uds_contract_identity="/run/secp/enrollment-signer.sock",
     api_uid=10001,
     api_gid=10001,
