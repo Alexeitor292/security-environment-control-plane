@@ -15,7 +15,6 @@ import hashlib
 import hmac
 
 import pytest
-from secp_management import ManagementError
 from secp_management.enrollment_signer_db import (
     ENROLLMENT_SIGNER_CREDENTIAL_ID,
     EnrollmentSignerDbError,
@@ -100,7 +99,7 @@ def test_generated_password_is_high_entropy_ascii_hex():
 
 @pytest.mark.parametrize("bad", ["", "not-hex!!", "pencil", "AB" * 40 + "ZZ"])
 def test_non_hex_password_is_refused(bad):
-    with pytest.raises(ManagementError) as e:
+    with pytest.raises(EnrollmentSignerDbError) as e:
         scram_sha256_verifier(bad, salt=b"salt-16-bytes-aa")
     assert e.value.reason_code == "enrollment_signer_password_invalid"
 
@@ -148,13 +147,13 @@ def test_credential_loads_from_the_systemd_directory(tmp_path):
 
 def test_credential_is_unavailable_off_systemd(monkeypatch):
     monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
-    with pytest.raises(ManagementError) as e:
+    with pytest.raises(EnrollmentSignerDbError) as e:
         load_signer_db_password()
     assert e.value.reason_code == "enrollment_signer_credential_unavailable"
 
 
 def test_malformed_credential_is_refused(tmp_path):
     (tmp_path / ENROLLMENT_SIGNER_CREDENTIAL_ID).write_text("not-a-valid-secret!!")
-    with pytest.raises(ManagementError) as e:
+    with pytest.raises(EnrollmentSignerDbError) as e:
         load_signer_db_password(credentials_dir=str(tmp_path))
     assert e.value.reason_code == "enrollment_signer_credential_malformed"
