@@ -81,9 +81,21 @@ _BROKER_HARDENING = tuple(
 )
 
 
+def _validate_credential_id(credential_id: str) -> None:
+    # a systemd credential ID is a short, filesystem-safe token (it becomes a file basename under
+    # $CREDENTIALS_DIRECTORY): no separator/whitespace/control chars, bounded.
+    if (
+        not isinstance(credential_id, str)
+        or not (1 <= len(credential_id) <= 64)
+        or any(c in credential_id for c in ("/", "\\", ":", " ", "\t", "\n", "\x00"))
+    ):
+        raise ManagementError("systemd_credential_id_unclean")
+
+
 def render_enrollment_signer_broker_service(
     *,
     exec_argv: tuple[str, ...],
+    load_credential: tuple[str, str] | None = None,
     wanted_by: str | None = None,
 ) -> str:
     """The SECP-PR5H-B1 root-gated controller-enrollment offer signer broker unit.
@@ -95,9 +107,15 @@ def render_enrollment_signer_broker_service(
     the shared commissioning-plane locations — there is NO ``socket_dir_name`` / ``key_path``
     override, so a rendered unit can never point the broker at another socket or key. The private
     key is exposed READ-ONLY (never mounted into, or readable by, the non-root API container).
-    ``wanted_by=None`` (the default) renders it present-but-DISABLED — the evidence-driven exchange
-    stays sealed until an operator explicitly enables both this unit and the API-side progression
-    flag; it is never enabled or started from an HTTP request."""
+
+    ``load_credential=(id, source_path)`` (SECP-PR5H-B2, 2b-3b-iii) renders a ``LoadCredential=``
+    line
+    so systemd copies the root-owned dedicated-role SCRAM secret into the broker's private tmpfs
+    ``$CREDENTIALS_DIRECTORY/<id>`` (0400, readable only by the root broker, never by the non-root
+    API): this is the ONLY channel for the DB plaintext — never an env var, argv, or world-readable
+    file. ``wanted_by=None`` (the default) renders it present-but-DISABLED — never enabled or
+    started
+    from an HTTP request."""
     _validate(exec_argv, ())
     # the RuntimeDirectory name is the basename of the fixed socket dir ("/run/secp" -> "secp"); the
     # read-only key path is the fixed controller enrollment key location. Both are code constants.
@@ -120,6 +138,12 @@ def render_enrollment_signer_broker_service(
         "RuntimeDirectoryMode=0755",  # root-owned, no group/other write (bind-time validated)
         f"ReadOnlyPaths={key_path}",
     ]
+    if load_credential is not None:
+        credential_id, source_path = load_credential
+        _validate_credential_id(credential_id)
+        if not source_path.startswith("/") or "\\" in source_path or ".." in source_path.split("/"):
+            raise ManagementError("systemd_credential_source_unclean")
+        lines.append(f"LoadCredential={credential_id}:{source_path}")
     lines.extend(_BROKER_HARDENING)
     if wanted_by is not None:
         lines.extend(["", "[Install]", f"WantedBy={wanted_by}"])

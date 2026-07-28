@@ -177,13 +177,11 @@ def _load_evidence_authenticator(
     return LocalManagementEvidenceAuthenticator(private_hex, public_hex)
 
 
-def production_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
-    """Build the production ``EngineDeps`` from the fixed root-controlled inputs, or raise
-    ``ManagementError`` (keeping production sealed) on any missing/unsafe/mismatched/bad input.
-
-    ``fs``/``runner`` default to the real hardened filesystem + pinned runner; they are dependency
-    seams for the hermetic tests, NOT adapter selection (no adapter is ever chosen by a
-    caller argument, environment variable, import, or global)."""
+def _compose_engine_deps(*, fs: Any, runner: Any, finalization: bool) -> EngineDeps:
+    """Shared production composition. ``finalization=False`` is the STEADY-STATE composer (the
+    finalization seam stays SEALED); ``finalization=True`` is the DISTINCT root-only install
+    composition that injects the real finalization adapter. Both read the identical fixed
+    root-controlled inputs through the same hardened readers."""
     from secp_commissioning.runtime import RealFilesystem
 
     locations = ManagementLocations()
@@ -219,6 +217,9 @@ def production_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
         runner=command_runner,
         executables=executables,
     )
+    extra: dict[str, Any] = {}
+    if finalization:
+        extra["finalization_adapter"] = build_real_controller_finalization_adapter(ctx)
     return EngineDeps(
         locations=locations,
         trust_root=trust_root,
@@ -229,7 +230,57 @@ def production_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
         evidence_authenticator=authenticator,
         evidence_trust_root=evidence_trust_root,
         fs=filesystem,
+        **extra,
     )
 
 
-__all__ = ["production_engine_deps"]
+def production_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
+    """Build the STEADY-STATE production ``EngineDeps`` from the fixed root-controlled inputs, or
+    raise ``ManagementError`` (keeping production sealed) on any missing/unsafe/mismatched/bad
+    input.
+    The finalization seam stays SEALED here — finalization is an install-time mutation, never a
+    steady-state read.
+
+    ``fs``/``runner`` default to the real hardened filesystem + pinned runner; they are dependency
+    seams for the hermetic tests, NOT adapter selection (no adapter is ever chosen by a
+    caller argument, environment variable, import, or global)."""
+    return _compose_engine_deps(fs=fs, runner=runner, finalization=False)
+
+
+def build_real_controller_finalization_adapter(ctx: RealAdapterContext) -> Any:
+    """Compose the REAL controller-enrollment finalization adapter from a production host context.
+    The reviewed non-root controller-API peer identity is the fixed code constant (never selected);
+    no secret is carried. Constructed ONLY by the root-only install composition below."""
+    from secp_management.controller_finalization import (
+        FinalizationContext,
+        RealControllerEnrollmentFinalizationAdapter,
+    )
+    from secp_management.topology import API_RUNTIME_GID, API_RUNTIME_UID
+
+    return RealControllerEnrollmentFinalizationAdapter(
+        FinalizationContext(host=ctx, api_uid=API_RUNTIME_UID, api_gid=API_RUNTIME_GID)
+    )
+
+
+def controller_install_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
+    """The DISTINCT root-only clean-host install composition (SECP-PR5H-B2, 2b-3b-iii): the ONLY
+    composer that injects the REAL controller-enrollment finalization adapter. It is gated
+    POSIX-root
+    up front and is reachable ONLY from a future root-only install verb — NEVER from ``cli.main``'s
+    steady-state ``deps = _production_engine_deps()`` line, which keeps finalization sealed, and
+    never
+    from a CLI flag / environment variable / import / mutable global. A bare ``EngineDeps()`` stays
+    sealed. (Driving this seam through the bootstrap write transaction is the separate 2b-3c commit;
+    here the real adapter is composed-but-not-yet-orchestrated, changing zero steady-state
+    behavior.)"""
+    from secp_management.controller_install import assert_posix_root
+
+    assert_posix_root()
+    return _compose_engine_deps(fs=fs, runner=runner, finalization=True)
+
+
+__all__ = [
+    "build_real_controller_finalization_adapter",
+    "controller_install_engine_deps",
+    "production_engine_deps",
+]

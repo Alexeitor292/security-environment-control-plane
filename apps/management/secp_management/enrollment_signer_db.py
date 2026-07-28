@@ -41,9 +41,45 @@ ENROLLMENT_SIGNER_CREDENTIAL_SOURCE_PATH = ManagementLocations().enrollment_sign
 _MAX_CREDENTIAL_BYTES = 4096
 _PASSWORD_GRAMMAR = re.compile(r"[0-9a-f]{32,128}")  # the generated ASCII-hex secret
 
+# The reviewed FIXED controller PostgreSQL coordinates the dedicated least-privilege role connects
+# to. Host/port/dbname are code-owned constants (a single-host controller install maps postgres to
+# loopback); the driver is psycopg. Production connects here with the role name + plaintext ONLY —
+# never a caller/env-selected DSN. ``base_url`` is a TEST-ONLY seam (the real-PostgreSQL fences
+# point
+# it at the ephemeral CI database); production ``main()`` never passes it.
+_SIGNER_DB_HOST = "127.0.0.1"
+_SIGNER_DB_PORT = 5432
+_SIGNER_DB_NAME = "secp"
+
 
 def _reject(reason_code: str) -> NoReturn:
     raise EnrollmentSignerRoleError(reason_code)
+
+
+def build_signer_role_engine(password: str, *, base_url: str | None = None):
+    """Build a SQLAlchemy ``Engine`` authenticated as the dedicated least-privilege
+    ``secp_enrollment_signer`` role with ``password``. The DSN is code-owned: only the role name +
+    plaintext vary; host/port/dbname are fixed constants. The session ``TimeZone`` is pinned to UTC
+    so the derived ``activation_token`` (``str(activated_at)``) renders identically to the API's
+    runtime binding across planes. The plaintext lives ONLY inside the returned engine's connection
+    config — it is never printed, logged, or persisted. ``base_url`` is a test-only coordinate seam;
+    production passes none."""
+    if not _PASSWORD_GRAMMAR.fullmatch(password):
+        _reject("enrollment_signer_credential_malformed")
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    base = (
+        make_url(base_url)
+        if base_url
+        else make_url(
+            f"postgresql+psycopg://x@{_SIGNER_DB_HOST}:{_SIGNER_DB_PORT}/{_SIGNER_DB_NAME}"
+        )
+    )
+    url = base.set(username=ENROLLMENT_SIGNER_DB_ROLE, password=password)
+    return create_engine(
+        url, future=True, pool_pre_ping=True, connect_args={"options": "-c timezone=UTC"}
+    )
 
 
 def signer_db_credential_dir() -> str | None:

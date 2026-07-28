@@ -293,6 +293,7 @@ jobs:
           apps/api/tests/test_enrollment_signer_scram_postgres.py
           apps/api/tests/test_enrollment_signer_provision_postgres.py
           apps/api/tests/test_activate_controller_identity_once_postgres.py
+          apps/management/tests/test_controller_finalization_postgres.py
           -q -p no:cacheprovider
           --junitxml=junit-pr5h-postgres-enrollment.xml
       - name: Upload PR5H-A PostgreSQL JUnit
@@ -327,8 +328,11 @@ jobs:
           # lookup replays via the locked authoritative re-read, a new operation id and a mismatched
           # operation-digest still conflict under that re-read, tampered receipt refuses state-corrupt,
           # genuine concurrent same-operation is a single winner via the advisory lock with no raw
-          # IntegrityError, the write-once receipt table is unreachable by the least-privilege role).
-          EXPECTED_MINIMUM = 74
+          # IntegrityError, the write-once receipt table is unreachable by the least-privilege role),
+          # + 4 PR5H-B2 2b-3b-iii finalization dedicated-role proofs (build_signer_role_engine
+          # authenticates + pins UTC + takes the advisory lock, wrong plaintext rejected, the
+          # management ACTIVE-identity reobservation returns the exact facts, identity writes refuse).
+          EXPECTED_MINIMUM = 78
           path = Path("junit-pr5h-postgres-enrollment.xml")
           if not path.exists():
               print("::error::PR5H-A PostgreSQL JUnit missing - the test step produced no results")
