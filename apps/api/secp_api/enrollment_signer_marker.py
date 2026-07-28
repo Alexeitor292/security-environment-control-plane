@@ -105,10 +105,9 @@ def load_valid_marker(*, path: str = MARKER_PATH) -> EnrollmentSignerMarker | No
 
 
 def marker_binding_matches(marker: EnrollmentSignerMarker, *, expected: dict[str, Any]) -> bool:
-    """Whether the marker's binding matches the running install's expected public facts (id, release,
-    active identity, key, broker, UDS, API uid/gid, role, locator/CA + mgmt/evidence digests). Any
-    mismatch → the caller seals. Only the keys present in ``expected`` are checked (each must equal
-    the marker field)."""
+    """Whether the marker's binding matches the running install's expected public facts. Any
+    mismatch → the caller seals. Only the keys present in ``expected`` are checked (each must
+    equal the marker field)."""
     for key, value in expected.items():
         if getattr(marker, key, object()) != value:
             return False
