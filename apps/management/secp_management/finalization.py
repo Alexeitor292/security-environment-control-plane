@@ -245,6 +245,7 @@ class ControllerEnrollmentFinalizationAdapter(Protocol):
     ) -> ActivationReceipt: ...
     def enable_api_signer(self, marker: ApiSignerMarker) -> None: ...  # LAST
     def receipt(self) -> ControllerFinalizationReceipt: ...
+    def commit(self) -> bool: ...  # seal single-use + remove staged backups/journal; True iff clean
     def compensate(self, receipt: ControllerFinalizationReceipt) -> CompensationResult: ...
 
 
@@ -290,6 +291,10 @@ class SealedControllerEnrollmentFinalizationAdapter:
         # every op raised before touching the host → an EMPTY receipt PROVES no effect occurred, so
         # the engine refuses with the original reason rather than a false recovery_required.
         return ControllerFinalizationReceipt()
+
+    def commit(self) -> bool:
+        # no effect was ever produced, so there is nothing staged to clean → trivially clean.
+        return True
 
     def compensate(self, receipt: ControllerFinalizationReceipt) -> CompensationResult:
         return CompensationResult(proven=True)

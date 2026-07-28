@@ -30,6 +30,7 @@ from secp_management.engine import (
     EngineDeps,
     adopt,
     bootstrap,
+    controller_install,
     host_inspect,
     read_evidence,
     release_verify,
@@ -90,9 +91,30 @@ def build_parser() -> argparse.ArgumentParser:
             )
             sub.add_argument("--confirm", action="store_true", help="confirm a real write")
 
+    _add_controller_parser(groups)
     _add_enrollment_parser(groups)
     _add_worker_parser(groups)
     return parser
+
+
+def _add_controller_parser(groups) -> None:
+    """``secpctl controller install`` — the supported root-only controller-enrollment installation
+    (SECP-PR5H-B2 2b-3c). It takes ONLY the two reviewed operator facts (``--public-origin``,
+    ``--tls-mode``) plus the hardened ``--bundle``; there is NO ``--url``/``--ca``/``--key``/
+    ``--credential``/``--dsn``/``--path``/``--command``. ``--write --confirm`` are mandatory for a
+    real install; the default is a dry-run plan. Its deps resolve through the root-gated install
+    composition; every steady-state command keeps finalization sealed."""
+    controller = groups.add_parser("controller", help="controller installation operations")
+    actions = controller.add_subparsers(dest="action", required=True)
+    install = actions.add_parser(
+        "install", help="install controller enrollment finalization (POSIX root only)"
+    )
+    install.add_argument("--bundle", required=True, help="offline release bundle directory")
+    install.add_argument(
+        "--public-origin", required=True, help="controller canonical public HTTPS origin"
+    )
+    install.add_argument("--tls-mode", required=True, help="policy-permitted controller TLS mode")
+    _add_write_confirm(install)
 
 
 def _add_write_confirm(parser: argparse.ArgumentParser) -> None:
@@ -211,6 +233,12 @@ def _dispatch(
         return read_evidence(args.role, deps)
     if group == "rollback":
         return engine_rollback(args.role, _gate(args), deps)
+    if group == "controller":
+        if args.action == "install":
+            return controller_install(
+                args.public_origin, args.tls_mode, args.bundle, _gate(args), deps
+            )
+        return EXIT_REFUSED, {"command": "controller", "reason_code": "unknown_command"}
     if group == "enrollment":
         return _dispatch_enrollment(args, enr)
     if group == "worker":
@@ -280,6 +308,25 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         return EnrollmentCliDeps()
 
 
+def _controller_install_engine_deps() -> EngineDeps | None:
+    """Compose the ROOT-ONLY controller-install deps (the ONLY composition that reaches the real
+    finalization factory). It is gated POSIX-root up front (``assert_posix_root`` inside
+    ``controller_install_engine_deps``) and falls back to the SEALED default on any error, so a
+    non-root/non-POSIX/unprovisioned host fails closed with a bounded reason. No adapter/factory is
+    ever selected by a flag, environment variable, or import."""
+    try:
+        from secp_management.production import controller_install_engine_deps
+
+        return controller_install_engine_deps()
+    except Exception:  # noqa: BLE001 - fail closed to the sealed default; the command refuses
+        return None
+
+
+def _is_controller_install_group(argv: list[str]) -> bool:
+    positionals = [a for a in argv if not a.startswith("-")]
+    return len(positionals) >= 2 and positionals[0] == "controller" and positionals[1] == "install"
+
+
 def _production_engine_deps() -> EngineDeps | None:
     """Compose the production management-engine deps from the fixed root-controlled bootstrap inputs
     (SECP-PR5H-B2). This is the supported production CLI entrypoint's composition: it wires the real
@@ -306,7 +353,14 @@ def main(argv: list[str] | None = None) -> int:
     # reason (unchanged) while a properly provisioned production host drives the real adapters.
     is_enrollment = _is_enrollment_group(args_list)
     enr = _production_enrollment_deps() if is_enrollment else None
-    deps = None if is_enrollment else _production_engine_deps()
+    if is_enrollment:
+        deps = None
+    elif _is_controller_install_group(args_list):
+        # the ONLY path that reaches the real finalization factory (root-gated); steady-state groups
+        # stay on the finalization-SEALED steady-state composition.
+        deps = _controller_install_engine_deps()
+    else:
+        deps = _production_engine_deps()
     exit_code, payload = run(args_list, deps=deps, enrollment_deps=enr)
     if "--json" in args_list:
         sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")

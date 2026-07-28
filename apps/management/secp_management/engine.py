@@ -24,8 +24,10 @@ no infrastructure.
 
 from __future__ import annotations
 
+import json
 import posixpath
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from secp_commissioning.canonical import canonical_json, sha256_bytes, sha256_digest
@@ -57,9 +59,16 @@ from secp_management.adapters import (
     is_generation_marker,
     worker_generation_marker,
 )
+from secp_management.controller_install import (
+    ControllerInstallOptions,
+    build_controller_install_options,
+)
 from secp_management.evidence import (
     CLASSIFICATION_ADOPTED,
     CLASSIFICATION_CREATED,
+    CLASSIFY_EXACT_SAME_RELEASE,
+    CLASSIFY_FRESH,
+    FINALIZATION_SCHEMA_VERSION,
     MODE_ADOPTED,
     MODE_INSTALLED,
     OBJECT_EVIDENCE,
@@ -69,6 +78,8 @@ from secp_management.evidence import (
     OBJECT_RELEASE_SIGNATURE,
     BootstrapEvidence,
     EvidenceAttestation,
+    FinalizationEffectRecord,
+    FinalizationEvidence,
     ManagedObjectRecord,
     ManagementPlaneIdentity,
     attestation_bytes,
@@ -82,7 +93,13 @@ from secp_management.evidence import (
     path_binding_digest,
 )
 from secp_management.finalization import (
+    FINALIZATION_EFFECTS,
+    ApiSignerMarker,
     ControllerEnrollmentFinalizationAdapter,
+    ControllerEnrollmentFinalizationPlan,
+    ControllerFinalizationReceipt,
+    ControllerIdentityActivation,
+    ReviewedSignerRole,
     SealedControllerEnrollmentFinalizationAdapter,
 )
 from secp_management.hostview import HostProbe, LocalHostProbe
@@ -156,6 +173,15 @@ class EngineDeps:
     finalization_adapter: ControllerEnrollmentFinalizationAdapter = field(
         default_factory=SealedControllerEnrollmentFinalizationAdapter
     )
+    # the plan-bound, single-use finalization FACTORY (2b-3c). The real adapter freezes its
+    # generation + transaction id at construction and is single-use, so a fresh instance must be
+    # built per install from the derived, authenticated plan. Production sets this ONLY through the
+    # root-only install composition; steady-state and bare EngineDeps leave it None so finalization
+    # stays SEALED (a controller install with no factory refuses `finalization_not_composed`).
+    finalization_factory: (
+        Callable[[ControllerEnrollmentFinalizationPlan], ControllerEnrollmentFinalizationAdapter]
+        | None
+    ) = None
     # the management signing seam that attests evidence, and the anchor that verifies the
     # attestation.
     # SHIPPED sealed / empty → production cannot attest or verify → bootstrap/status fail closed.
@@ -495,6 +521,162 @@ def bootstrap(
     base["evidence_digest"] = ev.digest()
     base["reobserved_healthy"] = True
     return EXIT_OK, base
+
+
+def controller_install(
+    public_origin: str | None,
+    tls_mode: str | None,
+    bundle_dir: str,
+    gate: WriteGate,
+    deps: EngineDeps,
+) -> tuple[int, dict]:
+    """``secpctl controller install`` — the supported root-only controller-enrollment installation
+    (SECP-PR5H-B2 2b-3c). Dry-run by default (verify the release + host, classify the prior state,
+    derive the planned generation, and print ONLY nonsecret plan facts — no finalization mutation,
+    no
+    recovery journal, no secret). ``--write --confirm`` drives the combined bootstrap + finalization
+    write transaction for a FRESH install, or a deterministic idempotent replay for an exact
+    same-release state. It reaches the real finalization factory ONLY through the root-gated install
+    composition; every steady-state command keeps finalization sealed."""
+    role = Role.CONTROLLER
+    try:
+        partial = gate.refusal_reason()
+        if partial is not None:
+            raise ManagementError(partial)
+        options = build_controller_install_options(public_origin=public_origin, tls_mode=tls_mode)
+        vr = _verify_release_for_role(role, bundle_dir, deps)
+        pf = _platform_or_refuse(deps)
+        pfx = _preflight(pf, need_root=gate.is_write)
+        if pfx is not None:
+            raise ManagementError(pfx)
+        if not read_seals().safe:
+            raise ManagementError("seals_unsafe")
+        summary = _managed_plan_summary(role, vr, deps)
+        install_cls = _classify_controller_install(vr, deps)  # classify BEFORE any mutation
+        if install_cls.reason is not None:
+            raise ManagementError(install_cls.reason)
+    except ManagementError as exc:
+        return EXIT_REFUSED, _refused("controller-install", role.value, exc.reason_code)
+
+    base = {
+        "command": "controller-install",
+        "role": role.value,
+        "release_aggregate_digest": vr.aggregate_digest,
+        "plan": summary,
+        "install_options": options.safe_summary(),  # public origin + mode (public deployment facts)
+        "classification": install_cls.classification,
+        "planned_generation": install_cls.generation,
+        "finalization_steps": list(FINALIZATION_EFFECTS),  # nonsecret ordered step names
+        "code_seals": _seal_section(),
+        "operator_started": False,
+        "operator_enabled": True,
+        "external_contacts_performed": False,
+        "workflows_submitted": False,
+        "run_plan_generation_called": False,
+        "opentofu_executed": False,
+        "proxmox_contacted": False,
+    }
+    if not gate.is_write:
+        base["mode"] = MODE_DRY_RUN
+        return EXIT_OK, base
+
+    # --- write phase (only reached with --write --confirm) ---
+    try:
+        if install_cls.classification == CLASSIFY_EXACT_SAME_RELEASE:
+            ident, ev = _controller_install_replay(vr, deps, install_cls)  # NO mutation
+            base["idempotent_replay"] = True
+        elif install_cls.classification == CLASSIFY_FRESH:
+            ident, ev = _write_transaction(role, vr, deps, bundle_dir, install=options)
+            base["idempotent_replay"] = False
+        else:  # managed_upgrade is delivered in 2b-3c-b; never reached in 2b-3c-a
+            raise ManagementError("controller_install_unsupported_classification")
+    except ManagementError as exc:
+        return EXIT_REFUSED, _refused("controller-install", role.value, exc.reason_code)
+    base["mode"] = MODE_WRITTEN
+    base["installation_id"] = ident.installation_id
+    base["evidence_digest"] = ev.digest()
+    base["finalization_generation"] = ev.finalization.generation if ev.finalization else 0
+    base["marker_path_binding"] = path_binding_digest(
+        role.value, deps.locations.api_signer_marker_path()
+    )
+    base["reobserved_healthy"] = True
+    return EXIT_OK, base
+
+
+def _controller_install_replay(
+    vr: VerifiedRelease, deps: EngineDeps, install_cls: _ControllerInstallClassification
+) -> tuple[ManagementPlaneIdentity, BootstrapEvidence]:
+    """Exact same-release idempotent replay (2b-3c). Re-authenticates all five documents + the
+    finalization extension + the marker binding + the recomputed bootstrap_binding_digest, mutating
+    NOTHING (no host op, no credential rotation, no new identity, no evidence rewrite), and returns
+    the existing authenticated identity + evidence. A partially-correct same-release state already
+    refused during classification — it is never silently repaired by ordinary replay."""
+    role = Role.CONTROLLER
+    commit_reason = _verify_committed_transaction(
+        role, deps, expected_mode=MODE_INSTALLED, expected_aggregate=vr.aggregate_digest
+    )
+    if commit_reason is not None:
+        raise ManagementError(commit_reason)
+    ev = install_cls.prior_evidence
+    ident, _ir = _load_identity(role, deps)
+    if ev is None or ident is None or ev.finalization is None:
+        raise ManagementError("controller_install_replay_incoherent")
+    if ev.finalization.bootstrap_binding_digest != ev.bootstrap_binding_digest():
+        raise ManagementError("controller_install_binding_drift")
+    marker_reason = _verify_marker_binding(deps, ev)
+    if marker_reason is not None:
+        raise ManagementError(marker_reason)
+    return ident, ev
+
+
+def _verify_marker_binding(deps: EngineDeps, ev: BootstrapEvidence) -> str | None:
+    """Cross-check the on-disk enablement marker against the authenticated finalization evidence —
+    the
+    nonsecret marker/identity/generation binding a status/replay independently revalidates. Returns
+    a
+    bounded reason code or None. Skipped (None) when there is no finalization extension."""
+    fin = ev.finalization
+    if fin is None:
+        return None
+    loc = deps.locations
+    fs = deps.filesystem()
+    path = loc.api_signer_marker_path()
+    st = fs.lstat(path)  # type: ignore[attr-defined]
+    if st is None or st.is_symlink or not st.is_regular or st.nlink != 1 or st.uid != _ROOT_UID:
+        return "controller_marker_unsafe"
+    try:
+        raw = fs.safe_read(path, max_bytes=_MAX_DOC_BYTES, expected_uid=_ROOT_UID)  # type: ignore[attr-defined]
+        marker = json.loads(raw.decode("ascii"))
+    except Exception:  # noqa: BLE001 - unreadable/malformed marker is drift, not a crash
+        return "controller_marker_unreadable"
+    if not isinstance(marker, dict):
+        return "controller_marker_unreadable"
+    try:
+        subset = {
+            "installation_id": marker["installation_id"],
+            "release_digest": marker["release_digest"],
+            "active_identity_row_id": marker["active_identity_row_id"],
+            "controller_key_id": marker["controller_key_id"],
+            "uds_contract_identity": marker["uds_contract_identity"],
+            "signer_role_name": marker["signer_role_name"],
+            "locator_ca_digest": marker["locator_ca_digest"],
+            "bootstrap_evidence_digest": marker["bootstrap_evidence_digest"],
+            "api_uid": marker["api_uid"],
+            "api_gid": marker["api_gid"],
+        }
+        token = marker["activation_token"]
+    except (KeyError, TypeError):
+        return "controller_marker_incomplete"
+    if _sep_digest("secp.management.api-signer-marker/v1", subset) != fin.marker_identity:
+        return "controller_marker_identity_drift"
+    token_digest = _sep_digest("secp.management.activation-token/v1", token)
+    if token_digest != fin.activation_concurrency_digest:
+        return "controller_marker_token_drift"
+    if subset["bootstrap_evidence_digest"] != fin.bootstrap_binding_digest:
+        return "controller_marker_binding_drift"
+    if subset["active_identity_row_id"] != fin.active_identity_row_id:
+        return "controller_marker_identity_disagreement"
+    return None
 
 
 def _run_worker_ops(plan: WorkerBootstrapPlan, deps: EngineDeps) -> None:
@@ -971,6 +1153,7 @@ def _build_evidence(
     deployment_aggregate: str | None,
     expected_components: tuple[str, ...],
     component_image_identity: str | None,
+    finalization: FinalizationEvidence | None = None,
 ) -> BootstrapEvidence:
     seals = read_seals()
     loc = deps.locations
@@ -1026,6 +1209,7 @@ def _build_evidence(
         plan_only_process_sealed=seals.plan_only_process_sealed,
         b1a_subprocess_sealed_activation=seals.b1a_subprocess_sealed_activation,
         b1a_subprocess_sealed_executor=seals.b1a_subprocess_sealed_executor,
+        finalization=finalization,
         transaction_timestamp=deps.now(),
         external_contacts_performed=False,
         workflows_submitted=False,
@@ -1078,6 +1262,7 @@ def _controller_evidence(
     identity_bytes: bytes,
     manifest_bytes: bytes,
     sig_bytes: bytes,
+    finalization: FinalizationEvidence | None = None,
 ) -> BootstrapEvidence:
     return _build_evidence(
         role,
@@ -1095,11 +1280,327 @@ def _controller_evidence(
         expected_components=plan.expected_components,
         # bind the SIGNED component->image mapping (never the observed host mapping)
         component_image_identity=_component_image_identity(plan.component_images),
+        finalization=finalization,
     )
 
 
+# ------------------------------------------------------------------- controller finalization
+# (2b-3c)
+
+_FINALIZATION_TXID_SCHEMA = "secp.management.finalization-txid/v1"
+
+
+@dataclass(frozen=True)
+class _ControllerInstallClassification:
+    """The closed controller-install classification + the authenticated prior state it derived.
+    Every
+    field is nonsecret."""
+
+    reason: str | None
+    classification: str | None  # CLASSIFY_FRESH / EXACT_SAME_RELEASE / MANAGED_UPGRADE
+    generation: int
+    prior_evidence: BootstrapEvidence | None
+
+
+def _sep_digest(schema: str, value: object) -> str:
+    """A domain-separated sha256 digest under a versioned schema identity."""
+    return sha256_digest({"v": schema, "value": value})
+
+
+def _classify_controller_install(
+    vr: VerifiedRelease, deps: EngineDeps
+) -> _ControllerInstallClassification:
+    """Extend the bootstrap classification with the finalization prior state WITHOUT weakening any
+    existing refusal. Closed outcomes: FRESH (all five docs absent AND no managed finalization
+    state); EXACT_SAME_RELEASE (an exact, fully authenticated bootstrap replay PLUS a present,
+    verified prior finalization extension whose bootstrap_binding_digest recomputes and whose marker
+    exists); REFUSED
+    (partial/foreign/drift/unauthenticated/mode-crossed/changed-release/finalization-
+    orphan/legacy-without-finalization). ``managed_upgrade`` is delivered in 2b-3c-b — here a
+    changed
+    release stays refused (never treated as an unconditional upgrade)."""
+    base = _classify_preexisting(Role.CONTROLLER, vr, deps, mode=MODE_INSTALLED)
+    fs = deps.filesystem()
+    loc = deps.locations
+    marker_present = fs.lstat(loc.api_signer_marker_path()) is not None  # type: ignore[attr-defined]
+    if base.fresh:
+        if marker_present:  # a clean bootstrap host must ALSO carry no managed finalization state
+            return _ControllerInstallClassification(
+                "controller_install_finalization_orphan", None, 0, None
+            )
+        return _ControllerInstallClassification(None, CLASSIFY_FRESH, 0, None)
+    if base.reason is not None:  # every bootstrap refusal is preserved verbatim
+        return _ControllerInstallClassification(base.reason, None, 0, None)
+    # exact idempotent same-release bootstrap: base already authenticated all five docs +
+    # attestation
+    ev, _ = _load_evidence(Role.CONTROLLER, deps)
+    if ev is None or ev.finalization is None:
+        # legacy/pre-2b-3c controller evidence (no finalization extension) is readable for status/
+        # rollback but is NOT automatically eligible for a B2 managed replay.
+        return _ControllerInstallClassification(
+            "controller_install_finalization_missing", None, 0, None
+        )
+    if not marker_present:
+        return _ControllerInstallClassification("controller_install_marker_absent", None, 0, None)
+    if ev.finalization.bootstrap_binding_digest != ev.bootstrap_binding_digest():
+        return _ControllerInstallClassification("controller_install_binding_drift", None, 0, None)
+    return _ControllerInstallClassification(
+        None, CLASSIFY_EXACT_SAME_RELEASE, ev.finalization.generation, ev
+    )
+
+
+def _build_controller_finalization_plan(
+    vr: VerifiedRelease,
+    ident: ManagementPlaneIdentity,
+    ev0: BootstrapEvidence,
+    install: ControllerInstallOptions,
+    loc: ManagementLocations,
+    generation: int,
+) -> ControllerEnrollmentFinalizationPlan:
+    """Build the closed, nonsecret finalization plan from already-verified inputs. Binds the
+    explicit
+    domain-separated ``bootstrap_binding_digest`` (never a partial evidence digest) that the
+    identity
+    activation + marker will carry. Refuses a missing signed TLS policy or an operator mode outside
+    the signed policy's allowed modes."""
+    from secp_commissioning.enrollment_signer_role import ENROLLMENT_SIGNER_DB_ROLE
+
+    from secp_management.controller_compose_contract import render_broker_reviewed_unit
+
+    policy = vr.manifest.controller_tls_policy
+    if policy is None:
+        raise ManagementError("finalization_tls_policy_missing")
+    if install.tls_mode not in policy.allowed_modes:
+        raise ManagementError("finalization_tls_mode_not_permitted")
+    return ControllerEnrollmentFinalizationPlan(
+        role=Role.CONTROLLER.value,
+        tls_policy=policy,
+        canonical_origin=install.canonical_origin,
+        tls_mode=install.tls_mode,
+        signer_role=ReviewedSignerRole(
+            role_name=ENROLLMENT_SIGNER_DB_ROLE,
+            credential_source_path=loc.enrollment_signer_credential_path(),
+        ),
+        broker_unit=render_broker_reviewed_unit(loc),
+        controller_installation_id=ident.installation_id,
+        release_digest=vr.aggregate_digest,
+        management_identity_digest=ident.digest(),
+        bootstrap_evidence_digest=ev0.bootstrap_binding_digest(),
+        generation=generation,
+    )
+
+
+def _drive_controller_finalization(
+    vr: VerifiedRelease,
+    ident: ManagementPlaneIdentity,
+    ev0: BootstrapEvidence,
+    install: ControllerInstallOptions,
+    loc: ManagementLocations,
+    generation: int,
+    classification: str,
+    deps: EngineDeps,
+) -> tuple[object, ControllerFinalizationReceipt, FinalizationEvidence]:
+    """Drive the corrected finalization adapter through its exact reviewed order for a FRESH
+    install,
+    then build the authenticated FinalizationEvidence from the typed receipt + observed facts.
+    Returns
+    (bound adapter, receipt, finalization evidence). Any step raises → the write transaction's
+    combined
+    compensation runs (marker-first)."""
+    from secp_commissioning.controller_enrollment_signer import ENROLLMENT_SIGNER_SOCKET_PATH
+    from secp_commissioning.enrollment_signer_role import ENROLLMENT_SIGNER_DB_ROLE
+
+    if deps.finalization_factory is None:
+        raise ManagementError(
+            "finalization_not_composed"
+        )  # never fall through to the sealed default
+    plan = _build_controller_finalization_plan(vr, ident, ev0, install, loc, generation)
+    binding = plan.bootstrap_evidence_digest
+    fadapter = deps.finalization_factory(plan)  # ONE fresh, plan-bound, single-use adapter
+    fs = deps.filesystem()
+
+    fadapter.install_tls_material(
+        policy=plan.tls_policy, canonical_origin=plan.canonical_origin, tls_mode=plan.tls_mode
+    )
+    ca_bytes = fs.safe_read(  # type: ignore[attr-defined]
+        loc.controller_ca_bundle_path(), max_bytes=_MAX_DOC_BYTES, expected_uid=_ROOT_UID
+    )
+    ca_digest = sha256_bytes(ca_bytes)  # the ACTUAL installed CA (must equal the marker's binding)
+    fadapter.record_locator(canonical_origin=plan.canonical_origin)
+    fadapter.provision_signer_role(plan.signer_role)
+    key = fadapter.prepare_enrollment_key()
+    fadapter.install_broker_unit(plan.broker_unit)
+    fadapter.start_broker()
+    fadapter.verify_signer_operational(key_identity=key)
+    op_id = _sep_digest(
+        "secp.management.activation-op/v1",
+        {"install": ident.installation_id, "generation": generation, "binding": binding},
+    )
+    activation = ControllerIdentityActivation(
+        controller_installation_id=ident.installation_id,
+        controller_key_id=key.controller_key_id,
+        controller_trust_anchor_hex=key.controller_trust_anchor_hex,
+        controller_origin=plan.canonical_origin,
+        release_digest=vr.aggregate_digest,
+        management_identity_digest=ident.digest(),
+        bootstrap_evidence_digest=binding,
+        enrollment_key_proof_id=key.enrollment_key_proof_id,
+        operation_id=op_id,
+        generation=generation,
+        previous_active_row_id=None,  # fresh install (2b-3c-b upgrade supplies the prior row)
+    )
+    arec = fadapter.activate_controller_identity(activation)
+    marker = ApiSignerMarker(
+        marker_path=loc.api_signer_marker_path(),
+        installation_id=ident.installation_id,
+        release_digest=vr.aggregate_digest,
+        active_identity_row_id=arec.resulting_row_id,
+        activation_token=arec.activation_token,
+        controller_key_id=key.controller_key_id,
+        uds_contract_identity=ENROLLMENT_SIGNER_SOCKET_PATH,
+        api_uid=_RUNTIME_UID,
+        api_gid=_RUNTIME_GID,
+        signer_role_name=ENROLLMENT_SIGNER_DB_ROLE,
+        locator_ca_digest=ca_digest,
+        management_identity_digest=ident.digest(),
+        bootstrap_evidence_digest=binding,
+    )
+    fadapter.enable_api_signer(marker)  # LAST — writes marker, restarts API, proves runtime sealed
+    freceipt = fadapter.receipt()
+    fin_ev = _finalization_evidence_from(
+        plan, key, activation, arec, marker, ca_digest, freceipt, classification
+    )
+    return fadapter, freceipt, fin_ev
+
+
+def _finalization_evidence_from(
+    plan: ControllerEnrollmentFinalizationPlan,
+    key: object,
+    activation: ControllerIdentityActivation,
+    arec: object,
+    marker: ApiSignerMarker,
+    ca_digest: str,
+    freceipt: ControllerFinalizationReceipt,
+    classification: str,
+) -> FinalizationEvidence:
+    """Build the strict PUBLIC finalization evidence from the plan + typed receipt + observed facts.
+    Every concurrency token is stored as a domain-separated digest; no secret byte is included."""
+    effects = tuple(
+        FinalizationEffectRecord(
+            effect=e.effect,
+            object_identity=e.object_identity,
+            disposition=e.disposition,
+            candidate_digest=(e.candidate_digest or None),
+        )
+        for e in freceipt.effects
+    )
+    cred = freceipt.of("signer_credential")
+    cred_binding = (
+        _sep_digest("secp.management.signer-credential-binding/v1", cred.ownership_evidence)
+        if cred is not None and cred.ownership_evidence
+        else None
+    )
+    marker_public = {
+        "installation_id": marker.installation_id,
+        "release_digest": marker.release_digest,
+        "active_identity_row_id": marker.active_identity_row_id,
+        "controller_key_id": marker.controller_key_id,
+        "uds_contract_identity": marker.uds_contract_identity,
+        "signer_role_name": marker.signer_role_name,
+        "locator_ca_digest": marker.locator_ca_digest,
+        "bootstrap_evidence_digest": marker.bootstrap_evidence_digest,
+        "api_uid": marker.api_uid,
+        "api_gid": marker.api_gid,
+    }
+    marker_identity = _sep_digest("secp.management.api-signer-marker/v1", marker_public)
+    receipt_digest = _sep_digest(
+        "secp.management.finalization-receipt/v1",
+        [
+            [e.effect, e.object_identity, e.disposition, e.candidate_digest]
+            for e in freceipt.effects
+        ],
+    )
+    return FinalizationEvidence(
+        schema_version=FINALIZATION_SCHEMA_VERSION,
+        role=Role.CONTROLLER.value,
+        mode=MODE_INSTALLED,
+        classification=classification,
+        generation=plan.generation,
+        transaction_id_digest=_sep_digest(_FINALIZATION_TXID_SCHEMA, freceipt.transaction_id),
+        bootstrap_binding_digest=plan.bootstrap_evidence_digest,
+        finalization_receipt_digest=receipt_digest,
+        canonical_origin_digest=_sep_digest(
+            "secp.management.controller-origin/v1", plan.canonical_origin
+        ),
+        tls_mode=plan.tls_mode,
+        tls_policy_identity=_sep_digest(
+            "secp.management.controller-tls-policy/v1", plan.tls_policy.model_dump(mode="json")
+        ),
+        locator_ca_digest=ca_digest,
+        signer_role_identity=_sep_digest(
+            "secp.management.enrollment-signer-role/v1",
+            {"role": plan.signer_role.role_name, "cred": plan.signer_role.credential_source_path},
+        ),
+        signer_login_binding_digest=cred_binding,
+        enrollment_key_id=key.controller_key_id,  # type: ignore[attr-defined]
+        enrollment_key_proof_id=key.enrollment_key_proof_id,  # type: ignore[attr-defined]
+        broker_unit_identity=plan.broker_unit.identity,
+        broker_transport_identity=_sep_digest(
+            "secp.management.broker-transport/v1", marker.uds_contract_identity
+        ),
+        active_identity_row_id=arec.resulting_row_id,  # type: ignore[attr-defined]
+        activation_concurrency_digest=_sep_digest(
+            "secp.management.activation-token/v1",
+            arec.activation_token,  # type: ignore[attr-defined]
+        ),
+        activation_operation_digest=_sep_digest(
+            "secp.management.activation-op-binding/v1", activation.operation_id
+        ),
+        marker_identity=marker_identity,
+        runtime_observation_identity=_sep_digest(
+            "secp.management.api-runtime-observation/v1",
+            {"marker": marker_identity, "generation": plan.generation},
+        ),
+        recovery_journal_absent=True,  # proven by the commit gate (adapter.commit removes it)
+        marker_last=True,
+        api_runtime_proven=True,  # enable_api_signer returns only after a proven observation
+        no_mixed_generation=True,
+        operator_sealed=True,
+        controlled_live_sealed=True,
+        isolation_boundaries_proven=True,
+        effects=effects,
+    )
+
+
+def _finalization_compensation_proven(fadapter: object) -> bool:
+    """Combined-compensation helper mirroring :func:`_compensate_host`, on the finalization receipt.
+    Returns a bool and NEVER raises so the engine can run it FIRST (the adapter reseals the marker
+    first internally) before the doc/host unwind. A lost/malformed receipt is NOT proof of no effect
+    → unproven; an empty receipt proves no effect → proven; otherwise drive ``compensate`` and
+    require
+    a proven, residual-free result."""
+    try:
+        receipt = fadapter.receipt()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a lost receipt is unproven, never no-effect
+        return False
+    if type(receipt) is not ControllerFinalizationReceipt:
+        return False
+    if not receipt.effects:
+        return True
+    try:
+        result = fadapter.compensate(receipt)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a compensation exception is recovery_required
+        return False
+    return bool(getattr(result, "proven", False)) and not getattr(result, "residual", ("x",))
+
+
 def _write_transaction(
-    role: Role, vr: VerifiedRelease, deps: EngineDeps, bundle_dir: str
+    role: Role,
+    vr: VerifiedRelease,
+    deps: EngineDeps,
+    bundle_dir: str,
+    *,
+    install: ControllerInstallOptions | None = None,
 ) -> tuple[ManagementPlaneIdentity, BootstrapEvidence]:
     """Classify pre-existing documents, execute the closed typed host operations, write the
     root-controlled documents (identity FIRST, evidence LAST), gate evidence on a FINAL coherent
@@ -1108,9 +1609,24 @@ def _write_transaction(
     records (reporting recovery_required if host compensation cannot be proven) — so a failed
     idempotent re-install never leaves a pre-existing document mutated."""
     loc = deps.locations
-    classify = _classify_preexisting(role, vr, deps, mode=MODE_INSTALLED)
-    if classify.reason is not None:
-        raise ManagementError(classify.reason)
+    generation = 0
+    if install is not None:
+        # the driven controller-install path: classify the bootstrap docs AND the finalization prior
+        # state together. Exact replay is short-circuited earlier (in controller_install), so a
+        # driven
+        # write transaction reaches here only for a FRESH install in 2b-3c-a.
+        if role is not Role.CONTROLLER:
+            raise ManagementError("controller_install_role_invalid")
+        install_cls = _classify_controller_install(vr, deps)
+        if install_cls.reason is not None:
+            raise ManagementError(install_cls.reason)
+        if install_cls.classification != CLASSIFY_FRESH:
+            raise ManagementError("controller_install_unsupported_classification")
+        generation = install_cls.generation
+    else:
+        classify = _classify_preexisting(role, vr, deps, mode=MODE_INSTALLED)
+        if classify.reason is not None:
+            raise ManagementError(classify.reason)
 
     ident = _build_identity(role, vr, deps.now())
     identity_bytes = canonical_bytes(ident)
@@ -1128,13 +1644,30 @@ def _write_transaction(
 
     writer = _DocWriter(deps.filesystem(), loc)
     host_effected = False
+    finalization_effected = False
+    fadapter: object | None = None
 
     def _compensate() -> None:
+        # COMBINED marker-first compensation: finalization FIRST (the corrected adapter reverses its
+        # effects in reverse order — resealing the marker + restarting the API before anything
+        # else),
+        # THEN the managed documents, THEN the bootstrap host effects. Any unproven residual in ANY
+        # participant → recovery_required (never an ordinary transaction error, never a false
+        # success). The candidate marker can never remain enabled after a failed transaction.
+        fin_unproven = False
+        if finalization_effected and fadapter is not None:
+            fin_unproven = not _finalization_compensation_proven(fadapter)
         doc_result = writer.compensate()
+        host_unproven = False
         if host_effected:
-            _compensate_host(adapter)  # raises recovery_required if host compensation is unproven
-        if not doc_result.proven:
-            raise ManagementError("recovery_required")  # document restore/removal not proven
+            try:
+                _compensate_host(
+                    adapter
+                )  # raises recovery_required if host compensation is unproven
+            except ManagementError:
+                host_unproven = True
+        if fin_unproven or host_unproven or not doc_result.proven:
+            raise ManagementError("recovery_required")
 
     try:
         # 1. closed typed host operations (image load → config → unit/package → reload → start)
@@ -1173,6 +1706,27 @@ def _write_transaction(
             reason = _controller_end_state_reason(cobs, _expected_controller(vr.manifest))
             if reason is not None:
                 raise ManagementError(reason)
+            finalization_ev: FinalizationEvidence | None = None
+            if install is not None:
+                # 4b. build the PRE-finalization evidence core → the stable domain-separated
+                #     bootstrap_binding_digest the identity activation + marker bind, THEN drive the
+                #     corrected finalization adapter in its exact reviewed order (marker LAST).
+                ev0 = _controller_evidence(
+                    role,
+                    vr,
+                    ident,
+                    plan_c,
+                    deps,
+                    mode=MODE_INSTALLED,
+                    classification=CLASSIFICATION_CREATED,
+                    identity_bytes=identity_bytes,
+                    manifest_bytes=manifest_bytes,
+                    sig_bytes=sig_bytes,
+                )
+                finalization_effected = True  # combined compensation now drives the adapter
+                fadapter, _freceipt, finalization_ev = _drive_controller_finalization(
+                    vr, ident, ev0, install, loc, generation, CLASSIFY_FRESH, deps
+                )
             ev = _controller_evidence(
                 role,
                 vr,
@@ -1184,6 +1738,7 @@ def _write_transaction(
                 identity_bytes=identity_bytes,
                 manifest_bytes=manifest_bytes,
                 sig_bytes=sig_bytes,
+                finalization=finalization_ev,
             )
         # 5. evidence LAST, then its detached attestation (the true commit point) — a sealed
         #    authenticator refuses here, so evidence is never written unauthenticated
@@ -1196,13 +1751,23 @@ def _write_transaction(
         )
         if commit_reason is not None:
             raise ManagementError(commit_reason)
-        return ident, ev
+        result = (ident, ev)
     except ManagementError:
         _compensate()
         raise
     except Exception:
         _compensate()
         raise ManagementError("bootstrap_transaction_error") from None
+    # 7. FINALIZATION COMMIT — only AFTER the five documents + detached attestation passed the
+    # commit
+    # gate (the true commit point). Runs OUTSIDE the compensating try: the install is committed and
+    #    working, so a staging/journal cleanup residual is surfaced as recovery_required rather than
+    # destructively tearing the committed install down. A fresh install stages no prior secret, so
+    #    commit() removes only the recovery journal and returns True.
+    if finalization_effected and fadapter is not None:
+        if not fadapter.commit():  # type: ignore[attr-defined]
+            raise ManagementError("finalization_commit_residual")
+    return result
 
 
 def _write_evidence_and_attestation(

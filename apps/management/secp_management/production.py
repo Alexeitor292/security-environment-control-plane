@@ -219,7 +219,10 @@ def _compose_engine_deps(*, fs: Any, runner: Any, finalization: bool) -> EngineD
     )
     extra: dict[str, Any] = {}
     if finalization:
-        extra["finalization_adapter"] = build_real_controller_finalization_adapter(ctx)
+        # Inject the plan-bound single-use FACTORY (never a mutable singleton adapter) so the write
+        # transaction builds one fresh adapter per install from its authenticated plan. The sealed
+        # finalization_adapter default is left in place (unused when a factory is present).
+        extra["finalization_factory"] = build_real_finalization_factory(ctx)
     return EngineDeps(
         locations=locations,
         trust_root=trust_root,
@@ -248,9 +251,10 @@ def production_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
 
 
 def build_real_controller_finalization_adapter(ctx: RealAdapterContext) -> Any:
-    """Compose the REAL controller-enrollment finalization adapter from a production host context.
-    The reviewed non-root controller-API peer identity is the fixed code constant (never selected);
-    no secret is carried. Constructed ONLY by the root-only install composition below."""
+    """Compose the REAL controller-enrollment finalization adapter (unbound) from a production host
+    context. Retained as the reviewed leaf constructor; the driven install uses the plan-bound
+    FACTORY below. The reviewed non-root controller-API peer identity is the fixed code constant
+    (never selected); no secret is carried."""
     from secp_management.controller_finalization import (
         FinalizationContext,
         RealControllerEnrollmentFinalizationAdapter,
@@ -260,6 +264,40 @@ def build_real_controller_finalization_adapter(ctx: RealAdapterContext) -> Any:
     return RealControllerEnrollmentFinalizationAdapter(
         FinalizationContext(host=ctx, api_uid=API_RUNTIME_UID, api_gid=API_RUNTIME_GID)
     )
+
+
+def build_real_finalization_factory(ctx: RealAdapterContext) -> Any:
+    """The plan-bound, single-use finalization FACTORY the root-only install composition injects.
+    Each call builds ONE fresh adapter bound to exactly the supplied, already-authenticated
+    ``ControllerEnrollmentFinalizationPlan`` (its generation + transaction id freeze at
+    construction)
+    with the REAL boundary-safe runtime observer wired in — so ``enable_api_signer`` proves the live
+    API is sealed with the candidate marker rather than fail-closing on the default observer. The
+    factory captures only the fixed production context + observer; it accepts NO caller/env/import
+    adapter selection and carries no secret."""
+    from secp_management.controller_finalization import (
+        FinalizationContext,
+        RealControllerEnrollmentFinalizationAdapter,
+    )
+    from secp_management.enrollment_signer_runtime_observer import (
+        build_api_signer_runtime_observer,
+    )
+    from secp_management.topology import API_RUNTIME_GID, API_RUNTIME_UID
+
+    observer = build_api_signer_runtime_observer(ctx)
+
+    def _factory(plan: Any) -> Any:
+        return RealControllerEnrollmentFinalizationAdapter(
+            FinalizationContext(
+                host=ctx,
+                api_uid=API_RUNTIME_UID,
+                api_gid=API_RUNTIME_GID,
+                runtime_observer=observer,
+            ),
+            plan=plan,
+        )
+
+    return _factory
 
 
 def controller_install_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:
@@ -281,6 +319,7 @@ def controller_install_engine_deps(*, fs: Any = None, runner: Any = None) -> Eng
 
 __all__ = [
     "build_real_controller_finalization_adapter",
+    "build_real_finalization_factory",
     "controller_install_engine_deps",
     "production_engine_deps",
 ]
