@@ -68,6 +68,7 @@ from secp_management.evidence import (
     CLASSIFICATION_CREATED,
     CLASSIFY_EXACT_SAME_RELEASE,
     CLASSIFY_FRESH,
+    CLASSIFY_MANAGED_UPGRADE,
     FINALIZATION_SCHEMA_VERSION,
     MODE_ADOPTED,
     MODE_INSTALLED,
@@ -585,10 +586,15 @@ def controller_install(
         if install_cls.classification == CLASSIFY_EXACT_SAME_RELEASE:
             ident, ev = _controller_install_replay(vr, deps, install_cls)  # NO mutation
             base["idempotent_replay"] = True
-        elif install_cls.classification == CLASSIFY_FRESH:
-            ident, ev = _write_transaction(role, vr, deps, bundle_dir, install=options)
+        elif install_cls.classification in (CLASSIFY_FRESH, CLASSIFY_MANAGED_UPGRADE):
+            # a fresh install and an authenticated managed upgrade take the SAME driven write
+            # transaction; the upgrade path activates generation N+1 against the prior identity and
+            # rolls the prior generation back on a post-activation failure.
+            ident, ev = _write_transaction(
+                role, vr, deps, bundle_dir, install=options, install_cls=install_cls
+            )
             base["idempotent_replay"] = False
-        else:  # managed_upgrade is delivered in 2b-3c-b; never reached in 2b-3c-a
+        else:  # unreachable — classification is one of the closed set above or already refused
             raise ManagementError("controller_install_unsupported_classification")
     except ManagementError as exc:
         return EXIT_REFUSED, _refused("controller-install", role.value, exc.reason_code)
@@ -1302,6 +1308,17 @@ class _ControllerInstallClassification:
     prior_evidence: BootstrapEvidence | None
 
 
+@dataclass
+class _DriveState:
+    """A MUTABLE holder the finalization drive publishes into AS ops progress — the bound adapter as
+    soon as it is built, the activation receipt as soon as it returns — so the engine's combined
+    compensation can reach the adapter and know a candidate identity is durably active even when a
+    later op (e.g. enable_api_signer) raises mid-drive."""
+
+    adapter: object | None = None
+    arec: object | None = None
+
+
 def _sep_digest(schema: str, value: object) -> str:
     """A domain-separated sha256 digest under a versioned schema identity."""
     return sha256_digest({"v": schema, "value": value})
@@ -1314,11 +1331,10 @@ def _classify_controller_install(
     existing refusal. Closed outcomes: FRESH (all five docs absent AND no managed finalization
     state); EXACT_SAME_RELEASE (an exact, fully authenticated bootstrap replay PLUS a present,
     verified prior finalization extension whose bootstrap_binding_digest recomputes and whose marker
-    exists); REFUSED
-    (partial/foreign/drift/unauthenticated/mode-crossed/changed-release/finalization-
-    orphan/legacy-without-finalization). ``managed_upgrade`` is delivered in 2b-3c-b — here a
-    changed
-    release stays refused (never treated as an unconditional upgrade)."""
+    exists); MANAGED_UPGRADE (a changed release that is an authenticated linear successor of a
+    complete prior B2 install → generation N+1); REFUSED (partial/foreign/drift/unauthenticated/
+    mode-crossed/non-successor/downgrade/finalization-orphan/legacy-without-finalization). A changed
+    release is NEVER an unconditional upgrade -- only an authenticated linear successor."""
     base = _classify_preexisting(Role.CONTROLLER, vr, deps, mode=MODE_INSTALLED)
     fs = deps.filesystem()
     loc = deps.locations
@@ -1329,7 +1345,13 @@ def _classify_controller_install(
                 "controller_install_finalization_orphan", None, 0, None
             )
         return _ControllerInstallClassification(None, CLASSIFY_FRESH, 0, None)
-    if base.reason is not None:  # every bootstrap refusal is preserved verbatim
+    if base.reason == "preexisting_changed_release":
+        # a changed release is the ONLY case eligible for a managed upgrade — and only after the
+        # prior complete B2 install is fully re-authenticated and the new release is proven a linear
+        # successor. The base classifier returned this reason BEFORE the attestation verify, so the
+        # upgrade path re-authenticates everything from scratch.
+        return _classify_upgrade_eligibility(vr, deps)
+    if base.reason is not None:  # every OTHER bootstrap refusal is preserved verbatim
         return _ControllerInstallClassification(base.reason, None, 0, None)
     # exact idempotent same-release bootstrap: base already authenticated all five docs +
     # attestation
@@ -1347,6 +1369,44 @@ def _classify_controller_install(
     return _ControllerInstallClassification(
         None, CLASSIFY_EXACT_SAME_RELEASE, ev.finalization.generation, ev
     )
+
+
+def _classify_upgrade_eligibility(
+    vr: VerifiedRelease, deps: EngineDeps
+) -> _ControllerInstallClassification:
+    """A changed release qualifies as a MANAGED_UPGRADE only when the PRIOR complete B2 install is
+    fully re-authenticated (evidence + attestation + record binding + document integrity + present,
+    coherent marker + finalization extension) AND the new release is proven an authenticated LINEAR
+    SUCCESSOR of the prior (``new.parent_sha == prior.source_sha`` — both signed). Generation
+    becomes
+    the prior authenticated finalization generation + 1. Every other changed-release state refuses.
+    The durable per-row generation CAS in the API activation one-shot is the independent anti-
+    downgrade / anti-skip backstop during the drive."""
+    ev, ident, record, reason = _revalidate_records(Role.CONTROLLER, deps)
+    if reason is not None:  # prior unreadable / unauthenticated / binding drift
+        return _ControllerInstallClassification(
+            "controller_upgrade_prior_unauthenticated", None, 0, None
+        )
+    assert ev is not None and ident is not None and record is not None
+    if _verify_installed_documents(Role.CONTROLLER, deps, ev, ident, record) is not None:
+        return _ControllerInstallClassification("controller_upgrade_prior_drifted", None, 0, None)
+    if ev.finalization is None:  # a plain (non-B2) prior install is not eligible for a B2 upgrade
+        return _ControllerInstallClassification(
+            "controller_upgrade_prior_not_finalized", None, 0, None
+        )
+    if ev.finalization.bootstrap_binding_digest != ev.bootstrap_binding_digest():
+        return _ControllerInstallClassification("controller_install_binding_drift", None, 0, None)
+    marker_reason = _verify_marker_binding(deps, ev)  # prior marker present + binds prior identity
+    if marker_reason is not None:
+        return _ControllerInstallClassification(marker_reason, None, 0, None)
+    # linear-successor trust-window rule: the new release must descend from the prior installed one.
+    prior_source = record.manifest.source_sha
+    if not vr.manifest.parent_sha or vr.manifest.parent_sha != prior_source:
+        return _ControllerInstallClassification(
+            "controller_upgrade_not_linear_successor", None, 0, None
+        )
+    generation = ev.finalization.generation + 1
+    return _ControllerInstallClassification(None, CLASSIFY_MANAGED_UPGRADE, generation, ev)
 
 
 def _build_controller_finalization_plan(
@@ -1399,14 +1459,16 @@ def _drive_controller_finalization(
     generation: int,
     classification: str,
     deps: EngineDeps,
+    *,
+    previous_active_row_id: str | None = None,
+    state: _DriveState | None = None,
 ) -> tuple[object, ControllerFinalizationReceipt, FinalizationEvidence]:
-    """Drive the corrected finalization adapter through its exact reviewed order for a FRESH
-    install,
-    then build the authenticated FinalizationEvidence from the typed receipt + observed facts.
-    Returns
-    (bound adapter, receipt, finalization evidence). Any step raises → the write transaction's
-    combined
-    compensation runs (marker-first)."""
+    """Drive the corrected finalization adapter through its exact reviewed order (fresh install ⇒
+    previous_active_row_id None + generation 0; managed upgrade ⇒ the prior active row + generation
+    N+1), then build the authenticated FinalizationEvidence from the typed receipt + observed facts.
+    The optional ``state`` holder is published AS ops progress (the bound adapter as soon as it is
+    built, the activation receipt as soon as it returns) so a mid-drive failure is visible to the
+    engine's combined compensation. Any step raises -> combined compensation runs (marker-first)."""
     from secp_commissioning.controller_enrollment_signer import ENROLLMENT_SIGNER_SOCKET_PATH
     from secp_commissioning.enrollment_signer_role import ENROLLMENT_SIGNER_DB_ROLE
 
@@ -1417,6 +1479,8 @@ def _drive_controller_finalization(
     plan = _build_controller_finalization_plan(vr, ident, ev0, install, loc, generation)
     binding = plan.bootstrap_evidence_digest
     fadapter = deps.finalization_factory(plan)  # ONE fresh, plan-bound, single-use adapter
+    if state is not None:
+        state.adapter = fadapter  # visible to compensation the moment the adapter exists
     fs = deps.filesystem()
 
     fadapter.install_tls_material(
@@ -1447,9 +1511,11 @@ def _drive_controller_finalization(
         enrollment_key_proof_id=key.enrollment_key_proof_id,
         operation_id=op_id,
         generation=generation,
-        previous_active_row_id=None,  # fresh install (2b-3c-b upgrade supplies the prior row)
+        previous_active_row_id=previous_active_row_id,  # None fresh; prior active row on upgrade
     )
     arec = fadapter.activate_controller_identity(activation)
+    if state is not None:
+        state.arec = arec  # the candidate identity is now durably active (visible to compensation)
     marker = ApiSignerMarker(
         marker_path=loc.api_signer_marker_path(),
         installation_id=ident.installation_id,
@@ -1594,6 +1660,105 @@ def _finalization_compensation_proven(fadapter: object) -> bool:
     return bool(getattr(result, "proven", False)) and not getattr(result, "residual", ("x",))
 
 
+def _upgrade_rollback(
+    prior_ev: BootstrapEvidence,
+    install: ControllerInstallOptions | None,
+    loc: ManagementLocations,
+    generation: int,
+    writer: _DocWriter,
+    drive: _DriveState,
+    deps: EngineDeps,
+) -> bool:
+    """Roll a managed upgrade that FAILED AFTER the candidate identity activated back to the prior
+    generation, PROVING it healthy — else return False (→ recovery_required). Engine-owned because
+    the 2b-3b-iv adapter deliberately defers identity reactivation. Historical activation receipts
+    stay immutable (every activation appends a new row):
+
+      1. compensate the forward adapter (marker-first: restores the prior marker + reseals/restarts
+         the API; on an upgrade the adopted TLS/locator/credential/broker are left, so the ONLY
+         residual is the candidate identity — resolved by the reactivation below);
+      2. restore the prior release's five documents byte-exact (evidence still binds the prior row);
+      3. REACTIVATE the prior identity's facts as a NEW row at generation N+2 (predecessor = the
+         failed candidate row) through a fresh factory adapter, write the corresponding rollback
+         marker, and prove the runtime healthy (enable_api_signer's authoritative observation);
+      4. re-author the prior evidence to bind the NEW active row (the byte-restored evidence bound
+         the OLD row; the live marker now binds the new row) + re-sign;
+      5. commit-gate the prior-release-at-N+2 state; any unproven step → False."""
+    if install is None or prior_ev.finalization is None:
+        return False
+    forward_adapter = drive.adapter
+    arec_c = drive.arec
+    if forward_adapter is None or arec_c is None:
+        return False
+    c_row = getattr(arec_c, "resulting_row_id", None)
+    if not c_row:
+        return False
+    # (1) reverse the forward finalization effects (marker-first)
+    try:
+        fwd_result = forward_adapter.compensate(forward_adapter.receipt())  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a forward-compensation fault is unrecoverable in-plane
+        return False
+    residual = set(getattr(fwd_result, "residual", ("unproven",)))
+    if not getattr(fwd_result, "proven", False) and (residual - {"identity_activation"}):
+        return False  # any residual beyond the expected identity residual is unrecoverable
+    # (2) restore the prior release's documents byte-exact
+    if not writer.compensate().proven:
+        return False
+    ident_a, _ia = _load_identity(Role.CONTROLLER, deps)
+    record_a, _ra = _load_release_record(Role.CONTROLLER, deps)
+    if ident_a is None or record_a is None:
+        return False
+    # (3) reactivate the prior identity as a NEW row at N+2 (predecessor = the failed candidate) +
+    #     write the rollback marker + prove the runtime healthy
+    rb_state = _DriveState()
+    try:
+        _rb_adapter, _rb_receipt, rb_fin_ev = _drive_controller_finalization(
+            record_a,
+            ident_a,
+            prior_ev,
+            install,
+            loc,
+            generation + 1,
+            CLASSIFY_MANAGED_UPGRADE,
+            deps,
+            previous_active_row_id=c_row,
+            state=rb_state,
+        )
+    except ManagementError:
+        return False
+    # (4) re-author the prior evidence to bind the new active row + re-sign, then (5) commit-gate it
+    evidence_a_prime = prior_ev.model_copy(
+        update={"finalization": rb_fin_ev, "transaction_timestamp": deps.now()}
+    )
+    rb_writer = _DocWriter(deps.filesystem(), loc)
+    try:
+        _write_evidence_and_attestation(
+            Role.CONTROLLER,
+            evidence_a_prime,
+            canonical_bytes(ident_a),
+            record_a.aggregate_digest,
+            deps,
+            rb_writer,
+        )
+    except ManagementError:
+        return False
+    if (
+        _verify_committed_transaction(
+            Role.CONTROLLER,
+            deps,
+            expected_mode=MODE_INSTALLED,
+            expected_aggregate=record_a.aggregate_digest,
+        )
+        is not None
+    ):
+        return False
+    if _verify_marker_binding(deps, evidence_a_prime) is not None:
+        return False
+    if rb_state.adapter is not None and not rb_state.adapter.commit():  # type: ignore[attr-defined]
+        return False
+    return True
+
+
 def _write_transaction(
     role: Role,
     vr: VerifiedRelease,
@@ -1601,28 +1766,40 @@ def _write_transaction(
     bundle_dir: str,
     *,
     install: ControllerInstallOptions | None = None,
+    install_cls: _ControllerInstallClassification | None = None,
 ) -> tuple[ManagementPlaneIdentity, BootstrapEvidence]:
     """Classify pre-existing documents, execute the closed typed host operations, write the
     root-controlled documents (identity FIRST, evidence LAST), gate evidence on a FINAL coherent
     reobservation of the COMPLETE end state, and on any failure RESTORE any document this invocation
     overwrote and remove any it newly created AND compensate the host effects the adapter receipt
     records (reporting recovery_required if host compensation cannot be proven) — so a failed
-    idempotent re-install never leaves a pre-existing document mutated."""
+    idempotent re-install never leaves a pre-existing document mutated. For a driven controller
+    install this ALSO drives the finalization adapter (fresh = generation 0; managed upgrade =
+    generation N+1 against the prior identity, finalization-only, with an engine-owned rollback-
+    reactivation of the prior generation on a post-activation failure)."""
     loc = deps.locations
     generation = 0
+    classification = CLASSIFY_FRESH
+    previous_active_row_id: str | None = None
+    prior_ev: BootstrapEvidence | None = None
     if install is not None:
-        # the driven controller-install path: classify the bootstrap docs AND the finalization prior
-        # state together. Exact replay is short-circuited earlier (in controller_install), so a
-        # driven
-        # write transaction reaches here only for a FRESH install in 2b-3c-a.
+        # the driven controller-install path. controller_install classified the state and passes it
+        # here; re-classify defensively if it did not. Only FRESH or an authenticated
+        # MANAGED_UPGRADE
+        # reach the write path (exact replay is short-circuited earlier).
         if role is not Role.CONTROLLER:
             raise ManagementError("controller_install_role_invalid")
-        install_cls = _classify_controller_install(vr, deps)
-        if install_cls.reason is not None:
-            raise ManagementError(install_cls.reason)
-        if install_cls.classification != CLASSIFY_FRESH:
+        cls = install_cls if install_cls is not None else _classify_controller_install(vr, deps)
+        if cls.reason is not None:
+            raise ManagementError(cls.reason)
+        if cls.classification not in (CLASSIFY_FRESH, CLASSIFY_MANAGED_UPGRADE):
             raise ManagementError("controller_install_unsupported_classification")
-        generation = install_cls.generation
+        classification = cls.classification
+        generation = cls.generation
+        if cls.classification == CLASSIFY_MANAGED_UPGRADE:
+            prior_ev = cls.prior_evidence
+            assert prior_ev is not None and prior_ev.finalization is not None
+            previous_active_row_id = prior_ev.finalization.active_identity_row_id
     else:
         classify = _classify_preexisting(role, vr, deps, mode=MODE_INSTALLED)
         if classify.reason is not None:
@@ -1645,18 +1822,29 @@ def _write_transaction(
     writer = _DocWriter(deps.filesystem(), loc)
     host_effected = False
     finalization_effected = False
-    fadapter: object | None = None
+    drive = _DriveState()  # publishes the bound adapter + activation receipt AS ops progress (R3)
 
     def _compensate() -> None:
         # COMBINED marker-first compensation: finalization FIRST (the corrected adapter reverses its
         # effects in reverse order — resealing the marker + restarting the API before anything
-        # else),
-        # THEN the managed documents, THEN the bootstrap host effects. Any unproven residual in ANY
-        # participant → recovery_required (never an ordinary transaction error, never a false
+        # else), THEN the managed documents, THEN the bootstrap host effects. Any unproven residual
+        # in ANY participant → recovery_required (never an ordinary transaction error, never a false
         # success). The candidate marker can never remain enabled after a failed transaction.
+        if (
+            classification == CLASSIFY_MANAGED_UPGRADE
+            and drive.arec is not None
+            and prior_ev is not None
+        ):
+            # a managed upgrade failed AFTER the candidate identity activated → the engine owns the
+            # rollback-reactivation of the PRIOR generation (the adapter defers identity
+            # reactivation
+            # to the engine); it re-commits the prior release + restores its documents itself.
+            if not _upgrade_rollback(prior_ev, install, loc, generation, writer, drive, deps):
+                raise ManagementError("recovery_required")
+            return
         fin_unproven = False
-        if finalization_effected and fadapter is not None:
-            fin_unproven = not _finalization_compensation_proven(fadapter)
+        if finalization_effected and drive.adapter is not None:
+            fin_unproven = not _finalization_compensation_proven(drive.adapter)
         doc_result = writer.compensate()
         host_unproven = False
         if host_effected:
@@ -1669,13 +1857,22 @@ def _write_transaction(
         if fin_unproven or host_unproven or not doc_result.proven:
             raise ManagementError("recovery_required")
 
+    # a managed upgrade is FINALIZATION-ONLY: the controller stack (images/config/unit/migrations)
+    # is upgraded out of band and the reobservation gate proves it is ALREADY at the new release;
+    # the
+    # transaction's only net effects are the enrollment identity + marker, so its rollback is always
+    # reversible. A full stack-upgrade (forward-only migrations + container recreation) is a
+    # distinct,
+    # separately reviewed milestone.
+    run_host_ops = classification != CLASSIFY_MANAGED_UPGRADE
     try:
         # 1. closed typed host operations (image load → config → unit/package → reload → start)
-        host_effected = True
-        if role is Role.WORKER:
-            _run_worker_ops(plan_w, deps)
-        else:
-            _run_controller_ops(plan_c, deps)
+        if run_host_ops:
+            host_effected = True
+            if role is Role.WORKER:
+                _run_worker_ops(plan_w, deps)
+            else:
+                _run_controller_ops(plan_c, deps)
         # 2. identity FIRST, reverified before anything downstream trusts it
         writer.install(id_path, identity_bytes)
         _reverify_doc(deps, id_path, identity_bytes, "identity_reverify_mismatch")
@@ -1724,8 +1921,17 @@ def _write_transaction(
                     sig_bytes=sig_bytes,
                 )
                 finalization_effected = True  # combined compensation now drives the adapter
-                fadapter, _freceipt, finalization_ev = _drive_controller_finalization(
-                    vr, ident, ev0, install, loc, generation, CLASSIFY_FRESH, deps
+                _fa, _freceipt, finalization_ev = _drive_controller_finalization(
+                    vr,
+                    ident,
+                    ev0,
+                    install,
+                    loc,
+                    generation,
+                    classification,
+                    deps,
+                    previous_active_row_id=previous_active_row_id,
+                    state=drive,
                 )
             ev = _controller_evidence(
                 role,
@@ -1764,8 +1970,8 @@ def _write_transaction(
     #    working, so a staging/journal cleanup residual is surfaced as recovery_required rather than
     # destructively tearing the committed install down. A fresh install stages no prior secret, so
     #    commit() removes only the recovery journal and returns True.
-    if finalization_effected and fadapter is not None:
-        if not fadapter.commit():  # type: ignore[attr-defined]
+    if finalization_effected and drive.adapter is not None:
+        if not drive.adapter.commit():  # type: ignore[attr-defined]
             raise ManagementError("finalization_commit_residual")
     return result
 

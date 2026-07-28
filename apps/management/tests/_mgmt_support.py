@@ -178,15 +178,26 @@ def ephemeral_trust_root() -> tuple[ReleaseTrustRoot, str, str, str]:
     return trust, TEST_KEY_ID, priv, pub
 
 
-def manifest_dict(role: str, artifacts: list[dict]) -> dict:
+def manifest_dict(
+    role: str,
+    artifacts: list[dict],
+    *,
+    release_version: str = "0.1.0",
+    source_sha: str = "a" * 40,
+    source_tree_sha: str = "b" * 40,
+    parent_sha: str | None = None,
+) -> dict:
+    # release_version/source_sha/parent_sha are overridable so upgrade tests can seed a linear
+    # successor bundle (new.parent_sha == prior.source_sha); the defaults reproduce the fixed
+    # single-release fixture every existing caller relies on.
     return {
         "bootstrap_contract_version": BOOTSTRAP_CONTRACT_VERSION,
         "plane": "management",
         "role": role,
-        "release_version": "0.1.0",
-        "source_sha": "a" * 40,
-        "source_tree_sha": "b" * 40,
-        "parent_sha": None,
+        "release_version": release_version,
+        "source_sha": source_sha,
+        "source_tree_sha": source_tree_sha,
+        "parent_sha": parent_sha,
         "migration_identity": _MIGRATION,
         "implementation_aggregate": _IMPL_AGGREGATE,
         "bootstrap_package_identity": "secp-pr5e/management-bootstrap/v1",
@@ -268,10 +279,26 @@ def seed_signed_bundle(
     key_id: str,
     priv: str,
     artifacts: list[dict] | None = None,
+    *,
+    release_version: str = "0.1.0",
+    source_sha: str = "a" * 40,
+    source_tree_sha: str = "b" * 40,
+    parent_sha: str | None = None,
 ) -> str:
-    """Seed a fully-signed release bundle under ``bundle_dir`` and return the aggregate digest."""
+    """Seed a fully-signed release bundle under ``bundle_dir`` and return the aggregate digest. The
+    lineage fields are overridable so an upgrade test can seed release B as a linear successor of A
+    (``B.parent_sha == A.source_sha``)."""
     arts = artifacts if artifacts is not None else default_artifacts(role)
-    manifest = ReleaseManifest.model_validate(manifest_dict(role, arts))
+    manifest = ReleaseManifest.model_validate(
+        manifest_dict(
+            role,
+            arts,
+            release_version=release_version,
+            source_sha=source_sha,
+            source_tree_sha=source_tree_sha,
+            parent_sha=parent_sha,
+        )
+    )
     sig = sign_ed25519(priv, manifest_signing_message(manifest))
     _seed_dirs_for(fs, bundle_dir, arts)
     fs.seed_file(f"{bundle_dir}/release-manifest.json", manifest.canonical().encode(), mode=0o644)
