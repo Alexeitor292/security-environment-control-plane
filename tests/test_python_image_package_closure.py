@@ -148,9 +148,10 @@ def test_importing_the_full_image_closure_preserves_the_runtime_seals() -> None:
 
 def test_image_smoke_expected_alembic_head_tracks_the_actual_sole_head() -> None:
     """Regression (found in exact-head CI run 30137230869): the in-container image smoke asserts
-    shipped image's sole Alembic head, but its ``_EXPECTED_ALEMBIC_HEAD`` constant is hardcoded and
-    was left at the PR5F head ``d8f1a2b3c4e5`` when SECP-PR5H-A introduced the new sole head
-    ``b6e2f4a9c1d7``. The smoke runs only inside the built container in CI, so this was invisible to
+    the shipped image's sole Alembic head, but its ``_EXPECTED_ALEMBIC_HEAD`` constant is hardcoded
+    and was left at a stale head when a new sole head was introduced. The head has since advanced
+    ``b6e2f4a9c1d7 -> c2f8e1a4b6d9 -> a1d4f7c2e9b6`` (PR5H-A -> B1 -> B2), so this pin now tracks
+    ``a1d4f7c2e9b6``. The smoke runs only inside the built container in CI, so this was invisible to
     every local suite. This local pin fails the moment the constant drifts from the real head."""
     import importlib.util
 
@@ -168,7 +169,7 @@ def test_image_smoke_expected_alembic_head_tracks_the_actual_sole_head() -> None
     cfg.set_main_option("script_location", str(api_dir / "migrations"))
     actual_heads = tuple(ScriptDirectory.from_config(cfg).get_heads())
 
-    assert actual_heads == ("c2f8e1a4b6d9",), actual_heads
+    assert actual_heads == ("a1d4f7c2e9b6",), actual_heads
     assert module._EXPECTED_ALEMBIC_HEAD == actual_heads[0], (
         f"image_smoke._EXPECTED_ALEMBIC_HEAD={module._EXPECTED_ALEMBIC_HEAD!r} drifted from the "
         f"actual sole Alembic head {actual_heads[0]!r}"

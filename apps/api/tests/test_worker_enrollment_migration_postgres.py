@@ -2,7 +2,7 @@
 
 The portable round-trip proof runs on SQLite; this module proves the same migration is a clean,
 reversible, retryable round trip on the engine that actually ships, and that the live Alembic head
-is exactly ``c2f8e1a4b6d9``. It is one of the three targets of the exact-head PostgreSQL no-skip CI
+is exactly ``a1d4f7c2e9b6``. It is one of the targets of the exact-head PostgreSQL no-skip CI
 gate, so a PostgreSQL outage fails the build instead of silently skipping.
 """
 

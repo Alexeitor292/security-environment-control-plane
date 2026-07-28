@@ -8,8 +8,14 @@ PostgreSQL — not the portable SQLite stand-in the hermetic suite uses:
     activation without receipt);
   * an exact replay returns the BYTE-EQUIVALENT stored receipt and inserts nothing (even after the
     freshness window has expired);
-  * the ``UNIQUE(operation_id)`` race is a single winner — the loser's INSERT raises a real
-    ``IntegrityError`` that rolls back and replays the winner's receipt (exactly one durable row);
+  * a missed initial receipt lookup (a lost/stale read) is recovered under the advisory lock: the
+    locked authoritative re-read inside ``_first_execution`` finds THIS operation's committed
+    receipt and replays it byte-for-byte (no second INSERT), while a new/different operation id and
+    a changed operation-digest still conflict;
+  * genuine concurrent same-operation execution is a single winner — the shared advisory lock
+    SERIALIZES the two transactions, so the loser observes the committed receipt and replays it
+    (exactly one durable row) WITHOUT a raw ``IntegrityError`` (that recovery path is retained only
+    for dialects / edge races that actually reach the UNIQUE constraint);
   * a tampered stored receipt (its digest no longer matches) refuses ``activation-state-corrupt``;
   * the durable receipt table is WRITE-ONCE at the privilege boundary: the dedicated least-privilege
     ``secp_enrollment_signer`` runtime role (SELECT on the one identity table only) has NO privilege
@@ -21,6 +27,7 @@ It contacts only the ephemeral job-local database and no deployment infrastructu
 from __future__ import annotations
 
 import os
+import threading
 from datetime import UTC, datetime
 
 import pytest
@@ -103,9 +110,7 @@ def pg():
 
 
 def _drop_role(conn) -> None:
-    exists = conn.execute(
-        text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": _ROLE}
-    ).scalar()
+    exists = conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": _ROLE}).scalar()
     if exists:
         conn.exec_driver_sql(f"DROP OWNED BY {_ROLE}")
         conn.exec_driver_sql(f"DROP ROLE {_ROLE}")
@@ -146,27 +151,89 @@ def test_exact_replay_is_byte_equivalent_even_after_freshness_expiry(pg):
     assert canonical_json(r1) == canonical_json(r2) and _count(factory) == 1
 
 
-def test_unique_operation_id_race_is_a_single_winner(pg, monkeypatch):
-    _admin, _ac, factory = pg
-    # a genuine winner commits the receipt for op-race
-    _, winner = _run(factory, _handoff(_A, operation_id="op-race"))
-    assert _count(factory) == 1
-    # force the loser's first-execution path (pretend it did not yet see the receipt) so its INSERT
-    # hits the REAL UNIQUE(operation_id) constraint -> IntegrityError -> rollback -> replay winner.
+def _force_initial_lookup_miss(monkeypatch):
+    """Force ONLY run_activation's first (pre-lock) ``_load_receipt`` to miss, so the one-shot
+    enters ``_first_execution`` even though the receipt already exists — exercising the locked
+    authoritative re-read. Every subsequent ``_load_receipt`` (the re-read) is the real query."""
     original = mod._load_receipt
-    calls = {"n": 0}
+    state = {"first": True}
 
-    def _blind_first_load(session, operation_id):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return None  # the pre-lock lookup: act as if the receipt is not there yet
+    def _patched(session, operation_id):
+        if state["first"]:
+            state["first"] = False
+            return None
         return original(session, operation_id)
 
-    monkeypatch.setattr(mod, "_load_receipt", _blind_first_load)
-    code, loser = _run(factory, _handoff(_A, operation_id="op-race"))
+    monkeypatch.setattr(mod, "_load_receipt", _patched)
+
+
+def test_missed_initial_lookup_replays_via_locked_reread(pg, monkeypatch):
+    _admin, _ac, factory = pg
+    _, winner = _run(factory, _handoff(_A, operation_id="op-race"))  # the true writer committed
+    assert _count(factory) == 1
+    # a lost/stale initial lookup: inside _first_execution the candidate is already active, so the
+    # locked authoritative re-read finds THIS operation's committed receipt and replays it
+    # byte-for-byte — no second INSERT (so no IntegrityError) and no new durable row.
+    _force_initial_lookup_miss(monkeypatch)
+    code, replay = _run(factory, _handoff(_A, operation_id="op-race"))
     assert code == mod.EXIT_OK
-    assert canonical_json(loser) == canonical_json(winner)  # replayed the winner's exact bytes
-    assert _count(factory) == 1  # still exactly one durable row
+    assert canonical_json(replay) == canonical_json(winner)  # the winner's exact stored bytes
+    assert _count(factory) == 1  # the re-read mutated nothing
+
+
+def test_missed_initial_lookup_with_new_operation_id_still_conflicts(pg, monkeypatch):
+    _admin, _ac, factory = pg
+    _run(factory, _handoff(_A, operation_id="op-first"))  # candidate _A is now active
+    _force_initial_lookup_miss(monkeypatch)
+    # a DIFFERENT operation id whose candidate merely happens to be active cannot claim replay: the
+    # locked re-read finds no receipt for op-second, so it is refused, not replayed.
+    code, payload = _run(factory, _handoff(_A, operation_id="op-second"))
+    assert code == mod.EXIT_OPERATION_CONFLICT
+    assert payload["reason_code"] == "activation_candidate_already_active"
+    assert _count(factory) == 1
+
+
+def test_missed_initial_lookup_with_mismatched_operation_digest_conflicts(pg, monkeypatch):
+    _admin, _ac, factory = pg
+    _run(factory, _handoff(_A, operation_id="op-x"))  # generation 0
+    _force_initial_lookup_miss(monkeypatch)
+    # same operation id + same (active) candidate but a CHANGED binding (generation): the locked
+    # re-read finds the receipt, but _exact_replay rejects the operation-digest mismatch — a changed
+    # operation never silently replays.
+    code, payload = _run(factory, _handoff(_A, operation_id="op-x", generation=7))
+    assert code == mod.EXIT_OPERATION_CONFLICT
+    assert payload["reason_code"] == "activation_operation_conflict"
+    assert _count(factory) == 1
+
+
+def test_genuine_concurrent_same_operation_is_a_single_winner(pg):
+    _admin, _ac, factory = pg
+    raw = _handoff(_A, operation_id="op-concurrent")
+    barrier = threading.Barrier(2)
+    results: dict[str, tuple] = {}
+    errors: dict[str, BaseException] = {}
+
+    def worker(name: str) -> None:
+        try:
+            barrier.wait(
+                timeout=15
+            )  # release both together so they truly race on the advisory lock
+            results[name] = mod.run_activation(
+                read_handoff=lambda: raw, session_factory=factory, now=_FRESH
+            )
+        except BaseException as exc:  # noqa: BLE001 - capture ANY error (incl a raw IntegrityError)
+            errors[name] = exc
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=45)
+    assert not any(t.is_alive() for t in threads), "a concurrent activation worker hung"
+    assert not errors, errors  # the advisory lock serializes: NO raw IntegrityError surfaces
+    assert {results["a"][0], results["b"][0]} == {mod.EXIT_OK}  # both succeed
+    assert canonical_json(results["a"][1]) == canonical_json(results["b"][1])  # byte-equivalent
+    assert _count(factory) == 1  # exactly one durable receipt — a single winner
 
 
 def test_tampered_receipt_refuses_state_corrupt(pg):
@@ -195,9 +262,9 @@ def test_receipt_table_is_unreachable_by_the_least_privilege_runtime_role(pg):
         for stmt in ENROLLMENT_SIGNER_DB_GRANTS:  # USAGE on schema + SELECT on the identity table
             conn.exec_driver_sql(stmt)
     role_engine = create_engine(
-        make_url(PG_URL).set(username=_ROLE, password=_ROLE_PW).render_as_string(
-            hide_password=False
-        ),
+        make_url(PG_URL)
+        .set(username=_ROLE, password=_ROLE_PW)
+        .render_as_string(hide_password=False),
         future=True,
     )
     try:

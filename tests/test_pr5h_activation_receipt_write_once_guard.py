@@ -42,9 +42,7 @@ def _referenced_identifiers(path: Path) -> set[str]:
 
 
 def test_only_the_definition_and_the_one_shot_reference_the_receipt_model() -> None:
-    referencing = {
-        path for path in API_PKG.rglob("*.py") if MODEL in _referenced_identifiers(path)
-    }
+    referencing = {path for path in API_PKG.rglob("*.py") if MODEL in _referenced_identifiers(path)}
     assert referencing == {DEFINITION, ONE_SHOT}, sorted(
         str(p.relative_to(REPO)) for p in referencing
     )
@@ -73,9 +71,7 @@ def test_every_receipt_construction_is_an_insert_via_session_add() -> None:
     constructions = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == MODEL
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == MODEL
     ]
     add_args: list[ast.AST] = []
     for node in ast.walk(tree):

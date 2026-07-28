@@ -99,7 +99,7 @@ Tests throughout use **ephemeral test trust roots**; the only required stop is b
 ```
 absent
   └─(bootstrap --write --confirm, root)→ PREPARING
-PREPARING: release-verify → migrate(to c2f8e1a4b6d9) → provision signer DB role/grants
+PREPARING: release-verify → migrate(to a1d4f7c2e9b6) → provision signer DB role/grants
   → prepare_controller_enrollment_key (0600 root) → build VerifiedControllerIdentity → activate_controller_identity
   → record_controller_api_locator(origin,ca) → render+install broker unit (disabled→enabled) → render+install API/stack units
   → daemon-reload → enable API signer client → start (ordering: db → broker → api → stack) → REOBSERVE
@@ -186,7 +186,7 @@ One root-gated, explicitly-enabled harness with a controller host + worker host 
 
 ## 7. Non-goals / prohibitions (preserved)
 
-B2 introduces **no** Proxmox/cloud/Kubernetes mutation, OpenTofu apply/destroy, Ansible workload config, provider credentials, operator-worker activation, controlled-live workflow submission, provider-discovery expansion, PR6 behaviour, remote root SSH from HTTP/UI, arbitrary shell execution, or arbitrary root filesystem operations. All current seals + queue separation are preserved. Sole Alembic head stays `c2f8e1a4b6d9` unless a genuinely required migration is extended in place (no new head).
+B2 introduces **no** Proxmox/cloud/Kubernetes mutation, OpenTofu apply/destroy, Ansible workload config, provider credentials, operator-worker activation, controlled-live workflow submission, provider-discovery expansion, PR6 behaviour, remote root SSH from HTTP/UI, arbitrary shell execution, or arbitrary root filesystem operations. All current seals + queue separation are preserved. Sole Alembic head is now `a1d4f7c2e9b6` — the C3 controller-identity activation-receipt migration, the one genuinely required new head, a linear successor of `c2f8e1a4b6d9` (no branch).
 
 ## 8. Completion & acceptance gates
 

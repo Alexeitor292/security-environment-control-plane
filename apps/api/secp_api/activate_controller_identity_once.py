@@ -312,8 +312,17 @@ def _first_execution(
     if len(rows) > 1:
         return EXIT_AMBIGUOUS_STATE, {"reason_code": "controller_identity_ambiguous"}
     current = rows[0] if rows else None
-    # a NEW operation whose candidate is merely already active cannot claim the activation
     if current is not None and _identity_digest(_row_values(current)) == h.candidate_digest:
+        # The candidate is ALREADY active. Before refusing, do ONE authoritative re-read of the
+        # receipt for THIS exact operation_id under the advisory lock we already hold: the initial
+        # lookup in run_activation can miss (a lost/stale read) while THIS operation in fact already
+        # committed — in which case this is a legitimate exact replay, not a new-operation attempt.
+        # _exact_replay revalidates the operation_digest + every stored binding and mutates nothing;
+        # a genuinely NEW operation_id (no receipt) still cannot claim replay merely because its
+        # candidate happens to be active.
+        committed = _load_receipt(session, h.operation_id)
+        if committed is not None:
+            return _exact_replay(session, committed, op_digest)
         return EXIT_OPERATION_CONFLICT, {"reason_code": "activation_candidate_already_active"}
     actual_row = str(current.id) if current is not None else None
     actual_token = _token(current) if current is not None else None

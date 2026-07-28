@@ -322,11 +322,13 @@ jobs:
           # the old plaintext, role exactly least-privilege, attributes closed incl NOINHERIT +
           # NOREPLICATION, SET ROLE refused + RESET cannot reveal admin, memberships repaired both
           # directions, sequence/function privileges stripped, owned object refused not silently kept),
-          # + 5 PR5H-B2 C3 activation durable-idempotency proofs (first execution commits identity +
-          # receipt atomically, exact replay byte-equivalent after freshness expiry, UNIQUE(operation_id)
-          # race is a single winner, tampered receipt refuses state-corrupt, the write-once receipt
-          # table is unreachable by the least-privilege runtime role).
-          EXPECTED_MINIMUM = 71
+          # + 8 PR5H-B2 C3 activation durable-idempotency proofs (first execution commits identity +
+          # receipt atomically, exact replay byte-equivalent after freshness expiry, a missed initial
+          # lookup replays via the locked authoritative re-read, a new operation id and a mismatched
+          # operation-digest still conflict under that re-read, tampered receipt refuses state-corrupt,
+          # genuine concurrent same-operation is a single winner via the advisory lock with no raw
+          # IntegrityError, the write-once receipt table is unreachable by the least-privilege role).
+          EXPECTED_MINIMUM = 74
           path = Path("junit-pr5h-postgres-enrollment.xml")
           if not path.exists():
               print("::error::PR5H-A PostgreSQL JUnit missing - the test step produced no results")
