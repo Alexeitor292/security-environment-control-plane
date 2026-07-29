@@ -39,7 +39,7 @@ import hmac
 import os
 import re
 import stat
-from typing import ClassVar, NoReturn
+from typing import ClassVar, NoReturn, SupportsIndex
 
 from fastapi import Request
 
@@ -110,7 +110,7 @@ class FixedOriginGateSecret:
     def __reduce__(self) -> NoReturn:
         raise self.error_class(f"{self.reason_prefix}_not_serializable")
 
-    def __reduce_ex__(self, protocol: int) -> NoReturn:
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
         raise self.error_class(f"{self.reason_prefix}_not_serializable")
 
     def __getstate__(self) -> NoReturn:
