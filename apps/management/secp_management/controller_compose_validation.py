@@ -35,6 +35,7 @@ deployment value, path, host name, image or credential from the artifact.
 
 from __future__ import annotations
 
+import posixpath
 from typing import Any, Final
 
 import yaml
@@ -206,37 +207,105 @@ def _api_volumes(api: dict[str, Any]) -> list[Any]:
     return volumes  # type: ignore[return-value]
 
 
-def _entry_target(entry: Any) -> str | None:
-    """The container target an entry claims, for duplicate/short-form detection across ALL entries.
+#: R8a: the EXACT top-level key set a required mount may carry, and the EXACT bind key set. A
+#: closed allow-list, not a deny-list: a future Compose feature must not be able to silently broaden
+#: the authority the ordinary API receives merely because this module has not heard of it yet.
+REQUIRED_MOUNT_KEYS: Final = frozenset({"type", "source", "target", "read_only", "bind"})
+REQUIRED_MOUNT_BIND_KEYS: Final = frozenset({"create_host_path"})
 
-    A short-form string (``"src:dst:ro"``) is understood only well enough to notice that it TARGETS
-    a contract path; it is never accepted as satisfying the contract."""
+_MAX_TARGET_LEN: Final = 1024
+#: the shapes a short-form string may take: `dst`, `src:dst`, `src:dst:opts`. Anything longer is a
+#: representation this contract does not understand.
+_MAX_SHORT_FORM_PARTS: Final = 3
+
+
+def canonical_container_target(raw: object) -> str:
+    """The ONE canonical POSIX container target, or a bounded refusal.
+
+    R8. compose-go applies POSIX ``path.Clean`` to every volume target, so ``/run/secp/../secp/x``,
+    ``/run/secp/x/``, ``/run//secp/x`` and ``/run/secp/./x`` are FOUR different strings that become
+    ONE runtime destination. Comparing raw strings therefore let a valid required mount coexist with
+    a WRITABLE alias that Compose would land on the very same path -- a full bypass of the read-only
+    gate contract, and one that no amount of later Docker error checking may be relied on to catch.
+
+    ``posixpath`` is used deliberately, never ``os.path``: the target is a path inside a Linux
+    container and must be read identically on every host that validates or signs the release. On
+    Windows ``os.path`` treats a backslash as a separator and would normalize it away.
+
+    A noncanonical target is REFUSED, never silently normalized and accepted -- accepting it would
+    make the bytes that were signed differ from the destination that is mounted, which is the exact
+    ambiguity this contract exists to remove."""
+    if not isinstance(raw, str) or not raw:
+        _reject("controller_compose_target_invalid")
+    text: str = raw  # type: ignore[assignment]
+    if len(text) > _MAX_TARGET_LEN:
+        _reject("controller_compose_target_too_long")
+    if "\x00" in text:
+        _reject("controller_compose_target_invalid")
+    if "\\" in text:  # a backslash is a literal character in a POSIX path, never a separator
+        _reject("controller_compose_target_invalid")
+    if _interpolated(text):
+        _reject("controller_compose_target_interpolated")
+    if not text.startswith("/"):
+        _reject("controller_compose_target_not_absolute")
+    segments = text.split("/")[1:]
+    if any(seg == "" for seg in segments):  # a repeated separator, or a trailing slash
+        _reject("controller_compose_target_not_canonical")
+    if any(seg in (".", "..") for seg in segments):
+        _reject("controller_compose_target_not_canonical")
+    canonical = posixpath.normpath(text)
+    if canonical != text:  # a total check: nothing noncanonical may survive the checks above
+        _reject("controller_compose_target_not_canonical")
+    if canonical == "/":  # the container root is never a valid mount target here
+        _reject("controller_compose_target_invalid")
+    return canonical
+
+
+def _declared_target(entry: Any) -> str:
+    """The container target an entry declares, in EVERY representation Compose accepts.
+
+    Every entry on the API service must declare a target this contract can characterise -- a bind, a
+    named volume, a tmpfs, an image mount, or a short-form string. An entry whose target cannot be
+    extracted is REFUSED rather than skipped: skipping it is precisely how an alias would slip
+    past."""
     if isinstance(entry, str):
         parts = entry.split(":")
-        return parts[1] if len(parts) >= 2 else None
+        if not 1 <= len(parts) <= _MAX_SHORT_FORM_PARTS:
+            _reject("controller_compose_unsupported_volume_structure")
+        # `dst` (anonymous volume) -> the path IS the target; `src:dst[:opts]` -> the second field.
+        return canonical_container_target(parts[0] if len(parts) == 1 else parts[1])
     if isinstance(entry, dict):
-        target = entry.get("target")
-        return target if isinstance(target, str) else None
-    return None
+        if "target" not in entry:
+            _reject("controller_compose_unsupported_volume_structure")
+        return canonical_container_target(entry["target"])
+    _reject("controller_compose_unsupported_volume_structure")
+    raise AssertionError  # pragma: no cover - _reject always raises
 
 
-def _matches_long_form_bind(entry: Any, source: str, target: str) -> bool:
-    return (
-        isinstance(entry, dict)
-        and entry.get("type") == "bind"
-        and entry.get("source") == source
-        and entry.get("target") == target
-    )
+def _group_by_canonical_target(volumes: list[Any]) -> dict[str, list[Any]]:
+    """Every API volume entry, grouped by the destination Compose will ACTUALLY mount it at.
+
+    This is the pre-pass R8 requires: it runs over ALL entries -- binds, named volumes, tmpfs, image
+    mounts and short forms alike -- BEFORE either required mount is examined, so a lexical alias is
+    caught by construction. A runtime "duplicate mount point" error is not a security gate: the
+    signed release must refuse before it is signed and before any host mutation."""
+    grouped: dict[str, list[Any]] = {}
+    for entry in volumes:
+        grouped.setdefault(_declared_target(entry), []).append(entry)
+    return grouped
 
 
-def _assert_required_mount(volumes: list[Any], source: str, target: str, kind: str) -> None:
-    """Prove EXACTLY ONE conforming long-form read-only bind for ``target``, and no rival entry."""
-    # 1. no other entry may claim this target -- an alias, a short form, or a second bind with a
-    #    different source would make the effective mount ambiguous or attacker-chosen.
-    claiming = [e for e in volumes if _entry_target(e) == target]
+def _assert_required_mount(
+    grouped: dict[str, list[Any]], source: str, target: str, kind: str
+) -> None:
+    """Prove EXACTLY ONE conforming long-form read-only bind at ``target``, and no rival entry."""
+    claiming = grouped.get(target, [])
     if len(claiming) == 0:
         _reject(f"controller_compose_{kind}_mount_missing")
     if len(claiming) > 1:
+        # a second entry resolving to the SAME canonical destination -- a `..`/`.`/repeated-slash/
+        # trailing-slash alias, a short form, a named volume, a tmpfs, an image mount, or a second
+        # bind -- makes the effective mount ambiguous or attacker-chosen.
         _reject(f"controller_compose_{kind}_mount_duplicate_target")
     entry = claiming[0]
     if isinstance(entry, str):
@@ -245,7 +314,28 @@ def _assert_required_mount(volumes: list[Any], source: str, target: str, kind: s
     if not isinstance(entry, dict):
         _reject("controller_compose_unsupported_volume_structure")
 
-    # 2. it must be the exact long-form bind this contract requires.
+    # R8a: the EXACT key set, checked BEFORE any value, so an unknown key can never be reached and
+    # then ignored. `consistency`, `volume`, `tmpfs`, `image`, `cluster`, `subpath`, `selinux`,
+    # `recursive` and anything not yet invented all land here as an EXTRA key. A MISSING key keeps
+    # its own precise code -- reporting an omitted `create_host_path` as "unexpected key" would tell
+    # an operator the wrong thing.
+    if set(entry) - REQUIRED_MOUNT_KEYS:
+        _reject(f"controller_compose_{kind}_mount_unexpected_key")
+    if "bind" not in entry:
+        # no bind block at all means no create_host_path, which is the risk that matters.
+        _reject(f"controller_compose_{kind}_mount_create_host_path")
+    if REQUIRED_MOUNT_KEYS - set(entry):
+        _reject(f"controller_compose_{kind}_mount_invalid")
+    bind = entry.get("bind")
+    if not isinstance(bind, dict):
+        _reject("controller_compose_unsupported_volume_structure")
+    # `propagation` keeps its own named code: it is the one bind option that could reopen what
+    # read_only closed, and it was called out by name in review.
+    if "propagation" in bind:  # type: ignore[operator]
+        _reject(f"controller_compose_{kind}_mount_propagation_forbidden")
+    if set(bind) - REQUIRED_MOUNT_BIND_KEYS:  # type: ignore[arg-type]
+        _reject(f"controller_compose_{kind}_mount_unexpected_key")
+
     for field in ("source", "target"):
         value = entry.get(field)
         if not isinstance(value, str):
@@ -256,20 +346,13 @@ def _assert_required_mount(volumes: list[Any], source: str, target: str, kind: s
         _reject(f"controller_compose_{kind}_mount_invalid")
     if entry.get("source") != source:
         _reject(f"controller_compose_{kind}_mount_wrong_source")
-    if entry.get("target") != target:  # unreachable via `claiming`, kept as a total check
+    if entry.get("target") != target:  # byte-for-byte, not merely canonically equal
         _reject(f"controller_compose_{kind}_mount_wrong_target")
-    if entry.get("read_only") is not True:
+    if entry.get("read_only") is not True:  # the actual boolean, never a truthy string
         _reject(f"controller_compose_{kind}_mount_writable")
-
-    # 3. no propagation or writable override may reopen what read_only closed.
-    bind = entry.get("bind")
-    if bind is not None and not isinstance(bind, dict):
-        _reject("controller_compose_unsupported_volume_structure")
-    if isinstance(bind, dict) and "propagation" in bind:
-        _reject(f"controller_compose_{kind}_mount_propagation_forbidden")
-    # 4. create_host_path MUST be present and false: with it absent or true, Docker silently
-    #    creates a DIRECTORY at a missing gate/marker path, and the API then sees a directory where
-    #    the contract promised a file -- an unauthenticated readiness route in the gate's case.
+    # create_host_path MUST be present and false: with it absent or true, Docker silently creates a
+    # DIRECTORY at a missing gate/marker path, and the API then sees a directory where the contract
+    # promised a file -- an unauthenticated readiness route in the gate's case.
     if not isinstance(bind, dict) or bind.get("create_host_path") is not False:
         _reject(f"controller_compose_{kind}_mount_create_host_path")
 
@@ -284,8 +367,11 @@ def assert_controller_compose_contract(content: bytes) -> None:
     api = _api_service(document)
     _assert_no_indirection(document, api)
     volumes = _api_volumes(api)
+    # R8: canonicalize and group EVERY entry's destination FIRST, then validate the required
+    # mounts. Doing it in that order is what makes a normalized alias impossible.
+    grouped = _group_by_canonical_target(volumes)
     for source, target, kind in REQUIRED_API_MOUNTS:
-        _assert_required_mount(volumes, source, target, kind)
+        _assert_required_mount(grouped, source, target, kind)
 
 
 def controller_compose_contract_reason(content: bytes) -> str | None:
@@ -302,8 +388,11 @@ def controller_compose_contract_reason(content: bytes) -> str | None:
 
 __all__ = [
     "CONTROLLER_API_SERVICE",
+    "REQUIRED_MOUNT_BIND_KEYS",
+    "REQUIRED_MOUNT_KEYS",
     "REQUIRED_API_MOUNTS",
     "ControllerComposeContractError",
+    "canonical_container_target",
     "assert_controller_compose_contract",
     "controller_compose_contract_reason",
     "parse_controller_compose_document",

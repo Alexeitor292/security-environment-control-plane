@@ -213,6 +213,16 @@ def _seed_api_mount_sources() -> None:
         os.chmod(path, mode)
 
 
+def _installed_compose_path(stack: dict) -> str:
+    return str(stack["ctx"].locations.controller_compose_path())
+
+
+def _sha(data: bytes) -> str:
+    from secp_commissioning.canonical import sha256_bytes
+
+    return sha256_bytes(data)
+
+
 def _api_mounts() -> list[dict]:
     """Every mount Docker ACTUALLY resolved for the API container, from the running container."""
     raw = _sh(
@@ -506,6 +516,108 @@ def test_readiness_is_404_without_the_gate_and_served_with_it(controller_stack) 
     assert got["same"] is True  # no oracle distinguishes absent / wrong / duplicated
     assert got["secret_in_body"] is False
     assert got["good"] != 404  # the mounted gate authenticates; the surface exists for it alone
+
+
+# ------------------------------- R8: Compose NORMALIZES aliases; the validator must refuse them
+
+
+def _alias_template(target: str) -> bytes:
+    """The installed valid template plus ONE hostile writable bind aimed at ``target``."""
+    installed = _CONTROLLER_COMPOSE.decode()
+    hostile = (
+        "    volumes:\n"
+        "      - type: bind\n"
+        "        source: /tmp/secp-evil\n"
+        f"        target: {target}\n"
+        "        read_only: false\n"
+        "        bind:\n"
+        "          create_host_path: true\n"
+    )
+    # append the hostile entry to the api service's existing volume list
+    marker = "    volumes:\n"
+    head, _sep, tail = installed.partition(marker)
+    return (head + marker + hostile[len(marker) :] + tail).encode()
+
+
+#: the four spellings compose-go collapses onto the reviewed readiness-gate target.
+_ALIAS_TARGETS = {
+    "parent-segment": "/run/secp/../secp/enrollment-signer-readiness-gate.secret",
+    "trailing-slash": _GATE_TARGET + "/",
+    "repeated-separator": "/run//secp/enrollment-signer-readiness-gate.secret",
+    "dot-segment": "/run/secp/./enrollment-signer-readiness-gate.secret",
+}
+
+
+@pytest.mark.parametrize("name", list(_ALIAS_TARGETS))
+def test_compose_normalizes_the_alias_and_the_validator_refuses_it(controller_stack, name) -> None:
+    """Two facts in one test, in the order that matters.
+
+    1. REAL Compose, given the alias, resolves it to the REVIEWED target -- so the alias is not a
+       different mount, it is a SECOND mount on the gate's destination, writable, allowed to create
+       its own source. This is the evidence for why raw-string comparison was unsafe.
+    2. The strict OFFLINE validator refuses that same document, so it can never be signed,
+       never reach `install_config`, and never reach `compose up`. Compose's own error is not
+       relied on as the gate."""
+    target = _ALIAS_TARGETS[name]
+    template = _alias_template(target)
+
+    # 2 FIRST, because it is the actual control: the document is refused before any host mutation.
+    reason = controller_compose_contract_reason(template)
+    assert reason is not None, "the alias must be refused offline"
+    assert reason.startswith("controller_compose_")
+
+    # 1: now show WHY -- Compose itself normalizes the alias onto the reviewed destination.
+    scratch = os.path.join(
+        os.path.dirname(_installed_compose_path(controller_stack)), f"alias-{name}.yml"
+    )
+    with open(scratch, "wb") as fh:
+        fh.write(template)
+    os.chmod(scratch, 0o640)
+    compose = os.path.realpath(shutil.which("docker-compose"))
+    rendered = _sh(
+        compose, "--project-name", f"{_PROJECT}-alias", "--file", scratch, "config", check=False
+    )
+    os.unlink(scratch)
+    if rendered.returncode != 0:
+        # Compose itself rejected the duplicate destination -- which is agreement, not a gate.
+        assert "duplicate" in (rendered.stderr + rendered.stdout).lower()
+        return
+    volumes = yaml.safe_load(rendered.stdout)["services"]["api"]["volumes"]
+    normalized = [v.get("target") for v in volumes]
+    assert normalized.count(_GATE_TARGET) >= 2, (
+        f"compose normalized {target!r} to something other than the reviewed target: {normalized}"
+    )
+
+
+def test_no_invalid_alias_template_can_reach_install_config(controller_stack) -> None:
+    """The adapter is the last boundary before the bytes become the host's Compose config: every
+    alias is refused there too, so nothing invalid can reach `compose up` even by mistake."""
+    from secp_management.adapters import ReviewedConfig
+    from secp_management.controller_compose_validation import ControllerComposeContractError
+
+    adapter = controller_stack["adapter"]
+    installed_before = open(_installed_compose_path(controller_stack), "rb").read()
+    for name, target in _ALIAS_TARGETS.items():
+        template = _alias_template(target)
+        config = ReviewedConfig(identity=_sha(template), content=template)
+        with pytest.raises(ControllerComposeContractError):
+            adapter.install_config(config)
+        assert open(_installed_compose_path(controller_stack), "rb").read() == installed_before, (
+            f"{name} mutated the installed config"
+        )
+
+
+def test_the_valid_template_still_resolves_one_and_only_one_gate_mount(controller_stack) -> None:
+    """The positive control for the whole R8 matrix: after all of the above, the real installed
+    template still resolves exactly one gate mount, and the running container's is read-only."""
+    ctx = controller_stack["ctx"]
+    rendered = yaml.safe_load(_dc(ctx, "config").stdout)
+    targets = [v.get("target") for v in rendered["services"]["api"]["volumes"]]
+    assert targets.count(_GATE_TARGET) == 1
+    mounts = _gate_mounts()
+    assert len(mounts) == 1
+    assert mounts[0]["RW"] is False
+    assert os.path.realpath(mounts[0]["Source"]) == os.path.realpath(_GATE_HOST)
 
 
 def test_zzz_compensation_tears_down_zero_residual(controller_stack) -> None:

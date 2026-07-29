@@ -33,13 +33,18 @@ from secp_management import ManagementError
 from secp_management.controller_compose_reference import reference_controller_compose
 from secp_management.controller_compose_validation import (
     REQUIRED_API_MOUNTS,
+    REQUIRED_MOUNT_BIND_KEYS,
+    REQUIRED_MOUNT_KEYS,
     ControllerComposeContractError,
     assert_controller_compose_contract,
+    canonical_container_target,
     controller_compose_contract_reason,
 )
 from secp_management.release_verify import verify_release_bundle
 
 VALID = reference_controller_compose()
+#: a literal newline, spelled once so the alias fixtures below read as plain YAML.
+NL = chr(10)
 _BD = "/opt/secp/release"
 
 
@@ -189,6 +194,273 @@ def test_no_refusal_ever_echoes_a_deployment_value(name: str) -> None:
     assert reason is not None
     assert "/" not in reason and "$" not in reason and " " not in reason
     assert len(reason) <= 72 and reason.startswith("controller_compose_")
+
+
+# ---------------------------------------------------- R8: normalized-alias reproduction + refusal
+#
+# Independent review R8. compose-go applies POSIX `path.Clean` to EVERY volume target, so four
+# different strings become ONE runtime destination. The validator compared raw strings, so a VALID
+# required mount could coexist with a WRITABLE alias landing on the very same path. Each template
+# below was ACCEPTED before this correction; the worst is the `..` form, a writable bind with
+# `create_host_path: true` on the readiness gate's destination.
+
+
+def _alias_entry(target: str, *, read_only: str = "false", create: str = "true") -> str:
+    """A hostile long-form bind aimed at ``target``: writable, and allowed to create its source."""
+    return (
+        "      - type: bind\n"
+        "        source: /tmp/evil\n"
+        f"        target: {target}\n"
+        f"        read_only: {read_only}\n"
+        "        bind:\n"
+        f"          create_host_path: {create}\n"
+    )
+
+
+#: every lexical spelling that compose-go normalizes onto the reviewed readiness-gate target.
+GATE_ALIAS_TARGETS: dict[str, str] = {
+    "parent-segment": "/run/secp/../secp/enrollment-signer-readiness-gate.secret",
+    "trailing-slash": GATE_TARGET + "/",
+    "repeated-separator": "/run//secp/enrollment-signer-readiness-gate.secret",
+    "dot-segment": "/run/secp/./enrollment-signer-readiness-gate.secret",
+    "deep-parent-segment": "/run/secp/x/../enrollment-signer-readiness-gate.secret",
+}
+
+#: aliases whose target string is already canonical, so they collide by grouping rather than by
+#: canonicalization: a rival representation of the same destination.
+VALID_PLUS_ALIAS: dict[str, str] = {
+    "short-form alias": f'      - "/tmp/evil:{GATE_TARGET}:rw"' + NL,
+    "anonymous short-form alias": f'      - "{GATE_TARGET}"' + NL,
+    "named-volume alias": (
+        "      - type: volume"
+        + NL
+        + "        source: evil"
+        + NL
+        + f"        target: {GATE_TARGET}"
+        + NL
+    ),
+    "tmpfs alias": "      - type: tmpfs" + NL + f"        target: {GATE_TARGET}" + NL,
+    "image alias": (
+        "      - type: image"
+        + NL
+        + "        source: evil:latest"
+        + NL
+        + f"        target: {GATE_TARGET}"
+        + NL
+    ),
+    "second writable bind": _alias_entry(GATE_TARGET),
+}
+
+
+@pytest.mark.parametrize("name", list(GATE_ALIAS_TARGETS))
+def test_a_valid_mount_plus_a_normalizing_alias_is_refused(name: str) -> None:
+    template = VALID.decode() + _alias_entry(GATE_ALIAS_TARGETS[name])
+    with pytest.raises(ControllerComposeContractError) as exc:
+        assert_controller_compose_contract(template.encode())
+    # refused for being NONCANONICAL -- never silently normalized and then accepted.
+    assert exc.value.reason_code == "controller_compose_target_not_canonical"
+
+
+@pytest.mark.parametrize("name", list(VALID_PLUS_ALIAS))
+def test_a_valid_mount_plus_a_rival_representation_is_refused(name: str) -> None:
+    template = VALID.decode() + VALID_PLUS_ALIAS[name]
+    with pytest.raises(ControllerComposeContractError) as exc:
+        assert_controller_compose_contract(template.encode())
+    assert exc.value.reason_code == "controller_compose_readiness_gate_mount_duplicate_target"
+
+
+@pytest.mark.parametrize("name", list(GATE_ALIAS_TARGETS) + list(VALID_PLUS_ALIAS))
+def test_every_alias_is_refused_as_a_correctly_signed_bundle(name: str) -> None:
+    """The decisive property, restated for R8: the manifest is canonical, the declared digest
+    matches the mutated bytes exactly, the ed25519 signature verifies under a pinned anchor --
+    and the bundle is STILL refused, before any host mutation. Docker's eventual "duplicate
+    mount point" is not the gate; the signed release must never be signable or installable."""
+    extra = (
+        _alias_entry(GATE_ALIAS_TARGETS[name])
+        if name in GATE_ALIAS_TARGETS
+        else VALID_PLUS_ALIAS[name]
+    )
+    trust, key_id, priv, _pub = ephemeral_trust_root()
+    fs = InMemoryFilesystem()
+    _bundle(fs, priv, key_id, (VALID.decode() + extra).encode())
+    with pytest.raises(ManagementError) as exc:
+        verify_release_bundle(_BD, trust_root=trust, fs=fs)
+    assert exc.value.reason_code.startswith("controller_compose_")
+
+
+# ---------------------------------------------------------------- the canonicalizer, directly
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("", "controller_compose_target_invalid"),
+        (None, "controller_compose_target_invalid"),
+        (123, "controller_compose_target_invalid"),
+        ("relative/path", "controller_compose_target_not_absolute"),
+        ("./x", "controller_compose_target_not_absolute"),
+        ("/", "controller_compose_target_not_canonical"),
+        ("/a/", "controller_compose_target_not_canonical"),
+        ("/a//b", "controller_compose_target_not_canonical"),
+        ("/a/./b", "controller_compose_target_not_canonical"),
+        ("/a/../b", "controller_compose_target_not_canonical"),
+        ("/a/..", "controller_compose_target_not_canonical"),
+        ("/a/b" + chr(92) + "c", "controller_compose_target_invalid"),
+        ("/a" + chr(92) + "x00b", "controller_compose_target_invalid"),
+        ("/${VAR}/b", "controller_compose_target_interpolated"),
+        ("/" + "a" * 2000, "controller_compose_target_too_long"),
+    ],
+)
+def test_the_canonicalizer_refuses_every_noncanonical_target(raw: object, expected: str) -> None:
+    with pytest.raises(ControllerComposeContractError) as exc:
+        canonical_container_target(raw)
+    assert exc.value.reason_code == expected
+
+
+@pytest.mark.parametrize("raw", ["/a", "/a/b", "/run/secp/x.secret", GATE_TARGET, MARKER])
+def test_the_canonicalizer_accepts_a_canonical_target_unchanged(raw: str) -> None:
+    assert canonical_container_target(raw) == raw  # byte-for-byte, never rewritten
+
+
+def test_the_canonicalizer_uses_posix_not_host_semantics() -> None:
+    """On Windows ``os.path`` treats a backslash as a separator and would normalize it away; the
+    target is a path inside a Linux container and must read identically on every signing host."""
+    backslashed = "/run/secp" + chr(92) + ".." + chr(92) + "evil"
+    with pytest.raises(ControllerComposeContractError) as exc:
+        canonical_container_target(backslashed)
+    assert exc.value.reason_code == "controller_compose_target_invalid"
+
+
+# ---------------------------------------------------- R8a: the required mount shape is CLOSED
+
+
+def test_the_allowed_mount_key_sets_are_exact() -> None:
+    assert REQUIRED_MOUNT_KEYS == {"type", "source", "target", "read_only", "bind"}
+    assert REQUIRED_MOUNT_BIND_KEYS == {"create_host_path"}
+
+
+_GATE_BLOCK_TAIL = "          create_host_path: false" + NL
+
+R8A_EXTRA_KEYS: dict[str, tuple[str, str]] = {
+    # name: (needle, replacement) -- each adds ONE key the contract does not allow
+    "bind.selinux": (_GATE_BLOCK_TAIL, _GATE_BLOCK_TAIL + "          selinux: z" + NL),
+    "bind.recursive": (_GATE_BLOCK_TAIL, _GATE_BLOCK_TAIL + "          recursive: disabled" + NL),
+    "unknown bind key": (_GATE_BLOCK_TAIL, _GATE_BLOCK_TAIL + "          future_flag: true" + NL),
+    "top-level consistency": (
+        "        read_only: true" + NL,
+        "        read_only: true" + NL + "        consistency: cached" + NL,
+    ),
+    "top-level volume map": (
+        "        read_only: true" + NL,
+        "        read_only: true" + NL + "        volume:" + NL + "          nocopy: true" + NL,
+    ),
+    "top-level tmpfs map": (
+        "        read_only: true" + NL,
+        "        read_only: true" + NL + "        tmpfs:" + NL + "          size: 1024" + NL,
+    ),
+    "top-level image map": (
+        "        read_only: true" + NL,
+        "        read_only: true" + NL + "        image:" + NL + "          subpath: x" + NL,
+    ),
+    "top-level cluster": (
+        "        read_only: true" + NL,
+        "        read_only: true" + NL + "        cluster:" + NL + "          group: g" + NL,
+    ),
+    "top-level subpath": (
+        "        read_only: true" + NL,
+        "        read_only: true" + NL + "        subpath: inner" + NL,
+    ),
+    "unknown top-level key": (
+        "        read_only: true" + NL,
+        "        read_only: true" + NL + "        future_option: true" + NL,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(R8A_EXTRA_KEYS))
+def test_any_extra_mount_key_is_refused(name: str) -> None:
+    """A closed allow-list, not a deny-list: a future Compose feature must not silently broaden the
+    authority the ordinary API receives merely because this module has not heard of it."""
+    needle, replacement = R8A_EXTRA_KEYS[name]
+    template = VALID.decode().replace(needle, replacement, 1)
+    assert template != VALID.decode(), name
+    with pytest.raises(ControllerComposeContractError) as exc:
+        assert_controller_compose_contract(template.encode())
+    assert exc.value.reason_code.endswith("_mount_unexpected_key")
+
+
+@pytest.mark.parametrize("name", list(R8A_EXTRA_KEYS))
+def test_any_extra_mount_key_is_refused_as_a_correctly_signed_bundle(name: str) -> None:
+    needle, replacement = R8A_EXTRA_KEYS[name]
+    template = VALID.decode().replace(needle, replacement, 1)
+    trust, key_id, priv, _pub = ephemeral_trust_root()
+    fs = InMemoryFilesystem()
+    _bundle(fs, priv, key_id, template.encode())
+    with pytest.raises(ManagementError) as exc:
+        verify_release_bundle(_BD, trust_root=trust, fs=fs)
+    assert exc.value.reason_code.endswith("_mount_unexpected_key")
+
+
+def test_bind_propagation_keeps_its_own_named_refusal() -> None:
+    """It is the one bind option that could reopen what ``read_only`` closed, so it stays named
+    rather than collapsing into the generic unexpected-key code."""
+    template = VALID.decode().replace(
+        _GATE_BLOCK_TAIL, _GATE_BLOCK_TAIL + "          propagation: rshared" + NL, 1
+    )
+    assert controller_compose_contract_reason(template.encode()) == (
+        "controller_compose_marker_mount_propagation_forbidden"
+    )
+
+
+# ---------------------------------------------------- YAML aliases and merge structures
+
+
+def test_an_alias_cannot_introduce_an_extra_mount() -> None:
+    """``safe_load`` resolves anchors and aliases at PARSE time, so the validator always sees the
+    EFFECTIVE structure -- an alias can never hide an entry from the canonical-target grouping."""
+    hostile = (
+        "x: &evil"
+        + NL
+        + "  type: bind"
+        + NL
+        + "  source: /tmp/evil"
+        + NL
+        + f"  target: {GATE_TARGET}"
+        + NL
+        + "  read_only: false"
+        + NL
+        + VALID.decode()
+        + "      - *evil"
+        + NL
+    )
+    assert controller_compose_contract_reason(hostile.encode()) == (
+        "controller_compose_readiness_gate_mount_duplicate_target"
+    )
+
+
+def test_an_alias_cannot_replace_the_required_volume_list() -> None:
+    hostile = "x: &empty []" + NL + "services:" + NL + "  api:" + NL + "    volumes: *empty" + NL
+    assert controller_compose_contract_reason(hostile.encode()) == (
+        "controller_compose_marker_mount_missing"
+    )
+
+
+def test_a_merge_key_cannot_graft_volumes_onto_the_api_service() -> None:
+    hostile = (
+        "base: &base"
+        + NL
+        + "  volumes: []"
+        + NL
+        + "services:"
+        + NL
+        + "  api:"
+        + NL
+        + "    <<: *base"
+        + NL
+        + "    restart: unless-stopped"
+        + NL
+    )
+    assert controller_compose_contract_reason(hostile.encode()) is not None
 
 
 def test_a_yaml_tag_cannot_construct_an_object() -> None:
