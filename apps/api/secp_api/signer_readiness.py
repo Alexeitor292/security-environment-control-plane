@@ -19,12 +19,18 @@ What it is:
 * NEVER a signing request — the broker probe deliberately sends an op that is NOT ``sign_offer``
   (see :func:`probe_broker_no_sign`), so the broker's reviewed request validation refuses it before
   the signer, the lease, or the enrollment key is ever reached;
-* NONSECRET — the payload carries only PUBLIC installation facts (the same facts the root-owned
-  world-readable marker already carries plus the process uid/gid and closed status vocabularies).
-  No key, credential, verifier, DSN, header or raw exception ever enters it. It DOES carry the fixed
-  UDS contract path and the activation tokens, exactly as the world-readable marker already does --
-  they are concurrency identifiers, not secrets -- so the route must be treated as exposing every
-  public installation identifier to any peer that can reach it;
+* PRIVATE — reached only through the fixed readiness ORIGIN GATE
+  (:mod:`secp_api.signer_readiness_origin`), attached as a ROUTER-level dependency so an
+  unauthorized request never reaches the observation, the broker socket, or the no-sign exchange;
+* MINIMIZED (2b-3c-c Defect-3 E) — the payload carries NO raw installation identifier. Earlier
+  revisions published the activation token, the identity row id, the installation id, the release
+  digest, the controller key id, the locator-CA / management-identity / bootstrap-evidence digests
+  and the UDS socket path, so any peer that reached the surface learned the install's complete
+  public identity. The management observer never needed them: it holds those facts independently.
+  The surface now reports only DOMAIN-SEPARATED BINDING DIGESTS
+  (:mod:`secp_commissioning.enrollment_signer_binding_digest`) that management recomputes from its
+  OWN authenticated plan / activation receipt / release evidence and compares. No key, credential,
+  verifier, DSN, header, path or raw exception ever enters the payload either;
 * STRICT + VERSIONED + BOUNDED — exactly the closed field set of :data:`SIGNER_READINESS_FIELDS`
   under the single :data:`SIGNER_READINESS_SCHEMA` literal, re-validated against its own strict
   model and refused if it exceeds :data:`SIGNER_READINESS_MAX_BYTES`. There is no negotiation and no
@@ -42,9 +48,11 @@ What it reports (all ACTUAL RUNNING PROCESS state, never marker intent):
 * that no alternate activation exists: the effective client is bound to the ONE code-owned socket
   constant, its class exposes no socket/path selector, and NO environment variable in the RUNNING
   process would independently enable signing (a stronger fact than a container's declared env);
-* the actual loaded marker identity + complete binding, parsed through the ONE shared strict
-  contract (``secp_commissioning.enrollment_signer_marker``) — never re-implemented here;
-* the actual ACTIVE controller identity binding and the durable activation GENERATION;
+* whether a marker is loaded, and the DIGEST of its complete twelve-field binding — parsed through
+  the ONE shared strict contract (``secp_commissioning.enrollment_signer_marker``) and digested
+  through the ONE shared plane-neutral rule, never re-implemented here;
+* the DIGEST of the actual ACTIVE controller identity binding, and the durable activation
+  GENERATION;
 * the API process's effective uid/gid;
 * a BOUNDED NO-SIGN UDS probe the API process performs itself against the fixed AF_UNIX broker
   socket, reporting the peer-authorization result and the broker protocol identity, and failing on
@@ -66,6 +74,12 @@ from typing import Any, Literal, NoReturn
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from secp_commissioning.canonical import canonical_json
 from secp_commissioning.controller_enrollment_signer import ENROLLMENT_SIGNER_SOCKET_PATH
+from secp_commissioning.enrollment_signer_binding_digest import (
+    EnrollmentSignerBindingDigestError,
+    active_identity_binding_digest,
+    marker_binding_digest_for,
+)
+from secp_commissioning.enrollment_signer_marker import EnrollmentSignerMarker
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -86,8 +100,11 @@ from secp_api.enrollment_signer_marker import MARKER_PATH, load_valid_marker
 SIGNER_READINESS_PREFIX = "/internal/enrollment-signer"
 SIGNER_READINESS_PATH = f"{SIGNER_READINESS_PREFIX}/readiness"
 
-#: The ONE accepted schema/version literal. A consumer pins this exact string.
-SIGNER_READINESS_SCHEMA = "secp.api.enrollment-signer-readiness/v1"
+#: The ONE accepted schema/version literal. A consumer pins this exact string. ``/v2`` is the
+#: MINIMIZED payload (2b-3c-c Defect-3 E): every raw installation identifier was removed and
+#: replaced by two domain-separated binding digests. It is a hard break — a ``/v1`` consumer must
+#: refuse it rather than best-effort-parse it, which is exactly what the strict literal enforces.
+SIGNER_READINESS_SCHEMA = "secp.api.enrollment-signer-readiness/v2"
 
 #: Bounded response size — the payload is fixed-shape, so this can never grow with install size.
 SIGNER_READINESS_MAX_BYTES = 8192
@@ -137,8 +154,16 @@ _UNPROVEN_GENERATION = -1
 
 _TRUTHY = frozenset({"1", "true", "yes", "on", "t", "y"})
 
-#: The CLOSED field set of the readiness payload (the JSON keys). Missing or extra keys both refuse;
-#: ``schema`` is exposed on the model as ``schema_id`` because pydantic reserves ``schema``.
+#: The bound + grammar of a rendered ``sha256:<64 hex>`` binding digest. An unproven digest is
+#: ``""`` — the payload never carries a partial, truncated, or placeholder digest.
+_DIGEST_LEN = 71
+_DIGEST_OR_EMPTY = r"^(sha256:[0-9a-f]{64})?$"
+
+#: The CLOSED field set of the MINIMIZED readiness payload (the JSON keys). Missing or extra keys
+#: both refuse; ``schema`` is exposed on the model as ``schema_id`` because pydantic reserves
+#: ``schema``. Every raw installation identifier that used to live here is gone: what remains is a
+#: status vocabulary, the running process's own uid/gid, the activation generation, and two
+#: domain-separated BINDING DIGESTS management recomputes from its own authenticated inputs.
 SIGNER_READINESS_FIELDS: tuple[str, ...] = (
     "schema",
     "status",
@@ -149,24 +174,9 @@ SIGNER_READINESS_FIELDS: tuple[str, ...] = (
     "process_gid",
     "marker_present",
     "marker_binding_matches_runtime",
-    "marker_installation_id",
-    "marker_release_digest",
-    "marker_active_identity_row_id",
-    "marker_activation_token",
-    "marker_controller_key_id",
-    "marker_uds_contract_identity",
-    "marker_signer_role_name",
-    "marker_api_uid",
-    "marker_api_gid",
-    "marker_locator_ca_digest",
-    "marker_management_identity_digest",
-    "marker_bootstrap_evidence_digest",
+    "marker_binding_digest",
     "active_identity_present",
-    "active_identity_row_id",
-    "active_identity_activation_token",
-    "active_identity_installation_id",
-    "active_identity_release_digest",
-    "active_identity_controller_key_id",
+    "active_identity_binding_digest",
     "activation_generation",
     "broker_probe",
     "broker_peer_authorized",
@@ -180,7 +190,7 @@ class SignerReadinessPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
-    schema_id: Literal["secp.api.enrollment-signer-readiness/v1"] = Field(alias="schema")
+    schema_id: Literal["secp.api.enrollment-signer-readiness/v2"] = Field(alias="schema")
     status: Literal["ready", "sealed"]
     effective_signer: Literal["fixed_uds", "sealed", "unavailable"]
     signer_transport: Literal["af_unix", "none"]
@@ -189,24 +199,10 @@ class SignerReadinessPayload(BaseModel):
     process_gid: int = Field(ge=-1, le=_MAX_POSIX_ID)
     marker_present: bool
     marker_binding_matches_runtime: bool
-    marker_installation_id: str = Field(max_length=64)
-    marker_release_digest: str = Field(max_length=80)
-    marker_active_identity_row_id: str = Field(max_length=64)
-    marker_activation_token: str = Field(max_length=128)
-    marker_controller_key_id: str = Field(max_length=80)
-    marker_uds_contract_identity: str = Field(max_length=128)
-    marker_signer_role_name: str = Field(max_length=64)
-    marker_api_uid: int = Field(ge=0, le=_MAX_POSIX_ID)
-    marker_api_gid: int = Field(ge=0, le=_MAX_POSIX_ID)
-    marker_locator_ca_digest: str = Field(max_length=80)
-    marker_management_identity_digest: str = Field(max_length=80)
-    marker_bootstrap_evidence_digest: str = Field(max_length=80)
+    # a ``sha256:<64 hex>`` binding digest, or ``""`` when unproven. Never a raw installation value.
+    marker_binding_digest: str = Field(max_length=_DIGEST_LEN, pattern=_DIGEST_OR_EMPTY)
     active_identity_present: bool
-    active_identity_row_id: str = Field(max_length=64)
-    active_identity_activation_token: str = Field(max_length=128)
-    active_identity_installation_id: str = Field(max_length=64)
-    active_identity_release_digest: str = Field(max_length=80)
-    active_identity_controller_key_id: str = Field(max_length=80)
+    active_identity_binding_digest: str = Field(max_length=_DIGEST_LEN, pattern=_DIGEST_OR_EMPTY)
     activation_generation: int = Field(ge=_UNPROVEN_GENERATION, le=_MAX_GENERATION)
     broker_probe: Literal[
         "ok",
@@ -516,6 +512,35 @@ def _process_ids() -> tuple[int, int]:
     return int(geteuid()), int(getegid())
 
 
+def _marker_digest(marker: EnrollmentSignerMarker | None) -> str:
+    """The marker's COMPLETE-binding digest, or ``""`` when there is nothing proven to digest.
+
+    The rule lives in the plane-neutral contract, so management's recomputation cannot drift from
+    this one. An undigestable binding is ``""`` (fail closed) — never a partial or raw value."""
+    if marker is None:
+        return ""
+    try:
+        return marker_binding_digest_for(marker)
+    except EnrollmentSignerBindingDigestError:  # pragma: no cover - the parser already bounds these
+        return ""
+
+
+def _identity_digest(identity: _ActiveIdentityFacts) -> str:
+    """The ACTIVE identity's binding digest, or ``""`` when no identity was proven."""
+    if not identity.present:
+        return ""
+    try:
+        return active_identity_binding_digest(
+            active_identity_row_id=identity.row_id,
+            activation_token=identity.activation_token,
+            installation_id=identity.installation_id,
+            release_digest=identity.release_digest,
+            controller_key_id=identity.controller_key_id,
+        )
+    except EnrollmentSignerBindingDigestError:
+        return ""
+
+
 def observe_signer_readiness(
     session: Session,
     signer: object,
@@ -589,28 +614,9 @@ def observe_signer_readiness(
         "process_gid": gid,
         "marker_present": marker is not None,
         "marker_binding_matches_runtime": binding_matches_runtime,
-        "marker_installation_id": "" if marker is None else marker.installation_id,
-        "marker_release_digest": "" if marker is None else marker.release_digest,
-        "marker_active_identity_row_id": "" if marker is None else marker.active_identity_row_id,
-        "marker_activation_token": "" if marker is None else marker.activation_token,
-        "marker_controller_key_id": "" if marker is None else marker.controller_key_id,
-        "marker_uds_contract_identity": "" if marker is None else marker.uds_contract_identity,
-        "marker_signer_role_name": "" if marker is None else marker.signer_role_name,
-        "marker_api_uid": 0 if marker is None else marker.api_uid,
-        "marker_api_gid": 0 if marker is None else marker.api_gid,
-        "marker_locator_ca_digest": "" if marker is None else marker.locator_ca_digest,
-        "marker_management_identity_digest": (
-            "" if marker is None else marker.management_identity_digest
-        ),
-        "marker_bootstrap_evidence_digest": (
-            "" if marker is None else marker.bootstrap_evidence_digest
-        ),
+        "marker_binding_digest": _marker_digest(marker),
         "active_identity_present": identity.present,
-        "active_identity_row_id": identity.row_id,
-        "active_identity_activation_token": identity.activation_token,
-        "active_identity_installation_id": identity.installation_id,
-        "active_identity_release_digest": identity.release_digest,
-        "active_identity_controller_key_id": identity.controller_key_id,
+        "active_identity_binding_digest": _identity_digest(identity),
         "activation_generation": identity.generation,
         "broker_probe": probe.status,
         "broker_peer_authorized": probe.peer_authorized,

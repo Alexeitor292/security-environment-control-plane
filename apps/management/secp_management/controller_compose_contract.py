@@ -23,6 +23,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from secp_commissioning.controller_enrollment_signer import CONTROLLER_ENROLLMENT_KEY_PATH
+from secp_commissioning.enrollment_signer_binding_digest import (
+    ENROLLMENT_SIGNER_READINESS_GATE_CONTAINER_PATH as READINESS_GATE_CONTAINER_PATH,
+)
 
 from secp_management import ManagementError
 from secp_management.adapters import ReviewedUnit
@@ -88,13 +91,30 @@ def api_marker_mount(locations: ManagementLocations | None = None) -> OneShotMou
     return OneShotMount(path, path)
 
 
+def api_readiness_gate_mount(locations: ManagementLocations | None = None) -> OneShotMount:
+    """The readiness-origin GATE mount: read-only, host path -> the fixed API container path.
+
+    This is the ONE authorization-only secret the ordinary API may receive (2b-3c-c). It carries no
+    identity, key, credential or database material -- it only proves that a caller of the fixed
+    readiness route is the root management installer."""
+    loc = _loc(locations)
+    return OneShotMount(loc.api_signer_readiness_gate_path(), READINESS_GATE_CONTAINER_PATH)
+
+
 def assert_no_secret_reaches_ordinary_api(
     api_host_mounts: tuple[str, ...], *, locations: ManagementLocations | None = None
 ) -> None:
-    """Prove no secret-bearing host path is mounted into the ordinary API. ``api_host_mounts`` is
-    the
-    set of host paths mounted into the ordinary API service; if any is a known secret path, fail
-    closed (``finalization_secret_mount_reaches_api``)."""
+    """Prove no FORBIDDEN secret-bearing host path is mounted into the ordinary API.
+
+    ``api_host_mounts`` is the set of host paths mounted into the ordinary API service. The
+    enrollment private key, the controller TLS server key, the SCRAM credential source and both
+    transient one-shot handoffs remain forbidden and fail closed
+    (``finalization_secret_mount_reaches_api``).
+
+    EXACTLY ONE authorization-only secret is permitted: the readiness-origin gate
+    (:func:`api_readiness_gate_mount`), which authenticates the root installer to the fixed
+    readiness route and carries no identity, key, credential or database material. It is
+    deliberately absent from :func:`secret_host_paths` for that reason; anything else is refused."""
     secrets = set(secret_host_paths(locations))
     for host_path in api_host_mounts:
         if host_path in secrets:
@@ -120,6 +140,7 @@ __all__ = [
     "OneShotMount",
     "activation_oneshot_mount",
     "api_marker_mount",
+    "api_readiness_gate_mount",
     "assert_no_secret_reaches_ordinary_api",
     "provisioning_oneshot_mount",
     "render_broker_reviewed_unit",

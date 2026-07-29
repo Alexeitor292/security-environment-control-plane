@@ -13,8 +13,10 @@ The real-PostgreSQL/root/systemd proofs are the separate zero-skip fences.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
+import re
 from datetime import UTC, datetime  # noqa: E402
 
 import pytest
@@ -25,6 +27,7 @@ from secp_management import ManagementError
 from secp_management.controller_compose_contract import render_broker_reviewed_unit
 from secp_management.controller_finalization import (
     ApiSignerRuntimeObservation,
+    ControllerFinalizationError,
     FinalizationContext,
     RealControllerEnrollmentFinalizationAdapter,
 )
@@ -580,6 +583,122 @@ def test_failed_runtime_on_an_upgrade_restores_the_prior_marker():
         restored == prior_bytes
     )  # the PRIOR marker is restored, not removed and not the candidate
     assert adapter.receipt().of("marker").disposition == EffectDisposition.MANAGED_REPLACED.value
+
+
+# ------------------------------------------- the readiness-origin GATE lifecycle (2b-3c-c, C3)
+
+_GATE_PATH = _LOC.api_signer_readiness_gate_path()
+_GATE_RE = re.compile(rb"[0-9a-f]{64}\n")
+
+
+def test_a_fresh_install_creates_and_PROVES_the_readiness_gate() -> None:
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    adapter.install_readiness_gate()
+
+    st = fs.lstat(_GATE_PATH)
+    assert st is not None
+    assert st.uid == 0 and st.gid == API_RUNTIME_GID  # root-owned, API-group readable
+    assert st.mode & 0o777 == 0o640  # NO world bit on a 256-bit machine secret
+    raw = fs.safe_read(_GATE_PATH, max_bytes=65, expected_uid=0)
+    assert _GATE_RE.fullmatch(raw)  # 256 bits of lowercase hex plus exactly one LF
+
+
+def test_two_fresh_installs_never_produce_the_same_gate() -> None:
+    # the value comes from the OS CSPRNG, not from any installation fact the caller controls.
+    values = set()
+    for _ in range(4):
+        fs = _fs()
+        _adapter(fs, _FakeRunner(fs)).install_readiness_gate()
+        values.add(fs.safe_read(_GATE_PATH, max_bytes=65, expected_uid=0))
+    assert len(values) == 4
+
+
+def test_the_gate_effect_records_only_a_digest_and_ownership_never_the_value() -> None:
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    adapter.install_readiness_gate()
+    raw = fs.safe_read(_GATE_PATH, max_bytes=65, expected_uid=0)
+    secret = raw.decode("ascii").strip()
+
+    effects = [e for e in adapter.receipt().effects if e.effect == "readiness_gate"]
+    assert len(effects) == 1
+    blob = canonical_json([dataclasses.asdict(e) for e in adapter.receipt().effects])
+    assert secret not in blob  # the 256-bit value never enters a receipt
+    assert effects[0].candidate_digest.startswith("sha256:")
+
+
+def test_an_exact_replay_ADOPTS_the_gate_unchanged_and_never_rotates_it() -> None:
+    fs = _fs()
+    _adapter(fs, _FakeRunner(fs)).install_readiness_gate()
+    installed = fs.safe_read(_GATE_PATH, max_bytes=65, expected_uid=0)
+
+    replay = _adapter(fs, _FakeRunner(fs))
+    replay.install_readiness_gate()
+    # rotating would revoke a LIVE api's authorization while proving nothing.
+    assert fs.safe_read(_GATE_PATH, max_bytes=65, expected_uid=0) == installed
+    effect = [e for e in replay.receipt().effects if e.effect == "readiness_gate"][0]
+    assert effect.disposition == EffectDisposition.EXACT_ADOPTED.value
+    assert effect.candidate_digest == ""  # nothing was authored, so nothing is claimed
+
+
+@pytest.mark.parametrize(
+    "uid,gid,mode,body",
+    [
+        (0, API_RUNTIME_GID, 0o644, b"a" * 64 + b"\n"),  # world-readable
+        (0, API_RUNTIME_GID, 0o660, b"a" * 64 + b"\n"),  # group-WRITABLE
+        (1000, API_RUNTIME_GID, 0o640, b"a" * 64 + b"\n"),  # not root-owned
+        (0, 0, 0o640, b"a" * 64 + b"\n"),  # a group the API cannot read
+        (0, API_RUNTIME_GID, 0o640, b"A" * 64 + b"\n"),  # not lowercase hex
+        (0, API_RUNTIME_GID, 0o640, b"a" * 64),  # no trailing LF
+        (0, API_RUNTIME_GID, 0o640, b"a" * 63 + b"\n"),  # short of 256 bits
+    ],
+)
+def test_a_foreign_or_malformed_gate_refuses_and_is_never_overwritten(uid, gid, mode, body) -> None:
+    fs = _fs()
+    fs.seed_file(_GATE_PATH, body, uid=uid, gid=gid, mode=mode)
+    before = fs.lstat(_GATE_PATH)
+    with pytest.raises(ControllerFinalizationError) as exc:
+        _adapter(fs, _FakeRunner(fs)).install_readiness_gate()
+    assert exc.value.reason_code == "finalization_readiness_gate_unsafe_or_foreign"
+    # classify-before-mutate: the foreign object is left EXACTLY as found. The install is atomic,
+    # so an overwrite would replace the node -- an identical stat proves nothing was written.
+    assert fs.lstat(_GATE_PATH) == before
+
+
+def test_compensation_removes_a_gate_this_transaction_CREATED() -> None:
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    adapter.install_readiness_gate()
+    assert fs.lstat(_GATE_PATH) is not None
+    result = adapter.compensate(adapter.receipt())
+    assert result.proven is True
+    assert fs.lstat(_GATE_PATH) is None
+
+
+def test_compensation_PRESERVES_a_gate_the_installation_already_owned() -> None:
+    fs = _fs()
+    _adapter(fs, _FakeRunner(fs)).install_readiness_gate()
+    prior = fs.safe_read(_GATE_PATH, max_bytes=65, expected_uid=0)
+
+    replay = _adapter(fs, _FakeRunner(fs))
+    replay.install_readiness_gate()  # adopted, not created
+    assert replay.compensate(replay.receipt()).proven is True
+    # a rollback must never revoke authorization the installation owned before it started.
+    assert fs.safe_read(_GATE_PATH, max_bytes=65, expected_uid=0) == prior
+
+
+def test_compensation_leaves_a_DRIFTED_gate_in_place_and_reports_a_residual() -> None:
+    fs = _fs()
+    adapter = _adapter(fs, _FakeRunner(fs))
+    adapter.install_readiness_gate()
+    drifted = b"b" * 64 + b"\n"
+    fs.seed_file(_GATE_PATH, drifted, uid=0, gid=API_RUNTIME_GID, mode=0o640)
+
+    result = adapter.compensate(adapter.receipt())
+    assert result.proven is False
+    assert "readiness_gate" in result.residual
+    assert fs.safe_read(_GATE_PATH, max_bytes=65, expected_uid=0) == drifted
 
 
 def test_marker_seals_on_reobservation_disagreement():

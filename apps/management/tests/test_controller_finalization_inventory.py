@@ -61,6 +61,9 @@ _SOCKET = _LOC.broker_socket_path()
 _PROV = _LOC.provisioning_handoff_host_path()
 _ACT = _LOC.activation_handoff_host_path()
 _MARKER = _LOC.api_signer_marker_path()
+_GATE = _LOC.api_signer_readiness_gate_path()
+#: a conformant readiness-gate file body: 256 bits of lowercase hex plus exactly one LF.
+_GATE_BYTES = b"a" * 64 + b"\n"
 _JOURNAL = finalization_recovery_journal_path(_LOC)
 _STAGING = finalization_staging_root(_LOC)
 _BOOTSTRAP_STATE = _LOC.bootstrap_state
@@ -188,14 +191,19 @@ def _seed_staging(fs: InMemoryFilesystem, *, handles: tuple[str, ...] = ("marker
         fs.seed_file(f"{_STAGING}/tx-abc/{handle}", b"PRIOR", mode=0o600)
 
 
-def _seed_complete(fs: InMemoryFilesystem) -> None:
-    """Every installer-owned object present with its exact reviewed posture (no transient state)."""
+def _seed_complete(fs: InMemoryFilesystem, *, gate: bool = True) -> None:
+    """Every installer-owned object present with its exact reviewed posture (no transient state).
+
+    ``gate=False`` omits ONLY the readiness-origin gate, so an otherwise complete installation
+    can be proven incomplete on that one object alone."""
     _seed_tls(fs)
     fs.seed_file(_LOCATOR, b"{}", mode=0o644)
     fs.seed_file(_CRED, b"secret\n", mode=0o600)
     fs.seed_file(CONTROLLER_ENROLLMENT_KEY_PATH, b"K" * 32, mode=0o600)
     fs.seed_file(_UNIT, b"[Unit]\n", mode=0o644)
     fs.seed_socket(_SOCKET, gid=API_RUNTIME_GID, mode=0o660)
+    if gate:
+        fs.seed_file(_GATE, _GATE_BYTES, gid=API_RUNTIME_GID, mode=0o640)
     fs.seed_file(_MARKER, b"{}", mode=0o644)
 
 
@@ -415,7 +423,7 @@ def test_orphan_activation_generation_without_an_active_identity() -> None:
 def test_every_orphan_reason_code_is_reachable_from_a_single_seeded_object() -> None:
     # a structural completeness check over the whole precedence table: exactly the codes the engine
     # may ever see, each bounded and object-specific.
-    assert len(set(ORPHAN_REASONS)) == len(ORPHAN_REASONS) == len(ORPHAN_PRECEDENCE) == 14
+    assert len(set(ORPHAN_REASONS)) == len(ORPHAN_REASONS) == len(ORPHAN_PRECEDENCE) == 15
     assert all(
         code.startswith("finalization_orphan_") and len(code) <= 60 for code in ORPHAN_REASONS
     )
@@ -432,6 +440,52 @@ def test_a_wrong_posture_marker_is_foreign_not_absent() -> None:
     assert inventory.is_fresh is False
     assert inventory.orphan_reason == "finalization_orphan_marker"
     assert inventory.is_complete is False
+
+
+# ------------------------------------------------- the readiness-origin gate (2b-3c-c, section C)
+
+
+def test_an_orphan_readiness_gate_refuses_freshness_before_any_mutation() -> None:
+    fs = _fs()
+    fs.seed_file(_GATE, _GATE_BYTES, gid=API_RUNTIME_GID, mode=0o640)
+    inventory = _observe(fs)
+    assert inventory.readiness_gate is ObjectState.PRESENT
+    assert inventory.is_fresh is False
+    assert inventory.orphan_reason == "finalization_orphan_readiness_gate"
+
+
+def test_a_world_readable_readiness_gate_is_foreign_not_installed() -> None:
+    # the gate is a 256-bit machine SECRET: a world bit means some other party may already hold it,
+    # so it is never adoptable as an installed object.
+    fs = _fs()
+    fs.seed_file(_GATE, _GATE_BYTES, gid=API_RUNTIME_GID, mode=0o644)
+    inventory = _observe(fs)
+    assert inventory.readiness_gate is ObjectState.FOREIGN
+    assert inventory.is_fresh is False
+    assert inventory.orphan_reason == "finalization_orphan_readiness_gate"
+
+
+def test_a_non_root_owned_readiness_gate_is_foreign() -> None:
+    fs = _fs()
+    fs.seed_file(_GATE, _GATE_BYTES, uid=1000, gid=API_RUNTIME_GID, mode=0o640)
+    inventory = _observe(fs)
+    assert inventory.readiness_gate is ObjectState.FOREIGN
+    assert inventory.orphan_reason == "finalization_orphan_readiness_gate"
+
+
+def test_a_readiness_gate_group_the_api_cannot_read_is_foreign() -> None:
+    fs = _fs()
+    fs.seed_file(_GATE, _GATE_BYTES, gid=API_RUNTIME_GID + 1, mode=0o640)
+    inventory = _observe(fs)
+    assert inventory.readiness_gate is ObjectState.FOREIGN
+
+
+def test_a_complete_installation_missing_only_the_readiness_gate_is_incomplete() -> None:
+    fs = _fs()
+    _seed_complete(fs, gate=False)  # every OTHER object exactly as a complete install leaves it
+    inventory = _observe(fs, _FakeRunner(service=_RUNNING), db=_complete_db())
+    assert inventory.is_complete is False
+    assert inventory.complete_reason == "finalization_incomplete_readiness_gate"
 
 
 def test_a_non_socket_node_at_the_broker_socket_path_is_foreign() -> None:

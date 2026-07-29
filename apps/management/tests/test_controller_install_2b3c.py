@@ -78,12 +78,15 @@ POST_MARKER_RUNTIME_UNVERIFIED = "finalization_post_marker_runtime_unverified"
 # evidence re-read self-refused. The fields were renamed; the driven install commits and these tests
 # exercise the committed path directly.
 
-# The reviewed 9-op finalization order (marker LAST, identity activation PENULTIMATE).
+# The reviewed 10-op finalization order (marker LAST, identity activation PENULTIMATE). The
+# readiness-origin GATE is installed before the broker unit, so the fixed readiness route is
+# authenticated from the first moment the recreated API can serve it.
 _EXPECTED_OPS = (
     "install_tls_material",
     "record_locator",
     "provision_signer_role",
     "prepare_enrollment_key",
+    "install_readiness_gate",
     "install_broker_unit",
     "start_broker",
     "verify_signer_operational",
@@ -242,6 +245,9 @@ class _FakeFinalizationAdapter:
             controller_trust_anchor_hex="1" * 64,
             enrollment_key_proof_id="enrkp:" + "5" * 64,
         )
+
+    def install_readiness_gate(self) -> None:
+        self._step("install_readiness_gate")
 
     def install_broker_unit(self, unit: object) -> None:
         self._step("install_broker_unit")

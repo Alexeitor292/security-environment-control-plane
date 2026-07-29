@@ -10,6 +10,13 @@ is a bounded NO-SIGN exchange that never sends ``sign_offer``; every transport/p
 fails closed to a closed status token; a REAL AF_UNIX listener round-trip passes end to end (POSIX);
 the payload is strict, versioned, canonical, bounded and secret-free; and the route is a fixed
 read-only GET that mutates nothing.
+
+2b-3c-c Defect-3 E adds the MINIMIZATION proof: the payload carries NO raw installation identifier
+(no activation token, identity row id, installation id, release digest, controller key id,
+locator-CA / management-identity / bootstrap-evidence digest, and no socket path). What it reports
+instead are two DOMAIN-SEPARATED binding digests that an INDEPENDENT caller — modelled here exactly
+as the management observer does it, through the plane-neutral
+``secp_commissioning.enrollment_signer_binding_digest`` contract — recomputes and compares.
 """
 
 from __future__ import annotations
@@ -30,8 +37,17 @@ from secp_api.enrollment_signer_client import (
     SealedEnrollmentOfferSignerClient,
     UnixSocketEnrollmentOfferSignerClient,
 )
+from secp_api.signer_readiness_origin import (
+    ENROLLMENT_SIGNER_READINESS_GATE_HEADER,
+    EnrollmentSignerReadinessGateSecret,
+    enrollment_signer_readiness_gate_secret,
+)
 from secp_commissioning.canonical import canonical_json, sha256_bytes
 from secp_commissioning.controller_enrollment_signer import ENROLLMENT_SIGNER_SOCKET_PATH
+from secp_commissioning.enrollment_signer_binding_digest import (
+    active_identity_binding_digest,
+    marker_binding_digest,
+)
 from secp_commissioning.enrollment_signer_marker import render_marker_bytes
 from secp_commissioning.enrollment_signer_role import ENROLLMENT_SIGNER_DB_ROLE
 
@@ -44,6 +60,10 @@ _CA_DIGEST = "sha256:" + "b" * 64
 
 _REQUEST_INVALID = b'{"error":"enrollment_signer_request_invalid"}'
 _PEER_UNAUTHORIZED = b'{"error":"enrollment_signer_peer_unauthorized"}'
+
+#: The root installer's authenticated in-controller hop, modelled without a root-owned production
+#: gate file. The REAL opaque secret type is used, so the route still runs the real origin gate.
+_TEST_READINESS_GATE = EnrollmentSignerReadinessGateSecret(b"c" * 64)
 
 
 # --------------------------------------------------------------------------- fixtures / builders
@@ -73,7 +93,7 @@ def _activate_identity() -> dict:
     return receipt
 
 
-def _marker_file(tmp_path, receipt: dict, **over: object) -> str:
+def _marker_values(receipt: dict, **over: object) -> dict[str, object]:
     proof = build_test_verified_controller_identity()
     values: dict[str, object] = {
         "installation_id": proof.controller_installation_id,
@@ -91,9 +111,33 @@ def _marker_file(tmp_path, receipt: dict, **over: object) -> str:
         "recorded_at": _T0,
     }
     values.update(over)
+    return values
+
+
+def _marker_file(tmp_path, receipt: dict, **over: object) -> str:
     path = tmp_path / "enrollment-signer.enabled"
-    path.write_bytes(render_marker_bytes(**values))  # type: ignore[arg-type]
+    path.write_bytes(render_marker_bytes(**_marker_values(receipt, **over)))  # type: ignore[arg-type]
     return str(path)
+
+
+def _expected_marker_digest(receipt: dict, **over: object) -> str:
+    """The marker-binding digest an INDEPENDENT caller computes from its OWN inputs — exactly what
+    the management observer does. ``recorded_at`` is a provenance stamp, not a binding field."""
+    values = _marker_values(receipt, **over)
+    values.pop("recorded_at")
+    return marker_binding_digest(**values)  # type: ignore[arg-type]
+
+
+def _expected_identity_digest(receipt: dict) -> str:
+    """The active-identity binding digest recomputed from the activation receipt + plan facts."""
+    proof = build_test_verified_controller_identity()
+    return active_identity_binding_digest(
+        active_identity_row_id=receipt["resulting_row_id"],
+        activation_token=receipt["activation_token"],
+        installation_id=proof.controller_installation_id,
+        release_digest=proof.release_digest,
+        controller_key_id=proof.controller_key_id,
+    )
 
 
 def _ok_exchange(request: bytes, timeout: float) -> bytes:
@@ -311,8 +355,9 @@ def test_ready_when_the_running_process_genuinely_proves_everything(
     assert payload["marker_present"] is True
     assert payload["marker_binding_matches_runtime"] is True
     assert payload["active_identity_present"] is True
-    assert payload["active_identity_row_id"] == receipt["resulting_row_id"]
-    assert payload["active_identity_activation_token"] == receipt["activation_token"]
+    # the two digests an INDEPENDENT observer recomputes from its own authenticated inputs
+    assert payload["marker_binding_digest"] == _expected_marker_digest(receipt)
+    assert payload["active_identity_binding_digest"] == _expected_identity_digest(receipt)
     assert payload["activation_generation"] == 0
     assert payload["broker_probe"] == sr.PROBE_OK
     assert payload["broker_peer_authorized"] is True
@@ -370,7 +415,7 @@ def test_absent_marker_is_reported_absent(session, tmp_path, clean_env, posix_pr
     )
     assert payload["marker_present"] is False
     assert payload["marker_binding_matches_runtime"] is False
-    assert payload["marker_installation_id"] == "" and payload["marker_api_uid"] == 0
+    assert payload["marker_binding_digest"] == ""  # nothing proven -> nothing digested
     assert payload["status"] == sr.STATUS_SEALED
 
 
@@ -382,6 +427,11 @@ def test_marker_binding_disagreeing_with_the_live_identity_fails_closed(
     payload = _observe(session, UnixSocketEnrollmentOfferSignerClient(), drifted)
     assert payload["marker_present"] is True
     assert payload["marker_binding_matches_runtime"] is False
+    # the digest itself is the drift signal: it matches the DRIFTED binding, not the true one
+    assert payload["marker_binding_digest"] == _expected_marker_digest(
+        receipt, installation_id="controller-other01"
+    )
+    assert payload["marker_binding_digest"] != _expected_marker_digest(receipt)
     assert payload["status"] == sr.STATUS_SEALED
 
 
@@ -406,6 +456,7 @@ def test_no_active_identity_leaves_the_generation_unproven(
         session, UnixSocketEnrollmentOfferSignerClient(), _marker_file(tmp_path, receipt)
     )
     assert payload["active_identity_present"] is False
+    assert payload["active_identity_binding_digest"] == ""  # nothing proven -> nothing digested
     assert payload["activation_generation"] == -1
     assert payload["marker_binding_matches_runtime"] is False
     assert payload["status"] == sr.STATUS_SEALED
@@ -441,7 +492,31 @@ def test_the_payload_is_closed_canonical_bounded_and_versioned(
     raw = sr.render_signer_readiness(payload)
     assert raw == canonical_json(payload).encode("utf-8")
     assert len(raw) <= sr.SIGNER_READINESS_MAX_BYTES
-    assert json.loads(raw.decode())["schema"] == "secp.api.enrollment-signer-readiness/v1"
+    assert json.loads(raw.decode())["schema"] == "secp.api.enrollment-signer-readiness/v2"
+
+
+def test_the_closed_field_set_is_exactly_the_minimized_contract() -> None:
+    """Defect-3 E: the payload's key set is pinned HERE, so re-adding a raw installation identifier
+    (or dropping a reported fact) is a test failure, not a silent contract change."""
+    assert sr.SIGNER_READINESS_FIELDS == (
+        "schema",
+        "status",
+        "effective_signer",
+        "signer_transport",
+        "no_alternate_signer_activation",
+        "process_uid",
+        "process_gid",
+        "marker_present",
+        "marker_binding_matches_runtime",
+        "marker_binding_digest",
+        "active_identity_present",
+        "active_identity_binding_digest",
+        "activation_generation",
+        "broker_probe",
+        "broker_peer_authorized",
+        "broker_protocol",
+    )
+    assert sr.SIGNER_READINESS_SCHEMA == "secp.api.enrollment-signer-readiness/v2"
 
 
 def test_a_payload_that_fails_its_own_schema_is_never_served(
@@ -454,12 +529,69 @@ def test_a_payload_that_fails_its_own_schema_is_never_served(
     for broken in (
         {**payload, "extra": 1},
         {k: v for k, v in payload.items() if k != "status"},
-        {**payload, "schema": "secp.api.enrollment-signer-readiness/v2"},
+        # the SUPERSEDED schema is refused outright: there is no best-effort downgrade path
+        {**payload, "schema": "secp.api.enrollment-signer-readiness/v1"},
+        {**payload, "schema": "secp.api.enrollment-signer-readiness/v3"},
         {**payload, "effective_signer": "root"},
         {**payload, "activation_generation": -2},
+        # a digest field may be a canonical sha256 digest or empty — never anything else
+        {**payload, "marker_binding_digest": "sha256:zz"},
+        {**payload, "marker_binding_digest": "sha256:" + "A" * 64},
+        {**payload, "active_identity_binding_digest": "unknown"},
+        # a re-added RAW identifier is an extra field and refuses
+        {**payload, "marker_installation_id": "controller-a0000001"},
+        {**payload, "active_identity_activation_token": "row|2026-07-28 00:00:00+00:00"},
     ):
         with pytest.raises(ValueError):
             sr.render_signer_readiness(broken)
+
+
+def test_the_payload_discloses_no_raw_installation_identifier(
+    session, tmp_path, clean_env, posix_process
+) -> None:
+    """The Defect-3 E property, directly: every raw fact the marker + identity row carry must be
+    ABSENT from the rendered response — as a key AND as a value anywhere in the bytes."""
+    receipt = _activate_identity()
+    proof = build_test_verified_controller_identity()
+    raw = sr.render_signer_readiness(
+        _observe(session, UnixSocketEnrollmentOfferSignerClient(), _marker_file(tmp_path, receipt))
+    ).decode()
+
+    for value in (
+        receipt["activation_token"],  # the per-activation concurrency token
+        receipt["resulting_row_id"],  # the durable identity row id
+        proof.controller_installation_id,
+        proof.release_digest,
+        proof.controller_key_id,
+        proof.management_identity_digest,
+        proof.bootstrap_evidence_digest,
+        _CA_DIGEST,  # the locator CA binding
+        ENROLLMENT_SIGNER_SOCKET_PATH,  # no socket path, no path of any kind
+        ENROLLMENT_SIGNER_DB_ROLE,
+    ):
+        assert value not in raw, value
+
+    for key in (
+        "marker_installation_id",
+        "marker_release_digest",
+        "marker_active_identity_row_id",
+        "marker_activation_token",
+        "marker_controller_key_id",
+        "marker_uds_contract_identity",
+        "marker_signer_role_name",
+        "marker_api_uid",
+        "marker_api_gid",
+        "marker_locator_ca_digest",
+        "marker_management_identity_digest",
+        "marker_bootstrap_evidence_digest",
+        "active_identity_row_id",
+        "active_identity_activation_token",
+        "active_identity_installation_id",
+        "active_identity_release_digest",
+        "active_identity_controller_key_id",
+    ):
+        assert key not in raw, key
+        assert key not in sr.SIGNER_READINESS_FIELDS, key
 
 
 def test_the_payload_carries_no_secret_material(
@@ -489,12 +621,22 @@ def test_the_payload_carries_no_secret_material(
 def app(engine):
     from secp_api.main import create_app
 
-    return create_app()
+    application = create_app()
+    # Model the root installer's authenticated in-controller hop without requiring a root-owned
+    # production gate file in this hermetic ASGI test. The REAL router-level origin dependency still
+    # runs, including the exact-one raw-header, exact-secret-type validation.
+    application.dependency_overrides[enrollment_signer_readiness_gate_secret] = lambda: (
+        _TEST_READINESS_GATE
+    )
+    return application
 
 
 @pytest.fixture
 def client(app):
-    return TestClient(app)
+    return TestClient(
+        app,
+        headers={ENROLLMENT_SIGNER_READINESS_GATE_HEADER: _TEST_READINESS_GATE.header_value()},
+    )
 
 
 def test_the_route_is_one_fixed_read_only_get(app) -> None:
@@ -536,6 +678,8 @@ def test_the_route_returns_the_canonical_payload(app, client, tmp_path, monkeypa
     assert response.content == canonical_json(body).encode("utf-8")
     assert body["effective_signer"] == sr.SIGNER_FIXED_UDS
     assert body["status"] == sr.STATUS_READY
+    assert body["marker_binding_digest"] == _expected_marker_digest(receipt)
+    assert body["active_identity_binding_digest"] == _expected_identity_digest(receipt)
 
 
 def test_the_route_defaults_to_the_sealed_signer_and_mutates_nothing(client) -> None:

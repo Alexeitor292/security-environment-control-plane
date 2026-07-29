@@ -26,6 +26,10 @@ from secp_commissioning.controller_enrollment_signer import (
     CONTROLLER_ENROLLMENT_KEY_PATH,
     ENROLLMENT_SIGNER_SOCKET_PATH,
 )
+from secp_commissioning.enrollment_signer_binding_digest import (
+    active_identity_binding_digest,
+    marker_binding_digest_for,
+)
 from secp_commissioning.enrollment_signer_marker import render_marker_bytes
 from secp_commissioning.runtime import InMemoryFilesystem
 from secp_management import enrollment_signer_runtime_observer as obs_mod
@@ -126,7 +130,7 @@ def _readiness_body(marker: ApiSignerMarker = _MARKER, **over: object) -> dict[s
     """The API's conformant readiness payload for ``marker``: a RUNNING API that resolved the
     fixed-UDS client and completed the bounded no-sign broker probe."""
     body: dict[str, object] = {
-        "schema": "secp.api.enrollment-signer-readiness/v1",
+        "schema": "secp.api.enrollment-signer-readiness/v2",
         "status": "ready",
         "effective_signer": "fixed_uds",
         "signer_transport": "af_unix",
@@ -135,24 +139,16 @@ def _readiness_body(marker: ApiSignerMarker = _MARKER, **over: object) -> dict[s
         "process_gid": marker.api_gid,
         "marker_present": True,
         "marker_binding_matches_runtime": True,
-        "marker_installation_id": marker.installation_id,
-        "marker_release_digest": marker.release_digest,
-        "marker_active_identity_row_id": marker.active_identity_row_id,
-        "marker_activation_token": marker.activation_token,
-        "marker_controller_key_id": marker.controller_key_id,
-        "marker_uds_contract_identity": marker.uds_contract_identity,
-        "marker_signer_role_name": marker.signer_role_name,
-        "marker_api_uid": marker.api_uid,
-        "marker_api_gid": marker.api_gid,
-        "marker_locator_ca_digest": marker.locator_ca_digest,
-        "marker_management_identity_digest": marker.management_identity_digest,
-        "marker_bootstrap_evidence_digest": marker.bootstrap_evidence_digest,
+        # v2: DIGESTS, never the raw activation token / row id / installation binding.
+        "marker_binding_digest": marker_binding_digest_for(marker),
+        "active_identity_binding_digest": active_identity_binding_digest(
+            active_identity_row_id=marker.active_identity_row_id,
+            activation_token=marker.activation_token,
+            installation_id=marker.installation_id,
+            release_digest=marker.release_digest,
+            controller_key_id=marker.controller_key_id,
+        ),
         "active_identity_present": True,
-        "active_identity_row_id": marker.active_identity_row_id,
-        "active_identity_activation_token": marker.activation_token,
-        "active_identity_installation_id": marker.installation_id,
-        "active_identity_release_digest": marker.release_digest,
-        "active_identity_controller_key_id": marker.controller_key_id,
         "activation_generation": 0,
         "broker_probe": "ok",
         "broker_peer_authorized": True,

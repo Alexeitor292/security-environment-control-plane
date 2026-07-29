@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -51,6 +53,10 @@ from secp_commissioning.controller_enrollment_signer import (
     enrollment_key_proof_id_for,
     key_id_for,
     prepare_controller_enrollment_key,
+)
+from secp_commissioning.enrollment_signer_binding_digest import (
+    ENROLLMENT_SIGNER_READINESS_GATE_FILE_BYTES,
+    ENROLLMENT_SIGNER_READINESS_GATE_HEX_BYTES,
 )
 from secp_commissioning.enrollment_signer_marker import render_marker_bytes
 from secp_commissioning.runtime import FilesystemError
@@ -471,6 +477,34 @@ def _run_oneshot(
 # --------------------------------------------------------------------------- the adapter
 
 
+#: The readiness-origin GATE's reviewed on-disk posture: root-owned, API-group readable, NO world
+#: bit. It is the one authorization-only secret the ordinary API may hold, so its mode is stricter
+#: than the marker's (0644 public installation facts) and looser than the signer credential's
+#: (0600 root-only) by exactly the group read the API process needs.
+_READINESS_GATE_MODE = 0o640
+#: the ONE accepted on-disk gate representation: 256-bit lowercase hex plus a single LF.
+_READINESS_GATE_ON_DISK = re.compile(rb"[0-9a-f]{64}\n")
+
+
+def generate_readiness_gate_secret() -> bytes:
+    """256 bits from the operating system's cryptographically secure source, rendered in the ONE
+    accepted on-disk form: 64 lowercase hex characters plus exactly one LF.
+
+    The caller may not choose the length, the alphabet, the encoding or the source."""
+    return (
+        secrets.token_hex(ENROLLMENT_SIGNER_READINESS_GATE_HEX_BYTES // 2).encode("ascii") + b"\n"
+    )
+
+
+def _readiness_gate_content_ok(raw: bytes) -> bool:
+    """True only for the ONE accepted on-disk gate representation. Never echoes the bytes."""
+    return bool(
+        isinstance(raw, bytes)
+        and len(raw) == ENROLLMENT_SIGNER_READINESS_GATE_FILE_BYTES
+        and _READINESS_GATE_ON_DISK.fullmatch(raw)
+    )
+
+
 class RealControllerEnrollmentFinalizationAdapter:
     """The exact reviewed, UPGRADE-SAFE controller-enrollment finalization sequence. Bound to ONE
     plan + transaction id (reuse across unrelated transactions is refused). Every op classifies its
@@ -841,6 +875,45 @@ class RealControllerEnrollmentFinalizationAdapter:
             _reject("finalization_dedicated_role_unproven")
         finally:
             engine.dispose()
+
+    # ---- 15b: the readiness-origin GATE (classify -> adopt UNCHANGED / create+prove) ----
+    def install_readiness_gate(self) -> None:
+        """Install or ADOPT the fixed readiness-origin gate, before anything can recreate the API.
+
+        Classify first, mutate second. An existing gate with the exact reviewed posture is adopted
+        UNCHANGED -- an exact replay or a managed upgrade never rotates it, because rotation would
+        revoke a live API's authorization while proving nothing (the value is already root-owned and
+        readable only by the API group). Any other on-disk state is FOREIGN and refuses rather than
+        being overwritten. A freshly created gate is RE-READ and proven, both posture and content
+        identity, before its effect is recorded."""
+        path = self._ctx.host.locations.api_signer_readiness_gate_path()
+        if not _absent(self._ctx, path):
+            if not _root_regular_posture(
+                self._ctx, path, gid=API_RUNTIME_GID, mode=_READINESS_GATE_MODE
+            ) or not _readiness_gate_content_ok(_read_exact(self._ctx, path)):
+                _reject("finalization_readiness_gate_unsafe_or_foreign")
+            self._effect(
+                "readiness_gate",
+                path,
+                EffectDisposition.EXACT_ADOPTED,
+                ownership_evidence=_ownership_evidence(self._ctx, path),
+            )
+            return
+        content = generate_readiness_gate_secret()
+        self._journal_ahead("readiness_gate", path, EffectDisposition.ABSENT)
+        _install(self._ctx, path, content, gid=API_RUNTIME_GID, mode=_READINESS_GATE_MODE)
+        if _read_exact(self._ctx, path) != content or not _root_regular_posture(
+            self._ctx, path, gid=API_RUNTIME_GID, mode=_READINESS_GATE_MODE
+        ):
+            _reject("finalization_readiness_gate_readback_mismatch")
+        self._effect(
+            "readiness_gate",
+            path,
+            EffectDisposition.ABSENT,
+            # the DIGEST and the ownership facts -- never the 256-bit value.
+            candidate_digest=_digest_bytes(content),
+            ownership_evidence=_ownership_evidence(self._ctx, path),
+        )
 
     # ---- 14-15: enrollment key ----
     def prepare_enrollment_key(self) -> EnrollmentKeyIdentity:

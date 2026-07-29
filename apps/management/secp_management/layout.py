@@ -211,6 +211,19 @@ class ManagementLocations:
         """The fixed AF_UNIX broker socket path (bound by the broker at runtime; name-only)."""
         return _BROKER_SOCKET_PATH
 
+    def api_signer_readiness_gate_path(self) -> str:
+        """The fixed host path of the enrollment-signer READINESS-ORIGIN GATE (2b-3c-c).
+
+        A 256-bit root-owned, API-group-readable 0640 machine secret that authenticates the root
+        management installer to the fixed readiness route. It is the ONLY authorization-only secret
+        the ordinary API is permitted to receive, it is mounted read-only, and it is distinct in
+        path, header, value and reason codes from the worker-admission proxy gate."""
+        from secp_commissioning.enrollment_signer_binding_digest import (
+            ENROLLMENT_SIGNER_READINESS_GATE_HOST_PATH,
+        )
+
+        return ENROLLMENT_SIGNER_READINESS_GATE_HOST_PATH
+
     def api_signer_marker_path(self) -> str:
         """The root-owned API signer-enablement MARKER — the SOLE positive production authority for
         the API signer client, written LAST. Host path == the API container read path (bind-mounted

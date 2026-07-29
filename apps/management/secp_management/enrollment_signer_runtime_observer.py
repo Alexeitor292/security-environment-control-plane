@@ -56,6 +56,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from secp_commissioning.controller_enrollment_signer import CONTROLLER_ENROLLMENT_KEY_PATH
+from secp_commissioning.enrollment_signer_binding_digest import (
+    ENROLLMENT_SIGNER_READINESS_GATE_FILE_BYTES,
+    ENROLLMENT_SIGNER_READINESS_GATE_HEADER,
+    ENROLLMENT_SIGNER_READINESS_GATE_HOST_PATH,
+    active_identity_binding_digest,
+    marker_binding_digest_for,
+)
 from secp_commissioning.enrollment_signer_marker import (
     EnrollmentSignerMarker,
     marker_binding_matches,
@@ -90,6 +97,10 @@ _MAX_READ = 512 * 1024
 # Fixed attempts x fixed interval (never an unbounded wait); exhausting it fails closed.
 _READINESS_ATTEMPTS = 20
 _READINESS_INTERVAL_SECONDS = 3.0
+#: the ONE accepted on-disk gate representation: 256-bit lowercase hex plus a single LF.
+#: the gate's reviewed on-disk posture: root-owned, API-group readable, NO world bit.
+_READINESS_GATE_MODE = 0o640
+_READINESS_GATE_ON_DISK = re.compile(rb"[0-9a-f]{64}\n")
 _HEALTH_STARTING = "starting"
 _INSPECT_TIMEOUT = 20
 
@@ -112,7 +123,7 @@ _COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 #: The FIXED readiness path. Management appends nothing and selects nothing.
 API_READINESS_PATH = "/internal/enrollment-signer/readiness"
 #: The ONE accepted readiness schema/version literal.
-API_READINESS_SCHEMA = "secp.api.enrollment-signer-readiness/v1"
+API_READINESS_SCHEMA = "secp.api.enrollment-signer-readiness/v2"
 #: The reviewed broker wire-protocol identity the API's no-sign probe must have proven.
 ENROLLMENT_SIGNER_BROKER_PROTOCOL = "secp.enrollment-signer-broker/v1"
 #: The only effective-signer identifier that means "the reviewed fixed-UDS broker client".
@@ -128,27 +139,21 @@ _READINESS_MAX_FIELD_LEN = 256
 _MAX_POSIX_ID = 2**31 - 1
 _UNPROVEN_GENERATION = -1
 
-#: The CLOSED readiness field set. A response with an extra or a missing key refuses outright.
+#: The CLOSED readiness field set (v2). A response with an extra or a missing key refuses outright.
+#:
+#: v2 MINIMIZED the payload: the twelve raw ``marker_*`` fields and the five raw
+#: ``active_identity_*`` fields are gone. They handed every reader of the response the
+#: installation's activation token, identity row id and installation binding in cleartext --
+#: data the reader needs
+#: only to COMPARE. Two domain-separated binding DIGESTS replace them, and management proves
+#: agreement by RECOMPUTING each digest from its own independently derived facts.
 _READINESS_STR_FIELDS: tuple[str, ...] = (
     "schema",
     "status",
     "effective_signer",
     "signer_transport",
-    "marker_installation_id",
-    "marker_release_digest",
-    "marker_active_identity_row_id",
-    "marker_activation_token",
-    "marker_controller_key_id",
-    "marker_uds_contract_identity",
-    "marker_signer_role_name",
-    "marker_locator_ca_digest",
-    "marker_management_identity_digest",
-    "marker_bootstrap_evidence_digest",
-    "active_identity_row_id",
-    "active_identity_activation_token",
-    "active_identity_installation_id",
-    "active_identity_release_digest",
-    "active_identity_controller_key_id",
+    "marker_binding_digest",
+    "active_identity_binding_digest",
     "broker_probe",
     "broker_protocol",
 )
@@ -162,8 +167,6 @@ _READINESS_BOOL_FIELDS: tuple[str, ...] = (
 _READINESS_INT_FIELDS: tuple[str, ...] = (
     "process_uid",
     "process_gid",
-    "marker_api_uid",
-    "marker_api_gid",
     "activation_generation",
 )
 READINESS_FIELDS: tuple[str, ...] = (
@@ -234,32 +237,19 @@ class ApiSignerReadiness:
     status: str = ""
     effective_signer: str = ""
     signer_transport: str = ""
-    marker_installation_id: str = ""
-    marker_release_digest: str = ""
-    marker_active_identity_row_id: str = ""
-    marker_activation_token: str = ""
-    marker_controller_key_id: str = ""
-    marker_uds_contract_identity: str = ""
-    marker_signer_role_name: str = ""
-    marker_locator_ca_digest: str = ""
-    marker_management_identity_digest: str = ""
-    marker_bootstrap_evidence_digest: str = ""
-    active_identity_row_id: str = ""
-    active_identity_activation_token: str = ""
-    active_identity_installation_id: str = ""
-    active_identity_release_digest: str = ""
-    active_identity_controller_key_id: str = ""
     broker_probe: str = ""
     broker_protocol: str = ""
     no_alternate_signer_activation: bool = False
     marker_present: bool = False
     marker_binding_matches_runtime: bool = False
+    #: v2: the API's digest over the twelve binding fields of the marker it ACTUALLY loaded.
+    marker_binding_digest: str = ""
+    #: v2: the API's digest over the five binding fields of the ACTIVE identity row it read.
+    active_identity_binding_digest: str = ""
     active_identity_present: bool = False
     broker_peer_authorized: bool = False
     process_uid: int = -1
     process_gid: int = -1
-    marker_api_uid: int = 0
-    marker_api_gid: int = 0
     activation_generation: int = _UNPROVEN_GENERATION
 
 
@@ -315,6 +305,46 @@ def _read_readiness(transport: Callable[[], tuple[int, bytes]]) -> ApiSignerRead
     return parse_readiness_response(status, raw)
 
 
+def _read_readiness_gate(ctx: RealAdapterContext) -> str:
+    """Read the readiness-origin gate from its FIXED host path through the hardened reader.
+
+    The path, the header name and the on-disk contract are code-owned constants: no caller may
+    select a secret, a path or a header. The value is returned only to be placed on the single
+    outbound request; it is never logged, returned in an observation, embedded in evidence, or
+    rendered in a repr. A missing, unsafe or malformed gate raises, which fails the whole R4
+    observation closed."""
+    st = _lstat(ctx, ENROLLMENT_SIGNER_READINESS_GATE_HOST_PATH)
+    if (
+        st is None
+        or not st.is_regular
+        or st.is_symlink
+        or st.nlink != 1
+        or st.uid != _ROOT_UID
+        or st.gid == 0
+        or (st.mode & 0o777) != _READINESS_GATE_MODE
+    ):
+        # the hardened reader accepts a root-owned WORLD-READABLE file; for a 256-bit secret that
+        # posture means some other local party may already hold it, so it is refused here.
+        raise ManagementError("api_signer_readiness_gate_invalid")
+    try:
+        raw = ctx.fs.safe_read(  # hardened: no-follow, posture-checked, bounded
+            ENROLLMENT_SIGNER_READINESS_GATE_HOST_PATH,
+            max_bytes=ENROLLMENT_SIGNER_READINESS_GATE_FILE_BYTES,
+            expected_uid=0,
+        )
+    except Exception as exc:  # noqa: BLE001 - a FilesystemError is a CommissioningError, NOT a
+        # ManagementError: letting it escape would surface an unclassified fault (and the hardened
+        # seam's own reason code) instead of this one bounded refusal.
+        raise ManagementError("api_signer_readiness_gate_invalid") from exc
+    if (
+        not isinstance(raw, bytes)
+        or len(raw) != ENROLLMENT_SIGNER_READINESS_GATE_FILE_BYTES
+        or _READINESS_GATE_ON_DISK.fullmatch(raw) is None
+    ):
+        raise ManagementError("api_signer_readiness_gate_invalid")
+    return raw[:-1].decode("ascii")
+
+
 def build_readiness_transport(
     ctx: RealAdapterContext,
     *,
@@ -351,7 +381,14 @@ def build_readiness_transport(
         ) as client:
             response = client.get(
                 locator.canonical_origin + API_READINESS_PATH,
-                headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "identity",
+                    # EXACTLY ONE readiness-gate header, from the fixed host path. httpx renders a
+                    # dict key once, so the route's "exactly one value" rule is satisfied by
+                    # construction; the value never appears in any log, evidence or observation.
+                    ENROLLMENT_SIGNER_READINESS_GATE_HEADER: _read_readiness_gate(ctx),
+                },
             )
             if response.is_redirect:
                 raise ManagementError("api_signer_readiness_response_invalid")
@@ -641,8 +678,36 @@ def _fail_closed() -> ApiSignerRuntimeObservation:
     )
 
 
+def _marker_digest(marker: ApiSignerMarker) -> str:
+    """The candidate marker's binding digest, or ``""`` when it cannot be computed.
+
+    A digest that cannot be computed can never authorize a response: every caller requires a
+    non-empty value AND equality, so an unavailable digest fails closed."""
+    try:
+        return marker_binding_digest_for(marker)
+    except Exception:  # noqa: BLE001 - an uncomputable digest is never a passing comparison
+        return ""
+
+
+def _active_identity_digest(expected: ApiSignerRuntimeExpectations) -> str:
+    """The ACTIVE identity's binding digest, recomputed from INDEPENDENTLY DERIVED expectations
+    (never from the readiness response). ``""`` when it cannot be computed -- fails closed."""
+    try:
+        return active_identity_binding_digest(
+            active_identity_row_id=expected.active_identity_row_id,
+            activation_token=expected.active_identity_activation_token,
+            installation_id=expected.installation_id,
+            release_digest=expected.release_digest,
+            controller_key_id=expected.marker.controller_key_id,
+        )
+    except Exception:  # noqa: BLE001 - see above
+        return ""
+
+
 def _readiness_effective_signer_ok(
-    readiness: ApiSignerReadiness, expected: ApiSignerRuntimeExpectations
+    readiness: ApiSignerReadiness,
+    marker: ApiSignerMarker,
+    expected: ApiSignerRuntimeExpectations,
 ) -> bool:
     """The RUNNING API must report the reviewed fixed-UDS client as its EFFECTIVE dependency, over
     an AF_UNIX transport, with no alternate activation, bound to the expected UDS contract."""
@@ -651,7 +716,12 @@ def _readiness_effective_signer_ok(
         and readiness.effective_signer == API_SIGNER_FIXED_UDS
         and readiness.signer_transport == API_SIGNER_TRANSPORT_AF_UNIX
         and readiness.no_alternate_signer_activation
-        and readiness.marker_uds_contract_identity == expected.broker_socket_path
+        # v2: the UDS contract is no longer echoed by the payload -- it is one of the twelve fields
+        # inside marker_binding_digest, which _readiness_binds_marker verifies against the
+        # candidate.
+        # Comparing the two INDEPENDENTLY DERIVED management facts here is strictly stronger than
+        # comparing an echo the API could simply repeat back.
+        and marker.uds_contract_identity == expected.broker_socket_path
     )
 
 
@@ -668,23 +738,19 @@ def _readiness_broker_ok(readiness: ApiSignerReadiness) -> bool:
 
 def _readiness_binds_marker(readiness: ApiSignerReadiness, marker: ApiSignerMarker) -> bool:
     """The marker the RUNNING API actually loaded must be the candidate, and its bound API peer must
-    be the process the API is actually running as."""
+    be the process the API is actually running as.
+
+    v2 proves this by RECOMPUTING the domain-separated binding digest over the candidate's twelve
+    fields and requiring the running API to have reported exactly that digest. The API never echoes
+    the underlying activation token, row id or installation binding, and an API that had loaded any
+    other marker cannot produce this value."""
+    expected_digest = _marker_digest(marker)
     return bool(
         readiness.valid
         and readiness.marker_present
         and readiness.marker_binding_matches_runtime
-        and readiness.marker_installation_id == marker.installation_id
-        and readiness.marker_release_digest == marker.release_digest
-        and readiness.marker_active_identity_row_id == marker.active_identity_row_id
-        and readiness.marker_activation_token == marker.activation_token
-        and readiness.marker_controller_key_id == marker.controller_key_id
-        and readiness.marker_uds_contract_identity == marker.uds_contract_identity
-        and readiness.marker_signer_role_name == marker.signer_role_name
-        and readiness.marker_locator_ca_digest == marker.locator_ca_digest
-        and readiness.marker_management_identity_digest == marker.management_identity_digest
-        and readiness.marker_bootstrap_evidence_digest == marker.bootstrap_evidence_digest
-        and readiness.marker_api_uid == marker.api_uid
-        and readiness.marker_api_gid == marker.api_gid
+        and bool(expected_digest)
+        and readiness.marker_binding_digest == expected_digest
         and readiness.process_uid == marker.api_uid
         and readiness.process_gid == marker.api_gid
     )
@@ -698,44 +764,49 @@ def _one_generation(
     readiness: ApiSignerReadiness,
     expected: ApiSignerRuntimeExpectations,
 ) -> bool:
-    """Exactly ONE live generation, proven by AGREEMENT across six independent observations: the
-    INSPECTED API image, the expected SIGNED release, the controller stack observation, the ACTIVE
-    identity the API reports, the marker on disk, and the readiness response."""
+    """Exactly ONE live generation.
+
+    R4/F -- a TRUTHFUL statement of what this proves. The earlier docstring advertised "six-way
+    agreement"; two of those six were not independent and the claim is withdrawn:
+
+    * ``expected.marker`` is the SAME candidate binding the observation already carries. Requiring
+      the candidate to agree with itself proves nothing and is not counted here (the genuine
+      candidate-vs-expectation check lives in :func:`_candidate_agrees_with_expected`);
+    * ``controller_stack_generation`` is ASSIGNED the value of ``finalization_generation`` by the
+      install plan, so their agreement is an assignment, not an observation. It is still required --
+      a disagreement would mean the plan was built inconsistently -- but it is not evidence.
+
+    What IS independent, and is what this function actually requires:
+
+    1. the INSPECTED image of the running API container, compared against
+    2. the EXPECTED image, taken only from the SIGNED ``controller/api`` purpose mapping of the
+       verified release -- this remains the real stack/release proof and stays mandatory;
+    3. the ACTIVATION GENERATION the running API reports from the durable activation state;
+    4. the marker bytes ON DISK, parsed strictly;
+    5. the ACTIVE IDENTITY row the running API read, proven through the recomputed
+       active-identity binding digest rather than an echoed token."""
     if sample is None or parsed is None or not readiness.valid:
         return False
     if not _IMAGE_ID.fullmatch(expected.api_image_digest or ""):
         return False  # an unproven expected image can never authorize an inspected one
-    if sample.image != expected.api_image_digest:  # R4: the inspected image is now COMPARED
+    if sample.image != expected.api_image_digest:  # R4: the inspected image is COMPARED (proof 1+2)
         return False
     if expected.finalization_generation < 0:
         return False
+    # not evidence (see the docstring) -- an inconsistent PLAN is still refused.
     if expected.controller_stack_generation != expected.finalization_generation:
         return False
-    if readiness.activation_generation != expected.finalization_generation:
+    if readiness.activation_generation != expected.finalization_generation:  # proof 3
         return False
-    release_ok = (
-        marker.release_digest
-        == parsed.release_digest
-        == readiness.marker_release_digest
-        == readiness.active_identity_release_digest
-        == expected.release_digest
-    )
-    installation_ok = (
-        marker.installation_id
-        == parsed.installation_id
-        == readiness.marker_installation_id
-        == readiness.active_identity_installation_id
-        == expected.installation_id
-    )
-    identity_ok = bool(
+    release_ok = marker.release_digest == parsed.release_digest == expected.release_digest
+    installation_ok = marker.installation_id == parsed.installation_id == expected.installation_id
+    identity_digest = _active_identity_digest(expected)
+    identity_ok = bool(  # proof 5
         readiness.active_identity_present
-        and readiness.active_identity_row_id
-        == marker.active_identity_row_id
-        == expected.active_identity_row_id
-        and readiness.active_identity_activation_token
-        == marker.activation_token
-        == expected.active_identity_activation_token
-        and readiness.active_identity_controller_key_id == marker.controller_key_id
+        and identity_digest
+        and readiness.active_identity_binding_digest == identity_digest
+        and marker.active_identity_row_id == expected.active_identity_row_id
+        and marker.activation_token == expected.active_identity_activation_token
     )
     return bool(release_ok and installation_ok and identity_ok)
 
@@ -772,7 +843,7 @@ def _observe(
         and marker.uds_contract_identity == expected.broker_socket_path
         and marker_obj is not None
         and marker_obj.uds_contract_identity == expected.broker_socket_path
-        and _readiness_effective_signer_ok(readiness, expected)
+        and _readiness_effective_signer_ok(readiness, marker, expected)
     )
 
     # ---- fs-only broker + secret posture (mirrors the adapter's fail-closed default) ----

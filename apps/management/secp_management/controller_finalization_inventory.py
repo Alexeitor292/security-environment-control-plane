@@ -65,6 +65,10 @@ _CREDENTIAL_MODE = 0o600
 _ENROLLMENT_KEY_MODE = 0o600
 _HANDOFF_MODE = 0o640
 _MARKER_MODE = 0o644
+#: the readiness-origin GATE: root-owned, API-GROUP-readable, no world bit. Unlike the marker
+#: (public installation facts, 0644) this is a 256-bit machine secret, so a world-readable or
+#: group-writable gate is FOREIGN, never an installed one.
+_READINESS_GATE_MODE = 0o640
 _LOCATOR_MODE = 0o644
 _UNIT_MODE = 0o644
 _JOURNAL_MODE = 0o600
@@ -182,6 +186,7 @@ ORPHAN_PRECEDENCE: tuple[tuple[str, str], ...] = (
     ("broker_service", "finalization_orphan_broker_service"),
     ("provisioning_handoff", "finalization_orphan_provisioning_handoff"),
     ("activation_handoff", "finalization_orphan_activation_handoff"),
+    ("readiness_gate", "finalization_orphan_readiness_gate"),
     ("signer_marker", "finalization_orphan_marker"),
     ("recovery_journal", "finalization_orphan_recovery_journal"),
     ("staging", "finalization_orphan_staging"),
@@ -206,6 +211,7 @@ REQUIRED_PRECEDENCE: tuple[tuple[str, str], ...] = (
     ("broker_unit", "finalization_incomplete_broker_unit"),
     ("broker_socket", "finalization_incomplete_broker_socket"),
     ("broker_service", "finalization_incomplete_broker_service"),
+    ("readiness_gate", "finalization_incomplete_readiness_gate"),
     ("signer_marker", "finalization_incomplete_marker"),
     ("signer_db_role", "finalization_incomplete_signer_role"),
     ("active_identity", "finalization_incomplete_active_identity"),
@@ -253,6 +259,7 @@ class ControllerFinalizationInventory:
     broker_service: ServiceState
     provisioning_handoff: ObjectState
     activation_handoff: ObjectState
+    readiness_gate: ObjectState
     signer_marker: ObjectState
     recovery_journal: ObjectState
     staging: ObjectState
@@ -281,7 +288,8 @@ class ControllerFinalizationInventory:
     def is_fresh(self) -> bool:
         """True ONLY when EVERY installer-owned finalization object is PROVEN absent: no TLS
         material, locator, signer credential, enrollment key, broker unit/service/socket, handoff,
-        marker, recovery journal or staging object, no dedicated signer database role, and no
+        marker, readiness-origin gate, recovery journal or staging object, no dedicated signer
+        database role, and no
         active controller enrollment identity or activation generation."""
         return self.orphan_reason is None
 
@@ -629,6 +637,9 @@ def observe_finalization_inventory(
         ),
         activation_handoff=_regular_object(
             ctx, loc.activation_handoff_host_path(), gid=api_gid, mode=_HANDOFF_MODE
+        ),
+        readiness_gate=_regular_object(
+            ctx, loc.api_signer_readiness_gate_path(), gid=api_gid, mode=_READINESS_GATE_MODE
         ),
         signer_marker=_regular_object(
             ctx, loc.api_signer_marker_path(), gid=_ROOT_GID, mode=_MARKER_MODE

@@ -1634,6 +1634,10 @@ def _drive_controller_finalization(
     fadapter.record_locator(canonical_origin=plan.canonical_origin)
     fadapter.provision_signer_role(plan.signer_role)
     key = fadapter.prepare_enrollment_key()
+    # the readiness-origin GATE, BEFORE anything can recreate the API: the ordinary API must
+    # already hold it when the fixed readiness route is first reachable, and a fresh install
+    # must never leave that route unauthenticated for a single request.
+    fadapter.install_readiness_gate()
     fadapter.install_broker_unit(plan.broker_unit)
     fadapter.start_broker()
     fadapter.verify_signer_operational(key_identity=key)
