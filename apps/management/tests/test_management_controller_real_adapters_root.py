@@ -549,44 +549,83 @@ _ALIAS_TARGETS = {
 
 
 @pytest.mark.parametrize("name", list(_ALIAS_TARGETS))
-def test_compose_normalizes_the_alias_and_the_validator_refuses_it(controller_stack, name) -> None:
-    """Two facts in one test, in the order that matters.
+def test_the_validator_refuses_the_alias_that_compose_itself_waves_through(
+    controller_stack, name
+) -> None:
+    """Two facts, in the order that matters for security.
 
-    1. REAL Compose, given the alias, resolves it to the REVIEWED target -- so the alias is not a
-       different mount, it is a SECOND mount on the gate's destination, writable, allowed to create
-       its own source. This is the evidence for why raw-string comparison was unsafe.
-    2. The strict OFFLINE validator refuses that same document, so it can never be signed,
-       never reach `install_config`, and never reach `compose up`. Compose's own error is not
-       relied on as the gate."""
+    1. The strict OFFLINE validator refuses the alias document, so it can never be signed, never
+       reach ``install_config``, and never reach ``compose up``. This is the actual control.
+    2. Real Compose RENDERS that same document without complaint -- so Compose is not a gate here at
+       all, and relying on a later runtime error would place the check after the mutation.
+
+    Exact-head CI corrected an assumption in an earlier version of this test: ``docker compose
+    config`` does NOT apply POSIX ``path.Clean`` at render time, it echoes the alias verbatim. Where
+    normalization actually happens is proven separately, against the ENGINE, in
+    :func:`test_the_engine_resolves_an_alias_to_the_reviewed_destination`."""
     target = _ALIAS_TARGETS[name]
     template = _alias_template(target)
 
-    # 2 FIRST, because it is the actual control: the document is refused before any host mutation.
+    # 1: the control -- refused offline, before anything could be installed or started.
     reason = controller_compose_contract_reason(template)
     assert reason is not None, "the alias must be refused offline"
-    assert reason.startswith("controller_compose_")
+    assert reason == "controller_compose_target_not_canonical"
 
-    # 1: now show WHY -- Compose itself normalizes the alias onto the reviewed destination.
-    scratch = os.path.join(
-        os.path.dirname(_installed_compose_path(controller_stack)), f"alias-{name}.yml"
-    )
+    # 2: Compose is content with it, which is exactly why the offline refusal has to exist.
+    installed = _installed_compose_path(controller_stack)
+    scratch = os.path.join(os.path.dirname(installed), f"alias-{name}.yml")
     with open(scratch, "wb") as fh:
         fh.write(template)
     os.chmod(scratch, 0o640)
     compose = os.path.realpath(shutil.which("docker-compose"))
-    rendered = _sh(
-        compose, "--project-name", f"{_PROJECT}-alias", "--file", scratch, "config", check=False
-    )
-    os.unlink(scratch)
-    if rendered.returncode != 0:
-        # Compose itself rejected the duplicate destination -- which is agreement, not a gate.
+    try:
+        rendered = _sh(
+            compose, "--project-name", f"{_PROJECT}-alias", "--file", scratch, "config", check=False
+        )
+    finally:
+        os.unlink(scratch)
+    if rendered.returncode == 0:
+        targets = [
+            v.get("target") for v in yaml.safe_load(rendered.stdout)["services"]["api"]["volumes"]
+        ]
+        # the alias survives rendering as its own distinct string: Compose did not reject the
+        # duplicate destination, and did not clean the path either.
+        assert target in targets, targets
+    else:
+        # some Compose versions refuse the duplicate destination -- agreement, never the gate.
         assert "duplicate" in (rendered.stderr + rendered.stdout).lower()
-        return
-    volumes = yaml.safe_load(rendered.stdout)["services"]["api"]["volumes"]
-    normalized = [v.get("target") for v in volumes]
-    assert normalized.count(_GATE_TARGET) >= 2, (
-        f"compose normalized {target!r} to something other than the reviewed target: {normalized}"
+
+
+@pytest.mark.parametrize("name", list(_ALIAS_TARGETS))
+def test_the_engine_resolves_an_alias_to_the_reviewed_destination(controller_stack, name) -> None:
+    """WHERE the normalization actually happens, and why an alias is not a different mount.
+
+    A throwaway container is CREATED (never started) with the alias spelling as its only mount
+    target, and the engine's own view of that container is inspected. The reported destination is
+    the CLEANED path -- i.e. the reviewed target -- so an alias entry alongside the required
+    mount is a second mount on the gate's destination, not a mount somewhere else. That is the
+    fact that makes raw-string comparison unsafe, and why the validator must refuse first."""
+    alias = _ALIAS_TARGETS[name]
+    created = _sh(
+        "docker",
+        "create",
+        "--volume",
+        f"{_GATE_HOST}:{alias}:ro",
+        _STANDIN,
+        "true",
+        check=False,
     )
+    assert created.returncode == 0, created.stderr
+    container = created.stdout.strip()
+    try:
+        raw = _sh("docker", "inspect", "--format", "{{json .Mounts}}", container)
+        destinations = [m.get("Destination") for m in json.loads(raw.stdout)]
+        assert _GATE_TARGET in destinations, (
+            f"the engine resolved {alias!r} to {destinations} -- if this ever stops equalling the "
+            "reviewed target, the canonicalization rule must be revisited"
+        )
+    finally:
+        _sh("docker", "rm", "--force", container, check=False)
 
 
 def test_no_invalid_alias_template_can_reach_install_config(controller_stack) -> None:

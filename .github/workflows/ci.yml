@@ -1109,10 +1109,13 @@ jobs:
           # alias spellings shown to collapse onto the reviewed target by real Compose while the
           # offline validator refuses each one first, the install_config boundary refusing every
           # alias without mutating the installed config, and the valid template still resolving
-          # one and only one read-only mount). This fence is the ONLY place the mount and the
+          # one and only one read-only mount) + the 4 ENGINE-normalization proofs (a throwaway
+          # container created with each alias spelling reports the CLEANED reviewed target, so
+          # an alias is a SECOND mount on the gate's destination, never a different one).
+          # This fence is the ONLY place the mount and the
           # normalization are proven against real Docker rather than asserted about the bytes.
-          if tests < 18:
-              problems.append(f"expected >= 18 controller E2E tests, collected {tests}")
+          if tests < 22:
+              problems.append(f"expected >= 22 controller E2E tests, collected {tests}")
           if skipped != 0:
               problems.append(f"expected 0 skipped, got {skipped} (controller stack NOT executed)")
           if failures != 0:
@@ -1125,7 +1128,7 @@ jobs:
               sys.exit(1)
           print(
               "Real controller stack + migration + signed-Compose mount executed as root: "
-              ">= 18 tests, zero skipped/failed/errored."
+              ">= 22 tests, zero skipped/failed/errored."
           )
           PY
 
