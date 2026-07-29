@@ -53,6 +53,7 @@ from secp_management.finalization import (
     EffectDisposition,
     FinalizationEffectReceipt,
 )
+from secp_management.layout import ManagementLocations
 from secp_management.release_bundle import (
     ReleaseManifest,
     manifest_aggregate_digest,
@@ -336,6 +337,20 @@ def _upgrade_setup(
         )
     seed_write_ancestors(fs)
     _seed_etc_controller(fs)
+    # R2: the real controller install writes the compose config + supervisor unit to their fixed
+    # paths; the shared fake bootstrap adapter records ops without touching the fs, so seed them
+    # here — the managed upgrade must be able to CAPTURE the prior stack in order to restore it.
+    _loc0 = ManagementLocations()
+    for _p, _b in (
+        (_loc0.controller_compose_path(), b"# prior controller compose (release A)"),
+        (_loc0.controller_unit_path(), b"[Unit] prior controller (release A)"),
+    ):
+        _cur = ""
+        for _seg in _p.split("/")[1:-1]:
+            _cur += "/" + _seg
+            if fs.lstat(_cur) is None:
+                fs.seed_dir(_cur, uid=0, gid=0, mode=0o755)
+        fs.seed_file(_p, _b, uid=0, gid=0, mode=0o640)
     world = fresh_controller_world()
     deps = deps_for(fs, world, trust)
     loc = deps.locations
@@ -354,12 +369,29 @@ def _upgrade_setup(
 
 
 def _advance_world_to(world: object, image_map: dict[str, str]) -> None:
-    """A managed upgrade is FINALIZATION-ONLY: the controller stack is upgraded out of band. Model
-    that by advancing the observed stack to release B's images so the reobservation gate proves the
-    host is ALREADY at the new release (the transaction runs no host op)."""
+    """Advance the OBSERVED controller stack to ``image_map``. Under R2 the managed upgrade performs
+    the stack transition ITSELF, so this is armed as a side effect of the bootstrap adapter's
+    ``start_stack`` (see :func:`_arm_stack_transition`) rather than applied out of band."""
     world.controller_containers = dict(image_map)  # type: ignore[attr-defined]
     world.controller_running = {c: True for c in image_map}  # type: ignore[attr-defined]
     world.controller_healthy = {c: True for c in image_map}  # type: ignore[attr-defined]
+
+
+def _arm_stack_transition(deps: object, world: object, image_map: dict[str, str]) -> None:
+    """R2: the candidate stack becomes observable ONLY when the transaction itself starts it. Wrap
+    the fake bootstrap adapter's reviewed ``start_stack`` op so the observed component/image map
+    advances exactly then — and so a ROLLBACK that reinstalls + restarts the PRIOR config/unit
+    likewise returns the observed stack to the prior images."""
+    adapter = deps.controller_adapter  # type: ignore[attr-defined]
+    original = adapter.start_stack
+    prior = dict(world.controller_containers)  # type: ignore[attr-defined]
+
+    def _start_stack(*, expected_components: tuple[str, ...]) -> None:
+        original(expected_components=expected_components)
+        target = image_map if set(expected_components) == set(image_map) else prior
+        _advance_world_to(world, target)
+
+    adapter.start_stack = _start_stack  # type: ignore[assignment]
 
 
 def _install_a(deps: object) -> dict:
@@ -401,7 +433,7 @@ def test_upgrade_A_to_B_success_generation_1():
     a_row = _IDENTITY_DB.active_row
     assert _IDENTITY_DB.generation_by_row[a_row] == 0
 
-    _advance_world_to(world, B_IMAGES)
+    _arm_stack_transition(deps, world, B_IMAGES)
     ops_after_a = list(world.ops)  # the FakeControllerAdapter's recorded host ops (from A install)
     calls_after_a = state["calls"]  # == 1 (only A's plan-bound adapter)
 
@@ -414,9 +446,14 @@ def test_upgrade_A_to_B_success_generation_1():
     assert rep["finalization_generation"] == 1
     assert rep["release_aggregate_digest"] != rep_a["release_aggregate_digest"]
 
-    # host ops NOT re-run on the upgrade (finalization-only): the bootstrap controller adapter's op
-    # list is unchanged from A's install; exactly one NEW plan-bound finalization adapter was built.
-    assert world.ops == ops_after_a
+    # R2: the managed upgrade performs a REAL candidate stack upgrade INSIDE the transaction — the
+    # bootstrap controller adapter's ops MUST advance (candidate images loaded, candidate compose
+    # config + supervisor unit installed, daemon-reload, migration transition, candidate stack
+    # started). An externally upgraded stack no longer qualifies.
+    assert len(world.ops) > len(ops_after_a)
+    _new_ops = world.ops[len(ops_after_a) :]
+    for _expected in ("install_config", "install_unit", "daemon_reload", "start_stack"):
+        assert _expected in _new_ops, (_expected, _new_ops)
     assert state["calls"] == calls_after_a + 1
 
     # the surface was ADOPTED and the identity re-activated against A's row at generation 1
@@ -455,7 +492,7 @@ def test_upgrade_fail_after_activation_reactivates_prior_and_proves_healthy():
     a_agg = rep_a["release_aggregate_digest"]
     a_row = _IDENTITY_DB.active_row
 
-    _advance_world_to(world, B_IMAGES)
+    _arm_stack_transition(deps, world, B_IMAGES)
     code, rep = run(_install_argv(BD_B, write=True), deps)
 
     # a fully-proven rollback refuses with the ORIGINAL finalization reason, NOT recovery_required
@@ -492,7 +529,7 @@ def test_upgrade_rollback_unprovable_is_recovery_required():
     # cannot prove the rolled-back state healthy → the transaction refuses recovery_required.
     deps, fs, world, state = _upgrade_setup(runtime_fail_generations=frozenset({1, 2}))
     _install_a(deps)
-    _advance_world_to(world, B_IMAGES)
+    _arm_stack_transition(deps, world, B_IMAGES)
     code, rep = run(_install_argv(BD_B, write=True), deps)
     assert code == 2
     assert rep["reason_code"] == "recovery_required"
@@ -513,7 +550,7 @@ def test_upgrade_stale_or_skipped_or_downgrade_generation_refuses(db_generation)
     a_row = _IDENTITY_DB.active_row
     _IDENTITY_DB.generation_by_row[a_row] = db_generation  # DB moved ahead of the on-disk evidence
 
-    _advance_world_to(world, B_IMAGES)
+    _arm_stack_transition(deps, world, B_IMAGES)
     code, rep = run(_install_argv(BD_B, write=True), deps)
     assert code == 2
     assert rep["reason_code"] == "activation_generation_out_of_order"
@@ -680,7 +717,7 @@ def test_historical_receipts_immutable_after_upgrade_and_rollback():
     a_row = _IDENTITY_DB.active_row
     a_receipt = copy.deepcopy(_IDENTITY_DB.receipts[a_row])
 
-    _advance_world_to(world, B_IMAGES)
+    _arm_stack_transition(deps, world, B_IMAGES)
     assert run(_install_argv(BD_B, write=True), deps)[0] == 0
     c_row = _IDENTITY_DB.active_row
     assert _IDENTITY_DB.receipts[a_row] == a_receipt  # A untouched
@@ -692,7 +729,7 @@ def test_historical_receipts_immutable_after_upgrade_and_rollback():
     _install_a(deps)
     a_row = _IDENTITY_DB.active_row
     a_receipt = copy.deepcopy(_IDENTITY_DB.receipts[a_row])
-    _advance_world_to(world, B_IMAGES)
+    _arm_stack_transition(deps, world, B_IMAGES)
     assert run(_install_argv(BD_B, write=True), deps)[0] == 2  # post-activation failure → rollback
 
     c_row, p_row = _IDENTITY_DB.log[1]["row"], _IDENTITY_DB.log[2]["row"]

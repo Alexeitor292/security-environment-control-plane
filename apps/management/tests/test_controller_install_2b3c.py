@@ -457,6 +457,8 @@ def _synthetic_finalization(*, generation: int = 0) -> FinalizationEvidence:
         operator_sealed=True,
         controlled_live_sealed=True,
         isolation_boundaries_proven=True,
+        finalization_commit_state="committed",
+        staging_objects_absent=True,
         effects=(),
     )
 

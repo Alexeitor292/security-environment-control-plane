@@ -70,6 +70,8 @@ from secp_management.evidence import (
     CLASSIFY_FRESH,
     CLASSIFY_MANAGED_UPGRADE,
     FINALIZATION_SCHEMA_VERSION,
+    FINALIZATION_STATE_COMMITTED,
+    FINALIZATION_STATE_PREPARED,
     MODE_ADOPTED,
     MODE_INSTALLED,
     OBJECT_EVIDENCE,
@@ -1667,7 +1669,12 @@ def _finalization_evidence_from(
             "secp.management.api-runtime-observation/v1",
             {"marker": marker_identity, "generation": plan.generation},
         ),
-        recovery_journal_absent=True,  # proven by the commit gate (adapter.commit removes it)
+        # R5: this is the PREPARED checkpoint — written BEFORE finalization cleanup, so it must not
+        # claim the journal/staging objects are absent. The COMMITTED record is authored only after
+        # cleanup runs AND its absence is independently observed.
+        finalization_commit_state=FINALIZATION_STATE_PREPARED,
+        recovery_journal_absent=False,
+        staging_objects_absent=False,
         marker_last=True,
         api_runtime_proven=True,  # enable_api_signer returns only after a proven observation
         no_mixed_generation=True,
@@ -1698,6 +1705,204 @@ def _finalization_compensation_proven(fadapter: object) -> bool:
     except Exception:  # noqa: BLE001 - a compensation exception is recovery_required
         return False
     return bool(getattr(result, "proven", False)) and not getattr(result, "residual", ("x",))
+
+
+def _compensate_rollback_participant(rb_state: _DriveState, reason: str | None = None) -> bool:
+    """R6: ALWAYS compensate the ROLLBACK participant when any rollback-drive / runtime / evidence /
+    attestation / commit-gate / adapter-commit step fails. The rollback adapter may already have
+    mutated state (marker, identity, broker, filesystem), so returning a bare False would strand its
+    own partial effects. This reverses it MARKER-FIRST through the adapter's own reverse-order
+    compensation (which removes/restores the marker and restarts the API back to sealed), preserves
+    the exact typed residual classification, and accounts for an attempted-but-INDETERMINATE
+    activation. Returns True only when the participant is proven fully reversed; a confirmed
+    rollback activation truthfully retains an identity residual (→ False → recovery_required) while
+    still guaranteeing the API is sealed and no marker remains enabled."""
+    adapter = rb_state.adapter
+    if adapter is None:
+        # nothing was constructed -> no participant effect to reverse; the caller still fails closed
+        return rb_state.activation_attempted is False
+    proven = _finalization_compensation_proven(adapter)  # marker-first, never raises
+    if rb_state.activation_attempted and rb_state.arec is None:
+        # the rollback activation may have durably committed with no receipt -> unprovable
+        return False
+    if reason is not None and reason in _ACTIVATION_DETERMINATE_REASONS:
+        return proven  # a determinate refusal committed nothing beyond what compensation reversed
+    return proven
+
+
+# ------------------------------------------------- R2: real controller STACK upgrade (2b-3c-c)
+
+
+@dataclass(frozen=True)
+class ControllerStackUpgradePlan:
+    """The closed typed candidate controller-stack upgrade (R2). It carries the AUTHENTICATED prior
+    stack facts needed to restore it and the SIGNED candidate facts to apply. Nonsecret only."""
+
+    candidate: ControllerBootstrapPlan
+    prior_config: ReviewedConfig  # exact prior compose config, restorable
+    prior_unit: ReviewedUnit  # exact prior supervisor unit, restorable
+    prior_migration_identity: str
+    prior_component_images: tuple[tuple[str, str], ...]  # signed component -> image digest
+    prior_expected_components: tuple[str, ...]
+    prior_running: bool
+
+
+@dataclass(frozen=True)
+class ControllerStackUpgradeReceipt:
+    """The typed record of what the candidate stack upgrade actually did, so the transaction can
+    restore the prior stack and report residuals truthfully."""
+
+    loaded_image_digests: tuple[str, ...]  # candidate images this transaction introduced
+    prior_config_identity: str
+    prior_unit_identity: str
+    prior_migration_identity: str
+    candidate_config_identity: str
+    candidate_unit_identity: str
+    migration_transition: str  # "unchanged" is the only supported transition (see R2)
+    config_applied: bool
+    unit_applied: bool
+    stack_started: bool
+
+
+def _reviewed_config_from_disk(deps: EngineDeps, path: str) -> ReviewedConfig | None:
+    try:
+        data = deps.filesystem().safe_read(  # type: ignore[attr-defined]
+            path, max_bytes=_MAX_DOC_BYTES, expected_uid=_ROOT_UID
+        )
+    except Exception:  # noqa: BLE001 - an unreadable prior object cannot be restored -> refuse
+        return None
+    return ReviewedConfig(identity=sha256_bytes(data), content=data)
+
+
+def _reviewed_unit_from_disk(deps: EngineDeps, path: str) -> ReviewedUnit | None:
+    try:
+        data = deps.filesystem().safe_read(  # type: ignore[attr-defined]
+            path, max_bytes=_MAX_DOC_BYTES, expected_uid=_ROOT_UID
+        )
+    except Exception:  # noqa: BLE001 - an unreadable prior object cannot be restored -> refuse
+        return None
+    return ReviewedUnit(identity=sha256_bytes(data), content=data)
+
+
+def _plan_controller_stack_upgrade(
+    candidate: ControllerBootstrapPlan,
+    prior_record: VerifiedRelease,
+    deps: EngineDeps,
+) -> ControllerStackUpgradePlan:
+    """Build the candidate stack-upgrade plan from the AUTHENTICATED prior installation + the SIGNED
+    candidate release, enforcing the supported MIGRATION TRANSITION LIMIT.
+
+    Supported transition: the candidate migration identity EQUALS the authenticated prior migration
+    identity, so applying the candidate stack cannot advance the schema past the point where the
+    prior binaries still run -- restoring the prior stack stays genuinely possible. A CHANGED
+    migration identity has no signed reversible/compatible contract in the manifest, so it REFUSES
+    with controller_upgrade_migration_transition_unsupported rather than running an irreversible
+    schema transition while claiming prior-stack rollback."""
+    loc = deps.locations
+    prior_config = _reviewed_config_from_disk(deps, loc.controller_compose_path())
+    prior_unit = _reviewed_unit_from_disk(deps, loc.controller_unit_path())
+    if prior_config is None or prior_unit is None:
+        raise ManagementError("controller_upgrade_prior_stack_unreadable")
+    prior_migration = prior_record.manifest.migration_identity
+    if candidate.migration_identity != prior_migration:
+        raise ManagementError("controller_upgrade_migration_transition_unsupported")
+    prior_expected = _expected_controller(prior_record.manifest)
+    prior_images = tuple(sorted(prior_expected.component_images.items()))
+    try:
+        obs = deps.observer.observe_controller()
+        prior_running = _controller_end_state_reason(obs, prior_expected) is None
+    except ManagementError:
+        prior_running = False
+    if not prior_running:
+        # the prior stack must be genuinely operational before it may be upgraded (and before any
+        # claim that it can be restored) -- an already-broken stack is not a valid upgrade base.
+        raise ManagementError("controller_upgrade_prior_stack_not_operational")
+    return ControllerStackUpgradePlan(
+        candidate=candidate,
+        prior_config=prior_config,
+        prior_unit=prior_unit,
+        prior_migration_identity=prior_migration,
+        prior_component_images=prior_images,
+        prior_expected_components=prior_expected.expected_components,
+        prior_running=prior_running,
+    )
+
+
+def _apply_controller_stack_upgrade(
+    plan: ControllerStackUpgradePlan, vr: VerifiedRelease, deps: EngineDeps
+) -> ControllerStackUpgradeReceipt:
+    """Actually UPGRADE the controller stack through the reviewed adapter ops: load the signed
+    candidate images, install + verify the candidate compose config and supervisor unit (the prior
+    ones are retained in the plan for restoration), daemon-reload, apply the identity-unchanged
+    migration transition, start/recreate the candidate stack, and reobserve the EXACT signed
+    candidate component/image map before finalization is allowed to proceed."""
+    ad = deps.controller_adapter
+    loaded: list[str] = []
+    for artifact in plan.candidate.image_artifacts:
+        ad.load_image(artifact)
+        if artifact.image_digest:
+            loaded.append(artifact.image_digest)
+    ad.install_config(plan.candidate.config)
+    ad.install_unit(plan.candidate.unit)
+    ad.daemon_reload()
+    ad.run_migrations(migration_identity=plan.candidate.migration_identity)
+    ad.start_stack(expected_components=plan.candidate.expected_components)
+    reason = _controller_end_state_reason(
+        deps.observer.observe_controller(), _expected_controller(vr.manifest)
+    )
+    if reason is not None:
+        raise ManagementError(reason)  # candidate stack did not reach the exact signed end state
+    return ControllerStackUpgradeReceipt(
+        loaded_image_digests=tuple(loaded),
+        prior_config_identity=plan.prior_config.identity,
+        prior_unit_identity=plan.prior_unit.identity,
+        prior_migration_identity=plan.prior_migration_identity,
+        candidate_config_identity=plan.candidate.config.identity,
+        candidate_unit_identity=plan.candidate.unit.identity,
+        migration_transition="unchanged",
+        config_applied=True,
+        unit_applied=True,
+        stack_started=True,
+    )
+
+
+def _restore_controller_stack(
+    plan: ControllerStackUpgradePlan, deps: EngineDeps
+) -> tuple[bool, tuple[str, ...]]:
+    """Restore the EXACT prior controller stack after a failed candidate: reinstall the prior
+    compose config + supervisor unit, daemon-reload, restart it, and PROVE the prior image map /
+    config / unit / migration identity is operational again. Returns (proven, residuals).
+
+    A candidate image this transaction introduced is NOT deleted: proving exclusive ownership and
+    non-use of a shared image layer is not possible in-plane, so a harmless bounded residual is
+    reported truthfully instead of risking deletion of an image another workload uses."""
+    residual: list[str] = []
+    ad = deps.controller_adapter
+    try:
+        ad.install_config(plan.prior_config)
+        ad.install_unit(plan.prior_unit)
+        ad.daemon_reload()
+        ad.run_migrations(migration_identity=plan.prior_migration_identity)
+        ad.start_stack(expected_components=plan.prior_expected_components)
+    except ManagementError:
+        return False, ("controller_stack_restore_failed",)
+    try:
+        obs = deps.observer.observe_controller()
+    except ManagementError:
+        return False, ("controller_stack_restore_unobservable",)
+    expected = _ExpectedController(
+        component_images=dict(plan.prior_component_images),
+        expected_components=plan.prior_expected_components,
+        config_identity=plan.prior_config.identity,
+        unit_identity=plan.prior_unit.identity,
+        migration_identity=plan.prior_migration_identity,
+    )
+    reason = _controller_end_state_reason(obs, expected)
+    if reason is not None:
+        return False, ("controller_stack_restore_unproven",)
+    if plan.candidate.image_artifacts:
+        residual.append("candidate_image_cache_residual")  # bounded, harmless, truthful
+    return True, tuple(residual)
 
 
 def _upgrade_rollback(
@@ -1764,7 +1969,8 @@ def _upgrade_rollback(
             previous_active_row_id=c_row,
             state=rb_state,
         )
-    except ManagementError:
+    except ManagementError as exc:
+        _compensate_rollback_participant(rb_state, exc.reason_code)  # R6: never a bare False
         return False
     # (4) re-author the prior evidence to bind the new active row + re-sign, then (5) commit-gate it
     evidence_a_prime = prior_ev.model_copy(
@@ -1780,7 +1986,8 @@ def _upgrade_rollback(
             deps,
             rb_writer,
         )
-    except ManagementError:
+    except ManagementError as exc:
+        _compensate_rollback_participant(rb_state, exc.reason_code)
         return False
     if (
         _verify_committed_transaction(
@@ -1791,10 +1998,13 @@ def _upgrade_rollback(
         )
         is not None
     ):
+        _compensate_rollback_participant(rb_state)
         return False
     if _verify_marker_binding(deps, evidence_a_prime) is not None:
+        _compensate_rollback_participant(rb_state)
         return False
     if rb_state.adapter is not None and not rb_state.adapter.commit():  # type: ignore[attr-defined]
+        _compensate_rollback_participant(rb_state)
         return False
     return True
 
@@ -1890,7 +2100,11 @@ def _write_transaction(
             # rollback-reactivation of the PRIOR generation (the adapter defers identity
             # reactivation
             # to the engine); it re-commits the prior release + restores its documents itself.
-            if not _upgrade_rollback(prior_ev, install, loc, generation, writer, drive, deps):
+            ok = _upgrade_rollback(prior_ev, install, loc, generation, writer, drive, deps)
+            if stack_plan is not None and stack_upgraded:
+                stack_ok, _sr = _restore_controller_stack(stack_plan, deps)
+                ok = ok and stack_ok
+            if not ok:
                 raise ManagementError("recovery_required")
             return
         fin_unproven = False
@@ -1906,6 +2120,12 @@ def _write_transaction(
             and drive.arec is None
             and reason not in _ACTIVATION_DETERMINATE_REASONS
         )
+        stack_unproven = False
+        if stack_plan is not None and stack_upgraded:
+            # R2 rollback: restore + PROVE the exact prior controller stack (config, unit, migration
+            # identity, image map) rather than leaving a half-upgraded stack behind.
+            stack_proven, _stack_residual = _restore_controller_stack(stack_plan, deps)
+            stack_unproven = not stack_proven
         doc_result = writer.compensate()
         host_unproven = False
         if host_effected:
@@ -1915,20 +2135,32 @@ def _write_transaction(
                 )  # raises recovery_required if host compensation is unproven
             except ManagementError:
                 host_unproven = True
-        if fin_unproven or activation_unproven or host_unproven or not doc_result.proven:
+        if (
+            fin_unproven
+            or activation_unproven
+            or stack_unproven
+            or host_unproven
+            or not doc_result.proven
+        ):
             raise ManagementError("recovery_required")
 
-    # a managed upgrade is FINALIZATION-ONLY: the controller stack (images/config/unit/migrations)
-    # is upgraded out of band and the reobservation gate proves it is ALREADY at the new release;
-    # the
-    # transaction's only net effects are the enrollment identity + marker, so its rollback is always
-    # reversible. A full stack-upgrade (forward-only migrations + container recreation) is a
-    # distinct,
-    # separately reviewed milestone.
-    run_host_ops = classification != CLASSIFY_MANAGED_UPGRADE
+    # R2: a managed upgrade performs a REAL candidate STACK upgrade inside this transaction (signed
+    # candidate images, compose config, supervisor unit, the identity-unchanged migration transition
+    # and the candidate stack start), retaining the exact prior config/unit/runtime facts so the
+    # prior stack can be restored and PROVEN on failure. No externally upgraded stack qualifies.
+    stack_plan: ControllerStackUpgradePlan | None = None
+    stack_upgraded = False
     try:
-        # 1. closed typed host operations (image load → config → unit/package → reload → start)
-        if run_host_ops:
+        # 1. closed typed host operations (image load -> config -> unit/package -> reload -> start)
+        if classification == CLASSIFY_MANAGED_UPGRADE:
+            prior_record_v, _prr = _load_release_record(Role.CONTROLLER, deps)
+            if prior_record_v is None:
+                raise ManagementError("controller_upgrade_prior_stack_unreadable")
+            stack_plan = _plan_controller_stack_upgrade(plan_c, prior_record_v, deps)
+            host_effected = True
+            _apply_controller_stack_upgrade(stack_plan, vr, deps)
+            stack_upgraded = True
+        else:
             host_effected = True
             if role is Role.WORKER:
                 _run_worker_ops(plan_w, deps)
@@ -2025,16 +2257,87 @@ def _write_transaction(
     except Exception:
         _compensate()  # unknown fault -> no determinate reason -> attempted activation is unproven
         raise ManagementError("bootstrap_transaction_error") from None
-    # 7. FINALIZATION COMMIT — only AFTER the five documents + detached attestation passed the
-    # commit
-    # gate (the true commit point). Runs OUTSIDE the compensating try: the install is committed and
-    #    working, so a staging/journal cleanup residual is surfaced as recovery_required rather than
-    # destructively tearing the committed install down. A fresh install stages no prior secret, so
-    #    commit() removes only the recovery journal and returns True.
+    # 7. R5 CLEANUP PHASE — the evidence written above is the durable PREPARED checkpoint (it makes
+    #    NO cleanup-absence claim). Only now is cleanup performed, its absence independently
+    #    OBSERVED, and the COMMITTED evidence + attestation authored and re-gated. Runs OUTSIDE the
+    #    compensating try: the install itself is committed and working, so a cleanup fault is
+    #    reported truthfully as recovery_required (with the prepared checkpoint preserved for the
+    #    deterministic finalize-prepared path) rather than destructively tearing it down.
     if finalization_effected and drive.adapter is not None:
-        if not drive.adapter.commit():  # type: ignore[attr-defined]
-            raise ManagementError("finalization_commit_residual")
+        ident_c, ev_c = _finalize_prepared_checkpoint(role, vr, deps, drive.adapter, result[1])
+        return ident_c or result[0], ev_c
     return result
+
+
+def _finalization_cleanup_absent(deps: EngineDeps) -> bool:
+    """Independently OBSERVE that the finalization recovery journal and every staging/backup object
+    is gone (R5). The committed evidence may claim absence ONLY when this returns True."""
+    loc = deps.locations
+    fs = deps.filesystem()
+    base = loc.bootstrap_state
+    try:
+        if fs.lstat(f"{base}/controller-finalization-journal.json") is not None:  # type: ignore[attr-defined]
+            return False
+        staging_root = f"{base}/finalization-staging"
+        st = fs.lstat(staging_root)  # type: ignore[attr-defined]
+        if st is None:
+            return True  # never created (or already swept) -> nothing staged remains
+        for handle in ("broker-unit.prior", "marker.prior", "locator.prior"):
+            # the fixed, code-owned staging handles (a deterministic sweep, never an enumeration)
+            for sub in (f"{staging_root}/{handle}",):
+                if fs.lstat(sub) is not None:  # type: ignore[attr-defined]
+                    return False
+        return True
+    except Exception:  # noqa: BLE001 - an unprovable sweep is NOT proof of absence
+        return False
+
+
+def _finalize_prepared_checkpoint(
+    role: Role,
+    vr: VerifiedRelease,
+    deps: EngineDeps,
+    fadapter: object,
+    prepared: BootstrapEvidence,
+) -> tuple[ManagementPlaneIdentity | None, BootstrapEvidence]:
+    """R5 cleanup phase: drive ``commit()``, prove the journal + staging objects absent, author the
+    COMMITTED finalization evidence + detached attestation, and re-run the complete commit gate.
+    Any unproven step raises ``recovery_required`` leaving the PREPARED checkpoint durable, so the
+    operation is deterministically resumable and no attestation claims an unobserved absence."""
+    try:
+        committed_clean = bool(fadapter.commit())  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a cleanup fault is recovery_required, never an ordinary error
+        raise ManagementError("recovery_required") from None
+    if not committed_clean or not _finalization_cleanup_absent(deps):
+        raise ManagementError("recovery_required")  # prepared checkpoint preserved for resume
+    fin = prepared.finalization
+    if fin is None:
+        return None, prepared
+    committed_fin = fin.model_copy(
+        update={
+            "finalization_commit_state": FINALIZATION_STATE_COMMITTED,
+            "recovery_journal_absent": True,
+            "staging_objects_absent": True,
+        }
+    )
+    ev_committed = prepared.model_copy(update={"finalization": committed_fin})
+    ident, _ir = _load_identity(role, deps)
+    if ident is None:
+        raise ManagementError("recovery_required")
+    writer = _DocWriter(deps.filesystem(), deps.locations)
+    try:
+        _write_evidence_and_attestation(
+            role, ev_committed, canonical_bytes(ident), vr.aggregate_digest, deps, writer
+        )
+    except ManagementError:
+        raise ManagementError("recovery_required") from None
+    if (
+        _verify_committed_transaction(
+            role, deps, expected_mode=MODE_INSTALLED, expected_aggregate=vr.aggregate_digest
+        )
+        is not None
+    ):
+        raise ManagementError("recovery_required")
+    return ident, ev_committed
 
 
 def _write_evidence_and_attestation(

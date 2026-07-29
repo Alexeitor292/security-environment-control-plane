@@ -41,6 +41,12 @@ _ROLES = frozenset({"controller", "worker"})
 _BOOTSTRAP_BINDING_SCHEMA = "secp.management.bootstrap-binding/v1"
 FINALIZATION_SCHEMA_VERSION = "secp.management.finalization-evidence/v1"
 # The closed controller-install classifications (2b-3c). Every other pre-existing state refuses.
+# The two-phase finalization commit states (2b-3c-c / R5). A PREPARED checkpoint is a durable,
+# attested record written BEFORE cleanup, so it may never claim the journal/staging objects are
+# absent; only a COMMITTED record — written after cleanup is performed AND absence-observed — may.
+FINALIZATION_STATE_PREPARED = "prepared"
+FINALIZATION_STATE_COMMITTED = "committed"
+_FINALIZATION_STATES = frozenset({FINALIZATION_STATE_PREPARED, FINALIZATION_STATE_COMMITTED})
 CLASSIFY_FRESH = "fresh"
 CLASSIFY_EXACT_SAME_RELEASE = "exact_same_release"
 CLASSIFY_MANAGED_UPGRADE = "managed_upgrade"
@@ -198,7 +204,10 @@ class FinalizationEvidence(_Strict):
     marker_identity: _Str
     runtime_observation_identity: _Str
     # proofs
+    # two-phase commit state (R5): 'prepared' (pre-cleanup checkpoint) or 'committed' (post-cleanup)
+    finalization_commit_state: _Str
     recovery_journal_absent: bool
+    staging_objects_absent: bool
     marker_last: bool
     api_runtime_proven: bool
     no_mixed_generation: bool
@@ -417,9 +426,24 @@ def _assert_finalization_semantics(ev: BootstrapEvidence) -> None:
         fin.signer_login_binding_digest
     ):
         raise ManagementError("evidence_finalization_digest_invalid:signer_login_binding_digest")
-    # every finalization safety predicate must be TRUE (no false success, no unsealed operator/live)
+    if fin.finalization_commit_state not in _FINALIZATION_STATES:
+        raise ManagementError("evidence_finalization_commit_state_invalid")
+    if fin.finalization_commit_state == FINALIZATION_STATE_PREPARED:
+        # a PREPARED checkpoint must NOT claim cleanup it has not performed/observed yet, and it is
+        # never an installation-complete record.
+        if fin.recovery_journal_absent or fin.staging_objects_absent:
+            raise ManagementError("evidence_finalization_prepared_claims_cleanup")
+        for pred in ("marker_last", "api_runtime_proven", "no_mixed_generation"):
+            if getattr(fin, pred) is not True:
+                raise ManagementError(f"evidence_finalization_predicate_invalid:{pred}")
+        for pred in ("operator_sealed", "controlled_live_sealed", "isolation_boundaries_proven"):
+            if getattr(fin, pred) is not True:
+                raise ManagementError(f"evidence_finalization_predicate_invalid:{pred}")
+        return
+    # every COMMITTED finalization safety predicate must be TRUE (no false success)
     for pred in (
         "recovery_journal_absent",
+        "staging_objects_absent",
         "marker_last",
         "api_runtime_proven",
         "no_mixed_generation",
