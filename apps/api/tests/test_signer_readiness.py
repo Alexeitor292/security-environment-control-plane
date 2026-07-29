@@ -117,6 +117,20 @@ def posix_process(monkeypatch):
     return None
 
 
+@pytest.fixture(autouse=True)
+def _marker_posture(monkeypatch):
+    """Neutralise the POSIX filesystem POSTURE gate on the marker read.
+
+    ``load_valid_marker`` requires the marker to be a root-owned, non-symlink 0644 regular file.
+    That gate is a genuine production control and is proven by the marker suite itself; it is
+    SKIPPED off POSIX, so a test that seeds a marker under ``tmp_path`` passes on a Windows dev host
+    but fails on the Linux CI runner (which is not root). These tests exercise the readiness
+    CONTENT contract, so inject a passing gate exactly as the existing marker/binding suites do -
+    the posture control itself is unchanged and still enforced in production."""
+    monkeypatch.setattr("secp_api.enrollment_signer_marker._fs_safe", lambda path: True)
+    return None
+
+
 def _observe(session, signer, marker_path, *, exchange=_ok_exchange) -> dict:
     return sr.observe_signer_readiness(session, signer, marker_path=marker_path, exchange=exchange)
 
