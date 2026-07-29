@@ -64,9 +64,10 @@ _MAX = 256 * 1024
 _ROW = "11111111-1111-1111-1111-111111111111"
 _TOKEN = f"{_ROW}|2026-07-28 00:00:00+00:00"
 
-# NOTE (2b-3c-a): an initial run surfaced a source bug — three FinalizationEvidence field names
-# tripped the forbidden-secret field scan; the fields were renamed and the driven install now
-# commits. These tests exercise the committed path directly.
+# NOTE (2b-3c-a): an adversarial pass surfaced a source bug during development — three
+# FinalizationEvidence field names tripped the forbidden-secret field scan, so the commit gate's own
+# evidence re-read self-refused. The fields were renamed; the driven install commits and these tests
+# exercise the committed path directly.
 
 # The reviewed 9-op finalization order (marker LAST, identity activation PENULTIMATE).
 _EXPECTED_OPS = (
@@ -176,6 +177,7 @@ class _FakeFinalizationAdapter:
         loc: object,
         *,
         fail_on: str | None = None,
+        activation_failure_reason: str | None = None,
         compensate_residual: bool = False,
         receipt_raise_on_call: int = 0,
         compensate_raises: bool = False,
@@ -184,6 +186,7 @@ class _FakeFinalizationAdapter:
         self._fs = fs
         self._loc = loc
         self._fail_on = fail_on
+        self._activation_failure_reason = activation_failure_reason
         self._compensate_residual = compensate_residual
         self._receipt_raise_on_call = receipt_raise_on_call
         self._compensate_raises = compensate_raises
@@ -235,6 +238,9 @@ class _FakeFinalizationAdapter:
         self._step("verify_signer_operational")
 
     def activate_controller_identity(self, activation: object) -> ActivationReceipt:
+        if self._fail_on == "activate_controller_identity" and self._activation_failure_reason:
+            self.ops.append("activate_controller_identity")
+            raise ManagementError(self._activation_failure_reason)  # a DETERMINATE reported refusal
         self._step("activate_controller_identity")
         return ActivationReceipt(
             operation_id=activation.operation_id,  # type: ignore[attr-defined]
@@ -266,6 +272,7 @@ class _FakeFinalizationAdapter:
             "signer_role_name": marker.signer_role_name,  # type: ignore[attr-defined]
             "locator_ca_digest": marker.locator_ca_digest,  # type: ignore[attr-defined]
             "bootstrap_evidence_digest": marker.bootstrap_evidence_digest,  # type: ignore[attr-defined]
+            "management_identity_digest": marker.management_identity_digest,  # type: ignore[attr-defined]
             "api_uid": marker.api_uid,  # type: ignore[attr-defined]
             "api_gid": marker.api_gid,  # type: ignore[attr-defined]
             "activation_token": marker.activation_token,  # type: ignore[attr-defined]
@@ -328,6 +335,7 @@ def _install_deps(
     world_overrides: dict | None = None,
     authenticator: object | None = None,
     fail_on: str | None = None,
+    activation_failure_reason: str | None = None,
     compensate_residual: bool = False,
     receipt_raise_on_call: int = 0,
     compensate_raises: bool = False,
@@ -353,6 +361,7 @@ def _install_deps(
             fs,
             loc,
             fail_on=fail_on,
+            activation_failure_reason=activation_failure_reason,
             compensate_residual=compensate_residual,
             receipt_raise_on_call=receipt_raise_on_call,
             compensate_raises=compensate_raises,
@@ -456,8 +465,7 @@ def _synthetic_finalization(*, generation: int = 0) -> FinalizationEvidence:
 
 
 def test_fresh_install_drives_nine_finalization_ops_in_reviewed_order():
-    # the finalization drive completes (all 9 ops, marker LAST) BEFORE the commit gate — provable
-    # even though the commit gate itself is blocked by the FinalizationEvidence naming bug.
+    # the finalization drive completes (all 9 ops, marker LAST) BEFORE the commit gate.
     deps, bd, _fs, state = _install_deps()
     run(_install_argv(bd, write=True), deps)
     assert state["calls"] == 1  # exactly one plan-bound adapter built
@@ -621,8 +629,8 @@ def test_finalization_step_failure_refuses_and_leaves_no_marker(fail_on, reason)
 @pytest.mark.parametrize(
     "kwargs,expected,marker_gone",
     [
-        # proven compensation → the ORIGINAL commit reason; blocked by the commit bug (the reason
-        # is currently evidence_forbidden_secret, not the attestation reason), so xfail(strict).
+        # fully PROVEN compensation preserves the ORIGINAL bounded commit reason (never a
+        # blanket recovery_required)
         pytest.param({}, "evidence_attestation_untrusted", True),
         ({"compensate_residual": True}, "recovery_required", True),  # residual → recovery_required
         ({"receipt_raise_on_call": 2}, "recovery_required", False),  # lost receipt → recovery
@@ -642,12 +650,48 @@ def test_post_finalization_failure_runs_marker_first_compensation(kwargs, expect
         assert fs.lstat(loc.api_signer_marker_path()) is None
 
 
+# --------------------------- 5b. the INDETERMINATE activation window forces recovery_required
+
+
+def test_indeterminate_activation_failure_is_recovery_required():
+    # The API commits the activation durably INSIDE the one-shot and parses its receipt afterwards,
+    # so a transport fault / timeout / non-canonical output in that window can leave a durably
+    # ACTIVE candidate with no receipt and no recorded effect. The engine must treat that as an
+    # UNPROVEN residual (recovery_required) — never as an ordinary refusal, and never let an
+    # adopted-only receipt compensating "proven" mask it.
+    deps, bd, fs, state = _install_deps(fail_on="activate_controller_identity")
+    loc = deps.locations
+    code, rep = run(_install_argv(bd, write=True), deps)
+    assert code == 2
+    assert rep["reason_code"] == "recovery_required"
+    _assert_no_controller_documents(fs, loc)  # documents still fully unwound
+    adapter = state["adapters"][0]
+    assert adapter.ops[-1] == "activate_controller_identity"  # it WAS attempted
+    assert fs.lstat(loc.api_signer_marker_path()) is None  # no marker was ever enabled
+
+
+def test_determinate_activation_refusal_keeps_the_original_reason():
+    # A REPORTED refusal (the one-shot answered with a refusal payload, or the durable per-row
+    # generation CAS rejected it) is DETERMINATE: nothing was committed, so the transaction keeps
+    # its specific bounded reason instead of escalating to recovery_required.
+    deps, bd, fs, state = _install_deps(
+        fail_on="activate_controller_identity",
+        activation_failure_reason="finalization_activation_refused",
+    )
+    loc = deps.locations
+    code, rep = run(_install_argv(bd, write=True), deps)
+    assert code == 2
+    assert rep["reason_code"] == "finalization_activation_refused"  # NOT recovery_required
+    _assert_no_controller_documents(fs, loc)
+    assert fs.lstat(loc.api_signer_marker_path()) is None
+
+
 # ---------------------------------------------- 6. exact same-release idempotent replay
 
 
 def test_exact_same_release_replay_drives_zero_finalization_ops():
-    # requires a COMMITTED first install (the marker + authenticated finalization evidence a replay
-    # revalidates); blocked by the commit bug until a driven install can commit.
+    # requires a COMMITTED first install (the marker + authenticated finalization evidence that a
+    # replay independently revalidates).
     deps, bd, fs, state = _install_deps()
     loc = deps.locations
     code1, rep1 = run(_install_argv(bd, write=True), deps)

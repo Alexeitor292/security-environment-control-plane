@@ -188,8 +188,12 @@ def _ctx(fs: InMemoryFilesystem, runner: _FakeRunner) -> RealAdapterContext:
     )
 
 
-def _observe(fs: InMemoryFilesystem, runner: _FakeRunner):  # noqa: ANN202
-    return build_api_signer_runtime_observer(_ctx(fs, runner))(_MARKER)
+def _observe(fs: InMemoryFilesystem, runner: _FakeRunner, *, attempts: int = 1):  # noqa: ANN202
+    # attempts=1 + a 0s interval keeps the defect proofs instant: the bounded readiness poll is
+    # exercised explicitly by the two settling tests below, never implicitly by every defect case.
+    return build_api_signer_runtime_observer(
+        _ctx(fs, runner), readiness_attempts=attempts, readiness_interval_seconds=0.0
+    )(_MARKER)
 
 
 # --------------------------------------------------------------------------- the correct case
@@ -238,10 +242,30 @@ def test_wrong_api_uid_gid_fails_closed() -> None:
 
 
 def test_unhealthy_api_fails_closed() -> None:
+    # a container still 'starting' when the bounded readiness poll is exhausted fails closed
     runner = _FakeRunner(inspects=(_render_inspect(health="starting"),))
     observation = _observe(_build_fs(), runner)
     assert observation.ok is False
     assert observation.api_healthy is False
+
+
+def test_definitively_unhealthy_api_fails_closed_without_polling() -> None:
+    # 'unhealthy' is DEFINITIVE (not a settling state): the observer must not burn its readiness
+    # budget on it — one sample (2 inspects) and out.
+    runner = _FakeRunner(inspects=(_render_inspect(health="unhealthy"),))
+    observation = _observe(_build_fs(), runner, attempts=5)
+    assert observation.ok is False and observation.api_healthy is False
+    assert len([c for c in runner.calls if c and c[0] == "inspect"]) == 2  # exactly ONE sample
+
+
+def test_settling_api_becomes_healthy_within_the_readiness_poll() -> None:
+    # the real finalizer observes IMMEDIATELY after force-recreating the API, so the first samples
+    # report 'starting'; the bounded poll must let it settle and then prove it genuinely healthy.
+    starting = _render_inspect(health="starting")
+    healthy = _render_inspect(health="healthy")
+    runner = _FakeRunner(inspects=(starting, starting, healthy, healthy))
+    observation = _observe(_build_fs(), runner, attempts=5)
+    assert observation.ok is True and observation.api_healthy is True
 
 
 def test_not_running_api_fails_closed() -> None:

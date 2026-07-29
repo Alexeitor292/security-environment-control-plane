@@ -605,7 +605,11 @@ def controller_install(
     base["marker_path_binding"] = path_binding_digest(
         role.value, deps.locations.api_signer_marker_path()
     )
-    base["reobserved_healthy"] = True
+    # TRUTHFUL reporting: only a driven write (fresh install / managed upgrade) performs the live
+    # reobservation + the authoritative post-marker runtime proof. The idempotent replay path
+    # re-authenticates the on-disk documents + marker binding ONLY and reobserves no live runtime,
+    # so it must not claim it did.
+    base["reobserved_healthy"] = not base["idempotent_replay"]
     return EXIT_OK, base
 
 
@@ -667,6 +671,7 @@ def _verify_marker_binding(deps: EngineDeps, ev: BootstrapEvidence) -> str | Non
             "signer_role_name": marker["signer_role_name"],
             "locator_ca_digest": marker["locator_ca_digest"],
             "bootstrap_evidence_digest": marker["bootstrap_evidence_digest"],
+            "management_identity_digest": marker["management_identity_digest"],
             "api_uid": marker["api_uid"],
             "api_gid": marker["api_gid"],
         }
@@ -1295,6 +1300,27 @@ def _controller_evidence(
 
 _FINALIZATION_TXID_SCHEMA = "secp.management.finalization-txid/v1"
 
+# Activation failures whose outcome is DETERMINATE: the refusal was REPORTED (or raised by an engine
+# pre-check) BEFORE the API could durably commit, so no identity was activated and an ordinary
+# bounded refusal is truthful. EVERY OTHER failure once the activation was attempted is
+# INDETERMINATE — the API commits inside the one-shot and parses its receipt afterwards, so a
+# transport fault, a timeout, non-canonical output, or a receipt mismatch may have left a durably
+# active candidate with no receipt. Those force recovery_required (never a false ordinary error).
+_ACTIVATION_DETERMINATE_REASONS = frozenset(
+    {
+        "finalization_activation_refused",  # the one-shot REPORTED a refusal payload (no commit)
+        "activation_generation_out_of_order",  # durable per-row generation CAS refused it
+        "activation_generation_not_fresh",
+        "activation_predecessor_conflict",
+        "activation_predecessor_receipt_missing",
+        "activation_candidate_already_active",
+        "finalization_activation_generation_mismatch",  # engine pre-check, before the one-shot
+        "finalization_predecessor_conflict",  # engine pre-check, before the one-shot
+        "finalization_handoff_posture_invalid",  # before the one-shot
+        "finalization_transaction_sealed",
+    }
+)
+
 
 @dataclass(frozen=True)
 class _ControllerInstallClassification:
@@ -1311,12 +1337,19 @@ class _ControllerInstallClassification:
 @dataclass
 class _DriveState:
     """A MUTABLE holder the finalization drive publishes into AS ops progress — the bound adapter as
-    soon as it is built, the activation receipt as soon as it returns — so the engine's combined
-    compensation can reach the adapter and know a candidate identity is durably active even when a
-    later op (e.g. enable_api_signer) raises mid-drive."""
+    soon as it is built, the ATTEMPT flag before the durable activation one-shot, and the activation
+    receipt as soon as it returns — so the engine's combined compensation can reach the adapter and
+    know a candidate identity may be durably active even when a later op raises mid-drive.
+
+    ``activation_attempted`` is set BEFORE the one-shot because the API commits the new active
+    identity durably INSIDE that call and only then is its receipt parsed: a raise in that window
+    (non-canonical output, a post-commit timeout, a receipt mismatch) leaves a durably activated
+    candidate with NO receipt and NO recorded effect. Compensation must therefore treat
+    attempted-but-unconfirmed as an UNPROVEN residual (recovery_required), never as no-effect."""
 
     adapter: object | None = None
     arec: object | None = None
+    activation_attempted: bool = False
 
 
 def _sep_digest(schema: str, value: object) -> str:
@@ -1513,9 +1546,15 @@ def _drive_controller_finalization(
         generation=generation,
         previous_active_row_id=previous_active_row_id,  # None fresh; prior active row on upgrade
     )
+    if state is not None:
+        # BEFORE the durable one-shot: the API commits the activation inside this call and parses
+        # its
+        # receipt afterwards, so a raise in that window leaves a durably active candidate with no
+        # receipt. Publishing the ATTEMPT makes that window an unproven residual, never a no-effect.
+        state.activation_attempted = True
     arec = fadapter.activate_controller_identity(activation)
     if state is not None:
-        state.arec = arec  # the candidate identity is now durably active (visible to compensation)
+        state.arec = arec  # the candidate identity is CONFIRMED active (row + token known)
     marker = ApiSignerMarker(
         marker_path=loc.api_signer_marker_path(),
         installation_id=ident.installation_id,
@@ -1575,6 +1614,7 @@ def _finalization_evidence_from(
         "signer_role_name": marker.signer_role_name,
         "locator_ca_digest": marker.locator_ca_digest,
         "bootstrap_evidence_digest": marker.bootstrap_evidence_digest,
+        "management_identity_digest": marker.management_identity_digest,
         "api_uid": marker.api_uid,
         "api_gid": marker.api_gid,
     }
@@ -1800,6 +1840,17 @@ def _write_transaction(
             prior_ev = cls.prior_evidence
             assert prior_ev is not None and prior_ev.finalization is not None
             previous_active_row_id = prior_ev.finalization.active_identity_row_id
+            # An ordinary managed upgrade may NOT change the controller's canonical origin or TLS
+            # mode: the prior evidence stores only their DIGESTS, so a changed value could not be
+            # restored on a rollback (the rollback re-drives with these same options). Refuse rather
+            # than silently re-record the locator with the new origin while reverting to the prior
+            # release. Changing either is a distinct, separately reviewed operation.
+            if prior_ev.finalization.canonical_origin_digest != _sep_digest(
+                "secp.management.controller-origin/v1", install.canonical_origin
+            ):
+                raise ManagementError("controller_upgrade_origin_change_unsupported")
+            if prior_ev.finalization.tls_mode != install.tls_mode:
+                raise ManagementError("controller_upgrade_tls_mode_change_unsupported")
     else:
         classify = _classify_preexisting(role, vr, deps, mode=MODE_INSTALLED)
         if classify.reason is not None:
@@ -1824,7 +1875,7 @@ def _write_transaction(
     finalization_effected = False
     drive = _DriveState()  # publishes the bound adapter + activation receipt AS ops progress (R3)
 
-    def _compensate() -> None:
+    def _compensate(reason: str | None = None) -> None:
         # COMBINED marker-first compensation: finalization FIRST (the corrected adapter reverses its
         # effects in reverse order — resealing the marker + restarting the API before anything
         # else), THEN the managed documents, THEN the bootstrap host effects. Any unproven residual
@@ -1845,6 +1896,16 @@ def _write_transaction(
         fin_unproven = False
         if finalization_effected and drive.adapter is not None:
             fin_unproven = not _finalization_compensation_proven(drive.adapter)
+        # The activation was ATTEMPTED but never confirmed (the API commits durably inside the
+        # one-shot and parses the receipt afterwards): the candidate identity MAY be active with no
+        # receipt, no recorded effect, and — on an upgrade — no known candidate row to reverse. That
+        # is an UNPROVEN residual, so refuse recovery_required rather than an ordinary error. An
+        # adopted-only receipt compensating "proven" must never mask this window.
+        activation_unproven = (
+            drive.activation_attempted
+            and drive.arec is None
+            and reason not in _ACTIVATION_DETERMINATE_REASONS
+        )
         doc_result = writer.compensate()
         host_unproven = False
         if host_effected:
@@ -1854,7 +1915,7 @@ def _write_transaction(
                 )  # raises recovery_required if host compensation is unproven
             except ManagementError:
                 host_unproven = True
-        if fin_unproven or host_unproven or not doc_result.proven:
+        if fin_unproven or activation_unproven or host_unproven or not doc_result.proven:
             raise ManagementError("recovery_required")
 
     # a managed upgrade is FINALIZATION-ONLY: the controller stack (images/config/unit/migrations)
@@ -1958,11 +2019,11 @@ def _write_transaction(
         if commit_reason is not None:
             raise ManagementError(commit_reason)
         result = (ident, ev)
-    except ManagementError:
-        _compensate()
+    except ManagementError as exc:
+        _compensate(exc.reason_code)
         raise
     except Exception:
-        _compensate()
+        _compensate()  # unknown fault -> no determinate reason -> attempted activation is unproven
         raise ManagementError("bootstrap_transaction_error") from None
     # 7. FINALIZATION COMMIT — only AFTER the five documents + detached attestation passed the
     # commit
@@ -2594,6 +2655,17 @@ def _controller_status(deps: EngineDeps) -> tuple[int, dict]:
         end = _controller_end_state_reason(obs, _expected_controller(record.manifest))
         if end is not None:
             drift = end
+    # INDEPENDENTLY revalidate the authenticated finalization extension (2b-3c): recompute the
+    # domain-separated bootstrap binding digest from the parsed evidence and cross-check the live
+    # root-owned enablement marker against it — the attested finalization facts are NEVER trusted
+    # alone. Absent on worker/adopt/legacy evidence → skipped, so their status is unchanged.
+    if drift is None and ev is not None and ev.finalization is not None:
+        if ev.finalization.bootstrap_binding_digest != ev.bootstrap_binding_digest():
+            drift = "controller_install_binding_drift"
+        else:
+            marker_drift = _verify_marker_binding(deps, ev)
+            if marker_drift is not None:
+                drift = marker_drift
 
     exp = _expected_controller(record.manifest) if record is not None else None
     observed_components = tuple(sorted(obs.container_image_digests)) if obs else ()

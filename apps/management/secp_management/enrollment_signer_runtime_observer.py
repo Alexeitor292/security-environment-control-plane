@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -55,6 +56,12 @@ _ROOT_UID = 0
 _ROOT_GID = 0
 _MARKER_MODE = 0o644
 _MAX_READ = 512 * 1024
+# Bounded readiness poll: the finalizer observes immediately after force-recreating the API, so
+# a freshly recreated container reports health 'starting' until its first healthcheck passes.
+# Fixed attempts x fixed interval (never an unbounded wait); exhausting it fails closed.
+_READINESS_ATTEMPTS = 20
+_READINESS_INTERVAL_SECONDS = 3.0
+_HEALTH_STARTING = "starting"
 _INSPECT_TIMEOUT = 20
 
 _MARKER_SCHEMA = "secp.enrollment-signer-enablement/v1"
@@ -337,7 +344,11 @@ def _fail_closed() -> ApiSignerRuntimeObservation:
     )
 
 
-def _observe(ctx: RealAdapterContext, marker: ApiSignerMarker) -> ApiSignerRuntimeObservation:
+def _observe(
+    ctx: RealAdapterContext,
+    marker: ApiSignerMarker,
+    probe: dict[str, str] | None = None,
+) -> ApiSignerRuntimeObservation:
     loc = ctx.locations
     socket_path = loc.broker_socket_path()
     marker_mount = api_marker_mount(loc)
@@ -373,6 +384,8 @@ def _observe(ctx: RealAdapterContext, marker: ApiSignerMarker) -> ApiSignerRunti
     api_present = bool(sample is not None and sample.running and sample.container_id == api_ids[0])
     api_non_root = bool(sample is not None and sample.user == _EXPECTED_API_USER)
     api_healthy = bool(sample is not None and sample.health == "healthy")
+    if probe is not None:  # report the raw health so the caller can tell SETTLING from failed
+        probe["health"] = sample.health if sample is not None else ""
 
     sources = tuple(m.source for m in sample.mounts) if sample is not None else ()
     dests = tuple(m.destination for m in sample.mounts) if sample is not None else ()
@@ -432,20 +445,71 @@ def _observe(ctx: RealAdapterContext, marker: ApiSignerMarker) -> ApiSignerRunti
     )
 
 
+def _only_health_pending(obs: ApiSignerRuntimeObservation, health: str) -> bool:
+    """True when EVERY invariant holds except ``api_healthy`` — i.e. the container is present,
+    non-root, correctly mounted/bound/sealed and merely still SETTLING after the restart. This is
+    the only condition the readiness poll retries; every other defect fails closed immediately."""
+    if health != _HEALTH_STARTING:
+        return False  # 'unhealthy'/'none'/unknown is DEFINITIVE, never a settling state
+    return not obs.api_healthy and all(
+        (
+            obs.api_present,
+            obs.api_non_root,
+            obs.marker_mounted_readonly,
+            obs.handoffs_absent,
+            obs.enrollment_key_not_mounted,
+            obs.signer_credential_not_mounted,
+            obs.effective_signer_is_fixed_uds,
+            obs.binding_equals_marker,
+            obs.no_env_enablement,
+            obs.broker_reachable,
+            obs.no_mixed_generation,
+        )
+    )
+
+
 def build_api_signer_runtime_observer(
     ctx: RealAdapterContext,
+    *,
+    readiness_attempts: int = _READINESS_ATTEMPTS,
+    readiness_interval_seconds: float = _READINESS_INTERVAL_SECONDS,
 ) -> Callable[[ApiSignerMarker], ApiSignerRuntimeObservation]:
     """Build the boundary-safe runtime observer the finalization ``runtime_observer`` seam calls.
 
     Returns a closure ``observe(marker) -> ApiSignerRuntimeObservation`` that proves the ordinary
     API is genuinely running sealed with the candidate marker from management-observable facts only.
-    The closure NEVER raises: any fault falls back to a fully fail-closed observation."""
+    The closure NEVER raises: any fault falls back to a fully fail-closed observation.
+
+    The finalizer observes IMMEDIATELY after force-recreating the API container, which reports its
+    health as ``starting`` until its healthcheck first passes — so a single instantaneous sample
+    would fail every real install closed. The closure therefore performs a BOUNDED readiness poll
+    (fixed attempts × fixed interval, no unbounded wait) and retries ONLY while health is the sole
+    pending invariant; any other defect returns immediately, and exhausting the bound returns the
+    last fail-closed observation."""
 
     def observe(marker: ApiSignerMarker) -> ApiSignerRuntimeObservation:
-        try:
-            return _observe(ctx, marker)
-        except Exception:  # noqa: BLE001 - the observer must never raise into the finalizer
-            return _fail_closed()
+        probe: dict[str, str] = {}
+
+        def _sample() -> ApiSignerRuntimeObservation:
+            probe.clear()
+            try:
+                return _observe(ctx, marker, probe)
+            except Exception:  # noqa: BLE001 - the observer must never raise into the finalizer
+                return _fail_closed()
+
+        obs = _sample()
+        attempts = 1
+        while (
+            not obs.ok
+            and attempts < max(1, readiness_attempts)
+            # retry ONLY while the container is genuinely still settling (health 'starting') and
+            # every other invariant already holds; any other defect fails closed immediately.
+            and _only_health_pending(obs, probe.get("health", ""))
+        ):
+            time.sleep(max(0.0, readiness_interval_seconds))
+            obs = _sample()
+            attempts += 1
+        return obs
 
     return observe
 
