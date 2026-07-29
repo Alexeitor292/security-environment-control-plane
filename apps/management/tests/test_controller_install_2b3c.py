@@ -1182,3 +1182,54 @@ def test_worker_status_is_unaffected_by_the_finalization_contract():
     deps, bd, _fs, _state = _install_deps()
     code, _st = run(["status", "worker"], deps)
     assert code in (0, 2)
+
+
+# --------------- adversarial re-review of a1dcadb: R5 cleanup-absence must FAIL CLOSED (2b-3c-c)
+
+
+def _seed_tx_backup(fs, loc, *, tx: str, handle: str = "marker.prior") -> str:
+    root = f"{loc.bootstrap_state}/finalization-staging"
+    for seg in (root, f"{root}/{tx}"):
+        if fs.lstat(seg) is None:
+            fs.seed_dir(seg, uid=0, gid=0, mode=0o700)
+    path = f"{root}/{tx}/{handle}"
+    fs.seed_file(path, b"prior", uid=0, gid=0, mode=0o600)
+    return path
+
+
+def test_cleanup_absence_fails_closed_when_the_staging_sweep_cannot_enumerate():
+    # A signed `staging_objects_absent=True` may NEVER rest on an unprovable sweep: an enumeration
+    # fault is a RESIDUAL, not an absence. (The R1 inventory's counter is deliberately fail-open
+    # because there the staging root's presence already fails freshness closed; reusing it here
+    # would let a real staged backup be claimed absent.)
+    from secp_management.engine import _finalization_cleanup_absent
+
+    deps, _bd, fs = _committed_controller()
+    loc = deps.locations
+    _seed_tx_backup(fs, loc, tx="sha256:" + "e" * 64)
+    assert _finalization_cleanup_absent(deps) is False  # the real backup is seen
+
+    class _FaultingList:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def list_dir(self, path):
+            raise RuntimeError("enumeration fault")
+
+    faulted = dataclasses.replace(deps, fs=_FaultingList(fs))
+    assert _finalization_cleanup_absent(faulted) is False  # unprovable -> NOT absent
+
+
+def test_cleanup_absence_fails_closed_beyond_the_bounded_transaction_sweep():
+    # more staging transaction directories than can be bounded-probed is unprovable, so the claim
+    # must be refused rather than silently ignoring residuals past the bound.
+    from secp_management.engine import _MAX_STAGING_TRANSACTIONS, _finalization_cleanup_absent
+
+    deps, _bd, fs = _committed_controller()
+    loc = deps.locations
+    for n in range(_MAX_STAGING_TRANSACTIONS + 1):
+        _seed_tx_backup(fs, loc, tx=f"tx-{n:04d}")
+    assert _finalization_cleanup_absent(deps) is False

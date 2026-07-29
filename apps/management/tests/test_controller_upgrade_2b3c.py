@@ -1397,3 +1397,40 @@ def test_rollback_restores_the_prior_stack_before_it_reactivates_the_prior_gener
 
     # and the prior stack is observably back on its own signed images + compose bytes
     assert world.controller_containers == A_IMAGES, world.controller_containers
+
+
+# ------------- adversarial re-review of a1dcadb: R6 total failure containment (2b-3c-c)
+
+
+def test_a_non_management_error_during_rollback_never_escapes_unclassified(monkeypatch):
+    """REGRESSION: `FilesystemError` is a CommissioningError, NOT a ManagementError. A rollback that
+    faulted on one previously escaped `_upgrade_rollback` entirely -- the rollback participant was
+    never compensated, the enablement marker was left binding the rollback's newly activated row
+    with no evidence or attestation written for it, and the operator saw a raw traceback instead of
+    a bounded refusal. Every fault must now be contained, compensated and classified."""
+    from secp_commissioning.runtime import FilesystemError
+    from secp_management import engine as eng
+
+    deps, fs, world, state = _upgrade_setup(runtime_fail_generations=frozenset({1}))
+    _install_a(deps)
+
+    real_drive = eng._drive_controller_finalization
+    calls = {"n": 0}
+
+    def _drive(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_drive(*a, **k)  # the FORWARD drive runs (and fails its runtime gate)
+        # the ROLLBACK re-drive faults with a NON-ManagementError
+        state_holder = k.get("state")
+        if state_holder is not None:
+            state_holder.adapter = object()  # a participant now exists and must be compensated
+        raise FilesystemError("fs_atomic_install_failed")
+
+    monkeypatch.setattr(eng, "_drive_controller_finalization", _drive)
+
+    code, rep = run(_install_argv(BD_B, write=True), deps)
+    # contained: a bounded refusal, never a raw traceback escaping run()/cli.main
+    assert code == 2, rep
+    assert rep["reason_code"] == "recovery_required", rep
+    assert calls["n"] >= 2  # the rollback re-drive really was attempted

@@ -21,7 +21,10 @@ What it is:
   the signer, the lease, or the enrollment key is ever reached;
 * NONSECRET — the payload carries only PUBLIC installation facts (the same facts the root-owned
   world-readable marker already carries plus the process uid/gid and closed status vocabularies).
-  No key, credential, DSN, socket path, header, token or raw exception ever enters it;
+  No key, credential, verifier, DSN, header or raw exception ever enters it. It DOES carry the fixed
+  UDS contract path and the activation tokens, exactly as the world-readable marker already does --
+  they are concurrency identifiers, not secrets -- so the route must be treated as exposing every
+  public installation identifier to any peer that can reach it;
 * STRICT + VERSIONED + BOUNDED — exactly the closed field set of :data:`SIGNER_READINESS_FIELDS`
   under the single :data:`SIGNER_READINESS_SCHEMA` literal, re-validated against its own strict
   model and refused if it exceeds :data:`SIGNER_READINESS_MAX_BYTES`. There is no negotiation and no

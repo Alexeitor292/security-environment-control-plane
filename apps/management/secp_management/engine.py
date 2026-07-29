@@ -1319,6 +1319,9 @@ def _controller_evidence(
 # ------------------------------------------------------------------- controller finalization
 # (2b-3c)
 
+#: the bounded number of staging transaction directories the R5 sweep will probe; more than
+#: this cannot be proven absent and is reported as a residual.
+_MAX_STAGING_TRANSACTIONS = 64
 _FINALIZATION_TXID_SCHEMA = "secp.management.finalization-txid/v1"
 
 # Activation failures whose outcome is DETERMINATE: the refusal was REPORTED (or raised by an engine
@@ -2008,6 +2011,18 @@ def _restore_controller_stack(
     return True, tuple(residual)
 
 
+def _compensate_rollback_documents(holder: list[_DocWriter]) -> bool:
+    """Reverse the ROLLBACK participant's own document writes (R6). A rollback that installed
+    evidence but failed before its attestation verified must not leave that pair installed and
+    unclassified. Never raises: the caller already fails closed to recovery_required."""
+    if not holder:
+        return True
+    try:
+        return bool(holder[-1].compensate().proven)
+    except Exception:  # noqa: BLE001 - an unprovable document unwind is never proof of cleanliness
+        return False
+
+
 def _upgrade_rollback(
     prior_ev: BootstrapEvidence,
     install: ControllerInstallOptions | None,
@@ -2059,6 +2074,9 @@ def _upgrade_rollback(
     # (3) reactivate the prior identity as a NEW row at N+2 (predecessor = the failed candidate) +
     #     write the rollback marker + prove the runtime healthy
     rb_state = _DriveState()
+    # the rollback's OWN document writer, published as it is created so every failure path below can
+    # reverse a half-written or ungated rollback evidence/attestation pair.
+    rb_writer_holder: list[_DocWriter] = []
     try:
         _rb_adapter, _rb_receipt, rb_fin_ev = _drive_controller_finalization(
             record_a,
@@ -2072,14 +2090,18 @@ def _upgrade_rollback(
             previous_active_row_id=c_row,
             state=rb_state,
         )
-    except ManagementError as exc:
-        _compensate_rollback_participant(rb_state, exc.reason_code)  # R6: never a bare False
+    except Exception as exc:  # noqa: BLE001 - ANY fault (incl. FilesystemError, which is NOT a
+        # ManagementError) must compensate the rollback participant; letting one escape would strand
+        # its marker/identity effects and surface a traceback instead of recovery_required.
+        _compensate_rollback_participant(rb_state, getattr(exc, "reason_code", None))
+        _compensate_rollback_documents(rb_writer_holder)
         return False
     # (4) re-author the prior evidence to bind the new active row + re-sign, then (5) commit-gate it
     evidence_a_prime = prior_ev.model_copy(
         update={"finalization": rb_fin_ev, "transaction_timestamp": deps.now()}
     )
     rb_writer = _DocWriter(deps.filesystem(), loc)
+    rb_writer_holder.append(rb_writer)
     try:
         _write_evidence_and_attestation(
             Role.CONTROLLER,
@@ -2089,25 +2111,28 @@ def _upgrade_rollback(
             deps,
             rb_writer,
         )
-    except ManagementError as exc:
-        _compensate_rollback_participant(rb_state, exc.reason_code)
+    except Exception as exc:  # noqa: BLE001 - see above: a filesystem fault is not a ManagementError
+        _compensate_rollback_participant(rb_state, getattr(exc, "reason_code", None))
+        _compensate_rollback_documents(rb_writer_holder)
         return False
-    if (
-        _verify_committed_transaction(
+    try:
+        gate = _verify_committed_transaction(
             Role.CONTROLLER,
             deps,
             expected_mode=MODE_INSTALLED,
             expected_aggregate=record_a.aggregate_digest,
         )
-        is not None
-    ):
-        _compensate_rollback_participant(rb_state)
-        return False
-    if _verify_marker_binding(deps, evidence_a_prime) is not None:
-        _compensate_rollback_participant(rb_state)
-        return False
-    if rb_state.adapter is not None and not rb_state.adapter.commit():  # type: ignore[attr-defined]
-        _compensate_rollback_participant(rb_state)
+        if gate is not None:
+            raise ManagementError(gate)
+        if _verify_marker_binding(deps, evidence_a_prime) is not None:
+            raise ManagementError("controller_marker_identity_drift")
+        # the rollback adapter's own cleanup is a participant effect too: an unproven commit means
+        # its staging/journal state is unaccounted for.
+        if rb_state.adapter is not None and not rb_state.adapter.commit():  # type: ignore[attr-defined]
+            raise ManagementError("recovery_required")
+    except Exception as exc:  # noqa: BLE001 - total containment: no fault may escape unclassified
+        _compensate_rollback_participant(rb_state, getattr(exc, "reason_code", None))
+        _compensate_rollback_documents(rb_writer_holder)
         return False
     return True
 
@@ -2387,32 +2412,37 @@ def _finalization_cleanup_absent(deps: EngineDeps) -> bool:
     """Independently OBSERVE that the finalization recovery journal and every staging/backup object
     is gone (R5). The committed evidence may claim absence ONLY when this returns True.
 
-    Staged rollback copies live at ``finalization-staging/<transaction id>/<fixed handle>``, so the
-    sweep must descend into the per-transaction directories -- probing only the staging ROOT would
-    make the signed ``staging_objects_absent`` claim unobservable and therefore worthless. This
-    reuses the SAME bounded, code-owned probe the R1 pre-mutation inventory counts with, so the two
-    can never disagree about what a residual is."""
+    This performs its OWN strict sweep rather than reusing the R1 inventory's counter: that counter
+    is deliberately fail-OPEN (an enumeration fault yields 0, and entries beyond a bound are not
+    probed) because there the staging root's mere presence already fails freshness closed.
+    Here the root's presence is NOT a failure, so the same behaviours would let a signed
+    `staging_objects_absent=True` be claimed while real backups remained on disk. Every uncertainty
+    below is therefore treated as a RESIDUAL, never as an absence."""
     from secp_management.controller_finalization_inventory import (
-        _staged_backup_objects,
+        _STAGING_BACKUP_HANDLES,
         finalization_recovery_journal_path,
         finalization_staging_root,
     )
 
     loc = deps.locations
     fs = deps.filesystem()
-
-    class _Probe:
-        fs = None  # replaced below; the inventory probe only needs `.fs`
-
-    probe = _Probe()
-    probe.fs = fs  # type: ignore[assignment]
     try:
         if fs.lstat(finalization_recovery_journal_path(loc)) is not None:  # type: ignore[attr-defined]
             return False
         root = finalization_staging_root(loc)
         if fs.lstat(root) is None:  # type: ignore[attr-defined]
             return True  # never created (or already swept) -> nothing staged remains
-        return _staged_backup_objects(probe, root) == 0  # type: ignore[arg-type]
+        entries = fs.list_dir(root)  # type: ignore[attr-defined]
+        if entries is None:
+            return False
+        if len(entries) > _MAX_STAGING_TRANSACTIONS:
+            # more transaction directories than can be bounded-probed: unprovable, so NOT absent.
+            return False
+        for entry in entries:
+            for handle in _STAGING_BACKUP_HANDLES:
+                if fs.lstat(f"{root}/{entry}/{handle}") is not None:  # type: ignore[attr-defined]
+                    return False
+        return True
     except Exception:  # noqa: BLE001 - an unprovable sweep is NOT proof of absence
         return False
 
