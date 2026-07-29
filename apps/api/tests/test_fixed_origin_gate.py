@@ -371,3 +371,23 @@ def test_each_domains_error_type_is_caught_by_the_shared_base() -> None:
     assert not issubclass(EnrollmentSignerReadinessGateError, WorkerAdmissionProxyGateError)
     with pytest.raises(WorkerAdmissionProxyGateError):
         WORKER_ADMISSION_PROXY_GATE.parse(b"nope")
+
+
+def test_no_serialization_or_copy_path_yields_the_value() -> None:
+    """A redacted repr is only half a control: pickle and copy reach slot state directly, so any
+    serializer, structured logger or error reporter could otherwise bypass the redaction."""
+    import copy as _copy
+    import pickle as _pickle
+
+    secret = _gate_at("/run/secp/test-gate.secret").parse(b"ab" * 32 + b"\n")
+    for attempt in (
+        lambda: _pickle.dumps(secret),
+        lambda: _copy.copy(secret),
+        lambda: _copy.deepcopy(secret),
+    ):
+        with pytest.raises(FixedOriginGateError) as exc:
+            attempt()
+        assert exc.value.reason_code.endswith("_not_serializable")
+    # the value still leaves by the two intended paths, and only those.
+    assert secret.header_value() == "ab" * 32
+    assert secret.matches_raw_header_values((b"ab" * 32,)) is True

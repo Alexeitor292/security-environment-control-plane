@@ -39,7 +39,7 @@ import hmac
 import os
 import re
 import stat
-from typing import ClassVar
+from typing import ClassVar, NoReturn
 
 from fastapi import Request
 
@@ -101,6 +101,26 @@ class FixedOriginGateSecret:
 
     def __str__(self) -> str:
         return "<redacted>"
+
+    # A redacted repr is only half a control: `pickle`/`copy` reach slot state directly and would
+    # hand out the raw value, so any serializer, structured logger or error reporter could bypass
+    # the redaction above. Every serialization and copy path is therefore refused outright -- the
+    # value leaves this object ONLY through `header_value()` (one outbound request) and through the
+    # constant-time comparison. Refusing is safe: nothing legitimately copies or pickles a gate.
+    def __reduce__(self) -> NoReturn:
+        raise self.error_class(f"{self.reason_prefix}_not_serializable")
+
+    def __reduce_ex__(self, protocol: int) -> NoReturn:
+        raise self.error_class(f"{self.reason_prefix}_not_serializable")
+
+    def __getstate__(self) -> NoReturn:
+        raise self.error_class(f"{self.reason_prefix}_not_serializable")
+
+    def __copy__(self) -> NoReturn:
+        raise self.error_class(f"{self.reason_prefix}_not_serializable")
+
+    def __deepcopy__(self, memo: object) -> NoReturn:
+        raise self.error_class(f"{self.reason_prefix}_not_serializable")
 
     def header_value(self) -> str:
         """Return the value only for construction of the trusted hop's single upstream request."""
