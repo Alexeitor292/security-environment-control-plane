@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from secp_commissioning.descriptor import scan_forbidden
@@ -223,6 +224,37 @@ def _compose_engine_deps(*, fs: Any, runner: Any, finalization: bool) -> EngineD
         # transaction builds one fresh adapter per install from its authenticated plan. The sealed
         # finalization_adapter default is left in place (unused when a factory is present).
         extra["finalization_factory"] = build_real_finalization_factory(ctx)
+        # R1: the read-only PRE-MUTATION finalization inventory, whose dedicated-role/identity facts
+        # come from the fixed read-only API one-shot through the reviewed root->API boundary.
+        from secp_management.controller_finalization_inventory import (
+            build_oneshot_finalization_db_probe,
+            observe_finalization_inventory,
+        )
+
+        _probe = build_oneshot_finalization_db_probe(ctx)
+        extra["finalization_inventory"] = lambda: observe_finalization_inventory(
+            ctx, role_probe=_probe
+        )
+        # R3: the read-only LIVE finalization state observer used by exact replay + managed-upgrade
+        # eligibility (mutation-free).
+        from secp_management.controller_finalization_state import (
+            ControllerStateContext,
+            build_controller_finalization_state_observer,
+        )
+        from secp_management.enrollment_signer_runtime_observer import (
+            build_api_signer_runtime_observer,
+        )
+
+        extra["finalization_state_observer"] = build_controller_finalization_state_observer(
+            ControllerStateContext(
+                host=ctx,
+                # unbound: proves nothing by itself (fail-closed) and is never used in production --
+                # the expectation-bound seam below always takes precedence.
+                runtime_observer=build_api_signer_runtime_observer(ctx),
+                runtime_observer_for=_runtime_observation_for(ctx),
+                generation_probe=lambda: _probe().activation_generation,
+            )
+        )
     return EngineDeps(
         locations=locations,
         trust_root=trust_root,
@@ -279,25 +311,93 @@ def build_real_finalization_factory(ctx: RealAdapterContext) -> Any:
         FinalizationContext,
         RealControllerEnrollmentFinalizationAdapter,
     )
-    from secp_management.enrollment_signer_runtime_observer import (
-        build_api_signer_runtime_observer,
-    )
     from secp_management.topology import API_RUNTIME_GID, API_RUNTIME_UID
 
-    observer = build_api_signer_runtime_observer(ctx)
-
     def _factory(plan: Any) -> Any:
+        # R4: the runtime observer is PLAN-BOUND. It is never constructed unbound, and the complete
+        # ApiSignerRuntimeExpectations is deferred until observe(marker) runs AFTER activation --
+        # only genuinely post-activation facts (the active identity row, its activation token, the
+        # activation-receipt-bound key identity) come from the marker; every independently available
+        # fact comes from the authenticated plan, the signed release and fixed code-owned contracts.
         return RealControllerEnrollmentFinalizationAdapter(
             FinalizationContext(
                 host=ctx,
                 api_uid=API_RUNTIME_UID,
                 api_gid=API_RUNTIME_GID,
-                runtime_observer=observer,
+                runtime_observer=PlanBoundApiSignerRuntimeObserver(ctx=ctx, plan=plan),
             ),
             plan=plan,
         )
 
     return _factory
+
+
+def _runtime_observation_for(ctx: RealAdapterContext) -> Any:
+    """The REPLAY / UPGRADE-ELIGIBILITY runtime seam (R4). It derives the complete
+    ApiSignerRuntimeExpectations from the ALREADY-AUTHENTICATED installed state the caller proved
+    (the verified release's signed controller/api image, its release digest + installation id, and
+    the current durable generation), taking from the marker only the activation-receipt-bound token
+    that genuinely arises after activation."""
+
+    def _observe(expected: Any, marker: Any) -> Any:
+        from secp_management.enrollment_signer_runtime_observer import (
+            ApiSignerRuntimeExpectations,
+            build_api_signer_runtime_observer,
+        )
+
+        loc = ctx.locations
+        runtime_expected = ApiSignerRuntimeExpectations(
+            api_image_digest=expected.api_image_digest,
+            release_digest=expected.release_digest,
+            installation_id=expected.installation_id,
+            finalization_generation=expected.generation,
+            controller_stack_generation=expected.generation,
+            active_identity_row_id=expected.active_identity_row_id,
+            active_identity_activation_token=marker.activation_token,
+            marker=marker,
+            broker_unit_path=loc.broker_unit_path(),
+            broker_socket_path=loc.broker_socket_path(),
+        )
+        return build_api_signer_runtime_observer(ctx, expected=runtime_expected)(marker)
+
+    return _observe
+
+
+@dataclass(frozen=True)
+class PlanBoundApiSignerRuntimeObserver:
+    """The production runtime-observer seam, BOUND to one authenticated finalization plan.
+
+    The finalization adapter calls it as ``runtime_observer(marker)`` after it has written the
+    candidate marker and restarted the API. Only then are all the facts available, so the complete
+    independently-derived expectation is assembled here and handed to the authoritative observer.
+    Constructing it requires no contact and performs no observation."""
+
+    ctx: RealAdapterContext
+    plan: Any
+
+    def __call__(self, marker: Any) -> Any:
+        from secp_management.enrollment_signer_runtime_observer import (
+            ApiSignerRuntimeExpectations,
+            build_api_signer_runtime_observer,
+        )
+
+        loc = self.ctx.locations
+        expected = ApiSignerRuntimeExpectations(
+            # --- independently authenticated STATIC facts (plan + signed release) ---
+            api_image_digest=self.plan.expected_api_image_digest,
+            release_digest=self.plan.release_digest,
+            installation_id=self.plan.controller_installation_id,
+            finalization_generation=self.plan.generation,
+            controller_stack_generation=self.plan.controller_stack_generation,
+            # --- fixed code-owned contracts ---
+            broker_unit_path=loc.broker_unit_path(),
+            broker_socket_path=loc.broker_socket_path(),
+            # --- genuinely POST-ACTIVATION facts (activation-receipt bound, via the candidate) ---
+            active_identity_row_id=marker.active_identity_row_id,
+            active_identity_activation_token=marker.activation_token,
+            marker=marker,
+        )
+        return build_api_signer_runtime_observer(self.ctx, expected=expected)(marker)
 
 
 def controller_install_engine_deps(*, fs: Any = None, runner: Any = None) -> EngineDeps:

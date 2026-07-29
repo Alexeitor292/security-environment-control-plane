@@ -151,7 +151,15 @@ class ControllerEnrollmentFinalizationPlan:
     release_digest: str
     management_identity_digest: str
     bootstrap_evidence_digest: str
-    generation: int  # the authenticated finalization generation this plan installs (F6)
+    generation: int
+    # R4 (2b-3c-c): the INDEPENDENTLY DERIVED static runtime expectations. The image digest comes
+    # from the SIGNED controller/api purpose mapping of the verified release -- never a manifest
+    # field, an unsigned Compose scan, an environment variable, a Docker observation, the marker, or
+    # a caller-selectable argument. The stack generation is the authenticated generation of the
+    # candidate controller stack that was applied AND proven before finalization (R2). Both default
+    # empty/0 so an uncomposed caller stays FAIL-CLOSED rather than silently authorising.
+    expected_api_image_digest: str = ""
+    controller_stack_generation: int = 0  # authenticated generation of the applied stack (R2)
 
 
 # --------------------------------------------------------------------- receipt + protocol

@@ -52,6 +52,7 @@ from secp_commissioning.controller_enrollment_signer import (
     key_id_for,
     prepare_controller_enrollment_key,
 )
+from secp_commissioning.enrollment_signer_marker import render_marker_bytes
 from secp_commissioning.runtime import FilesystemError
 
 from secp_management import ManagementError
@@ -112,7 +113,6 @@ _RESTART_TIMEOUT = 300
 
 _PROVISION_SCHEMA = "secp.enrollment-signer-role-provision/v1"
 _ACTIVATION_SCHEMA = "secp.controller-identity-activation/v1"
-_MARKER_SCHEMA = "secp.enrollment-signer-enablement/v1"
 _JOURNAL_SCHEMA = "secp.controller-finalization-journal/v1"
 
 _IDENTITY_FIELDS = (
@@ -1218,23 +1218,23 @@ class RealControllerEnrollmentFinalizationAdapter:
             _reject("finalization_marker_binding_disagreement")
 
     def _render_marker(self, marker: ApiSignerMarker) -> bytes:
-        obj = {
-            "schema": _MARKER_SCHEMA,
-            "installation_id": marker.installation_id,
-            "release_digest": marker.release_digest,
-            "active_identity_row_id": marker.active_identity_row_id,
-            "activation_token": marker.activation_token,
-            "controller_key_id": marker.controller_key_id,
-            "uds_contract_identity": marker.uds_contract_identity,
-            "api_uid": marker.api_uid,
-            "api_gid": marker.api_gid,
-            "signer_role_name": marker.signer_role_name,
-            "locator_ca_digest": marker.locator_ca_digest,
-            "management_identity_digest": marker.management_identity_digest,
-            "bootstrap_evidence_digest": marker.bootstrap_evidence_digest,
-            "recorded_at": _utc(self._now(UTC)),
-        }
-        return canonical_json(obj).encode("utf-8")
+        """Render the enablement marker through the ONE plane-neutral strict contract (R7), so the
+        writer can never drift from the parser every consumer (API + management) validates with."""
+        return render_marker_bytes(
+            installation_id=marker.installation_id,
+            release_digest=marker.release_digest,
+            active_identity_row_id=marker.active_identity_row_id,
+            activation_token=marker.activation_token,
+            controller_key_id=marker.controller_key_id,
+            uds_contract_identity=marker.uds_contract_identity,
+            api_uid=marker.api_uid,
+            api_gid=marker.api_gid,
+            signer_role_name=marker.signer_role_name,
+            locator_ca_digest=marker.locator_ca_digest,
+            management_identity_digest=marker.management_identity_digest,
+            bootstrap_evidence_digest=marker.bootstrap_evidence_digest,
+            recorded_at=_utc(self._now(UTC)),
+        )
 
     def _reobserve_active(self) -> Any:
         if self._password is None:

@@ -15,16 +15,17 @@ no write), and that the module never imports ``secp_api`` (the management-plane 
 from __future__ import annotations
 
 import ast
-import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+from secp_commissioning.canonical import canonical_json
 from secp_commissioning.controller_enrollment_signer import (
     ENROLLMENT_SIGNER_SOCKET_PATH,
     SigningIdentityLease,
 )
+from secp_commissioning.enrollment_signer_marker import render_marker_bytes
 from secp_commissioning.runtime import InMemoryFilesystem
 from secp_management import ManagementError
 from secp_management import controller_finalization_state as state_mod
@@ -133,7 +134,15 @@ def _marker_bytes(**overrides: object) -> bytes:
         "recorded_at": "2026-07-28T00:00:00Z",
     }
     obj.update(overrides)
-    return json.dumps(obj).encode("utf-8")
+    if not overrides:
+        # the CONFORMANT baseline is rendered through the ONE shared strict contract, so the fixture
+        # can never drift from what production writes.
+        return render_marker_bytes(**{k: v for k, v in obj.items() if k != "schema"})
+    # A drift/hostile case deliberately carries values the fixed contract forbids (a foreign schema,
+    # a non-reviewed role/UDS path, a root api uid/gid...). Such bytes can only come from a
+    # hand-crafted file, so they are emitted canonically WITHOUT the strict renderer — the strict
+    # PARSER refusing them (marker unproven -> stale) is exactly the behaviour under test.
+    return canonical_json(obj).encode("utf-8")
 
 
 def _observation(**overrides: bool) -> ApiSignerRuntimeObservation:

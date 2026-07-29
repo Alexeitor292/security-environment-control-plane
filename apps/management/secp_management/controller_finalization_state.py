@@ -44,7 +44,6 @@ Discipline (identical to the finalization adapter it complements):
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -54,6 +53,7 @@ from secp_commissioning.controller_enrollment_signer import (
     ENROLLMENT_IDENTITY_ADVISORY_LOCK_KEY,
     ENROLLMENT_SIGNER_SOCKET_PATH,
 )
+from secp_commissioning.enrollment_signer_marker import parse_marker_bytes_or_none
 
 from secp_management import ManagementError
 from secp_management.controller_finalization import ApiSignerRuntimeObservation
@@ -113,7 +113,6 @@ _PROBE_TIMEOUT = 20
 _CONNECT_TIMEOUT_SECONDS = 5.0
 _UNPROVEN_GENERATION = -1
 
-_MARKER_SCHEMA = "secp.enrollment-signer-enablement/v1"
 _PASSWORD_GRAMMAR = re.compile(r"[0-9a-f]{32,128}")
 _FULL_CID = re.compile(r"[0-9a-f]{64}")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
@@ -363,6 +362,12 @@ class ControllerStateContext:
     host: RealAdapterContext
     runtime_observer: Callable[[ApiSignerMarker], ApiSignerRuntimeObservation]
     generation_probe: Callable[[], int | None]
+    # R4: the EXPECTATION-BOUND runtime seam. Production supplies this so the live observation is
+    # compared against the independently authenticated installed release + current generation; when
+    # it is None the plain ``runtime_observer`` seam is used (the hermetic tests' exact fakes).
+    runtime_observer_for: Callable[[Any, ApiSignerMarker], ApiSignerRuntimeObservation] | None = (
+        None
+    )
     api_uid: int = API_RUNTIME_UID
     api_gid: int = API_RUNTIME_GID
     db_base_url: str | None = None
@@ -425,7 +430,7 @@ class ControllerFinalizationStateObserver:
         marker_exact = marker is not None and self._marker_binds(marker, lease, expected)
 
         # 4. the LIVE API signer runtime observation (only meaningful against a parsed marker).
-        obs, runtime_observed = self._observe_runtime(marker)
+        obs, runtime_observed = self._observe_runtime(marker, expected)
         api_live = bool(obs.api_present and obs.api_non_root and obs.api_healthy)
         api_unsealed = bool(
             obs.marker_mounted_readonly
@@ -615,23 +620,29 @@ class ControllerFinalizationStateObserver:
             ):
                 return None
             raw = ctx.host.fs.safe_read(path, max_bytes=_MAX_READ, expected_uid=_ROOT_UID)
-            obj = json.loads(raw.decode("utf-8"))
-        except Exception:  # noqa: BLE001 - unreadable / malformed marker -> not a proven marker
+        except Exception:  # noqa: BLE001 - unreadable marker -> not a proven marker
             return None
-        if not isinstance(obj, dict) or obj.get("schema") != _MARKER_SCHEMA:
+        # R7: the ONE plane-neutral STRICT contract (canonical bytes, duplicate-key rejection,
+        # extra/missing-field rejection, exact types + grammar, fixed role + UDS contract), so a
+        # marker management accepts here is EXACTLY a marker the API accepts.
+        parsed = parse_marker_bytes_or_none(raw)
+        if parsed is None:
             return None
-        values: dict[str, Any] = {}
-        for field_name in _MARKER_STR_FIELDS:
-            value = obj.get(field_name)
-            if not isinstance(value, str) or not value:
-                return None
-            values[field_name] = value
-        for field_name in _MARKER_INT_FIELDS:
-            value = obj.get(field_name)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                return None
-            values[field_name] = value
-        return ApiSignerMarker(marker_path=path, **values)
+        return ApiSignerMarker(
+            marker_path=path,
+            installation_id=parsed.installation_id,
+            release_digest=parsed.release_digest,
+            active_identity_row_id=parsed.active_identity_row_id,
+            activation_token=parsed.activation_token,
+            controller_key_id=parsed.controller_key_id,
+            uds_contract_identity=parsed.uds_contract_identity,
+            api_uid=parsed.api_uid,
+            api_gid=parsed.api_gid,
+            signer_role_name=parsed.signer_role_name,
+            locator_ca_digest=parsed.locator_ca_digest,
+            management_identity_digest=parsed.management_identity_digest,
+            bootstrap_evidence_digest=parsed.bootstrap_evidence_digest,
+        )
 
     def _marker_binds(
         self, marker: ApiSignerMarker, lease: Any, expected: ExpectedControllerState
@@ -668,7 +679,7 @@ class ControllerFinalizationStateObserver:
 
     # ---- live runtime ----
     def _observe_runtime(
-        self, marker: ApiSignerMarker | None
+        self, marker: ApiSignerMarker | None, expected: Any = None
     ) -> tuple[ApiSignerRuntimeObservation, bool]:
         """Take the one authoritative live runtime observation against the on-disk marker. Returns
         ``(observation, taken)``; ``taken`` is False when there was no readable marker to bind, the
@@ -677,7 +688,11 @@ class ControllerFinalizationStateObserver:
         if marker is None:
             return _fail_closed_observation(), False
         try:
-            obs = self._ctx.runtime_observer(marker)
+            if self._ctx.runtime_observer_for is not None and expected is not None:
+                # R4: bind the observation to the independently authenticated expectation.
+                obs = self._ctx.runtime_observer_for(expected, marker)
+            else:
+                obs = self._ctx.runtime_observer(marker)
         except Exception:  # noqa: BLE001 - an observer fault proves nothing -> fail closed
             return _fail_closed_observation(), False
         if not isinstance(obs, ApiSignerRuntimeObservation):

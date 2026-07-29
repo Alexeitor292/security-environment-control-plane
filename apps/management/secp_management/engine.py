@@ -24,13 +24,19 @@ no infrastructure.
 
 from __future__ import annotations
 
-import json
 import posixpath
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
-from secp_commissioning.canonical import canonical_json, sha256_bytes, sha256_digest
+from secp_commissioning.canonical import (
+    canonical_json,
+    is_sha256_digest,  # noqa: F401
+    sha256_bytes,
+    sha256_digest,
+)
+from secp_commissioning.enrollment_signer_marker import parse_marker_bytes_or_none
 from secp_commissioning.runtime import FileStat
 
 from secp_management import BOOTSTRAP_CONTRACT_VERSION, ManagementError
@@ -185,6 +191,13 @@ class EngineDeps:
         Callable[[ControllerEnrollmentFinalizationPlan], ControllerEnrollmentFinalizationAdapter]
         | None
     ) = None
+    # R1: the read-only PRE-MUTATION finalization inventory (every fixed object + the dedicated DB
+    # role/identity through the fixed read-only API one-shot). None -> a driven controller install
+    # REFUSES: fresh can never be inferred from the five documents + marker alone again.
+    finalization_inventory: Callable[[], Any] | None = None
+    # R3: the read-only LIVE finalization state observer used by exact replay + managed-upgrade
+    # eligibility. None -> those paths REFUSE rather than trusting documents/marker alone.
+    finalization_state_observer: Callable[..., Any] | None = None
     # the management signing seam that attests evidence, and the anchor that verifies the
     # attestation.
     # SHIPPED sealed / empty → production cannot attest or verify → bootstrap/status fail closed.
@@ -638,6 +651,12 @@ def _controller_install_replay(
     marker_reason = _verify_marker_binding(deps, ev)
     if marker_reason is not None:
         raise ManagementError(marker_reason)
+    # R3: an exact replay must ALSO prove the LIVE signer system (single active identity, marker
+    # binding, dedicated role + credential, broker transport, API runtime, generation agreement).
+    # This observation is mutation-free, so the replay remains mutation-free.
+    live_reason = _live_state_refusal(ev, ident, vr, deps)
+    if live_reason is not None:
+        raise ManagementError(live_reason)
     return ident, ev
 
 
@@ -658,28 +677,28 @@ def _verify_marker_binding(deps: EngineDeps, ev: BootstrapEvidence) -> str | Non
         return "controller_marker_unsafe"
     try:
         raw = fs.safe_read(path, max_bytes=_MAX_DOC_BYTES, expected_uid=_ROOT_UID)  # type: ignore[attr-defined]
-        marker = json.loads(raw.decode("ascii"))
-    except Exception:  # noqa: BLE001 - unreadable/malformed marker is drift, not a crash
+    except Exception:  # noqa: BLE001 - an unreadable marker is drift, not a crash
         return "controller_marker_unreadable"
-    if not isinstance(marker, dict):
+    # R7: parse through the ONE plane-neutral STRICT contract (canonical bytes, duplicate-key
+    # rejection, extra/missing-field rejection, exact types + grammar, fixed role + UDS contract),
+    # so management can never accept a marker the API's own loader refuses.
+    parsed = parse_marker_bytes_or_none(raw)
+    if parsed is None:
         return "controller_marker_unreadable"
-    try:
-        subset = {
-            "installation_id": marker["installation_id"],
-            "release_digest": marker["release_digest"],
-            "active_identity_row_id": marker["active_identity_row_id"],
-            "controller_key_id": marker["controller_key_id"],
-            "uds_contract_identity": marker["uds_contract_identity"],
-            "signer_role_name": marker["signer_role_name"],
-            "locator_ca_digest": marker["locator_ca_digest"],
-            "bootstrap_evidence_digest": marker["bootstrap_evidence_digest"],
-            "management_identity_digest": marker["management_identity_digest"],
-            "api_uid": marker["api_uid"],
-            "api_gid": marker["api_gid"],
-        }
-        token = marker["activation_token"]
-    except (KeyError, TypeError):
-        return "controller_marker_incomplete"
+    subset = {
+        "installation_id": parsed.installation_id,
+        "release_digest": parsed.release_digest,
+        "active_identity_row_id": parsed.active_identity_row_id,
+        "controller_key_id": parsed.controller_key_id,
+        "uds_contract_identity": parsed.uds_contract_identity,
+        "signer_role_name": parsed.signer_role_name,
+        "locator_ca_digest": parsed.locator_ca_digest,
+        "bootstrap_evidence_digest": parsed.bootstrap_evidence_digest,
+        "management_identity_digest": parsed.management_identity_digest,
+        "api_uid": parsed.api_uid,
+        "api_gid": parsed.api_gid,
+    }
+    token = parsed.activation_token
     if _sep_digest("secp.management.api-signer-marker/v1", subset) != fin.marker_identity:
         return "controller_marker_identity_drift"
     token_digest = _sep_digest("secp.management.activation-token/v1", token)
@@ -1374,12 +1393,31 @@ def _classify_controller_install(
     fs = deps.filesystem()
     loc = deps.locations
     marker_present = fs.lstat(loc.api_signer_marker_path()) is not None  # type: ignore[attr-defined]
+    # R1: classify the COMPLETE finalization installation before ANY mutation. Fresh now means every
+    # installer-owned object is absent (TLS set, locator, credential, enrollment key, broker unit /
+    # service / socket, both handoffs, marker, recovery journal, staging + backups) AND the
+    # dedicated
+    # signer role, active identity and activation/generation state are absent. Any orphan or partial
+    # set refuses with its own bounded, object-specific reason instead of being silently adopted.
+    inv = deps.finalization_inventory() if deps.finalization_inventory is not None else None
+    if inv is None:
+        return _ControllerInstallClassification(
+            "finalization_inventory_not_composed", None, 0, None
+        )
     if base.fresh:
         if marker_present:  # a clean bootstrap host must ALSO carry no managed finalization state
             return _ControllerInstallClassification(
                 "controller_install_finalization_orphan", None, 0, None
             )
+        if not inv.is_fresh:
+            return _ControllerInstallClassification(inv.orphan_reason, None, 0, None)
         return _ControllerInstallClassification(None, CLASSIFY_FRESH, 0, None)
+    if inv.has_transient_state:
+        # a handoff / recovery journal / staging object means an INTERRUPTED transaction, never a
+        # complete install that may be replayed or upgraded.
+        return _ControllerInstallClassification(inv.transient_reason, None, 0, None)
+    if not inv.is_complete:
+        return _ControllerInstallClassification(inv.complete_reason, None, 0, None)
     if base.reason == "preexisting_changed_release":
         # a changed release is the ONLY case eligible for a managed upgrade — and only after the
         # prior complete B2 install is fully re-authenticated and the new release is proven a linear
@@ -1440,8 +1478,66 @@ def _classify_upgrade_eligibility(
         return _ControllerInstallClassification(
             "controller_upgrade_not_linear_successor", None, 0, None
         )
+    # R3: the prior installation must be LIVE-PROVEN before it may be upgraded -- exactly one
+    # verified ACTIVE identity, the exact marker binding, the dedicated role + credential, the
+    # broker
+    # transport and the API signer runtime, with every generation field in agreement. Documents and
+    # the marker file alone are never sufficient.
+    live_reason = _live_state_refusal(ev, ident, record, deps)
+    if live_reason is not None:
+        return _ControllerInstallClassification(live_reason, None, 0, None)
     generation = ev.finalization.generation + 1
     return _ControllerInstallClassification(None, CLASSIFY_MANAGED_UPGRADE, generation, ev)
+
+
+def _live_state_refusal(
+    ev: BootstrapEvidence,
+    ident: ManagementPlaneIdentity,
+    record: VerifiedRelease,
+    deps: EngineDeps,
+) -> str | None:
+    """R3: independently observe the LIVE finalization state and return a bounded refusal reason, or
+    None when every proof holds. Mutation-free. A missing observer seam REFUSES (never skips)."""
+    fin = ev.finalization
+    if fin is None:
+        return "controller_install_finalization_missing"
+    if deps.finalization_state_observer is None:
+        return "finalization_state_observer_not_composed"
+    from secp_management.controller_finalization_state import ExpectedControllerState
+
+    try:
+        api_image = signed_controller_image_map(record.manifest).get("api", "")
+    except ManagementError:
+        api_image = ""
+    expected = ExpectedControllerState(
+        generation=fin.generation,
+        installation_id=ident.installation_id,
+        release_digest=ev.release_aggregate_digest,
+        controller_key_id=fin.enrollment_key_id,
+        active_identity_row_id=fin.active_identity_row_id,
+        management_identity_digest=ident.digest(),
+        bootstrap_binding_digest=fin.bootstrap_binding_digest,
+        enrollment_key_proof_id=fin.enrollment_key_proof_id,
+        locator_ca_digest=fin.locator_ca_digest,
+        api_image_digest=api_image,
+    )
+    try:
+        state = deps.finalization_state_observer(expected=expected)
+    except Exception:  # noqa: BLE001 - an unobservable live state is never a proven one
+        return "controller_state_unobservable"
+    return state.refusal_reason(expected)
+
+
+def _expected_api_image_digest(vr: VerifiedRelease) -> str:
+    """The expected controller API image, taken ONLY from the SIGNED controller/api purpose mapping
+    of the verified release (the same closed helper the bootstrap plan + end-state gate use). Not a
+    new manifest field, an unsigned Compose scan, an environment variable, a Docker observation, the
+    marker, or a caller-selectable argument. A release whose signed mapping has no controller/api
+    image refuses rather than yielding an empty (unprovable) expectation."""
+    digest = signed_controller_image_map(vr.manifest).get("api", "")
+    if not is_sha256_digest(digest):
+        raise ManagementError("finalization_expected_api_image_unavailable")
+    return digest
 
 
 def _build_controller_finalization_plan(
@@ -1482,6 +1578,13 @@ def _build_controller_finalization_plan(
         management_identity_digest=ident.digest(),
         bootstrap_evidence_digest=ev0.bootstrap_binding_digest(),
         generation=generation,
+        # R4: bind the observation to the SIGNED candidate api image and to the authenticated
+        # generation of the controller stack that R2 applied + proved before finalization began.
+        expected_api_image_digest=_expected_api_image_digest(vr),
+        # the controller stack this plan is bound to was applied AND proven at exactly this
+        # generation by the R2 candidate-stack step, which runs to completion (including the exact
+        # signed component/image-map reobservation) BEFORE finalization begins.
+        controller_stack_generation=generation,
     )
 
 
@@ -2100,10 +2203,16 @@ def _write_transaction(
             # rollback-reactivation of the PRIOR generation (the adapter defers identity
             # reactivation
             # to the engine); it re-commits the prior release + restores its documents itself.
-            ok = _upgrade_rollback(prior_ev, install, loc, generation, writer, drive, deps)
+            # ORDER MATTERS: restore the PRIOR controller stack FIRST. The rollback reactivation
+            # re-drives finalization for the PRIOR release, and its authoritative R4 observation
+            # requires the running API to be on the PRIOR release's signed image. While the
+            # candidate stack is still up, that proof can never hold, so a rollback would always
+            # escalate to recovery_required instead of completing the provable restoration.
+            ok = True
             if stack_plan is not None and stack_upgraded:
                 stack_ok, _sr = _restore_controller_stack(stack_plan, deps)
-                ok = ok and stack_ok
+                ok = stack_ok
+            ok = _upgrade_rollback(prior_ev, install, loc, generation, writer, drive, deps) and ok
             if not ok:
                 raise ManagementError("recovery_required")
             return
@@ -2157,7 +2266,12 @@ def _write_transaction(
             if prior_record_v is None:
                 raise ManagementError("controller_upgrade_prior_stack_unreadable")
             stack_plan = _plan_controller_stack_upgrade(plan_c, prior_record_v, deps)
-            host_effected = True
+            # NOTE: host_effected stays False on the managed-upgrade path. The bootstrap adapter's
+            # own compensate() is a fresh-install TEARDOWN (compose down + remove the unit, the
+            # compose config and every loaded image). On an upgrade the prior stack must be
+            # RESTORED,
+            # not torn down, and _restore_controller_stack below owns exactly that participant --
+            # running both would stop the just-restored prior stack and delete its fixed objects.
             _apply_controller_stack_upgrade(stack_plan, vr, deps)
             stack_upgraded = True
         else:
@@ -2271,23 +2385,34 @@ def _write_transaction(
 
 def _finalization_cleanup_absent(deps: EngineDeps) -> bool:
     """Independently OBSERVE that the finalization recovery journal and every staging/backup object
-    is gone (R5). The committed evidence may claim absence ONLY when this returns True."""
+    is gone (R5). The committed evidence may claim absence ONLY when this returns True.
+
+    Staged rollback copies live at ``finalization-staging/<transaction id>/<fixed handle>``, so the
+    sweep must descend into the per-transaction directories -- probing only the staging ROOT would
+    make the signed ``staging_objects_absent`` claim unobservable and therefore worthless. This
+    reuses the SAME bounded, code-owned probe the R1 pre-mutation inventory counts with, so the two
+    can never disagree about what a residual is."""
+    from secp_management.controller_finalization_inventory import (
+        _staged_backup_objects,
+        finalization_recovery_journal_path,
+        finalization_staging_root,
+    )
+
     loc = deps.locations
     fs = deps.filesystem()
-    base = loc.bootstrap_state
+
+    class _Probe:
+        fs = None  # replaced below; the inventory probe only needs `.fs`
+
+    probe = _Probe()
+    probe.fs = fs  # type: ignore[assignment]
     try:
-        if fs.lstat(f"{base}/controller-finalization-journal.json") is not None:  # type: ignore[attr-defined]
+        if fs.lstat(finalization_recovery_journal_path(loc)) is not None:  # type: ignore[attr-defined]
             return False
-        staging_root = f"{base}/finalization-staging"
-        st = fs.lstat(staging_root)  # type: ignore[attr-defined]
-        if st is None:
+        root = finalization_staging_root(loc)
+        if fs.lstat(root) is None:  # type: ignore[attr-defined]
             return True  # never created (or already swept) -> nothing staged remains
-        for handle in ("broker-unit.prior", "marker.prior", "locator.prior"):
-            # the fixed, code-owned staging handles (a deterministic sweep, never an enumeration)
-            for sub in (f"{staging_root}/{handle}",):
-                if fs.lstat(sub) is not None:  # type: ignore[attr-defined]
-                    return False
-        return True
+        return _staged_backup_objects(probe, root) == 0  # type: ignore[arg-type]
     except Exception:  # noqa: BLE001 - an unprovable sweep is NOT proof of absence
         return False
 
@@ -2936,6 +3061,43 @@ def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
     }
 
 
+def _finalized_controller_drift(
+    ev: BootstrapEvidence,
+    ident: ManagementPlaneIdentity | None,
+    record: VerifiedRelease | None,
+    deps: EngineDeps,
+) -> str | None:
+    """Phase 8 (2b-3c-c): the complete status contract for a FINALIZED controller. Returns a bounded
+    drift reason or None. Documents alone can never make status healthy, and a PREPARED evidence
+    checkpoint is explicitly NOT an installed/healthy state."""
+    fin = ev.finalization
+    if fin is None:
+        return None  # worker / adopt / legacy evidence: unchanged behaviour
+    # 1. the finalization extension must be COMMITTED -- a prepared checkpoint means cleanup was
+    #    never proven, so the installation is not complete.
+    if fin.finalization_commit_state != FINALIZATION_STATE_COMMITTED:
+        return "controller_finalization_prepared_not_committed"
+    # 2. its attested cleanup claims must actually hold, and be independently observable NOW.
+    if not (fin.recovery_journal_absent and fin.staging_objects_absent):
+        return "controller_finalization_cleanup_unproven"
+    if not _finalization_cleanup_absent(deps):
+        return "controller_finalization_cleanup_residual"
+    # 3. the domain-separated bootstrap binding must recompute from the parsed evidence.
+    if fin.bootstrap_binding_digest != ev.bootstrap_binding_digest():
+        return "controller_install_binding_drift"
+    # 4. strict marker bytes + the exact marker binding (shared plane-neutral contract).
+    marker_drift = _verify_marker_binding(deps, ev)
+    if marker_drift is not None:
+        return marker_drift
+    # 5. the LIVE signer system: exactly one verified ACTIVE identity, the dedicated role +
+    #    credential, broker transport, API signer runtime readiness, the exact signed API image and
+    #    complete generation agreement. A dead broker, sealed/unhealthy API, wrong image, stale
+    #    socket/marker or identity drift each yields its own bounded reason.
+    if ident is None or record is None:
+        return "controller_status_records_incomplete"
+    return _live_state_refusal(ev, ident, record, deps)
+
+
 def _controller_status(deps: EngineDeps) -> tuple[int, dict]:
     role = Role.CONTROLLER
     seals = read_seals()
@@ -2963,12 +3125,7 @@ def _controller_status(deps: EngineDeps) -> tuple[int, dict]:
     # root-owned enablement marker against it — the attested finalization facts are NEVER trusted
     # alone. Absent on worker/adopt/legacy evidence → skipped, so their status is unchanged.
     if drift is None and ev is not None and ev.finalization is not None:
-        if ev.finalization.bootstrap_binding_digest != ev.bootstrap_binding_digest():
-            drift = "controller_install_binding_drift"
-        else:
-            marker_drift = _verify_marker_binding(deps, ev)
-            if marker_drift is not None:
-                drift = marker_drift
+        drift = _finalized_controller_drift(ev, ident, record, deps)
 
     exp = _expected_controller(record.manifest) if record is not None else None
     observed_components = tuple(sorted(obs.container_image_digests)) if obs else ()
