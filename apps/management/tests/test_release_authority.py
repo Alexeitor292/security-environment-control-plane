@@ -18,6 +18,7 @@ from _mgmt_support import default_artifacts, manifest_dict
 from secp_commissioning.canonical import canonical_json, sha256_bytes
 from secp_management import BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2 as V2
 from secp_management import ManagementError
+from secp_management.controller_compose_reference import reference_controller_compose
 from secp_management.release_authority import (
     AuthorityError,
     authority_build,
@@ -124,7 +125,13 @@ def _real_artifacts(tmp_path: Path, key_id: str) -> tuple[bytes, str]:
     adir.mkdir(exist_ok=True)
     real = []
     for i, art in enumerate(arts):
-        data = (f"secp-artifact-{i}-{art['name']}".encode()) * 2
+        # the controller Compose artifact must be a REAL conforming template: `sign` asserts the
+        # signed-Compose contract on every artifact, so synthetic bytes are (correctly) refused.
+        data = (
+            reference_controller_compose()
+            if art["kind"] == "controller_compose_template"
+            else (f"secp-artifact-{i}-{art['name']}".encode()) * 2
+        )
         dest = adir / art["name"]
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)

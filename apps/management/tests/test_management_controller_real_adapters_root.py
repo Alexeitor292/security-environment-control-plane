@@ -68,6 +68,9 @@ from secp_commissioning.enrollment_signer_binding_digest import (  # noqa: E402
 from secp_commissioning.enrollment_signer_marker import (  # noqa: E402
     ENROLLMENT_SIGNER_MARKER_PATH as _MARKER_HOST_DEFAULT,
 )
+from secp_management.controller_compose_validation import (  # noqa: E402
+    controller_compose_contract_reason,
+)
 from secp_management.topology import API_RUNTIME_GID  # noqa: E402
 
 # The fixture relocates the controller config root under a root-only temp base, so the reviewed
@@ -422,7 +425,16 @@ def test_compose_config_resolves_exactly_one_readiness_gate_mount(controller_sta
     assert entry["type"] == "bind"
     assert entry["source"] == _GATE_HOST
     assert entry["read_only"] is True
-    assert entry.get("bind", {}).get("create_host_path") is False
+    # `compose config` normalizes `bind.create_host_path` away, so assert that directive where it
+    # actually lives and is enforceable: the INSTALLED signed bytes, re-read from disk and put
+    # through the same strict validator every trust boundary uses. Docker's own guarantee -- that it
+    # did not fabricate anything at the source -- is proven by the container seeing a FILE below.
+    installed = open(ctx.locations.controller_compose_path(), "rb").read()
+    assert controller_compose_contract_reason(installed) is None
+    declared = yaml.safe_load(installed)["services"]["api"]["volumes"]
+    gate_declared = [v for v in declared if v.get("target") == _GATE_TARGET]
+    assert len(gate_declared) == 1
+    assert gate_declared[0]["bind"]["create_host_path"] is False
 
 
 def test_the_running_container_resolved_the_declared_gate_mount(controller_stack) -> None:
