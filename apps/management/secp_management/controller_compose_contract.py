@@ -96,7 +96,16 @@ def api_readiness_gate_mount(locations: ManagementLocations | None = None) -> On
 
     This is the ONE authorization-only secret the ordinary API may receive (2b-3c-c). It carries no
     identity, key, credential or database material -- it only proves that a caller of the fixed
-    readiness route is the root management installer."""
+    readiness route is the root management installer.
+
+    WHERE THE MOUNT ACTUALLY COMES FROM. The installer does not inject YAML and never authors or
+    mutates a Compose document: the controller Compose template is a SIGNED release artifact
+    installed verbatim. Management DEFINES and VALIDATES this mount contract -- see
+    :func:`~secp_management.controller_compose_validation.assert_controller_compose_contract`, which
+    runs on the signed bytes at every trust boundary -- and the signed artifact CARRIES the mount. A
+    release whose template omits it is a RELEASE-CONTRACT FAILURE that refuses before any host
+    mutation; it is not an external or later concern, and it is not something the installer can
+    paper over at runtime."""
     loc = _loc(locations)
     return OneShotMount(loc.api_signer_readiness_gate_path(), READINESS_GATE_CONTAINER_PATH)
 

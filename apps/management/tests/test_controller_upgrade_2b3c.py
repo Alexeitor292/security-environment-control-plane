@@ -55,6 +55,9 @@ from _mgmt_support import (
     seed_write_ancestors,
 )
 from secp_commissioning.canonical import canonical_json, sha256_bytes
+from secp_commissioning.enrollment_signer_binding_digest import (
+    ENROLLMENT_SIGNER_READINESS_GATE_HOST_PATH,
+)
 from secp_commissioning.enrollment_signer_marker import render_marker_bytes
 from secp_commissioning.runtime import InMemoryFilesystem
 from secp_management import BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2 as V2
@@ -62,6 +65,8 @@ from secp_management import ManagementError
 from secp_management import enrollment_signer_runtime_observer as obs_mod
 from secp_management.adapters import CompensationResult
 from secp_management.cli import run
+from secp_management.controller_compose_reference import reference_controller_compose
+from secp_management.controller_compose_validation import controller_compose_contract_reason
 from secp_management.evidence import (
     CLASSIFY_MANAGED_UPGRADE,
     FINALIZATION_SCHEMA_VERSION,
@@ -108,11 +113,21 @@ BD_A = "/var/lib/secp/bootstrap/release/controller"
 BD_B = "/var/lib/secp/bootstrap/release/controller-b"
 BD_M = "/var/lib/secp/bootstrap/release/controller-m"
 
+#: the ONE finalization op that legitimately precedes the candidate stack (see the helper).
+_GATE_OP = "install_readiness_gate"
+
 A_IMAGES = dict(CONTROLLER_COMPONENT_IMAGE)
 B_IMAGES = {
     c: sha256_bytes(f"image:controller-B/{c}".encode()) for c in EXPECTED_CONTROLLER_COMPONENTS
 }
-B_COMPOSE = b"# compose template (controller release B)\n"
+# Release B carries its OWN controller Compose template: DISTINCT bytes (so the candidate
+# config identity really differs from A's) that still satisfy the signed-template contract. A
+# candidate release whose template dropped the readiness-gate mount must never qualify for an
+# automated B2 upgrade, and `test_a_candidate_release_without_the_mount_contract_cannot_upgrade`
+# proves exactly that.
+B_COMPOSE = reference_controller_compose(services=EXPECTED_CONTROLLER_COMPONENTS) + (
+    b"# controller release B\n"
+)
 B_CONFIG_IDENTITY = sha256_bytes(B_COMPOSE)
 # a DIFFERENT signed schema-migration identity (the unsupported transition)
 M_MIGRATION_IDENTITY = "f1e2d3c4b5a6"
@@ -236,12 +251,32 @@ def _assert_candidate_stack_upgrade(
     candidate component/image map after the start, and NO finalization op anywhere before that
     proof.
 
-    Everything asserted here is scoped to the segment BEFORE the first finalization op, so the same
-    proof holds whether the transaction went on to commit or to restore the prior stack."""
+    Everything asserted here is scoped to the segment BEFORE the first STACK-DEPENDENT finalization
+    op, so the same proof holds whether the transaction went on to commit or to restore the prior
+    stack.
+
+    ONE finalization op legitimately precedes the candidate stack: ``install_readiness_gate``. The
+    signed candidate Compose template mounts the gate into the ordinary API with
+    ``create_host_path: false``, so the candidate stack CANNOT start until the gate exists with
+    proven posture -- and on an upgrade that step ADOPTS the existing gate unchanged rather than
+    rotating a live API's authorization. It is asserted explicitly below and then excluded from the
+    "no finalization before the stack proof" scope; every other finalization op must still
+    follow."""
     names = _names(segment)
     assert "finalization" in names, segment
-    first_finalization = names.index("finalization")
-    candidate = segment[:first_finalization]
+    gate_ops = [i for i, (k, v) in enumerate(segment) if k == "finalization" and v == _GATE_OP]
+    # At least one, and the FIRST one precedes every Compose operation. A rollback re-drives
+    # finalization for the PRIOR release and its gate step runs again -- but that step ADOPTS the
+    # existing gate unchanged (EXACT_ADOPTED), so the gate is generated once and preserved, never
+    # rotated. `test_rollback_preserves_the_readiness_gate_it_did_not_create` proves the value.
+    assert gate_ops, segment
+    stack_ops = [i for i, (k, _v) in enumerate(segment) if k in ("load_image", "install_config")]
+    if stack_ops:  # the gate is created/adopted BEFORE anything that mounts it
+        assert gate_ops[0] < min(stack_ops), segment
+    rest = [(i, k) for i, (k, v) in enumerate(segment) if k == "finalization" and v != _GATE_OP]
+    assert rest, segment
+    first_finalization = rest[0][0]
+    candidate = [e for i, e in enumerate(segment[:first_finalization]) if i not in set(gate_ops)]
 
     # 1/9. the COMPLETE reviewed candidate-stack sequence runs, and it runs entirely BEFORE the
     # first finalization op — no finalization begins on an unapplied or unproven candidate stack.
@@ -636,7 +671,7 @@ def _upgrade_setup(
     deps = deps_for(fs, world, trust)
     loc = deps.locations
     timeline: list[tuple[str, object]] = []
-    state: dict = {"calls": 0, "adapters": [], "timeline": timeline}
+    state: dict = {"calls": 0, "adapters": [], "timeline": timeline, "kid": kid, "priv": priv}
 
     def _factory(plan: object) -> _UpgradeFakeAdapter:
         state["calls"] += 1
@@ -726,6 +761,134 @@ def _read_stack_objects(fs: InMemoryFilesystem, loc: object) -> tuple[bytes, byt
 
 
 # =========================================================== 1. A→B managed upgrade at generation 1
+
+
+# ------------------------------------------- the signed-Compose mount contract (2b-3c-c gap)
+
+
+def _gate_bytes(fs, loc):  # noqa: ANN001, ANN202
+    """The readiness gate exactly as it exists on the host, or ``None`` when absent."""
+    try:
+        return fs.safe_read(loc.api_signer_readiness_gate_path(), max_bytes=65, expected_uid=0)
+    except Exception:  # noqa: BLE001 - absent / unsafe reads the same to this assertion
+        return None
+
+
+def test_the_gate_exists_before_the_candidate_stack_is_ever_started() -> None:
+    """The signed candidate template mounts the gate with create_host_path:false, so a start with
+    the gate absent fails closed -- and without that flag Docker would create a DIRECTORY at a
+    secret's path. The gate step must therefore precede every Compose operation of the upgrade."""
+    deps, fs, world, state = _upgrade_setup()
+    _install_a(deps)
+    mark = len(state["timeline"])
+
+    code, rep = run(_install_argv(BD_B, write=True), deps)
+    assert code == 0, rep
+    segment = state["timeline"][mark:]
+    gate = [i for i, (k, v) in enumerate(segment) if k == "finalization" and v == _GATE_OP]
+    compose = [i for i, (k, _v) in enumerate(segment) if k in ("load_image", "install_config")]
+    assert gate and compose
+    assert gate[0] < min(compose)
+
+
+def test_an_upgrade_drives_exactly_one_gate_op_and_never_a_second_generation() -> None:
+    """An upgrade ADOPTS the existing gate; it never creates a second one.
+
+    This harness drives a FAKE finalization adapter, so it proves the OP-level fact: the forward
+    upgrade drive performs the gate step exactly once, on the same single-use plan-bound adapter
+    that owns every other finalization effect. The byte-level proof that adoption leaves the value
+    untouched lives against the REAL adapter, in
+    ``test_controller_finalization.py``'s exact-replay adoption proof."""
+    deps, fs, world, state = _upgrade_setup()
+    _install_a(deps)
+    mark = len(state["timeline"])
+
+    code, rep = run(_install_argv(BD_B, write=True), deps)
+    assert code == 0, rep
+    forward = state["timeline"][mark:]
+    gate_ops = [1 for k, v in forward if k == "finalization" and v == _GATE_OP]
+    assert len(gate_ops) == 1  # one drive, one gate step -- never two
+
+
+def test_rollback_restores_a_prior_compose_config_that_still_carries_the_mounts() -> None:
+    """The prior stack and the gate that authorizes it must come back TOGETHER.
+
+    The restored prior Compose config is read back THROUGH the contract, so a rollback can never
+    restore a stack whose template lost the readiness-gate mount -- that stack could not start, and
+    its readiness route would be unreachable. The rollback drive's own gate step adopts the
+    preserved gate rather than rotating it."""
+    # fail the FORWARD (generation 1) runtime-health gate AFTER activation, exactly as the
+    # established rollback proof does; the rollback reactivation itself is not failed.
+    deps, fs, world, state = _upgrade_setup(runtime_fail_generations=frozenset({1}))
+    _install_a(deps)
+    loc = deps.locations
+    prior_compose, prior_unit = _read_stack_objects(fs, loc)
+    assert controller_compose_contract_reason(prior_compose) is None
+
+    code, rep = run(_install_argv(BD_B, write=True), deps)
+    assert code != 0
+
+    after_compose, after_unit = _read_stack_objects(fs, loc)
+    assert after_compose == prior_compose  # the exact prior signed config is back
+    assert after_unit == prior_unit
+    # and it is still a startable stack: the restored config satisfies the mount contract
+    assert controller_compose_contract_reason(after_compose) is None
+
+
+def test_a_candidate_release_without_the_mount_contract_cannot_upgrade() -> None:
+    """An old release whose signed template predates the B2 mount contract is not eligible for an
+    automated B2 upgrade: it refuses BEFORE any host effect rather than installing a config that
+    would leave the readiness route unreachable."""
+    deps, fs, world, state = _upgrade_setup()
+    _install_a(deps)
+    loc = deps.locations
+    gate_before = _gate_bytes(fs, loc)
+    prior_compose, _u = _read_stack_objects(fs, loc)
+    mark = len(state["timeline"])
+
+    legacy = reference_controller_compose(services=EXPECTED_CONTROLLER_COMPONENTS).replace(
+        (
+            b"      - type: bind\n        source: "
+            + ENROLLMENT_SIGNER_READINESS_GATE_HOST_PATH.encode()
+            + b"\n"
+        ),
+        b"",
+        1,
+    )
+    bd_legacy = "/var/lib/secp/bootstrap/release/controller-legacy"
+    _seed_v2_controller_bundle_custom(
+        fs,
+        bd_legacy,
+        state["kid"],
+        state["priv"],
+        source_sha=SB,
+        parent_sha=SA,
+        image_map=B_IMAGES,
+        compose=legacy,
+        archive_tag="controller-B",
+    )
+
+    code, rep = run(_install_argv(bd_legacy, write=True), deps)
+    assert code != 0
+    assert rep["reason_code"].startswith("controller_compose_")
+    # nothing was touched: no image loaded, no config installed, no stack restarted
+    assert _stack_sequence(state["timeline"][mark:]) == []
+    assert _read_stack_objects(fs, loc)[0] == prior_compose
+    assert _gate_bytes(fs, loc) == gate_before
+
+
+def test_an_out_of_band_compose_edit_cannot_satisfy_the_signed_release_proof() -> None:
+    """Editing the installed Compose config by hand must not make a stack replayable or upgradable:
+    the prior stack is read back through the contract, and a hand-edited config that dropped the
+    gate mount is not a stack this transaction may adopt or roll back to."""
+    deps, fs, world, state = _upgrade_setup()
+    _install_a(deps)
+    loc = deps.locations
+    fs.seed_file(loc.controller_compose_path(), b"services:\n  api:\n    volumes: []\n", mode=0o640)
+
+    code, rep = run(_install_argv(BD_B, write=True), deps)
+    assert code != 0
+    assert rep["reason_code"] == "controller_upgrade_prior_stack_unreadable"
 
 
 def test_upgrade_A_to_B_success_generation_1():

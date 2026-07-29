@@ -78,15 +78,20 @@ POST_MARKER_RUNTIME_UNVERIFIED = "finalization_post_marker_runtime_unverified"
 # evidence re-read self-refused. The fields were renamed; the driven install commits and these tests
 # exercise the committed path directly.
 
-# The reviewed 10-op finalization order (marker LAST, identity activation PENULTIMATE). The
-# readiness-origin GATE is installed before the broker unit, so the fixed readiness route is
-# authenticated from the first moment the recreated API can serve it.
+# The reviewed 10-op finalization order (marker LAST, identity activation PENULTIMATE).
+#
+# The readiness-origin GATE is now FIRST -- before TLS, before the locator, before ANY bootstrap
+# host operation. It has to be: the SIGNED controller Compose template mounts it into the
+# ordinary API with create_host_path:false, so `compose up` fails outright if the gate file does
+# not already exist, and without that flag Docker would silently create a DIRECTORY at a
+# secret's path. The step runs on the SAME single-use plan-bound adapter that owns every other
+# finalization effect, so there is exactly one gate, one receipt and one compensation path.
 _EXPECTED_OPS = (
+    "install_readiness_gate",
     "install_tls_material",
     "record_locator",
     "provision_signer_role",
     "prepare_enrollment_key",
-    "install_readiness_gate",
     "install_broker_unit",
     "start_broker",
     "verify_signer_operational",
@@ -578,7 +583,7 @@ def _synthetic_finalization(*, generation: int = 0) -> FinalizationEvidence:
 # ---------------------------------------------- 1. fresh install drives 9 ops, marker last
 
 
-def test_fresh_install_drives_nine_finalization_ops_in_reviewed_order():
+def test_fresh_install_drives_ten_finalization_ops_in_reviewed_order():
     # the finalization drive completes (all 9 ops, marker LAST) BEFORE the commit gate.
     deps, bd, _fs, state = _install_deps()
     run(_install_argv(bd, write=True), deps)

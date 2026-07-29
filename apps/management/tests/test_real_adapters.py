@@ -23,6 +23,7 @@ from secp_management.adapters import (
     ReviewedUnit,
     VerifiedArtifact,
 )
+from secp_management.controller_compose_reference import reference_controller_compose
 from secp_management.layout import ManagementLocations
 from secp_management.signing import generate_keypair
 from secp_management.topology import EXPECTED_CONTROLLER_COMPONENTS, ORDINARY_CONTAINER_NAME
@@ -119,8 +120,14 @@ def _artifact(purpose: str, image_digest: str, content: bytes = b"ARCHIVE") -> V
     )
 
 
-def _config(content: bytes = b"services: {}\n") -> ReviewedConfig:
-    return ReviewedConfig(identity=sha256_bytes(content), content=content)
+def _config(content: bytes | None = None) -> ReviewedConfig:
+    """A controller Compose config the adapter will actually accept.
+
+    ``install_config`` now asserts the signed-template contract as the LAST boundary before the
+    bytes become the host's Compose config, so an empty ``services: {}`` placeholder is refused
+    exactly as a real release missing the reviewed mounts would be."""
+    body = reference_controller_compose() if content is None else content
+    return ReviewedConfig(identity=sha256_bytes(body), content=body)
 
 
 def _unit(content: bytes = b"[Unit]\n") -> ReviewedUnit:

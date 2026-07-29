@@ -878,7 +878,13 @@ class RealControllerEnrollmentFinalizationAdapter:
 
     # ---- 15b: the readiness-origin GATE (classify -> adopt UNCHANGED / create+prove) ----
     def install_readiness_gate(self) -> None:
-        """Install or ADOPT the fixed readiness-origin gate, before anything can recreate the API.
+        """Install or ADOPT the fixed readiness-origin gate, before anything that MOUNTS it runs.
+
+        This step is ordered ahead of every Compose operation, not merely ahead of the marker
+        restart: the SIGNED controller template binds the gate into the ordinary API with
+        ``create_host_path: false``, so ``compose up`` fails outright when the gate is absent -- and
+        without that flag Docker would silently create a DIRECTORY where a 256-bit secret belongs,
+        leaving the readiness route permanently unauthenticated.
 
         Classify first, mutate second. An existing gate with the exact reviewed posture is adopted
         UNCHANGED -- an exact replay or a managed upgrade never rotates it, because rotation would

@@ -1102,8 +1102,13 @@ jobs:
               skipped += int(s.get("skipped", 0))
           print(f"collected={tests} failures={failures} errors={errors} skipped={skipped}")
           problems = []
-          if tests < 6:
-              problems.append(f"expected >= 6 controller E2E tests, collected {tests}")
+          # 6 established stack/migration/observer proofs + the 6 SIGNED-COMPOSE MOUNT proofs
+          # (compose config resolution, the container's resolved mount, the API's view of the
+          # gate file, its non-writability, the read-only marker mount, and the authenticated
+          # readiness exchange inside the container). This fence is the ONLY place the mount is
+          # proven against real Docker rather than asserted about the signed bytes.
+          if tests < 12:
+              problems.append(f"expected >= 12 controller E2E tests, collected {tests}")
           if skipped != 0:
               problems.append(f"expected 0 skipped, got {skipped} (controller stack NOT executed)")
           if failures != 0:
@@ -1114,7 +1119,10 @@ jobs:
               for pr in problems:
                   print(f"::error::{pr}")
               sys.exit(1)
-          print("Real controller stack + migration executed as root: >= 6 tests, zero skipped/failed/errored.")
+          print(
+              "Real controller stack + migration + signed-Compose mount executed as root: "
+              ">= 12 tests, zero skipped/failed/errored."
+          )
           PY
 
   # --- stable aggregate gate: green only if every backend job is green -------------------------

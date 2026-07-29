@@ -33,6 +33,7 @@ from typing import NoReturn
 from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_bytes
 
 from secp_management import ManagementError
+from secp_management.controller_compose_validation import assert_controller_compose_contract
 from secp_management.release_bundle import (
     MANIFEST_NAME,
     SIGNATURE_NAME,
@@ -282,7 +283,42 @@ def authority_init(*, key_path: str, repo_root: str | None) -> tuple[int, dict]:
     return EXIT_OK, {"command": "init", "anchor": anchor, "public_anchor_path": pub_path}
 
 
-def authority_build(*, spec_bytes: bytes) -> tuple[int, dict]:
+#: The signed artifact kind whose BYTES the controller installation contract constrains.
+CONTROLLER_COMPOSE_KIND = "controller_compose_template"
+
+
+def _require_controller_contract(
+    manifest: ReleaseManifest, artifacts_dir: str | None, *, at_build: bool
+) -> None:
+    """Prove a CONTROLLER manifest's Compose contract wherever this command can see the bytes.
+
+    Truthful scope, because overclaiming here would be the same defect this change exists to fix:
+
+    * a controller manifest MUST declare a controller Compose artifact -- checked unconditionally,
+      because it needs no bytes;
+    * when an artifacts directory is supplied, the declared template's BYTES are verified (digest +
+      hardened read) and then asserted against the installation contract.
+
+    ``build`` and ``verify`` take the directory optionally -- ``build`` canonicalises a manifest and
+    is routinely called with no artifacts at all. The guarantee that no controller bundle can be
+    PRODUCED without the contract holding comes from ``sign``, where the artifacts directory is
+    already MANDATORY and :func:`_verify_all_artifacts` asserts the contract on every artifact. The
+    guarantee that none can be INSTALLED comes from
+    :func:`~secp_management.release_verify.verify_release_bundle`, which always reads every
+    artifact."""
+    if manifest.role != "controller":
+        return  # a worker bundle carries no controller template and is unaffected
+    if not any(a.kind == CONTROLLER_COMPOSE_KIND for a in manifest.artifacts):
+        _reject("release_authority_controller_compose_missing")
+    if not artifacts_dir:
+        return
+    # NOT gated on POSIX secure storage: that control governs PRIVATE KEY custody, not reading a
+    # public artifact, and gating here would make an off-POSIX command refuse for the wrong reason.
+    _verify_all_artifacts(manifest, artifacts_dir)  # includes the Compose contract assertion
+    _ = at_build  # the refusal set is identical at build and verify; the parameter documents intent
+
+
+def authority_build(*, spec_bytes: bytes, artifacts_dir: str | None = None) -> tuple[int, dict]:
     """Assemble a deterministic canonical ``v1alpha2`` release manifest from a build spec (a strict
     manifest object). Refuses an incomplete installation profile or any well-formedness defect, and
     emits the exact canonical manifest bytes the signer will cover."""
@@ -290,6 +326,7 @@ def authority_build(*, spec_bytes: bytes) -> tuple[int, dict]:
         _reject("release_authority_spec_too_large")
     manifest = parse_manifest_bytes(spec_bytes)  # strict parse + wellformed (profile-complete)
     require_b2_installation_profile(manifest)  # release-building tooling emits ONLY v1alpha2
+    _require_controller_contract(manifest, artifacts_dir, at_build=True)
     canonical = manifest.canonical()
     return EXIT_OK, {
         "command": "build",
@@ -346,6 +383,12 @@ def _verify_all_artifacts(manifest: ReleaseManifest, artifacts_dir: str) -> None
             os.close(fd)
         if len(data) != art.size or sha256_bytes(data) != art.sha256:
             _reject("release_authority_artifact_drift")
+        if art.kind == CONTROLLER_COMPOSE_KIND:
+            # the artifact is authentic; now prove it is SEMANTICALLY valid. A controller
+            # template that does not mount the readiness gate read-only into the ordinary API
+            # would install and start cleanly and leave the readiness route permanently
+            # unreachable, so it must never be signable.
+            assert_controller_compose_contract(data)
 
 
 def authority_sign(
@@ -401,7 +444,7 @@ def _keypair_public(private_hex: str) -> tuple[str, str]:
 
 
 def authority_verify(
-    *, manifest_bytes: bytes, signature_bytes: bytes, anchor: dict
+    *, manifest_bytes: bytes, signature_bytes: bytes, anchor: dict, artifacts_dir: str | None = None
 ) -> tuple[int, dict]:
     """Verify a manifest + detached signature under ONLY the supplied public anchor (never a shipped
     or ambient trust root)."""
@@ -434,6 +477,8 @@ def authority_verify(
         signature_hex=sig.signature,
     ):
         _reject("release_authority_signature_untrusted")
+    # a TRUSTED signature over a semantically invalid controller template is still refused.
+    _require_controller_contract(manifest, artifacts_dir, at_build=False)
     return EXIT_OK, {"command": "verify", "verified": True, "key_id": sig.key_id}
 
 
@@ -452,6 +497,7 @@ def run(argv: list[str]) -> tuple[int, dict]:
     p_init.add_argument("--key-path", required=True)
     p_build = sub.add_parser("build")
     p_build.add_argument("--spec", required=True)
+    p_build.add_argument("--artifacts-dir")
     p_sign = sub.add_parser("sign")
     p_sign.add_argument("--manifest", required=True)
     p_sign.add_argument("--key-path", required=True)
@@ -460,12 +506,16 @@ def run(argv: list[str]) -> tuple[int, dict]:
     p_verify.add_argument("--manifest", required=True)
     p_verify.add_argument("--signature", required=True)
     p_verify.add_argument("--anchor", required=True)
+    p_verify.add_argument("--artifacts-dir")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "init":
             return authority_init(key_path=args.key_path, repo_root=_repo_root())
         if args.cmd == "build":
-            return authority_build(spec_bytes=_read_file(args.spec, max_bytes=_MAX_SPEC_BYTES))
+            return authority_build(
+                spec_bytes=_read_file(args.spec, max_bytes=_MAX_SPEC_BYTES),
+                artifacts_dir=args.artifacts_dir,
+            )
         if args.cmd == "sign":
             return authority_sign(
                 manifest_bytes=_read_file(args.manifest, max_bytes=_MAX_MANIFEST_BYTES),
@@ -478,6 +528,7 @@ def run(argv: list[str]) -> tuple[int, dict]:
                 manifest_bytes=_read_file(args.manifest, max_bytes=_MAX_MANIFEST_BYTES),
                 signature_bytes=_read_file(args.signature, max_bytes=_MAX_SIGNATURE_BYTES),
                 anchor=anchor,
+                artifacts_dir=args.artifacts_dir,
             )
     except ManagementError as exc:  # AuthorityError + release_bundle-level bounded refusals
         return EXIT_REFUSED, {"command": args.cmd, "reason_code": exc.reason_code}

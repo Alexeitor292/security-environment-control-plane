@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from secp_commissioning.canonical import sha256_bytes
 
 from secp_management import ManagementError
+from secp_management.controller_compose_validation import assert_controller_compose_contract
 from secp_management.release_bundle import (
     MANIFEST_NAME,
     SIGNATURE_NAME,
@@ -117,6 +118,10 @@ def verify_release_bundle(
             raise ManagementError("release_artifact_size_mismatch")
         if sha256_bytes(data) != art.sha256:
             raise ManagementError("release_artifact_digest_mismatch")
+        if art.kind == "controller_compose_template":
+            # authentic is not sufficient: the SIGNED controller template must also satisfy the
+            # installation contract (the reviewed read-only marker + readiness-gate binds).
+            assert_controller_compose_contract(data)
 
     return VerifiedRelease(
         manifest=manifest,

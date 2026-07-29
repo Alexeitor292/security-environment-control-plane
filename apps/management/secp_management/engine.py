@@ -65,6 +65,10 @@ from secp_management.adapters import (
     is_generation_marker,
     worker_generation_marker,
 )
+from secp_management.controller_compose_validation import (
+    assert_controller_compose_contract,
+    controller_compose_contract_reason,
+)
 from secp_management.controller_install import (
     ControllerInstallOptions,
     build_controller_install_options,
@@ -311,6 +315,10 @@ def _compose_config(
     if len(matches) != 1:
         raise ManagementError("release_compose_template_missing")
     content = _verified_artifact(matches[0], bundle_dir, deps).read()
+    if role is Role.CONTROLLER:
+        # the plan may not even be BUILT from a controller template that fails the contract --
+        # this runs before any image load, config install, unit install or stack start.
+        assert_controller_compose_contract(content)
     return ReviewedConfig(identity=sha256_bytes(content), content=content)
 
 
@@ -1591,6 +1599,44 @@ def _build_controller_finalization_plan(
     )
 
 
+@dataclass
+class _PreparedFinalization:
+    """The ONE plan-bound finalization adapter, built early so the readiness gate exists before the
+    first Compose start that mounts it. Carries no state of its own beyond that binding."""
+
+    plan: ControllerEnrollmentFinalizationPlan
+    adapter: ControllerEnrollmentFinalizationAdapter
+
+
+def _prepare_readiness_gate(
+    vr: VerifiedRelease,
+    ident: ManagementPlaneIdentity,
+    ev0: BootstrapEvidence,
+    install: ControllerInstallOptions,
+    loc: ManagementLocations,
+    generation: int,
+    deps: EngineDeps,
+    state: _DriveState,
+) -> _PreparedFinalization:
+    """Create/adopt and PROVE the readiness gate before any Compose operation that mounts it.
+
+    The signed controller template binds the gate with ``create_host_path: false``, so a start with
+    the gate absent fails rather than letting Docker fabricate a directory at a secret's path. The
+    adapter is published to ``state`` BEFORE the gate step runs, so a failure in the gate step
+    itself -- and every later bootstrap, image-load or stack-start failure -- compensates the gate
+    through the same single receipt that owns it.
+
+    Fresh install: generated from the OS CSPRNG, installed atomically, re-read and proven. Exact
+    replay and managed upgrade: adopted UNCHANGED, so neither rotates a live API's authorization."""
+    if deps.finalization_factory is None:
+        raise ManagementError("finalization_not_composed")
+    plan = _build_controller_finalization_plan(vr, ident, ev0, install, loc, generation)
+    adapter = deps.finalization_factory(plan)
+    state.adapter = adapter  # compensatable from this instant, before the first mutation
+    adapter.install_readiness_gate()
+    return _PreparedFinalization(plan=plan, adapter=adapter)
+
+
 def _drive_controller_finalization(
     vr: VerifiedRelease,
     ident: ManagementPlaneIdentity,
@@ -1603,6 +1649,7 @@ def _drive_controller_finalization(
     *,
     previous_active_row_id: str | None = None,
     state: _DriveState | None = None,
+    prepared: _PreparedFinalization | None = None,
 ) -> tuple[object, ControllerFinalizationReceipt, FinalizationEvidence]:
     """Drive the corrected finalization adapter through its exact reviewed order (fresh install ⇒
     previous_active_row_id None + generation 0; managed upgrade ⇒ the prior active row + generation
@@ -1617,9 +1664,15 @@ def _drive_controller_finalization(
         raise ManagementError(
             "finalization_not_composed"
         )  # never fall through to the sealed default
-    plan = _build_controller_finalization_plan(vr, ident, ev0, install, loc, generation)
+    if prepared is not None:
+        # the SAME adapter that already created/adopted the readiness gate before the API started.
+        # Rebuilding here would produce a second single-use adapter, a second receipt, and a second
+        # gate -- exactly the split ownership this ordering fix must not introduce.
+        plan, fadapter = prepared.plan, prepared.adapter
+    else:
+        plan = _build_controller_finalization_plan(vr, ident, ev0, install, loc, generation)
+        fadapter = deps.finalization_factory(plan)  # ONE fresh, plan-bound, single-use adapter
     binding = plan.bootstrap_evidence_digest
-    fadapter = deps.finalization_factory(plan)  # ONE fresh, plan-bound, single-use adapter
     if state is not None:
         state.adapter = fadapter  # visible to compensation the moment the adapter exists
     fs = deps.filesystem()
@@ -1634,10 +1687,12 @@ def _drive_controller_finalization(
     fadapter.record_locator(canonical_origin=plan.canonical_origin)
     fadapter.provision_signer_role(plan.signer_role)
     key = fadapter.prepare_enrollment_key()
-    # the readiness-origin GATE, BEFORE anything can recreate the API: the ordinary API must
-    # already hold it when the fixed readiness route is first reachable, and a fresh install
-    # must never leave that route unauthenticated for a single request.
-    fadapter.install_readiness_gate()
+    if prepared is None:
+        # The readiness-origin GATE, BEFORE anything can recreate the API. On the prepared path it
+        # already ran (it HAD to: the signed Compose mounts it with create_host_path:false, so the
+        # stack could not have started without it), and running it again would be a second effect
+        # for one object.
+        fadapter.install_readiness_gate()
     fadapter.install_broker_unit(plan.broker_unit)
     fadapter.start_broker()
     fadapter.verify_signer_operational(key_identity=key)
@@ -1875,12 +1930,21 @@ class ControllerStackUpgradeReceipt:
 
 
 def _reviewed_config_from_disk(deps: EngineDeps, path: str) -> ReviewedConfig | None:
+    """The controller Compose config currently ON DISK, or ``None`` when it cannot be TRUSTED.
+
+    Used for exact same-release replay, for the prior stack a managed upgrade must be able to
+    restore, and for proving the restored config after a rollback. The contract is asserted here
+    too: a prior stack whose config does not carry the reviewed mounts cannot be restored and then
+    claimed proven, and an out-of-band edit that removed the gate mount is not a stack this
+    transaction may adopt, replay against, or roll back to."""
     try:
         data = deps.filesystem().safe_read(  # type: ignore[attr-defined]
             path, max_bytes=_MAX_DOC_BYTES, expected_uid=_ROOT_UID
         )
     except Exception:  # noqa: BLE001 - an unreadable prior object cannot be restored -> refuse
         return None
+    if controller_compose_contract_reason(data) is not None:
+        return None  # an on-disk config that fails the contract is never a restorable prior stack
     return ReviewedConfig(identity=sha256_bytes(data), content=data)
 
 
@@ -2286,8 +2350,43 @@ def _write_transaction(
     # candidate images, compose config, supervisor unit, the identity-unchanged migration transition
     # and the candidate stack start), retaining the exact prior config/unit/runtime facts so the
     # prior stack can be restored and PROVEN on failure. No externally upgraded stack qualifies.
+    def _pre_evidence() -> BootstrapEvidence:
+        """The pre-finalization evidence core the finalization PLAN binds. Pure: derived from the
+        signed release, the identity and the plan -- it observes no host state, so it is identical
+        whether computed here or at the drive site."""
+        return _controller_evidence(
+            role,
+            vr,
+            ident,
+            plan_c,
+            deps,
+            mode=MODE_INSTALLED,
+            classification=CLASSIFICATION_CREATED,
+            identity_bytes=identity_bytes,
+            manifest_bytes=manifest_bytes,
+            sig_bytes=sig_bytes,
+        )
+
+    def _prepare_gate() -> _PreparedFinalization:
+        """Create/adopt and PROVE the readiness gate immediately before the first Compose operation
+        that MOUNTS it, and AFTER every pre-flight refusal, so a refusal decided without touching
+        the host still touches nothing.
+
+        The signed controller template binds the gate with ``create_host_path: false``, so a start
+        with the gate absent fails closed rather than letting Docker fabricate a DIRECTORY at a
+        secret's path. The adapter is published to the drive state BEFORE the step runs, so any
+        later image-load, config-install, migration or stack-start failure compensates the gate
+        through the SAME single-use adapter and the SAME receipt that owns it -- one gate, never
+        two. Only the B2 installation path reaches here: a bootstrap without ``--install`` composes
+        no finalization and is already ineligible for B2 installation."""
+        assert install is not None  # noqa: S101 - guarded at both call sites
+        return _prepare_readiness_gate(
+            vr, ident, _pre_evidence(), install, loc, generation, deps, drive
+        )
+
     stack_plan: ControllerStackUpgradePlan | None = None
     stack_upgraded = False
+    prepared: _PreparedFinalization | None = None
     try:
         # 1. closed typed host operations (image load -> config -> unit/package -> reload -> start)
         if classification == CLASSIFY_MANAGED_UPGRADE:
@@ -2301,6 +2400,9 @@ def _write_transaction(
             # RESTORED,
             # not torn down, and _restore_controller_stack below owns exactly that participant --
             # running both would stop the just-restored prior stack and delete its fixed objects.
+            if install is not None:
+                prepared = _prepare_gate()
+                finalization_effected = True
             _apply_controller_stack_upgrade(stack_plan, vr, deps)
             stack_upgraded = True
         else:
@@ -2308,6 +2410,9 @@ def _write_transaction(
             if role is Role.WORKER:
                 _run_worker_ops(plan_w, deps)
             else:
+                if install is not None:
+                    prepared = _prepare_gate()
+                    finalization_effected = True
                 _run_controller_ops(plan_c, deps)
         # 2. identity FIRST, reverified before anything downstream trusts it
         writer.install(id_path, identity_bytes)
@@ -2357,6 +2462,8 @@ def _write_transaction(
                     sig_bytes=sig_bytes,
                 )
                 finalization_effected = True  # combined compensation now drives the adapter
+                # ev0 must equal the evidence core the prepared plan was bound to: the plan is
+                # single-use and its bootstrap_binding_digest is already fixed.
                 _fa, _freceipt, finalization_ev = _drive_controller_finalization(
                     vr,
                     ident,
@@ -2368,6 +2475,7 @@ def _write_transaction(
                     deps,
                     previous_active_row_id=previous_active_row_id,
                     state=drive,
+                    prepared=prepared,
                 )
             ev = _controller_evidence(
                 role,
