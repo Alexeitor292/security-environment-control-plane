@@ -974,14 +974,26 @@ def test_hermetic_fixture_has_real_distinct_commits(hermetic_repo: _HermeticRepo
 
     common = load_hook_module("_common")
     # Proves the real helper is being exercised, in both directions, against real git.
-    assert common.git_succeeds(
-        hermetic_repo.root, "merge-base", "--is-ancestor",
-        hermetic_repo.base_sha, hermetic_repo.head_sha,
-    ) is True
-    assert common.git_succeeds(
-        hermetic_repo.root, "merge-base", "--is-ancestor",
-        hermetic_repo.unrelated_sha, hermetic_repo.head_sha,
-    ) is False
+    assert (
+        common.git_succeeds(
+            hermetic_repo.root,
+            "merge-base",
+            "--is-ancestor",
+            hermetic_repo.base_sha,
+            hermetic_repo.head_sha,
+        )
+        is True
+    )
+    assert (
+        common.git_succeeds(
+            hermetic_repo.root,
+            "merge-base",
+            "--is-ancestor",
+            hermetic_repo.unrelated_sha,
+            hermetic_repo.head_sha,
+        )
+        is False
+    )
     assert common.git(hermetic_repo.root, "cat-file", "-t", hermetic_repo.unrelated_sha) == "commit"
 
 
