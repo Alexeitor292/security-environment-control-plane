@@ -26,7 +26,11 @@ What it deliberately does NOT do:
 
 * it does not repair, ``chown`` or ``chmod`` anything -- an unexpected ancestor posture is
   reported, never silently fixed and proceeded through;
-* it does not treat an ABSENT code-owned directory as untrusted. Every ancestor that EXISTS must
+* it does not treat an ABSENT code-owned directory as untrusted -- but ONLY ``ENOENT`` proves
+  absence. Any other ``OSError`` (``EACCES``, ``EPERM``, ``ENOTDIR``, ``ELOOP``, ``EIO``,
+  ``ESTALE``, ``ENAMETOOLONG``, or an unknown errno) means the posture could not be OBSERVED,
+  which is ``not_statable`` and therefore ``infrastructure_invalid``. Every ancestor that EXISTS
+  must
   be trusted; a component the fence has not created yet is recorded as absent and is not a
   failure. Asserting existence here would assert a creation order this gate has no business
   asserting, and production still refuses at run time if a parent it must traverse is missing;
@@ -44,6 +48,7 @@ are files, and this script stats directories only.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import posixpath
@@ -124,13 +129,20 @@ def observe(path: str) -> dict[str, object]:
     try:
         st = os.lstat(path)
     except OSError as exc:
-        # ABSENT is not UNTRUSTED. A code-owned directory the fence (or its prepare step) has not
-        # created yet is simply not there; conflating that with a hostile posture would make this
-        # gate assert a creation ORDER it has no business asserting, and would refuse a perfectly
-        # valid machine. The security property is about what EXISTS: every existing ancestor must be
-        # trusted. Production keeps its own rule -- `_open_parent` still refuses at run time if a
-        # parent it must traverse is missing (`fs_ancestor_open_failed`), which this cannot mask.
-        record.update(statable=False, errno=exc.errno, absent=True, problems=[])
+        # CI-R1: classification must be TOTAL. Only ENOENT proves ABSENCE. Every other OSError means
+        # the posture could not be OBSERVED, which is not the same thing and must never be waved
+        # through: EACCES/EPERM say something is denying the root gate a stat it should always get,
+        # ENOTDIR/ELOOP say a component is not the kind of object the contract assumes, EIO/ESTALE
+        # say the storage answer is unreliable, and an unknown errno is by definition
+        # uncharacterised.
+        # Treating any of those as "absent, no problems" would let an unobservable ancestor pass the
+        # gate and then be traversed by the installer -- the precise hole this gate exists to close.
+        if exc.errno == errno.ENOENT:
+            record.update(statable=False, absent=True, errno=exc.errno, problems=[])
+        else:
+            # only the bounded numeric errno is retained: never the exception text, never a
+            # host-specific message, never file contents.
+            record.update(statable=False, absent=False, errno=exc.errno, problems=["not_statable"])
         return record
     mode = st.st_mode
     problems: list[str] = []
@@ -156,8 +168,14 @@ def observe(path: str) -> dict[str, object]:
 
 
 def process_identity() -> dict[str, object]:
-    # POSIX-only identity: this gate runs only under the root fences (mypy checks on Windows too).
+    """The identity performing the observation.
+
+    POSIX-optional: the gate only RUNS under the root fences, but its CLASSIFIER must be testable on
+    any host, so a platform without POSIX identity reports that fact instead of raising."""
+    if not hasattr(os, "getuid"):  # non-POSIX: the classifier is still exercisable
+        return {"posix": False}
     return {
+        "posix": True,
         "uid": os.getuid(),  # type: ignore[attr-defined]
         "euid": os.geteuid(),  # type: ignore[attr-defined]
         "gid": os.getgid(),  # type: ignore[attr-defined]

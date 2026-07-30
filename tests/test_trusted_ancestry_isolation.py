@@ -20,12 +20,15 @@ functions, so they are not gated on POSIX or root.
 
 from __future__ import annotations
 
+import copy
+import errno
 import os
 import stat
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 from secp_commissioning.runtime import FilesystemError, InMemoryFilesystem
 
 _GATE_DIR = str(Path(__file__).resolve().parents[1] / "infra" / "ci")
@@ -33,6 +36,11 @@ if _GATE_DIR not in sys.path:  # the gate is a standalone CI script, not an inst
     sys.path.insert(0, _GATE_DIR)
 
 import attest_trusted_ancestry as gate  # noqa: E402
+
+#: POSIX-only proofs: mode/ownership semantics and absolute-POSIX paths do not exist on Windows.
+_POSIX_ONLY = pytest.mark.skipif(
+    not hasattr(os, "getuid"), reason="POSIX path and ownership semantics are POSIX-only"
+)
 
 #: the fixed system parents a root fence traverses and must never mutate
 FIXED_SYSTEM_PARENTS = ("/", "/etc", "/etc/systemd", "/etc/systemd/system")
@@ -211,11 +219,6 @@ def test_the_fixed_system_parents_are_unchanged_by_this_session() -> None:
         assert mode & gate.WRITE_MASK == 0, f"{path} is group/other-writable ({oct(mode)})"
 
 
-_POSIX_ONLY = pytest.mark.skipif(
-    not hasattr(os, "getuid"), reason="POSIX path and ownership semantics are POSIX-only"
-)
-
-
 @_POSIX_ONLY
 def test_an_absent_code_owned_directory_is_not_a_failure(tmp_path: Path) -> None:
     """The distinction the first CI run of this gate exposed -- in my own wiring, not the runner.
@@ -283,39 +286,339 @@ def test_teardown_restores_the_exact_original_stat_tuple(tmp_path: Path) -> None
     assert restored.st_ino == original.st_ino  # the same object, not a replacement
 
 
-# ------------------------------------------------- the fences are gated before their product tests
+# ------------------------------------------------- CI-R1: filesystem classification is TOTAL
+#
+# The gate caught every OSError from `os.lstat` and called it `absent=True, problems=[]`. Only
+# ENOENT
+# proves absence. Every other error means the posture could not be OBSERVED, which is not the same
+# thing: EACCES/EPERM say something is denying the root gate a stat it should always get, ENOTDIR/
+# ELOOP say a component is not the kind of object the contract assumes, EIO/ESTALE say the storage
+# answer is unreliable, and an unknown errno is by definition uncharacterised. Any of those
+# passing as "absent" would let an UNOBSERVABLE ancestor through the gate and then be traversed
+# by the installer.
+
+_ESTALE = getattr(errno, "ESTALE", None)
+
+#: (errno, expected verdict). ENOENT is the SOLE accepted absence case.
+CLASSIFICATION_MATRIX: list[tuple[int, bool]] = [
+    (errno.ENOENT, True),
+    (errno.EACCES, False),
+    (errno.EPERM, False),
+    (errno.EIO, False),
+    (errno.ENOTDIR, False),
+    (errno.ELOOP, False),
+    (errno.ENAMETOOLONG, False),
+    (4242, False),  # an errno this gate has never heard of
+] + ([(_ESTALE, False)] if _ESTALE is not None else [])
 
 
-def test_every_root_fence_attests_ancestry_before_running_product_tests() -> None:
-    """The classification fix, asserted against the workflow itself: each root fence must run the
-    attestation gate BEFORE the step that executes product tests, so an invalid machine can never
-    again present as a product failure."""
-    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
+def _with_lstat_errno(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """Make every ``os.lstat`` the gate performs raise exactly ``code``, deterministically."""
+
+    def _raise(path: str, *args: object, **kwargs: object) -> None:
+        raise OSError(code, "injected")
+
+    monkeypatch.setattr(gate.os, "lstat", _raise)
+
+
+@pytest.mark.parametrize("code,expect_absent", CLASSIFICATION_MATRIX)
+def test_only_enoent_is_classified_as_absence(
+    monkeypatch: pytest.MonkeyPatch, code: int, expect_absent: bool
+) -> None:
+    _with_lstat_errno(monkeypatch, code)
+    record = gate.observe("/probe")
+    assert record["statable"] is False
+    assert record["errno"] == code  # the bounded numeric errno is retained
+    if expect_absent:
+        assert record["absent"] is True
+        assert record["problems"] == []
+    else:
+        assert record["absent"] is False
+        assert record["problems"] == ["not_statable"]
+
+
+@pytest.mark.parametrize("code,expect_absent", CLASSIFICATION_MATRIX)
+def test_an_unobservable_ancestor_is_infrastructure_invalid(
+    monkeypatch: pytest.MonkeyPatch, code: int, expect_absent: bool
+) -> None:
+    """The verdict, not just the record: an unobservable ancestor must stop the job at exit 78."""
+    _with_lstat_errno(monkeypatch, code)
+    exit_code, report, untrusted = gate.attest(["/etc/systemd/system"])
+    if expect_absent:
+        assert exit_code == gate.EXIT_OK
+        assert report["verdict"] == "trusted"
+        assert untrusted == []
+    else:
+        assert exit_code == gate.EXIT_INFRASTRUCTURE_INVALID
+        assert report["verdict"] == "infrastructure_invalid"
+        assert untrusted, "an unobservable ancestor must be reported"
+        for entry in untrusted:
+            assert entry["problems"] == ["not_statable"]
+
+
+@pytest.mark.parametrize("code,_expect", [c for c in CLASSIFICATION_MATRIX if not c[1]])
+def test_no_refusal_exposes_exception_text_or_a_host_value(
+    monkeypatch: pytest.MonkeyPatch, code: int, _expect: bool
+) -> None:
+    """Bounded evidence only: the numeric errno, never the OS message."""
+    _with_lstat_errno(monkeypatch, code)
+    _exit_code, report, _untrusted = gate.attest(["/etc/systemd/system"])
+    rendered = repr(report)
+    assert "injected" not in rendered  # the exception's own text
+    assert "strerror" not in rendered
+
+
+def test_a_refused_observation_is_never_repaired_or_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One observation per ancestor. The gate never re-stats a refused component, never repairs it,
+    and performs no write of any kind -- it only classifies."""
+    calls: list[str] = []
+
+    def _raise(path: str, *args: object, **kwargs: object) -> None:
+        calls.append(path)
+        raise OSError(errno.EACCES, "injected")
+
+    monkeypatch.setattr(gate.os, "lstat", _raise)
+    for forbidden in ("chown", "chmod", "mkdir", "makedirs", "rename", "replace", "remove"):
+        monkeypatch.setattr(
+            gate.os,
+            forbidden,
+            lambda *a, **k: pytest.fail("the gate must never mutate the filesystem"),
+            raising=False,
+        )
+    code, _report, untrusted = gate.attest(["/etc/systemd/system"])
+    assert code == gate.EXIT_INFRASTRUCTURE_INVALID
+    assert untrusted
+    assert calls == ["/", "/etc", "/etc/systemd", "/etc/systemd/system"]  # once each, in order
+
+
+@_POSIX_ONLY
+def test_the_cli_exits_78_so_the_product_test_step_never_starts(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The gate is a job GATE: a non-zero exit fails the step, so the product-test step that follows
+    it in the same job never runs."""
+
+    def _raise(path: str, *args: object, **kwargs: object) -> None:
+        raise OSError(errno.EACCES, "injected")
+
+    monkeypatch.setattr(gate.os, "lstat", _raise)
+    assert gate.main(["/etc/systemd/system"]) == gate.EXIT_INFRASTRUCTURE_INVALID
+    out = capsys.readouterr().out
+    assert "infrastructure_invalid" in out
+    assert "not_statable" in out
+    assert "the product tests were not run" in out
+
+
+def test_a_trusted_observation_still_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The positive control for the whole CI-R1 matrix."""
+
+    class _Fake:
+        st_mode = stat.S_IFDIR | 0o755
+        st_uid = 0
+        st_gid = 0
+        st_dev = 1
+        st_ino = 2
+        st_nlink = 3
+
+    monkeypatch.setattr(gate.os, "lstat", lambda path, *a, **k: _Fake())
+    code, report, untrusted = gate.attest(["/etc/systemd/system"])
+    assert code == gate.EXIT_OK
+    assert report["verdict"] == "trusted"
+    assert untrusted == []
+
+
+# ------------------------------------------------- CI-R2: workflow order proofs are JOB-LOCAL
+#
+# The previous proof searched the whole workflow PREFIX, so an attestation in an EARLIER job
+# satisfied it for every later job -- a job could have shipped with no gate at all and the test
+# would still have passed. These proofs parse the workflow and inspect `jobs.<job>.steps`
+# positionally, inside one job.
+
+_GATE_SCRIPT = "infra/ci/attest_trusted_ancestry.py"
+
+#: job key -> the product-test step that must be preceded, IN THAT JOB, by an attestation step.
+REQUIRED_GATED_JOBS: dict[str, str] = {
+    "backend-discovery-activation-root": (
+        "Run PR5F fixed-layout root transaction tests (no skips)"
+    ),
+    "backend-deployment-root": "Run deployment root-security tests as root (no skips)",
+    "backend-management-root": "Run management-plane root-security tests as root (no skips)",
+    "backend-management-real-adapters-root": (
+        "Run the real management adapter E2E as root (no skips)"
+    ),
+    "backend-management-controller-real-adapters-root": (
+        "Drive the real controller bootstrap + migration + observer as root (no skips)"
+    ),
+}
+
+#: PR5F additionally sequences two preparation steps, each of which must be preceded by the
+#: attestation covering the tree it is about to create in.
+PR5F_PREPARATION_ORDER: list[tuple[str, str]] = [
+    ("/var/lib", "Prepare the fixed trusted production parent"),
+    ("/etc", "Prepare the fixed trusted controller-config parent (PR5F.1 env file)"),
+]
+
+
+def _workflow() -> dict:
+    text = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
-    gated_steps = (
-        "Drive the real controller bootstrap + migration + observer as root (no skips)",
-        "Run the real management adapter E2E as root (no skips)",
-        "Run PR5F fixed-layout root transaction tests (no skips)",
-        "Run management-plane root-security tests as root (no skips)",
-        "Run deployment root-security tests as root (no skips)",
-    )
-    attest_marker = "attest_trusted_ancestry.py"
-    for step in gated_steps:
-        assert step in workflow, step
-        preceding = workflow[: workflow.index(step)]
-        # the gate must appear between the previous product-test step and this one
-        assert attest_marker in preceding, f"{step} is not preceded by the ancestry gate"
-    assert workflow.count(attest_marker) >= len(gated_steps)
+    return yaml.safe_load(text)
 
 
-def test_the_gate_is_never_allowed_to_continue_on_error() -> None:
-    """A security gate that a job is permitted to ignore is not a gate."""
-    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
-        encoding="utf-8"
+def _steps(workflow: dict, job: str) -> list[dict]:
+    assert job in workflow["jobs"], f"job {job} is absent from the workflow"
+    return list(workflow["jobs"][job]["steps"])
+
+
+def _is_gate(step: dict) -> bool:
+    return _GATE_SCRIPT in str(step.get("run", ""))
+
+
+def _index_of_step(steps: list[dict], name: str) -> int:
+    for index, step in enumerate(steps):
+        if step.get("name") == name:
+            return index
+    raise AssertionError(f"step {name!r} not found in this job")
+
+
+def _gate_indices(steps: list[dict]) -> list[int]:
+    return [index for index, step in enumerate(steps) if _is_gate(step)]
+
+
+def assert_job_local_gate_order(workflow: dict) -> None:
+    """The CI-R2 contract, factored so the mutation regressions can drive it directly."""
+    for job, product_step in REQUIRED_GATED_JOBS.items():
+        steps = _steps(workflow, job)
+        product_index = _index_of_step(steps, product_step)
+        gates = _gate_indices(steps)
+        assert gates, f"{job}: no attestation step in THIS job"
+        assert min(gates) < product_index, (
+            f"{job}: every attestation runs at or after the product-test step"
+        )
+        for index in gates:
+            step = steps[index]
+            assert step.get("continue-on-error") in (None, False), f"{job}: gate continue-on-error"
+            assert "if" not in step, f"{job}: gate is conditional"
+            run = str(step["run"])
+            assert "|| true" not in run, f"{job}: gate exit code is swallowed"
+            assert "||" not in run and "; true" not in run, f"{job}: gate exit code is swallowed"
+            assert "set +e" not in run, f"{job}: gate exit code is swallowed"
+
+    # PR5F sequences its preparation steps too: each must follow the attestation for its tree.
+    steps = _steps(workflow, "backend-discovery-activation-root")
+    for tree, preparation in PR5F_PREPARATION_ORDER:
+        prep_index = _index_of_step(steps, preparation)
+        covering = [
+            index
+            for index in _gate_indices(steps)
+            if tree in str(steps[index]["run"]) and index < prep_index
+        ]
+        assert covering, f"no {tree} attestation precedes {preparation!r}"
+    # and the full-path attestation still precedes the product tests
+    product_index = _index_of_step(steps, REQUIRED_GATED_JOBS["backend-discovery-activation-root"])
+    full = [
+        index
+        for index in _gate_indices(steps)
+        if "/etc/secp/controller" in str(steps[index]["run"]) and index < product_index
+    ]
+    assert full, "no full-path attestation precedes the PR5F product tests"
+
+
+def test_every_root_fence_attests_ancestry_in_its_own_job_before_its_product_tests() -> None:
+    assert_job_local_gate_order(_workflow())
+
+
+def test_every_required_job_exists_and_is_pinned_to_a_deterministic_image() -> None:
+    workflow = _workflow()
+    for job in REQUIRED_GATED_JOBS:
+        runs_on = workflow["jobs"][job]["runs-on"]
+        assert runs_on != "ubuntu-latest", f"{job} is on a rolling image"
+
+
+# ---- mutation regressions: the proof must FAIL when the property is broken -------------------
+
+
+def _mutated() -> dict:
+    """A deep-enough copy that a mutation cannot leak into another test."""
+    return copy.deepcopy(_workflow())
+
+
+def test_the_proof_fails_when_the_last_root_job_loses_its_gate() -> None:
+    workflow = _mutated()
+    job = "backend-management-controller-real-adapters-root"
+    steps = workflow["jobs"][job]["steps"]
+    workflow["jobs"][job]["steps"] = [s for s in steps if not _is_gate(s)]
+    with pytest.raises(AssertionError):
+        assert_job_local_gate_order(workflow)
+
+
+def test_the_proof_fails_when_a_gate_moves_after_its_product_test_step() -> None:
+    workflow = _mutated()
+    job = "backend-deployment-root"
+    steps = workflow["jobs"][job]["steps"]
+    gate_index = _gate_indices(steps)[0]
+    moved = steps.pop(gate_index)
+    steps.append(moved)  # now strictly after the product-test step
+    with pytest.raises(AssertionError):
+        assert_job_local_gate_order(workflow)
+
+
+def test_the_proof_fails_when_only_an_earlier_job_has_a_gate() -> None:
+    """The exact hole in the old prefix-search proof."""
+    workflow = _mutated()
+    job = "backend-management-real-adapters-root"
+    workflow["jobs"][job]["steps"] = [s for s in workflow["jobs"][job]["steps"] if not _is_gate(s)]
+    # an EARLIER job keeps its gate, which used to be enough to satisfy the old test
+    assert _gate_indices(_steps(workflow, "backend-deployment-root"))
+    with pytest.raises(AssertionError):
+        assert_job_local_gate_order(workflow)
+
+
+def test_the_proof_fails_when_a_gate_is_allowed_to_continue_on_error() -> None:
+    workflow = _mutated()
+    job = "backend-management-root"
+    steps = workflow["jobs"][job]["steps"]
+    steps[_gate_indices(steps)[0]]["continue-on-error"] = True
+    with pytest.raises(AssertionError):
+        assert_job_local_gate_order(workflow)
+
+
+def test_the_proof_fails_when_a_gate_becomes_conditional() -> None:
+    workflow = _mutated()
+    job = "backend-management-root"
+    steps = workflow["jobs"][job]["steps"]
+    steps[_gate_indices(steps)[0]]["if"] = "always()"
+    with pytest.raises(AssertionError):
+        assert_job_local_gate_order(workflow)
+
+
+def test_the_proof_fails_when_a_gate_swallows_the_exit_code() -> None:
+    workflow = _mutated()
+    job = "backend-management-root"
+    steps = workflow["jobs"][job]["steps"]
+    index = _gate_indices(steps)[0]
+    steps[index]["run"] = str(steps[index]["run"]).rstrip() + " || true\n"
+    with pytest.raises(AssertionError):
+        assert_job_local_gate_order(workflow)
+
+
+def test_the_proof_fails_when_the_pr5f_etc_attestation_moves_after_its_preparation() -> None:
+    workflow = _mutated()
+    steps = workflow["jobs"]["backend-discovery-activation-root"]["steps"]
+    prep = _index_of_step(
+        steps, "Prepare the fixed trusted controller-config parent (PR5F.1 env file)"
     )
-    for block in workflow.split("- name: Attest trusted ancestry")[1:]:
-        head = block.split("- name:")[0]
-        assert "continue-on-error" not in head
-        assert "|| true" not in head
-        assert "if: always()" not in head
+    covering = [i for i in _gate_indices(steps) if "/etc" in str(steps[i]["run"]) and i < prep]
+    assert covering
+    moved = steps.pop(covering[-1])
+    steps.insert(prep, moved)  # now at/after the preparation step
+    with pytest.raises(AssertionError):
+        assert_job_local_gate_order(workflow)
+
+
+def test_the_unmutated_workflow_passes() -> None:
+    """The control: every mutation above is a real break, not a broken assertion."""
+    assert_job_local_gate_order(_workflow())
