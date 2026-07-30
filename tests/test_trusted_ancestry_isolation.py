@@ -690,6 +690,26 @@ def controlled_jobs() -> list[str]:
     return sorted(set(REQUIRED_GATED_JOBS) - NOT_YET_CONTROLLED)
 
 
+def _assert_runs_in_this_environment(job: str, role: str, run: str) -> None:
+    """Refuse anything that would move ``run`` into a different mount namespace.
+
+    The gate and the product tests must observe ONE filesystem. A gate attesting a machine the
+    tests never touch, and tests running on a machine the gate never attested, are the SAME defect
+    seen from opposite ends -- so the scan has to cover both, not just the gate.
+
+    LIMITATION, recorded rather than fixed: ``_NAMESPACE_ESCAPES`` is a DENYLIST and is therefore
+    inherently incomplete. ``unshare --mount``, a tab-separated spelling, or a wrapper script would
+    all pass it. It raises the cost of an ACCIDENTAL redirect; it is not a defence against a
+    determined one.
+    """
+    for escape in _NAMESPACE_ESCAPES:
+        assert escape not in run, (
+            f"{job}: the {role} is redirected out of the controlled environment "
+            f"({escape.strip()}), so the gate and the product tests would not observe the same "
+            "filesystem"
+        )
+
+
 def assert_controlled_environment(workflow: dict, manifest: dict) -> None:
     """The SECP-WSA contract, factored so the mutation regressions can drive it directly."""
     pinned = str(manifest["image"])
@@ -703,16 +723,33 @@ def assert_controlled_environment(workflow: dict, manifest: dict) -> None:
         # one reviewed environment, not four independently drifting ones
         assert image == pinned, f"{job}: pin drifted from the manifest ({image} != {pinned})"
 
+        # A STEP-level scan cannot see either of these. A job-level `continue-on-error: true` makes
+        # the whole fence non-blocking and a job-level `if` can switch it off entirely -- in both
+        # cases the gate still exits 78 and the fence still stops nothing, which is the
+        # "green while proving less" shape this suite exists to refuse.
+        # Coverage note, so the next reader knows what is load-bearing here:
+        # `test_ci_workflow.py::test_no_continue_on_error_anywhere` ALREADY forbids
+        # `continue-on-error` at job and step level for every job, so that half is defence in depth
+        # and locality (the property stays inside this contract if that test ever narrows). The
+        # job-level `if` is NOT covered anywhere else -- that half closes a real gap.
+        specification = workflow["jobs"][job]
+        assert specification.get("continue-on-error") in (None, False), (
+            f"{job}: job-level continue-on-error makes the fence non-blocking"
+        )
+        assert "if" not in specification, (
+            f"{job}: a job-level `if` can switch the fence off entirely"
+        )
+
         steps = _steps(workflow, job)
         gates = _gate_indices(steps)
         assert gates, f"{job}: no attestation step in THIS job"
+        # The property is "the gate attests the environment the PRODUCT TESTS run in", and it breaks
+        # SYMMETRICALLY. Scanning only the gate caught a redirected gate and missed a redirected
+        # product step -- the identical hole from the other side.
         for index in gates:
-            run = str(steps[index]["run"])
-            for escape in _NAMESPACE_ESCAPES:
-                assert escape not in run, (
-                    f"{job}: the gate is redirected out of the environment ({escape.strip()}), so "
-                    "it would attest a machine the product tests do not run on"
-                )
+            _assert_runs_in_this_environment(job, "gate", str(steps[index]["run"]))
+        product_index = _index_of_step(steps, REQUIRED_GATED_JOBS[job])
+        _assert_runs_in_this_environment(job, "product-test step", str(steps[product_index]["run"]))
 
         # the pristine posture is recorded BEFORE any third-party action runs inside the container,
         # so a posture change is attributable to the pinned image rather than to something that ran
@@ -733,14 +770,20 @@ def test_every_controlled_root_fence_runs_in_the_pinned_environment() -> None:
 
 
 def test_the_uncontrolled_set_is_exactly_the_two_systemd_fences() -> None:
-    """Tier 2 is HELD, not forgotten. Naming the remainder exactly keeps the gap visible and keeps
-    a later change from quietly parking a third fence on the nondeterministic hosted runner."""
+    """Tier 2 is HELD, not forgotten. Naming the remainder exactly keeps the gap visible and stops a
+    later change quietly parking a third fence on the nondeterministic hosted runner.
+
+    The may-only-shrink property is carried by the EXACT-EQUALITY assertion below (plus the manifest
+    cross-check in `assert_controlled_environment`). The subset assertion that follows it does NOT
+    carry it -- a strict subset still evaluates True with a third job added -- and is only a
+    well-formedness check that every held job is a job this suite actually gates."""
     assert NOT_YET_CONTROLLED == frozenset(
         {
             "backend-management-real-adapters-root",
             "backend-management-controller-real-adapters-root",
         }
     )
+    # well-formedness only: see the docstring -- this permits growth and must not be relied on
     assert NOT_YET_CONTROLLED < set(REQUIRED_GATED_JOBS)
 
 
@@ -800,6 +843,38 @@ def test_the_controlled_proof_fails_when_the_canary_moves_after_a_third_party_ac
     moved = steps.pop(canary)
     first_action = next(i for i, step in enumerate(steps) if "uses" in step)
     steps.insert(first_action + 1, moved)
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_the_product_tests_are_redirected_out() -> None:
+    """The symmetric half of the redirect property, and the one the first version MISSED.
+
+    The fence still has a gate, the gate still runs in the controlled environment and still exits
+    78 on a bad posture -- but the product tests execute somewhere the gate never attested. That is
+    a vacuous pass, and before this it went undetected while every other proof stayed green."""
+    workflow = _mutated()
+    job = "backend-management-root"
+    steps = workflow["jobs"][job]["steps"]
+    index = _index_of_step(steps, REQUIRED_GATED_JOBS[job])
+    steps[index]["run"] = "sudo docker exec other-host " + str(steps[index]["run"]).lstrip()
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_a_fence_is_made_non_blocking_at_job_level() -> None:
+    """`continue-on-error` at JOB level is invisible to a step-level scan: the gate still exits 78
+    and the fence still stops nothing."""
+    workflow = _mutated()
+    workflow["jobs"]["backend-deployment-root"]["continue-on-error"] = True
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_a_fence_is_switched_off_at_job_level() -> None:
+    """A job-level `if` can disable the whole fence without touching a single step."""
+    workflow = _mutated()
+    workflow["jobs"]["backend-deployment-root"]["if"] = "false"
     with pytest.raises(AssertionError):
         assert_controlled_environment(workflow, _manifest())
 
