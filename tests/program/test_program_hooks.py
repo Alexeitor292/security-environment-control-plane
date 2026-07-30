@@ -18,6 +18,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -28,6 +30,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOKS_DIR = REPO_ROOT / ".claude" / "hooks"
+
+# The shape the unlock token's base_sha must carry, mirrored here so the tests assert the
+# contract independently of the hook's own constant.
+_CANONICAL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def run_hook(hook: str, payload: dict, env: dict[str, str] | None = None) -> dict | None:
@@ -1019,6 +1025,155 @@ def test_unlock_rejects_a_base_sha_that_is_not_an_ancestor(hermetic_repo: _Herme
 
 def test_unlock_rejects_a_base_sha_with_no_object(hermetic_repo: _HermeticRepo) -> None:
     assert _binding_verdict(hermetic_repo, "0" * 40) == "deny"
+
+
+# ---------------------------------------------------------------------------------------
+# base_sha must be a canonical literal object id, refused by SCHEMA before git resolution.
+#
+# Git resolves revision expressions, so an unvalidated base_sha re-resolves against
+# repository state at USE time -- `HEAD~1` keeps resolving as HEAD moves, which defeats the
+# binding. These assert the schema does the refusing, not an incidental git failure.
+# ---------------------------------------------------------------------------------------
+
+
+def _schema_verdict(repo: _HermeticRepo, base_sha: str) -> str:
+    module = load_hook_module("guard_migration_unlock")
+    try:
+        module._validate_schema(repo.token(base_sha))
+    except SystemExit:
+        return "deny"
+    return "allow"
+
+
+def test_git_can_resolve_the_revision_expressions_the_schema_refuses(
+    hermetic_repo: _HermeticRepo,
+) -> None:
+    """Proves the schema is what refuses them, not an incidental git failure.
+
+    If git could not resolve `HEAD~1` here, the deny tests below would pass for the wrong
+    reason and would not prove the shape check does anything.
+    """
+    resolved = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"],
+        cwd=str(hermetic_repo.root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert resolved.returncode == 0, "git must be able to resolve HEAD~1 in this fixture"
+    assert resolved.stdout.strip() == hermetic_repo.base_sha
+
+    for expression in ("HEAD", "HEAD^", hermetic_repo.branch, f"refs/heads/{hermetic_repo.branch}"):
+        probe = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{expression}^{{commit}}"],
+            cwd=str(hermetic_repo.root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert probe.returncode == 0, f"git must resolve {expression!r} in this fixture"
+
+
+def test_canonical_base_sha_shapes_are_accepted(hermetic_repo: _HermeticRepo) -> None:
+    for sha in (hermetic_repo.base_sha, hermetic_repo.head_sha, hermetic_repo.unrelated_sha):
+        assert _schema_verdict(hermetic_repo, sha) == "allow", sha
+        assert _CANONICAL_SHA_RE.fullmatch(sha), f"fixture produced a non-canonical sha: {sha}"
+
+
+def _malformed_base_shas(repo: _HermeticRepo) -> list[tuple[str, str]]:
+    return [
+        (repo.base_sha.upper(), "uppercase hexadecimal"),
+        (" " + repo.base_sha, "leading whitespace"),
+        (repo.base_sha + " ", "trailing whitespace"),
+        (repo.base_sha[:39], "39 characters"),
+        (repo.base_sha + "a", "41 characters"),
+        (repo.base_sha[:12], "abbreviated object id"),
+        (repo.base_sha[:7], "short abbreviated object id"),
+        ("z" * 40, "40 non-hexadecimal characters"),
+        (repo.base_sha[:39] + "g", "40 characters with one non-hex digit"),
+        ("a" * 64, "SHA-256 length in a SHA-1 repository"),
+        ("HEAD", "HEAD"),
+        ("HEAD~1", "HEAD~1"),
+        ("HEAD^", "HEAD^"),
+        ("@", "@"),
+        (repo.branch, "branch name"),
+        (f"refs/heads/{repo.branch}", "refs/heads/ ref"),
+        ("v1.0.0", "tag name"),
+        ("", "empty string"),
+    ]
+
+
+def test_non_canonical_base_sha_is_refused_by_schema(hermetic_repo: _HermeticRepo) -> None:
+    for value, description in _malformed_base_shas(hermetic_repo):
+        assert _schema_verdict(hermetic_repo, value) == "deny", (
+            f"base_sha {value!r} ({description}) must be refused as malformed"
+        )
+
+
+def test_non_canonical_base_sha_is_refused_end_to_end(
+    hermetic_repo: _HermeticRepo, tmp_path: Path
+) -> None:
+    """The full hook path, not only the schema helper."""
+    unlock_dir = tmp_path / "unlock"
+    unlock_dir.mkdir()
+    (unlock_dir / "unlock-0.json").write_text(
+        json.dumps(_valid_token(base_sha="HEAD~1")), encoding="utf-8"
+    )
+    result = run_hook(
+        "guard_migration_unlock.py",
+        write(MIGRATION_TARGET),
+        env={"SECP_MIGRATION_UNLOCK_DIR": str(unlock_dir)},
+    )
+    assert decision_of(result) == "deny"
+    assert "canonical commit id" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_minter_emits_a_canonical_lowercase_sha() -> None:
+    """The supported minter must keep producing exactly what the schema now requires."""
+    minter = (REPO_ROOT / "scripts" / "program" / "New-MigrationUnlock.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "git rev-parse HEAD" in minter, "the minter must derive base_sha from rev-parse"
+    assert "base_sha           = $baseSha" in minter or "base_sha" in minter
+    # rev-parse output is used verbatim -- no casing or truncation transform may creep in.
+    for transform in (".ToUpper()", ".Substring(", "-replace"):
+        assert transform not in minter.split("$baseSha")[1].split("\n")[0], (
+            f"base_sha must not be transformed by {transform}"
+        )
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell unavailable")
+def test_minter_run_produces_a_canonical_sha(tmp_path: Path) -> None:
+    """Run the real minter and assert the emitted token satisfies the schema."""
+    if _current_branch().lower() in {"main", "master", "head"}:
+        pytest.skip("the minter refuses to issue on a protected or detached checkout")
+    unlock_dir = tmp_path / "unlock"
+    env = dict(os.environ, SECP_MIGRATION_UNLOCK_DIR=str(unlock_dir))
+    completed = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(REPO_ROOT / "scripts" / "program" / "New-MigrationUnlock.ps1"),
+            "-MigrationFilename",
+            "zz99_probe.py",
+            "-Purpose",
+            "canonical sha shape check",
+            "-TtlMinutes",
+            "5",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    tokens = sorted(unlock_dir.glob("*.json"))
+    assert len(tokens) == 1
+    payload = json.loads(tokens[0].read_text(encoding="utf-8-sig"))
+    assert _CANONICAL_SHA_RE.fullmatch(payload["base_sha"]), payload["base_sha"]
 
 
 def test_unlock_valid_token_allows_and_burns_only_when_the_write_can_proceed(

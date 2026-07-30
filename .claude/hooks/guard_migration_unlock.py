@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,19 @@ from _common import (  # noqa: E402
 )
 
 UNLOCK_DIR_NAME = "secp-migration-unlock"
+
+# base_sha must be a canonical literal object ID, validated BEFORE any git resolution.
+#
+# Git happily resolves revision expressions -- HEAD, HEAD~1, HEAD^, a branch or tag name,
+# refs/heads/x, an abbreviated id -- so passing an unvalidated string to `cat-file` and
+# `merge-base` lets the token re-resolve against repository state at USE time. `HEAD~1`
+# keeps resolving as HEAD moves, which breaks the whole point of the binding: the token
+# must pin the exact repository state approved at issuance.
+#
+# The supported minter already writes the canonical output of `git rev-parse HEAD`, so
+# requiring that exact shape costs nothing. Deliberately NOT canonicalised here: calling
+# `git rev-parse` on an untrusted value would reintroduce the resolution being prevented.
+_CANONICAL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 REQUIRED_FIELDS = {
     "version",
@@ -137,6 +151,15 @@ def _validate_schema(payload: dict) -> None:
     for field in ("repository", "branch", "base_sha", "migration_filename", "issuer", "nonce"):
         if not isinstance(payload.get(field), str) or not payload[field].strip():
             deny(f"BLOCKED: the unlock token field '{field}' is malformed or empty.")
+
+    # Matched against the raw value: whitespace padding is malformed, not trimmed.
+    if _CANONICAL_SHA.fullmatch(payload["base_sha"]) is None:
+        deny(
+            f"BLOCKED: base_sha {payload['base_sha']!r} is not a canonical commit id. It must "
+            "be exactly 40 lowercase hexadecimal characters, as produced by "
+            "`git rev-parse HEAD`. A revision expression such as HEAD, HEAD~1 or a branch "
+            "name re-resolves as the repository moves, so it cannot pin the approved state."
+        )
 
 
 def _validate_binding(payload: dict, root: Path, target_filename: str) -> None:
