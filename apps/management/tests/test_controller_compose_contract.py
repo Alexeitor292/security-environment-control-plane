@@ -32,6 +32,7 @@ from secp_commissioning.runtime import InMemoryFilesystem
 from secp_management import ManagementError
 from secp_management.controller_compose_reference import reference_controller_compose
 from secp_management.controller_compose_validation import (
+    FORBIDDEN_API_MOUNT_SURFACES,
     REQUIRED_API_MOUNTS,
     REQUIRED_MOUNT_BIND_KEYS,
     REQUIRED_MOUNT_KEYS,
@@ -461,6 +462,204 @@ def test_a_merge_key_cannot_graft_volumes_onto_the_api_service() -> None:
         + NL
     )
     assert controller_compose_contract_reason(hostile.encode()) is not None
+
+
+# ------------------------------------- R9: ALTERNATE API mount surfaces are forbidden outright
+#
+# Independent review R9. The validator examined only `services.api.volumes`, but Compose can put a
+# filesystem object inside a container through five sibling fields plus `use_api_socket`. A
+# perfectly valid reviewed volumes list could therefore coexist with an alternate mount that
+# MASKS, collides
+# with or replaces the readiness-gate or signer-marker destination without ever entering the R8
+# canonical-target grouping. Every template below was ACCEPTED before this correction; the worst are
+# A and B, where a caller-chosen file is mounted exactly where the root-generated gate belongs.
+
+_R9_REASON = "controller_compose_api_alternate_mount_surface_forbidden"
+
+
+def _api_field(block: str, extra: str = "") -> str:
+    """The exact valid reference template with ``block`` added to services.api, plus any top-level
+    ``extra`` the field would need to be a well-formed Compose document."""
+    return VALID.decode().replace("  api:" + NL, "  api:" + NL + block, 1) + extra
+
+
+R9_CASES: dict[str, str] = {
+    # A. a config mounted onto the readiness gate's destination
+    "config targeting the gate": _api_field(
+        "    configs:"
+        + NL
+        + "      - source: hostile"
+        + NL
+        + f"        target: {GATE_TARGET}"
+        + NL,
+        "configs:" + NL + "  hostile:" + NL + "    file: ./known-value" + NL,
+    ),
+    # B. a secret mounted onto the readiness gate's destination
+    "secret targeting the gate": _api_field(
+        "    secrets:"
+        + NL
+        + "      - source: hostile"
+        + NL
+        + f"        target: {GATE_TARGET}"
+        + NL,
+        "secrets:" + NL + "  hostile:" + NL + "    file: ./known-value" + NL,
+    ),
+    # C. service-level tmpfs, at the gate and at each parent the gate/marker live under
+    "tmpfs at the gate": _api_field("    tmpfs:" + NL + f"      - {GATE_TARGET}" + NL),
+    "tmpfs at /run/secp": _api_field("    tmpfs:" + NL + "      - /run/secp" + NL),
+    "tmpfs at /etc/secp/controller": _api_field(
+        "    tmpfs:" + NL + "      - /etc/secp/controller" + NL
+    ),
+    # D. volumes_from -- targets that cannot be derived without evaluating another service or an
+    #    external container, in every mode form
+    "volumes_from another service": _api_field("    volumes_from:" + NL + "      - other" + NL),
+    "volumes_from container:external": _api_field(
+        "    volumes_from:" + NL + "      - container:external-name" + NL
+    ),
+    "volumes_from implicit rw": _api_field("    volumes_from:" + NL + "      - other" + NL),
+    "volumes_from explicit rw": _api_field("    volumes_from:" + NL + "      - other:rw" + NL),
+    # E. devices -- a separate host-path-to-container-path mapping surface
+    "device mapped onto the gate": _api_field(
+        "    devices:" + NL + f"      - /dev/null:{GATE_TARGET}" + NL
+    ),
+    "device mapped onto the marker": _api_field(
+        "    devices:" + NL + f"      - /dev/null:{MARKER}" + NL
+    ),
+    # F. the container-engine socket and delegated credentials
+    "use_api_socket true": _api_field("    use_api_socket: true" + NL),
+}
+
+#: PRESENCE is the refusal. An empty or false declaration is still outside the closed contract, and
+#: treating "empty" as "absent" would make the contract depend on how a future Compose version
+#: resolves an empty field.
+R9_EMPTY_CASES: dict[str, str] = {
+    "configs: []": _api_field("    configs: []" + NL),
+    "secrets: []": _api_field("    secrets: []" + NL),
+    "tmpfs: []": _api_field("    tmpfs: []" + NL),
+    "volumes_from: []": _api_field("    volumes_from: []" + NL),
+    "devices: []": _api_field("    devices: []" + NL),
+    "use_api_socket: false": _api_field("    use_api_socket: false" + NL),
+    "configs: null": _api_field("    configs:" + NL),
+}
+
+_R9_IDS = list(R9_CASES)
+_R9_EMPTY_IDS = list(R9_EMPTY_CASES)
+
+
+def test_the_forbidden_surface_set_is_exactly_the_six_reviewed_fields() -> None:
+    assert FORBIDDEN_API_MOUNT_SURFACES == {
+        "configs",
+        "secrets",
+        "tmpfs",
+        "volumes_from",
+        "devices",
+        "use_api_socket",
+    }
+
+
+@pytest.mark.parametrize("name", _R9_IDS)
+def test_every_alternate_api_mount_surface_is_refused(name: str) -> None:
+    """Each case keeps the reviewed marker and gate entries PRESENT and VALID -- the refusal is for
+    the alternate surface alone, not for a broken volumes list."""
+    template = R9_CASES[name]
+    assert controller_compose_contract_reason(VALID) is None  # the base really is valid
+    with pytest.raises(ControllerComposeContractError) as exc:
+        assert_controller_compose_contract(template.encode())
+    assert exc.value.reason_code == _R9_REASON
+
+
+@pytest.mark.parametrize("name", _R9_EMPTY_IDS)
+def test_presence_alone_is_refused_even_when_empty_null_or_false(name: str) -> None:
+    with pytest.raises(ControllerComposeContractError) as exc:
+        assert_controller_compose_contract(R9_EMPTY_CASES[name].encode())
+    assert exc.value.reason_code == _R9_REASON
+
+
+def test_the_refusal_names_the_contract_class_and_never_the_field_or_value() -> None:
+    """A refusal reaches operators; it must not become a way to enumerate what a hostile release
+    attempted, nor echo a config name, secret name, device or target."""
+    for template in list(R9_CASES.values()) + list(R9_EMPTY_CASES.values()):
+        reason = controller_compose_contract_reason(template.encode())
+        assert reason == _R9_REASON
+        for leak in ("hostile", "known-value", "/dev/null", GATE_TARGET, MARKER, "external-name"):
+            assert leak not in reason
+
+
+@pytest.mark.parametrize("name", _R9_IDS + _R9_EMPTY_IDS)
+def test_every_alternate_surface_is_refused_as_a_correctly_signed_bundle(name: str) -> None:
+    """The manifest is canonical, the declared digest and size bind the exact hostile artifact, and
+    the ed25519 signature verifies under a pinned anchor -- and release verification still
+    refuses on the Compose contract, before any host mutation."""
+    template = (R9_CASES | R9_EMPTY_CASES)[name]
+    trust, key_id, priv, _pub = ephemeral_trust_root()
+    fs = InMemoryFilesystem()
+    _bundle(fs, priv, key_id, template.encode())
+
+    # the signature itself is genuinely valid: the same bundle verifies once the Compose contract is
+    # satisfied, so the refusal below is attributable to the contract and nothing else.
+    with pytest.raises(ManagementError) as exc:
+        verify_release_bundle(_BD, trust_root=trust, fs=fs)
+    assert exc.value.reason_code == _R9_REASON
+
+
+def test_the_same_authority_and_anchor_accept_the_valid_template() -> None:
+    """The control for the signed-bundle matrix above: identical manifest shape, identical ephemeral
+    authority, identical anchor -- and it verifies. So every R9 refusal is the CONTRACT talking,
+    not a broken fixture or an untrusted signature."""
+    trust, key_id, priv, _pub = ephemeral_trust_root()
+    fs = InMemoryFilesystem()
+    _bundle(fs, priv, key_id, VALID)
+    assert verify_release_bundle(_BD, trust_root=trust, fs=fs).role == "controller"
+
+
+# ---------------------------------------------------- what R9 deliberately still ALLOWS
+
+
+def test_a_top_level_configs_or_secrets_block_the_api_does_not_reference_is_allowed() -> None:
+    """The contract constrains what the ordinary API RECEIVES. A release may declare top-level
+    configs/secrets for other services; only an API reference to them is forbidden."""
+    for block in (
+        "configs:" + NL + "  unused:" + NL + "    file: ./x" + NL,
+        "secrets:" + NL + "  unused:" + NL + "    file: ./y" + NL,
+    ):
+        assert controller_compose_contract_reason((VALID.decode() + block).encode()) is None
+
+
+def test_another_service_may_keep_its_own_reviewed_configuration() -> None:
+    """R9 applies specifically to services.api -- a sidecar's own tmpfs, devices or configs are that
+    service's business and are not constrained by the API mount contract."""
+    sidecar = (
+        "  sidecar:"
+        + NL
+        + "    tmpfs:"
+        + NL
+        + "      - /tmp/scratch"
+        + NL
+        + "    devices:"
+        + NL
+        + "      - /dev/null:/dev/null"
+        + NL
+    )
+    assert controller_compose_contract_reason((VALID.decode() + sidecar).encode()) is None
+
+
+def test_the_api_service_may_still_carry_unrelated_ordinary_settings() -> None:
+    """R9 forbids six MOUNT surfaces, not every optional service field: the contract must not become
+    an accidental whitelist of the whole service definition."""
+    extras = (
+        "    environment:"
+        + NL
+        + "      SECP_APP_ENV: test"
+        + NL
+        + "    depends_on:"
+        + NL
+        + "      - db"
+        + NL
+        + "    read_only: true"
+        + NL
+    )
+    template = VALID.decode().replace("  api:" + NL, "  api:" + NL + extras, 1)
+    assert controller_compose_contract_reason(template.encode()) is None
 
 
 def test_a_yaml_tag_cannot_construct_an_object() -> None:

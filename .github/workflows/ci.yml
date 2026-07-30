@@ -1112,10 +1112,15 @@ jobs:
           # one and only one read-only mount) + the 4 ENGINE-normalization proofs (a throwaway
           # container created with each alias spelling reports the CLEANED reviewed target, so
           # an alias is a SECOND mount on the gate's destination, never a different one).
+          # + the 8 R9 ALTERNATE-SURFACE proofs (six representative configs/secrets/tmpfs/
+          # volumes_from/devices/use_api_socket documents that Compose is happy to render while
+          # the offline validator refuses each one, none reaching install_config or leaving the
+          # installed config mutated, and the running stack still carrying only the two reviewed
+          # read-only mounts backed by the genuine root-generated gate).
           # This fence is the ONLY place the mount and the
           # normalization are proven against real Docker rather than asserted about the bytes.
-          if tests < 22:
-              problems.append(f"expected >= 22 controller E2E tests, collected {tests}")
+          if tests < 30:
+              problems.append(f"expected >= 30 controller E2E tests, collected {tests}")
           if skipped != 0:
               problems.append(f"expected 0 skipped, got {skipped} (controller stack NOT executed)")
           if failures != 0:
@@ -1128,7 +1133,7 @@ jobs:
               sys.exit(1)
           print(
               "Real controller stack + migration + signed-Compose mount executed as root: "
-              ">= 22 tests, zero skipped/failed/errored."
+              ">= 30 tests, zero skipped/failed/errored."
           )
           PY
 

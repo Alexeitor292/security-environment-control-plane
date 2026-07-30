@@ -659,6 +659,111 @@ def test_the_valid_template_still_resolves_one_and_only_one_gate_mount(controlle
     assert os.path.realpath(mounts[0]["Source"]) == os.path.realpath(_GATE_HOST)
 
 
+# --------------------- R9: alternate API mount surfaces -- Compose accepts them, we refuse them
+
+
+def _surface_template(block: str, extra: str = "") -> bytes:
+    """The installed valid template with ``block`` added to the api service, plus any top-level
+    ``extra`` the field needs to be a well-formed Compose document."""
+    installed = _CONTROLLER_COMPOSE.decode()
+    head, sep, tail = installed.partition("  api:\n")
+    assert sep, "the api service must be present"
+    return (head + sep + block + tail + extra).encode()
+
+
+#: One representative per alternate surface, each aimed at (or capable of masking) the reviewed
+#: readiness-gate destination while the correct reviewed mounts remain present and valid.
+_R9_SURFACES = {
+    "configs": (
+        f"    configs:\n      - source: hostile\n        target: {_GATE_TARGET}\n",
+        "configs:\n  hostile:\n    file: ./known-value\n",
+    ),
+    "secrets": (
+        f"    secrets:\n      - source: hostile\n        target: {_GATE_TARGET}\n",
+        "secrets:\n  hostile:\n    file: ./known-value\n",
+    ),
+    "tmpfs": (f"    tmpfs:\n      - {_GATE_TARGET}\n", ""),
+    "volumes_from": ("    volumes_from:\n      - minio\n", ""),
+    "devices": (f"    devices:\n      - /dev/null:{_GATE_TARGET}\n", ""),
+    "use_api_socket": ("    use_api_socket: true\n", ""),
+}
+
+
+@pytest.mark.parametrize("field", list(_R9_SURFACES))
+def test_the_validator_refuses_an_alternate_surface_compose_is_happy_with(
+    controller_stack, field
+) -> None:
+    """The point of doing this against real Compose: for most of these fields Compose is perfectly
+    content, so there is no runtime error to lean on. The offline refusal is the only control,
+    and it happens before signing, before ``install_config`` and before ``compose up``."""
+    block, extra = _R9_SURFACES[field]
+    template = _surface_template(block, extra)
+
+    # the control, asserted first: refused offline, with the bounded contract-class reason.
+    reason = controller_compose_contract_reason(template)
+    assert reason == "controller_compose_api_alternate_mount_surface_forbidden"
+
+    # and now the reason the control has to exist: Compose renders it without objecting.
+    installed = _installed_compose_path(controller_stack)
+    scratch = os.path.join(os.path.dirname(installed), f"surface-{field}.yml")
+    known = os.path.join(os.path.dirname(installed), "known-value")
+    with open(known, "wb") as fh:
+        fh.write(b"hostile\n")
+    with open(scratch, "wb") as fh:
+        fh.write(template)
+    os.chmod(scratch, 0o640)
+    compose = os.path.realpath(shutil.which("docker-compose"))
+    try:
+        rendered = _sh(
+            compose,
+            "--project-name",
+            f"{_PROJECT}-surface",
+            "--file",
+            scratch,
+            "config",
+            check=False,
+        )
+    finally:
+        os.unlink(scratch)
+        os.unlink(known)
+    if rendered.returncode == 0:
+        # Compose accepted a document that would mount over the gate's destination.
+        assert field.split("_")[0] in rendered.stdout or field in rendered.stdout, rendered.stdout
+    else:
+        # some fields need a resolvable referent; a Compose-side error is agreement, never the gate.
+        assert rendered.stderr.strip() or rendered.stdout.strip()
+
+
+def test_no_alternate_surface_template_can_reach_install_config(controller_stack) -> None:
+    """The adapter boundary refuses every alternate surface too, and the installed config is proven
+    byte-unchanged -- so none of these can reach ``compose up`` even by mistake."""
+    from secp_management.adapters import ReviewedConfig
+    from secp_management.controller_compose_validation import ControllerComposeContractError
+
+    adapter = controller_stack["adapter"]
+    installed_path = _installed_compose_path(controller_stack)
+    before = open(installed_path, "rb").read()
+    for field, (block, extra) in _R9_SURFACES.items():
+        template = _surface_template(block, extra)
+        config = ReviewedConfig(identity=_sha(template), content=template)
+        with pytest.raises(ControllerComposeContractError):
+            adapter.install_config(config)
+        assert open(installed_path, "rb").read() == before, f"{field} mutated the installed config"
+
+
+def test_the_running_stack_still_has_only_the_reviewed_mounts_and_the_real_gate(
+    controller_stack,
+) -> None:
+    """After the whole R8+R9 matrix: the running API still has exactly the two reviewed mounts, and
+    the readiness route is still backed by the genuine root-generated gate file."""
+    mounts = _api_mounts()
+    destinations = sorted(m.get("Destination") for m in mounts)
+    assert destinations == sorted({_GATE_TARGET, _MARKER_HOST}), destinations
+    assert all(m["RW"] is False for m in mounts)
+    seen = _sh("docker", "exec", "secp-controller-api", "cat", _GATE_TARGET)
+    assert seen.stdout.strip() == _GATE_VALUE  # the real gate, not a config/secret/tmpfs stand-in
+
+
 def test_zzz_compensation_tears_down_zero_residual(controller_stack) -> None:
     ctx = controller_stack["ctx"]
     adapter = controller_stack["adapter"]

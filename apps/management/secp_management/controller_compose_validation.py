@@ -27,7 +27,12 @@ refuses everything it does not understand:
 * no ``${...}``/``$VAR`` interpolation anywhere in a contract-relevant source or target, because the
   bytes signed are not then the paths mounted;
 * long-form binds only for the contract's targets: a short-form ``"a:b:ro"`` string is ambiguous and
-  is refused rather than parsed.
+  is refused rather than parsed;
+* every entry inside ``services.api.volumes`` is canonicalized and grouped by the destination it
+  actually resolves to (R8), AND every alternate API mount mechanism -- ``configs``, ``secrets``,
+  ``tmpfs``, ``volumes_from``, ``devices``, ``use_api_socket`` -- is forbidden outright (R9). Those
+  two statements together are what makes the API service's mount set knowable from the signed bytes;
+  neither alone is sufficient, because an alternate surface never enters the grouping.
 
 Every refusal is a bounded closed reason code naming the CONTRACT CLASS that failed — never a
 deployment value, path, host name, image or credential from the artifact.
@@ -64,6 +69,38 @@ REQUIRED_API_MOUNTS: Final[tuple[tuple[str, str, str], ...]] = (
         "readiness_gate",
     ),
 )
+
+#: R9. ``services.api.volumes`` is not the only way Compose can put a filesystem object inside a
+#: container. Each field below introduces an INDEPENDENT mount surface whose targets never enter the
+#: R8 canonical-target grouping, so a perfectly valid reviewed volumes list could coexist with an
+#: alternate mount that MASKS, collides with, or replaces the effective readiness-gate or
+#: signer-marker destination. All six are refused outright on the ordinary API service:
+#:
+#: * ``configs`` / ``secrets`` -- file mounts with independently selected targets; a caller-chosen
+#:   file can be placed exactly where the root-generated gate belongs;
+#: * ``tmpfs`` -- filesystem mounts declared outside ``volumes``;
+#: * ``volumes_from`` -- targets that cannot be derived here at all without evaluating another
+#:   service or an external container;
+#: * ``devices`` -- a separate host-path-to-container-path mapping surface;
+#: * ``use_api_socket`` -- mounts the container-engine socket and delegated credentials, which is
+#:   outside the ordinary API's authority entirely.
+#:
+#: PRESENCE is the refusal, even for ``[]``, ``null`` or ``false``: an empty declaration is still
+#: outside the closed v1alpha2 B2 contract, and treating "empty" as "absent" would make the contract
+#: depend on how a future Compose version resolves an empty field. Partially emulating the Compose
+#: resolver instead -- deriving what these fields would actually mount -- would make this module a
+#: second Compose implementation and could never be correct offline.
+FORBIDDEN_API_MOUNT_SURFACES: Final = frozenset(
+    {
+        "configs",
+        "secrets",
+        "tmpfs",
+        "volumes_from",
+        "devices",
+        "use_api_socket",
+    }
+)
+
 
 _MAX_TEMPLATE_BYTES: Final = 1 * 1024 * 1024  # a controller compose template is small
 _MAX_DEPTH: Final = 16
@@ -198,6 +235,23 @@ def _assert_no_indirection(document: dict[str, Any], api: dict[str, Any]) -> Non
             _reject("controller_compose_indirection_forbidden")
 
 
+def _assert_no_alternate_mount_surface(api: dict[str, Any]) -> None:
+    """R9: refuse every alternate API mount mechanism BEFORE ``volumes`` is even read.
+
+    The order matters. ``volumes`` is canonicalized and grouped (R8) so no two entries can
+    resolve to one reviewed destination; that guarantee is worth nothing if a sibling field can
+    mount over the
+    same path without ever entering the grouping. So this runs first, and it refuses on PRESENCE
+    rather than trying to work out what the field would have mounted.
+
+    The public reason names the CONTRACT CLASS only -- never which field, never a target, never a
+    config or secret name. A refusal is emitted to operators and must not become a way to enumerate
+    what a hostile release attempted."""
+    for field in FORBIDDEN_API_MOUNT_SURFACES:
+        if field in api:
+            _reject("controller_compose_api_alternate_mount_surface_forbidden")
+
+
 def _api_volumes(api: dict[str, Any]) -> list[Any]:
     volumes = api.get("volumes")
     if volumes is None:
@@ -262,12 +316,17 @@ def canonical_container_target(raw: object) -> str:
 
 
 def _declared_target(entry: Any) -> str:
-    """The container target an entry declares, in EVERY representation Compose accepts.
+    """The container target a ``volumes`` ENTRY declares, in every entry representation Compose
+    accepts.
 
-    Every entry on the API service must declare a target this contract can characterise -- a bind, a
-    named volume, a tmpfs, an image mount, or a short-form string. An entry whose target cannot be
-    extracted is REFUSED rather than skipped: skipping it is precisely how an alias would slip
-    past."""
+    Scope, stated precisely because an earlier comment here was easy to over-read: this covers every
+    representation an entry INSIDE ``services.api.volumes`` may take -- a long-form bind, a named
+    volume, a tmpfs entry, an image mount, or a short-form string. It does NOT and cannot cover
+    Compose's other mount mechanisms; those are forbidden outright by
+    :func:`_assert_no_alternate_mount_surface` (R9) rather than characterised here.
+
+    An entry whose target cannot be extracted is REFUSED rather than skipped: skipping it is
+    precisely how an alias would slip past."""
     if isinstance(entry, str):
         parts = entry.split(":")
         if not 1 <= len(parts) <= _MAX_SHORT_FORM_PARTS:
@@ -283,12 +342,18 @@ def _declared_target(entry: Any) -> str:
 
 
 def _group_by_canonical_target(volumes: list[Any]) -> dict[str, list[Any]]:
-    """Every API volume entry, grouped by the destination Compose will ACTUALLY mount it at.
+    """Every ``services.api.volumes`` entry, grouped by the destination Compose will ACTUALLY
+    mount it at.
 
-    This is the pre-pass R8 requires: it runs over ALL entries -- binds, named volumes, tmpfs, image
-    mounts and short forms alike -- BEFORE either required mount is examined, so a lexical alias is
-    caught by construction. A runtime "duplicate mount point" error is not a security gate: the
-    signed release must refuse before it is signed and before any host mutation."""
+    This is the pre-pass R8 requires: it runs over every entry in that list -- binds, named volumes,
+    tmpfs entries, image mounts and short forms alike -- BEFORE either required mount is
+    examined, so a lexical alias is caught by construction. A runtime "duplicate mount point"
+    error is not a security gate: the signed release must refuse before it is signed and before
+    any host mutation.
+
+    It covers the ``volumes`` LIST only. The two guarantees are therefore stated separately and
+    together are exhaustive for the API service: every entry inside ``services.api.volumes`` is
+    canonicalized and grouped (R8), and every alternate API mount mechanism is forbidden (R9)."""
     grouped: dict[str, list[Any]] = {}
     for entry in volumes:
         grouped.setdefault(_declared_target(entry), []).append(entry)
@@ -366,6 +431,9 @@ def assert_controller_compose_contract(content: bytes) -> None:
     document = parse_controller_compose_document(content)
     api = _api_service(document)
     _assert_no_indirection(document, api)
+    # R9 BEFORE R8: an alternate mount surface must be refused before `volumes` is read, because the
+    # canonical-target grouping cannot see a mount that never appears in `volumes`.
+    _assert_no_alternate_mount_surface(api)
     volumes = _api_volumes(api)
     # R8: canonicalize and group EVERY entry's destination FIRST, then validate the required
     # mounts. Doing it in that order is what makes a normalized alias impossible.
@@ -388,6 +456,7 @@ def controller_compose_contract_reason(content: bytes) -> str | None:
 
 __all__ = [
     "CONTROLLER_API_SERVICE",
+    "FORBIDDEN_API_MOUNT_SURFACES",
     "REQUIRED_MOUNT_BIND_KEYS",
     "REQUIRED_MOUNT_KEYS",
     "REQUIRED_API_MOUNTS",
