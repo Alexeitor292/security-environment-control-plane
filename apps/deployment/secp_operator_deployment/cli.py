@@ -10,6 +10,14 @@ path flag. There is deliberately NO ``activate`` command and no command that con
 ``Worker``, calls ``run_plan_generation``, resolves a credential, or contacts any infrastructure.
 Tests inject a pre-resolved context / explicit inputs through the TEST-ONLY :class:`VerifyDeps`
 seam.
+
+``python -m secp_operator_deployment provenance --json`` is the second read-only command: it
+recomputes the implementation manifest over the INSTALLED package through the trusted
+directory-fd walk and reports the aggregate, so an operator can compare it against the aggregate
+bound into a signed release BEFORE trusting the deployment. Like ``verify`` it takes no path
+argument — the directory inspected is the installed module's own, resolved in code — and it
+mutates nothing. Both commands perform their filesystem reads HERE and hand already-resolved
+values to the PURE builders in :mod:`secp_operator_deployment.verify`.
 """
 
 from __future__ import annotations
@@ -39,6 +47,10 @@ class VerifyDeps:
     attestation: object | None = None
     compositions: object | None = None
     host_observation: object | None = None
+    # provenance-command inputs (TEST-ONLY, same seam): already-resolved manifest aggregates.
+    source_aggregate: str | None = None
+    source_reason: str | None = None
+    installed_aggregate: str | None = None
 
 
 def _kwargs_from_context(ctx: object) -> dict:
@@ -86,7 +98,67 @@ def cmd_verify(args: argparse.Namespace, deps: VerifyDeps | None) -> tuple[int, 
     return code, report
 
 
-_HANDLERS = {"verify": cmd_verify}
+def _provenance_kwargs(deps: VerifyDeps | None) -> dict:
+    """Resolve the provenance inputs. This is where the I/O lives — :mod:`verify` stays PURE.
+
+    There is deliberately NO ``--package-dir`` flag: the directory inspected is the INSTALLED
+    module's own directory, resolved in code exactly as :mod:`production_context` resolves it. An
+    operator-supplied path would let the report describe a tree that is not the one that would
+    actually run, which is the same reason there is no arbitrary profile-path flag.
+    """
+    from secp_operator_deployment.manifest import COVERED_MODULES
+
+    covered = len(COVERED_MODULES)
+    if deps is not None:  # TEST-ONLY injection; never reached by the production CLI
+        return dict(
+            source_aggregate=deps.source_aggregate,
+            source_reason=deps.source_reason,
+            installed_aggregate=deps.installed_aggregate,
+            installed_trust_ok=bool(deps.installed_trust_ok),
+            installed_trust_reason=deps.installed_trust_reason,
+            covered_module_count=covered,
+        )
+
+    from secp_operator_deployment import package_implementation_digest
+    from secp_operator_deployment.manifest import verify_installed_package_trust
+    from secp_operator_deployment.production_context import _installed_package_dir
+
+    source_aggregate: str | None = None
+    source_reason: str | None = None
+    try:
+        source_aggregate = package_implementation_digest()
+    except Exception as exc:
+        source_reason = getattr(exc, "reason_code", "manifest_unavailable")
+
+    installed_aggregate: str | None = None
+    installed_trust_ok = False
+    installed_trust_reason: str | None = "install_trust_not_evaluated"
+    try:
+        installed_aggregate = verify_installed_package_trust(_installed_package_dir())
+        installed_trust_ok = True
+        installed_trust_reason = None
+    except Exception as exc:
+        installed_trust_reason = getattr(exc, "reason_code", "install_untrusted")
+
+    return dict(
+        source_aggregate=source_aggregate,
+        source_reason=source_reason,
+        installed_aggregate=installed_aggregate,
+        installed_trust_ok=installed_trust_ok,
+        installed_trust_reason=installed_trust_reason,
+        covered_module_count=covered,
+    )
+
+
+def cmd_provenance(args: argparse.Namespace, deps: VerifyDeps | None) -> tuple[int, dict]:
+    from secp_operator_deployment.verify import PROVENANCE_EXIT_CODES, build_provenance_report
+
+    report = build_provenance_report(**_provenance_kwargs(deps))
+    code = PROVENANCE_EXIT_CODES.get(report.get("status", ""), 20)
+    return code, report
+
+
+_HANDLERS = {"verify": cmd_verify, "provenance": cmd_provenance}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,6 +175,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     verify = sub.add_parser("verify", help="read-only prepared-deployment verification (sealed)")
     verify.add_argument("--json", action="store_true", help="deterministic machine-readable output")
+    prov = sub.add_parser(
+        "provenance",
+        help="read-only installed-package provenance (implementation aggregate + trust)",
+    )
+    prov.add_argument("--json", action="store_true", help="deterministic machine-readable output")
     return parser
 
 
