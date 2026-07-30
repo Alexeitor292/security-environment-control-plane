@@ -16,7 +16,10 @@ REPO = Path(__file__).resolve().parents[1]
 MGMT_PKG = REPO / "apps" / "management" / "secp_management"
 API_PKG = REPO / "apps" / "api" / "secp_api"
 
-#: The Phase 4 secpctl enrollment surface (management plane).
+#: The secpctl enrollment surface (PR5H-B1 Phase 4) plus the operator-authentication surface
+#: (PR5H-B2 / ADR-028 §3-§4), both management plane. This tuple enumerates modules BY PATH, so a new
+#: secpctl module is NOT covered until it is listed here — every addition to the CLI surface must
+#: extend it.
 SECPCTL_ENROLLMENT_MODULES = (
     MGMT_PKG / "cli.py",
     MGMT_PKG / "enrollment_cli.py",
@@ -24,6 +27,11 @@ SECPCTL_ENROLLMENT_MODULES = (
     MGMT_PKG / "controller_api_locator.py",
     MGMT_PKG / "operator_auth.py",
     MGMT_PKG / "worker_enroller.py",
+    MGMT_PKG / "auth_cli.py",
+    MGMT_PKG / "device_grant.py",
+    MGMT_PKG / "operator_device_auth.py",
+    MGMT_PKG / "operator_token_verify.py",
+    MGMT_PKG / "operator_credential_store.py",
 )
 
 

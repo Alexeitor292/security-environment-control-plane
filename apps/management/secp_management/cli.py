@@ -10,6 +10,8 @@ Command surface (there is deliberately NO ``activate``/``apply``/``destroy``/``p
     secpctl status    controller|worker
     secpctl evidence  controller|worker
     secpctl rollback  controller|worker                 [--write --confirm]
+    secpctl auth      login|logout                      [--write --confirm]
+    secpctl auth      status
 
 Every mutation defaults to DRY-RUN; a real write requires BOTH ``--write`` and ``--confirm``.
 ``--json``
@@ -26,6 +28,7 @@ import json
 import sys
 
 from secp_management import ManagementError
+from secp_management.auth_cli import AuthCliDeps, auth_login, auth_logout, auth_status
 from secp_management.engine import (
     EngineDeps,
     adopt,
@@ -94,7 +97,25 @@ def build_parser() -> argparse.ArgumentParser:
     _add_controller_parser(groups)
     _add_enrollment_parser(groups)
     _add_worker_parser(groups)
+    _add_auth_parser(groups)
     return parser
+
+
+def _add_auth_parser(groups) -> None:
+    """``secpctl auth login|status|logout`` — operator authentication by OAuth 2.0 Device
+    Authorization Grant (RFC 8628), per ADR-028 §3. There is NO ``--issuer``/``--client-id``/
+    ``--endpoint``/``--token``/``--password`` argument: the reviewed authority is discovered from
+    the bootstrap-recorded controller, and no password is ever collected. ``login`` and ``logout``
+    mutate credential state and keep the standard dry-run default; ``status`` is read-only."""
+    auth = groups.add_parser("auth", help="operator authentication operations")
+    actions = auth.add_subparsers(dest="action", required=True)
+    _add_write_confirm(
+        actions.add_parser("login", help="authenticate this operator via device authorization")
+    )
+    actions.add_parser("status", help="read-only local credential status")
+    _add_write_confirm(
+        actions.add_parser("logout", help="delete only the credential material secpctl owns")
+    )
 
 
 def _add_controller_parser(groups) -> None:
@@ -192,11 +213,20 @@ def _is_enrollment_group(argv: list[str]) -> bool:
     return False
 
 
+def _is_auth_group(argv: list[str]) -> bool:
+    for token in argv:
+        if token.startswith("-"):
+            continue
+        return token == "auth"
+    return False
+
+
 def run(
     argv: list[str],
     deps: EngineDeps | None = None,
     *,
     enrollment_deps: EnrollmentCliDeps | None = None,
+    auth_deps: AuthCliDeps | None = None,
 ) -> tuple[int, dict]:
     """Parse ``argv`` and execute the engine. Returns ``(exit_code, report_dict)``.
 
@@ -205,18 +235,20 @@ def run(
     explicitly-composed ``deps`` (steady-state :func:`_production_engine_deps`, or — Phase 2b — the
     clean-host root installation composition), falling back to this sealed default on any error.
     Tests inject their own ``deps`` directly. The enrollment/worker commands take a separate
-    :class:`EnrollmentCliDeps` (SEALED default; tests inject fakes; ``main`` composes the real)."""
+    :class:`EnrollmentCliDeps` (SEALED default; tests inject fakes; ``main`` composes the real), and
+    the auth commands a separate :class:`AuthCliDeps` whose credential store is likewise SEALED."""
     args = build_parser().parse_args(argv)
     resolved = deps if deps is not None else EngineDeps()
     enr = enrollment_deps if enrollment_deps is not None else EnrollmentCliDeps()
+    auth = auth_deps if auth_deps is not None else AuthCliDeps()
     try:
-        return _dispatch(args, resolved, enr)
+        return _dispatch(args, resolved, enr, auth)
     except ManagementError as exc:  # any uncaught engine refusal → bounded reason, exit 2
         return EXIT_REFUSED, {"command": args.group, "reason_code": exc.reason_code}
 
 
 def _dispatch(
-    args: argparse.Namespace, deps: EngineDeps, enr: EnrollmentCliDeps
+    args: argparse.Namespace, deps: EngineDeps, enr: EnrollmentCliDeps, auth: AuthCliDeps
 ) -> tuple[int, dict]:
     group = args.group
     if group == "release":
@@ -243,7 +275,19 @@ def _dispatch(
         return _dispatch_enrollment(args, enr)
     if group == "worker":
         return _dispatch_worker(args, enr)
+    if group == "auth":
+        return _dispatch_auth(args, auth)
     return EXIT_REFUSED, {"command": group, "reason_code": "unknown_command"}
+
+
+def _dispatch_auth(args: argparse.Namespace, auth: AuthCliDeps) -> tuple[int, dict]:
+    if args.action == "login":
+        return auth_login(auth, gate=_gate(args))
+    if args.action == "status":
+        return auth_status(auth)
+    if args.action == "logout":
+        return auth_logout(auth, gate=_gate(args))
+    return EXIT_REFUSED, {"command": "auth", "reason_code": "unknown_command"}
 
 
 def _dispatch_worker(args: argparse.Namespace, enr: EnrollmentCliDeps) -> tuple[int, dict]:
@@ -308,6 +352,28 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         return EnrollmentCliDeps()
 
 
+def _production_auth_deps() -> AuthCliDeps:
+    """Compose the operator-auth deps: the real bootstrap-recorded controller locator plus the
+    credential store from :func:`build_operator_credential_store`.
+
+    That builder resolves NO backend in this slice, so the store is the SEALED default and
+    ``auth login`` completes the grant but refuses to persist. Any construction failure falls back
+    to the fully sealed defaults, so an unconfigured or non-POSIX host fails closed with a code
+    rather than crashing. No identity, endpoint or trust input is read from a flag or an env var."""
+    try:
+        from secp_commissioning.runtime import RealFilesystem
+
+        from secp_management.controller_api_locator import FileControllerApiLocatorProvider
+        from secp_management.operator_credential_store import build_operator_credential_store
+
+        return AuthCliDeps(
+            credential_store=build_operator_credential_store(),
+            locator_provider=FileControllerApiLocatorProvider(RealFilesystem()),
+        )
+    except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
+        return AuthCliDeps()
+
+
 def _controller_install_engine_deps() -> EngineDeps | None:
     """Compose the ROOT-ONLY controller-install deps (the ONLY composition that reaches the real
     finalization factory). It is gated POSIX-root up front (``assert_posix_root`` inside
@@ -352,8 +418,12 @@ def main(argv: list[str] | None = None) -> int:
     # default on any error, so an unprovisioned/non-POSIX host still fails closed with a bounded
     # reason (unchanged) while a properly provisioned production host drives the real adapters.
     is_enrollment = _is_enrollment_group(args_list)
+    is_auth = _is_auth_group(args_list)
     enr = _production_enrollment_deps() if is_enrollment else None
-    if is_enrollment:
+    # the auth group composes ONLY the locator + credential store; it never builds an engine, so a
+    # login can never reach a filesystem/service mutation adapter.
+    auth = _production_auth_deps() if is_auth else None
+    if is_enrollment or is_auth:
         deps = None
     elif _is_controller_install_group(args_list):
         # the ONLY path that reaches the real finalization factory (root-gated); steady-state groups
@@ -361,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
         deps = _controller_install_engine_deps()
     else:
         deps = _production_engine_deps()
-    exit_code, payload = run(args_list, deps=deps, enrollment_deps=enr)
+    exit_code, payload = run(args_list, deps=deps, enrollment_deps=enr, auth_deps=auth)
     if "--json" in args_list:
         sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
     else:

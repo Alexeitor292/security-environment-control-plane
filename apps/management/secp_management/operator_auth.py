@@ -9,8 +9,15 @@ token is read through hardened filesystem checks and attached solely as ``Author
 the pinned controller origin (never forwarded across a redirect — redirects are forbidden).
 
 The token never appears in a repr, exception, log, audit line, or serialized/deterministic-JSON
-output. The shipped default provider is SEALED (``secpctl_operator_auth_unavailable``). Interactive
-OIDC login / device-authorization and OS credential storage remain PR5H-B2 auth-UX work.
+output. The shipped default provider is SEALED (``secpctl_operator_auth_unavailable``).
+
+Interactive device-authorization login now lives in :mod:`secp_management.auth_cli` (ADR-028 §3),
+which obtains and verifies a token and then offers it to
+:mod:`secp_management.operator_credential_store`. That store ships only its SEALED default, so no OS
+credential BACKEND exists yet and a login cannot complete; the protected token FILE below therefore
+remains the only working provider, and stays a deliberate test/recovery seam reachable solely when
+an operator sets ``SECP_OPERATOR_TOKEN_FILE``. It is never an automatic fallback from the
+credential store.
 """
 
 from __future__ import annotations
