@@ -1,59 +1,99 @@
-# Follow-up: migrate the host-systemd / host-Docker fences to a project-controlled runner
+# Follow-up: migrate the root-security fences to a project-controlled environment
 
-**Status:** open infrastructure item. **Does not block B2A.**
+**Status:** tier 1 **done** (SECP-WSA). Tier 2 **held** pending an operator decision.
 
 ## Why
 
 The trusted-ancestor rule requires every ancestor of a write target to be a real, root-owned,
-non-group/other-writable directory. Two fences write to `/etc/systemd/system/...`, so they depend on
-the GitHub-hosted machine's `/etc` posture — which is mutable and outside this repository's control.
+non-group/other-writable directory. The root fences therefore depend on the machine's `/etc` and
+`/` posture — which, on a GitHub-hosted runner, is mutable and outside this repository's control.
 
-It was observed invalid twice, with bounded evidence captured by
-`infra/ci/attest_trusted_ancestry.py`:
+It was observed invalid with bounded evidence captured by `infra/ci/attest_trusted_ancestry.py`:
 
-| path | uid | gid | mode | inode |
-|---|---|---|---|---|
-| `/` | 0 | 0 | `0o755` | 2 |
-| `/etc` | **1001** | **1001** | `0o755` | 42 |
-| `/etc/systemd` | 0 | 0 | `0o755` | 369 |
-| `/etc/systemd/system` | 0 | 0 | `0o755` | 370 |
+| path | uid | gid | mode | inode | dev | mount |
+|---|---|---|---|---|---|---|
+| `/` | 0 | 0 | `0o755` | 2 | 2049 | `/` |
+| `/etc` | **1001** | **1001** | `0o755` | 42 | 2049 | `/` |
 
-`/etc` alone was owned by the runner user while its children were `root:root` — a targeted,
-non-recursive chown of exactly `/etc` by something running as uid 1001. No step in this repository's
-workflow chowns `/etc` (every `chown` targets `/root/...`, `/usr/local/bin/docker-compose`, or a
-created child with explicit `0,0`), no source or test file may chown/chmod a fixed system parent
-(asserted structurally in `tests/test_trusted_ancestry_isolation.py`), and it reproduced on a **pinned**
-`ubuntu-24.04`. The cause is therefore the runner image or a third-party action
-(`actions/checkout@v4`, `astral-sh/setup-uv@v3`).
+`/etc` alone was owned by the runner user while its children were `root:root`, on the same device
+and mount as `/` — a targeted, non-recursive chown of exactly `/etc` by something running as
+uid 1001, not a mount or overlay artefact. No step in this repository's workflow chowns `/etc`
+(every `chown` targets `/root/...`, `/usr/local/bin/docker-compose`, or a created child with
+explicit `0,0`), and no source or test file may chown/chmod a fixed system parent (asserted
+structurally in `tests/test_trusted_ancestry_isolation.py`).
+
+### Correction: image pinning cannot fix this
+
+An earlier revision of this document claimed the six root fences being pinned to `ubuntu-24.04`
+made a future occurrence "attributable to a specific image rather than to 'some runner'". **That
+claim is false and is withdrawn.** Run `30522895412` (main, `e72f28f`) disproves it directly:
+
+* job `90807107915` observed `/etc` uid=1001 gid=1001 and exited **78**, product tests correctly
+  never started;
+* jobs `90807108008` and `90807107993` — **the same run, the same commit, the same
+  `ImageVersion 20260726.254.1`** — observed `/etc` uid=0.
+
+Each job gets its own VM, so this is **per-VM variance within one image version**. Pinning
+`runs-on` removes nothing, and a green root fence on a hosted VM is a coin flip rather than
+evidence. The cause of the chown remains unidentified (runner image provisioning, or a third-party
+action such as `actions/checkout@v4` / `astral-sh/setup-uv@v3`) — and the tier-1 fix below does not
+depend on identifying it.
 
 ## What is already done
 
 * the posture is **attested before any product test runs**, at every root fence and before both
-  inline preparation steps;
+  PR5F inline preparation steps;
 * an invalid machine exits **78 `infrastructure_invalid`** with bounded evidence — never a product
   failure, never a silent pass, never a repair;
 * classification is **total**: only `ENOENT` proves absence, and every other `OSError` is
   `not_statable` and therefore `infrastructure_invalid`;
-* the six root fences are pinned to `ubuntu-24.04`, so a future occurrence is attributable to a
-  specific image rather than to "some runner".
+* **tier 1 (SECP-WSA):** the four filesystem-only root fences —
+  `backend-realfs-root`, `backend-discovery-activation-root`, `backend-deployment-root`,
+  `backend-management-root` — now execute inside a **digest-pinned container** declared by
+  `jobs.<job>.container`, whose `/etc` comes from a content-addressed image layer and is root-owned
+  by construction. The pin is recorded once in `infra/ci/controlled-root-env.json` and every copy in
+  the workflow is machine-checked against it;
+* `backend-realfs-root` — previously the one root-elevated fence with **no** attestation gate — now
+  attests `/`, its complete ancestry, and is covered by `REQUIRED_GATED_JOBS`;
+* each controlled fence records the environment's pristine posture (`stat -c '%u %g %n' / /etc`)
+  as its **first** step, before any third-party action runs inside the container.
 
-## What remains
+Moving the gate is sound because it is **namespace-relative by construction**: it observes the
+filesystem only through `os.lstat` on plain absolute paths, `ancestors_of` is pure string
+splitting, and its single `/proc` read is `/proc/self/mountinfo` (evidence only — it feeds no
+verdict). Executed inside the container, it attests that container's ancestry. The script itself is
+**byte-for-byte unchanged**, the rule is not relaxed, and an invalid controlled environment still
+exits 78 before any product test runs.
 
-Migrate the two host-dependent fences —
+## What remains — tier 2, HELD
 
-* `backend-management-real-adapters-root` (host Docker + host systemd)
-* `backend-management-controller-real-adapters-root` (host Docker + real migration)
+Two fences still execute directly on the nondeterministic hosted VM:
 
-— to a **project-controlled runner or VM** whose ancestry is **constructed and attested by the job**,
-eliminating dependence on the mutable GitHub-hosted posture. Both need a real systemd instance and a
-real container runtime, so this is genuine infrastructure work (self-hosted runner image, or a
-privileged VM provisioned per run), not a workflow tweak. It was deliberately **not** attempted
-half-way inside the B2A reliability commits.
+* `backend-management-real-adapters-root` (real Docker + real systemd)
+* `backend-management-controller-real-adapters-root` (real Docker + real migration)
 
-## Re-dispatch rule until then
+Both install and observe **real systemd units** (`systemctl daemon-reload` / `is-enabled` /
+`is-active`) and drive a real container runtime. A GitHub `container:` job has no init system and no
+daemon, so it cannot host them. Moving them requires a job-constructed **privileged** environment
+(systemd as PID 1 plus a private daemon) or a nested VM — a CI posture decision that belongs to the
+operator, and which has been escalated rather than assumed.
 
-A classified infrastructure-invalid attempt may be re-dispatched **once**, and only after confirming
-all three:
+A **self-hosted runner is not the answer here**: it requires a real registration credential, and
+this repository is public with forking enabled, so a fork PR would obtain code execution on a
+machine that has root, Docker and systemd by design.
+
+Two prerequisites are unverified and must be settled before tier 2 is attempted: whether systemd
+runs reliably as PID 1 in a privileged container on a cgroup-v2 hosted runner, and whether
+`/dev/kvm` is usable there (which decides whether the nested-VM fallback exists at all).
+
+The stale "attributable to a specific image" comment still appears on those two jobs in
+`.github/workflows/ci.yml`; it should be corrected when they move.
+
+## Re-dispatch rule for the two remaining uncontrolled fences
+
+Applies **only** to `backend-management-real-adapters-root` and
+`backend-management-controller-real-adapters-root`. A classified infrastructure-invalid attempt may
+be re-dispatched **once**, and only after confirming all three:
 
 1. the attestation step exited **78**;
 2. the bounded evidence identifies the invalid posture (which ancestor, and its observed
@@ -62,3 +102,7 @@ all three:
 
 There is no automatic retry-until-green behaviour, and code must never be changed to satisfy an
 invalid machine.
+
+**This rule does not extend to the four controlled fences.** Their environment is constructed from a
+pinned digest, so an `infrastructure_invalid` verdict there is a genuine defect in the environment
+definition — it must be diagnosed and fixed, never re-dispatched.

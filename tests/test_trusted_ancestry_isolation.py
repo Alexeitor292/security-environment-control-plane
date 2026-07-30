@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import errno
+import json
 import os
 import stat
 import sys
@@ -440,6 +441,12 @@ _GATE_SCRIPT = "infra/ci/attest_trusted_ancestry.py"
 
 #: job key -> the product-test step that must be preceded, IN THAT JOB, by an attestation step.
 REQUIRED_GATED_JOBS: dict[str, str] = {
+    # SECP-WSA. This fence was root-elevated with NO attestation gate at all: its sandbox is built
+    # directly beneath `/` (apps/commissioning/tests/test_commissioning_realfs.py:26), so an
+    # untrusted `/` would have surfaced as errored product tests -- "the feature is broken" --
+    # instead of a classified invalid machine, which is the exact confusion this suite exists to
+    # prevent. `/` is its complete ancestry, so `/` is what it attests.
+    "backend-realfs-root": "Run production RealFilesystem tests as root",
     "backend-discovery-activation-root": (
         "Run PR5F fixed-layout root transaction tests (no skips)"
     ),
@@ -622,3 +629,181 @@ def test_the_proof_fails_when_the_pr5f_etc_attestation_moves_after_its_preparati
 def test_the_unmutated_workflow_passes() -> None:
     """The control: every mutation above is a real break, not a broken assertion."""
     assert_job_local_gate_order(_workflow())
+
+
+# --------------------------- SECP-WSA: the fence runs inside a CONTROLLED environment
+#
+# Pinning `runs-on` was never enough, and the evidence now says so directly. In run 30522895412 job
+# 90807107915 observed `/etc` uid=1001 gid=1001 (dev 2049, inode 42, mount `/`) and exited 78,
+# while two SIBLING jobs of that same run -- same commit, same `ImageVersion 20260726.254.1` --
+# observed uid=0. That is per-VM variance, so no image pin can remove it, and a green root fence on
+# a hosted VM is a coin flip rather than evidence.
+#
+# The tier-1 fences therefore execute inside a digest-pinned container whose `/etc` comes from a
+# content-addressed layer and is root-owned by construction. The RULE is untouched:
+# `attest_trusted_ancestry.py` is byte-for-byte unchanged and still decides the job. It is sound to
+# move it because the gate is namespace-relative by construction -- it observes the filesystem only
+# through `os.lstat` on plain absolute paths, `ancestors_of` is pure string splitting, and its one
+# `/proc` read is `/proc/self/mountinfo` (evidence only, feeding no verdict). Run inside the
+# container, it attests the container's ancestry.
+#
+# These proofs assert the environment is genuinely controlled, that the pin cannot drift between
+# its copies, and -- the property most worth defending -- that the gate is never REDIRECTED out of
+# the environment the product tests then run in.
+
+_CONTROLLED_ENV_MANIFEST = (
+    Path(__file__).resolve().parents[1] / "infra" / "ci" / "controlled-root-env.json"
+)
+
+#: Root fences that still execute directly on the nondeterministic hosted VM. Both drive real
+#: systemd units (`systemctl daemon-reload` / `is-enabled` / `is-active`) and a real container
+#: runtime, which a GitHub `container:` job provides neither of, so they are HELD pending the
+#: operator decision on a job-constructed privileged environment (tier 2). This set may only ever
+#: SHRINK; `test_the_uncontrolled_set_is_exactly_the_two_systemd_fences` refuses an addition.
+NOT_YET_CONTROLLED: frozenset[str] = frozenset(
+    {
+        "backend-management-real-adapters-root",
+        "backend-management-controller-real-adapters-root",
+    }
+)
+
+#: Ways a gate could be made to observe some OTHER namespace than the one the product tests use.
+#: A gate that attests a machine the tests never run on proves nothing at all.
+_NAMESPACE_ESCAPES = ("docker ", "podman ", "ssh ", "chroot ", "nsenter ")
+
+
+def _is_digest_pinned(image: str) -> bool:
+    """True only for `name:tag@sha256:<64 lowercase hex>` -- a tag alone is not a pin."""
+    base, separator, digest = image.partition("@")
+    if not base or not separator or not digest.startswith("sha256:"):
+        return False
+    body = digest[len("sha256:") :]
+    return len(body) == 64 and all(character in "0123456789abcdef" for character in body)
+
+
+def _manifest() -> dict:
+    return json.loads(_CONTROLLED_ENV_MANIFEST.read_text(encoding="utf-8"))
+
+
+def controlled_jobs() -> list[str]:
+    """Every gated root fence that must run inside the controlled environment today."""
+    return sorted(set(REQUIRED_GATED_JOBS) - NOT_YET_CONTROLLED)
+
+
+def assert_controlled_environment(workflow: dict, manifest: dict) -> None:
+    """The SECP-WSA contract, factored so the mutation regressions can drive it directly."""
+    pinned = str(manifest["image"])
+    assert _is_digest_pinned(pinned), f"the manifest pin is not digest-pinned: {pinned}"
+
+    for job in controlled_jobs():
+        container = workflow["jobs"][job].get("container")
+        assert container, f"{job}: no controlled environment (no `container:`)"
+        image = str(container["image"] if isinstance(container, dict) else container)
+        assert _is_digest_pinned(image), f"{job}: environment is not digest-pinned: {image}"
+        # one reviewed environment, not four independently drifting ones
+        assert image == pinned, f"{job}: pin drifted from the manifest ({image} != {pinned})"
+
+        steps = _steps(workflow, job)
+        gates = _gate_indices(steps)
+        assert gates, f"{job}: no attestation step in THIS job"
+        for index in gates:
+            run = str(steps[index]["run"])
+            for escape in _NAMESPACE_ESCAPES:
+                assert escape not in run, (
+                    f"{job}: the gate is redirected out of the environment ({escape.strip()}), so "
+                    "it would attest a machine the product tests do not run on"
+                )
+
+        # the pristine posture is recorded BEFORE any third-party action runs inside the container,
+        # so a posture change is attributable to the pinned image rather than to something that ran
+        # after it -- the question the old ordering (first observation only after checkout and
+        # setup-uv) could not answer.
+        first_action = next((i for i, step in enumerate(steps) if "uses" in step), len(steps))
+        canary = [i for i, step in enumerate(steps) if "stat -c" in str(step.get("run", ""))]
+        assert canary, f"{job}: no pristine-posture canary"
+        assert min(canary) < first_action, f"{job}: the canary runs after a third-party action"
+
+    # the manifest is the single source of truth for the pin; neither side may drift from the other
+    assert sorted(manifest["controlled_jobs"]) == controlled_jobs()
+    assert sorted(manifest["not_yet_controlled"]) == sorted(NOT_YET_CONTROLLED)
+
+
+def test_every_controlled_root_fence_runs_in_the_pinned_environment() -> None:
+    assert_controlled_environment(_workflow(), _manifest())
+
+
+def test_the_uncontrolled_set_is_exactly_the_two_systemd_fences() -> None:
+    """Tier 2 is HELD, not forgotten. Naming the remainder exactly keeps the gap visible and keeps
+    a later change from quietly parking a third fence on the nondeterministic hosted runner."""
+    assert NOT_YET_CONTROLLED == frozenset(
+        {
+            "backend-management-real-adapters-root",
+            "backend-management-controller-real-adapters-root",
+        }
+    )
+    assert NOT_YET_CONTROLLED < set(REQUIRED_GATED_JOBS)
+
+
+def test_the_realfs_fence_attests_its_complete_ancestry() -> None:
+    """It builds its sandbox directly beneath `/`, so `/` is the whole ancestry -- and until
+    SECP-WSA it was the one root-elevated fence with no gate at all."""
+    steps = _steps(_workflow(), "backend-realfs-root")
+    gates = _gate_indices(steps)
+    assert gates, "the RealFilesystem fence must attest its ancestry"
+    assert any(
+        str(steps[index]["run"]).rstrip().endswith(f"{_GATE_SCRIPT} /") for index in gates
+    ), "the RealFilesystem fence must attest exactly `/`"
+
+
+# ---- mutation regressions: each property must FAIL when broken -------------------------------
+
+
+def test_the_controlled_proof_fails_when_a_fence_loses_its_environment() -> None:
+    workflow = _mutated()
+    del workflow["jobs"]["backend-deployment-root"]["container"]
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_a_pin_drifts_from_the_manifest() -> None:
+    workflow = _mutated()
+    workflow["jobs"]["backend-management-root"]["container"]["image"] = (
+        "ubuntu:24.04@sha256:" + "0" * 64
+    )
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_an_environment_is_only_tag_pinned() -> None:
+    """A tag reintroduces exactly the silent-rollover variable this work removes."""
+    workflow = _mutated()
+    workflow["jobs"]["backend-realfs-root"]["container"]["image"] = "ubuntu:24.04"
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_the_gate_is_redirected_out_of_the_environment() -> None:
+    """The subtlest break: the fence still HAS a gate, and the gate still exits 78 -- but it is
+    attesting a different namespace from the one the product tests run in."""
+    workflow = _mutated()
+    steps = workflow["jobs"]["backend-management-root"]["steps"]
+    index = _gate_indices(steps)[0]
+    steps[index]["run"] = "sudo docker exec other-host " + str(steps[index]["run"]).lstrip()
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_the_canary_moves_after_a_third_party_action() -> None:
+    workflow = _mutated()
+    steps = workflow["jobs"]["backend-realfs-root"]["steps"]
+    canary = next(i for i, step in enumerate(steps) if "stat -c" in str(step.get("run", "")))
+    moved = steps.pop(canary)
+    first_action = next(i for i, step in enumerate(steps) if "uses" in step)
+    steps.insert(first_action + 1, moved)
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_unmutated_controlled_environment_passes() -> None:
+    """The control: every mutation above is a real break, not a broken assertion."""
+    assert_controlled_environment(_workflow(), _manifest())

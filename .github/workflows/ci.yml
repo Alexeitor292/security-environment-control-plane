@@ -414,14 +414,45 @@ jobs:
   # alone is NOT trusted, because an all-skipped run exits successfully.
   backend-realfs-root:
     name: Backend RealFilesystem (root, production openat backend)
-    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
-    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
-    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
-    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    # The hosted VM only HOSTS this job now; the fence executes inside the controlled environment
+    # declared below. `runs-on` stays pinned so the host side is still a known quantity.
     runs-on: ubuntu-24.04
+    # SECP-WSA tier 1 — the controlled environment. The trusted-ancestor requirement is unchanged;
+    # what changes is WHERE it is proven. The hosted VM's `/etc` ownership is nondeterministic: in
+    # run 30522895412 one job observed `/etc` uid=1001 gid=1001 while two sibling jobs of the SAME
+    # run, on the SAME `ImageVersion 20260726.254.1`, observed uid=0. That is per-VM variance, which
+    # image pinning cannot remove. The job body therefore runs inside a digest-pinned container
+    # whose `/etc` comes from a content-addressed image layer and is root-owned by construction.
+    # `attest_trusted_ancestry.py` is byte-for-byte unchanged and runs INSIDE this container (its
+    # `os.lstat` is namespace-relative, so it observes this environment's ancestry), and it still
+    # exits 78 before any product test if that environment is invalid. Nothing here relaxes,
+    # repairs, special-cases, skips or warns through a non-root-owned ancestor.
+    # The pin is mirrored in `infra/ci/controlled-root-env.json`; the agreement is machine-checked
+    # by `tests/test_trusted_ancestry_isolation.py`.
+    container:
+      image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     env:
       SECP_APP_ENV: test
     steps:
+      - name: Record the controlled environment's pristine ancestry posture
+        # The first thing that happens in this job, before any third-party action runs inside the
+        # container. Bounded, non-secret metadata for the two components every root fence depends
+        # on. This is EVIDENCE, not a gate: the classified gate below is the only thing that decides
+        # the job. It exists so that a future posture change is attributable to the pinned image
+        # rather than to something that ran after it — the question the old step ordering (first
+        # observation only after checkout and setup-uv) could not answer.
+        run: |
+          stat -c '%u %g %n' / /etc
+      - name: Install the controlled environment prerequisites
+        # The pinned base is minimal. Install exactly what this job needs and nothing else: sudo (so
+        # every root command keeps its reviewed `sudo` form even though the container is already
+        # uid 0), ca-certificates + curl (uv and its managed CPython fetch over HTTPS), git (so
+        # actions/checkout performs a real clone rather than a REST fallback), and the archive tools
+        # the toolchain unpacks with. No package repairs, chowns or chmods a system directory.
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install --yes --no-install-recommends sudo ca-certificates curl git tar xz-utils
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -435,6 +466,14 @@ jobs:
         run: |
           uv venv --python 3.11
           uv pip install -e ".[dev]"
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # This module builds its sandbox directly beneath `/` (test_commissioning_realfs.py:26), so
+        # `/` IS the complete ancestry the production openat backend will traverse here. Until now
+        # this was the one root-elevated fence with no attestation gate: an untrusted `/` would have
+        # surfaced as errored product tests — "the feature is broken" — instead of a classified
+        # invalid machine. The rule is not relaxed and the posture is never repaired.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /
       - name: Run production RealFilesystem tests as root
         # Absolute venv interpreter under passwordless sudo, so effective UID 0 satisfies the
         # backend's root-owned-ancestor requirement and the tests build a root-owned sandbox
@@ -495,14 +534,47 @@ jobs:
   # starts no service, contacts no endpoint, and never runs an operator or OpenTofu.
   backend-discovery-activation-root:
     name: PR5F discovery activation root-security (fixed state transaction)
-    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
-    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
-    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
-    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    # The hosted VM only HOSTS this job now; the fence executes inside the controlled environment
+    # declared below. `runs-on` stays pinned so the host side is still a known quantity.
     runs-on: ubuntu-24.04
+    # SECP-WSA tier 1 — the controlled environment. This is the fence that failed on main with
+    # `/etc not_root_owned uid=1001 gid=1001` (run 30522895412, exit 78, product tests correctly
+    # never started). The trusted-ancestor requirement is unchanged; what changes is WHERE it is
+    # proven. Two sibling jobs of that SAME run, on the SAME `ImageVersion 20260726.254.1`, observed
+    # `/etc` uid=0 — per-VM variance, which image pinning cannot remove. The job body therefore runs
+    # inside a digest-pinned container whose `/etc` comes from a content-addressed image layer and
+    # is root-owned by construction. `attest_trusted_ancestry.py` is byte-for-byte unchanged and
+    # runs INSIDE this container (its `os.lstat` is namespace-relative, so it observes this
+    # environment's ancestry), and it still exits 78 before any product test if that environment is
+    # invalid. Nothing here relaxes, repairs, special-cases, skips or warns through a non-root-owned
+    # `/etc`, and no re-dispatch behaviour is added.
+    # The pin is mirrored in `infra/ci/controlled-root-env.json`; the agreement is machine-checked
+    # by `tests/test_trusted_ancestry_isolation.py`.
+    container:
+      image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     env:
       SECP_APP_ENV: test
     steps:
+      - name: Record the controlled environment's pristine ancestry posture
+        # The first thing that happens in this job, before any third-party action runs inside the
+        # container. Bounded, non-secret metadata for the two components every root fence depends
+        # on. This is EVIDENCE, not a gate: the classified gates below are the only things that
+        # decide the job. It exists so a future posture change is attributable to the pinned image
+        # rather than to something that ran after it — the question the old step ordering (first
+        # observation only after checkout and setup-uv) could not answer.
+        run: |
+          stat -c '%u %g %n' / /etc
+      - name: Install the controlled environment prerequisites
+        # The pinned base is minimal. Install exactly what this job needs and nothing else: sudo (so
+        # every root command keeps its reviewed `sudo` form even though the container is already
+        # uid 0), ca-certificates + curl (uv and its managed CPython fetch over HTTPS), git (so
+        # actions/checkout performs a real clone rather than a REST fallback), and the archive tools
+        # the toolchain unpacks with. No package repairs, chowns or chmods a system directory, and
+        # in particular nothing touches `/etc`, `/var/lib` or any ancestor this fence attests.
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install --yes --no-install-recommends sudo ca-certificates curl git tar xz-utils
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -711,14 +783,44 @@ jobs:
   # No deployment infrastructure is contacted; every child process is a local, bounded, pinned probe.
   backend-deployment-root:
     name: Deployment package root-security (root, trusted dir-fd + pinned exec)
-    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
-    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
-    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
-    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    # The hosted VM only HOSTS this job now; the fence executes inside the controlled environment
+    # declared below. `runs-on` stays pinned so the host side is still a known quantity.
     runs-on: ubuntu-24.04
+    # SECP-WSA tier 1 — the controlled environment. The trusted-ancestor requirement is unchanged;
+    # what changes is WHERE it is proven. The hosted VM's `/etc` ownership is nondeterministic: in
+    # run 30522895412 one job observed `/etc` uid=1001 gid=1001 while two sibling jobs of the SAME
+    # run, on the SAME `ImageVersion 20260726.254.1`, observed uid=0. That is per-VM variance, which
+    # image pinning cannot remove. The job body therefore runs inside a digest-pinned container
+    # whose `/etc` comes from a content-addressed image layer and is root-owned by construction.
+    # `attest_trusted_ancestry.py` is byte-for-byte unchanged and runs INSIDE this container (its
+    # `os.lstat` is namespace-relative, so it observes this environment's ancestry), and it still
+    # exits 78 before any product test if that environment is invalid. Nothing here relaxes,
+    # repairs, special-cases, skips or warns through a non-root-owned ancestor.
+    # The pin is mirrored in `infra/ci/controlled-root-env.json`; the agreement is machine-checked
+    # by `tests/test_trusted_ancestry_isolation.py`.
+    container:
+      image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     env:
       SECP_APP_ENV: test
     steps:
+      - name: Record the controlled environment's pristine ancestry posture
+        # The first thing that happens in this job, before any third-party action runs inside the
+        # container. Bounded, non-secret metadata for the two components every root fence depends
+        # on. This is EVIDENCE, not a gate: the classified gate below is the only thing that decides
+        # the job. It exists so a future posture change is attributable to the pinned image rather
+        # than to something that ran after it.
+        run: |
+          stat -c '%u %g %n' / /etc
+      - name: Install the controlled environment prerequisites
+        # The pinned base is minimal. Install exactly what this job needs and nothing else: sudo (so
+        # every root command keeps its reviewed `sudo` form even though the container is already
+        # uid 0), ca-certificates + curl (uv and its managed CPython fetch over HTTPS), git (so
+        # actions/checkout performs a real clone rather than a REST fallback), and the archive tools
+        # the toolchain unpacks with. No package repairs, chowns or chmods a system directory.
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install --yes --no-install-recommends sudo ca-certificates curl git tar xz-utils
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -857,14 +959,44 @@ jobs:
   # is deployed, activated, or started.
   backend-management-root:
     name: Management-plane bootstrap root-security (root, hardened install)
-    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
-    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
-    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
-    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    # The hosted VM only HOSTS this job now; the fence executes inside the controlled environment
+    # declared below. `runs-on` stays pinned so the host side is still a known quantity.
     runs-on: ubuntu-24.04
+    # SECP-WSA tier 1 — the controlled environment. The trusted-ancestor requirement is unchanged;
+    # what changes is WHERE it is proven. The hosted VM's `/etc` ownership is nondeterministic: in
+    # run 30522895412 one job observed `/etc` uid=1001 gid=1001 while two sibling jobs of the SAME
+    # run, on the SAME `ImageVersion 20260726.254.1`, observed uid=0. That is per-VM variance, which
+    # image pinning cannot remove. The job body therefore runs inside a digest-pinned container
+    # whose `/etc` comes from a content-addressed image layer and is root-owned by construction.
+    # `attest_trusted_ancestry.py` is byte-for-byte unchanged and runs INSIDE this container (its
+    # `os.lstat` is namespace-relative, so it observes this environment's ancestry), and it still
+    # exits 78 before any product test if that environment is invalid. Nothing here relaxes,
+    # repairs, special-cases, skips or warns through a non-root-owned ancestor.
+    # The pin is mirrored in `infra/ci/controlled-root-env.json`; the agreement is machine-checked
+    # by `tests/test_trusted_ancestry_isolation.py`.
+    container:
+      image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     env:
       SECP_APP_ENV: test
     steps:
+      - name: Record the controlled environment's pristine ancestry posture
+        # The first thing that happens in this job, before any third-party action runs inside the
+        # container. Bounded, non-secret metadata for the two components every root fence depends
+        # on. This is EVIDENCE, not a gate: the classified gate below is the only thing that decides
+        # the job. It exists so a future posture change is attributable to the pinned image rather
+        # than to something that ran after it.
+        run: |
+          stat -c '%u %g %n' / /etc
+      - name: Install the controlled environment prerequisites
+        # The pinned base is minimal. Install exactly what this job needs and nothing else: sudo (so
+        # every root command keeps its reviewed `sudo` form even though the container is already
+        # uid 0), ca-certificates + curl (uv and its managed CPython fetch over HTTPS), git (so
+        # actions/checkout performs a real clone rather than a REST fallback), and the archive tools
+        # the toolchain unpacks with. No package repairs, chowns or chmods a system directory.
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install --yes --no-install-recommends sudo ca-certificates curl git tar xz-utils
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v3
