@@ -338,6 +338,152 @@ def current_branch(root: Path) -> str:
 # --------------------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------------------
+# Shared protected-path policy
+#
+# guard_writes.py enforces this for the editing tools, and guard_bash.py enforces the same
+# rules for shell write channels. They MUST share one definition: a shell redirection into
+# a protected path is the same policy violation as an Edit of it, and an agent blocked by
+# one guard must not simply reach for the other.
+# --------------------------------------------------------------------------------------
+
+MIGRATION_GLOBS = ("apps/api/migrations/versions/**",)
+
+ALWAYS_DENY: tuple[tuple[str, str], ...] = (
+    (
+        ".github/**",
+        "CI workflow definitions are operator-owned. The trusted-ancestry rule must not be "
+        "weakened, repaired, special-cased, skipped or warned through.",
+    ),
+    (
+        "infra/ci/**",
+        "The trusted-ancestry attestation is a security control and is operator-owned.",
+    ),
+    (
+        "apps/management/secp_management/production.py",
+        "This is the production trust-root loader.",
+    ),
+    (
+        "apps/management/secp_management/signing.py",
+        "This holds the release-signing trust anchor.",
+    ),
+)
+
+PROGRAM_BRANCH_MARKERS = ("secp-program-", "program-orchestration", "program-spine")
+
+PRODUCT_SOURCE_GLOBS = ("apps/**", "contracts/**", "plugins/**", "infra/**", ".ci/**")
+
+DOC_GLOBS = ("docs/**",)
+DOC_ALLOWED = ("docs/program/**",)
+
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+
+
+def is_program_branch(branch: str) -> bool:
+    lowered = (branch or "").lower()
+    return any(marker in lowered for marker in PROGRAM_BRANCH_MARKERS)
+
+
+def is_secret_path(rel_path: str) -> bool:
+    """Secrets are matched on BASENAME.
+
+    fnmatch has no ``**`` semantics -- ``*`` already crosses ``/`` -- so a pattern like
+    ``**/*.pem`` requires a literal slash and silently fails to match a repo-root
+    ``server.pem``. Matching the basename closes that hole for every depth.
+    """
+    name = PurePosixPath(rel_path).name.lower()
+    if name == ".env" or name.startswith(".env."):
+        return True
+    return name.endswith(SECRET_SUFFIXES)
+
+
+def protected_write_reason(rel_path: str, branch: str) -> str | None:
+    """Return why writing ``rel_path`` is denied, or None when it is permitted."""
+    if is_secret_path(rel_path):
+        return f"'{rel_path}' is secrets or key material and is never written by an agent."
+
+    hit = matches_any(rel_path, tuple(glob for glob, _ in ALWAYS_DENY))
+    if hit is not None:
+        reason = next(why for glob, why in ALWAYS_DENY if glob == hit)
+        return f"'{rel_path}' is an unconditional hard-deny in SECP. {reason}"
+
+    if is_program_branch(branch):
+        if matches_any(rel_path, PRODUCT_SOURCE_GLOBS) is not None:
+            return (
+                f"'{rel_path}' is product source and branch '{branch}' is a program-foundation "
+                "branch, which must contain no product behaviour. Open a separate product PR."
+            )
+        if matches_any(rel_path, DOC_GLOBS) is not None and (
+            matches_any(rel_path, DOC_ALLOWED) is None
+        ):
+            return (
+                f"'{rel_path}' is product documentation and branch '{branch}' is a "
+                "program-foundation branch. Only docs/program/ may be written here."
+            )
+    return None
+
+
+# --------------------------------------------------------------------------------------
+# Shell write-channel extraction
+# --------------------------------------------------------------------------------------
+
+_REDIRECTS = (">>", ">", "1>", "2>", "&>", ">|")
+
+_WRITE_BINARIES = {
+    "cp", "mv", "rm", "unlink", "truncate", "shred", "dd", "install", "ln", "tee",
+    "chmod", "chown", "touch", "mkdir", "rmdir", "patch",
+    "copy-item", "move-item", "remove-item", "set-content", "add-content", "out-file",
+    "new-item", "clear-content", "rename-item",
+}
+
+# Interpreters can write anywhere; inline code is not worth parsing, so any protected path
+# mentioned anywhere in such a segment is treated as a write target.
+_INTERPRETERS = {"python", "python3", "py", "node", "perl", "ruby", "php", "deno", "bun"}
+
+_GIT_WRITE_SUBCOMMANDS = {"checkout", "restore", "apply", "clean", "mv", "rm"}
+
+
+def shell_write_targets(tokens: list[str]) -> list[str]:
+    """Best-effort extraction of filesystem paths a shell segment would WRITE.
+
+    Deliberately over-collects: a candidate is only ever compared against the protected
+    glob set, so an ordinary path costs nothing while a missed one defeats every
+    write-side guard.
+    """
+    if not tokens:
+        return []
+    targets: list[str] = []
+
+    # Output redirection, both `> path` and `>path`.
+    for index, token in enumerate(tokens):
+        if token in _REDIRECTS:
+            if index + 1 < len(tokens):
+                targets.append(tokens[index + 1])
+            continue
+        for redirect in _REDIRECTS:
+            if token.startswith(redirect) and len(token) > len(redirect):
+                targets.append(token[len(redirect) :])
+                break
+
+    head = PurePosixPath(tokens[0].replace("\\", "/")).name.lower().removesuffix(".exe")
+    positionals = [t for t in tokens[1:] if not t.startswith("-")]
+
+    if head in _WRITE_BINARIES:
+        targets.extend(positionals)
+    elif head in _INTERPRETERS:
+        targets.extend(tokens[1:])
+    elif head in {"git", "git.exe"}:
+        lowered = [t.lower() for t in tokens[1:]]
+        for sub in _GIT_WRITE_SUBCOMMANDS:
+            if sub in lowered:
+                targets.extend(positionals)
+                break
+    elif head == "sed" and any(t == "-i" or t.startswith("-i") for t in tokens[1:]):
+        targets.extend(positionals)
+
+    return [t for t in targets if t and not t.startswith("-")]
+
+
 def evidence_dir(session_id: str) -> Path:
     import tempfile
 

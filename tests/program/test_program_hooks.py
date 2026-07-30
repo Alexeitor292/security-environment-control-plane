@@ -148,6 +148,46 @@ DENIED_COMMANDS = [
     "git -C /repo push --force",
     "git -c user.name=x push --force",
     "git push --force-with-lease=refs/heads/main",
+    # Control flow and grouping leave a keyword or bracket as the head token.
+    "if true; then git push --force origin feat; fi",
+    "for r in origin; do git push --force $r feat; done",
+    "while read x; do git push --force origin feat; done",
+    "(git push --force origin feat)",
+    "{ git push --force origin feat; }",
+    # A leading '+' forces the push with or without an explicit source:destination.
+    "git push origin +main",
+    "git push origin +feature/x",
+    "git push origin +refs/heads/main",
+    # gh global flags must not shift the subcommand index.
+    "gh -R owner/repo pr merge 123 --squash",
+    "gh --repo owner/repo pr ready 123",
+    # gh api sends POST implicitly when a field flag is present.
+    "gh api graphql -f query='mutation { m }'",
+    "gh api repos/o/r/pulls -f title=x -f head=y -f base=main",
+    "gh api --input body.json repos/o/r/pulls",
+    # Alembic is reachable through uv, poetry, docker compose run, or an explicit -c.
+    "alembic -c alembic.ini upgrade head",
+    "uv run alembic upgrade head",
+    "poetry run alembic downgrade -1",
+    "docker compose run --rm api alembic upgrade head",
+    # PowerShell indirection.
+    "Invoke-Expression 'git push --force origin feat'",
+    "Start-Process git -ArgumentList 'push','--force'",
+    # Shell write channels reach protected paths without any editing tool.
+    "echo 'on: push' > .github/workflows/ci.yml",
+    "printf 'x' >> infra/ci/attest_trusted_ancestry.py",
+    "sed -i 's/a/b/' .github/workflows/ci.yml",
+    "cp /tmp/ci.yml .github/workflows/ci.yml",
+    "rm .github/workflows/ci.yml",
+    "git checkout main -- .github/workflows/ci.yml",
+    "git restore --source=main .github/workflows/ci.yml",
+    "cat > apps/management/secp_management/production.py",
+    "tee .github/workflows/ci.yml",
+    "python -c \"open('.github/workflows/ci.yml','w').write('x')\"",
+    "Set-Content .github/workflows/ci.yml 'x'",
+    "Remove-Item .github/workflows/ci.yml",
+    # A shell write cannot present an unlock token.
+    "echo x > apps/api/migrations/versions/zz_new.py",
 ]
 
 
@@ -190,6 +230,22 @@ ALLOWED_COMMANDS = [
     "timeout 60 docker info",
     'sh -c "echo hello"',
     "env FOO=bar uv run pytest tests/program -q",
+    # Writes to ordinary paths must stay untouched by the shell write-channel guard.
+    "echo x > notes.txt",
+    "cp a.txt b.txt",
+    "rm build/artifact.tar",
+    "python -c \"open('notes.txt','w').write('x')\"",
+    "python scripts/ci/pytest_shards.py verify --collect",
+    "git checkout -- tests/program/test_program_hooks.py",
+    # --draft=true is valid pflag syntax and must not be treated as a missing --draft.
+    "gh pr create --draft=true --title x --body y",
+    # Read-only gh api calls, including an explicit GET with fields.
+    "gh api repos/o/r --method GET",
+    # Merely MENTIONING the unlock directory is not touching it.
+    "git log --grep=secp-migration-unlock",
+    'grep -rn "secp-migration-unlock" docs/program',
+    # rsync is only a host-contact risk when it actually targets a remote.
+    "rsync -a build/ dist/",
 ]
 
 
@@ -199,8 +255,41 @@ def test_guard_bash_allows_ordinary_work(command: str) -> None:
     assert decision_of(result) == "allow", f"guard over-denied ordinary work: {command}"
 
 
-def test_guard_bash_ignores_non_bash_payload() -> None:
+def test_guard_bash_ignores_non_shell_payload() -> None:
     assert run_hook("guard_bash.py", {"tool_name": "Read", "tool_input": {}}) is None
+
+
+UNREADABLE_SHELL_PAYLOADS = [
+    {},
+    {"tool_name": "Bash"},
+    {"tool_name": "Bash", "tool_input": "git push --force"},
+    {"tool_name": "Bash", "tool_input": {"cmd": "git push --force"}},
+    {"tool_name": "PowerShell", "tool_input": {"command": "   "}},
+]
+
+
+@pytest.mark.parametrize("payload", UNREADABLE_SHELL_PAYLOADS)
+def test_guard_bash_fails_closed_on_unreadable_shell_payload(payload: dict) -> None:
+    """`guard()` only fails closed on exceptions; an early return would ALLOW.
+
+    A shell call this guard cannot read is a shell call it cannot clear.
+    """
+    assert decision_of(run_hook("guard_bash.py", payload)) == "deny", (
+        f"unreadable shell payload must not be allowed: {payload}"
+    )
+
+
+def test_guard_bash_covers_powershell_tool_payloads() -> None:
+    """The matcher covers PowerShell; the guard must evaluate its payloads identically."""
+    result = run_hook(
+        "guard_bash.py",
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "PowerShell",
+            "tool_input": {"command": "git push --force origin feat"},
+        },
+    )
+    assert decision_of(result) == "deny"
 
 
 # ---------------------------------------------------------------------------------------
@@ -216,6 +305,14 @@ ALWAYS_DENIED_PATHS = [
     ".env",
     "certs/server.pem",
     "certs/server.key",
+    # fnmatch has no `**` semantics, so `**/*.pem` never matched a repo-root file.
+    # Secrets are matched on basename instead, at every depth.
+    "server.pem",
+    "signing.key",
+    ".env.production",
+    ".env.local",
+    "apps/api/.env",
+    "nested/deep/private.key",
 ]
 
 
@@ -262,15 +359,67 @@ def test_guard_writes_denies_unlock_directory_manipulation() -> None:
 
 
 def test_program_branch_predicate_recognises_foundation_branches() -> None:
-    module = load_hook_module("guard_writes")
+    module = load_hook_module("_common")
     for branch in (
         "feature/secp-program-orchestration-foundation",
         "feature/secp-program-spine",
         "chore/program-orchestration-tidy",
     ):
-        assert module._is_program_branch(branch) is True, branch
+        assert module.is_program_branch(branch) is True, branch
     for branch in ("main", "feature/secp-pr6-provisioning", "fix/oidc-clock-skew"):
-        assert module._is_program_branch(branch) is False, branch
+        assert module.is_program_branch(branch) is False, branch
+
+
+def test_multiedit_cannot_bypass_the_append_only_record() -> None:
+    """MultiEdit carries its pairs in `edits`; reading only top-level keys let it through."""
+    invariants = REPO_ROOT / "docs" / "program" / "SAFETY_INVARIANTS.md"
+    first_real_line = next(
+        line for line in invariants.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
+    result = run_hook(
+        "guard_writes.py",
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "MultiEdit",
+            "tool_input": {
+                "file_path": "docs/program/SAFETY_INVARIANTS.md",
+                "edits": [{"old_string": first_real_line, "new_string": ""}],
+            },
+        },
+    )
+    assert decision_of(result) == "deny"
+    assert "append-only" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_seal_check_denies_a_change_but_permits_a_mention() -> None:
+    """Denying on PRESENCE refused pure appends that merely quote a seal name.
+
+    `_B1A_SUBPROCESS_SEALED` alone appears in dozens of files, so that false-deny was
+    broad enough to push agents into routing around the guards entirely.
+    """
+    module = load_hook_module("guard_writes")
+    unchanged = {
+        "file_path": "apps/api/tests/t.py",
+        "old_string": "assert x._B1A_SUBPROCESS_SEALED is True\n",
+        "new_string": "assert x._B1A_SUBPROCESS_SEALED is True\nassert y\n",
+    }
+    module._check_seal_literals("apps/api/tests/t.py", REPO_ROOT, unchanged)  # must not raise
+
+    for changing in (
+        {
+            "file_path": "apps/api/tests/t.py",
+            "old_string": "assert x._B1A_SUBPROCESS_SEALED is True\n",
+            "new_string": "pass\n",
+        },
+        {
+            "file_path": "apps/worker/secp_worker/x.py",
+            "edits": [
+                {"old_string": "_B1A_SUBPROCESS_SEALED = True", "new_string": "OTHER = True"}
+            ],
+        },
+    ):
+        with pytest.raises(SystemExit):
+            module._check_seal_literals("apps/api/tests/t.py", REPO_ROOT, changing)
 
 
 def test_seal_literals_are_scoped_to_product_source() -> None:
@@ -471,7 +620,18 @@ def test_unlock_rejects_a_base_sha_that_is_not_an_ancestor(tmp_path: Path) -> No
     )
 
 
-def test_unlock_valid_token_is_consumed_exactly_once(tmp_path: Path) -> None:
+def test_unlock_valid_token_allows_and_burns_only_when_the_write_can_proceed(
+    tmp_path: Path,
+) -> None:
+    """A valid token authorises the write; it is consumed only if the write can proceed.
+
+    Both PreToolUse guards fire for the same call. On a program-foundation branch
+    guard_writes denies migrations outright, so consuming here would burn a single-use
+    operator approval on a call that wrote nothing.
+    """
+    module = load_hook_module("_common")
+    on_program_branch = module.is_program_branch(_git("rev-parse", "--abbrev-ref", "HEAD"))
+
     unlock_dir = tmp_path / "unlock"
     unlock_dir.mkdir()
     (unlock_dir / "unlock-0.json").write_text(json.dumps(_valid_token()), encoding="utf-8")
@@ -481,16 +641,37 @@ def test_unlock_valid_token_is_consumed_exactly_once(tmp_path: Path) -> None:
         write(MIGRATION_TARGET),
         env={"SECP_MIGRATION_UNLOCK_DIR": str(unlock_dir)},
     )
-    assert decision_of(first) == "allow", "a valid token must authorise the write"
+    assert decision_of(first) == "allow", "a valid token must not be refused"
+
+    if on_program_branch:
+        assert (unlock_dir / "unlock-0.json").exists(), (
+            "the token must NOT be burned when a sibling guard will deny the write anyway"
+        )
+        return
+
     assert not (unlock_dir / "unlock-0.json").exists()
     assert (unlock_dir / "unlock-0.json.consumed").exists()
-
     second = run_hook(
         "guard_migration_unlock.py",
         write(MIGRATION_TARGET),
         env={"SECP_MIGRATION_UNLOCK_DIR": str(unlock_dir)},
     )
     assert decision_of(second) == "deny", "a consumed token must never authorise a second write"
+
+
+def test_unlock_consume_is_single_use(tmp_path: Path) -> None:
+    """Direct test of the consumption primitive, independent of branch policy."""
+    module = load_hook_module("guard_migration_unlock")
+    token_path = tmp_path / "unlock-0.json"
+    token_path.write_text(json.dumps(_valid_token()), encoding="utf-8")
+
+    module._consume(token_path)
+    assert not token_path.exists()
+    assert token_path.with_suffix(token_path.suffix + ".consumed").exists()
+
+    token_path.write_text(json.dumps(_valid_token()), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        module._consume(token_path)
 
 
 def test_unlock_accepts_a_bom_prefixed_token(tmp_path: Path) -> None:

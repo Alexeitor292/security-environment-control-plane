@@ -24,6 +24,14 @@ duplicate. Treat shared vocabularies as exclusive-ownership resources.
 A hook denial is a decision, not a prompt. Stop, or take a compliant alternative. Never retry the
 same call hoping for a different answer, and never wait for a human to approve past it.
 
+The shell is not an escape hatch. `guard_bash` applies the same protected-path policy as
+`guard_writes`, so a redirection, `sed -i`, `cp`, `rm`, `tee`, `git checkout -- <path>`, a
+PowerShell write cmdlet, or inline interpreter code that opens a protected file is denied exactly
+as an Edit would be. Wrapper prefixes (`env`, `sudo`, `xargs`, a bare `VAR=value`), shell
+keywords, grouping brackets and nested `sh -c` / `Invoke-Expression` payloads are all unwrapped
+before the decision. Writing an Alembic migration through the shell is always denied, because a
+shell call cannot present an unlock token.
+
 ## Model posture
 
 - Program Lead: Opus 5, xhigh, Opus 1M selector, interactive Ultracode workflow posture.

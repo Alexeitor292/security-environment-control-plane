@@ -29,18 +29,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _common import (  # noqa: E402
+    MIGRATION_GLOBS,
     deny,
     edited_paths,
     git,
     git_succeeds,
     guard,
     matches_any,
+    protected_write_reason,
     read_event,
     relative_posix,
     repo_root,
 )
-
-MIGRATION_GLOBS = ("apps/api/migrations/versions/**",)
 
 UNLOCK_DIR_NAME = "secp-migration-unlock"
 
@@ -240,6 +240,14 @@ def main() -> None:
     _validate_schema(payload)
     _validate_binding(payload, root, target_filename)
     _validate_expiry(payload)
+
+    # Both PreToolUse guards fire for the same call. Validation above still runs so an
+    # invalid token is always refused, but the token is only CONSUMED when the write can
+    # actually proceed -- otherwise a sibling guard's denial would burn a single-use
+    # operator approval on a call that never wrote anything, forcing a needless re-mint.
+    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if protected_write_reason(targets[0], branch) is not None:
+        return
     _consume(token_path)
 
 
