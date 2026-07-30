@@ -615,6 +615,16 @@ jobs:
                   os.chmod(directory, 0o755, follow_symlinks=False)
                   print(f"created fixed ephemeral controller-config parent: {directory}")
           PY
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/secp/controller /var/lib/secp
       - name: Run PR5F fixed-layout root transaction tests (no skips)
         run: >-
           sudo env
@@ -745,6 +755,16 @@ jobs:
               sys.exit(1)
           print(f"ancestor chain trusted (real dir, uid 0, no group/other write): {chain}")
           PY
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/secp/controller /var/lib/secp
       - name: Run deployment root-security tests as root (no skips)
         # Absolute venv interpreter under passwordless sudo (effective UID 0) so the trusted dir-fd
         # walk, the pinned-exec root-owner refusal, and the real subprocess seam actually execute. The
@@ -870,6 +890,16 @@ jobs:
               sys.exit(1)
           print(f"ancestor chain trusted: {chain}")
           PY
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/secp/controller /var/lib/secp
       - name: Run management-plane root-security tests as root (no skips)
         run: >-
           sudo env "SECP_ROOT_TEST_DIR=/root/secp-mgmt-roottest" "$(pwd)/.venv/bin/python" -m pytest
@@ -964,6 +994,16 @@ jobs:
           sudo mkdir -p /root/secp-mgmt-real
           sudo chown root:root /root/secp-mgmt-real
           sudo chmod 0755 /root/secp-mgmt-real
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/systemd/system /etc/secp/controller
       - name: Run the real management adapter E2E as root (no skips)
         # Absolute venv interpreter under passwordless sudo (effective UID 0) so the pinned runner's
         # root-owned executable + hardened root-owned filesystem requirements are satisfied and the
@@ -1070,6 +1110,16 @@ jobs:
           sudo mkdir -p /root/secp-mgmt-real
           sudo chown root:root /root/secp-mgmt-real
           sudo chmod 0755 /root/secp-mgmt-real
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/systemd/system /etc/secp/controller /root/secp-mgmt-real
       - name: Drive the real controller bootstrap + migration + observer as root (no skips)
         run: >-
           sudo env "SECP_ROOT_TEST_DIR=/root/secp-mgmt-real" "$(pwd)/.venv/bin/python" -m pytest
