@@ -45,7 +45,7 @@
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_orient.py\"",
-            "timeout": 20
+            "timeout": 30
           }
         ]
       }
@@ -57,7 +57,7 @@
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py\"",
-            "timeout": 20
+            "timeout": 30
           }
         ]
       },
@@ -67,12 +67,12 @@
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_writes.py\"",
-            "timeout": 20
+            "timeout": 30
           },
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_migration_unlock.py\"",
-            "timeout": 20
+            "timeout": 30
           }
         ]
       }
@@ -84,7 +84,7 @@
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/record_evidence.py\"",
-            "timeout": 20
+            "timeout": 30
           }
         ]
       }
@@ -95,7 +95,7 @@
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_task_completion.py\"",
-            "timeout": 20
+            "timeout": 30
           }
         ]
       }
@@ -106,7 +106,7 @@
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_teammate_idle.py\"",
-            "timeout": 20
+            "timeout": 30
           }
         ]
       }

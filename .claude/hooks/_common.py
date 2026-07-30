@@ -7,8 +7,17 @@ Design constraints (see docs/program/AGENT_OPERATING_MODEL.md):
 * Self-locating. Each hook lives at ``<repo>/.claude/hooks/<name>.py`` so the repo
   root is ``parents[2]`` of the script. ``CLAUDE_PROJECT_DIR`` is preferred when
   present but is never required.
-* Fail closed. A guard that cannot evaluate its input denies rather than allows.
-  A denied action is recoverable; a silently permitted force-push is not.
+* Fail closed WHERE IT CAN. An exception raised inside a guard's ``main()`` denies rather
+  than allows: a denied action is recoverable, a silently permitted force-push is not.
+
+  This protection has a real edge, and it must not be mistaken for total. ``guard()`` wraps
+  ``main()`` only, so a failure at MODULE IMPORT scope happens before the wrapper exists.
+  A hook TIMEOUT has the same shape. Both exit non-zero with empty stdout, which the client
+  treats as NON-BLOCKING -- so a crashed or slow guard silently allows, and looks identical
+  from the outside to a correctly installed one. Keep import-time work trivial, keep
+  subprocess budgets well inside the configured hook timeout, and rely on
+  ``tests/program/test_program_hooks.py::test_hook_module_imports_cleanly`` to catch the
+  static case.
 
 These hooks reduce accidental project-policy violations by agents. They are NOT an
 operating-system security boundary: anything running under the operator's identity
@@ -126,10 +135,13 @@ def add_context(text: str, event_name: str = "SessionStart") -> None:
 
 
 def guard(main) -> None:
-    """Run ``main`` fail-closed.
+    """Run ``main`` fail-closed, within the limits described in the module docstring.
 
-    An unexpected exception denies the action rather than allowing it, and names the
-    hook so the failure is diagnosable instead of silent.
+    An unexpected exception inside ``main`` denies the action rather than allowing it, and
+    names the hook so the failure is diagnosable instead of silent.
+
+    It cannot cover a failure at import scope or a hook timeout -- both exit non-zero with
+    empty stdout and are treated as non-blocking. Fail-open-on-crash is the residual shape.
     """
     try:
         main()
@@ -295,7 +307,7 @@ def written_text(tool_input: dict) -> str:
 # --------------------------------------------------------------------------------------
 
 
-def git(root: Path, *args: str, timeout: float = 10.0) -> str:
+def git(root: Path, *args: str, timeout: float = 5.0) -> str:
     """Run a read-only git command, returning stripped stdout ('' on any failure)."""
     try:
         completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
@@ -311,7 +323,7 @@ def git(root: Path, *args: str, timeout: float = 10.0) -> str:
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
-def git_succeeds(root: Path, *args: str, timeout: float = 10.0) -> bool:
+def git_succeeds(root: Path, *args: str, timeout: float = 5.0) -> bool:
     """True when a git command exits 0.
 
     Required for predicates that signal through the EXIT CODE and print nothing --

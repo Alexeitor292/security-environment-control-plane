@@ -155,6 +155,30 @@ def test_shell_guards_cover_every_shell_tool(settings: dict) -> None:
         )
 
 
+def test_every_hook_declares_a_timeout_above_its_subprocess_budget(settings: dict) -> None:
+    """A hook TIMEOUT exits non-zero with empty stdout, which the client treats as
+    non-blocking -- so a slow guard silently ALLOWS. The configured timeout must exceed the
+    worst-case subprocess budget of the slowest guard.
+
+    guard_migration_unlock makes up to four git calls; `_common.git` bounds each at 5s.
+    """
+    worst_case_seconds = 4 * 5
+    for matchers in settings["hooks"].values():
+        for matcher in matchers:
+            for hook in matcher.get("hooks", []):
+                timeout = hook.get("timeout")
+                assert isinstance(timeout, int), f"hook {hook.get('command')} declares no timeout"
+                assert timeout > worst_case_seconds, (
+                    f"timeout {timeout}s does not exceed the {worst_case_seconds}s worst-case "
+                    "git budget; a timeout fails OPEN, not closed"
+                )
+
+    common = (CLAUDE_DIR / "hooks" / "_common.py").read_text(encoding="utf-8")
+    assert common.count("timeout: float = 5.0") == 2, (
+        "git helpers must keep a 5s bound so the worst case stays inside the hook timeout"
+    )
+
+
 def test_no_ask_rules_that_would_stall_an_unattended_session(settings: dict) -> None:
     """The standing Program Lead runs unattended; an `ask` rule has no approver."""
     assert "ask" not in settings["permissions"] or not settings["permissions"]["ask"], (

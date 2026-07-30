@@ -53,6 +53,16 @@ not an operating-system security boundary**: anything running under the operator
 edit the hooks, mint or consume unlock tokens, or start a session with `--safe-mode` / `--bare`,
 all of which disable hooks entirely. `permissions.deny` string matching is likewise evadable.
 
+**A crashed or slow guard fails OPEN, not closed.** `guard()` wraps only a hook's `main()`, so a
+failure at module-import scope happens before the wrapper exists; a hook timeout behaves the same
+way. Both exit non-zero with empty stdout, which the client treats as non-blocking — so the
+action proceeds, and the hook looks identical from the outside to a correctly installed one. This
+is the one failure mode where a broken guard is indistinguishable from an absent guard. It was
+observed for real during development, so do not read "fail closed" as unconditional: it holds for
+exceptions inside `main()`, and nowhere else.
+`tests/program/test_program_hooks.py::test_hook_module_imports_cleanly` covers the static case;
+timeouts are bounded by keeping each guard's subprocess budget well inside its configured limit.
+
 ---
 
 ## 3. Escalate to Juan
