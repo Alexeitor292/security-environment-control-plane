@@ -82,8 +82,9 @@ def test_the_gate_classifies_each_untrusted_posture_by_name(tmp_path: Path) -> N
     assert set(observation) >= {"uid", "gid", "mode", "dev", "inode", "nlink", "path"}
 
     missing = gate.observe(str(tmp_path / "absent"))
-    assert missing["problems"] == ["not_statable"]
     assert missing["statable"] is False
+    assert missing["absent"] is True
+    assert missing["problems"] == []  # ABSENT is not UNTRUSTED -- see below
 
     regular = tmp_path / "file"
     regular.write_bytes(b"x")
@@ -208,6 +209,42 @@ def test_the_fixed_system_parents_are_unchanged_by_this_session() -> None:
         # reports as infrastructure_invalid before any product test runs.
         assert (uid, gid) == (0, 0), f"{path} is not root:root ({uid}:{gid})"
         assert mode & gate.WRITE_MASK == 0, f"{path} is group/other-writable ({oct(mode)})"
+
+
+_POSIX_ONLY = pytest.mark.skipif(
+    not hasattr(os, "getuid"), reason="POSIX path and ownership semantics are POSIX-only"
+)
+
+
+@_POSIX_ONLY
+def test_an_absent_code_owned_directory_is_not_a_failure(tmp_path: Path) -> None:
+    """The distinction the first CI run of this gate exposed -- in my own wiring, not the runner.
+
+    `/etc/secp/controller` is created by the fence (or its prepare step), so at gate time it may not
+    exist. My first wiring reported that as `infrastructure_invalid`, which asserts a creation ORDER
+    this gate has no business asserting and refuses a perfectly valid machine. Every ancestor that
+    EXISTS must be trusted; an absent code-owned component is recorded and allowed."""
+    code, report, untrusted = gate.attest([str(tmp_path / "not" / "created" / "yet")])
+    assert code == gate.EXIT_OK
+    assert report["verdict"] == "trusted"
+    assert untrusted == []
+    absent = report["absent"]
+    assert isinstance(absent, list)
+    assert [Path(p).name for p in absent] == ["not", "created", "yet"]
+
+
+@_POSIX_ONLY
+def test_an_untrusted_existing_prefix_still_fails_even_with_an_absent_tail(tmp_path: Path) -> None:
+    """Allowing an absent tail must not become a way to skip checking the existing prefix."""
+    prefix = tmp_path / "prefix"
+    prefix.mkdir(mode=0o775)  # group-writable: a real, existing, untrusted ancestor
+    os.chmod(prefix, 0o775)
+    code, report, untrusted = gate.attest([str(prefix / "absent" / "tail")])
+    assert code == gate.EXIT_INFRASTRUCTURE_INVALID
+    assert report["verdict"] == "infrastructure_invalid"
+    offending = [str(o["path"]) for o in untrusted]
+    assert str(prefix) in offending
+    assert "group_or_other_writable" in untrusted[-1]["problems"]  # type: ignore[operator]
 
 
 # --------------------------------- teardown restores what a test temporarily changed

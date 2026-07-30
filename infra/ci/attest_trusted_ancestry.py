@@ -24,8 +24,12 @@ invalid machine are then never confused for one another.
 
 What it deliberately does NOT do:
 
-* it does not repair, ``chown`` or ``chmod`` anything -- an unexpected ancestor posture is reported,
-  never silently fixed and proceeded through;
+* it does not repair, ``chown`` or ``chmod`` anything -- an unexpected ancestor posture is
+  reported, never silently fixed and proceeded through;
+* it does not treat an ABSENT code-owned directory as untrusted. Every ancestor that EXISTS must
+  be trusted; a component the fence has not created yet is recorded as absent and is not a
+  failure. Asserting existence here would assert a creation order this gate has no business
+  asserting, and production still refuses at run time if a parent it must traverse is missing;
 * it does not special-case ``/etc`` or any other component as trusted;
 * it does not downgrade a violation to a warning or a skip;
 * it does not accept the runner user as an acceptable owner.
@@ -120,7 +124,13 @@ def observe(path: str) -> dict[str, object]:
     try:
         st = os.lstat(path)
     except OSError as exc:
-        record.update(statable=False, errno=exc.errno, problems=["not_statable"])
+        # ABSENT is not UNTRUSTED. A code-owned directory the fence (or its prepare step) has not
+        # created yet is simply not there; conflating that with a hostile posture would make this
+        # gate assert a creation ORDER it has no business asserting, and would refuse a perfectly
+        # valid machine. The security property is about what EXISTS: every existing ancestor must be
+        # trusted. Production keeps its own rule -- `_open_parent` still refuses at run time if a
+        # parent it must traverse is missing (`fs_ancestor_open_failed`), which this cannot mask.
+        record.update(statable=False, errno=exc.errno, absent=True, problems=[])
         return record
     mode = st.st_mode
     problems: list[str] = []
@@ -177,9 +187,13 @@ def attest(paths: list[str]) -> tuple[int, dict[str, object], list[dict[str, obj
                 seen.append(ancestor)
     observations = [observe(ancestor) for ancestor in seen]
     untrusted = [o for o in observations if o.get("problems")]
+    absent = [str(o["path"]) for o in observations if o.get("absent")]
     report: dict[str, object] = {
         "verdict": "infrastructure_invalid" if untrusted else "trusted",
         "requested": paths,
+        # recorded so a reviewer can see WHICH components did not exist yet, without that being a
+        # failure -- the distinction is the whole point.
+        "absent": absent,
         "process": process_identity(),
         "runner": runner_metadata(),
         "ancestors": observations,
