@@ -24,6 +24,7 @@ import { StagingDeployment } from "./pages/StagingDeployment";
 import { StagingLab } from "./pages/StagingLab";
 import { TargetDiscovery } from "./pages/TargetDiscovery";
 import { Templates } from "./pages/Templates";
+import { WorkerEnrollment } from "./pages/WorkerEnrollment";
 // The topology workspace (with the React Flow + ELK runtime) is code-split so
 // the heavy canvas libraries load only when the workspace route is opened.
 const TopologyView = React.lazy(() =>
@@ -71,6 +72,10 @@ const router = createBrowserRouter([
       { path: "readonly-preflight", element: <ReadonlyPreflight /> },
       { path: "resolver-activation", element: <ResolverActivation /> },
       { path: "approvals", element: <Approvals /> },
+      // SECP-PR5H-B1: the supported worker-enrollment controller surface. Reached directly, with
+      // no sidebar entry — the control plane has no endpoint that lists enrollments, so a nav item
+      // would promise an inventory this milestone cannot show.
+      { path: "worker-enrollment", element: <WorkerEnrollment /> },
       { path: "audit", element: <AuditLog /> },
     ],
   },

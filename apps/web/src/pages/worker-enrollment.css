@@ -1,0 +1,124 @@
+/* Worker enrollment surface. Semantic tokens only — never a raw --secp-* primitive.
+   Text never uses --ink-muted (3.1:1, below WCAG AA); it is decorative only. */
+
+.wenr {
+  display: grid;
+  gap: 14px;
+}
+
+.wenr-head h1 {
+  margin: 0 0 6px;
+}
+.wenr-intro {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+  max-width: 92ch;
+}
+
+.wenr-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 1050px) {
+  .wenr-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.wenr-form {
+  display: grid;
+  gap: 10px;
+}
+.wenr-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+/* The reason a control is unavailable, sat next to it. Secondary ink, not muted. */
+.wenr-reason {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  margin: 0;
+}
+
+/* ---- hand-off ------------------------------------------------------------ */
+
+.wenr-handoff {
+  display: grid;
+  gap: 10px;
+}
+.wenr-handoff__block {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface-well);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--ink-primary);
+  /* Long digests must scroll inside the block, never widen the page. */
+  overflow-x: auto;
+  white-space: pre;
+}
+.wenr-handoff__meta {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+/* ---- status -------------------------------------------------------------- */
+
+.wenr-status__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.wenr-status__head h3 {
+  margin: 0;
+}
+.wenr-expiry {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.wenr-expiry--expired {
+  color: var(--tone-danger-ink);
+}
+
+.wenr-rail {
+  margin-top: 12px;
+}
+
+/* ---- recent list --------------------------------------------------------- */
+
+.wenr-recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.wenr-recent__item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+.wenr-recent__site {
+  color: var(--ink-secondary);
+}

@@ -10,6 +10,9 @@ import type {
   BootstrapSession,
   BootstrapSessionCreate,
   DeploymentPlan,
+  EnrollmentInvitation,
+  EnrollmentInvitationCreate,
+  EnrollmentStatus,
   EnvironmentPublicationClientResult,
   EnvironmentPublicationRequest,
   ExecutionTarget,
@@ -685,4 +688,27 @@ export const api = {
       `/api/v1/topology-authoring/documents/${documentId}/revisions/${revisionId}/reject`,
       { content_hash: contentHash, reason },
     ),
+
+  // SECP-PR5H-B1 — the supported worker-enrollment controller surface. These are the ONLY three
+  // enrollment routes that take a browser principal (routers/enrollment.py). The worker exchange
+  // routes are authenticated by the worker's own signed evidence and the claim-only progression
+  // routes are sealed closed in production; neither is callable from here, by design.
+  //
+  // `enrollment:manage` gates create/revoke and `enrollment:read` gates status — and manage does
+  // NOT imply read, so a manage-only principal can create an invitation and still be refused its
+  // status. The service is authoritative for all of it.
+  createEnrollmentInvitation: (body: EnrollmentInvitationCreate) =>
+    request<EnrollmentInvitation>("POST", "/api/v1/enrollment/invitations", body),
+  // `enrollmentId` is a `sha256:<64 hex>` content address. Callers validate it against that grammar
+  // before calling (see pages/worker-enrollment.ts), so no caller-controlled path segment is
+  // interpolated unchecked.
+  getEnrollmentStatus: (enrollmentId: string) =>
+    request<EnrollmentStatus>("GET", `/api/v1/enrollment/${enrollmentId}`),
+  // `expectedRevision` is always the revision from the last observed status projection — never a
+  // value a human typed. A stale revision on a live enrollment fails closed with a bounded
+  // enrollment_revision_conflict rather than revoking the wrong state.
+  revokeEnrollment: (enrollmentId: string, expectedRevision: number) =>
+    request<EnrollmentStatus>("POST", `/api/v1/enrollment/${enrollmentId}/revoke`, {
+      expected_revision: expectedRevision,
+    }),
 };

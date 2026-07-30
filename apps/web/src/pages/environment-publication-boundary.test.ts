@@ -53,9 +53,23 @@ describe("publication page import boundary", () => {
   });
 
   it("sends no caller idempotency key or publication fingerprint", () => {
-    for (const src of [PAGE, MODULE, TYPES, CLIENT]) {
+    // The publication-owned files carry no idempotency key at all.
+    for (const src of [PAGE, MODULE]) {
       expect(src.includes("idempotency_key")).toBe(false);
     }
+    // types.ts and client.ts are SHARED with every other feature, and an unrelated surface may
+    // legitimately own an idempotency key (the supported worker-enrollment create is retry-safe by
+    // contract and requires one). So assert the property that actually matters here — that the
+    // PUBLICATION request type and the PUBLICATION client method carry none — rather than scanning
+    // whole shared files, which only ever passed because no other feature had one.
+    const requestType = TYPES.slice(
+      TYPES.indexOf("export interface EnvironmentPublicationRequest"),
+    );
+    expect(requestType.slice(0, requestType.indexOf("}")))
+      .not.toContain("idempotency_key");
+    const publishMethod = CLIENT.slice(CLIENT.indexOf("publishEnvironmentVersion:"));
+    expect(publishMethod.slice(0, publishMethod.indexOf("listExercises:")))
+      .not.toContain("idempotency_key");
     // the request type/builder never place publication_fingerprint INTO the request
     expect(MODULE).not.toMatch(/publication_fingerprint\s*:/); // no fingerprint field written into a request
   });

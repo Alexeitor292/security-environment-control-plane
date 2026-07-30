@@ -910,3 +910,80 @@ export interface TopologyDocumentDetail extends TopologyDocument {
   current_revision: TopologyRevisionDetail | null;
   current_validation_status: TopologyValidationStatus;
 }
+
+// --- Supported worker enrollment (SECP-PR5H-B1) ---
+//
+// Mirrors apps/api/secp_api/schemas_enrollment.py. Only the three routes that take a browser
+// principal are modelled here: create invitation, read status, revoke. The worker exchange routes
+// (/exchange/bind, /exchange/result) are authenticated by the worker's Ed25519 proof-of-possession
+// and carry no principal, and the claim-only progression routes are sealed closed and hidden from
+// the schema — neither is a browser surface, so neither is typed or called from this client.
+
+/** The closed, ordered enrollment lifecycle (worker_enrollment_contract.py). The five forward edges
+ *  are driven by the worker's signed evidence; `refused` is the terminal an operator revoke reaches
+ *  and `recovery_required` is produced only by the controller-side expiry sweep. */
+export type EnrollmentLifecycleState =
+  | "invited"
+  | "worker_bound"
+  | "offer_transported"
+  | "result_transported"
+  | "verified"
+  | "healthy"
+  | "refused"
+  | "recovery_required";
+
+export interface EnrollmentInvitationCreate {
+  /** High-entropy client-generated single-use key (22-128 url-safe chars). Never typed by a human;
+   *  the server persists only its org-bound digest, never the raw value. */
+  idempotency_key: string;
+  deployment_site_label: string;
+  ttl_seconds: number;
+}
+
+/**
+ * The non-secret invitation an operator hands to a worker. It carries no private key, no raw
+ * handoff record and no host path — but it IS a single-use enrollment capability: the bind exchange
+ * proves the presenter owns the key it presents, not that it was the intended recipient, so the
+ * first valid binder wins. Treat it as bearer-grade in the interface: never log it, never render it
+ * unprompted, never place it anywhere the browser persists.
+ *
+ * Returned ONLY by the create call — no route re-serves it, so it cannot be recovered after this
+ * response is lost.
+ */
+export interface EnrollmentInvitation {
+  enrollment_id: string;
+  invitation_id: string;
+  controller_installation_id: string;
+  controller_key_id: string;
+  controller_trust_anchor_hex: string;
+  controller_origin: string;
+  release_digest: string;
+  transaction_id: string;
+  deployment_site_label: string;
+  created_at: string;
+  expires_at: string;
+  /** Always "invited" on creation; typed as the closed lifecycle for display. */
+  state: string;
+  revision: number;
+}
+
+/**
+ * The bounded, secret-free status projection (`EnrollmentState.public_view`). Identities appear only
+ * as short non-reversible fingerprints; `refusal_reason` is a bounded lowercase code, never prose.
+ * It deliberately does NOT carry the invitation material or the deployment site label.
+ */
+export interface EnrollmentStatus {
+  enrollment_id: string;
+  state: string;
+  revision: number;
+  controller_installation_id: string;
+  controller_key_fingerprint: string;
+  worker_installation_id: string;
+  worker_key_fingerprint: string;
+  release_fingerprint: string;
+  offer_fingerprint: string;
+  result_fingerprint: string;
+  expires_at: string;
+  updated_at: string;
+  refusal_reason: string;
+}

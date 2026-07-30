@@ -7,6 +7,7 @@
 
 import type {
   BootstrapStatus,
+  EnrollmentLifecycleState,
   LifecycleState,
   OnboardingStatus,
   PlanStatus,
@@ -42,7 +43,8 @@ export type StatusDomain =
   | "target"
   | "audit"
   | "eligibility"
-  | "plan-decision";
+  | "plan-decision"
+  | "enrollment";
 
 export const LIFECYCLE_TONE: Record<LifecycleState, StatusTone> = {
   draft: "pending",
@@ -215,6 +217,25 @@ export const AUDIT_TONE: Record<string, StatusTone> = {
   expired: "danger",
 };
 
+/** Worker-enrollment lifecycle (SECP-PR5H-B1). The four pre-terminal states are progress, not
+ *  outcomes: `invited` is waiting on a worker that has not arrived, and the three transported
+ *  states are an exchange in flight. Only `healthy` is a finished, working worker. `refused` is
+ *  where an operator revoke lands and `recovery_required` is the expiry sweep's terminal — both
+ *  mean no worker was enrolled. */
+export const ENROLLMENT_TONE: Record<EnrollmentLifecycleState, StatusTone> = {
+  invited: "pending",
+  worker_bound: "warn",
+  offer_transported: "warn",
+  result_transported: "warn",
+  verified: "accent",
+  healthy: "ok",
+  refused: "danger",
+  recovery_required: "danger",
+};
+
+// Deliberately NOT added to DEFAULT_ORDER: every enrollment call site passes
+// domain="enrollment", so these keys can never shadow (or be shadowed by) an
+// identically-named state in another domain.
 const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   lifecycle: LIFECYCLE_TONE,
   plan: PLAN_TONE,
@@ -232,6 +253,7 @@ const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   audit: AUDIT_TONE,
   eligibility: ELIGIBILITY_TONE,
   "plan-decision": PLAN_DECISION_TONE,
+  enrollment: ENROLLMENT_TONE,
 };
 
 /** Resolution order for domain-less lookups. Lifecycle then plan first, which
