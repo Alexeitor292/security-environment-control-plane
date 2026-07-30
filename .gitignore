@@ -21,6 +21,12 @@ apps/web/dist/
 apps/web/.vite/
 *.local
 
+# Claude Code — machine-local permission allowances only.
+# The committed, reviewed configuration is .claude/settings.json (hooks + deny rules).
+# This file was previously ignored only via .git/info/exclude, which does not travel
+# to other clones; tracking the rule here closes that gap.
+.claude/settings.local.json
+
 # Editor / OS
 .DS_Store
 .idea/
