@@ -181,23 +181,37 @@ def _validate_binding(payload: dict, root: Path, target_filename: str) -> None:
         )
 
 
-def _validate_expiry(payload: dict) -> None:
+def _validate_expiry(payload: dict, now: datetime | None = None) -> None:
+    """Enforce a CLOSED freshness window: ``issued_at <= now < expires_at``.
+
+    Checking only the upper bound accepted a token stamped in the future, which would let a
+    forward-dated approval sit valid indefinitely. ``now`` is injectable so the boundaries
+    can be tested exactly rather than with timing-sensitive sleeps.
+    """
     try:
         issued_at = _parse_timestamp(payload["issued_at"])
         expires_at = _parse_timestamp(payload["expires_at"])
     except (TypeError, ValueError) as exc:
         deny(f"BLOCKED: the unlock token timestamps are malformed ({exc!r}).")
+
     ttl = (expires_at - issued_at).total_seconds()
     if ttl <= 0 or ttl > MAX_TTL_SECONDS:
         deny(
             f"BLOCKED: the unlock token declares a {int(ttl)}s lifetime; the permitted maximum "
             f"is {MAX_TTL_SECONDS}s (60 minutes)."
         )
-    now = datetime.now(timezone.utc)
-    if now >= expires_at:
+
+    moment = now or datetime.now(timezone.utc)
+    if moment < issued_at:
+        deny(
+            f"BLOCKED: the unlock token is stamped in the future "
+            f"(issued_at {issued_at.isoformat()}, now {moment.isoformat()}). "
+            "A forward-dated token is refused."
+        )
+    if moment >= expires_at:
         deny(
             f"BLOCKED: the unlock token expired at {expires_at.isoformat()} "
-            f"(now {now.isoformat()}). Ask Juan to issue a fresh token."
+            f"(now {moment.isoformat()}). Ask Juan to issue a fresh token."
         )
 
 

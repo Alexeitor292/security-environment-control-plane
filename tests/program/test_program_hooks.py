@@ -241,8 +241,9 @@ ALLOWED_COMMANDS = [
     "git diff HEAD",
     "git add -A",
     "git commit -m 'SECP: add guardrails'",
-    "git push -u origin feature/secp-program-orchestration-foundation",
-    "git push origin feature/x",
+    # Branch-specific push shapes are covered by the C1 matrix below, which resolves the
+    # current branch at runtime; a hardcoded name here would be wrong on CI's detached HEAD.
+    "git push",
     "git checkout -b feature/y",
     "git worktree add ../wt feature/y",
     "gh pr create --draft --title x --body y",
@@ -301,8 +302,8 @@ ALLOWED_COMMANDS = [
     # The mention scan is PER SEGMENT. A command-global rule let one unrelated writer
     # poison every other segment -- including the exact workflow for landing a
     # safety-invariant entry (append, stage, commit, push).
-    "git add docs/program/SAFETY_INVARIANTS.md && git commit -m 'docs: x' && git push origin f",
-    "git commit -m 'ci: note .github/workflows/ci.yml change' && git push origin feature/x",
+    "git add docs/program/SAFETY_INVARIANTS.md && git commit -m 'docs: x' && git push",
+    "git commit -m 'ci: note .github/workflows/ci.yml change' && git push",
     "cd .github/workflows && ls",
     "cd apps/api/migrations/versions && ls -la",
     "ls apps/api/migrations/versions/ && python -m alembic heads",
@@ -354,6 +355,64 @@ def test_hook_module_imports_cleanly(hook: str) -> None:
         f"{hook} exited {completed.returncode}; a non-zero exit with empty stdout is treated "
         f"as non-blocking, so the guard would be silently disabled. stderr: {completed.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# C1: an agent may push ONLY the branch it is working on.
+#
+# Denying force and protected destinations is not sufficient: `git push --all origin` and
+# `git push origin some-other-feature` are ordinary fast-forwards to non-protected refs,
+# and both push work the agent was never assigned.
+# ---------------------------------------------------------------------------------------
+
+
+def _current_branch() -> str:
+    return _git("rev-parse", "--abbrev-ref", "HEAD")
+
+
+def test_push_of_the_current_branch_is_permitted() -> None:
+    branch = _current_branch()
+    if branch.lower() in {"main", "master", "head"}:
+        pytest.skip(f"checkout is on {branch!r}; every push is denied by design")
+    for command in (
+        "git push",
+        "git push origin",
+        f"git push origin {branch}",
+        f"git push -u origin {branch}",
+        f"git push --set-upstream origin {branch}",
+        f"git push origin HEAD:{branch}",
+        f"git push origin {branch}:{branch}",
+        f"git push origin refs/heads/{branch}",
+    ):
+        assert decision_of(run_hook("guard_bash.py", bash(command))) == "allow", command
+
+
+def test_push_outside_the_current_branch_is_denied() -> None:
+    branch = _current_branch()
+    if branch.lower() in {"main", "master", "head"}:
+        pytest.skip(f"checkout is on {branch!r}; every push is denied by design")
+    denied = [
+        "git push --all origin",
+        "git push --mirror origin",
+        "git push --prune origin",
+        "git push --tags origin",
+        "git push --delete origin feature/x",
+        "git push origin some-other-feature",
+        "git push origin feature/unrelated-work",
+        f"git push origin {branch}:some-other-feature",
+        "git push origin main",
+        "git push origin master",
+        f"git push origin {branch}:main",
+        "git push origin refs/heads/main",
+        "git push origin HEAD",
+        "git push origin @",
+        "git push --force origin " + branch,
+        "git push -f origin " + branch,
+        f"git push origin +{branch}",
+    ]
+    for command in denied:
+        result = run_hook("guard_bash.py", bash(command))
+        assert decision_of(result) == "deny", f"expected deny for: {command}"
 
 
 def test_guard_bash_ignores_non_shell_payload() -> None:
@@ -936,6 +995,68 @@ def test_unlock_accepts_a_bom_prefixed_token(tmp_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------------------
+# C2: closed token freshness window, issued_at <= now < expires_at.
+# `now` is injected so the boundaries are exact rather than timing-sensitive.
+# ---------------------------------------------------------------------------------------
+
+
+def _expiry_verdict(payload: dict, now: datetime) -> str:
+    module = load_hook_module("guard_migration_unlock")
+    try:
+        module._validate_expiry(payload, now)
+    except SystemExit:
+        return "deny"
+    return "allow"
+
+
+ISSUED = datetime(2026, 7, 30, 12, 0, 0, tzinfo=UTC)
+EXPIRES = ISSUED + timedelta(minutes=30)
+
+
+def _timed_token(**overrides) -> dict:
+    return _valid_token(
+        issued_at=ISSUED.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        expires_at=EXPIRES.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        **overrides,
+    )
+
+
+FRESHNESS_BOUNDARIES = [
+    (ISSUED - timedelta(seconds=1), "deny", "a token stamped in the future is refused"),
+    (ISSUED, "allow", "now == issued_at is inside the window"),
+    (ISSUED + timedelta(minutes=15), "allow", "mid-window is inside the window"),
+    (EXPIRES - timedelta(seconds=1), "allow", "just before expiry is inside the window"),
+    (EXPIRES, "deny", "now == expires_at is outside the window"),
+    (EXPIRES + timedelta(seconds=1), "deny", "after expiry is outside the window"),
+]
+
+
+@pytest.mark.parametrize("moment,expected,why", FRESHNESS_BOUNDARIES)
+def test_token_freshness_window_is_closed(moment: datetime, expected: str, why: str) -> None:
+    assert _expiry_verdict(_timed_token(), moment) == expected, why
+
+
+def test_token_ttl_over_sixty_minutes_denies_at_any_moment() -> None:
+    long_token = _valid_token(
+        issued_at=ISSUED.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        expires_at=(ISSUED + timedelta(minutes=61)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    assert _expiry_verdict(long_token, ISSUED + timedelta(minutes=1)) == "deny"
+
+
+def test_future_issued_token_denies_end_to_end(tmp_path: Path) -> None:
+    """The forward-dated case through the real hook, not only the helper."""
+    future = datetime.now(UTC) + timedelta(minutes=20)
+    token = _valid_token(
+        issued_at=future.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        expires_at=(future + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    result = _run_unlock(tmp_path, [token])
+    assert decision_of(result) == "deny"
+    assert "future" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
 def test_unlock_ignores_non_migration_paths(tmp_path: Path) -> None:
     assert _run_unlock(tmp_path, None, target="tests/program/test_program_hooks.py") is None
 
@@ -963,14 +1084,30 @@ def test_session_start_computes_alembic_head_from_files_not_from_docs() -> None:
         pytest.skip(f"docs/STATUS.md is behind the real head {heads[0]} (known drift)")
 
 
-def test_teammate_idle_blocks_when_work_is_uncommitted() -> None:
+def test_teammate_idle_does_not_infer_ownership_from_a_dirty_tree() -> None:
+    """C3: a read-only teammate must be able to go idle while OTHERS' work is uncommitted.
+
+    Inferring ownership from shared working-tree state is wrong in a shared checkout, and
+    blocked read-only reviewers over the lead's changes twice during this PR's own review.
+    """
+    active_work = REPO_ROOT / "docs" / "program" / "ACTIVE_WORK.md"
+    if active_work.is_file():
+        pytest.skip("ACTIVE_WORK.md exists; contract-based enforcement is active (PR 2)")
+
     dirty = _git("status", "--porcelain")
     result = run_hook("guard_teammate_idle.py", {"hook_event_name": "TeammateIdle"})
-    if dirty.strip():
-        assert decision_of(result) == "block"
-        assert "uncommitted" in result["reason"]
-    else:
-        assert decision_of(result) == "allow"
+    assert decision_of(result) == "allow", (
+        "TeammateIdle must be inert without recorded contracts, even with a dirty tree "
+        f"(tree dirty: {bool(dirty.strip())})"
+    )
+
+
+def test_teammate_idle_is_inert_without_recorded_contracts() -> None:
+    """PR 1 ships this hook deliberately inert; PR 2 binds contracts to an exact agent."""
+    module = load_hook_module("guard_teammate_idle")
+    assert module._open_contracts(REPO_ROOT) == []
+    source = (HOOKS_DIR / "guard_teammate_idle.py").read_text(encoding="utf-8")
+    assert "status --porcelain" not in source, "the dirty-tree ownership inference must not return"
 
 
 def test_task_completion_requires_evidence_when_tree_is_dirty(tmp_path: Path) -> None:

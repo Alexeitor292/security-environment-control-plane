@@ -125,8 +125,21 @@ Completion is earned by a command that ran, never asserted in prose.
   the repository.
 - `.claude/hooks/guard_task_completion.py` blocks completing a task while the tree is dirty and
   no passing validation has been recorded.
-- `.claude/hooks/guard_teammate_idle.py` blocks a teammate going idle while holding an open
-  contract or uncommitted work.
+- `.claude/hooks/guard_teammate_idle.py` blocks a teammate going idle while holding an
+  **open task contract recorded in `docs/program/ACTIVE_WORK.md`**.
+
+  **In PR 1 this hook is inert**, because `ACTIVE_WORK.md` arrives with the Project Brain in
+  PR 2. It deliberately does **not** infer ownership from a dirty working tree: in a shared
+  checkout that inference is wrong, and it blocked read-only review agents over the lead's
+  changes twice during this PR's own review. A guard that punishes an agent for someone
+  else's work teaches agents to route around guards. Enforcement becomes real once contracts
+  are bound to an exact agent and an isolated worktree — PR 2 scope. Until then, "a teammate
+  may not go idle holding incomplete work" is a rule this repository states but does not yet
+  enforce.
+
+  The same caveat applies in weaker form to `guard_task_completion.py`, which still consults
+  working-tree dirtiness. It gates the *completing* agent's own claim of doneness rather than
+  attributing authorship, so it is retained in PR 1 — but it is not ownership-aware either.
 
 **A local green run is not the gate.** `pyproject.toml` `testpaths` omits
 `contracts/scenario-schema/tests` which the CI manifest includes, and 26 modules skip silently

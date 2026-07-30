@@ -229,6 +229,13 @@ def _git_parts(tokens: list[str]) -> tuple[str, list[str]] | None:
 
 
 def _check_git_push(args: list[str]) -> None:
+    """Permit exactly one shape: an ordinary push of the CURRENT non-protected branch.
+
+    The approved git authority is "push only your assigned branch". Denying force and
+    protected destinations is not sufficient on its own -- `git push --all origin` and
+    `git push origin some-other-feature` are both ordinary fast-forwards to non-protected
+    refs, and both push work the agent was never assigned.
+    """
     lowered = [a.lower() for a in args]
 
     for flag in ("--force", "--force-with-lease", "--mirror", "--delete"):
@@ -236,7 +243,13 @@ def _check_git_push(args: list[str]) -> None:
             deny(
                 f"BLOCKED: 'git push {flag}' is an unconditional hard-deny in SECP. "
                 "Force-pushing and deleting remote refs are never permitted. "
-                "Push an ordinary fast-forward to your feature branch instead."
+                "Push an ordinary fast-forward to your assigned branch instead."
+            )
+    for flag in ("--all", "--prune", "--tags", "--follow-tags"):
+        if flag in lowered:
+            deny(
+                f"BLOCKED: 'git push {flag}' pushes refs beyond your assigned branch. "
+                "An agent may push only the branch it is working on."
             )
     for arg in args:
         if arg.startswith("-") and not arg.startswith("--"):
@@ -244,34 +257,58 @@ def _check_git_push(args: list[str]) -> None:
             if "f" in letters:
                 deny(
                     "BLOCKED: 'git push -f' (force push) is an unconditional hard-deny in "
-                    "SECP. Push an ordinary fast-forward to your feature branch instead."
+                    "SECP. Push an ordinary fast-forward to your assigned branch instead."
                 )
             if "d" in letters:
                 deny("BLOCKED: 'git push -d' deletes a remote ref and is a hard-deny.")
 
+    current = current_branch(repo_root())
+    if current.lower() in PROTECTED_BRANCHES:
+        deny(
+            f"BLOCKED: the current branch is '{current}'. Pushing from main is an "
+            "unconditional hard-deny in SECP; every change reaches main through a PR."
+        )
+
     positional = [a for a in args if not a.startswith("-")]
     refspecs = positional[1:] if len(positional) > 1 else []
+    if not refspecs:
+        return  # `git push` / `git push origin`: the current branch to its upstream.
 
     for refspec in refspecs:
-        # A leading '+' forces the push, with or without an explicit source:destination.
         if refspec.startswith("+"):
             deny(
                 f"BLOCKED: refspec '{refspec}' begins with '+', which forces the push. "
                 "Forced refspecs are an unconditional hard-deny in SECP."
             )
-        target = refspec.split(":")[-1].lstrip("+").rsplit("/", 1)[-1]
+        if ":" in refspec:
+            destination = refspec.rsplit(":", 1)[1]
+        else:
+            # A bare HEAD/@ carries no explicit destination, so the ref it lands on cannot
+            # be proven here (push.default and remote config can redirect it).
+            if refspec.lower() in {"head", "@"}:
+                deny(
+                    "BLOCKED: 'git push <remote> HEAD' has no explicit destination, so the "
+                    f"ref it lands on cannot be proven to be '{current}'. Push the branch by "
+                    f"name: git push origin {current}"
+                )
+            destination = refspec
+
+        # Strip only the refs/heads/ prefix -- a branch name may itself contain slashes,
+        # so taking the last path component would turn feature/x into x.
+        target = destination
+        for prefix in ("refs/heads/", "heads/"):
+            if target.startswith(prefix):
+                target = target[len(prefix) :]
+                break
         if target.lower() in PROTECTED_BRANCHES:
             deny(
                 f"BLOCKED: pushing to '{target}' is an unconditional hard-deny in SECP. "
                 "Every change reaches main through a reviewed pull request."
             )
-
-    if not refspecs:
-        branch = current_branch(repo_root()).lower()
-        if branch in PROTECTED_BRANCHES:
+        if target != current:
             deny(
-                f"BLOCKED: the current branch is '{branch}' and a bare 'git push' would push "
-                "to it. Pushing to main is an unconditional hard-deny in SECP."
+                f"BLOCKED: this pushes '{target}', but the current branch is '{current}'. "
+                "An agent may push only the branch it is working on."
             )
 
 
