@@ -18,7 +18,9 @@ from secp_management.controller_api_locator import (
     FileControllerApiLocatorProvider,
     SealedControllerApiLocatorProvider,
     record_controller_api_locator,
+    record_fixed_controller_api_locator,
 )
+from secp_management.layout import ManagementLocations
 
 ORIGIN = "https://controller.example.test"
 CA = "/etc/secp/controller/ca.pem"
@@ -68,6 +70,30 @@ def test_a_recorded_locator_reads_back():
     # the repr never leaks the origin or CA path
     assert ORIGIN not in repr(loc) and CA not in repr(loc)
     assert "redacted" in repr(loc)
+
+
+def test_fixed_locator_pins_the_code_owned_ca_bundle_path():
+    # SECP-PR5H-B2: the install-time record pins the CA path to the fixed controller CA bundle, so a
+    # recorded locator can only trust the installer-produced CA — never a caller-chosen path.
+    fixed_ca = ManagementLocations().controller_ca_bundle_path()
+    fs = _fs()
+    fs.seed_dir("/etc/secp/controller/tls", uid=0, gid=0, mode=0o755)
+    written = record_fixed_controller_api_locator(
+        fs, canonical_origin=ORIGIN, write=True, confirm=True
+    )
+    assert written.ca_bundle_path == fixed_ca == "/etc/secp/controller/tls/ca-bundle.pem"
+    assert written.canonical_origin == ORIGIN
+    loc = FileControllerApiLocatorProvider(fs).locate()
+    assert loc.ca_bundle_path == fixed_ca
+
+
+def test_fixed_locator_dry_run_does_not_write():
+    fs = _fs()
+    loc = record_fixed_controller_api_locator(
+        fs, canonical_origin=ORIGIN, write=True, confirm=False
+    )
+    assert loc.ca_bundle_path == ManagementLocations().controller_ca_bundle_path()
+    assert fs.lstat(CONTROLLER_API_LOCATOR_PATH) is None
 
 
 def test_dry_run_validates_without_writing():

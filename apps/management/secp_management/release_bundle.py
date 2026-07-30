@@ -27,8 +27,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_bytes
 from secp_commissioning.descriptor import scan_forbidden
 
-from secp_management import BOOTSTRAP_CONTRACT_VERSION, PLANE_MANAGEMENT, ManagementError
+from secp_management import (
+    BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2,
+    PLANE_MANAGEMENT,
+    SUPPORTED_BOOTSTRAP_CONTRACT_VERSIONS,
+    ManagementError,
+)
 from secp_management.topology import EXPECTED_CONTROLLER_COMPONENTS
+
+#: The v1alpha2-only manifest fields, version-gated out of the v1alpha1 canonical/signing form.
+_V1ALPHA2_MANIFEST_FIELDS = ("platform_profile", "runtime_profile", "controller_tls_policy")
 
 MANIFEST_NAME = "release-manifest.json"
 SIGNATURE_NAME = "release-manifest.sig.json"
@@ -107,8 +115,156 @@ class ArtifactRecord(_Strict):
     purpose: _Str | None = None  # required for image_archive + python_wheel (closed taxonomy)
 
 
+# --- SECP-PR5H-B2: the v1alpha2 signed installation profile (provider-neutral; no deployment value)
+
+
+#: The CANONICAL supported platform matrix (OS -> canonical architectures). The signed profile MUST
+#: use these canonical names (aliases like ``amd64``/``aarch64`` are normalization INPUTS, refused
+#: the signed profile to avoid an implicit ``amd64``/``x86_64`` mismatch reaching installation).
+_SUPPORTED_PLATFORMS: dict[str, frozenset[str]] = {"linux": frozenset({"x86_64", "arm64"})}
+#: The ONE code-owned architecture-alias normalization boundary: raw ``platform.machine()`` values
+#: (and common aliases) -> the canonical name the signed profile uses. Parity-tested.
+_ARCH_ALIASES: dict[str, str] = {
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+    "arm64": "arm64",
+    "aarch64": "arm64",
+}
+
+# The CLOSED, code-owned host-runtime policy: the EXACT invocation shape + allowed-subcommand set
+# real management adapters (secp_management.real_adapters) use, and nothing more. A signed but
+# semantically-incompatible executable surface (extra/missing subcommand, wrong compose model, a
+# shell/interpreter, an arbitrary invocation) is refused. ``allowed_subcommands`` must equal the set
+# EXACTLY (no extra, no missing). ``invocation`` is the fixed argv PREFIX after the pinned exe
+# path: empty for a direct runtime/service-manager/standalone-compose, or ``("compose",)`` for the
+# docker-compose-plugin model.
+_RUNTIME_CAPABILITIES = frozenset({"container_runtime", "compose", "service_manager"})
+_RUNTIME_ALLOWED_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "container_runtime": frozenset({"load", "image"}),  # docker load -i … ; docker image inspect/rm
+    "compose": frozenset({"up", "down"}),  # compose up --detach ; compose down --remove-orphans
+    "service_manager": frozenset(
+        {"daemon-reload"}
+    ),  # systemctl daemon-reload (units run via compose)
+}
+#: Allowed fixed argv prefixes per capability (after the pinned executable path).
+_RUNTIME_INVOCATIONS: dict[str, frozenset[tuple[str, ...]]] = {
+    "container_runtime": frozenset({()}),
+    "compose": frozenset({(), ("compose",)}),  # standalone binary, or the docker-compose plugin
+    "service_manager": frozenset({()}),
+}
+#: Executable basenames that are never a valid host-runtime binary (a shell / interpreter surface).
+_FORBIDDEN_RUNTIME_BASENAMES = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "csh",
+        "fish",
+        "env",
+        "xargs",
+        "python",
+        "python2",
+        "python3",
+        "perl",
+        "ruby",
+        "node",
+        "awk",
+        "tclsh",
+        "lua",
+    }
+)
+#: The closed set of controller TLS modes the release policy may permit.
+TLS_MODE_GENERATED_LOCAL_CA = "generated_local_ca"
+TLS_MODE_IMPORTED_ENTERPRISE = "imported_enterprise_tls"
+_TLS_MODES = frozenset({TLS_MODE_GENERATED_LOCAL_CA, TLS_MODE_IMPORTED_ENTERPRISE})
+#: key algorithm -> the closed set of signature algorithms COMPATIBLE with it.
+_TLS_KEY_SIG_COMPAT: dict[str, frozenset[str]] = {
+    "ecdsa-p256": frozenset({"ecdsa-with-sha256"}),
+    "ecdsa-p384": frozenset({"ecdsa-with-sha384"}),
+    "ed25519": frozenset({"ed25519"}),
+    "rsa-3072": frozenset({"sha256-rsa", "sha384-rsa"}),
+    "rsa-4096": frozenset({"sha256-rsa", "sha384-rsa"}),
+}
+_TLS_MIN_VERSIONS = frozenset({"1.2", "1.3"})
+_TLS_MAX_VALIDITY_DAYS = 825  # closed upper bound (CA/Browser-Forum server-cert ceiling)
+_ARGV_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def normalize_arch(machine: str) -> str:
+    """The ONE code-owned normalization boundary: map a raw ``platform.machine()`` value (or a known
+    alias) to the CANONICAL architecture the signed profile uses. An unknown value refuses (never an
+    implicit alias mismatch). Parity-tested against ``_SUPPORTED_PLATFORMS``."""
+    canonical = _ARCH_ALIASES.get(machine.strip().lower())
+    if canonical is None:
+        raise ManagementError("release_platform_arch_unknown")
+    return canonical
+
+
+class PlatformProfile(_Strict):
+    """The signed, closed platform binding for a v1alpha2 release (provider-neutral)."""
+
+    os: _Str
+    arch: _Str
+    installation_profile_version: _Str
+
+
+class RuntimeExecutablePin(_Strict):
+    """A signed pin for one host-runtime executable capability: the exact absolute path + SHA-256 +
+    the closed invocation prefix + the closed allowed-subcommand surface. Models Docker Compose
+    truthfully — when Compose is ``docker compose`` the ``compose`` pin shares the docker path and
+    binds the ``compose`` subcommand; a standalone compose binary is pinned independently."""
+
+    capability: _Str
+    path: _Str
+    sha256: _Sha
+    invocation: tuple[_Str, ...]
+    allowed_subcommands: tuple[_Str, ...]
+
+    @field_validator("invocation", "allowed_subcommands", mode="before")
+    @classmethod
+    def _coerce_seq(cls, v: object) -> object:
+        return tuple(v) if isinstance(v, list) else v
+
+
+class RuntimeProfile(_Strict):
+    """The signed host-runtime profile: one pin per required capability."""
+
+    pins: tuple[RuntimeExecutablePin, ...]
+
+    @field_validator("pins", mode="before")
+    @classmethod
+    def _coerce_pins(cls, v: object) -> object:
+        return tuple(v) if isinstance(v, list) else v
+
+
+class ControllerTlsPolicy(_Strict):
+    """The signed, CLOSED controller-API TLS policy — NOT a deployment origin, private CA, key, or
+    certificate path. It bounds what the root installer may generate or import at deploy time."""
+
+    allowed_modes: tuple[_Str, ...]
+    key_algorithm: _Str
+    signature_algorithm: _Str
+    max_validity_days: Annotated[int, Field(ge=1, le=3660, strict=True)]
+    require_san: bool
+    server_auth_eku_required: bool
+    ca_pathlen_zero: bool
+    min_tls_version: _Str
+    allow_ip_origin: bool
+    allow_generated_local_ca: bool
+
+    @field_validator("allowed_modes", mode="before")
+    @classmethod
+    def _coerce_modes(cls, v: object) -> object:
+        return tuple(v) if isinstance(v, list) else v
+
+
 class ReleaseManifest(_Strict):
-    """The strict, canonical release manifest binding every artifact digest."""
+    """The strict, canonical release manifest binding every artifact digest. v1alpha2 additionally
+    carries the signed installation profile (platform / host-runtime pins / controller TLS policy);
+    those three fields are version-gated OUT of the v1alpha1 canonical/signing form so existing
+    v1alpha1 signatures reverify byte-for-byte."""
 
     bootstrap_contract_version: _Str
     plane: _Str
@@ -122,6 +278,10 @@ class ReleaseManifest(_Strict):
     bootstrap_package_identity: _Str
     signing_anchor_id: _Str
     artifacts: tuple[ArtifactRecord, ...]
+    # --- v1alpha2-only (None on v1alpha1; excluded from the v1alpha1 canonical form) ---
+    platform_profile: PlatformProfile | None = None
+    runtime_profile: RuntimeProfile | None = None
+    controller_tls_policy: ControllerTlsPolicy | None = None
 
     @field_validator("artifacts", mode="before")
     @classmethod
@@ -129,7 +289,13 @@ class ReleaseManifest(_Strict):
         return tuple(v) if isinstance(v, list) else v
 
     def canonical(self) -> str:
-        return canonical_json(self.model_dump(mode="json"))
+        dump = self.model_dump(mode="json")
+        if self.bootstrap_contract_version != BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2:
+            # v1alpha1 form: the v1alpha2-only fields are absent from the signed bytes, so an
+            # existing v1alpha1 signature verifies unchanged.
+            for field in _V1ALPHA2_MANIFEST_FIELDS:
+                dump.pop(field, None)
+        return canonical_json(dump)
 
 
 class ReleaseSignature(_Strict):
@@ -174,8 +340,10 @@ def parse_signature_bytes(raw: bytes) -> ReleaseSignature:
 
 def assert_manifest_wellformed(manifest: ReleaseManifest) -> None:
     """Fail closed on any semantic defect the schema alone cannot express (bounded reasons)."""
-    if manifest.bootstrap_contract_version != BOOTSTRAP_CONTRACT_VERSION:
+    if manifest.bootstrap_contract_version not in SUPPORTED_BOOTSTRAP_CONTRACT_VERSIONS:
+        # unknown / malformed / older-unsupported / future contract versions all refuse.
         raise ManagementError("release_contract_version_invalid")
+    _assert_installation_profile(manifest)
     if manifest.plane != PLANE_MANAGEMENT:
         raise ManagementError("release_plane_invalid")
     if manifest.role not in _ROLES:
@@ -214,6 +382,96 @@ def assert_manifest_wellformed(manifest: ReleaseManifest) -> None:
     # every REQUIRED purpose for this role must be present (missing → refused).
     if not _REQUIRED_PURPOSES[manifest.role].issubset(seen_purposes):
         raise ManagementError("release_purpose_set_incomplete")
+
+
+def _assert_installation_profile(manifest: ReleaseManifest) -> None:
+    """v1alpha1 MUST carry none of the v1alpha2 installation-profile fields; v1alpha2 MUST carry all
+    three, each well-formed. This keeps the two contract generations unambiguous and never lets a
+    v1alpha1 manifest smuggle an (unsigned-in-its-form) profile."""
+    present = [f for f in _V1ALPHA2_MANIFEST_FIELDS if getattr(manifest, f) is not None]
+    if manifest.bootstrap_contract_version != BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2:
+        if present:
+            raise ManagementError("release_v1alpha1_profile_unexpected")
+        return
+    if len(present) != len(_V1ALPHA2_MANIFEST_FIELDS):
+        raise ManagementError("release_v1alpha2_profile_incomplete")
+    _assert_platform_profile(manifest.platform_profile)  # type: ignore[arg-type]
+    _assert_runtime_profile(manifest.runtime_profile)  # type: ignore[arg-type]
+    _assert_controller_tls_policy(manifest.controller_tls_policy)  # type: ignore[arg-type]
+
+
+def _assert_platform_profile(p: PlatformProfile) -> None:
+    if p.os not in _SUPPORTED_PLATFORMS:
+        raise ManagementError("release_platform_unsupported")
+    # the signed profile MUST use the CANONICAL arch name (an alias like ``amd64`` is a
+    # normalization input, refused here so it can never reach installation as an implicit mismatch).
+    if p.arch not in _SUPPORTED_PLATFORMS[p.os]:
+        raise ManagementError(
+            "release_platform_arch_alias"
+            if p.arch in _ARCH_ALIASES
+            else "release_platform_unsupported"
+        )
+    if not _safe_name(p.installation_profile_version):
+        raise ManagementError("release_platform_profile_version_invalid")
+
+
+def _assert_runtime_profile(rp: RuntimeProfile) -> None:
+    seen: set[str] = set()
+    for pin in rp.pins:
+        if pin.capability not in _RUNTIME_CAPABILITIES:
+            raise ManagementError("release_runtime_capability_unknown")
+        if pin.capability in seen:
+            raise ManagementError("release_runtime_capability_duplicate")
+        seen.add(pin.capability)
+        if not (pin.path.startswith("/") and ".." not in pin.path.split("/")):
+            raise ManagementError("release_runtime_path_invalid")
+        if pin.path.rsplit("/", 1)[-1] in _FORBIDDEN_RUNTIME_BASENAMES:
+            raise ManagementError("release_runtime_interpreter_forbidden")  # no shell/interpreter
+        if not is_sha256_digest(pin.sha256):
+            raise ManagementError("release_runtime_digest_invalid")
+        # the fixed invocation prefix must be a CLOSED, capability-specific shape (empty, or the
+        # docker-compose plugin ``("compose",)`` for the compose capability) — nothing arbitrary.
+        if any(not _ARGV_TOKEN.fullmatch(t) for t in pin.invocation):
+            raise ManagementError("release_runtime_invocation_invalid")
+        if pin.invocation not in _RUNTIME_INVOCATIONS[pin.capability]:
+            raise ManagementError("release_runtime_invocation_incompatible")
+        # the allowed-subcommand set must EQUAL the exact set the real adapter uses (no drift).
+        if set(pin.allowed_subcommands) != _RUNTIME_ALLOWED_SUBCOMMANDS[pin.capability]:
+            raise ManagementError("release_runtime_subcommand_set_mismatch")
+        if len(set(pin.allowed_subcommands)) != len(pin.allowed_subcommands):
+            raise ManagementError("release_runtime_subcommand_duplicate")
+    if seen != _RUNTIME_CAPABILITIES:  # exactly one pin per required capability
+        raise ManagementError("release_runtime_capabilities_incomplete")
+
+
+def _assert_controller_tls_policy(t: ControllerTlsPolicy) -> None:
+    if not t.allowed_modes or any(m not in _TLS_MODES for m in t.allowed_modes):
+        raise ManagementError("release_tls_mode_invalid")
+    if len(set(t.allowed_modes)) != len(t.allowed_modes):
+        raise ManagementError("release_tls_mode_duplicate")
+    # generated_local_ca may appear IFF allow_generated_local_ca is true (both directions).
+    if (TLS_MODE_GENERATED_LOCAL_CA in t.allowed_modes) != bool(t.allow_generated_local_ca):
+        raise ManagementError("release_tls_generated_ca_inconsistent")
+    if t.key_algorithm not in _TLS_KEY_SIG_COMPAT:
+        raise ManagementError("release_tls_key_algorithm_invalid")
+    if t.signature_algorithm not in _TLS_KEY_SIG_COMPAT[t.key_algorithm]:
+        raise ManagementError(
+            "release_tls_signature_incompatible"
+        )  # key/sig combo must be compatible
+    if t.min_tls_version not in _TLS_MIN_VERSIONS:
+        raise ManagementError("release_tls_min_version_invalid")
+    if not (1 <= t.max_validity_days <= _TLS_MAX_VALIDITY_DAYS):
+        raise ManagementError("release_tls_validity_out_of_bounds")
+    # a controller-API server policy MUST require a SAN, server-auth EKU, and a non-CA leaf chain.
+    if not (t.require_san and t.server_auth_eku_required and t.ca_pathlen_zero):
+        raise ManagementError("release_tls_policy_too_weak")
+
+
+def require_b2_installation_profile(manifest: ReleaseManifest) -> None:
+    """Refuse a clean-host SECP-PR5H-B2 installation from a bundle that lacks the v1alpha2
+    installation profile (a legacy v1alpha1 bundle), with a bounded reason rather than guessing."""
+    if manifest.bootstrap_contract_version != BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2:
+        raise ManagementError("release_b2_installation_profile_required")
 
 
 def _assert_artifact_purpose(role: str, art: ArtifactRecord, seen_purposes: set[str]) -> None:

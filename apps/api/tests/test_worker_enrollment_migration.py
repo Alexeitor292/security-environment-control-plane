@@ -1,9 +1,11 @@
 """Upgrade/downgrade proof for the durable worker-enrollment foundation (SECP-PR5H-A).
 
-Revision ``b6e2f4a9c1d7`` (down_revision ``d8f1a2b3c4e5``) is the new SOLE head. This module proves
-the migration is a clean, reversible, RETRYABLE round trip on SQLite:
+Revision ``b6e2f4a9c1d7`` (down_revision ``d8f1a2b3c4e5``) introduced these four foundation tables;
+the current sole head is ``a1d4f7c2e9b6``. This module proves the migration is a clean, reversible,
+RETRYABLE round trip on SQLite:
 
-* upgrading to head creates exactly the four enrollment tables and lands on ``b6e2f4a9c1d7``;
+* upgrading to head creates exactly the four enrollment tables and lands on the current sole head
+  ``a1d4f7c2e9b6``;
 * the durable single-use nonce key and the CAS/dedup uniqueness constraints actually exist and bite;
 * downgrading removes all four and returns the head to ``d8f1a2b3c4e5``, leaving the PR5F schema
   intact so the existing rollback path is unaffected;
@@ -25,7 +27,7 @@ from sqlalchemy import create_engine, inspect, text
 
 API_DIR = Path(__file__).resolve().parents[1]
 
-REVISION = "c2f8e1a4b6d9"
+REVISION = "a1d4f7c2e9b6"
 DOWN_REVISION = "d8f1a2b3c4e5"
 
 ENROLLMENT_TABLES = {

@@ -50,9 +50,11 @@ def test_repository_has_exactly_one_alembic_head_and_it_is_pr5h() -> None:
 def test_pr5h_head_chains_linearly_from_the_pr5f_base() -> None:
     revisions, _ = _revision_graph()
     assert RUNTIME_REQUIRED_MIGRATION_HEAD in revisions
-    # linear chain: d8f1a2b3c4e5 -> b6e2f4a9c1d7 -> c2f8e1a4b6d9 (the required head)
+    # linear chain: d8f1a2b3c4e5 -> b6e2f4a9c1d7 -> c2f8e1a4b6d9 -> a1d4f7c2e9b6 (required head)
     head_src = open(os.path.join(_VERSIONS, revisions[RUNTIME_REQUIRED_MIGRATION_HEAD])).read()
-    assert re.search(r'^down_revision[^=]*=\s*"b6e2f4a9c1d7"', head_src, re.M)
+    assert re.search(r'^down_revision[^=]*=\s*"c2f8e1a4b6d9"', head_src, re.M)
+    b1_src = open(os.path.join(_VERSIONS, revisions["c2f8e1a4b6d9"])).read()
+    assert re.search(r'^down_revision[^=]*=\s*"b6e2f4a9c1d7"', b1_src, re.M)
     foundation_src = open(os.path.join(_VERSIONS, revisions["b6e2f4a9c1d7"])).read()
     assert re.search(r'^down_revision[^=]*=\s*"d8f1a2b3c4e5"', foundation_src, re.M)
 

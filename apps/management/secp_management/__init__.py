@@ -21,9 +21,21 @@ path, value, endpoint, credential, secret, host address, or third-party exceptio
 
 from __future__ import annotations
 
-# The management-bootstrap CONTRACT version (distinct from the tool/package version). Manifests,
-# evidence, and identity documents whose contract version is not EXACTLY this are refused.
+# The management-bootstrap CONTRACT version (distinct from the tool/package version). Evidence and
+# identity documents whose contract version is not EXACTLY this are refused (unchanged legacy
+# semantics). ``BOOTSTRAP_CONTRACT_VERSION`` remains v1alpha1 so existing authenticated records read
+# unchanged; the release MANIFEST accepts a bounded, closed compatibility window (SECP-PR5H-B2):
+# legacy ``v1alpha1`` (accepted for upgrade/rollback) and newly-issued ``v1alpha2`` (which carries
+# the B2 installation profile — platform, host-runtime executable pins, controller TLS policy).
+# New release-building tooling emits only v1alpha2; clean-host B2 installs require v1alpha2.
 BOOTSTRAP_CONTRACT_VERSION = "secp.management-bootstrap/v1alpha1"
+BOOTSTRAP_CONTRACT_VERSION_V1ALPHA1 = "secp.management-bootstrap/v1alpha1"
+BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2 = "secp.management-bootstrap/v1alpha2"
+#: The closed compatibility window of accepted release-manifest contract versions.
+SUPPORTED_BOOTSTRAP_CONTRACT_VERSIONS = (
+    BOOTSTRAP_CONTRACT_VERSION_V1ALPHA1,
+    BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2,
+)
 
 # The package's own version, recorded in evidence.
 PACKAGE_VERSION = "0.1.0"
@@ -39,6 +51,9 @@ _MAX_REASON_CODE = 120
 
 __all__ = [
     "BOOTSTRAP_CONTRACT_VERSION",
+    "BOOTSTRAP_CONTRACT_VERSION_V1ALPHA1",
+    "BOOTSTRAP_CONTRACT_VERSION_V1ALPHA2",
+    "SUPPORTED_BOOTSTRAP_CONTRACT_VERSIONS",
     "PACKAGE_VERSION",
     "PACKAGE_IMPLEMENTATION_ID",
     "PLANE_MANAGEMENT",

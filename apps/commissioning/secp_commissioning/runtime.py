@@ -50,6 +50,8 @@ class FileStat:
     mode: int
     size: int
     nlink: int
+    is_socket: bool = False  # EXACTLY an AF_UNIX socket (POSIX S_ISSOCK) — a strict subset of
+    #: is_special; lets a caller distinguish a socket from a FIFO/device/other special node.
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +142,7 @@ class _Node:
     data: bytes = b""
     is_symlink: bool = False
     is_special: bool = False
+    is_socket: bool = False
     nlink: int = 1
     inode: int = 0
 
@@ -186,6 +189,7 @@ class InMemoryFilesystem:
         data: bytes = b"",
         is_symlink: bool = False,
         is_special: bool = False,
+        is_socket: bool = False,
         nlink: int = 1,
     ) -> _Node:
         inode = self._next_inode
@@ -198,6 +202,7 @@ class InMemoryFilesystem:
             data=data,
             is_symlink=is_symlink,
             is_special=is_special,
+            is_socket=is_socket,
             nlink=nlink,
             inode=inode,
         )
@@ -226,8 +231,15 @@ class InMemoryFilesystem:
         )
 
     def seed_special(self, path: str, *, uid: int = 0, gid: int = 0) -> None:
+        # a generic special node (FIFO / device / other) — is_special but NOT a socket.
         self._nodes[path] = self._new_node(
             is_dir=False, uid=uid, gid=gid, mode=0o660, is_special=True
+        )
+
+    def seed_socket(self, path: str, *, uid: int = 0, gid: int = 0, mode: int = 0o660) -> None:
+        # an AF_UNIX socket: is_special AND is_socket (parity with the production S_ISSOCK path).
+        self._nodes[path] = self._new_node(
+            is_dir=False, uid=uid, gid=gid, mode=mode, is_special=True, is_socket=True
         )
 
     def paths(self) -> tuple[str, ...]:
@@ -248,6 +260,7 @@ class InMemoryFilesystem:
             mode=node.mode,
             size=len(node.data),
             nlink=node.nlink,
+            is_socket=node.is_socket,
         )
 
     def _assert_safe_ancestors(self, path: str) -> None:
@@ -571,6 +584,7 @@ class RealFilesystem:
             mode=stat.S_IMODE(m),
             size=st.st_size,
             nlink=st.st_nlink,
+            is_socket=stat.S_ISSOCK(m),
         )
 
     def makedir(self, path: str, *, uid: int, gid: int, mode: int) -> None:

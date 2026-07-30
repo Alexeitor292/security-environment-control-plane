@@ -5,111 +5,74 @@ the proxy proves the final in-controller hop with a high-entropy value read from
 root-controlled file.  The value is deliberately not a setting: callers cannot select a path or
 put the secret in an environment variable, compose contract, log record, or evidence document.
 
+The MECHANISM — the opaque non-disclosing secret, the ``[0-9a-f]{64}\\n`` parser, the
+``O_NOFOLLOW``/``O_CLOEXEC`` open with ``fstat``-on-descriptor posture proof, and the exactly-one
+constant-time header comparison — lives in :mod:`secp_api.fixed_origin_gate` and is shared with the
+sibling readiness gate (2b-3c-c Defect-3 A).  What stays here is only this DOMAIN: its own header
+name, its own fixed container path, its own opaque secret type and reason codes, and its own
+controlled-integration profile rule.  Because the domain authenticates only its own exact secret
+type, the readiness gate's material can never admit a worker and vice versa.
+
 This gate is additional transport provenance only.  Worker identity remains the Ed25519
 signed-nonce protocol implemented by :mod:`secp_api.services.worker_admission`.
 """
 
 from __future__ import annotations
 
-import hmac
-import os
-import re
-import stat
+from typing import ClassVar
 
 from fastapi import Depends, HTTPException, Request
 
 from secp_api.config import Settings
 from secp_api.deps import settings_dep
+from secp_api.fixed_origin_gate import (
+    FIXED_ORIGIN_GATE_FILE_BYTES,
+    FixedOriginGate,
+    FixedOriginGateError,
+    FixedOriginGateSecret,
+)
 
 WORKER_ADMISSION_PROXY_GATE_HEADER = "X-SECP-Admission-Proxy-Gate"
 WORKER_ADMISSION_PROXY_GATE_CONTAINER_PATH = "/run/secp/admission-proxy-gate.secret"
-WORKER_ADMISSION_PROXY_GATE_FILE_BYTES = 65
-
-_HEADER_NAME_BYTES = WORKER_ADMISSION_PROXY_GATE_HEADER.lower().encode("ascii")
-_SECRET_PATTERN = re.compile(rb"[0-9a-f]{64}\n")
-_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+WORKER_ADMISSION_PROXY_GATE_FILE_BYTES = FIXED_ORIGIN_GATE_FILE_BYTES
 
 
-class WorkerAdmissionProxyGateError(RuntimeError):
+class WorkerAdmissionProxyGateError(FixedOriginGateError):
     """The fixed origin-gate secret was absent or failed strict validation."""
 
-    def __init__(self, reason_code: str) -> None:
-        self.reason_code = reason_code
-        super().__init__(reason_code)
 
-
-class WorkerAdmissionProxyGateSecret:
+class WorkerAdmissionProxyGateSecret(FixedOriginGateSecret):
     """Opaque validated gate material whose repr/str never disclose its value."""
 
-    __slots__ = ("__value",)
+    __slots__ = ()
 
-    def __init__(self, value: bytes) -> None:
-        if not isinstance(value, bytes) or not re.fullmatch(rb"[0-9a-f]{64}", value):
-            raise WorkerAdmissionProxyGateError("proxy_gate_secret_invalid")
-        self.__value = value
-
-    def __repr__(self) -> str:
-        return "WorkerAdmissionProxyGateSecret(<redacted>)"
-
-    def __str__(self) -> str:
-        return "<redacted>"
-
-    def header_value(self) -> str:
-        """Return the value only for construction of the proxy's single upstream request."""
-
-        return self.__value.decode("ascii")
-
-    def matches_raw_header_values(self, values: tuple[bytes, ...]) -> bool:
-        """Verify exactly one raw header value with a fixed-size constant-time comparison."""
-
-        exactly_one = len(values) == 1
-        candidate = values[0] if exactly_one and len(values[0]) == len(self.__value) else b"\0" * 64
-        matches = hmac.compare_digest(self.__value, candidate)
-        return exactly_one and len(values[0]) == len(self.__value) and matches
+    reason_prefix: ClassVar[str] = "proxy_gate_secret"
+    error_class: ClassVar[type[FixedOriginGateError]] = WorkerAdmissionProxyGateError
 
 
-def parse_worker_admission_proxy_gate(raw: bytes) -> WorkerAdmissionProxyGateSecret:
+#: The ONE worker-admission origin-gate domain. Not caller-selectable in any way.
+WORKER_ADMISSION_PROXY_GATE = FixedOriginGate(
+    header=WORKER_ADMISSION_PROXY_GATE_HEADER,
+    container_path=WORKER_ADMISSION_PROXY_GATE_CONTAINER_PATH,
+    secret_class=WorkerAdmissionProxyGateSecret,
+)
+
+
+def parse_worker_admission_proxy_gate(raw: bytes) -> FixedOriginGateSecret:
     """Parse the one closed on-disk representation: 256-bit lowercase hex plus one LF."""
 
-    if not isinstance(raw, bytes) or len(raw) != WORKER_ADMISSION_PROXY_GATE_FILE_BYTES:
-        raise WorkerAdmissionProxyGateError("proxy_gate_secret_size_invalid")
-    if _SECRET_PATTERN.fullmatch(raw) is None:
-        raise WorkerAdmissionProxyGateError("proxy_gate_secret_format_invalid")
-    return WorkerAdmissionProxyGateSecret(raw[:-1])
+    return WORKER_ADMISSION_PROXY_GATE.parse(raw)
 
 
-def load_fixed_worker_admission_proxy_gate() -> WorkerAdmissionProxyGateSecret:
+def load_fixed_worker_admission_proxy_gate() -> FixedOriginGateSecret:
     """Read and validate the sole code-owned root-controlled gate path without following links."""
 
-    path = WORKER_ADMISSION_PROXY_GATE_CONTAINER_PATH
-    try:
-        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC)
-    except OSError:
-        raise WorkerAdmissionProxyGateError("proxy_gate_secret_open_failed") from None
-    try:
-        metadata = os.fstat(fd)
-        mode = metadata.st_mode & 0o7777
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or metadata.st_uid != 0
-            or metadata.st_gid <= 0
-            or mode != 0o640
-            or metadata.st_size != WORKER_ADMISSION_PROXY_GATE_FILE_BYTES
-        ):
-            raise WorkerAdmissionProxyGateError("proxy_gate_secret_metadata_invalid")
-        raw = os.read(fd, WORKER_ADMISSION_PROXY_GATE_FILE_BYTES + 1)
-        if len(raw) != metadata.st_size:
-            raise WorkerAdmissionProxyGateError("proxy_gate_secret_read_invalid")
-        return parse_worker_admission_proxy_gate(raw)
-    finally:
-        os.close(fd)
+    return WORKER_ADMISSION_PROXY_GATE.load()
 
 
 def worker_admission_proxy_gate_secret(
     settings: Settings = Depends(settings_dep),
-) -> WorkerAdmissionProxyGateSecret | None:
+) -> FixedOriginGateSecret | None:
     """Load gate material only for an explicitly enabled controlled-integration profile."""
 
     if not settings.discovery_controlled_integration_enabled:
@@ -126,7 +89,7 @@ def worker_admission_proxy_gate_secret(
 def require_worker_admission_proxy_origin(
     request: Request,
     settings: Settings = Depends(settings_dep),
-    gate: WorkerAdmissionProxyGateSecret | None = Depends(worker_admission_proxy_gate_secret),
+    gate: FixedOriginGateSecret | None = Depends(worker_admission_proxy_gate_secret),
 ) -> None:
     """Refuse enabled admission unless exactly one proxy-injected gate value authenticates."""
 
@@ -137,24 +100,20 @@ def require_worker_admission_proxy_origin(
             status_code=503,
             detail={"code": "worker_admission_proxy_gate_unavailable"},
         )
-    raw_values = tuple(
-        value
-        for name, value in request.scope.get("headers", ())
-        if name.lower() == _HEADER_NAME_BYTES
-    )
-    if not gate.matches_raw_header_values(raw_values):
+    if not WORKER_ADMISSION_PROXY_GATE.authenticates(gate, request):
         # Hide the private surface and disclose no distinction between absent/malformed/bad values.
         raise HTTPException(status_code=404, detail={"code": "not_found"})
 
 
 __all__ = [
-    "WORKER_ADMISSION_PROXY_GATE_HEADER",
+    "WORKER_ADMISSION_PROXY_GATE",
     "WORKER_ADMISSION_PROXY_GATE_CONTAINER_PATH",
     "WORKER_ADMISSION_PROXY_GATE_FILE_BYTES",
+    "WORKER_ADMISSION_PROXY_GATE_HEADER",
     "WorkerAdmissionProxyGateError",
     "WorkerAdmissionProxyGateSecret",
-    "parse_worker_admission_proxy_gate",
     "load_fixed_worker_admission_proxy_gate",
-    "worker_admission_proxy_gate_secret",
+    "parse_worker_admission_proxy_gate",
     "require_worker_admission_proxy_origin",
+    "worker_admission_proxy_gate_secret",
 ]

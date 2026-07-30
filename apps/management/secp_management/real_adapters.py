@@ -60,6 +60,7 @@ from secp_management.adapters import (
     controller_generation_marker,
     worker_generation_marker,
 )
+from secp_management.controller_compose_validation import assert_controller_compose_contract
 from secp_management.evidence import health_command_identity
 from secp_management.layout import ManagementLocations
 from secp_management.signing import sign_ed25519, verify_ed25519
@@ -283,6 +284,10 @@ class RealControllerBootstrapAdapter:
 
     def install_config(self, config: ReviewedConfig) -> None:
         config.verify()
+        # the LAST boundary before the bytes become the host's Compose config: even a config that
+        # reached here through some future path is proven to carry the reviewed read-only marker and
+        # readiness-gate binds before it is written.
+        assert_controller_compose_contract(config.content)
         _install_file(
             self._ctx,
             self._ctx.locations.controller_compose_path(),

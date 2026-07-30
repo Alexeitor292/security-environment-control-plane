@@ -249,7 +249,7 @@ jobs:
   # The normal shards already collect these modules, but they SKIP without a database. This additive
   # gate proves the durable enrollment repository, the transactional CAS/nonce concurrency suite, the
   # restart/crash recovery suite and the real migration round trip all EXECUTE against a real
-  # PostgreSQL, and that the live Alembic head is exactly c2f8e1a4b6d9. It runs only against the
+  # PostgreSQL, and that the live Alembic head is exactly a1d4f7c2e9b6. It runs only against the
   # ephemeral job-local database and contacts no deployment infrastructure.
   backend-pr5h-postgres-enrollment:
     name: PR5H-A PostgreSQL enrollment/recovery fence (real DB, no skips)
@@ -290,6 +290,10 @@ jobs:
           apps/api/tests/test_worker_enrollment_recovery_postgres.py
           apps/api/tests/test_worker_enrollment_migration_postgres.py
           apps/api/tests/test_enrollment_signer_lease_postgres.py
+          apps/api/tests/test_enrollment_signer_scram_postgres.py
+          apps/api/tests/test_enrollment_signer_provision_postgres.py
+          apps/api/tests/test_activate_controller_identity_once_postgres.py
+          apps/management/tests/test_controller_finalization_postgres.py
           -q -p no:cacheprovider
           --junitxml=junit-pr5h-postgres-enrollment.xml
       - name: Upload PR5H-A PostgreSQL JUnit
@@ -310,8 +314,25 @@ jobs:
           # PR5H-B1 Phase 3 signed-offer proofs: write-once single-winner + tamper-refusal-on-load),
           # + 6 PR5H-B1 C4 least-privilege signer-lease proofs (real secp_enrollment_signer role:
           # advisory-lock lease succeeds, rotation serializes behind it, unrelated read + identity
-          # writes refuse, role is not superuser/owner).
-          EXPECTED_MINIMUM = 52
+          # writes refuse, role is not superuser/owner),
+          # + 5 PR5H-B2 2b-2 SCRAM dedicated-role provisioning proofs (locally-computed SCRAM verifier
+          # authenticates against real PostgreSQL, wrong password rejected, provisioned role is exactly
+          # least-privilege, role flags closed, provisioning idempotent),
+          # + 9 PR5H-B2 C4 provisioning one-shot + hostile-repair proofs (one-shot creates role +
+          # SCRAM plaintext authenticates, wrong plaintext rejected, credential rotation invalidates
+          # the old plaintext, role exactly least-privilege, attributes closed incl NOINHERIT +
+          # NOREPLICATION, SET ROLE refused + RESET cannot reveal admin, memberships repaired both
+          # directions, sequence/function privileges stripped, owned object refused not silently kept),
+          # + 8 PR5H-B2 C3 activation durable-idempotency proofs (first execution commits identity +
+          # receipt atomically, exact replay byte-equivalent after freshness expiry, a missed initial
+          # lookup replays via the locked authoritative re-read, a new operation id and a mismatched
+          # operation-digest still conflict under that re-read, tampered receipt refuses state-corrupt,
+          # genuine concurrent same-operation is a single winner via the advisory lock with no raw
+          # IntegrityError, the write-once receipt table is unreachable by the least-privilege role),
+          # + 4 PR5H-B2 2b-3b-iii finalization dedicated-role proofs (build_signer_role_engine
+          # authenticates + pins UTC + takes the advisory lock, wrong plaintext rejected, the
+          # management ACTIVE-identity reobservation returns the exact facts, identity writes refuse).
+          EXPECTED_MINIMUM = 78
           path = Path("junit-pr5h-postgres-enrollment.xml")
           if not path.exists():
               print("::error::PR5H-A PostgreSQL JUnit missing - the test step produced no results")
@@ -346,7 +367,7 @@ jobs:
               f"PR5H-A PostgreSQL proofs executed: {tests} tests, zero skipped/failed/errored."
           )
           PY
-      - name: Prove the live Alembic head is exactly c2f8e1a4b6d9
+      - name: Prove the live Alembic head is exactly a1d4f7c2e9b6
         run: |
           uv run python - <<'PY'
           import os, sys
@@ -356,10 +377,10 @@ jobs:
           with engine.connect() as conn:
               rows = conn.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
           engine.dispose()
-          if rows != ["c2f8e1a4b6d9"]:
-              print(f"::error::live Alembic head is {rows}, expected exactly ['c2f8e1a4b6d9']")
+          if rows != ["a1d4f7c2e9b6"]:
+              print(f"::error::live Alembic head is {rows}, expected exactly ['a1d4f7c2e9b6']")
               sys.exit(1)
-          print("live Alembic head verified: c2f8e1a4b6d9")
+          print("live Alembic head verified: a1d4f7c2e9b6")
           PY
 
   # --- dependency/security scan ----------------------------------------------------------------
@@ -393,7 +414,11 @@ jobs:
   # alone is NOT trusted, because an all-skipped run exits successfully.
   backend-realfs-root:
     name: Backend RealFilesystem (root, production openat backend)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -470,7 +495,11 @@ jobs:
   # starts no service, contacts no endpoint, and never runs an operator or OpenTofu.
   backend-discovery-activation-root:
     name: PR5F discovery activation root-security (fixed state transaction)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -487,6 +516,14 @@ jobs:
         run: |
           uv venv --python 3.11
           uv pip install -e ".[dev]"
+      - name: Attest trusted ancestry before the inline preflight (infrastructure_invalid)
+        # The inline preflights below exit 1 with a bare message, which is indistinguishable from a
+        # product failure -- that is how `/etc: not root:root` came to be answered with blind
+        # re-runs. Running the classified gate first captures the full bounded evidence and exits 78
+        # so the outcome is unambiguously INFRASTRUCTURE. The inline checks remain as belt-and-braces
+        # and still create the code-owned parents; nothing here relaxes or repairs anything.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /var/lib
       - name: Prepare the fixed trusted production parent
         # The ephemeral runner starts without SECP state. Create only the code-owned parent; the
         # test owns the leaf transaction and refuses if that leaf or either test sibling exists. An
@@ -563,6 +600,14 @@ jobs:
               sys.exit(1)
           print(f"trusted fixed parent and absent test paths proven: {parent}")
           PY
+      - name: Attest trusted ancestry before the inline preflight (infrastructure_invalid)
+        # The inline preflights below exit 1 with a bare message, which is indistinguishable from a
+        # product failure -- that is how `/etc: not root:root` came to be answered with blind
+        # re-runs. Running the classified gate first captures the full bounded evidence and exits 78
+        # so the outcome is unambiguously INFRASTRUCTURE. The inline checks remain as belt-and-braces
+        # and still create the code-owned parents; nothing here relaxes or repairs anything.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc
       - name: Prepare the fixed trusted controller-config parent (PR5F.1 env file)
         # The controller Compose environment file lives at the code-owned /etc/secp/controller/
         # secp.env.  Create only the code-owned parents (root:root 0755); the test owns the leaf
@@ -594,6 +639,16 @@ jobs:
                   os.chmod(directory, 0o755, follow_symlinks=False)
                   print(f"created fixed ephemeral controller-config parent: {directory}")
           PY
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/secp/controller /var/lib/secp
       - name: Run PR5F fixed-layout root transaction tests (no skips)
         run: >-
           sudo env
@@ -656,7 +711,11 @@ jobs:
   # No deployment infrastructure is contacted; every child process is a local, bounded, pinned probe.
   backend-deployment-root:
     name: Deployment package root-security (root, trusted dir-fd + pinned exec)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -724,6 +783,16 @@ jobs:
               sys.exit(1)
           print(f"ancestor chain trusted (real dir, uid 0, no group/other write): {chain}")
           PY
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/secp/controller /var/lib/secp
       - name: Run deployment root-security tests as root (no skips)
         # Absolute venv interpreter under passwordless sudo (effective UID 0) so the trusted dir-fd
         # walk, the pinned-exec root-owner refusal, and the real subprocess seam actually execute. The
@@ -788,7 +857,11 @@ jobs:
   # is deployed, activated, or started.
   backend-management-root:
     name: Management-plane bootstrap root-security (root, hardened install)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -849,6 +922,16 @@ jobs:
               sys.exit(1)
           print(f"ancestor chain trusted: {chain}")
           PY
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/secp/controller /var/lib/secp
       - name: Run management-plane root-security tests as root (no skips)
         run: >-
           sudo env "SECP_ROOT_TEST_DIR=/root/secp-mgmt-roottest" "$(pwd)/.venv/bin/python" -m pytest
@@ -908,7 +991,11 @@ jobs:
   # or OpenTofu. (The full 8-service controller stack + real migration are the follow-on 4b job.)
   backend-management-real-adapters-root:
     name: Management real adapters E2E (root, real Docker + systemd)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -943,6 +1030,16 @@ jobs:
           sudo mkdir -p /root/secp-mgmt-real
           sudo chown root:root /root/secp-mgmt-real
           sudo chmod 0755 /root/secp-mgmt-real
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/systemd/system /etc/secp/controller
       - name: Run the real management adapter E2E as root (no skips)
         # Absolute venv interpreter under passwordless sudo (effective UID 0) so the pinned runner's
         # root-owned executable + hardened root-owned filesystem requirements are satisfied and the
@@ -1008,7 +1105,11 @@ jobs:
   # enables/starts no operator, submits no workflow, contacts no provider/OpenTofu.
   backend-management-controller-real-adapters-root:
     name: Controller full-stack real adapters + real migration (root, real Docker)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -1049,6 +1150,16 @@ jobs:
           sudo mkdir -p /root/secp-mgmt-real
           sudo chown root:root /root/secp-mgmt-real
           sudo chmod 0755 /root/secp-mgmt-real
+      - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
+        # SECP-PR5H-B2A reliability gate. `RealFilesystem._open_parent` fstat-verifies every ancestor
+        # to be a real, root-owned, non-group/other-writable directory. That rule is NOT relaxed
+        # here and an unexpected posture is NEVER repaired. This step only makes a violation
+        # ATTRIBUTABLE and correctly CLASSIFIED: it captures bounded stat evidence for each ancestor
+        # the fence will traverse and exits 78 (infrastructure_invalid) before any product test runs,
+        # so "this machine is invalid" can never again be mistaken for "the feature is broken" and
+        # answered with a blind re-run.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc/systemd/system /etc/secp/controller /root/secp-mgmt-real
       - name: Drive the real controller bootstrap + migration + observer as root (no skips)
         run: >-
           sudo env "SECP_ROOT_TEST_DIR=/root/secp-mgmt-real" "$(pwd)/.venv/bin/python" -m pytest
@@ -1081,8 +1192,25 @@ jobs:
               skipped += int(s.get("skipped", 0))
           print(f"collected={tests} failures={failures} errors={errors} skipped={skipped}")
           problems = []
-          if tests < 6:
-              problems.append(f"expected >= 6 controller E2E tests, collected {tests}")
+          # 6 established stack/migration/observer proofs + the 6 SIGNED-COMPOSE MOUNT proofs
+          # (compose config resolution, the container's resolved mount, the API's view of the
+          # gate file, its non-writability, the read-only marker mount, and the authenticated
+          # readiness exchange inside the container) + the 6 R8 NORMALIZED-ALIAS proofs (four
+          # alias spellings shown to collapse onto the reviewed target by real Compose while the
+          # offline validator refuses each one first, the install_config boundary refusing every
+          # alias without mutating the installed config, and the valid template still resolving
+          # one and only one read-only mount) + the 4 ENGINE-normalization proofs (a throwaway
+          # container created with each alias spelling reports the CLEANED reviewed target, so
+          # an alias is a SECOND mount on the gate's destination, never a different one).
+          # + the 8 R9 ALTERNATE-SURFACE proofs (six representative configs/secrets/tmpfs/
+          # volumes_from/devices/use_api_socket documents that Compose is happy to render while
+          # the offline validator refuses each one, none reaching install_config or leaving the
+          # installed config mutated, and the running stack still carrying only the two reviewed
+          # read-only mounts backed by the genuine root-generated gate).
+          # This fence is the ONLY place the mount and the
+          # normalization are proven against real Docker rather than asserted about the bytes.
+          if tests < 30:
+              problems.append(f"expected >= 30 controller E2E tests, collected {tests}")
           if skipped != 0:
               problems.append(f"expected 0 skipped, got {skipped} (controller stack NOT executed)")
           if failures != 0:
@@ -1093,7 +1221,10 @@ jobs:
               for pr in problems:
                   print(f"::error::{pr}")
               sys.exit(1)
-          print("Real controller stack + migration executed as root: >= 6 tests, zero skipped/failed/errored.")
+          print(
+              "Real controller stack + migration + signed-Compose mount executed as root: "
+              ">= 30 tests, zero skipped/failed/errored."
+          )
           PY
 
   # --- stable aggregate gate: green only if every backend job is green -------------------------

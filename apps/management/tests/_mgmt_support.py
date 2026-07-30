@@ -29,6 +29,7 @@ from secp_management.adapters import (
     controller_generation_marker,
     worker_generation_marker,
 )
+from secp_management.controller_compose_reference import reference_controller_compose
 from secp_management.engine import EngineDeps
 from secp_management.evidence import health_command_identity, path_binding_digest
 from secp_management.hostview import HostView, StaticHostProbe
@@ -56,7 +57,15 @@ _IMPL_AGGREGATE = (
     "sha256:" + "1" * 64
 )  # == manifest.implementation_aggregate == deployment aggregate
 
-_COMPOSE_BYTES = b"# compose template\n"
+# The CONTROLLER template is a real, contract-satisfying document (2b-3c-c deployability
+# gap). The placeholder comment that used to live here meant a fully green CI proved NOTHING
+# about the mounts the ordinary API actually receives -- a release could have been signed,
+# verified, installed and started with no readiness-gate mount at all. Every controller bundle
+# these harnesses sign now carries the reviewed read-only marker + readiness-gate binds, so the
+# strict contract runs for real at every trust boundary. The WORKER template is unconstrained.
+_CONTROLLER_COMPOSE_BYTES = reference_controller_compose(services=EXPECTED_CONTROLLER_COMPONENTS)
+_WORKER_COMPOSE_BYTES = b"# worker compose template\n"
+_COMPOSE_BYTES = _WORKER_COMPOSE_BYTES
 _WHEEL_BYTES = b"fake wheel package\n"
 
 # Per-PURPOSE container image digests (distinct, so a swap between two valid release images is
@@ -68,7 +77,8 @@ CONTROLLER_COMPONENT_IMAGE = {
 }
 
 # Expected installed-artifact identities (deterministic, code-derived) a prepared host must observe.
-_CONFIG_IDENTITY = sha256_bytes(_COMPOSE_BYTES)
+_CONFIG_IDENTITY = sha256_bytes(_CONTROLLER_COMPOSE_BYTES)
+_WORKER_CONFIG_IDENTITY = sha256_bytes(_WORKER_COMPOSE_BYTES)
 _OPERATOR_UNIT_IDENTITY = unit_identity(
     render_operator_unit_disabled(
         exec_argv=OPERATOR_ENTRYPOINT, user="secp-operator", group="secp-operator"
@@ -178,15 +188,26 @@ def ephemeral_trust_root() -> tuple[ReleaseTrustRoot, str, str, str]:
     return trust, TEST_KEY_ID, priv, pub
 
 
-def manifest_dict(role: str, artifacts: list[dict]) -> dict:
+def manifest_dict(
+    role: str,
+    artifacts: list[dict],
+    *,
+    release_version: str = "0.1.0",
+    source_sha: str = "a" * 40,
+    source_tree_sha: str = "b" * 40,
+    parent_sha: str | None = None,
+) -> dict:
+    # release_version/source_sha/parent_sha are overridable so upgrade tests can seed a linear
+    # successor bundle (new.parent_sha == prior.source_sha); the defaults reproduce the fixed
+    # single-release fixture every existing caller relies on.
     return {
         "bootstrap_contract_version": BOOTSTRAP_CONTRACT_VERSION,
         "plane": "management",
         "role": role,
-        "release_version": "0.1.0",
-        "source_sha": "a" * 40,
-        "source_tree_sha": "b" * 40,
-        "parent_sha": None,
+        "release_version": release_version,
+        "source_sha": source_sha,
+        "source_tree_sha": source_tree_sha,
+        "parent_sha": parent_sha,
         "migration_identity": _MIGRATION,
         "implementation_aggregate": _IMPL_AGGREGATE,
         "bootstrap_package_identity": "secp-pr5e/management-bootstrap/v1",
@@ -213,12 +234,13 @@ def _image_artifact(name: str, purpose: str, image_digest: str) -> dict[str, obj
 
 
 def default_artifacts(role: str) -> list[dict[str, object]]:
+    body = _CONTROLLER_COMPOSE_BYTES if role == "controller" else _WORKER_COMPOSE_BYTES
     compose: dict[str, object] = {
         "name": f"{role}-compose.yml",
         "kind": f"{role}_compose_template",
         "role": role,
-        "sha256": sha256_bytes(_COMPOSE_BYTES),
-        "size": len(_COMPOSE_BYTES),
+        "sha256": sha256_bytes(body),
+        "size": len(body),
     }
     if role == "controller":
         arts: list[dict[str, object]] = [compose]
@@ -244,8 +266,10 @@ def default_artifacts(role: str) -> list[dict[str, object]]:
 
 def _artifact_bytes(art: dict) -> bytes:
     kind = art["kind"]
-    if kind.endswith("compose_template"):
-        return _COMPOSE_BYTES
+    if kind == "controller_compose_template":
+        return _CONTROLLER_COMPOSE_BYTES
+    if kind == "worker_compose_template":
+        return _WORKER_COMPOSE_BYTES
     if kind == "python_wheel":
         return _WHEEL_BYTES
     return _img_bytes(str(art["name"]))
@@ -268,10 +292,39 @@ def seed_signed_bundle(
     key_id: str,
     priv: str,
     artifacts: list[dict] | None = None,
+    *,
+    release_version: str = "0.1.0",
+    source_sha: str = "a" * 40,
+    source_tree_sha: str = "b" * 40,
+    parent_sha: str | None = None,
+    compose_bytes: bytes | None = None,
 ) -> str:
-    """Seed a fully-signed release bundle under ``bundle_dir`` and return the aggregate digest."""
+    """Seed a fully-signed release bundle under ``bundle_dir`` and return the aggregate digest. The
+    lineage fields are overridable so an upgrade test can seed release B as a linear successor of A
+    (``B.parent_sha == A.source_sha``).
+
+    ``compose_bytes`` replaces the role's Compose template body AND its declared digest/size, so a
+    test can produce a bundle whose signature is genuinely VALID over a template that is
+    semantically invalid -- the exact shape the signed-Compose contract has to refuse."""
     arts = artifacts if artifacts is not None else default_artifacts(role)
-    manifest = ReleaseManifest.model_validate(manifest_dict(role, arts))
+    bodies: dict[str, bytes] = {}
+    if compose_bytes is not None:
+        arts = [dict(a) for a in arts]
+        for art in arts:
+            if art["kind"] == f"{role}_compose_template":
+                art["sha256"] = sha256_bytes(compose_bytes)
+                art["size"] = len(compose_bytes)
+                bodies[str(art["name"])] = compose_bytes
+    manifest = ReleaseManifest.model_validate(
+        manifest_dict(
+            role,
+            arts,
+            release_version=release_version,
+            source_sha=source_sha,
+            source_tree_sha=source_tree_sha,
+            parent_sha=parent_sha,
+        )
+    )
     sig = sign_ed25519(priv, manifest_signing_message(manifest))
     _seed_dirs_for(fs, bundle_dir, arts)
     fs.seed_file(f"{bundle_dir}/release-manifest.json", manifest.canonical().encode(), mode=0o644)
@@ -281,7 +334,12 @@ def seed_signed_bundle(
         mode=0o644,
     )
     for art in arts:
-        fs.seed_file(f"{bundle_dir}/{art['name']}", _artifact_bytes(art), mode=0o644)
+        body = bodies.get(str(art["name"]), None)
+        fs.seed_file(
+            f"{bundle_dir}/{art['name']}",
+            _artifact_bytes(art) if body is None else body,
+            mode=0o644,
+        )
     from secp_management.release_bundle import manifest_aggregate_digest
 
     return manifest_aggregate_digest(manifest)
@@ -520,7 +578,7 @@ def prepared_worker_world(
     package_trusted: bool = True,
     image_digest: str = WORKER_ORDINARY_IMAGE,
     operator_image_digest: str = WORKER_OPERATOR_IMAGE,
-    config_identity: str = _CONFIG_IDENTITY,
+    config_identity: str = _WORKER_CONFIG_IDENTITY,
     unit_identity_value: str = _OPERATOR_UNIT_IDENTITY,
     deployment_package_aggregate: str = _IMPL_AGGREGATE,
     health_command_identity_value: str = _HEALTH_COMMAND_IDENTITY,

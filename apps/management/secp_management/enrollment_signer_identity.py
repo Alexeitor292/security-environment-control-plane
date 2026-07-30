@@ -32,25 +32,18 @@ from secp_commissioning.controller_enrollment_signer import (
     ControllerEnrollmentSignerError,
     SigningIdentityLease,
 )
-from sqlalchemy import Engine, text
 
-#: The dedicated least-privilege database ROLE the broker authenticates as. It is a plain LOGIN role
-#: (NOSUPERUSER / NOCREATEDB / NOCREATEROLE, owning nothing) granted ONLY CONNECT + schema USAGE +
-#: ``SELECT`` on the single identity table — never INSERT/UPDATE/DELETE, never any enrollment /
-#: worker / audit / unrelated table. It takes the transaction-level advisory lock (executable by
-#: PUBLIC, needing no extra grant) instead of a ``FOR UPDATE`` row lock, so SELECT-only is enough
-#: and correct. The bootstrap provisions it out of band with the reviewed grants below.
-ENROLLMENT_SIGNER_DB_ROLE = "secp_enrollment_signer"
-
-#: The reviewed, code-owned least-privilege grants (applied out of band by the DBA / bootstrap,
-#: never from an HTTP request). SELECT-only on the identity history + the connect/usage needed to
-#: reach it — nothing else. ``pg_advisory_xact_lock`` needs no grant (PUBLIC executes it).
-ENROLLMENT_SIGNER_DB_GRANTS = (
-    "GRANT USAGE ON SCHEMA public TO secp_enrollment_signer;",
-    "GRANT SELECT ON controller_enrollment_identity TO secp_enrollment_signer;",
+# The dedicated least-privilege database ROLE the broker authenticates as (a plain LOGIN role owning
+# nothing, granted ONLY schema USAGE + SELECT on the single identity table; it takes the
+# transaction-level advisory lock instead of a FOR UPDATE row lock, so SELECT-only is correct) and
+# its reviewed grants are the plane-neutral code-owned constants, re-exported here for
+# compatibility.
+from secp_commissioning.enrollment_signer_role import (
+    ENROLLMENT_SIGNER_DB_GRANT_SQL,
+    ENROLLMENT_SIGNER_DB_GRANTS,
+    ENROLLMENT_SIGNER_DB_ROLE,
 )
-#: Back-compat alias: the single SELECT grant that is the security-critical one.
-ENROLLMENT_SIGNER_DB_GRANT_SQL = ENROLLMENT_SIGNER_DB_GRANTS[-1]
+from sqlalchemy import Engine, text
 
 # The identity columns the lease needs — all PUBLIC identity material (ids, digests, anchor hex,
 # https origin); the private enrollment key is NEVER in this table.

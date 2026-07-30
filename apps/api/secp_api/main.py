@@ -40,6 +40,7 @@ from secp_api.routers import provisioning as provisioning_router
 from secp_api.routers import readiness as readiness_router
 from secp_api.routers import readonly_preflight as readonly_preflight_router
 from secp_api.routers import resolver_activation as resolver_activation_router
+from secp_api.routers import signer_readiness as signer_readiness_router
 from secp_api.routers import staging_deployments as staging_deployments_router
 from secp_api.routers import staging_labs as staging_labs_router
 from secp_api.routers import target_discovery as target_discovery_router
@@ -213,6 +214,12 @@ def create_app() -> FastAPI:
     # internal HTTPS for server identity and transport security, plus an Ed25519 signed-nonce
     # proof-of-possession handshake for worker authentication — NOT X.509 client-certificate mTLS.
     app.include_router(worker_admission_router.router)
+    # Internal controller-only signer READINESS route (SECP-PR5H-B2 2b-3c-c, review R4) — NOT under
+    # /api/v1. It is the ONLY authoritative source for the API's ACTUAL effective signer and for a
+    # bounded no-sign proof that the running API can reach the root broker over the fixed UDS; the
+    # root installer's management observer consumes it over the controller's CA-pinned origin. It
+    # mutates nothing, requests no signature, and returns only public installation facts.
+    app.include_router(signer_readiness_router.router)
 
     @app.on_event("startup")
     def _startup() -> None:

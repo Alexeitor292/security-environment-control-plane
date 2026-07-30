@@ -35,6 +35,25 @@ MODE_ADOPTED = "adopted"
 _MODES = frozenset({MODE_INSTALLED, MODE_ADOPTED})
 _ROLES = frozenset({"controller", "worker"})
 
+# Domain-separated schema identities (2b-3c). The bootstrap binding digest is the explicit,
+# versioned pre-finalization binding the controller identity activation + enablement marker bind;
+# it is NEVER a silent partial of BootstrapEvidence.digest().
+_BOOTSTRAP_BINDING_SCHEMA = "secp.management.bootstrap-binding/v1"
+FINALIZATION_SCHEMA_VERSION = "secp.management.finalization-evidence/v1"
+# The closed controller-install classifications (2b-3c). Every other pre-existing state refuses.
+# The two-phase finalization commit states (2b-3c-c / R5). A PREPARED checkpoint is a durable,
+# attested record written BEFORE cleanup, so it may never claim the journal/staging objects are
+# absent; only a COMMITTED record — written after cleanup is performed AND absence-observed — may.
+FINALIZATION_STATE_PREPARED = "prepared"
+FINALIZATION_STATE_COMMITTED = "committed"
+_FINALIZATION_STATES = frozenset({FINALIZATION_STATE_PREPARED, FINALIZATION_STATE_COMMITTED})
+CLASSIFY_FRESH = "fresh"
+CLASSIFY_EXACT_SAME_RELEASE = "exact_same_release"
+CLASSIFY_MANAGED_UPGRADE = "managed_upgrade"
+_FINALIZATION_CLASSIFICATIONS = frozenset(
+    {CLASSIFY_FRESH, CLASSIFY_EXACT_SAME_RELEASE, CLASSIFY_MANAGED_UPGRADE}
+)
+
 # The closed set of root-controlled management documents a transaction owns. Every
 # bootstrap/adoption
 # records ONE ManagedObjectRecord per kind; rollback is content-bound to exactly these FIVE. The
@@ -128,6 +147,85 @@ class ManagedObjectRecord(_Strict):
         return self.model_dump(mode="json")
 
 
+class FinalizationEffectRecord(_Strict):
+    """One PUBLIC per-effect record of a controller-enrollment finalization host/DB effect. It
+    mirrors
+    only the public fields of ``FinalizationEffectReceipt`` (effect name, fixed object identity,
+    pre-mutation disposition, candidate public digest) — never a secret byte or restore handle."""
+
+    effect: _Str  # one of FINALIZATION_EFFECTS
+    object_identity: _Str
+    disposition: _Str
+    candidate_digest: _OptStr | None = None
+
+    def canonical(self) -> dict:
+        return self.model_dump(mode="json")
+
+
+class FinalizationEvidence(_Strict):
+    """Strict PUBLIC evidence of the controller-enrollment finalization: the authenticated
+    generation, the closed classification, the domain-separated bootstrap binding digest, and the
+    marker/identity/runtime facts a later status independently revalidates. Present ONLY for a
+    driven
+    controller install; ``None`` for worker/adopt/legacy installs. It carries ONLY public
+    identities,
+    digests, and safety booleans — never a plaintext credential, verifier, private key, token
+    secret,
+    DSN, or raw path (the loader's forbidden-secret scan enforces this)."""
+
+    schema_version: _Str  # == FINALIZATION_SCHEMA_VERSION
+    role: _Str  # == the evidence role (controller)
+    mode: _Str  # == installed
+    classification: _Str  # one of _FINALIZATION_CLASSIFICATIONS
+    generation: Annotated[int, Field(ge=0, le=2**31 - 1, strict=True)]
+    # bindings
+    transaction_id_digest: _Str
+    bootstrap_binding_digest: _Str
+    finalization_receipt_digest: _Str
+    # TLS / locator
+    canonical_origin_digest: _Str
+    tls_mode: _Str
+    tls_policy_identity: _Str
+    locator_ca_digest: _Str  # the ACTUAL installed CA-bundle digest
+    # signer role + credential (public bindings only)
+    signer_role_identity: _Str
+    signer_login_binding_digest: _OptStr | None = None
+    # enrollment key (public identity)
+    enrollment_key_id: _Str
+    enrollment_key_proof_id: _Str
+    # broker
+    broker_unit_identity: _Str
+    broker_transport_identity: _Str
+    # active identity + activation (concurrency facts kept as digests)
+    active_identity_row_id: _Str
+    activation_concurrency_digest: _Str
+    activation_operation_digest: _Str
+    # marker + runtime
+    marker_identity: _Str
+    runtime_observation_identity: _Str
+    # proofs
+    # two-phase commit state (R5): 'prepared' (pre-cleanup checkpoint) or 'committed' (post-cleanup)
+    finalization_commit_state: _Str
+    recovery_journal_absent: bool
+    staging_objects_absent: bool
+    marker_last: bool
+    api_runtime_proven: bool
+    no_mixed_generation: bool
+    operator_sealed: bool
+    controlled_live_sealed: bool
+    isolation_boundaries_proven: bool
+    # per-effect dispositions
+    effects: tuple[FinalizationEffectRecord, ...]
+
+    @field_validator("effects", mode="before")
+    @classmethod
+    def _coerce_effects(cls, v: object) -> object:
+        return tuple(v) if isinstance(v, list) else v
+
+    def canonical(self) -> dict:
+        return self.model_dump(mode="json")
+
+
 class BootstrapEvidence(_Strict):
     """Strict nonsecret bootstrap evidence for a controller or worker install/adoption."""
 
@@ -161,6 +259,10 @@ class BootstrapEvidence(_Strict):
     # content-bound per-object ownership records for exactly the 5 managed documents (identity,
     # release manifest, release signature, evidence, evidence attestation)
     object_records: tuple[ManagedObjectRecord, ...]
+    # OPTIONAL controller-enrollment finalization evidence (2b-3c). None for worker/adopt/legacy;
+    # the key is DROPPED from canonical() when None so pre-existing evidence stays byte-identical
+    # (no migration). Excluded from digest() so the value bound BEFORE the receipt exists is stable.
+    finalization: FinalizationEvidence | None = None
     commissioning_evidence_digest: _OptStr | None = None
     operator_activation_sealed: bool
     plan_only_process_sealed: bool
@@ -188,11 +290,37 @@ class BootstrapEvidence(_Strict):
         return tuple(v) if isinstance(v, list) else v
 
     def canonical(self) -> dict:
-        return self.model_dump(mode="json")
+        data = self.model_dump(mode="json")
+        if data.get("finalization") is None:
+            # DROP the optional key when absent so legacy/worker/adopted evidence canonicalizes
+            # byte-identically to before this field existed (sorted keys → an absent key changes
+            # nothing) — the attestation over canonical_bytes(ev) stays valid without a migration.
+            data.pop("finalization", None)
+        return data
 
     def digest(self) -> str:
+        # The evidence content identity: every semantic field EXCEPT transaction_timestamp. This
+        # BINDS the finalization extension when present (a changed FinalizationEvidence changes this
+        # digest and therefore the attestation) — it is NOT redefined as a partial digest.
         payload = {k: v for k, v in self.canonical().items() if k != "transaction_timestamp"}
         return sha256_digest(payload)
+
+    def bootstrap_binding_digest(self) -> str:
+        """The domain-separated PRE-FINALIZATION bootstrap binding: every semantic evidence field
+        EXCEPT ``transaction_timestamp`` and the ``finalization`` extension, under a versioned
+        schema
+        identity. This is the exact value the controller identity activation and the enablement
+        marker bind as ``bootstrap_evidence_digest`` — so it is IDENTICAL whether computed before
+        the
+        finalization receipt exists (from the pre-finalization ``ev0``) or from the final written
+        evidence (which additionally carries the authenticated ``FinalizationEvidence``). It is a
+        distinct, explicitly named binding — never a silent partial of :meth:`digest`."""
+        binding = {
+            k: v
+            for k, v in self.canonical().items()
+            if k not in ("transaction_timestamp", "finalization")
+        }
+        return sha256_digest({"v": _BOOTSTRAP_BINDING_SCHEMA, "binding": binding})
 
     def created_records(self) -> tuple[ManagedObjectRecord, ...]:
         return tuple(r for r in self.object_records if r.classification == CLASSIFICATION_CREATED)
@@ -252,7 +380,86 @@ def _assert_evidence_semantics(ev: BootstrapEvidence) -> None:
         if getattr(ev, flag_name) is not False:
             raise ManagementError("evidence_effect_flag_invalid")
     _assert_object_records(ev)
+    _assert_finalization_semantics(ev)
     _assert_tz_aware(ev.transaction_timestamp, "evidence_timestamp_invalid")
+
+
+def _assert_finalization_semantics(ev: BootstrapEvidence) -> None:
+    """Validate the OPTIONAL finalization extension. Skipped entirely when absent (worker/adopt/
+    legacy), so pre-existing evidence is unaffected. When present, the install MUST be an installed
+    controller, the classification MUST be closed, every digest MUST be well-formed, and every
+    finalization safety predicate MUST hold — so a forged or worker/adopt/legacy evidence cannot
+    smuggle a finalization extension past authentication."""
+    fin = ev.finalization
+    if fin is None:
+        return
+    from .finalization import FINALIZATION_EFFECTS  # local import avoids any module cycle
+
+    if fin.schema_version != FINALIZATION_SCHEMA_VERSION:
+        raise ManagementError("evidence_finalization_schema_invalid")
+    if ev.role != "controller" or ev.mode != MODE_INSTALLED:
+        raise ManagementError("evidence_finalization_role_invalid")
+    if fin.role != ev.role or fin.mode != ev.mode:
+        raise ManagementError("evidence_finalization_binding_mismatch")
+    if fin.classification not in _FINALIZATION_CLASSIFICATIONS:
+        raise ManagementError("evidence_finalization_classification_invalid")
+    if fin.generation < 0:
+        raise ManagementError("evidence_finalization_generation_invalid")
+    for name, value in (
+        ("transaction_id_digest", fin.transaction_id_digest),
+        ("bootstrap_binding_digest", fin.bootstrap_binding_digest),
+        ("finalization_receipt_digest", fin.finalization_receipt_digest),
+        ("canonical_origin_digest", fin.canonical_origin_digest),
+        ("tls_policy_identity", fin.tls_policy_identity),
+        ("locator_ca_digest", fin.locator_ca_digest),
+        ("signer_role_identity", fin.signer_role_identity),
+        ("broker_unit_identity", fin.broker_unit_identity),
+        ("broker_transport_identity", fin.broker_transport_identity),
+        ("activation_concurrency_digest", fin.activation_concurrency_digest),
+        ("activation_operation_digest", fin.activation_operation_digest),
+        ("marker_identity", fin.marker_identity),
+        ("runtime_observation_identity", fin.runtime_observation_identity),
+    ):
+        if not is_sha256_digest(value):
+            raise ManagementError(f"evidence_finalization_digest_invalid:{name}")
+    if fin.signer_login_binding_digest is not None and not is_sha256_digest(
+        fin.signer_login_binding_digest
+    ):
+        raise ManagementError("evidence_finalization_digest_invalid:signer_login_binding_digest")
+    if fin.finalization_commit_state not in _FINALIZATION_STATES:
+        raise ManagementError("evidence_finalization_commit_state_invalid")
+    if fin.finalization_commit_state == FINALIZATION_STATE_PREPARED:
+        # a PREPARED checkpoint must NOT claim cleanup it has not performed/observed yet, and it is
+        # never an installation-complete record.
+        if fin.recovery_journal_absent or fin.staging_objects_absent:
+            raise ManagementError("evidence_finalization_prepared_claims_cleanup")
+        for pred in ("marker_last", "api_runtime_proven", "no_mixed_generation"):
+            if getattr(fin, pred) is not True:
+                raise ManagementError(f"evidence_finalization_predicate_invalid:{pred}")
+        for pred in ("operator_sealed", "controlled_live_sealed", "isolation_boundaries_proven"):
+            if getattr(fin, pred) is not True:
+                raise ManagementError(f"evidence_finalization_predicate_invalid:{pred}")
+        return
+    # every COMMITTED finalization safety predicate must be TRUE (no false success)
+    for pred in (
+        "recovery_journal_absent",
+        "staging_objects_absent",
+        "marker_last",
+        "api_runtime_proven",
+        "no_mixed_generation",
+        "operator_sealed",
+        "controlled_live_sealed",
+        "isolation_boundaries_proven",
+    ):
+        if getattr(fin, pred) is not True:
+            raise ManagementError(f"evidence_finalization_predicate_invalid:{pred}")
+    seen = set()
+    for rec in fin.effects:
+        if rec.effect not in FINALIZATION_EFFECTS:
+            raise ManagementError("evidence_finalization_effect_invalid")
+        seen.add(rec.effect)
+    if "marker" not in seen or "identity_activation" not in seen:
+        raise ManagementError("evidence_finalization_incomplete")
 
 
 def _assert_object_records(ev: BootstrapEvidence) -> None:

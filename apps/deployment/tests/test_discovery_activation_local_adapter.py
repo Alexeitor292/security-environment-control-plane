@@ -659,7 +659,7 @@ class FakeRunner:
             if argv[-1] == "current":
                 return CommandResult(
                     0,
-                    "c2f8e1a4b6d9 (head)\n" if self.migration_ready else "c4e2f9a1b7d3\n",
+                    "a1d4f7c2e9b6 (head)\n" if self.migration_ready else "c4e2f9a1b7d3\n",
                 )
             if argv[-2:] == ("downgrade", "c4e2f9a1b7d3"):
                 if self.fail_downgrade:
@@ -669,7 +669,7 @@ class FakeRunner:
         if argv[:2] == ("exec", self.api_container_id):
             return CommandResult(
                 0,
-                "c2f8e1a4b6d9 (head)\n" if self.migration_ready else "c4e2f9a1b7d3\n",
+                "a1d4f7c2e9b6 (head)\n" if self.migration_ready else "c4e2f9a1b7d3\n",
             )
         if "ps" in argv and "--quiet" in argv and argv[-1] == "api":
             return CommandResult(0, self.api_container_id + "\n")
@@ -1290,7 +1290,7 @@ def test_controller_observation_binds_api_proxy_runtime_and_migration_head() -> 
     assert observed.proxy_runtime is not None and observed.proxy_runtime.verified()
     assert observed.proxy_runtime.image_digest == "sha256:" + "8" * 64
     assert observed.proxy_runtime.compose_service == "discovery-admission-proxy"
-    assert observed.migration_head == "c2f8e1a4b6d9"
+    assert observed.migration_head == "a1d4f7c2e9b6"
     assert observed.migration_head_ready
     assert observed.tls_ready and observed.activation_route_enabled and observed.proxy_healthy
     assert tls_probe.calls == tls_probe.route_calls == 1
@@ -1492,7 +1492,7 @@ def test_controller_observes_exact_live_fence_with_bounded_output(
     assert engaged.observation_complete is True
     assert engaged.state == "engaged"
     assert engaged.api_container_id == _API_ID
-    assert engaged.migration_head == "c2f8e1a4b6d9"
+    assert engaged.migration_head == "a1d4f7c2e9b6"
     assert released.observation_complete is True
     assert released.state == "released"
     fence_calls = [
@@ -1536,7 +1536,7 @@ def test_controller_fence_observation_malformed_output_is_unverified(
     assert observation.observation_complete is False
     assert observation.state == "unverified"
     assert observation.api_container_id == _API_ID
-    assert observation.migration_head == "c2f8e1a4b6d9"
+    assert observation.migration_head == "a1d4f7c2e9b6"
 
 
 def test_controller_fence_observation_rejects_generation_drift(

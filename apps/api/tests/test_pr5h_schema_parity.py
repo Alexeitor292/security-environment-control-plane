@@ -21,8 +21,9 @@ from secp_api.models import Base
 from sqlalchemy import create_engine, inspect
 
 API_DIR = Path(__file__).resolve().parents[1]
-HEAD = "c2f8e1a4b6d9"  # PR5H-B1 sole head (controller-identity, F3)
-DOWN_REVISION = "b6e2f4a9c1d7"  # HEAD's immediate parent (PR5H-A enrollment foundation)
+HEAD = "a1d4f7c2e9b6"  # PR5H-B2 sole head (controller-identity activation receipt)
+DOWN_REVISION = "c2f8e1a4b6d9"  # HEAD's immediate parent (PR5H-B1 controller-identity history)
+PR5H_B1_BASE = "b6e2f4a9c1d7"  # DOWN_REVISION's parent (PR5H-A enrollment foundation)
 PR5F_BASE = "d8f1a2b3c4e5"  # below all PR5H tables — the downgrade target that removes them
 
 ENROLLMENT_TABLES = (
@@ -32,6 +33,7 @@ ENROLLMENT_TABLES = (
     "worker_enrollment_step_receipt",
     "controller_enrollment_identity",
     "worker_enrollment_signed_offer",
+    "controller_identity_activation_receipt",
 )
 
 
@@ -198,13 +200,14 @@ def test_tenancy_and_shadow_columns_exist_in_both(migrated_and_orm) -> None:
 # --- head chain ----------------------------------------------------------------------------
 
 
-def test_c2f8e1a4b6d9_is_the_sole_head_with_the_linear_pr5h_chain() -> None:
+def test_a1d4f7c2e9b6_is_the_sole_head_with_the_linear_pr5h_chain() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite+pysqlite:///:memory:"))
     heads = tuple(script.get_heads())
     assert heads == (HEAD,), f"expected the sole head {HEAD}, found {heads}"
-    # linear chain: d8f1a2b3c4e5 -> b6e2f4a9c1d7 -> c2f8e1a4b6d9
+    # linear chain: d8f1a2b3c4e5 -> b6e2f4a9c1d7 -> c2f8e1a4b6d9 -> a1d4f7c2e9b6
     assert script.get_revision(HEAD).down_revision == DOWN_REVISION
-    assert script.get_revision(DOWN_REVISION).down_revision == PR5F_BASE
+    assert script.get_revision(DOWN_REVISION).down_revision == PR5H_B1_BASE
+    assert script.get_revision(PR5H_B1_BASE).down_revision == PR5F_BASE
 
 
 def test_only_one_pr5h_migration_exists_and_it_adds_no_recovery_step() -> None:
@@ -235,7 +238,7 @@ def test_accepted_issued_and_runtime_heads_are_unchanged() -> None:
     )
 
     # the bounded rolling window holds the explicitly supported heads, in upgrade order
-    assert ACCEPTED_CONTROLLER_MIGRATION_HEADS == (PR5F_BASE, DOWN_REVISION, HEAD)
+    assert ACCEPTED_CONTROLLER_MIGRATION_HEADS == (PR5F_BASE, PR5H_B1_BASE, DOWN_REVISION, HEAD)
     # issuance and live-schema readiness are new-head-only
     assert ISSUED_CONTROLLER_MIGRATION_HEAD == HEAD
     assert RUNTIME_REQUIRED_MIGRATION_HEAD == HEAD
