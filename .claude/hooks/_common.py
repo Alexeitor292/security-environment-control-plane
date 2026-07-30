@@ -246,9 +246,12 @@ def matches_any(rel_path: str, patterns: tuple[str, ...]) -> str | None:
     for pattern in patterns:
         if fnmatch.fnmatch(rel_path, pattern):
             return pattern
-        # Allow "dir/**" to match "dir/file" as well as "dir/a/b".
-        if pattern.endswith("/**") and fnmatch.fnmatch(rel_path, pattern[:-3] + "/*"):
-            return pattern
+        if pattern.endswith("/**"):
+            base = pattern[:-3]
+            # "dir/**" must match "dir/file" and also the directory "dir" itself --
+            # otherwise `tar -C dir` or `rm -rf dir` slips past a protected tree.
+            if fnmatch.fnmatch(rel_path, base + "/*") or rel_path == base:
+                return pattern
     return None
 
 

@@ -212,6 +212,18 @@ DENIED_COMMANDS = [
     # Content-bearing writes whose target is not on the command line at all.
     "git apply /tmp/ci.diff",
     "patch -p1 < /tmp/ci.diff",
+    # Writers that a naive reader-classification waves through.
+    "sed --in-place 's/a/b/' .github/workflows/ci.yml",
+    "sed --in-place=.bak 's/a/b/' .github/workflows/ci.yml",
+    "python -m pip install --target .github/workflows somepkg",
+    "python -m venv .github/venv",
+    "find . -name x -fprint .github/workflows/ci.yml",
+    # A wildcard target that could match a protected path.
+    "echo x > .git*/workflows/ci.yml",
+    "echo x > .gi*hub/workflows/ci.yml",
+    "cp /tmp/x .git?ub/workflows/ci.yml",
+    # A protected directory named as a destination, not as a file.
+    "rm -rf .github",
 ]
 
 
@@ -286,6 +298,25 @@ ALLOWED_COMMANDS = [
     "git diff HEAD -- .github/workflows/ci.yml",
     "ls .github/workflows",
     "git log -1 -- docs/program/SAFETY_INVARIANTS.md",
+    # The mention scan is PER SEGMENT. A command-global rule let one unrelated writer
+    # poison every other segment -- including the exact workflow for landing a
+    # safety-invariant entry (append, stage, commit, push).
+    "git add docs/program/SAFETY_INVARIANTS.md && git commit -m 'docs: x' && git push origin f",
+    "git commit -m 'ci: note .github/workflows/ci.yml change' && git push origin feature/x",
+    "cd .github/workflows && ls",
+    "cd apps/api/migrations/versions && ls -la",
+    "ls apps/api/migrations/versions/ && python -m alembic heads",
+    # A writer whose own targets are all unprotected may name a protected path.
+    "grep -c runs-on .github/workflows/ci.yml > /tmp/count.txt",
+    "cat .github/workflows/ci.yml | head -40 > /tmp/ci-head.yml",
+    # find -exec running a reader is still a read.
+    "find .github -name '*.yml' -exec grep -l runs-on {} ;",
+    # git read subcommands beyond the obvious ones.
+    "git check-ignore .github/workflows/ci.yml",
+    "git show-ref --verify refs/heads/main && cat .github/workflows/ci.yml",
+    # `->` in a quoted pattern is not a redirection.
+    'grep -n "a->b" .github/workflows/ci.yml',
+    'rg -n "->" .github/',
 ]
 
 
@@ -293,6 +324,36 @@ ALLOWED_COMMANDS = [
 def test_guard_bash_allows_ordinary_work(command: str) -> None:
     result = run_hook("guard_bash.py", bash(command))
     assert decision_of(result) == "allow", f"guard over-denied ordinary work: {command}"
+
+
+HOOK_SCRIPTS = sorted(p.name for p in HOOKS_DIR.glob("*.py") if p.name != "_common.py")
+
+
+@pytest.mark.parametrize("hook", HOOK_SCRIPTS)
+def test_hook_module_imports_cleanly(hook: str) -> None:
+    """An import-time error silently DISABLES a guard, and `guard()` cannot catch it.
+
+    A module-level failure happens before the fail-closed wrapper exists, so the process
+    exits non-zero with empty stdout -- which the client treats as non-blocking rather than
+    as a denial. This is the one failure mode where a broken guard looks exactly like an
+    absent one, so it is asserted directly.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-c", f"import runpy; runpy.run_path(r'{HOOKS_DIR / hook}')"],
+        input="{}",
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    assert "NameError" not in completed.stderr, f"{hook} has an import-time NameError"
+    assert "ImportError" not in completed.stderr, f"{hook} has an import-time ImportError"
+    assert "SyntaxError" not in completed.stderr, f"{hook} has a SyntaxError"
+    assert completed.returncode == 0, (
+        f"{hook} exited {completed.returncode}; a non-zero exit with empty stdout is treated "
+        f"as non-blocking, so the guard would be silently disabled. stderr: {completed.stderr}"
+    )
 
 
 def test_guard_bash_ignores_non_shell_payload() -> None:
@@ -317,6 +378,32 @@ def test_guard_bash_fails_closed_on_unreadable_shell_payload(payload: dict) -> N
     assert decision_of(run_hook("guard_bash.py", payload)) == "deny", (
         f"unreadable shell payload must not be allowed: {payload}"
     )
+
+
+def test_data_heredoc_content_is_not_treated_as_a_command() -> None:
+    """Writing a file whose CONTENT names a protected path is ordinary work.
+
+    A commit message describing these guards, or a doc quoting a workflow path, must not be
+    refused as though the command targeted that path.
+    """
+    command = (
+        "cat > /tmp/msg.txt <<'EOF'\n"
+        "see .github/workflows/ci.yml for details\n"
+        "grep -c runs-on .github/workflows/ci.yml > /tmp/n\n"
+        "EOF"
+    )
+    assert decision_of(run_hook("guard_bash.py", bash(command))) == "allow"
+
+
+def test_heredoc_does_not_disarm_a_real_write() -> None:
+    command = "cat > .github/workflows/ci.yml <<'EOF'\nhello\nEOF"
+    assert decision_of(run_hook("guard_bash.py", bash(command))) == "deny"
+
+
+def test_interpreter_heredoc_body_is_still_code() -> None:
+    """A body fed to an interpreter is code, not data, and stays in scope."""
+    command = "python - <<'PY'\nopen('.github/workflows/ci.yml','w').write('x')\nPY"
+    assert decision_of(run_hook("guard_bash.py", bash(command))) == "deny"
 
 
 def test_guard_bash_covers_powershell_tool_payloads() -> None:
