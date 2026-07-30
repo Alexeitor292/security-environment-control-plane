@@ -884,60 +884,129 @@ def test_unlock_unknown_base_sha_denies(tmp_path: Path) -> None:
     assert decision_of(result) == "deny"
 
 
-def test_unlock_accepts_an_ancestor_base_sha(tmp_path: Path) -> None:
-    """HEAD advances as the agent commits, so an ancestor base must stay valid.
-
-    CI checks out shallowly, where `HEAD~1` can resolve to a SHA whose object is not
-    present. The hook requires a complete commit object, so the preconditions are checked
-    with the hook's own predicates and the assertion is skipped when they cannot hold --
-    rather than asserting something the environment cannot support.
-    """
-    ancestor = _git("rev-parse", "HEAD~1")
-    if not ancestor:
-        pytest.skip("no parent commit available (shallow clone)")
-    if _git("cat-file", "-t", ancestor) != "commit":
-        pytest.skip("parent commit object is absent (shallow clone)")
-    is_ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", ancestor, "HEAD"],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        check=False,
-    )
-    if is_ancestor.returncode != 0:
-        pytest.skip("parent is not reachable as an ancestor (shallow clone)")
-
-    result = _run_unlock(tmp_path, [_valid_token(base_sha=ancestor)])
-    assert decision_of(result) == "allow"
+# ---------------------------------------------------------------------------------------
+# Ancestry binding, proven HERMETICALLY.
+#
+# These previously derived an ancestor from HEAD~1 in the checkout under test, which made
+# them depend on ancestry across a shallow PR merge boundary. GitHub Actions checks out with
+# fetch-depth 1, where `git rev-parse HEAD~1` returns the literal string "HEAD~1" -- not a
+# SHA and not empty -- so the token carried an unresolvable base and the hook correctly
+# refused it. The guard was right; the test was not hermetic.
+#
+# A purpose-built temporary repository with real commits removes the dependency entirely.
+# The real `git` and `git_succeeds` helpers run against it -- `merge-base --is-ancestor` is
+# never mocked, because the defect these tests exist to catch was precisely that its exit
+# code was being ignored.
+# ---------------------------------------------------------------------------------------
 
 
-def test_unlock_rejects_a_base_sha_that_is_not_an_ancestor(tmp_path: Path) -> None:
+class _HermeticRepo:
+    """A throwaway git repository with a base commit, a child commit and an unrelated root."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._git("init", "--quiet")
+        self._git("config", "user.email", "hermetic@secp.test")
+        self._git("config", "user.name", "SECP Hermetic Test")
+        self._git("config", "commit.gpgsign", "false")
+
+        self._commit("base.txt", "base revision\n", "base revision")
+        self.base_sha = self._git("rev-parse", "HEAD")
+
+        self._commit("child.txt", "child revision\n", "child revision")
+        self.head_sha = self._git("rev-parse", "HEAD")
+        self.branch = self._git("rev-parse", "--abbrev-ref", "HEAD")
+
+        # A second root commit: a real, complete object that is genuinely NOT an ancestor.
+        self._git("checkout", "--quiet", "--orphan", "unrelated-line")
+        self._commit("unrelated.txt", "unrelated\n", "unrelated root")
+        self.unrelated_sha = self._git("rev-parse", "HEAD")
+        self._git("checkout", "--quiet", self.branch)
+
+    def _git(self, *args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args], cwd=str(self.root), capture_output=True, text=True, check=False
+        )
+        assert completed.returncode == 0, f"git {' '.join(args)} failed: {completed.stderr}"
+        return completed.stdout.strip()
+
+    def _commit(self, name: str, body: str, message: str) -> None:
+        (self.root / name).write_text(body, encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "--quiet", "-m", message)
+
+    def token(self, base_sha: str, filename: str = "zz99_probe.py") -> dict:
+        return {
+            "version": 1,
+            "repository": str(self.root),
+            "branch": self.branch,
+            "base_sha": base_sha,
+            "migration_filename": filename,
+            "purpose": "hermetic ancestry proof",
+            "issuer": "test",
+            "issued_at": "2026-07-30T12:00:00Z",
+            "expires_at": "2026-07-30T12:30:00Z",
+            "nonce": "0123456789abcdef",
+        }
+
+
+@pytest.fixture
+def hermetic_repo(tmp_path: Path) -> _HermeticRepo:
+    return _HermeticRepo(tmp_path / "hermetic-ancestry")
+
+
+def _binding_verdict(repo: _HermeticRepo, base_sha: str) -> str:
+    module = load_hook_module("guard_migration_unlock")
+    try:
+        module._validate_binding(repo.token(base_sha), repo.root, "zz99_probe.py")
+    except SystemExit:
+        return "deny"
+    return "allow"
+
+
+def test_hermetic_fixture_has_real_distinct_commits(hermetic_repo: _HermeticRepo) -> None:
+    """The fixture must be sound before anything is concluded from it."""
+    shas = {hermetic_repo.base_sha, hermetic_repo.head_sha, hermetic_repo.unrelated_sha}
+    assert len(shas) == 3, f"expected three distinct commits, got {shas}"
+    for sha in shas:
+        assert len(sha) == 40, sha
+
+    common = load_hook_module("_common")
+    # Proves the real helper is being exercised, in both directions, against real git.
+    assert common.git_succeeds(
+        hermetic_repo.root, "merge-base", "--is-ancestor",
+        hermetic_repo.base_sha, hermetic_repo.head_sha,
+    ) is True
+    assert common.git_succeeds(
+        hermetic_repo.root, "merge-base", "--is-ancestor",
+        hermetic_repo.unrelated_sha, hermetic_repo.head_sha,
+    ) is False
+    assert common.git(hermetic_repo.root, "cat-file", "-t", hermetic_repo.unrelated_sha) == "commit"
+
+
+def test_unlock_accepts_an_ancestor_base_sha(hermetic_repo: _HermeticRepo) -> None:
+    """HEAD advances as the agent commits, so an ancestor base must stay valid."""
+    assert _binding_verdict(hermetic_repo, hermetic_repo.base_sha) == "allow"
+
+
+def test_unlock_accepts_a_base_sha_equal_to_head(hermetic_repo: _HermeticRepo) -> None:
+    assert _binding_verdict(hermetic_repo, hermetic_repo.head_sha) == "allow"
+
+
+def test_unlock_rejects_a_base_sha_that_is_not_an_ancestor(hermetic_repo: _HermeticRepo) -> None:
     """`merge-base --is-ancestor` signals via exit code and prints nothing.
 
     Regression guard: reading its stdout made this check vacuous, so a token bound to an
-    unrelated commit was accepted as though it pinned the real base.
+    unrelated commit was accepted as though it pinned the real base. The unrelated commit
+    here is a real, readable object -- so passing requires the ancestry check, not merely
+    an object-existence check.
     """
-    candidates = _git("rev-list", "--all", "--max-count=400").splitlines()
-    foreign = next(
-        (
-            sha
-            for sha in candidates
-            if sha
-            and subprocess.run(
-                ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
-                cwd=str(REPO_ROOT),
-                capture_output=True,
-                check=False,
-            ).returncode
-            != 0
-        ),
-        None,
-    )
-    if foreign is None:
-        pytest.skip("no non-ancestor commit reachable in this checkout")
-    result = _run_unlock(tmp_path, [_valid_token(base_sha=foreign)])
-    assert decision_of(result) == "deny", (
-        f"a token bound to non-ancestor {foreign[:12]} must not authorise a write"
-    )
+    assert _binding_verdict(hermetic_repo, hermetic_repo.unrelated_sha) == "deny"
+
+
+def test_unlock_rejects_a_base_sha_with_no_object(hermetic_repo: _HermeticRepo) -> None:
+    assert _binding_verdict(hermetic_repo, "0" * 40) == "deny"
 
 
 def test_unlock_valid_token_allows_and_burns_only_when_the_write_can_proceed(
