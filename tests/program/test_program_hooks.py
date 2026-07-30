@@ -410,6 +410,123 @@ def test_program_branch_predicate_recognises_foundation_branches() -> None:
         assert module.is_program_branch(branch) is False, branch
 
 
+# ---------------------------------------------------------------------------------------
+# Non-program-branch policy.
+#
+# Every subprocess test above runs on whatever branch the checkout is on, which today is a
+# program-foundation branch. That is NOT the state this guard spends most of its life in:
+# the moment PR 1 merges, ordinary work happens on feature branches where the broad
+# product-source fence is absent. These exercise the policy functions directly so both
+# branch states are covered regardless of the checkout.
+# ---------------------------------------------------------------------------------------
+
+FEATURE_BRANCH = "feature/secp-pr6-provisioning"
+PROGRAM_BRANCH = "feature/secp-program-orchestration-foundation"
+
+ABSOLUTE_ON_EVERY_BRANCH = [
+    ".github/workflows/ci.yml",
+    "infra/ci/attest_trusted_ancestry.py",
+    "apps/management/secp_management/production.py",
+    "apps/management/secp_management/signing.py",
+    ".env",
+    ".env.production",
+    "server.pem",
+    "apps/api/signing.key",
+]
+
+
+@pytest.mark.parametrize("rel_path", ABSOLUTE_ON_EVERY_BRANCH)
+@pytest.mark.parametrize("branch", [FEATURE_BRANCH, PROGRAM_BRANCH])
+def test_absolute_protections_hold_on_every_branch(rel_path: str, branch: str) -> None:
+    module = load_hook_module("_common")
+    assert module.protected_write_reason(rel_path, branch) is not None, (
+        f"{rel_path} must be protected on {branch}"
+    )
+
+
+ORDINARY_PRODUCT_WORK = [
+    "apps/api/secp_api/routers/scoring.py",
+    "apps/worker/secp_worker/main.py",
+    "apps/web/src/api/client.ts",
+    "plugins/proxmox/secp_plugin_proxmox/plugin.py",
+    "contracts/plugin-api/secp_plugin_api/v1/__init__.py",
+    "docs/STATUS.md",
+    "docs/adr/ADR-029-scoring.md",
+    "infra/dev/docker-compose.yml",
+]
+
+
+@pytest.mark.parametrize("rel_path", ORDINARY_PRODUCT_WORK)
+def test_product_work_is_permitted_on_a_feature_branch(rel_path: str) -> None:
+    """After this PR merges, product work is the normal case and must not be fenced."""
+    module = load_hook_module("_common")
+    assert module.protected_write_reason(rel_path, FEATURE_BRANCH) is None, (
+        f"{rel_path} must be writable on an ordinary feature branch"
+    )
+
+
+@pytest.mark.parametrize("rel_path", ORDINARY_PRODUCT_WORK)
+def test_product_work_is_fenced_on_a_program_branch(rel_path: str) -> None:
+    module = load_hook_module("_common")
+    assert module.protected_write_reason(rel_path, PROGRAM_BRANCH) is not None, (
+        f"{rel_path} must be fenced on a program-foundation branch"
+    )
+
+
+def test_append_only_and_migrations_are_shell_only_protections() -> None:
+    """The editing tools must still be able to append; only the shell is refused outright."""
+    module = load_hook_module("_common")
+    for rel_path in (
+        "docs/program/SAFETY_INVARIANTS.md",
+        "apps/api/migrations/versions/zz_new.py",
+    ):
+        assert module.absolute_protection_reason(rel_path, shell=True) is not None
+        assert module.absolute_protection_reason(rel_path, shell=False) is None, (
+            f"{rel_path} must remain reachable by the editing tools, which can verify the edit"
+        )
+
+
+READER_SEGMENTS = [
+    "cat README.md",
+    "grep -rn secp docs",
+    "ls apps/api",
+    "git log --oneline -5",
+    "git diff HEAD",
+    "git show HEAD",
+    "git status --porcelain",
+    "git rev-parse HEAD",
+    "git ls-files apps",
+    "python -m pytest tests -q",
+    "python -m mypy apps/api",
+    "find docs -name '*.md'",
+    "sed -n '1,10p' README.md",
+]
+
+WRITER_SEGMENTS = [
+    "echo x > file.txt",
+    "cp a b",
+    "rm file.txt",
+    "sed -i s/a/b/ file.txt",
+    "find docs -name '*.md' -delete",
+    "git checkout main -- file.txt",
+    "python script.py",
+    "tar -xf p.tar -C dir",
+    "dd of=file.txt",
+]
+
+
+@pytest.mark.parametrize("segment", READER_SEGMENTS)
+def test_reader_classification_recognises_read_only_work(segment: str) -> None:
+    module = load_hook_module("guard_bash")
+    assert module._is_reader(module._unwrap(module.tokenize(segment))) is True, segment
+
+
+@pytest.mark.parametrize("segment", WRITER_SEGMENTS)
+def test_reader_classification_recognises_writers(segment: str) -> None:
+    module = load_hook_module("guard_bash")
+    assert module._is_reader(module._unwrap(module.tokenize(segment))) is False, segment
+
+
 def test_multiedit_cannot_bypass_the_append_only_record() -> None:
     """MultiEdit carries its pairs in `edits`; reading only top-level keys let it through."""
     invariants = REPO_ROOT / "docs" / "program" / "SAFETY_INVARIANTS.md"
