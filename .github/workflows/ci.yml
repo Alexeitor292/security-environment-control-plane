@@ -414,7 +414,11 @@ jobs:
   # alone is NOT trusted, because an all-skipped run exits successfully.
   backend-realfs-root:
     name: Backend RealFilesystem (root, production openat backend)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -491,7 +495,11 @@ jobs:
   # starts no service, contacts no endpoint, and never runs an operator or OpenTofu.
   backend-discovery-activation-root:
     name: PR5F discovery activation root-security (fixed state transaction)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -508,6 +516,14 @@ jobs:
         run: |
           uv venv --python 3.11
           uv pip install -e ".[dev]"
+      - name: Attest trusted ancestry before the inline preflight (infrastructure_invalid)
+        # The inline preflights below exit 1 with a bare message, which is indistinguishable from a
+        # product failure -- that is how `/etc: not root:root` came to be answered with blind
+        # re-runs. Running the classified gate first captures the full bounded evidence and exits 78
+        # so the outcome is unambiguously INFRASTRUCTURE. The inline checks remain as belt-and-braces
+        # and still create the code-owned parents; nothing here relaxes or repairs anything.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /var/lib
       - name: Prepare the fixed trusted production parent
         # The ephemeral runner starts without SECP state. Create only the code-owned parent; the
         # test owns the leaf transaction and refuses if that leaf or either test sibling exists. An
@@ -584,6 +600,14 @@ jobs:
               sys.exit(1)
           print(f"trusted fixed parent and absent test paths proven: {parent}")
           PY
+      - name: Attest trusted ancestry before the inline preflight (infrastructure_invalid)
+        # The inline preflights below exit 1 with a bare message, which is indistinguishable from a
+        # product failure -- that is how `/etc: not root:root` came to be answered with blind
+        # re-runs. Running the classified gate first captures the full bounded evidence and exits 78
+        # so the outcome is unambiguously INFRASTRUCTURE. The inline checks remain as belt-and-braces
+        # and still create the code-owned parents; nothing here relaxes or repairs anything.
+        run: |
+          sudo "$(pwd)/.venv/bin/python" infra/ci/attest_trusted_ancestry.py /etc
       - name: Prepare the fixed trusted controller-config parent (PR5F.1 env file)
         # The controller Compose environment file lives at the code-owned /etc/secp/controller/
         # secp.env.  Create only the code-owned parents (root:root 0755); the test owns the leaf
@@ -687,7 +711,11 @@ jobs:
   # No deployment infrastructure is contacted; every child process is a local, bounded, pinned probe.
   backend-deployment-root:
     name: Deployment package root-security (root, trusted dir-fd + pinned exec)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -829,7 +857,11 @@ jobs:
   # is deployed, activated, or started.
   backend-management-root:
     name: Management-plane bootstrap root-security (root, hardened install)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -959,7 +991,11 @@ jobs:
   # or OpenTofu. (The full 8-service controller stack + real migration are the follow-on 4b job.)
   backend-management-real-adapters-root:
     name: Management real adapters E2E (root, real Docker + systemd)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:
@@ -1069,7 +1105,11 @@ jobs:
   # enables/starts no operator, submits no workflow, contacts no provider/OpenTofu.
   backend-management-controller-real-adapters-root:
     name: Controller full-stack real adapters + real migration (root, real Docker)
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
+    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
+    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
+    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
     steps:

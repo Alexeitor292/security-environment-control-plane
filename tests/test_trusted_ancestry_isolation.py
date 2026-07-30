@@ -224,27 +224,38 @@ def test_an_absent_code_owned_directory_is_not_a_failure(tmp_path: Path) -> None
     exist. My first wiring reported that as `infrastructure_invalid`, which asserts a creation ORDER
     this gate has no business asserting and refuses a perfectly valid machine. Every ancestor that
     EXISTS must be trusted; an absent code-owned component is recorded and allowed."""
-    code, report, untrusted = gate.attest([str(tmp_path / "not" / "created" / "yet")])
+    # A chain whose ENTIRE tail is absent, rooted directly at "/" -- deliberately NOT under
+    # tmp_path: on Linux that lives beneath /tmp, which is legitimately world-writable (1777), so
+    # walking it would report a real and correct untrusted-ancestor finding and prove nothing about
+    # absence. The first CI run of this test failed exactly that way.
+    code, report, untrusted = gate.attest(["/secp-attest-absent-probe/not/created/yet"])
     assert code == gate.EXIT_OK
     assert report["verdict"] == "trusted"
     assert untrusted == []
     absent = report["absent"]
     assert isinstance(absent, list)
-    assert [Path(p).name for p in absent] == ["not", "created", "yet"]
+    assert [Path(entry).name for entry in absent] == [
+        "secp-attest-absent-probe",
+        "not",
+        "created",
+        "yet",
+    ]
 
 
 @_POSIX_ONLY
 def test_an_untrusted_existing_prefix_still_fails_even_with_an_absent_tail(tmp_path: Path) -> None:
     """Allowing an absent tail must not become a way to skip checking the existing prefix."""
     prefix = tmp_path / "prefix"
-    prefix.mkdir(mode=0o775)  # group-writable: a real, existing, untrusted ancestor
-    os.chmod(prefix, 0o775)
+    prefix.mkdir()
+    os.chmod(prefix, 0o775)  # group-writable: a real, existing, untrusted ancestor
     code, report, untrusted = gate.attest([str(prefix / "absent" / "tail")])
     assert code == gate.EXIT_INFRASTRUCTURE_INVALID
     assert report["verdict"] == "infrastructure_invalid"
-    offending = [str(o["path"]) for o in untrusted]
-    assert str(prefix) in offending
-    assert "group_or_other_writable" in untrusted[-1]["problems"]  # type: ignore[operator]
+    offending = {str(o["path"]) for o in untrusted}
+    assert str(prefix) in offending  # the prefix itself is named, not merely the tail
+    entry = next(o for o in untrusted if str(o["path"]) == str(prefix))
+    problems = entry["problems"]
+    assert isinstance(problems, list) and "group_or_other_writable" in problems
 
 
 # --------------------------------- teardown restores what a test temporarily changed
