@@ -188,6 +188,30 @@ DENIED_COMMANDS = [
     "Remove-Item .github/workflows/ci.yml",
     # A shell write cannot present an unlock token.
     "echo x > apps/api/migrations/versions/zz_new.py",
+    # The append-only record has no shell exemption: a shell write cannot be shown to be
+    # an append, so every form is refused.
+    "echo '' > docs/program/SAFETY_INVARIANTS.md",
+    "sed -i '1,50d' docs/program/SAFETY_INVARIANTS.md",
+    "truncate -s 0 docs/program/SAFETY_INVARIANTS.md",
+    "rm docs/program/SAFETY_INVARIANTS.md",
+    "cp /tmp/short.md docs/program/SAFETY_INVARIANTS.md",
+    # Write verbs and redirection forms that no target-extraction heuristic would catch.
+    # The mention scan covers them without needing to model each one.
+    "dd of=.github/workflows/ci.yml if=/dev/zero",
+    "tar -xf payload.tar -C .github",
+    "unzip -o payload.zip -d .github",
+    "find .github -name ci.yml -delete",
+    "echo x >| .github/workflows/ci.yml",
+    "exec 3> .github/workflows/ci.yml",
+    'echo x > "$(pwd)/.github/workflows/ci.yml"',
+    "echo .github/workflows/ci.yml | xargs rm",
+    "busybox rm .github/workflows/ci.yml",
+    "vim -es -c 'wq' .github/workflows/ci.yml",
+    "rsync -a /tmp/x .github/workflows/ci.yml",
+    "python scripts/validate_ci.py .github/workflows/ci.yml",
+    # Content-bearing writes whose target is not on the command line at all.
+    "git apply /tmp/ci.diff",
+    "patch -p1 < /tmp/ci.diff",
 ]
 
 
@@ -246,6 +270,22 @@ ALLOWED_COMMANDS = [
     'grep -rn "secp-migration-unlock" docs/program',
     # rsync is only a host-contact risk when it actually targets a remote.
     "rsync -a build/ dist/",
+    # The project's OWN validation loop must not be blocked. Interpreter positionals are
+    # not evidence of a write; treating them as such denied every direct pytest/mypy run
+    # on a program branch, where apps/** is fenced.
+    "python -m pytest apps/api/tests -q",
+    "python -m pytest apps/api/tests/test_migrations.py -q",
+    "python -m mypy apps/api",
+    "python -m ruff check apps/api",
+    # A quoted dotted string in inline code is not key material.
+    "python -c \"print(cfg['db.key'])\"",
+    # Reading an operator-owned path is ordinary work; only writing it is denied.
+    "cat .github/workflows/ci.yml",
+    "grep -rn jobs .github/workflows",
+    "git log --oneline -- .github",
+    "git diff HEAD -- .github/workflows/ci.yml",
+    "ls .github/workflows",
+    "git log -1 -- docs/program/SAFETY_INVARIANTS.md",
 ]
 
 

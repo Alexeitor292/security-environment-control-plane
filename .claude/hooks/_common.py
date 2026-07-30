@@ -378,6 +378,22 @@ DOC_ALLOWED = ("docs/program/**",)
 
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 
+APPEND_ONLY_GLOBS = ("docs/program/SAFETY_INVARIANTS.md",)
+
+# Literal path fragments for the shell MENTION scan. Detecting "does this shell command
+# write to X" is undecidable in general, so for this small absolute set the rule is
+# inverted: mentioning one of these at all is denied unless every segment is a known
+# reader. The set is deliberately tiny -- these paths are operator-owned and an agent has
+# no routine reason to name them in a shell command.
+ABSOLUTE_PREFIXES = (
+    ".github/",
+    "infra/ci/",
+    "apps/management/secp_management/production.py",
+    "apps/management/secp_management/signing.py",
+    "docs/program/SAFETY_INVARIANTS.md",
+    "apps/api/migrations/versions/",
+)
+
 
 def is_program_branch(branch: str) -> bool:
     lowered = (branch or "").lower()
@@ -397,8 +413,13 @@ def is_secret_path(rel_path: str) -> bool:
     return name.endswith(SECRET_SUFFIXES)
 
 
-def protected_write_reason(rel_path: str, branch: str) -> str | None:
-    """Return why writing ``rel_path`` is denied, or None when it is permitted."""
+def absolute_protection_reason(rel_path: str, *, shell: bool = False) -> str | None:
+    """Protections that apply on every branch, independent of the program-branch fence.
+
+    ``shell=True`` adds the two protections a shell call can never satisfy: an append-only
+    record (a shell write cannot be shown to be an append) and a migration (a shell call
+    cannot present an unlock token).
+    """
     if is_secret_path(rel_path):
         return f"'{rel_path}' is secrets or key material and is never written by an agent."
 
@@ -407,6 +428,22 @@ def protected_write_reason(rel_path: str, branch: str) -> str | None:
         reason = next(why for glob, why in ALWAYS_DENY if glob == hit)
         return f"'{rel_path}' is an unconditional hard-deny in SECP. {reason}"
 
+    if shell:
+        if matches_any(rel_path, APPEND_ONLY_GLOBS) is not None:
+            return (
+                f"'{rel_path}' is an append-only record. A shell write cannot be shown to be "
+                "an append, so it is refused; use the editing tools to append an entry."
+            )
+        if matches_any(rel_path, MIGRATION_GLOBS) is not None:
+            return (
+                f"'{rel_path}' is an Alembic migration and a shell call cannot present an "
+                "unlock token. Migration authoring must go through the editing tools."
+            )
+    return None
+
+
+def branch_fence_reason(rel_path: str, branch: str) -> str | None:
+    """The broad, branch-scoped fence: no product source or product docs on a program branch."""
     if is_program_branch(branch):
         if matches_any(rel_path, PRODUCT_SOURCE_GLOBS) is not None:
             return (
@@ -423,6 +460,11 @@ def protected_write_reason(rel_path: str, branch: str) -> str | None:
     return None
 
 
+def protected_write_reason(rel_path: str, branch: str) -> str | None:
+    """Full editing-tool policy: absolute protections plus the branch fence."""
+    return absolute_protection_reason(rel_path) or branch_fence_reason(rel_path, branch)
+
+
 # --------------------------------------------------------------------------------------
 # Shell write-channel extraction
 # --------------------------------------------------------------------------------------
@@ -432,13 +474,13 @@ _REDIRECTS = (">>", ">", "1>", "2>", "&>", ">|")
 _WRITE_BINARIES = {
     "cp", "mv", "rm", "unlink", "truncate", "shred", "dd", "install", "ln", "tee",
     "chmod", "chown", "touch", "mkdir", "rmdir", "patch",
+    "tar", "unzip", "rsync", "busybox", "vim", "vi", "ex", "ed", "7z", "gzip", "xz",
     "copy-item", "move-item", "remove-item", "set-content", "add-content", "out-file",
     "new-item", "clear-content", "rename-item",
 }
 
-# Interpreters can write anywhere; inline code is not worth parsing, so any protected path
-# mentioned anywhere in such a segment is treated as a write target.
-_INTERPRETERS = {"python", "python3", "py", "node", "perl", "ruby", "php", "deno", "bun"}
+# Flags whose VALUE is a destination (tar -C, unzip -d, dd of=, gzip -o).
+_DESTINATION_FLAGS = {"-C", "-d", "--directory", "-o", "--output", "--target-directory", "-t"}
 
 _GIT_WRITE_SUBCOMMANDS = {"checkout", "restore", "apply", "clean", "mv", "rm"}
 
@@ -468,10 +510,28 @@ def shell_write_targets(tokens: list[str]) -> list[str]:
     head = PurePosixPath(tokens[0].replace("\\", "/")).name.lower().removesuffix(".exe")
     positionals = [t for t in tokens[1:] if not t.startswith("-")]
 
+    # `dd of=path`, `--output=path`: the destination is glued to the flag. Only a
+    # destination-shaped flag or a path-shaped value counts -- otherwise an ordinary
+    # `--grep=needle` would be mistaken for a write target.
+    for token in tokens[1:]:
+        if "=" not in token:
+            continue
+        name, _, value = token.partition("=")
+        if not value:
+            continue
+        destination_flag = name.lower().lstrip("-") in {
+            "of", "o", "output", "file", "target", "directory", "dest", "destination",
+        }
+        if destination_flag or "/" in value or "\\" in value:
+            targets.append(value)
+
+    # A destination flag's value is a target wherever it appears.
+    for index, token in enumerate(tokens[1:], start=1):
+        if token in _DESTINATION_FLAGS and index + 1 < len(tokens):
+            targets.append(tokens[index + 1])
+
     if head in _WRITE_BINARIES:
         targets.extend(positionals)
-    elif head in _INTERPRETERS:
-        targets.extend(tokens[1:])
     elif head in {"git", "git.exe"}:
         lowered = [t.lower() for t in tokens[1:]]
         for sub in _GIT_WRITE_SUBCOMMANDS:
@@ -479,6 +539,10 @@ def shell_write_targets(tokens: list[str]) -> list[str]:
                 targets.extend(positionals)
                 break
     elif head == "sed" and any(t == "-i" or t.startswith("-i") for t in tokens[1:]):
+        targets.extend(positionals)
+    elif head == "find" and any(
+        t in {"-delete", "-exec", "-execdir", "-ok"} for t in tokens[1:]
+    ):
         targets.extend(positionals)
 
     return [t for t in targets if t and not t.startswith("-")]

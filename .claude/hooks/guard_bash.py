@@ -33,13 +33,13 @@ from pathlib import Path, PurePosixPath
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _common import (  # noqa: E402
-    MIGRATION_GLOBS,
+    ABSOLUTE_PREFIXES,
+    absolute_protection_reason,
+    branch_fence_reason,
     command_segments,
     current_branch,
     deny,
     guard,
-    matches_any,
-    protected_write_reason,
     read_event,
     relative_posix,
     repo_root,
@@ -248,6 +248,11 @@ def _check_git(tokens: list[str]) -> None:
             f"BLOCKED: 'git {subcommand}' {HISTORY_REWRITE_SUBCOMMANDS[subcommand]}. "
             "History rewriting is an unconditional hard-deny in SECP."
         )
+    if subcommand == "apply":
+        deny(
+            "BLOCKED: 'git apply' writes whatever paths the diff names, which cannot be "
+            "checked from the command line. Use the editing tools so the write is visible."
+        )
     if subcommand == "rebase":
         deny(
             "BLOCKED: 'git rebase' rewrites history. Create a new commit on your feature "
@@ -362,6 +367,12 @@ def _check_infrastructure(tokens: list[str]) -> None:
                     "Running migrations is not authorised; authoring is gated separately."
                 )
 
+    if head in _FORBIDDEN_PATCH_BINARIES:
+        deny(
+            f"BLOCKED: '{head}' writes whatever paths the patch names, which cannot be "
+            "checked from the command line. Use the editing tools so the write is visible."
+        )
+
     if head in MANAGEMENT_CLIS:
         flags = {t.lower() for t in tokens[1:]}
         if "--write" in flags and "--confirm" in flags:
@@ -384,26 +395,104 @@ _QUOTE_SPLIT = re.compile(r"['\"]")
 
 _INTERPRETER_BINARIES = {"python", "python3", "py", "node", "perl", "ruby", "php", "deno", "bun"}
 
+_INLINE_CODE_FLAGS = {"-c", "-e", "--eval", "--exec", "-"}
+
+# Commands that only read. A segment led by one of these may name an absolutely protected
+# path -- reading `.github/workflows/ci.yml` is ordinary work; writing it is not.
+_READERS = {
+    "cat", "bat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ag",
+    "ls", "dir", "wc", "diff", "jq", "yq", "stat", "file", "find", "tree", "cut", "sort",
+    "uniq", "md5sum", "sha1sum", "sha256sum", "basename", "dirname", "realpath", "echo",
+    "printf", "true", "false", "test", "which", "type", "pwd", "date", "env", "sed", "awk",
+    "get-content", "select-string", "get-childitem", "test-path", "measure-object",
+}
+
+_GIT_READ_SUBCOMMANDS = {
+    "log", "diff", "show", "status", "cat-file", "ls-files", "ls-tree", "grep", "blame",
+    "rev-parse", "rev-list", "describe", "config", "remote", "branch", "tag", "shortlog",
+    "merge-base", "for-each-ref", "reflog", "worktree", "stash", "fetch", "add", "commit",
+}
+
+_READ_ONLY_PY_MODULES = {"pytest", "ruff", "mypy", "json.tool", "compileall", "pip", "venv"}
+
+_FORBIDDEN_PATCH_BINARIES = {"patch"}
+
+
+def _is_reader(tokens: list[str]) -> bool:
+    """True when a segment cannot write, so it may safely name a protected path."""
+    if not tokens:
+        return True
+    # Any redirection makes a segment a writer regardless of its binary.
+    if any(">" in token for token in tokens):
+        return False
+    head = _binary(tokens)
+    if head == "git":
+        parsed = _git_parts(tokens)
+        return parsed is not None and parsed[0] in _GIT_READ_SUBCOMMANDS
+    if head == "find":
+        return not any(t in {"-delete", "-exec", "-execdir", "-ok"} for t in tokens[1:])
+    if head == "sed":
+        return not any(t == "-i" or t.startswith("-i") for t in tokens[1:])
+    if head in _INTERPRETER_BINARIES:
+        for index, token in enumerate(tokens[1:], start=1):
+            if token == "-m" and index + 1 < len(tokens):
+                return tokens[index + 1].lower() in _READ_ONLY_PY_MODULES
+        return False
+    return head in _READERS
+
 
 def _interpreter_path_candidates(tokens: list[str], segment: str) -> list[str]:
     """Paths referenced by inline interpreter code.
 
-    `python -c "open('.github/workflows/ci.yml','w')"` writes a protected file without any
-    shell redirection. Inline code is not worth parsing, so every quoted string in such a
-    segment is treated as a candidate write target.
+    `python -c "open('.github/workflows/ci.yml','w')"` writes a protected file with no shell
+    redirection. Inline code is not worth parsing, so quoted strings are harvested -- but
+    only ones that look like paths. Requiring a separator keeps a dict key such as
+    `cfg['db.key']` from being mistaken for key material.
     """
     if _binary(tokens) not in _INTERPRETER_BINARIES:
         return []
-    if not any(t in {"-c", "-e", "--eval", "--exec"} for t in tokens[1:]):
+    if not any(t in _INLINE_CODE_FLAGS for t in tokens[1:]):
         return []
-    # Split on quote characters rather than pairing them: quote pairing mis-associates
-    # nested quotes (`"open('path','w')"` yields `open(` instead of the path).
     pieces = _QUOTE_SPLIT.split(segment)
-    return [p.strip() for p in pieces if ("/" in p or "\\" in p or "." in p) and len(p) > 2]
+    return [p.strip() for p in pieces if ("/" in p or "\\" in p) and len(p) > 2]
+
+
+def _check_mentions(command: str, segments_tokens: list[list[str]]) -> None:
+    """Absolute-protection MENTION scan.
+
+    Enumerating every way a shell can write to a path is undecidable, and each missed verb
+    is a silent hole. For the small absolute set the rule is inverted: naming one of those
+    paths anywhere in the command is denied unless EVERY segment is a known reader. This
+    catches `dd of=`, `tar -C`, `find -delete`, `>|`, `exec 3>`, `$(pwd)/…` and cross-segment
+    `xargs` without needing to model any of them.
+    """
+    lowered = command.replace("\\", "/").lower()
+    hit = None
+    for prefix in ABSOLUTE_PREFIXES:
+        # Match the bare directory form too (`-C .github`, `find .github`), without
+        # matching an unrelated longer name such as `.githubfoo`.
+        base = re.escape(prefix.rstrip("/").lower())
+        # A preceding '/' is legitimate (an absolute or $(pwd)-prefixed path); a preceding
+        # word character, '.' or '-' means this is a different, longer name.
+        if re.search(rf"(?<![\w.\-]){base}(?:[/\s'\"]|$)", lowered):
+            hit = prefix
+            break
+    if hit is None:
+        return
+    if all(_is_reader(tokens) for tokens in segments_tokens):
+        return
+    deny(
+        f"BLOCKED: this shell command names the protected path '{hit}' and is not a "
+        "read-only command. These paths are operator-owned: CI workflows, the "
+        "trusted-ancestry attestation, production trust roots, the append-only safety "
+        "record and Alembic migrations. Read them with the Read tool instead."
+    )
 
 
 def _check_write_targets(tokens: list[str], root: Path, branch: str, segment: str = "") -> None:
     """Apply the guard_writes path policy to shell write channels."""
+    if _is_reader(tokens):
+        return  # A read-only segment names paths; it does not write them.
     candidates = shell_write_targets(tokens) + _interpreter_path_candidates(tokens, segment)
     for raw in candidates:
         lowered = raw.replace("\\", "/").lower()
@@ -415,13 +504,9 @@ def _check_write_targets(tokens: list[str], root: Path, branch: str, segment: st
         rel_path = relative_posix(raw, root)
         if rel_path is None:
             continue
-        if matches_any(rel_path, MIGRATION_GLOBS) is not None:
-            deny(
-                f"BLOCKED: '{rel_path}' is an Alembic migration and this is a shell write, "
-                "which cannot present an unlock token. Migration authoring requires an "
-                "operator-issued token and must go through the editing tools."
-            )
-        reason = protected_write_reason(rel_path, branch)
+        reason = absolute_protection_reason(rel_path, shell=True) or branch_fence_reason(
+            rel_path, branch
+        )
         if reason is not None:
             deny(f"BLOCKED: this shell command writes to a protected path. {reason}")
 
@@ -449,13 +534,19 @@ def main() -> None:
     while pending and depth < _MAX_DEPTH:
         nested: list[str] = []
         for text in pending:
-            for segment in command_segments(text):
+            # `>|` is a real redirect but `|` is a segment separator, so normalise it away
+            # before splitting or the token can never be delivered intact.
+            normalised = text.replace(">|", "> ")
+            segment_tokens: list[list[str]] = []
+            for segment in command_segments(normalised):
                 tokens = _unwrap(tokenize(segment))
+                segment_tokens.append(tokens)
                 _check_git(tokens)
                 _check_gh(tokens)
                 _check_infrastructure(tokens)
                 _check_write_targets(tokens, root, branch, segment)
                 nested.extend(_nested_commands(tokens))
+            _check_mentions(normalised, segment_tokens)
         pending = nested
         depth += 1
 
