@@ -885,10 +885,27 @@ def test_unlock_unknown_base_sha_denies(tmp_path: Path) -> None:
 
 
 def test_unlock_accepts_an_ancestor_base_sha(tmp_path: Path) -> None:
-    """HEAD advances as the agent commits, so an ancestor base must stay valid."""
+    """HEAD advances as the agent commits, so an ancestor base must stay valid.
+
+    CI checks out shallowly, where `HEAD~1` can resolve to a SHA whose object is not
+    present. The hook requires a complete commit object, so the preconditions are checked
+    with the hook's own predicates and the assertion is skipped when they cannot hold --
+    rather than asserting something the environment cannot support.
+    """
     ancestor = _git("rev-parse", "HEAD~1")
     if not ancestor:
-        pytest.skip("no parent commit available")
+        pytest.skip("no parent commit available (shallow clone)")
+    if _git("cat-file", "-t", ancestor) != "commit":
+        pytest.skip("parent commit object is absent (shallow clone)")
+    is_ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, "HEAD"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        check=False,
+    )
+    if is_ancestor.returncode != 0:
+        pytest.skip("parent is not reachable as an ancestor (shallow clone)")
+
     result = _run_unlock(tmp_path, [_valid_token(base_sha=ancestor)])
     assert decision_of(result) == "allow"
 
