@@ -106,6 +106,14 @@ describe("publication page import boundary", () => {
     // Prove the slice really is the publish method before trusting a negative assertion about it.
     expect(publishMethod).toContain("/api/v1/environment-versions/publish");
     expect(publishMethod).not.toContain("idempotency_key");
+
+    // RESIDUAL, documented deliberately and NOT chased: narrowing from a whole-file scan to these
+    // two windows gives up exactly one path — an idempotency key injected generically into the
+    // shared `request` / `buildRequestHeaders` helpers, which would reach the publish call without
+    // appearing in either window. No such injection exists, and adding one would be a change to
+    // the shared client that this file is the wrong place to police. The alternative (keeping the
+    // whole-file scan) made a publication-specific assertion hostage to every other feature, which
+    // is the worse trade.
     // the request type/builder never place publication_fingerprint INTO the request
     expect(MODULE).not.toMatch(/publication_fingerprint\s*:/); // no fingerprint field written into a request
   });

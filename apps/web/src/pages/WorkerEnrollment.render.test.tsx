@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
 import { WorkerEnrollmentView, type WorkerEnrollmentViewProps } from "./WorkerEnrollment";
+import { handoffFields } from "./worker-enrollment";
 
 const ID = "sha256:" + "a".repeat(64);
 const INVITATION_ID = "sha256:" + "b".repeat(64);
@@ -79,15 +80,22 @@ describe("WorkerEnrollmentView — hand-off material exposure", () => {
   // not be in the document until the operator explicitly asks for it.
   it("renders no invitation material before the operator reveals it", () => {
     const out = html({ invitation: INVITATION, revealed: false });
-    for (const secretish of [
-      INVITATION_ID,
-      TRANSACTION_ID,
-      INVITATION.controller_key_id,
-      INVITATION.release_digest,
-      INVITATION.controller_origin,
-      INVITATION.controller_trust_anchor_hex,
-    ]) {
-      expect(out, secretish).not.toContain(secretish);
+    // DERIVED from handoffFields(), never restated. A hand-written list drifts: it named six
+    // values while handoffFields() returns eight, so enrollment_id, controller_installation_id
+    // and the raw expires_at went unasserted — and a future edit moving any of them into the
+    // pre-reveal meta block would have kept this test green. Deriving makes the forbidden set
+    // definitionally equal to what the reveal actually discloses.
+    const forbidden = [
+      ...handoffFields(INVITATION).map((field) => field.value),
+      INVITATION.controller_trust_anchor_hex, // displayed beside the block, not part of it
+    ];
+    // Anti-vacuity: prove the derived set is the whole set before trusting negative assertions
+    // about it. If handoffFields() ever returns fewer fields this fails loudly rather than
+    // silently checking less.
+    expect(forbidden).toHaveLength(9);
+    expect(new Set(forbidden).size).toBe(9); // distinct, so no value is checked by accident
+    for (const value of forbidden) {
+      expect(out, value).not.toContain(value);
     }
   });
 
@@ -127,6 +135,14 @@ describe("WorkerEnrollmentView — hand-off material exposure", () => {
 
 describe("WorkerEnrollmentView — no fabricated lifecycle authority", () => {
   // The lifecycle has no approval edge. A button implying one would be fiction.
+  //
+  // SCOPE, recorded rather than widened: this covers the six forward states and matches four label
+  // literals, so it is an incomplete string check by construction — it does not cover `refused` /
+  // `recovery_required`, and a differently-worded affordance would evade it. That is acceptable
+  // because it is not the load-bearing proof. The CAPABILITY is pinned structurally instead:
+  // worker-enrollment-boundary.test.ts asserts SET EQUALITY on the `api.*` calls the page makes,
+  // so a fictional approve control could render but could not call anything. Widening this into an
+  // exhaustive copy-matcher would add brittleness without adding a guarantee.
   it("offers no approve or reject affordance in any state", () => {
     for (const state of [
       "invited",

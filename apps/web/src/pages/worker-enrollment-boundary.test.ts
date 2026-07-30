@@ -117,8 +117,14 @@ describe("enrollment page I/O boundary", () => {
     }
   });
 
+  // client.ts is included deliberately, and it is the most important of the three: it is where the
+  // successful invitation response exists as a live value (the parsed body, before any caller sees
+  // it), so it is the one place a stray debug line would print the whole bearer-grade payload. It
+  // is clean today — which is exactly the state that quietly stops being true, so it is pinned
+  // rather than assumed. The shared client is scanned whole; the enrollment methods are not
+  // separable from it for this property.
   it("never logs — the invitation must not reach a console sink", () => {
-    for (const src of [PAGE_CODE, MODULE_CODE]) {
+    for (const src of [PAGE_CODE, MODULE_CODE, CLIENT_CODE]) {
       expect(src).not.toMatch(/console\.\w+/);
     }
   });
