@@ -139,13 +139,35 @@ def test_the_section_11_table_names_every_actuation_command_and_no_others():
 
 def test_the_table_scoping_is_not_vacuous():
     """Guard the guard: if the section slice or the row regex stopped matching, the equality above
-    would compare two empty-ish sets and pass. Pin that it really parses the table."""
+    would compare two empty-ish sets and pass. Pin that it really parses the table.
+
+    This test previously ended with ``assert "provenance" not in cells`` and ``assert "queue" not
+    in cells``, which **could not fire**: neither appears as a first-column backticked cell
+    anywhere in the runbook, and the row regex requires ``[a-z-]+`` so the underscored status codes
+    (``provenance_ok``, ``queue_unverified``) can never match either. Two decorative assertions,
+    sitting inside the guard written to prove the absence of decorative assertions.
+
+    ``isolation`` is the honest replacement: it IS a first-column cell, in the §3 table, so
+    asserting its absence from §1.1 genuinely fails if the section slice widens — which is the
+    failure this guard exists to catch.
+    """
     cells = _section_11_command_cells()
     assert len(cells) == 8, cells
-    # And that the scoping genuinely excludes the rest of the document: `provenance` is discussed
-    # at length in §4 but is NOT an actuation command, so it must not appear in the table cells.
-    assert "provenance" not in cells
-    assert "queue" not in cells
+    assert "isolation" not in cells, "the §1.1 slice has widened into §3"
+
+
+def test_the_scoping_assertion_can_actually_fire():
+    """And prove the replacement is not decorative in its turn: with the slice widened to the whole
+    document, ``isolation`` appears and the assertion above would fail. An assertion that cannot
+    fail is the thing this pair of tests exists to catch, so it is checked rather than asserted."""
+    text = _runbook()
+    widened = {
+        match.group(1)
+        for line in text.splitlines()
+        if (match := re.match(r"^\|\s*`([a-z-]+)`\s*\|", line))
+    }
+    assert "isolation" in widened, "the §3 row this guard keys on has moved or been renamed"
+    assert len(widened) > 8, "a widened slice must differ from the scoped one"
 
 
 def test_the_runbook_points_at_the_actuation_package_by_name():
