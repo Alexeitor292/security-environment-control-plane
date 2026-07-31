@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { EnrollmentStatus } from "../api/types";
+import { singleProducerClaims } from "../testing/single-producer-copy";
 import {
   EnrollmentInventoryView,
   type EnrollmentInventoryViewProps,
@@ -434,5 +435,60 @@ describe("EnrollmentInventoryView - selection", () => {
 
   it("warns that a revoke is permanent before offering it", () => {
     expect(html({ selectedId: id("2") })).toContain("Revoking is permanent");
+  });
+});
+
+// ------------------------------------------- recovery required, in the rendered document
+
+/**
+ * The inventory's half of the same property. `recovery_required` has two producers and this page
+ * ships one of them, so nothing it renders may claim otherwise — and the check belongs over the
+ * markup, not only over the exported constants, because copy re-typed into JSX would bypass a
+ * constant-level guard entirely.
+ *
+ * Each case names a marker that must be PRESENT: a document that says nothing about recovery
+ * satisfies "makes no single-producer claim" for free, so without the marker a state that quietly
+ * stopped rendering the copy would read as a pass.
+ */
+describe("EnrollmentInventoryView - renders no single-producer claim about recovery required", () => {
+  const PAST_ROWS = loaded([
+    status({ enrollment_id: id("4"), state: "invited", expires_at: "2026-07-30T09:00:00+00:00" }),
+  ]);
+
+  const CASES: ReadonlyArray<readonly [string, Partial<EnrollmentInventoryViewProps>, string]> = [
+    // NO_DECISION_NOTICE and SWEEP_NOTICE are on every render of this page.
+    ["default page", {}, "The two operator writes both end an enrollment rather than advancing it"],
+    ["sweep notice", {}, "does not on its own mean the time ran out"],
+    [
+      // The scope that COLLECTS the two terminals, so it enumerates how a record reaches them.
+      "attention scope",
+      { scope: "attention" },
+      "or by an operator",
+    ],
+    [
+      "row past its expiry",
+      { page: PAST_ROWS },
+      "though an operator can also mark one without waiting for it",
+    ],
+    [
+      // The shared status panel, reached from a selected row rather than from a look-up.
+      "selected row needing recovery",
+      {
+        page: loaded([status({ enrollment_id: id("5"), state: "recovery_required" })]),
+        selectedId: id("5"),
+      },
+      "does not infer which one acted",
+    ],
+  ];
+
+  it("makes no such claim in any state that renders the copy", () => {
+    for (const [name, over, mustContain] of CASES) {
+      const out = html(over);
+      // Anti-vacuity: the copy under test is genuinely in this document.
+      expect(out, `${name}: marker absent, so the check below proves nothing`).toContain(
+        mustContain,
+      );
+      expect(singleProducerClaims(out), name).toEqual([]);
+    }
   });
 });

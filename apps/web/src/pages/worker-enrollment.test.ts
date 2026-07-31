@@ -6,6 +6,11 @@ import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
 // contradictions ship together.
 import { NO_DECISION_NOTICE, SCOPE_DESCRIPTIONS, SWEEP_NOTICE } from "./enrollment-inventory";
 import {
+  SHIPPED_SINGLE_PRODUCER_COPY,
+  SINGLE_PRODUCER_CLAIMS,
+  singleProducerClaims,
+} from "../testing/single-producer-copy";
+import {
   ENROLLMENT_CONTROLS,
   ENROLLMENT_FORWARD_STATES,
   ENROLLMENT_TERMINAL_LABELS,
@@ -1021,23 +1026,10 @@ describe("operator-facing copy never asserts a single producer for recovery requ
     ["recoveryView(past expiry).steps", recoveryView("worker_bound", gone).steps.join(" ")],
   ];
 
-  /** Each pattern is an exclusivity claim that the shipped recover control falsifies. */
-  const SINGLE_PRODUCER = [
-    /only operator (write|action)/i,
-    /one operator action/i,
-    /produced only by/i,
-    /expiry sweep closed this/i,
-    /expired before completing/i,
-    /not by this page/i,
-    /sweep — not this interface/i,
-  ];
-
   it("claims no single producer anywhere an operator can read it", () => {
     for (const [name, text] of OPERATOR_FACING) {
       expect(text.length, name).toBeGreaterThan(0);
-      for (const pattern of SINGLE_PRODUCER) {
-        expect(pattern.test(text), `${name} matched ${pattern}: ${text}`).toBe(false);
-      }
+      expect(singleProducerClaims(text), `${name}: ${text}`).toEqual([]);
     }
   });
 
@@ -1047,35 +1039,31 @@ describe("operator-facing copy never asserts a single producer for recovery requ
    * actually shipped. This is the half that proves the guard has teeth.
    */
   it("rejects the wording that shipped, so no pattern is inert", () => {
-    const SHIPPED: ReadonlyArray<readonly [string, RegExp]> = [
-      ["the one operator action is revoking it", /one operator action/i],
-      ["Revoking is the only operator write, and it is how you cancel", /only operator (write|action)/i],
-      [
-        "The controller's expiry sweep closed this enrollment before the exchange finished.",
-        /expiry sweep closed this/i,
-      ],
-      ["Recovery required — expired before completing", /expired before completing/i],
-      [
-        "moved to recovery required by the controller's own expiry sweep, not by this page",
-        /not by this page/i,
-      ],
-      [
-        "`recovery_required` is produced only by the controller-side expiry sweep",
-        /produced only by/i,
-      ],
-      [
-        "The controller's expiry sweep — not this interface — moves an unfinished enrollment",
-        /sweep — not this interface/i,
-      ],
-    ];
-    for (const [text, pattern] of SHIPPED) {
+    for (const [text, pattern] of SHIPPED_SINGLE_PRODUCER_COPY) {
       // the pattern this line exists for...
       expect(pattern.test(text), `${pattern} no longer rejects: ${text}`).toBe(true);
       // ...and the guard as a whole, so a pattern deleted from the list is caught here too
-      expect(
-        SINGLE_PRODUCER.some((p) => p.test(text)),
-        `no pattern rejects the shipped wording: ${text}`,
-      ).toBe(true);
+      expect(singleProducerClaims(text), `nothing rejects the shipped wording: ${text}`).not.toEqual(
+        [],
+      );
+    }
+    // Every pattern must be reachable from some shipped example. A pattern no example exercises is
+    // one nothing proves anything about.
+    const exercised = new Set(SHIPPED_SINGLE_PRODUCER_COPY.map(([, p]) => p.source));
+    for (const pattern of SINGLE_PRODUCER_CLAIMS) {
+      expect(exercised, `${pattern.source} has no shipped example`).toContain(pattern.source);
+    }
+  });
+
+  /**
+   * These patterns run against `renderToStaticMarkup` output too, where React escapes `'` to
+   * `&#x27;`. A pattern carrying a literal apostrophe would silently stop matching there while
+   * still looking like a guard — a failure with no symptom, which is the kind this whole exercise
+   * exists to remove. Pinned rather than left as a comment on the list.
+   */
+  it("keeps every pattern matchable against escaped HTML", () => {
+    for (const pattern of SINGLE_PRODUCER_CLAIMS) {
+      expect(pattern.source, `${pattern.source} contains an apostrophe`).not.toContain("'");
     }
   });
 

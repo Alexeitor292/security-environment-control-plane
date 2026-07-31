@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
+import { singleProducerClaims } from "../testing/single-producer-copy";
 import { WorkerEnrollmentView, type WorkerEnrollmentViewProps } from "./WorkerEnrollment";
 import {
   handoffText,
@@ -648,5 +649,68 @@ describe("WorkerEnrollmentView — busy states", () => {
     expect(html({ creating: true })).toContain("Creating…");
     expect(html({ lookingUp: true })).toContain("Loading…");
     expect(html({ status: STATUS, revoking: true })).toContain("Revoking…");
+  });
+});
+
+// ------------------------------------------- recovery required, in the rendered document
+
+/**
+ * The constant-level guard in `worker-enrollment.test.ts` proves no exported copy claims a single
+ * producer. It cannot prove what this page RENDERS: copy re-typed into JSX rather than read from a
+ * constant would pass it untouched, and six of these claims were rendered together in one document.
+ *
+ * So this asserts the property where an operator actually meets it — over the markup, in the states
+ * that surface the recovery copy at all. Each case carries a marker that must be PRESENT, because
+ * "makes no single-producer claim" is trivially true of a document that says nothing about
+ * recovery, and a state that silently stopped rendering the copy would otherwise pass.
+ */
+describe("WorkerEnrollmentView — renders no single-producer claim about recovery required", () => {
+  const PAST = "2026-07-30T09:00:00+00:00";
+
+  const CASES: ReadonlyArray<readonly [string, Partial<WorkerEnrollmentViewProps>, string]> = [
+    // WORKER_DRIVEN_NOTICE and the control inventory are on every render of this page.
+    ["default page", {}, "the two operator actions both end one"],
+    [
+      "status needing recovery",
+      { status: { ...STATUS, state: "recovery_required" } },
+      "does not infer which one acted",
+    ],
+    [
+      // The terminal label reaches the document as the blockedReason on every lifecycle step.
+      "lifecycle rail under a recovery terminal",
+      { status: { ...STATUS, state: "recovery_required" } },
+      "Recovery required — ended before completing",
+    ],
+    [
+      "live enrollment past its expiry",
+      { status: { ...STATUS, expires_at: PAST } },
+      "Close this one yourself rather than waiting for the sweep",
+    ],
+    [
+      "tracked row past its expiry",
+      {
+        tracked: [trackedFromInvitation({ ...INVITATION, expires_at: PAST })],
+      },
+      "though an operator can also mark one without waiting for it",
+    ],
+  ];
+
+  it("makes no such claim in any state that renders the copy", () => {
+    for (const [name, over, mustContain] of CASES) {
+      const out = html(over);
+      // Anti-vacuity: the copy under test is genuinely in this document.
+      expect(out, `${name}: marker absent, so the check below proves nothing`).toContain(
+        mustContain,
+      );
+      expect(singleProducerClaims(out), name).toEqual([]);
+    }
+  });
+
+  /** The control inventory renders as the page's own account of what it can do, so the operator
+   *  write it ships has to appear there in the markup, not only in the exported array. */
+  it("renders the recover route in the control inventory", () => {
+    const out = html();
+    expect(out).toContain("Mark a stuck enrollment as needing recovery");
+    expect(out).toContain("/recover");
   });
 });

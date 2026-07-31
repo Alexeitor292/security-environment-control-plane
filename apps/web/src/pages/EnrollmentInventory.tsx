@@ -479,8 +479,8 @@ export function EnrollmentInventoryView({
         </h2>
         {selected === null ? (
           <p className="wenr-reason">
-            Select an enrollment above to see its evidence, lifecycle and the one operator action
-            that exists for it.
+            Select an enrollment above to see its evidence, lifecycle and the two operator actions
+            that exist for it.
           </p>
         ) : (
           <>
