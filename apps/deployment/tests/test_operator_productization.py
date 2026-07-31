@@ -472,15 +472,23 @@ def test_provenance_unavailable_without_a_source_aggregate():
     assert report["source_aggregate"]["reason_code"] == "manifest_inventory_mismatch"
 
 
-def test_provenance_declares_it_had_no_effects():
+def test_provenance_reports_its_effects_in_the_same_measured_shape_as_the_others():
+    """WS-E: the provenance path spawns no process — it does filesystem reads only — so its count
+    is genuinely zero. It is reported as a COUNT rather than a declaration anyway, because an
+    operator reading all three reports should not find two that measure and one that asserts."""
     report = build_provenance_report(source_aggregate="sha256:" + "a" * 64)
     assert report["effects_of_this_provenance_check"] == {
-        "worker_constructed": False,
-        "workflow_submitted": False,
-        "run_plan_generation_called": False,
-        "secret_resolver_constructed": False,
-        "external_contact_performed": False,
-        "host_mutated": False,
+        "measured_this_invocation": {
+            "host_commands_executed": 0,
+            "local_host_contact_performed": False,
+        },
+        "structural_invariants": {
+            "worker_constructed": False,
+            "workflow_submitted": False,
+            "run_plan_generation_called": False,
+            "secret_resolver_constructed": False,
+            "host_mutated": False,
+        },
     }
 
 

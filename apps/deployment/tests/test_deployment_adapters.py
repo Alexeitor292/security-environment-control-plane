@@ -19,6 +19,7 @@ from _deploy_support import (
     OPERATOR_SERVICE,
     ORDINARY_CONTAINER,
     FakeCommandRunner,
+    prepared_host_runner,
     valid_expected,
     valid_profile,
 )
@@ -530,11 +531,21 @@ def test_host_observation_evidence_is_exact_typed_and_derives_snapshot():
 def test_build_real_host_adapters_requires_profile_agreement():
     bad = valid_profile(container_runtime_executable_digest="sha256:" + "0" * 64)
     with pytest.raises(DeploymentPackageError):
-        build_real_host_adapters(bad, valid_expected())
+        build_real_host_adapters(bad, valid_expected(), command_runner=prepared_host_runner())
+
+
+def test_build_real_host_adapters_requires_an_explicit_command_runner():
+    """WS-E: the runner used to default to an unwrapped ``RealCommandRunner``, which was a bypass
+    of the counting wrapper the reports derive their contact statement from. Omitting it now fails
+    at the call rather than silently executing host commands nothing counted."""
+    with pytest.raises(TypeError):
+        build_real_host_adapters(valid_profile(), valid_expected())  # type: ignore[call-arg]
 
 
 def test_build_real_host_adapters_wires_pins():
-    container, service = build_real_host_adapters(valid_profile(), valid_expected())
+    container, service = build_real_host_adapters(
+        valid_profile(), valid_expected(), command_runner=prepared_host_runner()
+    )
     assert container.container_runtime.path == CONTAINER_EXE
     assert service.ordinary_container == ORDINARY_CONTAINER
     assert service.service_inspector.path == INSPECTOR_EXE

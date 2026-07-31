@@ -543,6 +543,7 @@ def build_provenance_report(
     covered_module_count: int = 0,
     expected: object | None = None,
     expected_reason: str | None = None,
+    host_commands_executed: int = 0,
 ) -> dict:
     """Build the deterministic read-only PROVENANCE report from already-resolved inputs.
 
@@ -596,13 +597,23 @@ def build_provenance_report(
             else "manifest_installed_aggregate_mismatch",
         },
         "release_identity": _release_identity_section(expected, expected_reason),
+        # The same split as the other two reports. The old flat ``external_contact_performed:
+        # False`` was, unusually, TRUE here — the provenance path spawns no process, doing only
+        # filesystem reads — but it was the last surviving instance of the shape that was false
+        # elsewhere, and an operator reading all three reports should not find two that measure and
+        # one that merely declares. The count is genuinely zero and is now reported as a count.
         "effects_of_this_provenance_check": {
-            "worker_constructed": False,
-            "workflow_submitted": False,
-            "run_plan_generation_called": False,
-            "secret_resolver_constructed": False,
-            "external_contact_performed": False,
-            "host_mutated": False,
+            "measured_this_invocation": {
+                "host_commands_executed": int(host_commands_executed),
+                "local_host_contact_performed": int(host_commands_executed) > 0,
+            },
+            "structural_invariants": {
+                "worker_constructed": False,
+                "workflow_submitted": False,
+                "run_plan_generation_called": False,
+                "secret_resolver_constructed": False,
+                "host_mutated": False,
+            },
         },
     }
 

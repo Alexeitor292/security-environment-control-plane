@@ -616,6 +616,64 @@ def test_the_counting_runner_delegates_unchanged_and_returns_the_inner_result():
     assert counter.calls == 1
 
 
+def test_the_real_loader_counts_the_host_commands_it_actually_runs(monkeypatch):
+    """The WIRING, driven end to end through the real ``load_verify_context``.
+
+    This is the gap that made the whole measurement severable. Every other test either hands an
+    integer to a pure builder or monkeypatches the loader away; the single test that ran the real
+    loader asserted the count was ZERO (the refusing-filesystem path). So both
+    ``host_commands_executed = counting.calls`` and ``command_runner=counting`` could be reverted
+    and the suite stayed green — restoring the original defect, now wearing a measurement's
+    credibility.
+
+    Here the loader runs for real over a seeded in-memory filesystem and a scripted runner: the
+    profile and pins resolve, the adapters are built, and the observation executes commands. The
+    count must be non-zero and must equal what the scripted runner actually served.
+    """
+    from _deploy_support import prepared_host_runner, seeded_production_fs
+    from secp_operator_deployment import production_context
+
+    runner = prepared_host_runner()
+    calls = {"n": 0}
+    inner_run = runner.run
+
+    def _counted(*a, **k):  # noqa: ANN002, ANN003, ANN202
+        calls["n"] += 1
+        return inner_run(*a, **k)
+
+    runner.run = _counted  # type: ignore[method-assign]
+    monkeypatch.setattr(production_context, "_production_fs", lambda: seeded_production_fs())
+    monkeypatch.setattr(production_context, "_command_runner", lambda: runner)
+
+    ctx = production_context.load_verify_context()
+
+    assert ctx.host_observation is not None, "the observation did not run; the test proves nothing"
+    assert calls["n"] > 0, "the scripted runner was never called"
+    # The recorded count must be the REAL number of commands, not a constant that happens to be
+    # non-zero: it is compared against an independent tally taken at the runner itself.
+    assert ctx.host_commands_executed == calls["n"]
+
+
+def test_the_real_loader_reports_contact_through_to_both_reports(monkeypatch):
+    """And the count must survive into what an operator actually reads — in both commands."""
+    from _deploy_support import prepared_host_runner, seeded_production_fs
+    from secp_operator_deployment import production_context
+
+    monkeypatch.setattr(production_context, "_production_fs", lambda: seeded_production_fs())
+    monkeypatch.setattr(production_context, "_command_runner", prepared_host_runner)
+
+    _code, queue_payload = run(["queue", "--json"], None)
+    _code, verify_payload = run(["verify", "--json"], None)
+
+    for payload, key in (
+        (queue_payload, "effects_of_this_queue_check"),
+        (verify_payload, "effects_of_this_verification"),
+    ):
+        measured = payload[key]["measured_this_invocation"]
+        assert measured["host_commands_executed"] > 0, key
+        assert measured["local_host_contact_performed"] is True, key
+
+
 def test_the_cli_carries_the_measured_count_from_the_resolved_context(monkeypatch):
     """End to end: a context reporting executed commands must surface as contact in the report."""
     from secp_operator_deployment import production_context

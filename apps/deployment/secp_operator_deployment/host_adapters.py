@@ -31,7 +31,12 @@ from dataclasses import dataclass
 from secp_commissioning.status import ServiceStateSnapshot
 
 from secp_operator_deployment import DeploymentPackageError
-from secp_operator_deployment.host_process import CommandRunner, RealCommandRunner
+
+# NB: ``RealCommandRunner`` is deliberately NOT imported here any more. This module used to
+# construct one as a fallback when no runner was passed, which bypassed the counting wrapper the
+# reports derive their contact statement from. With the runner required, the unwrapped runner is
+# not reachable from this module at all — the import's absence is part of the guarantee.
+from secp_operator_deployment.host_process import CommandRunner
 from secp_operator_deployment.identities import ExpectedDeploymentIdentities
 from secp_operator_deployment.pinned_exec import ExecutablePin
 from secp_operator_deployment.profile import DeploymentProfile
@@ -469,15 +474,23 @@ def build_real_host_adapters(
     profile: DeploymentProfile,
     expected: ExpectedDeploymentIdentities,
     *,
-    command_runner: CommandRunner | None = None,
+    command_runner: CommandRunner,
 ) -> tuple[LocalContainerRuntimeAdapter, LocalServiceStateAdapter]:
     """Construct the read-only container-runtime + service-state adapters from the trusted profile,
     which must already AGREE with the independent ``expected`` pins (executable path+digest
-    included). Constructing them contacts nothing (no command runs until a method is called)."""
+    included). Constructing them contacts nothing (no command runs until a method is called).
+
+    ``command_runner`` is REQUIRED. It used to default to ``None`` and fall back to constructing an
+    unwrapped :class:`RealCommandRunner`, which was a ready-made bypass of the counting wrapper the
+    reports derive their contact statement from: a future caller that omitted the argument would
+    have executed host commands that no counter saw, and the report would have said no contact
+    occurred. Making it required means the count cannot be evaded by forgetting an argument — the
+    call simply does not compile into a working call.
+    """
     from secp_operator_deployment.identities import require_profile_agreement
 
     require_profile_agreement(profile, expected)  # the profile is never the sole authority
-    runner = command_runner if command_runner is not None else RealCommandRunner()
+    runner = command_runner
     container_pin = _container_pin(profile)
     container = LocalContainerRuntimeAdapter(container_runtime=container_pin, runner=runner)
     service = LocalServiceStateAdapter(
@@ -498,11 +511,17 @@ def real_host_facts(
     profile: DeploymentProfile,
     expected: ExpectedDeploymentIdentities,
     filesystem: object | None = None,
-    command_runner: CommandRunner | None = None,
+    command_runner: CommandRunner,
 ):  # noqa: ANN201
     """Compose the real read-only adapters into ``HostFacts`` by REUSING the existing
     ``secp_commissioning.inspect_host`` — no plan/install/status/evidence logic is duplicated, and
-    every PR5C gate the plan engine applies to these facts is preserved unchanged."""
+    every PR5C gate the plan engine applies to these facts is preserved unchanged.
+
+    ``command_runner`` is REQUIRED here for the same reason as in :func:`build_real_host_adapters`:
+    it previously defaulted to ``None`` and forwarded that through, so this function was a
+    second, quieter route to an uncounted runner. It has no callers today, which is exactly why it
+    was worth closing now — an unused bypass is one nobody notices until it is used.
+    """
     from secp_commissioning.runtime import RealFilesystem
     from secp_commissioning.status import inspect_host
 

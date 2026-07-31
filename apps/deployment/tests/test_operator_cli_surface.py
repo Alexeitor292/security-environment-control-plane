@@ -187,13 +187,20 @@ def test_main_provenance_against_the_real_installed_tree_stays_bounded(capsys):
         if reason is not None:
             assert classify_reason_code(reason) is not None, f"{section} -> {reason}"
 
+    # Through the REAL production path, so the zero here is measured rather than assumed: the
+    # provenance command does filesystem reads and spawns no process.
     assert payload["effects_of_this_provenance_check"] == {
-        "worker_constructed": False,
-        "workflow_submitted": False,
-        "run_plan_generation_called": False,
-        "secret_resolver_constructed": False,
-        "external_contact_performed": False,
-        "host_mutated": False,
+        "measured_this_invocation": {
+            "host_commands_executed": 0,
+            "local_host_contact_performed": False,
+        },
+        "structural_invariants": {
+            "worker_constructed": False,
+            "workflow_submitted": False,
+            "run_plan_generation_called": False,
+            "secret_resolver_constructed": False,
+            "host_mutated": False,
+        },
     }
 
 
