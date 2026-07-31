@@ -451,12 +451,31 @@ def next_blocking_prerequisite(ladder: list[dict]) -> dict | None:
 
 
 def _queue_section(profile_parsed: bool, profile: object | None) -> dict:
-    """Report queue separation as BOOLEANS only.
+    """Report queue separation as BOOLEANS only, from the DEPLOYMENT PROFILE.
 
     The queue NAMES are profile values and are deliberately never emitted (this module never
     emits a raw profile value). What an operator needs is the answer, not the value: are both
     queues configured, and are they distinct? A shared queue would let the shipped sealed worker
     pick up controlled-live work, which the profile validator already refuses at parse time.
+
+    WHICH FACT THIS IS, EXACTLY. The split is expressed TWICE, in two different artefacts, and
+    this section reads one of them:
+
+    * the **profile/plan** pair — ``ordinary_task_queue`` / ``operator_task_queue`` — which is what
+      this reads. It is well-founded: ``plan.py`` validates both against the independent
+      root-controlled expected pins (``ordinary_queue_mismatch`` / ``operator_queue_mismatch``) and
+      separately requires them distinct (``operator_queue_not_distinct``), so this is the third
+      independent enforcement of the same fact, not the only one.
+    * the **runtime** pair — ``Settings.temporal_task_queue`` /
+      ``Settings.temporal_operator_task_queue`` — which is what a RUNNING worker process actually
+      polls, and which this section does not read. They also differ in kind: the profile requires a
+      non-empty operator queue, while the runtime one is EMPTY by default, meaning no operator
+      worker is deployed and controlled-live work stays on the shipped sealed queue.
+
+    So a green here says the deployment MATERIAL is isolated; it does not by itself establish that
+    a running process matches it. The independent observation of the running side is consumer
+    dormancy (dimension C), taken from the host rather than from any configuration file — which is
+    precisely why the two are reported as separate facts and never merged.
     """
     if not profile_parsed:
         return {
@@ -464,6 +483,7 @@ def _queue_section(profile_parsed: bool, profile: object | None) -> dict:
             "ordinary_configured": False,
             "operator_configured": False,
             "distinct": False,
+            "authority": "deployment_profile",
             "reason_code": "queue_separation_unavailable",
         }
     pf: Any = profile
@@ -476,6 +496,9 @@ def _queue_section(profile_parsed: bool, profile: object | None) -> dict:
         "ordinary_configured": ordinary,
         "operator_configured": operator,
         "distinct": distinct,
+        # Names the artefact that was READ, so a green cannot be mistaken for a statement about
+        # the running process (see the docstring). Mirrors ``release_identity.authority``.
+        "authority": "deployment_profile",
         "reason_code": None if ok else "queue_not_distinct",
     }
 

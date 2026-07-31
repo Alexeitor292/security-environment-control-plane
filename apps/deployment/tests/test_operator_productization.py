@@ -392,6 +392,10 @@ def test_queue_separation_reports_booleans_and_never_a_queue_name():
         "ordinary_configured": True,
         "operator_configured": True,
         "distinct": True,
+        # WS-E: names the artefact READ. The split is expressed twice — this pair lives in the
+        # profile/plan; a running worker polls Settings.temporal_*_task_queue, which is NOT read
+        # here. Without this field a green reads as a claim about the running process.
+        "authority": "deployment_profile",
         "reason_code": None,
     }
     # The queue NAMES are profile values and must never be emitted.

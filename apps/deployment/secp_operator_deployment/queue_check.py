@@ -23,7 +23,8 @@ safe" boolean would hide:
 * **isolation** (dimension B) — are both queues configured, and are they DISTINCT? A shared queue
   would let the shipped sealed ordinary worker pick up controlled-live work. Built by the SAME
   :func:`~secp_operator_deployment.verify._queue_section` ``verify`` uses, deliberately, so the two
-  commands can never disagree about the same fact.
+  commands can never disagree about the same fact. It reads the **deployment profile** pair, and
+  the report says so in ``isolation.authority`` — see below for why that distinction matters.
 * **consumer dormancy** (dimension C) — is anything actually polling the operator queue? Observed
   from the host, not from configuration.
 * **submission stops** (dimensions D/E/F) — the reviewed code constants that would refuse.
@@ -32,6 +33,20 @@ Note that consumer dormancy here is NOT ``verify``'s ``operator_prepared_and_dis
 rung requires the operator unit to be PRESENT (a prepared host has it installed-but-disabled); this
 check asks only whether anything CONSUMES the queue, and an absent unit consumes nothing. The two
 answers differ on exactly one host state — unit absent — and they differ correctly.
+
+THE SPLIT IS EXPRESSED TWICE, AND ISOLATION READS ONE OF THEM. The deployment profile carries
+``ordinary_task_queue`` / ``operator_task_queue``; a RUNNING worker process polls
+``Settings.temporal_task_queue`` / ``Settings.temporal_operator_task_queue``, which this check does
+not read. The commissioning chain binds them — the plan validates the profile pair against the
+independent expected pins and separately requires them distinct — but a green isolation result
+still describes the deployment MATERIAL, not the process. They differ in kind as well: the profile
+requires a non-empty operator queue, while the runtime one is empty by default, meaning no operator
+worker is deployed and controlled-live work stays on the shipped sealed queue.
+
+This is exactly why isolation and dormancy are separate facts here. Dormancy is observed from the
+HOST, so it is the independent check on the running side that isolation cannot make. Merging them
+into one "the queue is safe" boolean would let a configuration read stand in for an observation of
+what is actually running — which is the substitution this whole module exists to refuse.
 
 PURE, like :mod:`~secp_operator_deployment.verify`: the builders take already-resolved, exact-typed
 inputs and do no filesystem I/O. The CLI resolves those inputs from the SAME fixed root-controlled

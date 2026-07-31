@@ -237,15 +237,35 @@ Booleans only — never the queue names, which are profile values:
 
 ```json
 "isolation": {
-  "ok": true, "ordinary_configured": true,
-  "operator_configured": true, "distinct": true, "reason_code": null
+  "ok": true, "ordinary_configured": true, "operator_configured": true,
+  "distinct": true, "authority": "deployment_profile", "reason_code": null
 }
 ```
 
 A shared queue would let the shipped sealed ordinary worker pick up controlled-live work, so the
 profile validator refuses it at parse time (`profile.py::_v_queue_separation`) and this section is
-the defence-in-depth report of the same fact. It is built by the **same** builder `verify` uses, so
+a defence-in-depth report of the same fact. It is built by the **same** builder `verify` uses, so
 the two commands can never disagree about it.
+
+#### Which pair this reads — read `authority` before you conclude
+
+The split is expressed **twice**, in two different artefacts, and this section reads one of them:
+
+| Pair | Where | Read here? |
+| --- | --- | --- |
+| `ordinary_task_queue` / `operator_task_queue` | the deployment profile and the commissioning plan | **yes** — `authority: "deployment_profile"` |
+| `temporal_task_queue` / `temporal_operator_task_queue` | `Settings`, what a **running worker process** actually polls | no |
+
+The profile pair is well-founded rather than self-asserted: the plan validates both against the
+independent root-controlled expected pins and separately requires them distinct, so this report is
+the third independent enforcement of the same fact. The two pairs also differ in kind — the profile
+requires a non-empty operator queue, while the runtime one is **empty by default**, meaning no
+operator worker is deployed and controlled-live work stays on the shipped sealed queue.
+
+So a green here says the deployment **material** is isolated. It does not by itself establish that
+a running process matches it. The independent check on the running side is **consumer dormancy**
+below, observed from the host rather than from any configuration file — which is why the two are
+reported separately and never merged into one "the queue is safe" boolean.
 
 ### `operator_consumer` (dimension C)
 

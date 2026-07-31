@@ -266,8 +266,18 @@ def test_a_prepared_isolated_deployment_is_clean():
         "ordinary_configured": True,
         "operator_configured": True,
         "distinct": True,
+        "authority": "deployment_profile",
         "reason_code": None,
     }
+
+
+def test_isolation_names_the_artefact_it_read_on_every_path():
+    """The split is expressed TWICE: this pair lives in the profile/plan, while a running worker
+    polls ``Settings.temporal_task_queue`` / ``temporal_operator_task_queue``, which is not read
+    here. Without naming the authority, a green ``isolation`` reads as a claim about the running
+    process — which only consumer dormancy, observed from the host, can make."""
+    for kwargs in ({}, dict(profile=None), dict(host_observation=None)):
+        assert _report(**kwargs)["isolation"]["authority"] == "deployment_profile", kwargs
 
 
 def test_an_absent_profile_is_unverified_not_isolated():
