@@ -149,7 +149,7 @@ function Harness() {
   const [status] = useState<EnrollmentStatus | null>(STATUS);
   const [tracked, setTracked] = useState<readonly TrackedEnrollment[]>(SEED);
   const [trackedFilter, setTrackedFilter] = useState<TrackedFilter>("all");
-  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [refreshingIds, setRefreshingIds] = useState<readonly string[]>([]);
 
   const props: WorkerEnrollmentViewProps = {
     permissions: { read: true, manage: true },
@@ -191,12 +191,16 @@ function Harness() {
     // Busy affordance only. It deliberately fetches nothing and changes no row: this harness
     // must not be able to "verify" a data flow the product does not perform.
     onRefreshTracked: (enrollmentId) => {
-      setRefreshingId(enrollmentId);
-      window.setTimeout(() => setRefreshingId(null), 800);
+      setRefreshingIds((ids) => (ids.includes(enrollmentId) ? ids : [...ids, enrollmentId]));
+      window.setTimeout(
+        () => setRefreshingIds((ids) => ids.filter((id) => id !== enrollmentId)),
+        800,
+      );
     },
     onForgetTracked: (enrollmentId) =>
       setTracked((list) => list.filter((e) => e.enrollmentId !== enrollmentId)),
-    refreshingId,
+    refreshingIds,
+    refreshError: null,
     nowMs: NOW,
   };
 
@@ -233,7 +237,7 @@ const INVENTORY_PAGE = appendPage(EMPTY_PAGE, {
     },
   ],
   next_cursor: "opaque-cursor",
-});
+}, "all");
 
 /** Same discipline as the hand-off harness: state moves, nothing is fetched and no controller
  *  behaviour is modelled. Load-more deliberately does nothing but toggle the busy affordance. */

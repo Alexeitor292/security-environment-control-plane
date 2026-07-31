@@ -59,7 +59,7 @@ function status(over: Partial<EnrollmentStatus> = {}): EnrollmentStatus {
 }
 
 function loaded(items: EnrollmentStatus[], cursor: string | null = null): InventoryPage {
-  return appendPage(EMPTY_PAGE, { items, next_cursor: cursor });
+  return appendPage(EMPTY_PAGE, { items, next_cursor: cursor }, "all");
 }
 
 const ROWS = loaded(

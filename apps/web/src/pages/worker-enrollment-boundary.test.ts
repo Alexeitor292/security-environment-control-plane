@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 import CLIENT from "../api/client.ts?raw";
 import HARNESS from "../dev/A11yHarness.tsx?raw";
+import CONTRAST_PROBE from "../dev/contrast-probe.js?raw";
 import MAIN from "../main.tsx?raw";
 import VITE_CONFIG from "../../vite.config.ts?raw";
 import PAGE from "./WorkerEnrollment.tsx?raw";
@@ -319,7 +320,9 @@ describe("enrollment page I/O boundary", () => {
     // than silently checking less. Two on the hand-off page (create, look-up), one on the shared
     // panel (revoke), two on the inventory (list, re-read).
     const expected: ReadonlyArray<readonly [string, string, number]> = [
-      ["WorkerEnrollment.tsx", PAGE_CODE, 2],
+      // three: create, look-up, and a refused ROW refresh — which is its own surface on purpose,
+      // so a row failure is not reported under the look-up control the operator never touched
+      ["WorkerEnrollment.tsx", PAGE_CODE, 3],
       // two: revoke and operator-triggered recovery, the lifecycle's only operator writes
       ["EnrollmentStatusPanel.tsx", PANEL_CODE, 2],
       ["EnrollmentInventory.tsx", INVENTORY_CODE, 2],
@@ -391,6 +394,20 @@ describe("dev harness stays out of the product", () => {
   // test root into the graph of anything that imports it, so it must stay reachable only from
   // test files. `vite build` takes index.html as its only input, which is what makes that true;
   // this pins that no product source has started importing it anyway.
+  // The measured contrast probe is dev-only too, and it must stay a probe: it may READ computed
+  // style, and it must never be wired into the product or reach for the API.
+  it("keeps the contrast probe read-only and out of the product", () => {
+    expect(MAIN).not.toContain("contrast-probe");
+    for (const [name, src] of SURFACE) {
+      expect(src, name).not.toContain("contrast-probe");
+    }
+    const probe = code(CONTRAST_PROBE);
+    expect(probe).toContain("getComputedStyle");
+    expect(probe).not.toMatch(/\bapi\./);
+    expect(probe).not.toMatch(/\bfetch\s*\(/);
+    expect(probe).not.toMatch(/\.(textContent|innerHTML|className)\s*=/);
+  });
+
   it("keeps the real-DOM test harness out of every product source file", () => {
     for (const [name, src] of SURFACE) {
       expect(src, name).not.toContain("testing/dom-a11y");

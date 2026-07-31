@@ -42,7 +42,7 @@ function status(over: Partial<EnrollmentStatus> = {}): EnrollmentStatus {
 }
 
 function loaded(items: EnrollmentStatus[], cursor: string | null = null): InventoryPage {
-  return appendPage(EMPTY_PAGE, { items, next_cursor: cursor });
+  return appendPage(EMPTY_PAGE, { items, next_cursor: cursor }, "all");
 }
 
 const ROWS = loaded([
@@ -311,6 +311,28 @@ describe("EnrollmentInventoryView - loading and error states", () => {
 
   it("says load-more does not guarantee another row is behind it", () => {
     expect(html()).toContain("does not guarantee another row is behind it");
+  });
+
+  /** The backend inconsistency made visible honestly: listed, but the detail refuses. */
+  it("says a row that refuses its detail still exists and was not deleted", () => {
+    const out = html({
+      selectedId: id("1"),
+      rereadError: { code: "enrollment_history_inconsistent", text: "" },
+    });
+    expect(out).toContain("This enrollment is listed, but its full record cannot be served");
+    expect(out).toContain("has not been deleted");
+    expect(out).toContain("do not run the same integrity checks");
+    // the row itself stays on screen — hiding it would be the client-side drop we refuse to do
+    expect(out).toContain("sha256:111111111111");
+  });
+
+  it("does not show that explanation for an ordinary not-found", () => {
+    const out = html({
+      selectedId: id("1"),
+      rereadError: { code: "enrollment_not_found", text: "" },
+    });
+    expect(out).toContain("No enrollment exists with that id");
+    expect(out).not.toContain("do not run the same integrity checks");
   });
 
   it("keeps a refused re-read separate from a refused revoke", () => {

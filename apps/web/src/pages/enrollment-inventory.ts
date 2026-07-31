@@ -115,9 +115,29 @@ export interface InventoryPage {
   cursor: string | null;
   /** How many responses have been accumulated. 0 means nothing has been loaded yet. */
   pages: number;
+  /**
+   * The scope this page was loaded under, or null when nothing has been loaded.
+   *
+   * The cursor is a keyset over ONE filtered order. Carrying it to a different filter produces a
+   * 200 with a short page — the server decodes the position and silently skips every row ordered
+   * before it — so rows that match the new filter simply do not appear, with no error and no
+   * signal. That is the exact operator-visible failure the backend's fail-closed corrupt-row
+   * decision exists to prevent, arriving through a different door.
+   *
+   * Recording the scope ON the page makes the invariant structural rather than procedural: it can
+   * be checked, it is checked here, and a container that forgot to reset state cannot defeat it.
+   * The container ALSO discards superseded responses; this is the second of two independent guards
+   * because a comment describing the rule is what this code had before, and it was not enough.
+   */
+  scope: InventoryScope | null;
 }
 
-export const EMPTY_PAGE: InventoryPage = { items: [], cursor: null, pages: 0 };
+export const EMPTY_PAGE: InventoryPage = {
+  items: [],
+  cursor: null,
+  pages: 0,
+  scope: null,
+};
 
 /**
  * Append a response to what is already loaded, in server order.
@@ -131,8 +151,13 @@ export const EMPTY_PAGE: InventoryPage = { items: [], cursor: null, pages: 0 };
 export function appendPage(
   prev: InventoryPage,
   response: { items: readonly EnrollmentStatus[]; next_cursor: string | null },
+  scope: InventoryScope,
 ): InventoryPage {
-  const items = [...prev.items];
+  // Two filtered orders can never be merged. If the accumulated page was built under a different
+  // filter, this response STARTS a new page rather than extending it — the fail-safe direction,
+  // because the alternative is a list that silently omits matching rows.
+  const base: InventoryPage = prev.scope === null || prev.scope === scope ? prev : EMPTY_PAGE;
+  const items = [...base.items];
   const index = new Map<string, number>();
   items.forEach((item, i) => index.set(item.enrollment_id, i));
 
@@ -145,7 +170,39 @@ export function appendPage(
       items[at] = incoming;
     }
   }
-  return { items, cursor: response.next_cursor, pages: prev.pages + 1 };
+  return {
+    items,
+    cursor: response.next_cursor,
+    pages: base.pages + 1,
+    scope,
+  };
+}
+
+/**
+ * How many rows a response actually ADDED, and how many it replaced in place.
+ *
+ * The live region announces this, and the two numbers are not interchangeable: a response of 50
+ * rows that replaced 10 already-loaded ones grew the list by 40. Announcing "loaded 50 more" would
+ * overstate what happened on exactly the concurrent-write case `appendPage` is written to expect.
+ */
+export function pageDelta(
+  before: InventoryPage,
+  after: InventoryPage,
+  response: { items: readonly EnrollmentStatus[] },
+): { added: number; updated: number } {
+  const added = after.items.length - (before.scope === after.scope ? before.items.length : 0);
+  return { added, updated: Math.max(0, response.items.length - added) };
+}
+
+/**
+ * Whether the loaded page can legitimately be continued under `scope`.
+ *
+ * Three things must hold together, and `loadMoreGate` is built on this rather than on the cursor
+ * alone: something was loaded, the server offered a continuation, and it was offered for THIS
+ * filter.
+ */
+export function canContinue(page: InventoryPage, scope: InventoryScope): boolean {
+  return page.pages > 0 && page.cursor !== null && page.scope === scope;
 }
 
 /** Replace one row wherever it sits, without reordering — used after a revoke or a single re-read
@@ -274,10 +331,17 @@ export function listGate(p: EnrollmentPermissions, busy: boolean): Gate {
 export function loadMoreGate(
   p: EnrollmentPermissions,
   page: InventoryPage,
+  scope: InventoryScope,
   busy: boolean,
 ): Gate {
   if (!p.read) return { ok: false, reason: MISSING_READ_REASON };
   if (page.pages === 0) return { ok: false, reason: "Load the list first." };
+  if (page.scope !== scope) {
+    // Reachable only if the page and the filter ever disagree. It is a refusal rather than a
+    // silent re-load because continuing here would send this filter's query with the other
+    // filter's cursor, and the controller would answer 200 with rows missing.
+    return { ok: false, reason: "The filter changed. Load this filter from the first page." };
+  }
   if (page.cursor === null) {
     return { ok: false, reason: "Every page has been loaded." };
   }
@@ -408,9 +472,46 @@ export const INVENTORY_ERROR_TEXT: Record<string, string> = {
 export const PAGE_INTEGRITY_STEPS: readonly string[] = [
   "The record is preserved, not repaired, and it is not deleted. This needs an administrator.",
   "No row was silently dropped — that is why the whole page refused rather than returning a shorter one.",
+  // The consequence an operator will otherwise discover by paging into a wall. The controller
+  // returns no position to resume from, so there is no way to page past the failing row: every
+  // request that would cross it refuses, and the rows ordered after it cannot be reached from this
+  // view at all. Saying so is the difference between a confusing dead end and a known limitation.
+  "There is no way to page past it from here: the refusal carries no position to resume from, so enrollments ordered after the failing one cannot be reached through this list.",
   "A different lifecycle filter asks for a different set of rows, and may not include the failing one.",
-  "Looking an enrollment up by id on the Worker Enrollment page still works for every other record.",
+  "Every other enrollment is still readable by id on the Worker Enrollment page, including ones this list cannot reach.",
 ];
+
+// --------------------------------------------------------------------------- listed vs readable
+//
+// A row can be LISTED and still refuse its own detail. The list projects each row; the
+// single-enrollment read additionally verifies the append-only history chain. A record whose chain
+// is broken therefore appears in the page and answers 409 `enrollment_history_inconsistent` when
+// opened. That is a backend inconsistency, not something this interface can fix or should hide —
+// but an operator who clicks a row they can see and gets "not found" would reasonably conclude the
+// record had just been deleted, which is the wrong conclusion entirely.
+
+/**
+ * Closed-code copy for reading ONE enrollment that came from the list.
+ *
+ * The layered codes are the two that mean "this row is listed but its detail cannot be served".
+ * They deliberately do not read like "it is gone": the record exists, it is preserved, and the
+ * inventory row an operator is looking at is not a stale artefact.
+ */
+export const DETAIL_ERROR_TEXT: Record<string, string> = {
+  ...ENROLLMENT_ERROR_TEXT,
+  enrollment_history_inconsistent:
+    "This enrollment is listed, but its full record cannot be served: its history failed an integrity check that the list does not perform. The record is preserved, not repaired, and it has not been deleted — the row you are looking at is real. Report it to an administrator.",
+  enrollment_state_corrupt:
+    "This enrollment is listed, but its stored state failed its own integrity check and will not be shown. The record is preserved, not repaired, and it has not been deleted. Report it to an administrator.",
+};
+
+/** True for the codes that mean "listed, but the detail cannot be read" rather than "gone". */
+export function isListedButUnreadable(code: string | null | undefined): boolean {
+  return code === "enrollment_history_inconsistent" || code === "enrollment_state_corrupt";
+}
+
+export const LISTED_BUT_UNREADABLE_NOTICE =
+  "A row can appear in this list and still refuse to open: the list and the single-enrollment read do not run the same integrity checks. That is a fault in the record, not a sign it was deleted — nothing here removes the row, because hiding it would be a worse answer than showing one that cannot be opened.";
 
 export const EMPTY_SCOPE_TITLE = "Nothing matches this filter";
 

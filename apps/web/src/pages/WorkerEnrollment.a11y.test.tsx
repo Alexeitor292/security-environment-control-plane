@@ -111,7 +111,8 @@ function html(over: Partial<WorkerEnrollmentViewProps> = {}): string {
     onTrackedFilterChange: () => {},
     onRefreshTracked: () => {},
     onForgetTracked: () => {},
-    refreshingId: null,
+    refreshingIds: [],
+    refreshError: null,
     nowMs: NOW,
     ...over,
   };
@@ -129,7 +130,7 @@ const RENDERS: [string, Partial<WorkerEnrollmentViewProps>][] = [
   ["terminal status", { status: { ...STATUS, state: "recovery_required" } }],
   ["tracked rows", { tracked: TRACKED }],
   ["tracked filtered", { tracked: TRACKED, trackedFilter: "pending" }],
-  ["refreshing a row", { tracked: TRACKED, refreshingId: TRACKED[0].enrollmentId }],
+  ["refreshing a row", { tracked: TRACKED, refreshingIds: [TRACKED[0].enrollmentId] }],
   ["no permissions", { permissions: { read: false, manage: false }, status: STATUS }],
   [
     "errors",

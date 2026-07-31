@@ -95,7 +95,8 @@ function html(over: Partial<WorkerEnrollmentViewProps> = {}): string {
     onTrackedFilterChange: () => {},
     onRefreshTracked: () => {},
     onForgetTracked: () => {},
-    refreshingId: null,
+    refreshingIds: [],
+    refreshError: null,
     nowMs: NOW,
     ...over,
   };
@@ -554,7 +555,7 @@ describe("WorkerEnrollmentView — tab-local working set", () => {
   });
 
   it("shows only the refreshing row as busy", () => {
-    const out = html({ tracked, refreshingId: tracked[0].enrollmentId });
+    const out = html({ tracked, refreshingIds: [tracked[0].enrollmentId] });
     expect(out).toContain("Refreshing…");
     expect(out.match(/Refreshing…/g)).toHaveLength(1);
   });

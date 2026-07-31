@@ -11,7 +11,9 @@ import {
   ATTENTION_STATES,
   COMPLETE_NOTICE,
   EMPTY_PAGE,
+  DETAIL_ERROR_TEXT,
   INVENTORY_ERROR_TEXT,
+  LISTED_BUT_UNREADABLE_NOTICE,
   MORE_MAY_REMAIN_NOTICE,
   PAGE_INTEGRITY_CODE,
   PAGE_INTEGRITY_STEPS,
@@ -34,9 +36,13 @@ import {
   listGate,
   loadMoreGate,
   replaceRow,
+  canContinue,
+  isListedButUnreadable,
   isPageIntegrityFailure,
+  pageDelta,
   scopeStates,
   type InventoryPage,
+  type InventoryScope,
 } from "./enrollment-inventory";
 import {
   ENROLLMENT_ERROR_TEXT,
@@ -72,8 +78,12 @@ function status(over: Partial<EnrollmentStatus> = {}): EnrollmentStatus {
   };
 }
 
-function page(items: EnrollmentStatus[], cursor: string | null = null): InventoryPage {
-  return appendPage(EMPTY_PAGE, { items, next_cursor: cursor });
+function page(
+  items: EnrollmentStatus[],
+  cursor: string | null = null,
+  scope: InventoryScope = "all",
+): InventoryPage {
+  return appendPage(EMPTY_PAGE, { items, next_cursor: cursor }, scope);
 }
 
 // --------------------------------------------------------------------- scopes
@@ -149,7 +159,7 @@ describe("accumulating pages", () => {
     const next = appendPage(first, {
       items: [status({ enrollment_id: id("b") })],
       next_cursor: null,
-    });
+    }, "all");
     expect(next.items.map((i) => i.enrollment_id)).toEqual([id("a"), id("b")]);
     expect(next.pages).toBe(2);
     expect(next.cursor).toBeNull();
@@ -160,7 +170,7 @@ describe("accumulating pages", () => {
     const next = appendPage(first, {
       items: [status({ enrollment_id: id("a"), revision: 2, state: "worker_bound" })],
       next_cursor: null,
-    });
+    }, "all");
     expect(next.items).toHaveLength(2);
     expect(next.items[0].state).toBe("worker_bound");
     // still first: a refresh must not make a row jump
@@ -172,7 +182,7 @@ describe("accumulating pages", () => {
     const next = appendPage(first, {
       items: [status({ revision: 4, state: "worker_bound" })],
       next_cursor: null,
-    });
+    }, "all");
     expect(next.items[0].revision).toBe(5);
     expect(next.items[0].state).toBe("verified");
   });
@@ -182,7 +192,7 @@ describe("accumulating pages", () => {
     const short = page([status()], "cursor-1");
     expect(inventorySummary(short, NOW).complete).toBe(false);
     expect(short.cursor).toBe("cursor-1");
-    const done = appendPage(short, { items: [], next_cursor: null });
+    const done = appendPage(short, { items: [], next_cursor: null }, "all");
     expect(inventorySummary(done, NOW).complete).toBe(true);
   });
 });
@@ -319,7 +329,7 @@ describe("summary", () => {
 
   it("reports incomplete while a cursor remains and complete only when it is null", () => {
     expect(inventorySummary(mixed, NOW).complete).toBe(false);
-    const done = appendPage(mixed, { items: [], next_cursor: null });
+    const done = appendPage(mixed, { items: [], next_cursor: null }, "all");
     expect(inventorySummary(done, NOW).complete).toBe(true);
   });
 
@@ -348,16 +358,16 @@ describe("gates", () => {
   });
 
   it("offers load-more only when the server said there is another page", () => {
-    expect(loadMoreGate(READ, EMPTY_PAGE, false).ok).toBe(false);
-    expect(loadMoreGate(READ, EMPTY_PAGE, false).reason).toContain("Load the list first");
+    expect(loadMoreGate(READ, EMPTY_PAGE, "all", false).ok).toBe(false);
+    expect(loadMoreGate(READ, EMPTY_PAGE, "all", false).reason).toContain("Load the list first");
 
     const more = page([status()], "cursor-1");
-    expect(loadMoreGate(READ, more, false).ok).toBe(true);
-    expect(loadMoreGate(READ, more, true).ok).toBe(false);
+    expect(loadMoreGate(READ, more, "all", false).ok).toBe(true);
+    expect(loadMoreGate(READ, more, "all", true).ok).toBe(false);
 
     const done = page([status()], null);
-    expect(loadMoreGate(READ, done, false).ok).toBe(false);
-    expect(loadMoreGate(READ, done, false).reason).toContain("Every page has been loaded");
+    expect(loadMoreGate(READ, done, "all", false).ok).toBe(false);
+    expect(loadMoreGate(READ, done, "all", false).reason).toContain("Every page has been loaded");
   });
 
   it("requires enrollment:manage to revoke and explains that read is not enough", () => {
@@ -390,7 +400,7 @@ describe("gates", () => {
   it("never returns an unavailable gate without a reason", () => {
     const gates = [
       listGate(NONE, false),
-      loadMoreGate(READ, EMPTY_PAGE, false),
+      loadMoreGate(READ, EMPTY_PAGE, "all", false),
       inventoryRevokeGate(READ, status(), false),
       inventoryRevokeGate(BOTH, null, false),
       inventoryRevokeGate(BOTH, status({ state: "refused" }), false),
@@ -481,7 +491,7 @@ describe("cursor semantics as the controller actually implements them", () => {
   it("completes cleanly when a full page is followed by an empty one", () => {
     const full = page([status({ enrollment_id: id("a") })], "cursor-1");
     expect(inventorySummary(full, NOW).complete).toBe(false);
-    const after = appendPage(full, { items: [], next_cursor: null });
+    const after = appendPage(full, { items: [], next_cursor: null }, "all");
     expect(after.items).toHaveLength(1);
     expect(after.pages).toBe(2);
     expect(inventorySummary(after, NOW).complete).toBe(true);
@@ -541,10 +551,14 @@ describe("no row is ever dropped client-side", () => {
   it("keeps every distinct row across several pages", () => {
     let acc = EMPTY_PAGE;
     for (const char of ["1", "2", "3", "4"]) {
-      acc = appendPage(acc, {
-        items: [status({ enrollment_id: id(char) })],
-        next_cursor: char === "4" ? null : `cursor-${char}`,
-      });
+      acc = appendPage(
+        acc,
+        {
+          items: [status({ enrollment_id: id(char) })],
+          next_cursor: char === "4" ? null : `cursor-${char}`,
+        },
+        "all",
+      );
     }
     expect(acc.items.map((i) => i.enrollment_id)).toEqual([id("1"), id("2"), id("3"), id("4")]);
     expect(inventorySummary(acc, NOW).loaded).toBe(4);
@@ -556,8 +570,161 @@ describe("no row is ever dropped client-side", () => {
     const stale = appendPage(first, {
       items: [status({ enrollment_id: id("a"), revision: 1 })],
       next_cursor: null,
-    });
+    }, "all");
     expect(stale.items).toHaveLength(1);
     expect(stale.items[0].revision).toBe(3);
+  });
+});
+
+// --------------------------------------------------------------------- the cursor belongs to one filter
+
+/**
+ * The keyset cursor is a position within ONE filtered order. Carrying it to a different filter
+ * makes the controller answer 200 with a short page — it decodes the position and skips every row
+ * ordered before it — so matching rows simply do not appear, with no error and no signal.
+ *
+ * The container discards superseded responses. This is the SECOND, independent guard: the page
+ * records the filter it was built under, so the invariant is structural and a container that
+ * forgot to reset state cannot defeat it. The surface previously had only a comment stating this
+ * rule, and a comment is what failed.
+ */
+describe("a page is bound to the filter it was loaded under", () => {
+  it("records the scope it was built under", () => {
+    expect(EMPTY_PAGE.scope).toBeNull();
+    expect(page([status()], null, "workers").scope).toBe("workers");
+  });
+
+  it("refuses to continue a page under a different filter", () => {
+    const workers = page([status()], "cursor-1", "workers");
+    expect(canContinue(workers, "workers")).toBe(true);
+    expect(canContinue(workers, "queue")).toBe(false);
+    expect(canContinue(workers, "all")).toBe(false);
+  });
+
+  it("never offers load-more across a filter change, and says why", () => {
+    const READ = { read: true, manage: false };
+    const workers = page([status()], "cursor-1", "workers");
+    expect(loadMoreGate(READ, workers, "workers", false).ok).toBe(true);
+    const crossed = loadMoreGate(READ, workers, "queue", false);
+    expect(crossed.ok).toBe(false);
+    expect(crossed.reason).toContain("The filter changed");
+  });
+
+  /** Merging two filtered orders is never correct, so the newer response starts a fresh page. */
+  it("starts a new page rather than merging a response from another filter", () => {
+    const workers = page([status({ enrollment_id: id("1") })], "cursor-1", "workers");
+    const crossed = appendPage(
+      workers,
+      { items: [status({ enrollment_id: id("2") })], next_cursor: null },
+      "queue",
+    );
+    expect(crossed.scope).toBe("queue");
+    expect(crossed.items.map((i) => i.enrollment_id)).toEqual([id("2")]);
+    expect(crossed.pages).toBe(1);
+  });
+
+  it("still accumulates normally within one filter", () => {
+    const first = page([status({ enrollment_id: id("1") })], "cursor-1", "queue");
+    const second = appendPage(
+      first,
+      { items: [status({ enrollment_id: id("2") })], next_cursor: null },
+      "queue",
+    );
+    expect(second.items.map((i) => i.enrollment_id)).toEqual([id("1"), id("2")]);
+    expect(second.pages).toBe(2);
+    expect(second.scope).toBe("queue");
+  });
+});
+
+describe("what a load actually added", () => {
+  it("reports growth, not response size, when rows are replaced in place", () => {
+    const first = page([status({ enrollment_id: id("1"), revision: 1 })], "c1", "all");
+    const response = {
+      items: [
+        status({ enrollment_id: id("1"), revision: 2 }),
+        status({ enrollment_id: id("2") }),
+      ],
+      next_cursor: null,
+    };
+    const second = appendPage(first, response, "all");
+    expect(pageDelta(first, second, response)).toEqual({ added: 1, updated: 1 });
+  });
+
+  it("reports every row as added on a first load", () => {
+    const response = { items: [status(), status({ enrollment_id: id("2") })], next_cursor: null };
+    const first = appendPage(EMPTY_PAGE, response, "all");
+    expect(pageDelta(EMPTY_PAGE, first, response)).toEqual({ added: 2, updated: 0 });
+  });
+
+  it("counts a filter change as a fresh page rather than negative growth", () => {
+    const workers = page([status({ enrollment_id: id("1") })], "c1", "workers");
+    const response = { items: [status({ enrollment_id: id("2") })], next_cursor: null };
+    const crossed = appendPage(workers, response, "queue");
+    expect(pageDelta(workers, crossed, response)).toEqual({ added: 1, updated: 0 });
+  });
+});
+
+// --------------------------------------------------------------------- listed but unreadable
+
+/**
+ * A confirmed backend inconsistency this UI has to be truthful about: the list projects each row,
+ * while the single-enrollment read ALSO verifies the append-only history chain. A record with a
+ * broken chain therefore appears in the page and answers 409 when opened.
+ *
+ * The interface must not hide the row (that would be the client-side dropping the whole fail-closed
+ * design exists to prevent) and must not let the operator read it as "deleted".
+ */
+describe("a row that is listed but whose detail cannot be read", () => {
+  it("recognises the codes that mean unreadable rather than gone", () => {
+    expect(isListedButUnreadable("enrollment_history_inconsistent")).toBe(true);
+    expect(isListedButUnreadable("enrollment_state_corrupt")).toBe(true);
+    expect(isListedButUnreadable("enrollment_not_found")).toBe(false);
+    expect(isListedButUnreadable("api_unreachable")).toBe(false);
+    expect(isListedButUnreadable(null)).toBe(false);
+  });
+
+  it("says the record exists and was not deleted, not that it is missing", () => {
+    for (const code of ["enrollment_history_inconsistent", "enrollment_state_corrupt"]) {
+      const copy = DETAIL_ERROR_TEXT[code];
+      expect(copy, code).toContain("listed");
+      expect(copy, code).toContain("has not been deleted");
+      expect(copy, code).toContain("preserved, not repaired");
+      // it must not read as an absence
+      expect(copy, code).not.toContain("No enrollment exists");
+    }
+  });
+
+  it("differs from the single-record copy, which does not know the row was listed", () => {
+    expect(DETAIL_ERROR_TEXT.enrollment_history_inconsistent).not.toBe(
+      ENROLLMENT_ERROR_TEXT.enrollment_history_inconsistent,
+    );
+    // an unrelated code is untouched
+    expect(DETAIL_ERROR_TEXT.enrollment_not_found).toBe(
+      ENROLLMENT_ERROR_TEXT.enrollment_not_found,
+    );
+  });
+
+  it("explains why a visible row can refuse to open, and that nothing hides it", () => {
+    expect(LISTED_BUT_UNREADABLE_NOTICE).toContain("do not run the same integrity checks");
+    expect(LISTED_BUT_UNREADABLE_NOTICE).toContain("not a sign it was deleted");
+    expect(LISTED_BUT_UNREADABLE_NOTICE).toContain("nothing here removes the row");
+  });
+});
+
+describe("the page-integrity refusal admits it is a dead end", () => {
+  /**
+   * The controller returns no position to resume from, so rows ordered after the failing one are
+   * unreachable through this list. An operator who is not told that will page into a wall and
+   * conclude the inventory is broken rather than that one record is.
+   */
+  it("says there is no way to page past the failing row", () => {
+    const all = PAGE_INTEGRITY_STEPS.join(" ");
+    expect(all).toContain("no way to page past it");
+    expect(all).toContain("carries no position to resume from");
+    expect(all).toContain("cannot be reached through this list");
+  });
+
+  it("points at the read that still works", () => {
+    expect(PAGE_INTEGRITY_STEPS.join(" ")).toContain("still readable by id");
   });
 });

@@ -96,7 +96,8 @@ function props(over: Partial<WorkerEnrollmentViewProps> = {}): WorkerEnrollmentV
     onTrackedFilterChange: () => {},
     onRefreshTracked: () => {},
     onForgetTracked: () => {},
-    refreshingId: null,
+    refreshingIds: [],
+    refreshError: null,
     nowMs: NOW,
     ...over,
   };

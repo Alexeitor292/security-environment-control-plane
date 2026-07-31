@@ -1,7 +1,7 @@
 import "./worker-enrollment.css";
 import "./enrollment-inventory.css";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api } from "../api/client";
 import type { EnrollmentStatus } from "../api/types";
@@ -26,12 +26,14 @@ import type { ClosedCodeCopy } from "../components/ui";
 import { EnrollmentStatusPanel, Expiry, GatedAction } from "./EnrollmentStatusPanel";
 import {
   COMPLETE_NOTICE,
+  DETAIL_ERROR_TEXT,
   EMPTY_PAGE,
   EMPTY_SCOPE_TITLE,
   FILTER_NOTICE,
   INVENTORY_ERROR_TEXT,
   INVENTORY_INTRO,
   INVENTORY_SCOPES,
+  LISTED_BUT_UNREADABLE_NOTICE,
   LIST_NEEDS_READ_NOTICE,
   MORE_MAY_REMAIN_NOTICE,
   NO_DECISION_NOTICE,
@@ -50,11 +52,14 @@ import {
   SWEEP_NOTICE,
   appendPage,
   emptyScopeBody,
+  pageDelta,
   findEnrollment,
   inventoryRevokeGate,
   inventoryRows,
   inventorySummary,
   isPageIntegrityFailure,
+  isListedButUnreadable,
+  canContinue,
   listGate,
   loadMoreGate,
   replaceRow,
@@ -162,7 +167,7 @@ export function EnrollmentInventoryView({
   const summary = inventorySummary(page, nowMs);
   const selected = findEnrollment(page, selectedId);
   const load = listGate(permissions, loading);
-  const more = loadMoreGate(permissions, page, loading);
+  const more = loadMoreGate(permissions, page, scope, loading);
   const revoke = inventoryRevokeGate(permissions, selected, revoking);
   const recover = recoverGate(permissions, selected, recovering);
 
@@ -481,10 +486,21 @@ export function EnrollmentInventoryView({
                     </CyberButton>
                   </div>
                   {rereadError && (
-                    <ClosedCodeError
-                      error={{ code: rereadError.code, message: "" }}
-                      codeText={ENROLLMENT_ERROR_TEXT}
-                    />
+                    <>
+                      <ClosedCodeError
+                        error={{ code: rereadError.code, message: "" }}
+                        codeText={DETAIL_ERROR_TEXT}
+                      />
+                      {/* "Listed but unreadable" is a real state, not a contradiction: the list
+                          and the single-enrollment read do not run the same integrity checks. An
+                          operator who clicks a row they can see and reads "not found" would
+                          reasonably conclude it had just been deleted. It has not. */}
+                      {isListedButUnreadable(rereadError.code) && (
+                        <p className="wenr-reason" role="note">
+                          {LISTED_BUT_UNREADABLE_NOTICE}
+                        </p>
+                      )}
+                    </>
                   )}
                 </>
               }
@@ -512,7 +528,22 @@ export function EnrollmentInventory() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [liveNotice, setLiveNotice] = useState<string | null>(null);
 
-  const listAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
+  const listAction = useAction({ codeText: INVENTORY_ERROR_TEXT });
+
+  /**
+   * The generation of the newest list request the operator actually asked for.
+   *
+   * `useAction`'s own staleness guard wraps `onDone`, `setError` and `setBusy` — but NOT the state
+   * writes performed inside the async body, which is where this container writes the page. So a
+   * response from a filter the operator has already left would otherwise land on the new filter,
+   * stamping its rows AND its cursor onto a query they do not belong to. Changing the filter bumps
+   * this counter, and a response whose generation is no longer current is discarded whole:
+   * no rows, no cursor, no announcement, and no error banner for a filter that is gone.
+   */
+  const listGeneration = useRef(0);
+  /** In-flight state for the CURRENT filter only, so a superseded request cannot keep the new
+   *  filter's controls disabled while it drains. */
+  const [listing, setListing] = useState(false);
   const rereadAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const revokeAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const recoverAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
@@ -524,20 +555,51 @@ export function EnrollmentInventory() {
    * page came back FULL, which includes the case where the next page turns out to be empty. Saying
    * more remain would be a claim the response does not support.
    */
-  const announce = (next: InventoryPage, added: number) => {
+  const announce = (
+    next: InventoryPage,
+    delta: { added: number; updated: number },
+  ) => {
     const more = next.cursor === null ? "No further pages." : "There may be more.";
-    setLiveNotice(`Loaded ${added} more; ${next.items.length} shown. ${more}`);
+    // "Added" is the growth of the list, not the size of the response: a response that replaced
+    // already-loaded rows in place did not add them, and saying so would overstate the load on
+    // exactly the concurrent-write case this page is written to expect.
+    const updated = delta.updated > 0 ? ` ${delta.updated} updated in place.` : "";
+    setLiveNotice(
+      `Loaded ${delta.added} more; ${next.items.length} shown.${updated} ${more}`,
+    );
   };
 
-  const load = (from: InventoryPage, cursor: string | undefined) => {
+  /**
+   * `forScope` is passed in rather than read from state inside the body: the query, the cursor and
+   * the page the response is merged into must all belong to ONE filter, decided at the moment the
+   * operator asked, not whatever the state happens to be when the promise resolves.
+   */
+  const load = (
+    from: InventoryPage,
+    cursor: string | undefined,
+    forScope: InventoryScope,
+  ) => {
+    const generation = ++listGeneration.current;
+    const current = () => generation === listGeneration.current;
+    setListing(true);
     void listAction.run(async () => {
-      const response = await api.listEnrollments({
-        state: scopeStates(scope),
-        ...(cursor === undefined ? {} : { after: cursor }),
-      });
-      const next = appendPage(from, response);
-      setPage(next);
-      announce(next, response.items.length);
+      try {
+        const response = await api.listEnrollments({
+          state: scopeStates(forScope),
+          ...(cursor === undefined ? {} : { after: cursor }),
+        });
+        if (!current()) return; // superseded: this filter is no longer on screen
+        const next = appendPage(from, response, forScope);
+        setPage(next);
+        announce(next, pageDelta(from, next, response));
+      } catch (error) {
+        // A superseded request's failure is not the operator's problem either — surfacing it would
+        // put an error banner over a filter they have already moved on from.
+        if (!current()) return;
+        throw error;
+      } finally {
+        if (current()) setListing(false);
+      }
     });
   };
 
@@ -545,6 +607,11 @@ export function EnrollmentInventory() {
    *  be carried across to a different filter. The selection goes with it — a record that is no
    *  longer in the loaded set must not stay open below the table. */
   const onScopeChange = (next: InventoryScope) => {
+    // Invalidate anything in flight BEFORE the state moves: the response that is already on its way
+    // belongs to the filter being left, and must not land on this one.
+    listGeneration.current += 1;
+    setListing(false);
+    listAction.clearError();
     setScope(next);
     setPage(EMPTY_PAGE);
     setSelectedId(null);
@@ -597,13 +664,15 @@ export function EnrollmentInventory() {
       scope={scope}
       onScopeChange={onScopeChange}
       page={page}
-      loading={listAction.busy}
+      loading={listing}
       firstLoad={page.pages === 0}
       listError={listAction.error}
-      onReload={() => load(EMPTY_PAGE, undefined)}
+      onReload={() => load(EMPTY_PAGE, undefined, scope)}
       onLoadMore={() => {
-        if (page.cursor === null) return;
-        load(page, page.cursor);
+        // Both guards restated at the call site: continue only a page built under THIS filter, and
+        // only when the server offered a continuation for it.
+        if (!canContinue(page, scope)) return;
+        load(page, page.cursor as string, scope);
       }}
       selectedId={selectedId}
       onSelect={setSelectedId}

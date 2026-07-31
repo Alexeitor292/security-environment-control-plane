@@ -1,6 +1,6 @@
 import "./worker-enrollment.css";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api } from "../api/client";
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
@@ -129,8 +129,12 @@ export interface WorkerEnrollmentViewProps {
   onTrackedFilterChange: (filter: TrackedFilter) => void;
   onRefreshTracked: (enrollmentId: string) => void;
   onForgetTracked: (enrollmentId: string) => void;
-  /** The row a status request is in flight for, so only that row shows a busy control. */
-  refreshingId: string | null;
+  /** Every row a status request is in flight for. A single id could only ever mark one row busy,
+   *  so a second refresh cleared the first row's affordance while its request was still running. */
+  refreshingIds: readonly string[];
+  /** A refused row refresh, shown WITH the table it came from rather than under the look-up card,
+   *  which is a different control the operator did not touch. */
+  refreshError: ClosedCodeCopy | null;
 
   /** Injected so expiry copy is deterministic in tests. */
   nowMs: number;
@@ -177,7 +181,8 @@ export function WorkerEnrollmentView({
   onTrackedFilterChange,
   onRefreshTracked,
   onForgetTracked,
-  refreshingId,
+  refreshingIds,
+  refreshError,
   nowMs,
 }: WorkerEnrollmentViewProps) {
   const site = validateSiteLabel(siteLabel);
@@ -446,6 +451,12 @@ export function WorkerEnrollmentView({
       <CyberCard heading="Tracked in this tab" headingLevel={2}>
         <p className="wenr-reason">{TRACKED_LIST_NOTICE}</p>
         <p className="wenr-reason">{TRACKED_STALENESS_NOTICE}</p>
+        {refreshError && (
+          <ClosedCodeError
+            error={{ code: refreshError.code, message: "" }}
+            codeText={ENROLLMENT_ERROR_TEXT}
+          />
+        )}
 
         <div className="wenr-metrics">
           <MetricTile label="Tracked here" value={summary.total} />
@@ -515,7 +526,7 @@ export function WorkerEnrollmentView({
             >
               {rows.map((entry) => {
                 const past = isPastExpiry(entry, nowMs);
-                const busy = refreshingId === entry.enrollmentId;
+                const busy = refreshingIds.includes(entry.enrollmentId);
                 return (
                   <tr key={entry.enrollmentId}>
                     <td>
@@ -608,12 +619,24 @@ export function WorkerEnrollment() {
   const [status, setStatus] = useState<EnrollmentStatus | null>(null);
   const [tracked, setTracked] = useState<readonly TrackedEnrollment[]>([]);
   const [trackedFilter, setTrackedFilter] = useState<TrackedFilter>("pending");
-  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [refreshingIds, setRefreshingIds] = useState<readonly string[]>([]);
+
+  /**
+   * The newest row refresh the operator asked for.
+   *
+   * Several rows can be refreshing at once, and their responses can land in any order. Every
+   * response still updates ITS OWN row — `addTracked` guards a revision that went backwards — but
+   * only the newest request may move the DETAIL panel, or the panel ends up showing whichever
+   * request happened to finish last rather than the row the operator most recently asked about.
+   */
+  const refreshGeneration = useRef(0);
 
   const createAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const lookupAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const revokeAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const recoverAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
+  // Its own action, so a refused row refresh does not render an error under the look-up card.
+  const refreshAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
 
   /** Every observed status updates the working set, so the table can never disagree with the
    *  detail panel about a state this tab has already seen. */
@@ -654,14 +677,19 @@ export function WorkerEnrollment() {
   /** A row refresh is the same supported read, addressed by an id this tab already holds — so it
    *  needs no parsing and can never widen the set of routes this page calls. */
   const onRefreshTracked = (enrollmentId: string) => {
-    setRefreshingId(enrollmentId);
-    void lookupAction.run(async () => {
-      // finally, not the success callback: a refused refresh must release the row too, or that
-      // row keeps a busy control forever and the operator cannot retry it.
+    const generation = ++refreshGeneration.current;
+    setRefreshingIds((ids) => (ids.includes(enrollmentId) ? ids : [...ids, enrollmentId]));
+    void refreshAction.run(async () => {
+      // finally, not the success callback: a refused refresh must release its own row too, or that
+      // row keeps a busy control forever and the operator cannot retry it. Releasing only THIS id
+      // is what stops one response clearing another row's affordance.
       try {
-        observe(await api.getEnrollmentStatus(enrollmentId));
+        const observed = await api.getEnrollmentStatus(enrollmentId);
+        // The row is always updated; the detail panel only by the newest request.
+        setTracked((list) => addTracked(list, trackedFromStatus(observed)));
+        if (generation === refreshGeneration.current) setStatus(observed);
       } finally {
-        setRefreshingId(null);
+        setRefreshingIds((ids) => ids.filter((id) => id !== enrollmentId));
       }
     });
   };
@@ -743,7 +771,8 @@ export function WorkerEnrollment() {
       onForgetTracked={(enrollmentId) =>
         setTracked((list) => removeTracked(list, enrollmentId))
       }
-      refreshingId={refreshingId}
+      refreshingIds={refreshingIds}
+      refreshError={refreshAction.error}
       nowMs={Date.now()}
     />
   );
