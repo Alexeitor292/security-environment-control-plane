@@ -323,9 +323,10 @@ class TrustedManifestReader:
         rule the enumeration itself follows, for the same reason. On a package dir that is already
         root-owned and non-group/other-writable, only root can create a subdirectory in it at all,
         so such a cache is necessarily root-OWNED. Whether it VERIFIES then depends on the umask
-        the install byte-compiled under, and this is worth stating exactly rather than round to
-        "the install's cache passes": umask 0022 gives 0755 and verifies; umask 0002 gives 0775 and
-        umask 0000 gives 0777, and both are refused ``manifest_ancestor_world_writable``.
+        the install byte-compiled under, and that condition is the whole claim — rounding it either
+        way is wrong. "The install's cache passes" is false; "this refusal is a defect" is more
+        false. umask 0022 gives 0755 and verifies; umask 0002 gives 0775 and umask 0000 gives 0777,
+        and both are refused ``manifest_ancestor_world_writable``.
 
         That refusal is CORRECT and is not to be loosened — a group- or other-writable
         ``__pycache__`` beneath a root-owned package dir is a ``.pyc`` injection path, and a

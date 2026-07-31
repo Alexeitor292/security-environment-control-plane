@@ -324,11 +324,19 @@ def test_both_readers_refuse_the_symlinked_subdirectory_tree_identically(root_ba
 def test_a_module_hidden_behind_a_symlinked_subdirectory_cannot_pass_as_the_source_aggregate(
     root_base,
 ):
-    """The consequence, stated as the operator-visible claim rather than as a reason code.
+    """The operator-visible consequence — and BOUND to the reason code that carries it.
 
     The hidden module is importable through the package path as a namespace sub-portion, and no
     digest covers it — so if this tree verified, ``verify`` would report ``installed_trust_ok`` and
     ``provenance`` would carry ``trusted: true`` for content the tamper guarantee does not reach.
+
+    The reason code is asserted even though the claim above is the point. This test is one of the
+    witnesses that attributes a failure to the DESCENT's refusal specifically, and a bare
+    ``pytest.raises(ManifestError)`` is satisfied by ANY refusal on this tree. It is unique in
+    effect today; it would stop being so the moment the fixture grew a second fault — a stray
+    ``.py``, a mode change — and would then keep passing for a reason unrelated to the site it
+    witnesses, while still reading as that site's witness. Unique in name is not unique in effect,
+    and binding the code is what keeps the two the same thing as the fixtures change.
     """
     pkg = _make_trusted_pkg(root_base)
     sub = _add_subdir(pkg)
@@ -340,13 +348,15 @@ def test_a_module_hidden_behind_a_symlinked_subdirectory_cannot_pass_as_the_sour
     # reachable through the package directory itself, not merely present somewhere on the host
     assert os.path.exists(os.path.join(pkg, "sub", "evil", "backdoor.py"))
 
-    with pytest.raises(ManifestError):
+    with pytest.raises(ManifestError) as exc:
         verify_installed_package_trust(pkg, expected_aggregate=_source_aggregate())
+    assert exc.value.reason_code == "manifest_symlinked_directory"
     # and editing the hidden module still cannot produce a passing aggregate
     with open(hidden, "ab") as f:
         f.write(b"BACKDOOR = 2\n")
-    with pytest.raises(ManifestError):
+    with pytest.raises(ManifestError) as exc:
         verify_installed_package_trust(pkg, expected_aggregate=_source_aggregate())
+    assert exc.value.reason_code == "manifest_symlinked_directory"
 
 
 def test_a_directory_below_the_bounded_descent_is_refused_not_skipped(root_base):
