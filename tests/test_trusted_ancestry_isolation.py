@@ -757,11 +757,57 @@ _PATH_LITERAL = re.compile(r"/[A-Za-z0-9_./-]*")
 #: its target really is a path, as opposed to pathlib's `/` join operator.
 _QUOTED_PATH_LITERAL = re.compile(r"""["'](/[^"']*)["']""")
 
-#: Container keys/flags that would import host state into the environment the gate attests. A bind
+#: Container flags that would import host state into the environment the gate attests. A bind
 #: mount of the host's `/etc` reinstates precisely the nondeterministic directory this work exists
 #: to remove -- and it would do so while every other proof here stayed green, because the job would
 #: still declare a digest-pinned `container:`.
-_HOST_IMPORTING_OPTIONS = ("--privileged", "-v ", "--volume", "--mount", "--userns")
+#:
+#: REVIEW FINDING, proven by mutation: the first version listed only the FILESYSTEM spellings, so
+#: `options: --init --pid=host` -- written into `infra/ci/controlled-root-env.json` AND all four
+#: `ci.yml` container blocks together -- left this suite byte-identical to the unmutated control.
+#: Options-equality cannot fire on a COORDINATED edit because both sides agree, and `--pid` was not
+#: denied. That flag matters more here than the mounts do: `--pid=host` is precisely what lets
+#: `--init`'s reaper see, signal and reap HOST processes, which is the isolation property this work
+#: claims. `--network`, `--ipc`, `--uts`, `--cgroupns`, `--cap-add`, `--device` and
+#: `--security-opt` were all equally unlisted, so the namespace, capability, device and
+#: security-profile flags are denied alongside the mounts: the environment is the pinned image plus
+#: exactly the reviewed options, whatever kind of boundary an option happens to dissolve.
+#:
+#: Each entry is a COMPLETE needle, scanned against the whitespace-normalised options with one
+#: trailing space appended (see `_assert_no_host_state_is_imported`), which is why `-v ` has always
+#: carried its separator: bare `-v` is a substring of ordinary text, and the separator is what makes
+#: it a token rather than a fragment. Every value-taking flag is therefore listed in both spellings
+#: docker accepts -- `--flag value` and `--flag=value` -- and NEVER as a bare prefix. That is not
+#: fussiness: as a bare prefix `--pid` also matches `--pids-limit`, `--network` also matches
+#: `--network-alias`, `--volume` also matches `--volume-driver`, and `--device` also matches
+#: `--device-read-bps` / `--device-write-iops` / `--device-cgroup-rule` -- all legitimate options
+#: that import nothing. A denylist that refused a reviewed environment for a flag it never actually
+#: names would be weakened by the next engineer to get their change through, which costs more than
+#: it buys, so `test_the_denylist_does_not_refuse_a_legitimate_lookalike_flag` holds that line.
+_HOST_IMPORTING_VALUE_FLAGS = (
+    # mounts: host paths put straight back over the pinned layer
+    "-v",
+    "--volume",
+    "--volumes-from",
+    "--mount",
+    # namespaces: `--pid=host` is the one that defeats the isolation claim head-on
+    "--pid",
+    "--network",
+    "--ipc",
+    "--uts",
+    "--userns",
+    "--cgroupns",
+    # authority over the host kernel, its devices and its confinement profiles
+    "--cap-add",
+    "--device",
+    "--security-opt",
+)
+
+#: `--privileged` takes no value, so it is the one entry matched bare. No longer docker flag begins
+#: with it, so it cannot over-match, and the appended trailing space is what lets it match last.
+_HOST_IMPORTING_OPTIONS = ("--privileged",) + tuple(
+    spelling for flag in _HOST_IMPORTING_VALUE_FLAGS for spelling in (f"{flag} ", f"{flag}=")
+)
 
 
 def _normalised(run: str) -> str:
@@ -870,7 +916,16 @@ def _assert_no_host_state_is_imported(job: str, container: dict | str, manifest:
     `options` is additionally required to EQUAL the manifest's, for the same reason the image is:
     one reviewed environment, not four that drift apart. It is not enough to denylist the harmful
     spellings, because the denylist cannot anticipate every flag that changes what the fences
-    observe -- equality means any change to the environment is a change to the reviewed manifest."""
+    observe -- equality means any change to the environment is a change to the reviewed manifest.
+
+    The two are not redundant, and it is worth being exact about which one carries what. Equality
+    catches an UNCOORDINATED edit -- one fence given an option the manifest does not declare -- and
+    nothing else; it is silent by construction when the manifest is edited to match, because then
+    both sides agree. So on a coordinated edit the DENYLIST is the only thing that refuses, which is
+    how `--pid=host` passed everything here until it was named. The denylist remains a denylist and
+    is therefore still incomplete: a flag nobody has thought of is refused by neither check, and
+    lands as a visible manifest diff for a human to catch. `_HOST_IMPORTING_VALUE_FLAGS` records
+    what raising that floor cost and why each entry is spelled the way it is."""
     if not isinstance(container, dict):
         return  # the bare-string form has no volumes and no options to import anything through
     assert "volumes" not in container, (
@@ -880,8 +935,8 @@ def _assert_no_host_state_is_imported(job: str, container: dict | str, manifest:
     options = _normalised(str(container.get("options", "")))
     for flag in _HOST_IMPORTING_OPTIONS:
         assert flag not in f"{options} ", (
-            f"{job}: `container.options` contains {flag.strip()}, which imports host state into "
-            "the environment the gate attests"
+            f"{job}: `container.options` contains {flag.rstrip(' =')}, which imports host state "
+            "into the environment the gate attests"
         )
     declared = _normalised(str(manifest.get("options", "")))
     assert options == declared, (
@@ -1254,6 +1309,147 @@ def test_the_controlled_proof_fails_when_options_import_host_state(options: str)
     container = {"image": manifest["image"], "options": options}
     with pytest.raises(AssertionError, match="imports host state"):
         _assert_no_host_state_is_imported("backend-deployment-root", container, manifest)
+
+
+#: One REAL docker spelling per denied flag, in both separator forms, written out BY HAND rather
+#: than derived from `_HOST_IMPORTING_OPTIONS`. Deriving them would make the regression circular: a
+#: typo in a needle would generate the same typo as the input, and the pair would agree happily on a
+#: denylist that catches nothing an operator could actually write.
+_HOST_IMPORTING_SPELLINGS = (
+    "--privileged",
+    "-v /:/host",
+    "-v=/:/host",
+    "--volume /etc:/etc",
+    "--volume=/etc:/etc",
+    "--volumes-from other-container",
+    "--volumes-from=other-container",
+    "--mount type=bind,src=/etc,dst=/etc",
+    "--mount=type=bind,src=/etc,dst=/etc",
+    "--pid host",
+    "--pid=host",
+    "--network host",
+    "--network=host",
+    "--ipc host",
+    "--ipc=host",
+    "--uts host",
+    "--uts=host",
+    "--userns host",
+    "--userns=host",
+    "--cgroupns host",
+    "--cgroupns=host",
+    "--cap-add SYS_ADMIN",
+    "--cap-add=SYS_ADMIN",
+    "--device /dev/kmsg",
+    "--device=/dev/kmsg",
+    "--security-opt seccomp=unconfined",
+    "--security-opt=seccomp=unconfined",
+)
+
+#: Real docker options that CONTAIN a denied flag as a prefix and import nothing: resource limits,
+#: a network alias, a volume driver. Paired with the prefix each one collides with, so the case
+#: cannot quietly stop exercising the collision it is named for.
+_LEGITIMATE_LOOKALIKE_OPTIONS = (
+    ("--pids-limit 512", "--pid"),
+    ("--pids-limit=512", "--pid"),
+    ("--network-alias secp-controlled", "--network"),
+    ("--network-alias=secp-controlled", "--network"),
+    ("--volume-driver local", "--volume"),
+    ("--device-read-bps /dev/sda:1mb", "--device"),
+    ("--device-write-iops /dev/sda:100", "--device"),
+    ("--device-cgroup-rule c 1:3 rwm", "--device"),
+)
+
+
+def _flag_name(option: str) -> str:
+    """The flag an option spelling NAMES, independent of which separator it uses."""
+    return re.split(r"[ =]", option, maxsplit=1)[0]
+
+
+@pytest.mark.parametrize("option", _HOST_IMPORTING_SPELLINGS)
+def test_the_controlled_proof_fails_when_every_copy_declares_the_same_host_importing_option(
+    option: str,
+) -> None:
+    """The COORDINATED edit -- the case that was actually passing, and the reason this list grew.
+
+    The uncoordinated version of this defect is caught by options-equality and was already covered.
+    What was not: an operator writing the same harmful option into the manifest AND all four
+    `ci.yml` container blocks. Both sides then agree, equality is silent by construction, and only
+    the denylist can refuse. `--init --pid=host` in every copy left the whole suite byte-identical
+    to the unmutated control -- this file reported 103 passed / 4 skipped / 0 failed either way,
+    re-measured on a scratch copy of the committed tree -- while `--init`'s reaper could see,
+    signal and reap HOST processes. With `--pid` denied, the same coordinated edit is refused.
+
+    So this drives the FULL contract, not the helper: the manifest and every controlled job are
+    edited together, both halves are proven to have landed, the agreement is asserted so that
+    equality CANNOT be what fires, and the refusal is bound to the individual denylist entry by the
+    flag it names -- not merely to "something went red", and not merely to "the denylist fired"."""
+    workflow = _mutated()
+    manifest = copy.deepcopy(_manifest())
+    declared = f"{manifest['options']} {option}"
+    manifest["options"] = declared
+    for job in controlled_jobs():
+        workflow["jobs"][job]["container"]["options"] = declared
+
+    # The manifest half LANDED. (`refuses` proves the workflow half, by comparing against the
+    # pristine parse.) Without this, a mutation that silently failed to apply would leave a green
+    # test that had asked the guard nothing at all.
+    assert manifest["options"] != _manifest()["options"], (
+        "the manifest edit did not apply, so this test would pass on a denylist that names nothing"
+    )
+    # And it ACHIEVED ITS INTENT: every copy carries the identical string, which is precisely the
+    # condition under which options-equality is silent. If this ever drifts, the test would still
+    # go red -- but from the equality check, i.e. for the wrong reason, proving nothing about the
+    # denylist. That is the false red this assertion exists to rule out.
+    assert (
+        {str(workflow["jobs"][job]["container"]["options"]) for job in controlled_jobs()}
+        == {declared}
+        == {str(manifest["options"])}
+    ), "the coordinated edit did not reach every controlled job"
+
+    with refuses(
+        workflow,
+        _workflow(),
+        match=rf"contains {re.escape(_flag_name(option))}, which imports host state",
+    ):
+        assert_controlled_environment(workflow, manifest)
+
+
+@pytest.mark.parametrize("option,collides_with", _LEGITIMATE_LOOKALIKE_OPTIONS)
+def test_the_denylist_does_not_refuse_a_legitimate_lookalike_flag(
+    option: str, collides_with: str
+) -> None:
+    """The false-refusal half, which is how raising the denylist's floor could break the build.
+
+    `--pids-limit`, `--network-alias`, `--volume-driver` and the `--device-*` resource limits all
+    begin with a denied flag and import nothing. A prefix denylist would refuse a reviewed
+    environment for a flag it never names, and the next engineer would rightly weaken the denylist
+    rather than fight it -- so the separator in every needle is load-bearing and is pinned here."""
+    assert collides_with in _HOST_IMPORTING_VALUE_FLAGS, f"{collides_with} is not a denied flag"
+    # non-vacuous by construction: the collision this case is named for is really present, so a
+    # bare-prefix denylist WOULD refuse this option and the separator is what prevents it
+    assert option.startswith(collides_with), f"{option} no longer collides with {collides_with}"
+    manifest = dict(_manifest())
+    declared = f"{manifest['options']} {option}"
+    manifest["options"] = declared
+    container = {"image": manifest["image"], "options": declared}
+    _assert_no_host_state_is_imported("backend-deployment-root", container, manifest)
+
+
+def test_every_denied_flag_has_a_coordinated_edit_regression() -> None:
+    """A denylist entry with no regression is an unproven claim, and this file's whole standard is
+    that a guard is only evidence once a mutation has been seen to hit it. Both separator forms are
+    required per flag: denying one of them denies nothing an operator cannot respell."""
+    denied = {"--privileged", *_HOST_IMPORTING_VALUE_FLAGS}
+    named = {_flag_name(option) for option in _HOST_IMPORTING_SPELLINGS}
+    assert named == denied, (
+        f"denied but never mutated: {sorted(denied - named)}"
+        f"; mutated but not denied: {sorted(named - denied)}"
+    )
+    for flag in _HOST_IMPORTING_VALUE_FLAGS:
+        for separator in (" ", "="):
+            assert any(
+                option.startswith(f"{flag}{separator}") for option in _HOST_IMPORTING_SPELLINGS
+            ), f"{flag} has no regression for its {separator!r}-separated spelling"
 
 
 def test_the_controlled_proof_fails_when_a_fence_option_drifts_from_the_manifest() -> None:

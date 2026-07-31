@@ -713,10 +713,17 @@ def test_python_image_smoke_is_fail_closed_on_skip_or_failure(wf):
 # --- the optional `worker` extra must be installed where the shared corpus EXECUTES -------------
 #
 # `temporalio` is declared only in the `worker` extra (pyproject.toml). Every install site in the
-# workflow used `.[dev]`, so eight tests reached `pytest.importorskip("temporalio")` and SKIPPED in
+# workflow used `.[dev]`, so seven tests reached `pytest.importorskip("temporalio")` and SKIPPED in
 # CI while passing on any developer machine -- among them a fail-closed worker guard and the
 # regression for a startup-fatal import bug. The shard jobs have no no-skip enforcement, so nothing
 # surfaced it. These proofs stop the extra being dropped again in silence.
+#
+# SEVEN, counted rather than estimated: `test_temporal_sandbox_validation.py` gates 1 test at its
+# own `importorskip`, `test_worker_fail_closed.py` gates 2 (two separate test bodies), and
+# `test_worker_readiness_timing.py` gates 4 (one `importorskip` in the shared `_install_common`
+# helper, which four of its five tests call). Six sites in this file and in ci.yml previously said
+# "eight" against ci.yml's own "seven"; the JUnit from a run without the extra reports exactly 7
+# skips whose reason is `could not import 'temporalio'`, and no other module gates on it.
 
 WORKER_EXTRA_TESTS = (
     "apps/api/tests/test_temporal_sandbox_validation.py",
@@ -740,7 +747,7 @@ def test_the_shard_job_proves_the_worker_extra_is_present(wf):
     run = _run_text(_jobs(wf)["backend-pytest"])
     assert "import temporalio" in run, (
         "backend-pytest must prove temporalio is importable, otherwise dropping the extra silently "
-        "re-skips eight tests"
+        "re-skips seven tests"
     )
 
 
