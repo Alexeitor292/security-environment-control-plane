@@ -322,9 +322,18 @@ class TrustedManifestReader:
         The gate is applied WITHOUT a name-keyed exemption, ``__pycache__`` included — the same
         rule the enumeration itself follows, for the same reason. On a package dir that is already
         root-owned and non-group/other-writable, only root can create a subdirectory in it at all,
-        so a byte-compilation cache written by the install passes; one that does not pass is a
-        directory the trust rule genuinely does not cover, and it is refused with a bounded code
-        rather than excused for its name.
+        so such a cache is necessarily root-OWNED. Whether it VERIFIES then depends on the umask
+        the install byte-compiled under, and this is worth stating exactly rather than round to
+        "the install's cache passes": umask 0022 gives 0755 and verifies; umask 0002 gives 0775 and
+        umask 0000 gives 0777, and both are refused ``manifest_ancestor_world_writable``.
+
+        That refusal is CORRECT and is not to be loosened — a group- or other-writable
+        ``__pycache__`` beneath a root-owned package dir is a ``.pyc`` injection path, and a
+        directory an unprivileged user can write is one this reader cannot vouch for. But the
+        operator consequence is real and belongs here rather than in a surprise: a correctly
+        installed, untampered package byte-compiled under umask 002 exits 15 ``install_untrusted``,
+        and what closes it is the cache's MODE, not a compromised file. The remediation for that
+        refusal is not the same as for a modified module, even though the code is the same one.
 
         A SYMLINKED directory here reaches :func:`_refuse_symlinked_directory` — the same call the
         other two enumeration sites make, not a third copy of the rule. Stat'd with

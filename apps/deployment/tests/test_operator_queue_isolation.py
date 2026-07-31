@@ -9,10 +9,11 @@ properties pinned here are, in order of what they protect:
   report's ``effects_of_this_queue_check`` section is a CLAIM; these tests are the observation. The
   operator run hook, the composition builders and the real command runner are each replaced by a
   tripwire that RECORDS and raises if reached, and the assertion is made on the record.
-  ``temporalio`` — the only way to submit a workflow or run a worker — is covered by two static
-  import scans plus the ``main`` exit code, for the reason given at the tripwire itself: it is an
-  optional extra installed in no environment this suite runs in, so an imported-module snapshot has
-  nothing to observe, while an import reached on this path still fails the exit-code assertion.
+  ``temporalio`` — the only way to submit a workflow or run a worker — rests on two static import
+  scans, which are environment-independent and hold for any import shape. The ``main`` exit code
+  catches one shape too, a bare ``import temporalio``, but not a guarded one; and an
+  imported-module snapshot catches none, since the extra is installed in no environment this suite
+  runs in. The reasoning is at the tripwire itself.
 * :func:`test_the_guard_order_is_exactly_the_ladder_order_on_every_fact_combination` — the ordering
   proof, exhaustive over all 32 combinations of the five facts rather than sampled. ``QUEUE_LADDER``
   and ``_resolve_queue_status`` are independent derivations of the same order; if either moves, or
@@ -546,10 +547,21 @@ def test_the_queue_command_submits_nothing_and_starts_no_consumer(prepared_conte
     #   * the queue-check module names no submission symbol in an import or call shape —
     #     ``test_the_queue_check_module_calls_and_imports_no_submission_symbol``, at the bottom of
     #     this file.
-    #   * the assertion above that ``main`` returned 0 — an ``import temporalio`` reached on this
-    #     path would raise ``ImportError`` wherever the extra is absent, ``cli.py``'s bounded guard
-    #     turns any escaping exception into ``UNAVAILABLE_EXIT_CODE`` (20), and this test fails on
-    #     the exit code. That is a real runtime observation, and it is the one doing the work.
+    #   * the assertion above that ``main`` returned 0 — for ONE import shape, named exactly,
+    #     because the three behave differently and only one of them lands here (measured, each
+    #     injected into ``queue_check.py`` in turn):
+    #       - a bare import DEFERRED into a function on the queue path -> ``ImportError`` where the
+    #         extra is absent, ``cli.py``'s bounded guard turns it into ``UNAVAILABLE_EXIT_CODE``
+    #         (20), and this assertion fails. This is the shape the exit code catches.
+    #       - a bare import at MODULE level -> this file imports ``queue_check`` at module level,
+    #         so it never reaches the assertion; the whole file fails at COLLECTION instead. Loud,
+    #         but not this guard.
+    #       - a GUARDED ``try: import temporalio / except Exception: pass`` -> raises nothing,
+    #         ``main`` returns 0, and this assertion PASSES. That is how an optional dependency is
+    #         normally written, so it is the likelier shape rather than a contrived one, and the
+    #         two static scans above are the only things that fail on it.
+    #     So this is a real runtime observation of one narrow shape — not the guard the property
+    #     rests on. The static scans are, because they are blind to none of the three.
     #   * the tripwires above — the INDIRECT reach, which a source scan genuinely cannot see.
     #
     # A ``sys.modules`` delta across the ``main()`` call used to sit here, credited both in this

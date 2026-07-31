@@ -478,7 +478,10 @@ Those two `temporalio` scans are STATIC deliberately, and this sentence used to 
 weaker and untrue: that a real `main()` run was observed not to import the module. It never could
 be. `temporalio` is an optional extra (`worker`) and every CI job installs `.[dev]` only, so a
 runtime check of the imported-module set has nothing to observe and cannot fail. The static scans
-hold in any environment, including one that does install the extra. The runtime half of the
-guarantee is carried by the exit code instead: an import reached on the queue path raises where the
-extra is absent, the CLI's bounded guard turns that into exit 20, and the test asserting a clean
-exit fails.
+hold in any environment, including one that does install the extra, and for any import shape — they
+are what the guarantee rests on. The exit code adds a runtime observation of one shape only: a bare
+import *deferred into a function on the queue path* raises where the extra is absent, the CLI's
+bounded guard turns that into exit 20, and the test asserting a clean exit fails. A guarded
+`try: import temporalio / except Exception: pass` — how an optional dependency is normally written
+— raises nothing and passes that assertion; only the static scans catch it. That is why the static
+scans, and not the exit code, are the load-bearing half.

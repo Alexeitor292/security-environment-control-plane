@@ -243,7 +243,14 @@ def test_the_symlinked_directory_refusal_is_expressed_once_and_reused_at_every_s
     each of the three sites reaches it through the shared helper. A site can then fail to CALL the
     rule, which is visible here, but cannot restate it differently.
 
-    Structural on purpose, and it is not the whole guard: the behavioural half is
+    Counted PER ENUMERATION SITE, not per class, and the difference is not pedantic — a per-class
+    count says only that the trusted reader calls the rule twice SOMEWHERE. Moving the descent's
+    call up into ``list_modules`` leaves ``_list_subdirectory`` with none while the class total
+    stays 2, so the per-class form passes on a tree the descent no longer guards. Only the three
+    behavioural tests caught that, and two of them need POSIX + root, which is exactly the coverage
+    this cross-platform test exists to not depend on.
+
+    Structural on purpose, and it is still not the whole guard: the behavioural half is
     ``test_a_symlinked_subdirectory_is_refused_not_skipped`` above for the source reader, and the
     two trusted-reader cases in ``test_deployment_root_manifest.py``, which need POSIX + root.
     """
@@ -278,11 +285,23 @@ def test_the_symlinked_directory_refusal_is_expressed_once_and_reused_at_every_s
     )
 
     classes = {c.name: c for c in tree.body if isinstance(c, ast.ClassDef)}
-    assert _calls_in(classes["RealManifestReader"]) == 1, "the source-side walk must call it"
-    assert _calls_in(classes["TrustedManifestReader"]) == 2, (
-        "the trusted reader has TWO enumeration sites — the package dir and the one-level "
-        "descent — and both must call it; one call means the descent is unguarded again"
-    )
+    sites = {
+        f"{cls}.{fn.name}": _calls_in(fn)
+        for cls in ("RealManifestReader", "TrustedManifestReader")
+        for fn in classes[cls].body
+        if isinstance(fn, ast.FunctionDef)
+    }
+    for site in (
+        "RealManifestReader.list_modules",
+        "TrustedManifestReader.list_modules",
+        "TrustedManifestReader._list_subdirectory",
+    ):
+        assert sites.get(site) == 1, (
+            f"{site} must apply the refusal exactly once — it has {sites.get(site)}. Each "
+            "enumeration site guards its own level; a call that moved to a sibling leaves this "
+            "one unguarded while any class-wide total stays unchanged."
+        )
+    assert sum(sites.values()) == 3, f"an unexpected site calls the refusal: {sites}"
 
 
 def test_the_new_manifest_reason_codes_are_catalogued():

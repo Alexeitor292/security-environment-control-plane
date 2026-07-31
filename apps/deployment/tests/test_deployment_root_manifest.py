@@ -394,13 +394,38 @@ def test_the_descent_has_no_pycache_name_exemption(root_base):
     assert exc.value.reason_code == "manifest_inventory_mismatch"
 
 
-def test_the_subdirectory_trust_gate_has_no_pycache_exemption_either(root_base):
-    """And the trust gate is applied to it by the same rule, for the same reason — a cache
-    directory an unprivileged user can write is not made trustworthy by its name."""
-    pkg = _make_trusted_pkg(root_base)
-    cache = _add_subdir(pkg, "__pycache__", mode=0o757)
-    _write_module(cache, "verify.cpython-311.pyc", b"\x00")
+@pytest.mark.parametrize(
+    ("umask", "mode", "refused"),
+    [
+        (0o022, 0o755, False),  # the common install posture — verifies
+        (0o002, 0o775, True),  # group-writable: a REAL install posture, and refused
+        (0o000, 0o777, True),  # group- and other-writable
+    ],
+    ids=["umask022", "umask002", "umask000"],
+)
+def test_the_subdirectory_trust_gate_has_no_pycache_exemption_either(
+    root_base, umask, mode, refused
+):
+    """The trust gate applies to ``__pycache__`` by the same rule — a cache directory an
+    unprivileged user can write is not made trustworthy by its name.
 
+    Parametrised over the modes a root ``compileall`` ACTUALLY produces, because the interesting
+    case is not 0777. It is 0775 from umask 002, which is a normal install posture on plenty of
+    hosts: the package is untampered, the cache is root-owned, and it is still refused. That is
+    correct — group-writable under a root-owned package dir is a ``.pyc`` injection path — but it
+    is an operator-visible exit 15 on a clean install, so it is pinned rather than left to be
+    discovered. Only 0755 was covered before, so nothing went red when the docstring's claim that
+    "the install's cache passes" stopped being true.
+    """
+    assert mode == 0o777 & ~umask, "the fixture must model the umask it names"
+    pkg = _make_trusted_pkg(root_base)
+    cache = _add_subdir(pkg, "__pycache__", mode=mode)
+    _write_module(cache, "verify.cpython-311.pyc", b"\x00")
+    assert os.stat(cache).st_uid == 0  # root-owned either way; only the mode differs
+
+    if not refused:
+        assert verify_installed_package_trust(pkg) == _source_aggregate()
+        return
     with pytest.raises(ManifestError) as exc:
         verify_installed_package_trust(pkg)
     assert exc.value.reason_code == "manifest_ancestor_world_writable"
