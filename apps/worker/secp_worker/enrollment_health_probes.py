@@ -364,23 +364,34 @@ class LocalWorkerHealthProbes:
             and record.ordinary_task_queue != record.operator_task_queue
         )
 
+    # The three inertness probes below take ``ctx`` to satisfy the uniform ``WorkerHealthProbes``
+    # signature and deliberately do NOT read it: they attest facts about the BOOTSTRAP TRANSACTION
+    # that built this host, which is a property of the host alone and cannot vary per exchange.
+    # Binding them to ``ctx`` would not strengthen them — it would only make a host-wide fact look
+    # exchange-scoped. Do not "fix" this by adding a ``_same_enrollment(ctx)`` conjunct.
+
     def no_provider_contact(self, ctx: HealthObservationContext) -> bool:
-        """No provider was contacted: the bootstrap transaction that produced this host recorded
-        both its provider-contact and its external-contact proofs as ``False``, and the reviewed
-        seals that keep provider contact unreachable are in position."""
+        """No provider was contacted while this host was built: the bootstrap transaction RECORDED
+        both its provider-contact and its external-contact proofs as ``False``, and it recorded the
+        seals that make provider contact unreachable in their reviewed positions.
+
+        This is a statement about what was OBSERVED AT BOOTSTRAP TIME, not a live assertion about
+        the current process — see the module docstring. A probe here re-reading today's seal state
+        would be a second, unreviewed observer of the same host."""
         return self._inert("proxmox_contacted", "external_contacts_performed") and (
             self._seals_reviewed()
         )
 
     def no_opentofu_execution(self, ctx: HealthObservationContext) -> bool:
-        """No OpenTofu ran: the recorded execution proof is ``False`` and both B1-A subprocess seals
-        are in their reviewed ``True`` position, so the real process executor cannot be
-        constructed at all."""
+        """No OpenTofu ran while this host was built: the recorded execution proof was ``False`` and
+        both B1-A subprocess seals were recorded in their reviewed ``True`` position — the position
+        in which the real process executor could not be constructed."""
         return self._inert("opentofu_executed") and self._seals_reviewed()
 
     def no_controlled_live_submission(self, ctx: HealthObservationContext) -> bool:
-        """Nothing was submitted to the controlled-live path: neither a workflow submission nor a
-        plan-generation run was recorded, and the operator-activation seal is in position."""
+        """Nothing was submitted to the controlled-live path while this host was built: neither a
+        workflow submission nor a plan-generation run was recorded, and the operator-activation seal
+        was recorded in its reviewed position."""
         return self._inert("workflows_submitted", "run_plan_generation_called") and (
             self._seals_reviewed()
         )

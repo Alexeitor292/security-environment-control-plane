@@ -20,9 +20,18 @@ import json
 import pytest
 from secp_commissioning import enrollment_attestation as ea
 from secp_commissioning.runtime import InMemoryFilesystem
+from secp_management import BOOTSTRAP_CONTRACT_VERSION
+from secp_management.evidence import BootstrapEvidence, ManagementPlaneIdentity
 from secp_management.layout import ManagementLocations
+from secp_management.planes import Plane, Role
 from secp_management.signing import generate_keypair
-from secp_management.topology import SealState
+from secp_management.topology import (
+    OPERATOR_SERVICE_NAME,
+    OPERATOR_TASK_QUEUE,
+    ORDINARY_CONTAINER_NAME,
+    ORDINARY_TASK_QUEUE,
+    SealState,
+)
 from secp_worker.enrollment_driver import (
     HealthObservationContext,
     LocalWorkerHealthObserver,
@@ -31,6 +40,7 @@ from secp_worker.enrollment_driver import (
     WorkerHealthProbes,
 )
 from secp_worker.enrollment_health_probes import (
+    _EVIDENCE_BOOLS,
     _REVIEWED_SEALS,
     MANAGEMENT_WORKER_EVIDENCE_PATH,
     MANAGEMENT_WORKER_IDENTITY_PATH,
@@ -52,37 +62,57 @@ NOW = "2026-07-30T00:00:00+00:00"
 FUTURE = "2999-01-01T00:00:00+00:00"
 BOOTSTRAP_DIR = "/var/lib/secp/bootstrap"
 
-_IDENTITY = {
-    "bootstrap_contract_version": "1",
-    "plane": "management",
-    "role": "worker",
-    "installation_id": "worker-aaaaaaaa",
-    "release_digest": RELEASE,
-    "source_sha": "s" * 40,
-    "source_tree_sha": "t" * 40,
-    "installed_artifact_digests": [],
-    "created_at": NOW,
-}
-_EVIDENCE = {
-    "plane": "management",
-    "role": "worker",
-    "mode": "installed",
-    "release_aggregate_digest": RELEASE,
-    "config_identity": "sha256:" + "d" * 64,
-    "unit_identity": "sha256:" + "e" * 64,
-    "deployment_package_aggregate": "sha256:" + "f" * 64,
-    "ordinary_task_queue": "secp-ordinary",
-    "operator_task_queue": "secp-operator",
-    "external_contacts_performed": False,
-    "workflows_submitted": False,
-    "run_plan_generation_called": False,
-    "opentofu_executed": False,
-    "proxmox_contacted": False,
-    "operator_activation_sealed": True,
-    "plan_only_process_sealed": False,
-    "b1a_subprocess_sealed_activation": True,
-    "b1a_subprocess_sealed_executor": True,
-}
+# The two seeded documents are built from the management plane's OWN strict models and serialized
+# through their own ``canonical()`` — never hand-rolled here. ``read_installed_worker_record``
+# projects fifteen field NAMES owned by those models; a hand-written dict would keep passing after a
+# rename while the production projection silently returned ``None``, turning every derived check
+# False and making a healthy worker unable to enroll. Building the real documents means a rename
+# breaks construction here (loudly) instead, and
+# ``test_every_projected_field_name_exists_in_the_management_documents`` pins the projection itself.
+_IDENTITY = ManagementPlaneIdentity(
+    bootstrap_contract_version=BOOTSTRAP_CONTRACT_VERSION,
+    plane=Plane.MANAGEMENT.value,
+    role=Role.WORKER.value,
+    installation_id="worker-aaaaaaaa",
+    release_digest=RELEASE,
+    source_sha="s" * 40,
+    source_tree_sha="t" * 40,
+    installed_artifact_digests=(),
+    created_at=NOW,
+).canonical()
+_EVIDENCE = BootstrapEvidence(
+    bootstrap_contract_version=BOOTSTRAP_CONTRACT_VERSION,
+    mode="installed",
+    role=Role.WORKER.value,
+    plane=Plane.MANAGEMENT.value,
+    installation_id="worker-aaaaaaaa",
+    release_aggregate_digest=RELEASE,
+    signing_anchor_id="sha256:" + "9" * 64,
+    source_sha="s" * 40,
+    source_tree_sha="t" * 40,
+    image_digests=(),
+    wheel_digests=(),
+    implementation_aggregate="sha256:" + "b" * 64,
+    path_bindings=(),
+    container_identities=(ORDINARY_CONTAINER_NAME,),
+    service_identities=(OPERATOR_SERVICE_NAME,),
+    config_identity="sha256:" + "d" * 64,
+    unit_identity="sha256:" + "e" * 64,
+    deployment_package_aggregate="sha256:" + "f" * 64,
+    runtime_uid=1000,
+    runtime_gid=1000,
+    ordinary_task_queue=ORDINARY_TASK_QUEUE,
+    operator_task_queue=OPERATOR_TASK_QUEUE,
+    health_command_identity="sha256:" + "7" * 64,
+    object_records=(),
+    transaction_timestamp=NOW,
+    **_REVIEWED_SEALS,
+    external_contacts_performed=False,
+    workflows_submitted=False,
+    run_plan_generation_called=False,
+    opentofu_executed=False,
+    proxmox_contacted=False,
+).canonical()
 
 
 def _invitation(**over) -> EnrollmentInvitationInputs:
@@ -175,6 +205,59 @@ def test_the_reviewed_seal_positions_match_the_management_seal_predicate():
     for name in _REVIEWED_SEALS:
         flipped = {**_REVIEWED_SEALS, name: not _REVIEWED_SEALS[name]}
         assert SealState(**flipped).safe is False
+
+
+#: Every field name ``read_installed_worker_record`` projects out of each management document. These
+#: are the THIRD drift axis (after the two document paths and the four seal positions): the
+#: projection reads them by string key, so a rename in ``BootstrapEvidence`` /
+#: ``ManagementPlaneIdentity`` would make the read return ``None`` — every derived check False, the
+#: worker permanently unable to reach healthy — with no other test failing.
+_PROJECTED_IDENTITY_FIELDS = frozenset({"role", "plane", "release_digest", "installation_id"})
+_PROJECTED_EVIDENCE_FIELDS = frozenset(
+    {
+        "role",
+        "plane",
+        "mode",
+        "release_aggregate_digest",
+        "unit_identity",
+        "config_identity",
+        "deployment_package_aggregate",
+        "ordinary_task_queue",
+        "operator_task_queue",
+        *_EVIDENCE_BOOLS,
+    }
+)
+
+
+def test_every_projected_field_name_exists_in_the_management_documents():
+    """The projection's field names must all be REAL fields of the management-plane models.
+
+    Guards the rename axis the two existing parity guards do not cover: renaming e.g.
+    ``BootstrapEvidence.deployment_package_aggregate`` makes ``read_installed_worker_record`` return
+    ``None`` in production — a silent, total false-red — while every behavioural test below keeps
+    passing, because they seed their documents from the same hand-written source they assert on."""
+    assert _PROJECTED_IDENTITY_FIELDS <= set(ManagementPlaneIdentity.model_fields)
+    assert _PROJECTED_EVIDENCE_FIELDS <= set(BootstrapEvidence.model_fields)
+    # and they survive canonicalization (the exact bytes the bootstrap writes to disk)
+    assert _PROJECTED_IDENTITY_FIELDS <= set(_IDENTITY)
+    assert _PROJECTED_EVIDENCE_FIELDS <= set(_EVIDENCE)
+
+
+def test_the_seeded_documents_actually_satisfy_the_production_projection():
+    """The real documents a bootstrapped worker carries must project successfully — so the fixtures
+    above prove the production reader works, not merely that some dict shape does."""
+    fs = InMemoryFilesystem()
+    _seed_host(fs)
+
+    record = read_installed_worker_record(fs)
+
+    assert record is not None
+    assert record.release_digest == RELEASE
+    assert record.mode == "installed"
+    assert record.ordinary_task_queue == ORDINARY_TASK_QUEUE
+    assert record.operator_task_queue == OPERATOR_TASK_QUEUE
+    assert record.ordinary_task_queue != record.operator_task_queue
+    assert all(record.flag(name) is _REVIEWED_SEALS[name] for name in _REVIEWED_SEALS)
 
 
 def test_the_probes_satisfy_the_declared_protocol():
@@ -333,7 +416,8 @@ def test_a_seal_out_of_its_reviewed_position_fails_every_inertness_check(seal):
         {"unit_identity": ""},
         {"config_identity": ""},
         {"deployment_package_aggregate": ""},
-        {"ordinary_task_queue": "secp-operator"},  # the ordinary worker on the operator queue
+        # the ordinary worker polling the OPERATOR queue (the two must stay distinct)
+        {"ordinary_task_queue": OPERATOR_TASK_QUEUE},
     ],
 )
 def test_a_worker_host_without_the_prepared_operator_end_state_fails(evidence_override):
