@@ -580,3 +580,314 @@ def test_the_live_backend_coverage_of_this_run_is_recorded(record_testsuite_prop
     }
     # exactly one backend can be live, so the other two are always structural-only
     assert len(structural_only) == (2 if live != "none" else 3)
+
+
+# --- the macOS Keychain binding, driven against a stand-in for the documented SecItem API ---------
+#
+# No host in this repository runs macOS and CI is ubuntu-only, so the real Security framework is
+# unreachable. Left at that, ~250 lines of ctypes would ship having never executed anywhere — and
+# ctypes mistakes (a transposed dictionary key, a missed CFRelease, a status code read as success)
+# are exactly the class that only appears at runtime. These drive the binding's OWN logic against a
+# stand-in following the documented SecItem contract: SecItemUpdate returns errSecItemNotFound for
+# an absent item, SecItemAdd returns errSecDuplicateItem for a present one, SecItemCopyMatching
+# writes a CFTypeRef through its second (by-reference) argument, and every CF object the caller
+# created is released by the caller.
+#
+# What this CAN prove: query composition, the update->add->update-on-duplicate sequence, status
+# handling, not-found vs failure, and that every created CF object is released. What it CANNOT
+# prove: that the real framework behaves as documented, or that the argtypes/restype declarations
+# and constant lookups in `_MacOSFrameworks` are correct — those need a macOS host, and that
+# remains an explicit gap rather than one papered over.
+
+_KEYCHAIN_CONSTANTS = (
+    "kSecClass",
+    "kSecClassGenericPassword",
+    "kSecAttrService",
+    "kSecAttrAccount",
+    "kSecValueData",
+    "kSecReturnData",
+    "kSecMatchLimit",
+    "kSecMatchLimitOne",
+    "kCFBooleanTrue",
+)
+
+_ERR_SEC_SUCCESS = 0
+_ERR_SEC_DUPLICATE_ITEM = -25299
+_ERR_SEC_ITEM_NOT_FOUND = -25300
+
+
+class _FakeSecurity:
+    """The four SecItem entry points, over an in-memory ``(service, account) -> bytes`` store."""
+
+    def __init__(self, frameworks):
+        self._fw = frameworks
+        self.items: dict[tuple[str, str], bytes] = {}
+        self.calls: list[str] = []
+
+    def decode(self, query_ref):
+        """Resolve a query CFDictionary back into the values the binding put into it."""
+        fields = self._fw.dict_contents(query_ref)
+        c = self._fw.constants
+        assert fields.get(c["kSecClass"]) == c["kSecClassGenericPassword"]
+        service = self._fw.str_contents(fields[c["kSecAttrService"]])
+        account = self._fw.str_contents(fields[c["kSecAttrAccount"]])
+        return service, account, fields
+
+    def SecItemUpdate(self, query, update):  # noqa: N802 - mirrors the framework's own name
+        self.calls.append("SecItemUpdate")
+        service, account, _fields = self.decode(query)
+        if (service, account) not in self.items:
+            return _ERR_SEC_ITEM_NOT_FOUND
+        changed = self._fw.dict_contents(update)
+        self.items[(service, account)] = self._fw.data_contents(
+            changed[self._fw.constants["kSecValueData"]]
+        )
+        return _ERR_SEC_SUCCESS
+
+    def SecItemAdd(self, query, _result):  # noqa: N802
+        self.calls.append("SecItemAdd")
+        service, account, fields = self.decode(query)
+        if (service, account) in self.items:
+            return _ERR_SEC_DUPLICATE_ITEM
+        self.items[(service, account)] = self._fw.data_contents(
+            fields[self._fw.constants["kSecValueData"]]
+        )
+        return _ERR_SEC_SUCCESS
+
+    def SecItemCopyMatching(self, query, result_ref):  # noqa: N802
+        self.calls.append("SecItemCopyMatching")
+        service, account, fields = self.decode(query)
+        c = self._fw.constants
+        # the binding must ask for the DATA back, and for exactly one match
+        assert fields.get(c["kSecReturnData"]) == c["kCFBooleanTrue"]
+        assert fields.get(c["kSecMatchLimit"]) == c["kSecMatchLimitOne"]
+        if (service, account) not in self.items:
+            return _ERR_SEC_ITEM_NOT_FOUND
+        # ``ctypes.byref(x)`` yields a CArgObject whose ``_obj`` is the original — this is how a
+        # stand-in emulates the framework writing a CFTypeRef through an out-parameter.
+        result_ref._obj.value = self._fw.data(self.items[(service, account)])
+        return _ERR_SEC_SUCCESS
+
+    def SecItemDelete(self, query):  # noqa: N802
+        self.calls.append("SecItemDelete")
+        service, account, _fields = self.decode(query)
+        if (service, account) not in self.items:
+            return _ERR_SEC_ITEM_NOT_FOUND
+        del self.items[(service, account)]
+        return _ERR_SEC_SUCCESS
+
+
+class _FakeFrameworks:
+    """Stands in for ``_MacOSFrameworks``: a CF object graph addressed by synthetic refs.
+
+    Refs start well above the constant sentinels, so a constant can never be mistaken for an object.
+    """
+
+    def __init__(self):
+        self.constants = {name: index + 1 for index, name in enumerate(_KEYCHAIN_CONSTANTS)}
+        self._objects: dict[int, tuple[str, object]] = {}
+        self._next = 1000
+        self.released: list[int] = []
+        self.sec = _FakeSecurity(self)
+
+    def _store(self, kind, value):
+        self._next += 1
+        self._objects[self._next] = (kind, value)
+        return self._next
+
+    def string(self, value):
+        return self._store("str", value)
+
+    def data(self, value):
+        return self._store("data", bytes(value))
+
+    def dictionary(self, pairs):
+        return self._store("dict", dict(pairs))
+
+    def release(self, *refs):
+        for ref in refs:
+            if ref:
+                self.released.append(ref)
+
+    def data_bytes(self, ref):
+        return self.data_contents(ref)
+
+    # --- stand-in introspection (not part of the real framework surface) ---
+
+    def dict_contents(self, ref):
+        kind, value = self._objects[ref]
+        assert kind == "dict"
+        return value
+
+    def str_contents(self, ref):
+        kind, value = self._objects[ref]
+        assert kind == "str"
+        return value
+
+    def data_contents(self, ref):
+        kind, value = self._objects[ref]
+        assert kind == "data"
+        return value
+
+    def live_refs(self):
+        """Every ref created but not yet released."""
+        return [ref for ref in self._objects if self.released.count(ref) == 0]
+
+
+def _keychain():
+    """A ``MacOSKeychainBinding`` bound to the stand-in.
+
+    ``__init__`` refuses off-darwin by design — a binding must never construct on the wrong
+    platform, which ``test_each_binding_refuses_construction_on_the_wrong_platform`` pins — so the
+    instance is built without it and the single slot is injected. That bypasses ONLY the gate; every
+    method under test below is the shipped one.
+    """
+    binding = object.__new__(MacOSKeychainBinding)
+    frameworks = _FakeFrameworks()
+    binding._fw = frameworks
+    return binding, frameworks
+
+
+def test_the_macos_binding_round_trips_a_secret():
+    binding, fw = _keychain()
+    assert binding.backend_id == BACKEND_MACOS_KEYCHAIN
+    assert binding.get_secret(service=SERVICE, account=ACCOUNT) is None
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"first")
+    assert binding.get_secret(service=SERVICE, account=ACCOUNT) == b"first"
+    assert binding.delete_secret(service=SERVICE, account=ACCOUNT) is True
+    assert binding.get_secret(service=SERVICE, account=ACCOUNT) is None
+    assert fw.sec.items == {}
+
+
+def test_a_second_write_updates_in_place_rather_than_adding_a_duplicate():
+    """The documented sequence is update-first, add-only-if-not-found. Getting it backwards leaves
+    two keychain items for one controller, and the wrong one can then be read back."""
+    binding, fw = _keychain()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"first")
+    assert fw.sec.calls == ["SecItemUpdate", "SecItemAdd"]
+
+    fw.sec.calls.clear()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"second")
+    assert fw.sec.calls == ["SecItemUpdate"]  # no second add
+    assert binding.get_secret(service=SERVICE, account=ACCOUNT) == b"second"
+    assert len(fw.sec.items) == 1
+
+
+def test_a_duplicate_item_race_falls_back_to_an_update():
+    """``SecItemAdd`` returning errSecDuplicateItem means another writer won between the update and
+    the add. The binding must recover by updating, not surface a failure."""
+    binding, fw = _keychain()
+    real_update = fw.sec.SecItemUpdate
+    state = {"first": True}
+
+    def racing_update(query, update):
+        if state["first"]:
+            state["first"] = False
+            fw.sec.calls.append("SecItemUpdate")  # record it as the real one would
+            # pretend the item is absent, then have it exist by the time the add runs
+            service, account, _f = fw.sec.decode(query)
+            fw.sec.items[(service, account)] = b"written-by-someone-else"
+            return _ERR_SEC_ITEM_NOT_FOUND
+        return real_update(query, update)
+
+    fw.sec.SecItemUpdate = racing_update
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"mine")
+    assert fw.sec.calls == ["SecItemUpdate", "SecItemAdd", "SecItemUpdate"]
+    assert fw.sec.items[(SERVICE, ACCOUNT)] == b"mine"
+
+
+def test_two_accounts_under_one_service_are_separate_keychain_items():
+    binding, _fw = _keychain()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"a")
+    binding.set_secret(service=SERVICE, account="https://other.invalid", secret=b"b")
+    assert binding.get_secret(service=SERVICE, account=ACCOUNT) == b"a"
+    assert binding.get_secret(service=SERVICE, account="https://other.invalid") == b"b"
+    # deleting one must not touch the other
+    assert binding.delete_secret(service=SERVICE, account=ACCOUNT) is True
+    assert binding.get_secret(service=SERVICE, account="https://other.invalid") == b"b"
+
+
+def test_deleting_an_absent_keychain_item_is_false_not_a_failure():
+    binding, _fw = _keychain()
+    assert binding.delete_secret(service=SERVICE, account=ACCOUNT) is False
+
+
+@pytest.mark.parametrize("status", [-25291, -34018, 1])
+def test_a_non_success_keychain_status_is_a_bounded_refusal(status):
+    """Anything that is not errSecSuccess or errSecItemNotFound must refuse — never be read as an
+    absent credential, which would let an unreachable keychain look like 'not logged in'."""
+    binding, fw = _keychain()
+
+    fw.sec.SecItemDelete = lambda query: status
+    with pytest.raises(ManagementError) as ei:
+        binding.delete_secret(service=SERVICE, account=ACCOUNT)
+    assert ei.value.reason_code == "secpctl_credential_backend_failed"
+
+    fw.sec.SecItemCopyMatching = lambda query, result: status
+    with pytest.raises(ManagementError) as ei:
+        binding.get_secret(service=SERVICE, account=ACCOUNT)
+    assert ei.value.reason_code == "secpctl_credential_backend_failed"
+
+
+def test_a_successful_keychain_status_with_no_returned_data_is_refused():
+    """errSecSuccess with a NULL out-parameter is a broken framework answer, not an empty secret."""
+    binding, fw = _keychain()
+    fw.sec.SecItemCopyMatching = lambda query, result: _ERR_SEC_SUCCESS
+    with pytest.raises(ManagementError) as ei:
+        binding.get_secret(service=SERVICE, account=ACCOUNT)
+    assert ei.value.reason_code == "secpctl_credential_backend_failed"
+
+
+def test_every_created_core_foundation_object_is_released():
+    """CF objects are caller-owned. A missed release is a leak no functional test would catch, so
+    ownership is asserted directly: nothing the binding created may outlive the call."""
+    binding, fw = _keychain()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"payload")
+    assert fw.live_refs() == []
+    binding.get_secret(service=SERVICE, account=ACCOUNT)
+    assert fw.live_refs() == []
+    binding.delete_secret(service=SERVICE, account=ACCOUNT)
+    assert fw.live_refs() == []
+
+
+def test_the_returned_keychain_data_object_is_released_too():
+    """The item ``SecItemCopyMatching`` hands back is owned by the CALLER — releasing only the query
+    would leak one CFData per read."""
+    binding, fw = _keychain()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"payload")
+    fw.released.clear()
+    binding.get_secret(service=SERVICE, account=ACCOUNT)
+    # the data ref the stand-in created for the result is among the released refs
+    assert any(fw._objects[ref][0] == "data" for ref in fw.released)
+
+
+def test_keychain_objects_are_released_even_when_the_framework_fails():
+    binding, fw = _keychain()
+    fw.sec.SecItemUpdate = lambda query, update: -25291
+    fw.sec.SecItemAdd = lambda query, result: -25291
+    with pytest.raises(ManagementError):
+        binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"payload")
+    assert fw.live_refs() == []
+
+
+@pytest.mark.parametrize("account", ["", "has space", "x" * 256, None])
+def test_a_malformed_account_never_reaches_a_keychain_call(account):
+    binding, fw = _keychain()
+    with pytest.raises(ManagementError) as ei:
+        binding.get_secret(service=SERVICE, account=account)
+    assert ei.value.reason_code == "secpctl_credential_account_invalid"
+    assert fw.sec.calls == []
+
+
+def test_an_oversized_secret_is_refused_before_any_keychain_call():
+    binding, fw = _keychain()
+    with pytest.raises(ManagementError) as ei:
+        binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"x" * (MAX_SECRET_BYTES + 1))
+    assert ei.value.reason_code == "secpctl_credential_too_large"
+    assert fw.sec.calls == [] and fw.sec.items == {}
+
+
+def test_the_macos_binding_repr_never_reveals_a_service_account_or_secret():
+    binding, _fw = _keychain()
+    assert repr(binding) == "MacOSKeychainBinding(<bound>)"
+    assert ACCOUNT not in repr(binding) and SERVICE not in repr(binding)
