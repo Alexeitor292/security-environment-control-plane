@@ -71,8 +71,25 @@ sequence is [pr5d-operator-deployment.md](pr5d-operator-deployment.md) (steps 1�
 So the division is: `secp_commissioning install-prepared` puts the host into the prepared state;
 `secp_operator_deployment verify` tells you, from the **other side**, whether it is actually there —
 and the prerequisite ladder (§2) tells you which rung is missing and whether closing it is yours to
-do. When `verify` reports `profile_installed` or `expected_identities_installed` unmet, the material
-is created out of band per step 4 of that sequence, not by any command in this package.
+do.
+
+#### The two root-controlled files are different artefacts
+
+`profile_installed` and `expected_identities_installed` are **separate rungs about separate files**,
+and their separation is the whole security property: the profile is the deployment's own claim, the
+expected-identities file is the independent authority it is checked against. Neither is created by
+any command in this package, and they are not created the same way.
+
+| Unmet rung | The artefact | Where it comes from |
+| --- | --- | --- |
+| `profile_installed` | the deployment profile | **Step 4** of the pr5d sequence — created out of band at the fixed root-controlled path, secret-free, root-owned, non-world-writable |
+| `expected_identities_installed` | the independent expected-identities pins | A **separate file at a different path**. **No step in the 1–10 sequence instructs creating it** — pr5d only refers to it descriptively. It is provisioned out of band by whoever holds release authority, and deliberately not by the same hand or the same step as the profile |
+
+That second row is a real gap in the pr5d sequence, recorded here rather than smoothed over: if
+your `expected_identities_installed` rung is unmet, there is **no numbered step to follow**, and
+you should escalate to release authority rather than improvise the file. Creating it yourself from
+the profile would destroy the independence that makes the check meaningful — the profile would
+become its own authority, which is exactly what `identities.py` exists to prevent.
 
 Note that `install-prepared` installs the operator unit **disabled**, and that is the terminal
 state of the whole sequence. Nothing in either package starts it.
@@ -291,7 +308,7 @@ the deployment:
   "agreement": {"source_equals_installed": true},
   "release_identity": {
     "available": true,
-    "release_source_sha": "...", "source_tree_sha": "...", "parent_sha": null,
+    "release_source_sha": "...", "source_tree_sha": "...",
     "authority": "independent_expected_identities",
     "release_signature_checked": false
   }
@@ -306,10 +323,22 @@ root-controlled expected-identities file** — never from the profile, because a
 able to name its own release. `build_provenance_report` takes no profile input at all, which is the
 structural guarantee rather than a convention.
 
-These three values are release **identifiers**, not configuration and not secrets: they are exactly
+These two values are release **identifiers**, not configuration and not secrets: they are exactly
 what you read off the deployment and compare against the signed release. When the pins are absent
 or malformed the section reports `available: false` with a bounded reason, rather than omitting the
 question.
+
+Emission is bounded **structurally**, not by convention: the pins object carries thirty fields and
+exactly two are read, by name — never by `asdict()` or iteration — so adding a field to it cannot
+auto-leak. What stays suppressed is the sensitive class: both queue names, both host executable
+paths, service and container names, uid/gids and image digests. The line is that an emitted value
+identifies an **immutable artefact that already exists**, while a suppressed one is the **address of
+a live resource** — a queue you could publish to, an executable you could target.
+
+`parent_sha` was emitted here and has been **removed**. A signed release names its own commit and
+tree, not its parent, so the compare-against-the-release justification never reached it — and it
+was the only one carrying commit-graph shape. A field that cannot be justified individually does not
+belong in a section whose whole defence is that every value in it is one you must compare.
 
 **Read `release_signature_checked` before you conclude anything.** It is always `false`. This
 package verifies no signature — it supplies the values for a comparison you perform. The section is

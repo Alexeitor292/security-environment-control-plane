@@ -209,6 +209,23 @@ REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
     "profile_manifest_digest_mismatch": {"dimension": "B", "remediation": _D},
     "expected_identities_not_provisioned": {"dimension": "B", "remediation": _D},
     "expected_identities_type_invalid": {"dimension": "B", "remediation": _D},
+    # The codes ``read_expected_identities`` ACTUALLY raises. Every one is reachable from the
+    # ``provenance`` pins read, and all were uncatalogued — so the precise production codes
+    # classified as unknown while the synthetic ones the tests used classified fine.
+    #
+    # ``expected_identities_not_installed`` names the SAME fact as
+    # ``expected_identities_not_provisioned`` above; they differ only in which layer produced it —
+    # the reader raises the specific one, ``build_verification`` synthesises the generic one for an
+    # absent rung. Both are catalogued so an operator can look up whichever they meet.
+    "expected_identities_not_installed": {"dimension": "B", "remediation": _D},
+    "expected_identities_unreadable": {"dimension": "B", "remediation": _D},
+    "expected_identities_reader_unavailable": {"dimension": "B", "remediation": _D},
+    "expected_identities_not_json": {"dimension": "B", "remediation": _D},
+    "expected_identities_not_utf8": {"dimension": "B", "remediation": _D},
+    "expected_identities_not_object": {"dimension": "B", "remediation": _D},
+    "expected_identities_duplicate_key": {"dimension": "B", "remediation": _D},
+    "expected_identities_forbidden_secret": {"dimension": "B", "remediation": _D},
+    "expected_identities_invalid": {"dimension": "B", "remediation": _D},
     "identity_mismatch": {"dimension": "B", "remediation": _D},
     "verify_context_type_invalid": {"dimension": "B", "remediation": _D},
     "queue_not_distinct": {"dimension": "B", "remediation": _D},
@@ -364,8 +381,12 @@ def build_prerequisite_ladder(
             "remediation": spec.remediation,
             "reason_code": code,
         }
-        classified = classify_reason_code(code)
-        row["reason_catalogued"] = classified is not None
+        # NULL when there is no reason code at all — a SATISFIED rung. ``False`` here would read as
+        # "this rung's reason is uncatalogued", a negative claim about a code that does not exist.
+        # ``False`` is reserved for its one real meaning: there IS a code and it is uncatalogued.
+        row["reason_catalogued"] = (
+            None if code is None else (classify_reason_code(code) is not None)
+        )
         return row
 
     attempted = bool(host.get("attempted"))
@@ -466,11 +487,25 @@ def _release_identity_section(expected: object | None, expected_reason: str | No
     never from the profile, so a profile cannot name its own release. A foreign object is refused
     by EXACT type without attribute access.
 
-    These three values are release IDENTIFIERS, not secrets and not profile configuration: they are
+    These TWO values are release IDENTIFIERS, not secrets and not profile configuration: they are
     exactly what an operator has to read off the deployment and compare against the signed release.
     Emitting them is the point of the command. ``release_signature_checked`` is always ``False`` —
     this package performs no signature verification, and says so rather than letting
     ``provenance_ok`` be read as one.
+
+    Emission is bounded STRUCTURALLY, not by convention: ``ExpectedDeploymentIdentities`` carries
+    thirty fields and exactly two are read, by named attribute — never ``asdict()``, ``__dict__``
+    or iteration — so adding a field to the dataclass cannot auto-leak it. The suppressed fields
+    are the sensitive class: both queue names, both host executable paths, service and container
+    names, uid/gids and image digests. The distinction is principled: what is emitted identifies an
+    IMMUTABLE ARTEFACT that already exists; what is suppressed is the ADDRESS OF A LIVE RESOURCE —
+    a queue that could be published to, an executable that could be targeted.
+
+    ``parent_sha`` was emitted here and has been REMOVED. It could not carry its own weight: a
+    signed release names its own commit and tree, not its parent, so the compare-against-the-release
+    justification never reached it — and it was the only one of the three carrying commit-graph
+    shape. A field that cannot be justified individually does not belong in a section whose entire
+    defence is that every value in it is one an operator must compare.
     """
     from secp_operator_deployment.identities import ExpectedDeploymentIdentities
 
@@ -479,7 +514,6 @@ def _release_identity_section(expected: object | None, expected_reason: str | No
             "available": False,
             "release_source_sha": None,
             "source_tree_sha": None,
-            "parent_sha": None,
             "authority": "independent_expected_identities",
             "release_signature_checked": False,
             "reason_code": expected_reason
@@ -493,7 +527,6 @@ def _release_identity_section(expected: object | None, expected_reason: str | No
         "available": True,
         "release_source_sha": expected.release_source_sha,
         "source_tree_sha": expected.source_tree_sha,
-        "parent_sha": expected.parent_sha,
         "authority": "independent_expected_identities",
         "release_signature_checked": False,
         "reason_code": None,

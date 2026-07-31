@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 
 _RUNBOOK = (
     pathlib.Path(__file__).resolve().parents[3] / "docs" / "runbooks" / "operator-productization.md"
@@ -74,7 +75,27 @@ def _runbook() -> str:
     return _RUNBOOK.read_text(encoding="utf-8")
 
 
-def test_the_runbook_exists_where_the_package_docstrings_say_it_does():
+def _section_11_command_cells() -> set[str]:
+    """The commands named in the FIRST COLUMN of the §1.1 actuation table.
+
+    Scoped to that table on purpose. An earlier version of this guard asked whether the backticked
+    command appeared anywhere in the document, which is blind: ``verify`` occurs eleven times in
+    §2/§3/§4 about THIS package, and ``plan`` collides with "a non-destroy `plan`" in §5 about
+    OpenTofu grammar. Both rows could be deleted from the operator-facing table and the guard
+    stayed green — the exact rot it exists to catch.
+    """
+    text = _runbook()
+    start = text.index("### 1.1")
+    end = text.index("\n## ", start)  # the next top-level section
+    cells: set[str] = set()
+    for line in text[start:end].splitlines():
+        match = re.match(r"^\|\s*`([a-z-]+)`\s*\|", line)
+        if match:
+            cells.add(match.group(1))
+    return cells
+
+
+def test_the_runbook_exists_where_this_guard_expects_it():
     assert _RUNBOOK.is_file(), _RUNBOOK
 
 
@@ -98,10 +119,25 @@ def test_the_runbook_names_the_whole_commissioning_surface_not_a_convenient_subs
     )
 
 
-def test_each_named_actuation_command_appears_in_the_runbook_text():
-    text = _runbook()
-    for command in sorted(_COMMISSIONING_COMMANDS):
-        assert f"`{command}`" in text, f"runbook §1.1 no longer names `{command}`"
+def test_the_section_11_table_names_every_actuation_command_and_no_others():
+    """Equality against the §1.1 TABLE, not a substring search of the document.
+
+    This is what makes deleting a row fail. The operator-facing actuation table is the thing an
+    operator reads; a command missing from it is missing, however many times the word appears
+    elsewhere in the runbook about something else entirely.
+    """
+    assert _section_11_command_cells() == set(_COMMISSIONING_COMMANDS)
+
+
+def test_the_table_scoping_is_not_vacuous():
+    """Guard the guard: if the section slice or the row regex stopped matching, the equality above
+    would compare two empty-ish sets and pass. Pin that it really parses the table."""
+    cells = _section_11_command_cells()
+    assert len(cells) == 8, cells
+    # And that the scoping genuinely excludes the rest of the document: `provenance` is discussed
+    # at length in §4 but is NOT an actuation command, so it must not appear in the table cells.
+    assert "provenance" not in cells
+    assert "queue" not in cells
 
 
 def test_the_runbook_points_at_the_actuation_package_by_name():

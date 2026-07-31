@@ -62,15 +62,49 @@ def test_the_release_identity_is_reported_from_the_trusted_pins():
     assert section["available"] is True
     assert section["release_source_sha"] == SOURCE_SHA
     assert section["source_tree_sha"] == SOURCE_TREE_SHA
-    assert section["parent_sha"] is None  # the fixture pins it absent, and absent is reported
     assert section["authority"] == "independent_expected_identities"
     assert section["reason_code"] is None
 
 
-def test_a_present_parent_sha_is_reported_rather_than_dropped():
-    parent = "c" * 40
-    section = _report(expected=valid_expected(parent_sha=parent))["release_identity"]
-    assert section["parent_sha"] == parent
+def test_parent_sha_is_not_emitted_even_when_the_pins_carry_one():
+    """It was emitted, and has been removed.
+
+    The justification for this section is *these are the values you compare against the signed
+    release* — and a signed release names its own commit and tree, not its parent. That argument
+    never reached ``parent_sha``, which was also the only one of the three carrying commit-graph
+    shape. A field that cannot be justified individually does not belong in a section whose whole
+    defence is that every value in it is one an operator must compare.
+    """
+    section = _report(expected=valid_expected(parent_sha="c" * 40))["release_identity"]
+    assert "parent_sha" not in section
+    assert "c" * 40 not in json.dumps(_report(expected=valid_expected(parent_sha="c" * 40)))
+
+
+def test_emission_is_bounded_structurally_not_by_convention():
+    """``ExpectedDeploymentIdentities`` carries many fields; exactly two are emitted, by NAMED
+    attribute read. The risk this pins is a future refactor to ``asdict()`` or iteration, which
+    would turn every added field into an automatic leak."""
+    import dataclasses
+
+    from secp_operator_deployment.identities import ExpectedDeploymentIdentities
+
+    all_fields = {f.name for f in dataclasses.fields(ExpectedDeploymentIdentities)}
+    emitted = {"release_source_sha", "source_tree_sha"}
+    assert emitted < all_fields
+
+    # Scoped to the SECTION, deliberately. The report's other sections legitimately carry package
+    # version / contract / implementation id, but they read them from MODULE CONSTANTS, not from
+    # the pins — so asserting over the whole payload would flag a value that never came from here.
+    section_blob = json.dumps(_report()["release_identity"])
+    pins = valid_expected()
+    for name in sorted(all_fields - emitted):
+        value = getattr(pins, name)
+        if isinstance(value, str) and len(value) > 8:  # bounded, comparable values only
+            assert value not in section_blob, f"{name} leaked into release_identity"
+
+    # The sensitive class the reviewer named, checked explicitly rather than only by sweep.
+    for name in ("ordinary_task_queue", "operator_task_queue", "operator_service_name"):
+        assert getattr(pins, name) not in section_blob, name
 
 
 def test_the_release_identity_comes_from_the_independent_pins_not_the_profile():
@@ -98,7 +132,6 @@ def test_absent_pins_report_unavailable_rather_than_omitting_the_question():
     assert section["available"] is False
     assert section["release_source_sha"] is None
     assert section["source_tree_sha"] is None
-    assert section["parent_sha"] is None
     assert section["reason_code"] == "expected_identities_not_provisioned"
     assert classify_reason_code(section["reason_code"]) == {
         "dimension": "B",
@@ -174,15 +207,42 @@ def test_provenance_does_not_re_derive_profile_agreement():
 
 
 def test_the_section_shape_is_exact():
-    assert set(_report()["release_identity"]) == {
+    """Pinned as a SET so a new emitted field is always a deliberate edit here."""
+    expected_keys = {
         "available",
         "release_source_sha",
         "source_tree_sha",
-        "parent_sha",
         "authority",
         "release_signature_checked",
         "reason_code",
     }
+    assert set(_report()["release_identity"]) == expected_keys
+    # The unavailable path must not have a different shape — a caller reading one and not the other
+    # would otherwise meet a missing key exactly when things are already going wrong.
+    assert set(_report(expected=None)["release_identity"]) == expected_keys
+
+
+def test_every_reason_code_the_pins_reader_can_raise_is_catalogued():
+    """The production codes, not the synthetic ones.
+
+    ``read_expected_identities`` raises specific codes — ``expected_identities_not_installed``,
+    ``..._unreadable``, ``..._not_json`` and so on — and the ``provenance`` pins read passes them
+    straight through. They were ALL uncatalogued while the generic codes the tests happened to use
+    classified fine, so an operator meeting a real one got an unexplained string.
+
+    Scans the reader's own source, so a newly added refusal fails here rather than in the field.
+    """
+    import pathlib
+    import re
+
+    src = (
+        pathlib.Path(__file__).resolve().parents[1] / "secp_operator_deployment" / "identities.py"
+    ).read_text(encoding="utf-8")
+    raised = set(re.findall(r'IdentityError\("([a-z0-9_]+)"\)', src))
+
+    assert len(raised) >= 9, f"the scan stopped matching IdentityError literals: {sorted(raised)}"
+    uncatalogued = sorted(c for c in raised if classify_reason_code(c) is None)
+    assert not uncatalogued, f"uncatalogued codes reachable from the pins read: {uncatalogued}"
 
 
 def test_the_report_stays_json_serialisable_and_deterministic():
