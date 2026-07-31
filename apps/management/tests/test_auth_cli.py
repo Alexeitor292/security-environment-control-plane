@@ -1182,3 +1182,264 @@ def test_remedies_are_rendered_to_the_operator():
     deps, _w, _p = _deps(store=_TooLargeStore())
     code, report = auth_login(deps, gate=WRITE)
     assert "remedy=" in _render_human(code, report)
+
+
+# --- the round trip the wiring fix exists to guarantee -------------------------------------------
+#
+# The earlier wiring tests assert provider TYPE, locator identity and the sealed-store refusal.
+# None of them proves the token `auth login` stored comes back OUT through the provider the
+# authenticated client uses -- so a regression that broke the binding would leave them all green.
+# For the fix to a defect that was precisely "the store is wired to nothing", a guard that cannot
+# detect the store being wired to nothing again is the wrong guard.
+
+
+def test_a_token_stored_by_login_comes_back_out_through_the_provider():
+    """End to end: `auth login` persists, and the provider the enrollment client holds returns THAT
+    token. This is the property the whole BLOCKER 1 fix exists to establish."""
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    assert auth_login(deps, gate=WRITE)[0] == EXIT_OK
+
+    # the provider composed exactly as `_production_enrollment_deps` composes it
+    provider = ControllerScopedCredentialProvider(_working_store(keystore), _FakeLocatorProvider())
+    token = provider.access_token()
+
+    stored = json.loads(keystore.entries[("secp-secpctl-operator", ORIGIN)])["t"]
+    assert token.authorization_header() == f"Bearer {stored}"
+
+
+def test_the_provider_serves_no_token_for_a_controller_that_was_never_logged_in():
+    """Cross-account isolation through the provider seam, not just the store."""
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+
+    other = ControllerScopedCredentialProvider(
+        _working_store(keystore), _FakeLocatorProvider(locator=OTHER_LOCATOR)
+    )
+    with pytest.raises(ManagementError) as ei:
+        other.access_token()
+    assert ei.value.reason_code == "secpctl_credential_absent"
+
+
+def test_the_provider_refuses_an_expired_credential_rather_than_serving_it():
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+
+    later = time.time() + 10_000
+    provider = ControllerScopedCredentialProvider(
+        _working_store(keystore, now=lambda: later), _FakeLocatorProvider()
+    )
+    with pytest.raises(ManagementError) as ei:
+        provider.access_token()
+    assert ei.value.reason_code == "secpctl_credential_expired"
+
+
+def test_a_logout_makes_the_provider_stop_serving_the_token():
+    """Revocation and deletion must be observable through the SAME seam authenticated commands use,
+    not only through the store."""
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+    provider = ControllerScopedCredentialProvider(_working_store(keystore), _FakeLocatorProvider())
+    assert provider.access_token() is not None
+
+    out, _w2, _p2 = _deps(store=_working_store(keystore))
+    assert auth_logout(out, gate=WRITE)[0] == EXIT_OK
+    with pytest.raises(ManagementError) as ei:
+        provider.access_token()
+    assert ei.value.reason_code == "secpctl_credential_absent"
+
+
+def test_the_provider_never_reveals_the_token_in_a_repr():
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    provider = ControllerScopedCredentialProvider(_working_store(), _FakeLocatorProvider())
+    assert repr(provider) == "ControllerScopedCredentialProvider(<redacted>)"
+    assert ORIGIN not in repr(provider)
+
+
+# --- N2: which provider is actually live ----------------------------------------------------------
+
+
+def test_auth_status_names_the_os_keystore_when_no_token_file_is_set():
+    code, report = auth_status(_deps(store=_working_store())[0])
+    assert code == EXIT_OK
+    assert report["active_token_provider"] == "os_keystore"
+    assert report["token_file_override_active"] is False
+
+
+def test_auth_status_warns_when_a_token_file_silently_overrides_the_keystore():
+    """An operator who set the file during rollout, then logged in successfully, keeps sending the
+    FILE's token. Login looks fine and the credential it stored is never used."""
+    from secp_management.cli import _render_human
+
+    deps, _w, _p = _deps(store=_working_store(), token_file_active=lambda: True)
+    code, report = auth_status(deps)
+    assert code == EXIT_OK
+    assert report["active_token_provider"] == "token_file"
+    assert report["token_file_override_active"] is True
+
+    rendered = _render_human(code, report)
+    assert "SECP_OPERATOR_TOKEN_FILE" in rendered
+    assert "not the OS keystore" in rendered or "not\n  the OS keystore" in rendered
+
+
+def test_a_broken_override_probe_never_breaks_a_read_only_status():
+    def _explode():
+        raise RuntimeError("probe failed")
+
+    deps, _w, _p = _deps(store=_working_store(), token_file_active=_explode)
+    code, report = auth_status(deps)
+    assert code == EXIT_OK
+    assert report["active_token_provider"] == "os_keystore"
+
+
+# --- N1: the terminal-disclosure property now covers EVERY command group -------------------------
+#
+# Removing the renderer's fixed allowlist was right -- an allowlist turns every future report field
+# into an invisible one. But it made "reports are safe to display" load-bearing for the WHOLE CLI,
+# where before only `--json` carried most fields. That property was asserted for one auth report.
+# It is now asserted for every command group, so another stream adding a report field cannot reach
+# the terminal by default without this guard being consulted.
+
+#: Shapes that must never reach a terminal, whatever produced the report.
+_SECRET_SHAPES = (
+    "eyJ",  # a JWT/JWS compact serialization
+    "-----BEGIN",  # any PEM private key or certificate body
+    "client_secret",
+    "password",
+    "Bearer ",
+    "PRIVATE KEY",
+)
+
+#: Every command group `build_parser` exposes, with an invocation that reaches a report. All run
+#: against SEALED defaults, so each yields a bounded refusal or a read-only projection -- which is
+#: exactly the output an operator sees on an unprovisioned host.
+_EVERY_GROUP_INVOCATION = (
+    ["release", "verify", "--bundle", "/nonexistent"],
+    ["host", "inspect"],
+    ["bootstrap", "controller", "--bundle", "/nonexistent"],
+    ["adopt", "controller", "--bundle", "/nonexistent"],
+    ["status", "controller"],
+    ["evidence", "controller"],
+    ["rollback", "controller"],
+    [
+        "controller",
+        "install",
+        "--bundle",
+        "/x",
+        "--public-origin",
+        "https://c.invalid",
+        "--tls-mode",
+        "reverse_proxy",
+    ],
+    ["enrollment", "invite", "create", "--site", "s", "--label", "l"],
+    ["worker", "status"],
+    ["auth", "status"],
+    ["auth", "login"],
+    ["auth", "logout"],
+    ["auth", "refresh"],
+)
+
+
+@pytest.mark.parametrize("argv", _EVERY_GROUP_INVOCATION, ids=lambda a: " ".join(a[:3]))
+def test_no_command_groups_terminal_output_can_carry_a_secret(argv):
+    """Live invocation where the host allows one. Several engine groups cannot produce a report on
+    a non-POSIX host (their sealed deps refuse `filesystem()` before any report exists), so they are
+    skipped HERE and covered host-independently by the field-name guard below — the two together,
+    not either alone, are what make this property hold for every group."""
+    from secp_management.cli import _render_human
+
+    try:
+        code, report = run(list(argv))
+    except SystemExit:
+        pytest.skip(f"argv not accepted by the parser: {argv}")
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"group produces no report on this host: {type(exc).__name__}")
+    rendered = _render_human(code, report)
+    for shape in _SECRET_SHAPES:
+        assert shape not in rendered, f"{shape!r} reached the terminal from {argv}"
+    for key, value in report.items():
+        if isinstance(value, (dict, list)):
+            assert f"{key}=" not in rendered, f"nested {key} was rendered to the terminal"
+
+
+#: Substrings that make a field name secret-shaped wherever they appear. The renderer now prints
+#: every scalar to the terminal by default, so a field named like this would leak by default.
+_FORBIDDEN_REPORT_FIELD_SHAPES = ("secret", "password", "passphrase", "private_key")
+
+#: Names dangerous only as a WHOLE field name. Matched exactly rather than as a substring, because
+#: `authorization` is also a legitimate word inside the RFC 8628 reason codes
+#: (`secpctl_device_authorization_denied` and friends) — those are exit-map keys, not report fields,
+#: and widening the substring set to catch a header name would flag every one of them.
+_FORBIDDEN_EXACT_FIELD_NAMES = frozenset({"authorization", "bearer", "token", "access_token"})
+
+#: Report keys that legitimately contain a forbidden substring. Each is a NON-secret and is listed
+#: individually so adding one is a deliberate, reviewable act rather than a widened pattern.
+_REVIEWED_FIELD_EXCEPTIONS = frozenset({"has_secret_store"})
+
+
+def _report_key_literals(module) -> set[str]:
+    """Every string literal used as a dict key in a module — a superset of its report fields."""
+    import ast
+    import pathlib as _pathlib
+
+    tree = ast.parse(_pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for k in node.keys:
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    keys.add(k.value)
+    return keys
+
+
+def test_no_report_producing_module_emits_a_secret_shaped_field_name():
+    """Host-independent, and the control that actually holds the line: the renderer prints every
+    scalar, so a field named like a secret would reach the terminal by default. This fails in the
+    file another stream would have to edit, rather than only on a host that can run that group."""
+    from secp_management import auth_cli, engine, enrollment_cli
+
+    offenders = []
+    for module in (engine, enrollment_cli, auth_cli):
+        for key in _report_key_literals(module):
+            if key in _REVIEWED_FIELD_EXCEPTIONS:
+                continue
+            lowered = key.lower()
+            if lowered in _FORBIDDEN_EXACT_FIELD_NAMES or any(
+                shape in lowered for shape in _FORBIDDEN_REPORT_FIELD_SHAPES
+            ):
+                offenders.append(f"{module.__name__}:{key}")
+    assert offenders == [], (
+        f"secret-shaped report field names would print to the terminal by default: {offenders}"
+    )
+
+
+def test_the_field_name_guard_would_actually_catch_one():
+    """Anti-vacuity for the guard above, on both matching modes."""
+    assert any(shape in "client_secret" for shape in _FORBIDDEN_REPORT_FIELD_SHAPES)
+    assert any(shape in "db_password" for shape in _FORBIDDEN_REPORT_FIELD_SHAPES)
+    assert "authorization" in _FORBIDDEN_EXACT_FIELD_NAMES
+    # ...and the exact-match mode must NOT flag the RFC 8628 reason codes, which are exit-map keys
+    assert "secpctl_device_authorization_denied" not in _FORBIDDEN_EXACT_FIELD_NAMES
+    assert not any(
+        shape in "secpctl_device_authorization_denied" for shape in _FORBIDDEN_REPORT_FIELD_SHAPES
+    )
+
+
+def test_the_secret_shape_guard_would_actually_catch_one():
+    """Anti-vacuity: a guard asserting an absence proves nothing unless it can detect a presence."""
+    from secp_management.cli import _render_human
+
+    rendered = _render_human(0, {"command": "x", "leaked": "eyJhbGciOiJSUzI1NiJ9.abc.def"})
+    assert any(shape in rendered for shape in _SECRET_SHAPES)

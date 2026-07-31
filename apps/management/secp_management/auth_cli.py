@@ -249,6 +249,11 @@ def _never_cancelled() -> bool:
     return False
 
 
+def _token_file_inactive() -> bool:
+    """The default: no protected token FILE is selected, so the OS keystore is the live provider."""
+    return False
+
+
 @dataclass
 class AuthCliDeps:
     """Injected collaborators for the auth commands. Shipped defaults are SEALED; tests inject
@@ -266,6 +271,11 @@ class AuthCliDeps:
     monotonic: Callable[[], float] = time.monotonic
     now_epoch: Callable[[], float] = time.time
     cancelled: Callable[[], bool] = _never_cancelled
+    #: Whether the protected token FILE seam is currently selected for AUTHENTICATED commands.
+    #: Injected rather than read here: this module must never touch the environment (the credential
+    #: surface is scanned for that), and the env read already lives in ``cli.py`` where the token
+    #: provider is composed. See :func:`auth_status` for why it is reported.
+    token_file_active: Callable[[], bool] = _token_file_inactive
 
 
 @dataclass(frozen=True)
@@ -303,6 +313,28 @@ def _prompt_payload(authorization: DeviceAuthorization) -> dict:
     if authorization.verification_uri_complete:
         payload["verification_uri_complete"] = authorization.verification_uri_complete
     return payload
+
+
+#: The provider an AUTHENTICATED command will use, as reported by ``auth status``.
+PROVIDER_OS_KEYSTORE = "os_keystore"
+PROVIDER_TOKEN_FILE = "token_file"
+
+
+def _active_provider_report(deps: AuthCliDeps) -> dict:
+    """Name the provider authenticated commands will actually use, and flag a silent override.
+
+    ``token_file_override_active`` is the operator-facing warning: when it is true, ``auth login``
+    can succeed and store a perfectly good credential that NOTHING will use, because the explicitly
+    selected token file wins. Without this the two facts never appear together.
+    """
+    try:
+        file_active = bool(deps.token_file_active())
+    except Exception:  # noqa: BLE001 - a broken probe must not break a read-only status
+        file_active = False
+    return {
+        "active_token_provider": PROVIDER_TOKEN_FILE if file_active else PROVIDER_OS_KEYSTORE,
+        "token_file_override_active": file_active,
+    }
 
 
 def _credential_report(account: str, status: StoredCredentialStatus) -> dict:
@@ -500,6 +532,13 @@ def auth_status(deps: AuthCliDeps) -> tuple[int, dict]:
     available but no controller is selected" is exactly what an operator needs to see on a host that
     has not been bootstrapped yet.
 
+    It also names the provider AUTHENTICATED commands will actually use. That matters because the
+    two can disagree silently: an operator who set ``SECP_OPERATOR_TOKEN_FILE`` during rollout, then
+    ran ``auth login`` successfully, keeps using the file's token — so a stale or revoked file token
+    produces an auth failure immediately after an apparently successful login, and a status command
+    that reported only keystore state would show nothing wrong. The precedence itself is deliberate
+    (the file is an explicit opt-in recovery seam); what was missing was saying which one is live.
+
     Resolving the authoritative operator principal from ``/api/v1/me`` remains out of scope: the DB
     is the sole authority for organization, role and permission, and a token claim never determines
     them. This command reports LOCAL credential state only.
@@ -509,7 +548,12 @@ def auth_status(deps: AuthCliDeps) -> tuple[int, dict]:
         selection = _select(deps)
     except ManagementError:
         backend = _describe_unbound(deps)
-        return EXIT_OK, {"command": command, "mode": "read", **_credential_report("", backend)}
+        return EXIT_OK, {
+            "command": command,
+            "mode": "read",
+            **_active_provider_report(deps),
+            **_credential_report("", backend),
+        }
     try:
         status = selection.store.describe()
     except ManagementError as exc:
@@ -517,6 +561,7 @@ def auth_status(deps: AuthCliDeps) -> tuple[int, dict]:
     return EXIT_OK, {
         "command": command,
         "mode": "read",
+        **_active_provider_report(deps),
         **_credential_report(selection.account, status),
     }
 

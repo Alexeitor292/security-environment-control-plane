@@ -393,14 +393,21 @@ def _production_auth_deps() -> AuthCliDeps:
     host fails closed with a code rather than crashing. No identity, endpoint or trust input is read
     from a flag or an env var."""
     try:
+        import os
+
         from secp_commissioning.runtime import RealFilesystem
 
         from secp_management.controller_api_locator import FileControllerApiLocatorProvider
+        from secp_management.operator_auth import OPERATOR_TOKEN_FILE_ENV
         from secp_management.operator_credential_store import build_operator_credential_store
 
         return AuthCliDeps(
             credential_store=build_operator_credential_store(),
             locator_provider=FileControllerApiLocatorProvider(RealFilesystem()),
+            # The env read lives HERE, beside the composition it governs — `auth_cli` must never
+            # touch the environment. `auth status` reports the result so an operator can see that a
+            # token file is overriding the keystore they just logged in to.
+            token_file_active=lambda: bool(os.environ.get(OPERATOR_TOKEN_FILE_ENV, "")),
         )
     except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
         return AuthCliDeps()
@@ -477,6 +484,10 @@ _HUMAN_LEADING_KEYS = ("role", "mode", "status", "ok", "trusted", "reason_code")
 #: Report fields that carry a WARNING an operator must not miss, and the text for each. A report
 #: field alone is not a warning: it prints among a dozen others and reads as noise.
 _HUMAN_WARNINGS = {
+    "token_file_override_active": (
+        "NOTE: SECP_OPERATOR_TOKEN_FILE is set, so authenticated commands use that FILE and\n"
+        "  not the OS keystore. A successful 'auth login' will not change which token they send."
+    ),
     "token_still_live": (
         "WARNING: the local credential was deleted, but the token is STILL VALID at the\n"
         "  identity provider and remains usable until it expires. The session was NOT ended."
@@ -494,6 +505,22 @@ def _render_human(exit_code: int, payload: dict) -> str:
     every new report field into an invisible one, which is exactly the failure a bounded,
     secret-free report format exists to make impossible. Reports are bounded and carry no secrets by
     construction, so printing all of them is both safe and the honest default.
+
+    **That property is now load-bearing for every command group, not just ``auth``**, because fields
+    that previously appeared only under ``--json`` now print by default. It is enforced two ways in
+    ``test_auth_cli``: live invocations are rendered and scanned for secret-shaped VALUES, and every
+    report-producing module is scanned for secret-shaped FIELD NAMES. The second is the one that
+    holds the line — it is host-independent and fails in the file another stream would have to edit.
+
+    **A deliberate asymmetry, decided rather than inherited.** The auth surface reduces the
+    credential ACCOUNT to a non-reversing fingerprint, while enrollment reports print
+    ``controller_origin`` in the clear. That is not an oversight and the two are not the same kind
+    of fact. The credential account is metadata ABOUT A HELD SECRET — it says which controller this
+    operator has a working credential for, which is exactly what an attacker reading a pasted ticket
+    would want. ``controller_origin`` is a deployment address the operator supplied themselves and
+    can read out of their own configuration; it identifies a service, not a secret anyone holds.
+    Fingerprinting the first and not the second is therefore consistent, and the guard above is what
+    keeps the line where it was drawn. Neither is a secret, and nothing here prints one.
     """
     command = payload.get("command", "?")
     parts = [f"[{command}] exit={exit_code}"]
