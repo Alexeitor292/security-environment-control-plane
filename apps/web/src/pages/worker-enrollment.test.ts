@@ -2,29 +2,45 @@ import { describe, expect, it } from "vitest";
 
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
 import {
+  ENROLLMENT_CONTROLS,
   ENROLLMENT_FORWARD_STATES,
   MISSING_MANAGE_REASON,
   MISSING_READ_REASON,
-  RECENT_LIMIT,
+  NOT_ESTABLISHED,
+  TRACKED_FILTERS,
+  TRACKED_FILTER_LABELS,
+  TRACKED_LIMIT,
   TTL_MAX_SECONDS,
-  addRecent,
+  addTracked,
   createGate,
   encodeIdempotencyKey,
+  enrollmentEvidence,
   enrollmentStepItems,
   expiryView,
+  filterTracked,
   handoffFields,
+  handoffPayload,
   handoffText,
   isEnrollmentId,
   isIdempotencyKey,
+  isPastExpiry,
   isTerminalState,
   lookupGate,
   parseEnrollmentId,
   parseTtlSeconds,
+  recoveryView,
+  removeTracked,
   resolveEnrollmentPermissions,
   revokeGate,
   shouldWarnManageWithoutRead,
   statusDetailRows,
+  trackedFromInvitation,
+  trackedFromStatus,
+  trackedGroup,
+  trackedSummary,
   validateSiteLabel,
+  verificationContext,
+  type TrackedEnrollment,
 } from "./worker-enrollment";
 
 const ID = "sha256:" + "a".repeat(64);
@@ -254,34 +270,115 @@ describe("expiry view", () => {
 
 // --------------------------------------------------------------------- hand-off
 
+/**
+ * Search a serialised artefact for a value the way JSON can legitimately encode it.
+ *
+ * `handoffText` is `JSON.stringify` output, so a value containing a real newline is emitted as the
+ * two characters `\` and `n`. A naive `text.includes(value)` for a multi-line value therefore can
+ * NEVER match — which makes `expect(text).not.toContain(value)` pass whether or not the value
+ * leaked: an assertion that silently stopped testing anything, while still looking green. Every
+ * exclusion below searches BOTH forms, and each exclusion block opens with a positive control
+ * proving this same search can still find something that IS present.
+ */
+function jsonEncoded(value: string): string {
+  return JSON.stringify(value).slice(1, -1);
+}
+function appearsIn(serialised: string, value: string): boolean {
+  return serialised.includes(value) || serialised.includes(jsonEncoded(value));
+}
+
+/** A PEM is the shape of value that broke the old format: inherently multi-line. Stream B is
+ *  adding `controller_ca_bundle_pem`; this proves the FORMAT is already safe for one, using a
+ *  field that exists today, so the format is not what has to change when the field lands. */
+const PEM = "-----BEGIN CERTIFICATE-----\nAAAA\nBBBB\n-----END CERTIFICATE-----\n";
+
+const HANDOFF_KEYS = [
+  "enrollment_id",
+  "invitation_id",
+  "controller_installation_id",
+  "controller_key_id",
+  "controller_origin",
+  "transaction_id",
+  "release_digest",
+  "expires_at",
+];
+
 describe("hand-off material", () => {
   it("is exactly the eight fields the shipped worker transport consumes", () => {
-    expect(handoffFields(invitation()).map((f) => f.key)).toEqual([
-      "enrollment_id",
-      "invitation_id",
-      "controller_installation_id",
-      "controller_key_id",
-      "controller_origin",
-      "controller_transaction_id",
-      "release_digest",
-      "expires_at",
-    ]);
+    expect(handoffFields(invitation()).map((f) => f.key)).toEqual(HANDOFF_KEYS);
+  });
+
+  // Replaces the previous "one stable key: value line per field" line assertions. Those pinned a
+  // format; this pins the CONTRACT — the key set of the parsed document — which is strictly
+  // stronger, because it is what `load_invitation_file` actually checks and it cannot be satisfied
+  // by text that merely looks right.
+  it("parses as JSON whose key set is exactly the hand-off contract", () => {
+    expect(Object.keys(JSON.parse(handoffText(invitation())))).toEqual(HANDOFF_KEYS);
+  });
+
+  // apps/management/secp_management/enrollment_cli.py:_REQUIRED_INVITATION_KEYS. Emitting the
+  // worker-facing name would produce a file load_invitation_file() refuses outright.
+  it("uses the API's own field names so the shipped CLI parser reads the file unchanged", () => {
+    const parsed = JSON.parse(handoffText(invitation()));
+    expect(parsed.transaction_id).toBe("txn-0123456789abcdef");
+    expect(Object.prototype.hasOwnProperty.call(parsed, "controller_transaction_id")).toBe(
+      false,
+    );
+  });
+
+  it("keeps the worker-facing name visible to humans through the label, not the key", () => {
+    const field = handoffFields(invitation()).find((f) => f.key === "transaction_id");
+    expect(field?.label).toBe("Controller transaction id");
+  });
+
+  it("emits every value as a string, which is what the parser requires", () => {
+    const parsed = JSON.parse(handoffText(invitation()));
+    for (const [key, value] of Object.entries(parsed)) expect(typeof value, key).toBe("string");
+  });
+
+  it("round-trips: parsing the block yields exactly the payload it was built from", () => {
+    expect(JSON.parse(handoffText(invitation()))).toEqual(handoffPayload(invitation()));
+  });
+
+  it("carries a multi-line value intact, which the previous line-delimited format could not", () => {
+    const text = handoffText(invitation({ controller_origin: PEM }));
+    expect(() => JSON.parse(text)).not.toThrow();
+    expect(JSON.parse(text).controller_origin).toBe(PEM);
+    // The embedded newlines are escaped rather than breaking the document apart.
+    expect(text).toContain("\\n");
+  });
+
+  // The enumeration is explicit ON PURPOSE. This is the test that fails if anyone replaces it with
+  // Object.entries(invitation): a field added to the API type must not be able to auto-render into
+  // a bearer-grade block that gets copied to a worker. Omission over leakage.
+  it("never auto-renders a field that was added to the invitation type", () => {
+    const withExtra = {
+      ...invitation(),
+      some_future_field: "FUTURE-VALUE-NOT-TO-BE-EMITTED",
+    } as unknown as EnrollmentInvitation;
+    const text = handoffText(withExtra);
+    expect(Object.keys(JSON.parse(text))).toEqual(HANDOFF_KEYS);
+    expect(appearsIn(text, "FUTURE-VALUE-NOT-TO-BE-EMITTED")).toBe(false);
   });
 
   // The block is bearer-grade: it carries what the worker needs and nothing more.
   it("omits the trust anchor, the site label and the server-owned lifecycle fields", () => {
     const text = handoffText(invitation());
-    expect(text).not.toContain("d".repeat(64)); // controller_trust_anchor_hex
-    expect(text).not.toContain("site-one"); // deployment_site_label
+
+    // POSITIVE CONTROL — asserted BEFORE the exclusions, using the identical search. If escaping
+    // ever made `appearsIn` unable to match, this fails on its own control instead of leaving the
+    // exclusions below green and vacuous.
+    for (const present of Object.values(handoffPayload(invitation()))) {
+      expect(appearsIn(text, present), present).toBe(true);
+    }
+    // The multi-line case specifically — the one the verbatim branch cannot find.
+    expect(appearsIn(handoffText(invitation({ controller_origin: PEM })), PEM)).toBe(true);
+    expect(handoffText(invitation({ controller_origin: PEM })).includes(PEM)).toBe(false);
+
+    expect(appearsIn(text, "d".repeat(64))).toBe(false); // controller_trust_anchor_hex
+    expect(appearsIn(text, "site-one")).toBe(false); // deployment_site_label
     expect(text).not.toContain("revision");
     expect(text).not.toContain("created_at");
-  });
-
-  it("renders one stable key: value line per field", () => {
-    const lines = handoffText(invitation()).split("\n");
-    expect(lines).toHaveLength(8);
-    expect(lines[0]).toBe(`enrollment_id: ${ID}`);
-    expect(lines[5]).toBe("controller_transaction_id: txn-0123456789abcdef");
   });
 });
 
@@ -419,40 +516,344 @@ describe("status detail rows", () => {
   });
 });
 
-// --------------------------------------------------------------------- recent list
+// --------------------------------------------------------------------- evidence
 
-describe("session-scoped recent list", () => {
-  const entry = (id: string): Parameters<typeof addRecent>[1] => ({
+describe("evidence chain", () => {
+  it("reads the five projection fingerprints, in exchange order", () => {
+    expect(enrollmentEvidence(status()).map((e) => e.field)).toEqual([
+      "controller_key_fingerprint",
+      "worker_key_fingerprint",
+      "release_fingerprint",
+      "offer_fingerprint",
+      "result_fingerprint",
+    ]);
+  });
+
+  // An unreached rung is not a failed check. Calling it one would invent a verdict the controller
+  // never returned and would render a healthy in-flight enrollment as broken.
+  it("never reports a rung as failed — only established or not yet established", () => {
+    const all = [
+      ...enrollmentEvidence(status()),
+      ...enrollmentEvidence(
+        status({
+          worker_key_fingerprint: "ffffffffffff",
+          offer_fingerprint: "111111111111",
+          result_fingerprint: "222222222222",
+        }),
+      ),
+      ...enrollmentEvidence(status({ state: "refused", refusal_reason: "operator_revoked" })),
+    ];
+    for (const item of all) {
+      expect(["pass", "unverifiable"], item.field).toContain(item.status);
+      expect(item.status, item.field).not.toBe("fail");
+    }
+  });
+
+  it("marks a rung established exactly when its fingerprint is non-empty", () => {
+    const items = enrollmentEvidence(status({ offer_fingerprint: "111111111111" }));
+    const byField = Object.fromEntries(items.map((i) => [i.field, i]));
+    expect(byField.controller_key_fingerprint.status).toBe("pass");
+    expect(byField.offer_fingerprint.status).toBe("pass");
+    expect(byField.worker_key_fingerprint.status).toBe("unverifiable");
+    expect(byField.worker_key_fingerprint.value).toBe(NOT_ESTABLISHED);
+    expect(byField.result_fingerprint.value).toBe(NOT_ESTABLISHED);
+  });
+
+  it("shows only short fingerprints — never a full digest, key or PEM", () => {
+    const values = enrollmentEvidence(
+      status({
+        worker_key_fingerprint: "ffffffffffff",
+        offer_fingerprint: "111111111111",
+        result_fingerprint: "222222222222",
+      }),
+    ).map((i) => i.value);
+    for (const value of values) {
+      expect(value, value).not.toMatch(/[0-9a-f]{64}/);
+      expect(value, value).not.toContain("BEGIN");
+      expect(value, value).not.toContain("PRIVATE");
+    }
+  });
+});
+
+// --------------------------------------------------------------------- recovery
+
+describe("recovery guidance", () => {
+  const live = expiryView("2026-07-30T11:00:00+00:00", NOW);
+  const gone = expiryView("2026-07-30T09:00:00+00:00", NOW);
+
+  it("stays silent while an enrollment is live and in time", () => {
+    for (const state of ENROLLMENT_FORWARD_STATES) {
+      expect(recoveryView(state, live).needed, state).toBe(false);
+    }
+  });
+
+  it("names both terminals and offers a new invitation, never a repair", () => {
+    for (const terminal of ["refused", "recovery_required"]) {
+      const view = recoveryView(terminal, live);
+      expect(view.needed, terminal).toBe(true);
+      expect(view.steps.join(" "), terminal).toContain("Create a new invitation");
+      expect(view.steps.join(" "), terminal).toMatch(/cannot be resumed|no un-revoke route/);
+    }
+    expect(recoveryView("recovery_required", live).title).toContain("Recovery required");
+    expect(recoveryView("refused", live).title).toContain("Refused");
+  });
+
+  // The page must not claim the controller has already swept a past-expiry enrollment: the sweep
+  // is the controller's, and until it runs the record is still whatever it was.
+  it("treats a past expiry as an observation, not as a lifecycle claim", () => {
+    const view = recoveryView("worker_bound", gone);
+    expect(view.needed).toBe(true);
+    expect(view.title).toContain("Past its expiry");
+    expect(view.steps.join(" ")).toContain("expiry sweep");
+    expect(view.steps.join(" ")).toContain("cannot be extended");
+    expect(view.title).not.toContain("Recovery required");
+  });
+
+  it("says nothing about expiry when the timestamp would not parse", () => {
+    expect(recoveryView("invited", expiryView("not-a-time", NOW)).needed).toBe(false);
+  });
+
+  it("keeps the terminal guidance even once the expiry has also passed", () => {
+    expect(recoveryView("refused", gone).title).toContain("Refused");
+    expect(recoveryView("recovery_required", gone).title).toContain("Recovery required");
+  });
+});
+
+// --------------------------------------------------------------------- verification context
+
+describe("out-of-band verification context", () => {
+  it("carries only controller and release identity — never the invitation's own ids", () => {
+    const rows = verificationContext(invitation());
+    expect(rows.map((r) => r.field)).toEqual([
+      "controller_origin",
+      "controller_installation_id",
+      "controller_key_id",
+      "controller_trust_anchor_hex",
+      "release_digest",
+    ]);
+    const values = rows.map((r) => r.value).join(" ");
+    // enrollment_id and invitation_id are what make the block a capability; neither is here.
+    expect(values).not.toContain(ID);
+    expect(values).not.toContain("b".repeat(64));
+  });
+
+  it("states what each value proves, so it is never a bare hash", () => {
+    for (const row of verificationContext(invitation())) {
+      expect(row.proves.length, row.field).toBeGreaterThan(20);
+      expect(row.label.length, row.field).toBeGreaterThan(0);
+    }
+  });
+});
+
+// --------------------------------------------------------------------- control inventory
+
+describe("control inventory", () => {
+  const byId = Object.fromEntries(ENROLLMENT_CONTROLS.map((c) => [c.id, c]));
+
+  it("offers exactly the three routes a browser principal may call", () => {
+    const available = ENROLLMENT_CONTROLS.filter((c) => c.available).map((c) => c.id);
+    expect(available.sort()).toEqual(["create", "revoke", "status"]);
+  });
+
+  // The deliverable: a control with no route is declared absent, never simulated.
+  it("declares approval, listing, hand-driving and re-issue as having no route", () => {
+    for (const id of ["decide", "list", "advance", "reissue"]) {
+      expect(byId[id].available, id).toBe(false);
+      expect(byId[id].detail.length, id).toBeGreaterThan(40);
+    }
+    expect(byId.decide.detail).toContain("no approval edge");
+    expect(byId.list.detail).toContain("no list route");
+  });
+
+  it("names revoke as the cancel, since there is no separate cancel route", () => {
+    expect(byId.revoke.available).toBe(true);
+    expect(byId.revoke.detail).toContain("no separate cancel route");
+  });
+
+  it("promises no future work in any detail line", () => {
+    for (const control of ENROLLMENT_CONTROLS) {
+      expect(control.detail, control.id).not.toMatch(/\b(yet|soon|coming|planned|will be)\b/i);
+    }
+  });
+});
+
+// --------------------------------------------------------------------- tab-local working set
+
+describe("tab-local working set", () => {
+  const entry = (id: string, over: Partial<TrackedEnrollment> = {}): TrackedEnrollment => ({
     enrollmentId: id,
     siteLabel: "site-one",
     createdAt: "2026-07-30T10:00:00+00:00",
     expiresAt: "2026-07-30T11:00:00+00:00",
+    state: "invited",
+    revision: 0,
+    ...over,
   });
 
-  it("puts the newest first", () => {
-    const list = addRecent(addRecent([], entry("a")), entry("b"));
+  it("puts a newly tracked enrollment first", () => {
+    const list = addTracked(addTracked([], entry("a")), entry("b"));
     expect(list.map((e) => e.enrollmentId)).toEqual(["b", "a"]);
   });
 
-  it("de-duplicates by enrollment id", () => {
-    const list = addRecent(addRecent([], entry("a")), entry("a"));
-    expect(list).toHaveLength(1);
+  // A refresh must not make the row jump under the pointer that clicked it.
+  it("updates an already-tracked enrollment in place, keeping its position", () => {
+    const seeded = addTracked(addTracked([], entry("a")), entry("b"));
+    const list = addTracked(seeded, entry("a", { state: "worker_bound", revision: 1 }));
+    expect(list.map((e) => e.enrollmentId)).toEqual(["b", "a"]);
+    expect(list[1].state).toBe("worker_bound");
+    expect(list).toHaveLength(2);
   });
 
   it("stays bounded", () => {
-    let list: ReturnType<typeof addRecent> = [];
-    for (let i = 0; i < RECENT_LIMIT + 5; i += 1) list = addRecent(list, entry(`id-${i}`));
-    expect(list).toHaveLength(RECENT_LIMIT);
-    expect(list[0].enrollmentId).toBe(`id-${RECENT_LIMIT + 4}`);
+    let list: TrackedEnrollment[] = [];
+    for (let i = 0; i < TRACKED_LIMIT + 5; i += 1) list = addTracked(list, entry(`id-${i}`));
+    expect(list).toHaveLength(TRACKED_LIMIT);
+    expect(list[0].enrollmentId).toBe(`id-${TRACKED_LIMIT + 4}`);
   });
 
-  it("keeps no invitation material — only what a look-up needs", () => {
-    const list = addRecent([], entry("a"));
-    expect(Object.keys(list[0]).sort()).toEqual([
+  // Revisions advance monotonically, so an older one is a late reply to an earlier request.
+  it("discards a response that is older than the state already displayed", () => {
+    const seeded = addTracked([], entry("a", { state: "verified", revision: 4 }));
+    const list = addTracked(seeded, entry("a", { state: "worker_bound", revision: 1 }));
+    expect(list[0].state).toBe("verified");
+    expect(list[0].revision).toBe(4);
+  });
+
+  it("retains the site label and creation time a look-up cannot supply", () => {
+    const created = addTracked([], trackedFromInvitation(invitation()));
+    const refreshed = addTracked(
+      created,
+      trackedFromStatus(status({ state: "worker_bound", revision: 1 })),
+    );
+    expect(refreshed[0].siteLabel).toBe("site-one");
+    expect(refreshed[0].createdAt).toBe("2026-07-30T10:00:00+00:00");
+    expect(refreshed[0].state).toBe("worker_bound");
+  });
+
+  it("leaves the site label blank rather than guessing it for a looked-up enrollment", () => {
+    const list = addTracked([], trackedFromStatus(status()));
+    expect(list[0].siteLabel).toBe("");
+    expect(list[0].createdAt).toBe("");
+  });
+
+  it("forgets an entry without touching the others", () => {
+    const list = addTracked(addTracked([], entry("a")), entry("b"));
+    expect(removeTracked(list, "b").map((e) => e.enrollmentId)).toEqual(["a"]);
+    expect(removeTracked(list, "missing")).toHaveLength(2);
+  });
+
+  // The whole point of the entry shape: the working set could not leak the capability even if it
+  // were persisted, which it is not.
+  it("keeps no invitation material — only the handle, the labels and the observed state", () => {
+    const tracked = trackedFromInvitation(invitation());
+    expect(Object.keys(tracked).sort()).toEqual([
       "createdAt",
       "enrollmentId",
       "expiresAt",
+      "revision",
       "siteLabel",
+      "state",
     ]);
+    // Derived from the hand-off artefact itself rather than restated, so a new hand-off field is
+    // covered here the moment it exists. enrollment_id and expires_at are the two the working set
+    // legitimately needs: one is the public handle you look a record up by, the other is shown as
+    // the row's expiry.
+    const serialised = JSON.stringify(tracked);
+    const payload = handoffPayload(invitation());
+    const allowed = new Set(["enrollment_id", "expires_at"]);
+    const forbidden = Object.entries(payload).filter(([key]) => !allowed.has(key));
+    expect(forbidden).toHaveLength(6); // anti-vacuity: 8 hand-off fields minus the 2 allowed
+    for (const [key, value] of forbidden) {
+      expect(appearsIn(serialised, value), key).toBe(false);
+    }
+    // Positive control for the same search, so an exclusion that can never match fails here.
+    expect(appearsIn(serialised, payload.enrollment_id)).toBe(true);
+    // ...and the trust anchor, which is not a hand-off field at all.
+    expect(appearsIn(serialised, "d".repeat(64))).toBe(false);
+  });
+});
+
+describe("working-set grouping and filters", () => {
+  const entry = (id: string, state: string, expiresAt = "2026-07-30T11:00:00+00:00") => ({
+    enrollmentId: id,
+    siteLabel: "site-one",
+    createdAt: "2026-07-30T10:00:00+00:00",
+    expiresAt,
+    state,
+    revision: 0,
+  });
+
+  it("groups every forward state as pending except healthy", () => {
+    for (const state of ENROLLMENT_FORWARD_STATES) {
+      expect(trackedGroup(state), state).toBe(state === "healthy" ? "healthy" : "pending");
+    }
+  });
+
+  it("groups both terminals as settled", () => {
+    expect(trackedGroup("refused")).toBe("settled");
+    expect(trackedGroup("recovery_required")).toBe("settled");
+  });
+
+  // A build older than the controller must not file a state it does not understand as progress.
+  it("gives an unrecognised state its own group rather than folding it into pending", () => {
+    expect(trackedGroup("some_future_state")).toBe("unknown");
+  });
+
+  it("filters to one group, and 'all' shows everything including the unrecognised", () => {
+    const list = [
+      entry("a", "invited"),
+      entry("b", "healthy"),
+      entry("c", "refused"),
+      entry("d", "some_future_state"),
+    ];
+    expect(filterTracked(list, "pending").map((e) => e.enrollmentId)).toEqual(["a"]);
+    expect(filterTracked(list, "healthy").map((e) => e.enrollmentId)).toEqual(["b"]);
+    expect(filterTracked(list, "settled").map((e) => e.enrollmentId)).toEqual(["c"]);
+    expect(filterTracked(list, "all")).toHaveLength(4);
+    // The unrecognised entry is reachable from exactly one filter, and the summary counts it, so
+    // it can never be silently invisible.
+    expect(trackedSummary(list, NOW).unknown).toBe(1);
+  });
+
+  it("counts every group plus past-expiry, and the groups partition the list", () => {
+    const list = [
+      entry("a", "invited"),
+      entry("b", "worker_bound", "2026-07-30T09:00:00+00:00"),
+      entry("c", "healthy"),
+      entry("d", "recovery_required"),
+      entry("e", "some_future_state"),
+    ];
+    const summary = trackedSummary(list, NOW);
+    expect(summary).toEqual({
+      total: 5,
+      pending: 2,
+      healthy: 1,
+      settled: 1,
+      unknown: 1,
+      pastExpiry: 1,
+    });
+    expect(summary.pending + summary.healthy + summary.settled + summary.unknown).toBe(
+      summary.total,
+    );
+  });
+
+  it("never calls a finished enrollment past expiry — the record is closed either way", () => {
+    const old = "2026-07-30T09:00:00+00:00";
+    expect(isPastExpiry(entry("a", "healthy", old), NOW)).toBe(false);
+    expect(isPastExpiry(entry("b", "refused", old), NOW)).toBe(false);
+    expect(isPastExpiry(entry("c", "recovery_required", old), NOW)).toBe(false);
+    expect(isPastExpiry(entry("d", "invited", old), NOW)).toBe(true);
+  });
+
+  it("never guesses past-expiry from a timestamp it could not parse", () => {
+    expect(isPastExpiry(entry("a", "invited", "not-a-time"), NOW)).toBe(false);
+  });
+
+  it("labels each filter without implying an operator decision", () => {
+    for (const filter of TRACKED_FILTERS) {
+      const label = TRACKED_FILTER_LABELS[filter];
+      expect(label.length, filter).toBeGreaterThan(0);
+      expect(label, filter).not.toMatch(/approv|reject|pending your|awaiting you/i);
+    }
   });
 });

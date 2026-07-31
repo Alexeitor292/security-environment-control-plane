@@ -64,6 +64,15 @@
   overflow-x: auto;
   white-space: pre;
 }
+.wenr-handoff__region {
+  display: grid;
+  gap: 10px;
+}
+/* The region is always present so aria-controls resolves; `hidden` must still win over the
+   display above, which the UA sheet's [hidden] rule would otherwise lose to. */
+.wenr-handoff__region[hidden] {
+  display: none;
+}
 .wenr-handoff__meta {
   display: flex;
   gap: 10px;
@@ -98,27 +107,164 @@
   margin-top: 12px;
 }
 
-/* ---- recent list --------------------------------------------------------- */
+.wenr-subhead {
+  margin: 14px 0 6px;
+  font-size: var(--text-base);
+  color: var(--ink-primary);
+}
 
-.wenr-recent {
+/* ---- scope disclosure ---------------------------------------------------- */
+
+.wenr-scope {
+  padding: 10px 12px;
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--border-divider);
+  border-radius: var(--radius-md);
+}
+.wenr-scope > summary {
+  cursor: pointer;
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+/* Native <summary> focus is easy to lose against the panel; give it the shared ring. */
+.wenr-scope > summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+.wenr-scope__list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.wenr-scope__item {
+  display: grid;
+  grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: 2px 12px;
+  padding: 8px 10px;
+  border: var(--border-width) solid var(--border-divider);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+.wenr-scope__item--yes {
+  border-left-color: var(--tone-ok);
+}
+.wenr-scope__item--no {
+  border-left-color: var(--tone-warn);
+}
+/* The verdict is a word, never a colour alone. */
+.wenr-scope__verdict {
+  grid-row: 1 / span 2;
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+.wenr-scope__label {
+  color: var(--ink-primary);
+}
+.wenr-scope__detail {
+  color: var(--ink-secondary);
+}
+@media (max-width: 640px) {
+  .wenr-scope__item {
+    grid-template-columns: 1fr;
+  }
+  .wenr-scope__verdict {
+    grid-row: auto;
+  }
+}
+
+/* ---- out-of-band verification -------------------------------------------- */
+
+.wenr-verify {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
-.wenr-recent__item {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: baseline;
-  flex-wrap: wrap;
+.wenr-verify__item {
+  display: grid;
+  gap: 3px;
   padding: 8px 10px;
-  background: var(--surface-raised);
-  border: var(--border-width) solid var(--border-divider);
+  background: var(--surface-well);
+  border: var(--border-width) solid var(--border-hairline);
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
 }
-.wenr-recent__site {
+.wenr-verify__label {
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+.wenr-verify__value {
+  color: var(--ink-primary);
+  font-family: var(--font-mono);
+  /* A 64-hex anchor must wrap inside its row rather than widen the card. */
+  overflow-wrap: anywhere;
+}
+.wenr-verify__proves {
   color: var(--ink-secondary);
+}
+
+/* ---- evidence ------------------------------------------------------------ */
+
+.wenr-evidence {
+  display: grid;
+  gap: 8px;
+}
+.wenr-evidence__label,
+.wenr-evidence__proves,
+.wenr-evidence__value {
+  display: block;
+}
+.wenr-evidence__label {
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+.wenr-evidence__proves {
+  color: var(--ink-secondary);
+}
+.wenr-evidence__value {
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  color: var(--ink-primary);
+  overflow-wrap: anywhere;
+}
+
+/* ---- recovery ------------------------------------------------------------ */
+
+.wenr-recovery {
+  margin-bottom: 10px;
+}
+.wenr-recovery__body {
+  margin: 4px 0 0;
+}
+.wenr-recovery__steps {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+/* ---- tab-local working set ----------------------------------------------- */
+
+.wenr-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+.wenr-revision,
+.wenr-unknown {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+/* Past-expiry is spelled out, not signalled by colour alone. */
+.wenr-past-expiry {
+  display: block;
+  margin-top: 3px;
+  color: var(--tone-danger-ink);
+  font-size: var(--text-sm);
 }

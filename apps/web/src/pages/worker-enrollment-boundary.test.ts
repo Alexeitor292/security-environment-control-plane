@@ -129,6 +129,57 @@ describe("enrollment page I/O boundary", () => {
     }
   });
 
+  // The tab-local working set exists so an operator can watch several enrollments at once. It must
+  // stay a MANUAL working set: a page that quietly re-read every tracked id on a timer would turn
+  // an explicit operator action into background traffic against a route that costs the controller
+  // a read per row, and would make the "Nothing polls" copy a lie.
+  it("never refreshes on a timer — every read is an explicit operator action", () => {
+    for (const src of [PAGE_CODE, MODULE_CODE]) {
+      expect(src).not.toContain("setInterval");
+      expect(src).not.toContain("setTimeout");
+      expect(src).not.toContain("requestAnimationFrame");
+      expect(src).not.toContain("requestIdleCallback");
+    }
+    // No effect at all, so there is no place for a fetch-on-mount to appear later either. The
+    // page's only I/O is in click handlers.
+    expect(PAGE_CODE).not.toContain("useEffect");
+    expect(PAGE_CODE).not.toContain("useLayoutEffect");
+  });
+
+  it("renders no unescaped markup", () => {
+    expect(PAGE_CODE).not.toContain("dangerouslySetInnerHTML");
+  });
+
+  /**
+   * Every ClosedCodeError on this page is handed a literal empty message, so a backend string is
+   * discarded STRUCTURALLY rather than filtered downstream.
+   *
+   * This is a source assertion on purpose, and it is the only place the property is falsifiable.
+   * A rendered-output test cannot see it: `ClosedCodeError` resolves its copy from the code alone
+   * and never reads `.message`, so switching these sites to `message: error.text` changes nothing
+   * in the document — verified by mutation, which the render suite (correctly) did not catch. The
+   * render suite proves the complementary half: real backend prose fed in as a fixture does not
+   * reach the document. Together they cover both "the page does not pass it on" and "the page does
+   * not render it".
+   */
+  it("passes a literal empty message at every closed-code error site", () => {
+    const sites = PAGE_CODE.match(/error=\{\{[^}]*\}\}/g) ?? [];
+    // Anti-vacuity: three error surfaces exist (create, look-up, revoke). A scan that found fewer
+    // has stopped matching and must fail here rather than silently checking less.
+    expect(sites).toHaveLength(3);
+    for (const site of sites) {
+      expect(site, site).toContain('message: ""');
+      expect(site, site).toMatch(/^error=\{\{ code: \w+Error\.code, message: "" \}\}$/);
+    }
+  });
+
+  // The hand-off block is now a machine-readable artefact the operator saves to a file. Serialising
+  // it here rather than hand-assembling text is what keeps a multi-line value (a PEM) representable
+  // and keeps the document parseable by `load_invitation_file`.
+  it("serialises the hand-off block rather than concatenating it", () => {
+    expect(MODULE_CODE).toContain("JSON.stringify(handoffPayload(invitation), null, 2)");
+  });
+
   it("derives permissions from the server principal, never from a token claim", () => {
     expect(PAGE_CODE).toContain("resolveEnrollmentPermissions");
     for (const decodeish of ["jwtDecode", "decodeJwt", "atob(", "realm_access"]) {

@@ -10,63 +10,129 @@ import {
   CyberButton,
   CyberCard,
   CyberInput,
+  CyberTable,
   EmptyState,
+  EvidenceBadge,
+  HashChip,
   KeyValueList,
+  MetricTile,
   SafetyNotice,
   StatusBadge,
   StepRail,
+  TabRail,
+  tabId,
+  tabPanelId,
   useAction,
 } from "../components/ui";
 import type { ClosedCodeCopy } from "../components/ui";
 import {
+  CONTROLS_NOTICE,
+  ENROLLMENT_CONTROLS,
   ENROLLMENT_ERROR_TEXT,
   ENROLLMENT_ID_HINT,
+  EVIDENCE_NOTICE,
   HANDOFF_BEARER_NOTICE,
+  HANDOFF_FILE_NOTICE,
   HANDOFF_ONE_TIME_NOTICE,
   HANDOFF_REVEAL_LABEL,
+  INVITATION_CLEARED_NOTICE,
   MANAGE_WITHOUT_READ_NOTICE,
   NO_INVENTORY_NOTICE,
-  RECENT_LIST_NOTICE,
+  PAST_EXPIRY_NOTICE,
   REVOKE_CONFIRM_NOTICE,
   SITE_LABEL_HINT,
+  TRACKED_FILTERS,
+  TRACKED_FILTER_LABELS,
+  TRACKED_LIST_NOTICE,
+  TRACKED_STALENESS_NOTICE,
+  TRACKED_UNKNOWN_NOTICE,
   TTL_DEFAULT_SECONDS,
   TTL_HINT,
-  TRUST_ANCHOR_NOTICE,
+  VERIFICATION_CONTEXT_NOTICE,
   ENROLLMENT_INTRO,
   WORKER_DRIVEN_NOTICE,
-  addRecent,
+  addTracked,
   createGate,
+  enrollmentEvidence,
   enrollmentStepItems,
   expiryView,
+  filterTracked,
   handoffFields,
   handoffText,
+  isPastExpiry,
   lookupGate,
   newIdempotencyKey,
   parseEnrollmentId,
   parseTtlSeconds,
+  recoveryView,
+  removeTracked,
   resolveEnrollmentPermissions,
   revokeGate,
   shouldWarnManageWithoutRead,
   statusDetailRows,
+  trackedFromInvitation,
+  trackedFromStatus,
+  trackedSummary,
   validateSiteLabel,
+  verificationContext,
   type EnrollmentPermissions,
-  type RecentEnrollment,
+  type TrackedEnrollment,
+  type TrackedFilter,
 } from "./worker-enrollment";
 
-/** A control plus the fixed reason it is unavailable. The reason is always rendered, so a disabled
- *  affordance never leaves the operator guessing which permission or gate is missing. */
+// Static element ids. The view renders once per route, so a fixed id is unique in the document and
+// — unlike a generated one — is stable enough for an aria-* reference to be asserted in a test.
+const CREATE_REASON = "wenr-create-reason";
+const LOOKUP_REASON = "wenr-lookup-reason";
+const REVOKE_REASON = "wenr-revoke-reason";
+const HANDOFF_REGION = "wenr-handoff-region";
+const TRACKED_TABS = "wenr-tracked";
+
+/**
+ * A control plus the fixed reason it is unavailable. The reason is always rendered, so a disabled
+ * affordance never leaves the operator guessing which permission or gate is missing.
+ *
+ * The reason carries a stable id so the control can point at it with `aria-describedby`. A
+ * `disabled` button is out of the tab order and most screen readers will not announce its
+ * description, which is exactly why the reason is ALSO adjacent visible text: it stays reachable in
+ * browse mode and to sighted keyboard users who tab past the control. `disabled` is kept over
+ * `aria-disabled` deliberately — these controls gate writes, and a control that cannot be clicked
+ * at all is the safer failure.
+ */
 function GatedAction({
   gate,
+  reasonId,
   children,
 }: {
   gate: { ok: boolean; reason?: string };
-  children: ReactNode;
+  reasonId: string;
+  /** Receives the id to hang `aria-describedby` on, or undefined when there is no reason to
+   *  describe. Passing it in rather than letting the caller decide is what guarantees the
+   *  reference and the element it points at can only ever appear together. */
+  children: (describedBy: string | undefined) => ReactNode;
 }) {
+  const showReason = !gate.ok && Boolean(gate.reason);
   return (
     <div className="wenr-actions">
-      {children}
-      {!gate.ok && gate.reason && <p className="wenr-reason">{gate.reason}</p>}
+      {children(showReason ? reasonId : undefined)}
+      {showReason && (
+        <p className="wenr-reason" id={reasonId} role="note">
+          {gate.reason}
+        </p>
+      )}
     </div>
+  );
+}
+
+/** An expiry as text, with the expired state carried by a word and not only by colour. */
+function Expiry({ at, nowMs }: { at: string; nowMs: number }) {
+  const view = expiryView(at, nowMs);
+  return (
+    <span
+      className={view.expired ? "wenr-expiry wenr-expiry--expired" : "wenr-expiry"}
+    >
+      {view.label}
+    </span>
   );
 }
 
@@ -85,10 +151,12 @@ export interface WorkerEnrollmentViewProps {
   // hand-off
   invitation: EnrollmentInvitation | null;
   revealed: boolean;
-  onReveal: () => void;
+  onToggleReveal: () => void;
   onCopyHandoff: () => void;
   copyNotice: string | null;
   onDismissInvitation: () => void;
+  /** Announced after a dismissal, in a live region that outlives the card being dismissed. */
+  dismissNotice: string | null;
 
   // look-up
   lookupId: string;
@@ -103,7 +171,15 @@ export interface WorkerEnrollmentViewProps {
   revoking: boolean;
   revokeError: ClosedCodeCopy | null;
 
-  recent: readonly RecentEnrollment[];
+  // tab-local working set
+  tracked: readonly TrackedEnrollment[];
+  trackedFilter: TrackedFilter;
+  onTrackedFilterChange: (filter: TrackedFilter) => void;
+  onRefreshTracked: (enrollmentId: string) => void;
+  onForgetTracked: (enrollmentId: string) => void;
+  /** The row a status request is in flight for, so only that row shows a busy control. */
+  refreshingId: string | null;
+
   /** Injected so expiry copy is deterministic in tests. */
   nowMs: number;
 }
@@ -123,10 +199,11 @@ export function WorkerEnrollmentView({
   createError,
   invitation,
   revealed,
-  onReveal,
+  onToggleReveal,
   onCopyHandoff,
   copyNotice,
   onDismissInvitation,
+  dismissNotice,
   lookupId,
   onLookupIdChange,
   onLookup,
@@ -136,7 +213,12 @@ export function WorkerEnrollmentView({
   onRevoke,
   revoking,
   revokeError,
-  recent,
+  tracked,
+  trackedFilter,
+  onTrackedFilterChange,
+  onRefreshTracked,
+  onForgetTracked,
+  refreshingId,
   nowMs,
 }: WorkerEnrollmentViewProps) {
   const site = validateSiteLabel(siteLabel);
@@ -145,6 +227,12 @@ export function WorkerEnrollmentView({
   const create = createGate(permissions, site, ttl, creating);
   const lookup = lookupGate(permissions, id, lookingUp);
   const revoke = revokeGate(permissions, status, revoking);
+
+  const summary = trackedSummary(tracked, nowMs);
+  const rows = filterTracked(tracked, trackedFilter);
+  const recovery = status
+    ? recoveryView(status.state, expiryView(status.expires_at, nowMs))
+    : null;
 
   return (
     <div className="wenr">
@@ -162,6 +250,38 @@ export function WorkerEnrollmentView({
           {MANAGE_WITHOUT_READ_NOTICE}
         </SafetyNotice>
       )}
+
+      {/* Dismissing the invitation unmounts the card the operator was working in, which takes the
+          focused control with it and leaves a screen reader with nothing announced. This region
+          lives OUTSIDE that card and is mounted from the start, so the outcome is spoken rather
+          than being a silent disappearance — and it says plainly that the material is gone. */}
+      <p className="wenr-reason" role="status">
+        {dismissNotice}
+      </p>
+
+      {/* Native disclosure: keyboard-operable and screen-reader-announced with no JS state. */}
+      <details className="wenr-scope">
+        <summary>What this interface can and cannot do</summary>
+        <p className="wenr-reason">{CONTROLS_NOTICE}</p>
+        <ul className="wenr-scope__list">
+          {ENROLLMENT_CONTROLS.map((control) => (
+            <li
+              className={
+                control.available
+                  ? "wenr-scope__item wenr-scope__item--yes"
+                  : "wenr-scope__item wenr-scope__item--no"
+              }
+              key={control.id}
+            >
+              <span className="wenr-scope__verdict">
+                {control.available ? "Available" : "Not available"}
+              </span>
+              <span className="wenr-scope__label">{control.label}</span>
+              <span className="wenr-scope__detail">{control.detail}</span>
+            </li>
+          ))}
+        </ul>
+      </details>
 
       <div className="wenr-grid">
         <CyberCard heading="Create an invitation">
@@ -181,10 +301,16 @@ export function WorkerEnrollmentView({
               errorText={ttlSeconds !== "" && !ttl.ok ? ttl.error : undefined}
               onChange={(e) => onTtlSecondsChange(e.target.value)}
             />
-            <GatedAction gate={create}>
-              <CyberButton disabled={!create.ok} onClick={onCreate}>
-                {creating ? "Creating…" : "Create invitation"}
-              </CyberButton>
+            <GatedAction gate={create} reasonId={CREATE_REASON}>
+              {(describedBy) => (
+                <CyberButton
+                  disabled={!create.ok}
+                  aria-describedby={describedBy}
+                  onClick={onCreate}
+                >
+                  {creating ? "Creating…" : "Create invitation"}
+                </CyberButton>
+              )}
             </GatedAction>
             {createError && (
               <ClosedCodeError
@@ -205,14 +331,17 @@ export function WorkerEnrollmentView({
               errorText={lookupId !== "" && !id.ok ? id.error : undefined}
               onChange={(e) => onLookupIdChange(e.target.value)}
             />
-            <GatedAction gate={lookup}>
-              <CyberButton
-                variant="secondary"
-                disabled={!lookup.ok}
-                onClick={onLookup}
-              >
-                {lookingUp ? "Loading…" : "Look up status"}
-              </CyberButton>
+            <GatedAction gate={lookup} reasonId={LOOKUP_REASON}>
+              {(describedBy) => (
+                <CyberButton
+                  variant="secondary"
+                  disabled={!lookup.ok}
+                  aria-describedby={describedBy}
+                  onClick={onLookup}
+                >
+                  {lookingUp ? "Loading…" : "Look up status"}
+                </CyberButton>
+              )}
             </GatedAction>
             <p className="wenr-reason">{NO_INVENTORY_NOTICE}</p>
             {statusError && (
@@ -239,76 +368,100 @@ export function WorkerEnrollmentView({
               <span>
                 Site: <strong>{invitation.deployment_site_label}</strong>
               </span>
-              <span
-                className={
-                  expiryView(invitation.expires_at, nowMs).expired
-                    ? "wenr-expiry wenr-expiry--expired"
-                    : "wenr-expiry"
-                }
-              >
-                {expiryView(invitation.expires_at, nowMs).label}
-              </span>
+              <Expiry at={invitation.expires_at} nowMs={nowMs} />
             </div>
 
-            {revealed ? (
-              <>
-                <pre className="wenr-handoff__block">{handoffText(invitation)}</pre>
-                <KeyValueList
-                  items={handoffFields(invitation).map((f) => ({
-                    key: f.label,
-                    value: f.value,
-                    mono: true,
-                  }))}
-                />
-                <p className="wenr-reason">{TRUST_ANCHOR_NOTICE}</p>
-                <KeyValueList
-                  items={[
-                    {
-                      key: "Controller trust anchor",
-                      value: invitation.controller_trust_anchor_hex,
+            {/* A toggle rather than a one-way button: focus stays on this control when the region
+                opens and closes, so revealing never strands the keyboard on <body>, and closing it
+                again is a first-class action rather than a page reload. */}
+            <div className="wenr-actions">
+              <CyberButton
+                onClick={onToggleReveal}
+                aria-expanded={revealed}
+                aria-controls={HANDOFF_REGION}
+              >
+                {revealed ? "Hide invitation" : HANDOFF_REVEAL_LABEL}
+              </CyberButton>
+            </div>
+
+            {/* The region element always exists so `aria-controls` above is never a dangling
+                reference and the disclosure relationship is stable in both states. Its CONTENT is
+                still strictly conditional — nothing about the invitation is in the document until
+                the operator opens it. */}
+            <div
+              className="wenr-handoff__region"
+              id={HANDOFF_REGION}
+              role="group"
+              aria-label="Invitation hand-off material"
+              hidden={!revealed}
+            >
+              {revealed && (
+                <>
+                  <p className="wenr-reason">{HANDOFF_FILE_NOTICE}</p>
+                  <pre className="wenr-handoff__block" tabIndex={0}>
+                    {handoffText(invitation)}
+                  </pre>
+                  <KeyValueList
+                    items={handoffFields(invitation).map((f) => ({
+                      key: f.label,
+                      value: f.value,
                       mono: true,
-                    },
-                  ]}
-                />
-                <div className="wenr-actions">
-                  <CyberButton variant="secondary" onClick={onCopyHandoff}>
-                    Copy hand-off block
-                  </CyberButton>
-                  <CyberButton variant="ghost" onClick={onDismissInvitation}>
-                    Done — hide it
-                  </CyberButton>
-                  {copyNotice && (
-                    <p className="wenr-reason" role="status">
-                      {copyNotice}
-                    </p>
-                  )}
-                </div>
-              </>
-            ) : (
-              <div className="wenr-actions">
-                <CyberButton onClick={onReveal}>{HANDOFF_REVEAL_LABEL}</CyberButton>
-              </div>
-            )}
+                    }))}
+                  />
+
+                  <h4 className="wenr-subhead">Confirm this out of band</h4>
+                  <p className="wenr-reason">{VERIFICATION_CONTEXT_NOTICE}</p>
+                  <ul className="wenr-verify">
+                    {verificationContext(invitation).map((row) => (
+                      <li className="wenr-verify__item" key={row.field}>
+                        <span className="wenr-verify__label">{row.label}</span>
+                        <code className="wenr-verify__value mono">{row.value}</code>
+                        <span className="wenr-verify__proves">{row.proves}</span>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <div className="wenr-actions">
+                    <CyberButton variant="secondary" onClick={onCopyHandoff}>
+                      Copy hand-off block
+                    </CyberButton>
+                    <CyberButton variant="ghost" onClick={onDismissInvitation}>
+                      Done — clear it from this browser
+                    </CyberButton>
+                  </div>
+                  <p className="wenr-reason" role="status">
+                    {copyNotice}
+                  </p>
+                </>
+              )}
+            </div>
           </div>
         </CyberCard>
       )}
 
       {status && (
-        <CyberCard heading="Enrollment status">
+        <CyberCard heading="Enrollment status and evidence">
           <div className="wenr-status__head">
-            <h3>
+            <h4 className="wenr-status__state">
+              <span className="ui-sr-only">Lifecycle state: </span>
               <StatusBadge state={status.state} domain="enrollment" />
-            </h3>
-            <span
-              className={
-                expiryView(status.expires_at, nowMs).expired
-                  ? "wenr-expiry wenr-expiry--expired"
-                  : "wenr-expiry"
-              }
-            >
-              {expiryView(status.expires_at, nowMs).label}
-            </span>
+            </h4>
+            <Expiry at={status.expires_at} nowMs={nowMs} />
           </div>
+
+          {recovery?.needed && (
+            <section className="wenr-recovery" aria-labelledby="wenr-recovery-title">
+              <SafetyNotice role="note" tone="warn">
+                <strong id="wenr-recovery-title">{recovery.title}</strong>
+                <p className="wenr-recovery__body">{recovery.body}</p>
+                <ul className="wenr-recovery__steps">
+                  {recovery.steps.map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </ul>
+              </SafetyNotice>
+            </section>
+          )}
 
           <KeyValueList
             items={statusDetailRows(status).map((row) => ({
@@ -318,6 +471,26 @@ export function WorkerEnrollmentView({
             }))}
           />
 
+          <h4 className="wenr-subhead">Evidence recorded so far</h4>
+          <p className="wenr-reason">{EVIDENCE_NOTICE}</p>
+          <div className="wenr-evidence">
+            {enrollmentEvidence(status).map((item) => (
+              <EvidenceBadge
+                key={item.field}
+                title={item.field}
+                status={item.status}
+                detail={
+                  <>
+                    <span className="wenr-evidence__label">{item.label}</span>
+                    <span className="wenr-evidence__proves">{item.proves}</span>
+                    <code className="wenr-evidence__value mono">{item.value}</code>
+                  </>
+                }
+              />
+            ))}
+          </div>
+
+          <h4 className="wenr-subhead">Lifecycle</h4>
           <div className="wenr-rail">
             <StepRail
               items={enrollmentStepItems(status.state)}
@@ -328,14 +501,17 @@ export function WorkerEnrollmentView({
           <SafetyNotice role="note" tone="warn">
             {REVOKE_CONFIRM_NOTICE}
           </SafetyNotice>
-          <GatedAction gate={revoke}>
-            <CyberButton
-              variant="danger"
-              disabled={!revoke.ok}
-              onClick={onRevoke}
-            >
-              {revoking ? "Revoking…" : "Revoke enrollment"}
-            </CyberButton>
+          <GatedAction gate={revoke} reasonId={REVOKE_REASON}>
+            {(describedBy) => (
+              <CyberButton
+                variant="danger"
+                disabled={!revoke.ok}
+                aria-describedby={describedBy}
+                onClick={onRevoke}
+              >
+                {revoking ? "Revoking…" : "Revoke enrollment"}
+              </CyberButton>
+            )}
           </GatedAction>
           {revokeError && (
             <ClosedCodeError
@@ -346,22 +522,147 @@ export function WorkerEnrollmentView({
         </CyberCard>
       )}
 
-      <CyberCard heading="Created in this tab">
-        <p className="wenr-reason">{RECENT_LIST_NOTICE}</p>
-        {recent.length === 0 ? (
-          <EmptyState title="Nothing created in this tab yet" />
-        ) : (
-          <ul className="wenr-recent">
-            {recent.map((entry) => (
-              <li className="wenr-recent__item" key={entry.enrollmentId}>
-                <span className="mono">{entry.enrollmentId}</span>
-                <span className="wenr-recent__site">
-                  {entry.siteLabel} · {expiryView(entry.expiresAt, nowMs).label}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
+      <CyberCard heading="Tracked in this tab">
+        <p className="wenr-reason">{TRACKED_LIST_NOTICE}</p>
+        <p className="wenr-reason">{TRACKED_STALENESS_NOTICE}</p>
+
+        <div className="wenr-metrics">
+          <MetricTile label="Tracked here" value={summary.total} />
+          <MetricTile
+            label="Waiting on a worker"
+            value={summary.pending}
+            tone={summary.pending > 0 ? "warn" : "default"}
+          />
+          <MetricTile
+            label="Worker healthy"
+            value={summary.healthy}
+            tone={summary.healthy > 0 ? "ok" : "default"}
+          />
+          <MetricTile
+            label="No worker enrolled"
+            value={summary.settled}
+            tone={summary.settled > 0 ? "danger" : "default"}
+          />
+          <MetricTile
+            label="Past expiry"
+            value={summary.pastExpiry}
+            tone={summary.pastExpiry > 0 ? "danger" : "default"}
+            detail={summary.pastExpiry > 0 ? PAST_EXPIRY_NOTICE : undefined}
+          />
+          <MetricTile
+            label="State not recognised"
+            value={summary.unknown}
+            detail={summary.unknown > 0 ? TRACKED_UNKNOWN_NOTICE : undefined}
+          />
+        </div>
+
+        <TabRail
+          tabs={TRACKED_FILTERS.map((filter) => ({
+            id: filter,
+            label: `${TRACKED_FILTER_LABELS[filter]} (${
+              filter === "all" ? summary.total : summary[filter]
+            })`,
+          }))}
+          active={trackedFilter}
+          onSelect={(next) => onTrackedFilterChange(next as TrackedFilter)}
+          idBase={TRACKED_TABS}
+          aria-label="Filter tracked enrollments"
+        />
+
+        <div
+          role="tabpanel"
+          id={tabPanelId(TRACKED_TABS, trackedFilter)}
+          aria-labelledby={tabId(TRACKED_TABS, trackedFilter)}
+        >
+          {rows.length === 0 ? (
+            <EmptyState title="Nothing to show under this filter">
+              {tracked.length === 0
+                ? "Create an invitation or look one up by id, and it will be tracked here for this tab."
+                : "Other enrollments are tracked under a different filter."}
+            </EmptyState>
+          ) : (
+            <CyberTable
+              label="Enrollments tracked in this browser tab"
+              caption={TRACKED_UNKNOWN_NOTICE}
+              head={[
+                "Enrollment id",
+                "Site",
+                "Last observed state",
+                "Expiry",
+                "Actions",
+              ]}
+            >
+              {rows.map((entry) => {
+                const past = isPastExpiry(entry, nowMs);
+                const busy = refreshingId === entry.enrollmentId;
+                return (
+                  <tr key={entry.enrollmentId}>
+                    <td>
+                      <HashChip value={entry.enrollmentId} />
+                    </td>
+                    <td>
+                      {entry.siteLabel === "" ? (
+                        <span className="wenr-unknown">
+                          Not known in this tab
+                          <span className="ui-sr-only">
+                            {" "}
+                            — this enrollment was tracked by look-up, and the status projection
+                            does not carry a site label
+                          </span>
+                        </span>
+                      ) : (
+                        entry.siteLabel
+                      )}
+                    </td>
+                    <td>
+                      <StatusBadge state={entry.state} domain="enrollment" />
+                      <span className="wenr-revision">
+                        {" "}
+                        at revision {entry.revision}
+                      </span>
+                    </td>
+                    <td>
+                      <Expiry at={entry.expiresAt} nowMs={nowMs} />
+                      {past && (
+                        <span className="wenr-past-expiry" role="note">
+                          {PAST_EXPIRY_NOTICE}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <div className="wenr-actions">
+                        <CyberButton
+                          size="sm"
+                          variant="secondary"
+                          disabled={!permissions.read || busy}
+                          onClick={() => onRefreshTracked(entry.enrollmentId)}
+                        >
+                          {busy ? "Refreshing…" : "Refresh"}
+                          <span className="ui-sr-only">
+                            {" "}
+                            enrollment {entry.enrollmentId}
+                          </span>
+                        </CyberButton>
+                        <CyberButton
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onForgetTracked(entry.enrollmentId)}
+                        >
+                          Forget
+                          <span className="ui-sr-only">
+                            {" "}
+                            enrollment {entry.enrollmentId} — removes this row from this tab only
+                            and changes nothing on the control plane
+                          </span>
+                        </CyberButton>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </CyberTable>
+          )}
+        </div>
       </CyberCard>
     </div>
   );
@@ -381,13 +682,23 @@ export function WorkerEnrollment() {
   const [invitation, setInvitation] = useState<EnrollmentInvitation | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [dismissNotice, setDismissNotice] = useState<string | null>(null);
   const [lookupId, setLookupId] = useState("");
   const [status, setStatus] = useState<EnrollmentStatus | null>(null);
-  const [recent, setRecent] = useState<readonly RecentEnrollment[]>([]);
+  const [tracked, setTracked] = useState<readonly TrackedEnrollment[]>([]);
+  const [trackedFilter, setTrackedFilter] = useState<TrackedFilter>("pending");
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
 
   const createAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const lookupAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const revokeAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
+
+  /** Every observed status updates the working set, so the table can never disagree with the
+   *  detail panel about a state this tab has already seen. */
+  const observe = (observed: EnrollmentStatus) => {
+    setStatus(observed);
+    setTracked((list) => addTracked(list, trackedFromStatus(observed)));
+  };
 
   const onCreate = () => {
     const site = validateSiteLabel(siteLabel);
@@ -405,14 +716,8 @@ export function WorkerEnrollment() {
       // Deliberately closed: the operator opts in to seeing bearer-grade material.
       setRevealed(false);
       setCopyNotice(null);
-      setRecent((list) =>
-        addRecent(list, {
-          enrollmentId: created.enrollment_id,
-          siteLabel: created.deployment_site_label,
-          createdAt: created.created_at,
-          expiresAt: created.expires_at,
-        }),
-      );
+      setDismissNotice(null);
+      setTracked((list) => addTracked(list, trackedFromInvitation(created)));
     });
   };
 
@@ -420,7 +725,22 @@ export function WorkerEnrollment() {
     const id = parseEnrollmentId(lookupId);
     if (!id.ok) return;
     void lookupAction.run(async () => {
-      setStatus(await api.getEnrollmentStatus(id.value));
+      observe(await api.getEnrollmentStatus(id.value));
+    });
+  };
+
+  /** A row refresh is the same supported read, addressed by an id this tab already holds — so it
+   *  needs no parsing and can never widen the set of routes this page calls. */
+  const onRefreshTracked = (enrollmentId: string) => {
+    setRefreshingId(enrollmentId);
+    void lookupAction.run(async () => {
+      // finally, not the success callback: a refused refresh must release the row too, or that
+      // row keeps a busy control forever and the operator cannot retry it.
+      try {
+        observe(await api.getEnrollmentStatus(enrollmentId));
+      } finally {
+        setRefreshingId(null);
+      }
     });
   };
 
@@ -429,7 +749,7 @@ export function WorkerEnrollment() {
     // The revision always comes from the status we actually observed — never from user input.
     const observed = status;
     void revokeAction.run(async () => {
-      setStatus(await api.revokeEnrollment(observed.enrollment_id, observed.revision));
+      observe(await api.revokeEnrollment(observed.enrollment_id, observed.revision));
     });
   };
 
@@ -460,14 +780,16 @@ export function WorkerEnrollment() {
       createError={createAction.error}
       invitation={invitation}
       revealed={revealed}
-      onReveal={() => setRevealed(true)}
+      onToggleReveal={() => setRevealed((open) => !open)}
       onCopyHandoff={onCopyHandoff}
       copyNotice={copyNotice}
       onDismissInvitation={() => {
         setInvitation(null);
         setRevealed(false);
         setCopyNotice(null);
+        setDismissNotice(INVITATION_CLEARED_NOTICE);
       }}
+      dismissNotice={dismissNotice}
       lookupId={lookupId}
       onLookupIdChange={setLookupId}
       onLookup={onLookup}
@@ -477,7 +799,14 @@ export function WorkerEnrollment() {
       onRevoke={onRevoke}
       revoking={revokeAction.busy}
       revokeError={revokeAction.error}
-      recent={recent}
+      tracked={tracked}
+      trackedFilter={trackedFilter}
+      onTrackedFilterChange={setTrackedFilter}
+      onRefreshTracked={onRefreshTracked}
+      onForgetTracked={(enrollmentId) =>
+        setTracked((list) => removeTracked(list, enrollmentId))
+      }
+      refreshingId={refreshingId}
       nowMs={Date.now()}
     />
   );
