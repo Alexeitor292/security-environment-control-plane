@@ -45,8 +45,13 @@ export function navPermissionReason(required: readonly string[]): string {
  * DISABLED, never hidden: the existence of an internal control-plane page is not sensitive, and
  * hiding it buys nothing while leaving the operator with no way to find out what to request.
  *
- * The result always has exactly one of href / unavailableReason, the same invariant the static
- * model holds — so gating cannot produce an item that is both live and explained, or neither.
+ * The result always has exactly one of href / unavailableReason, and the permitted branch returns
+ * the item UNCHANGED so that guarantee is inherited from the static invariant rather than
+ * re-derived. An earlier version rebuilt the item as `{ id, label, href, end }`, which silently
+ * dropped `unavailableReason`: a gated item that declared a reason and no href — legal under the
+ * static invariant — would have resolved to NEITHER. Unreachable with today's single gated item,
+ * but the docstring promised something the code did not do, so the code was corrected rather than
+ * the promise weakened.
  */
 export function resolveNavItem(
   item: NavItem,
@@ -55,7 +60,7 @@ export function resolveNavItem(
   const required = item.requiresAnyPermission;
   if (required === undefined || required.length === 0) return item;
   if (required.some((permission) => permissions?.includes(permission))) {
-    return { id: item.id, label: item.label, href: item.href, end: item.end };
+    return item;
   }
   return {
     id: item.id,

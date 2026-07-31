@@ -8,7 +8,9 @@
 import { describe, expect, it } from "vitest";
 
 import CLIENT from "../api/client.ts?raw";
+import HARNESS from "../dev/A11yHarness.tsx?raw";
 import MAIN from "../main.tsx?raw";
+import VITE_CONFIG from "../../vite.config.ts?raw";
 import PAGE from "./WorkerEnrollment.tsx?raw";
 import MODULE from "./worker-enrollment.ts?raw";
 
@@ -210,6 +212,45 @@ describe("enrollment page I/O boundary", () => {
     expect(PAGE_CODE).toContain("observed.revision");
     expect(PAGE_CODE).not.toMatch(/expected_revision:\s*Number\(/);
     expect(PAGE_CODE).not.toMatch(/parseInt/);
+  });
+});
+
+/**
+ * The dev-only accessibility harness must stay dev-only.
+ *
+ * It is excluded from the shipped bundle by CONSTRUCTION — `vite build` takes `index.html` as its
+ * only input — which is correct but was pinned by nothing: adding `rollupOptions.input`, or moving
+ * `a11y-harness.html` into `public/`, would start shipping it without any test noticing. Keeping a
+ * harness for repeatable verification and then leaving its own boundary unenforced would be the
+ * exact failure this suite exists to prevent.
+ *
+ * These are static checks on the two mechanisms that would actually ship it. They do not replace
+ * inspecting `dist/` after a build, which is also done; they make the regression fail in CI
+ * instead of only under a human who remembers to look.
+ */
+describe("dev harness stays out of the product", () => {
+  it("declares no extra build inputs, so index.html remains the only entry", () => {
+    // Anti-vacuity: prove the config was really read before asserting about what it lacks.
+    expect(VITE_CONFIG).toContain("defineConfig");
+    expect(VITE_CONFIG).toContain("plugins");
+    expect(VITE_CONFIG).not.toContain("rollupOptions");
+    expect(VITE_CONFIG).not.toContain("rolldownOptions");
+    expect(VITE_CONFIG).not.toContain("a11y-harness");
+  });
+
+  it("is not reachable from the application entry", () => {
+    expect(MAIN).not.toContain("A11yHarness");
+    expect(MAIN).not.toContain("dev/");
+  });
+
+  // The harness renders the shipped component; the moment it stops doing that it is a second
+  // implementation whose findings say nothing about the product.
+  it("renders the real component and models no controller behaviour", () => {
+    expect(HARNESS).toContain("WorkerEnrollmentView");
+    const code = HARNESS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    expect(code).not.toMatch(/\bapi\./);
+    expect(code).not.toMatch(/\bfetch\s*\(/);
+    expect(code).not.toContain("XMLHttpRequest");
   });
 });
 

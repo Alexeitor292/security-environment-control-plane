@@ -234,6 +234,30 @@ describe("WorkerEnrollmentView — hand-off material exposure", () => {
     expect(appearsIn(html({ invitation: withPem, revealed: false }), pem)).toBe(false);
   });
 
+  /**
+   * Control for the THIRD `appearsIn` branch. The JSON-escaping branch is exercised by the PEM
+   * test above and the verbatim branch by every other assertion, but no value in the fixture
+   * contains `& < > " '`, so the HTML-escaping branch was never proven to work — it could have
+   * been broken from the day it was written and nothing would have shown it.
+   *
+   * A `controller_origin` carrying a query string does contain them, and it is a realistic value:
+   * the field is a server-chosen URL.
+   */
+  it("finds an HTML-escaped value, the branch the other controls do not reach", () => {
+    const origin = 'https://controller.example/?a=1&b=2&q="x"<y>';
+    const withEntities: EnrollmentInvitation = { ...INVITATION, controller_origin: origin };
+    const out = html({ invitation: withEntities, revealed: true });
+
+    // The trap: React escapes the text, so the verbatim value is not in the document...
+    expect(out.includes(origin)).toBe(false);
+    // ...and the escaped form is what is actually there.
+    expect(out).toContain(htmlEscaped(origin));
+    // The search used by every assertion in this file is not fooled by that.
+    expect(appearsIn(out, origin)).toBe(true);
+    // And the gate still excludes such a value before the reveal.
+    expect(appearsIn(html({ invitation: withEntities, revealed: false }), origin)).toBe(false);
+  });
+
   it("still offers the reveal control and states why it matters", () => {
     const out = html({ invitation: INVITATION, revealed: false });
     expect(out).toContain("Reveal invitation for hand-off");

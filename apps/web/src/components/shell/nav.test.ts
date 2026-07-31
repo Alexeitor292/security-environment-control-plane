@@ -154,7 +154,11 @@ describe("permission-gated navigation", () => {
     const reason = resolveNavItem(enrollment, []).unavailableReason ?? "";
     expect(reason).toContain("enrollment:read");
     expect(reason).toContain("enrollment:manage");
-    expect(reason).toContain("or"); // either one suffices, and the copy says so
+    // The JOINED form, not a bare "or". `toContain("or")` was passing on the "or" inside
+    // "administrator", so switching the joiner to " and " — which would misstate the rule as
+    // requiring both — left it green. Asserting the whole phrase is what makes it falsifiable.
+    expect(reason).toContain("enrollment:read or enrollment:manage");
+    expect(reason).not.toContain("enrollment:read and enrollment:manage");
     expect(reason.toLowerCase()).not.toContain("coming soon");
     expect(reason).not.toMatch(/\d+ pending/);
   });
@@ -169,12 +173,18 @@ describe("permission-gated navigation", () => {
   // outcomes — so gating can never emit an item that is simultaneously live and explained, or
   // neither.
   it("keeps the exactly-one invariant after resolution", () => {
-    const cases = [
-      ["enrollment:read", "enrollment:manage"],
-      ["enrollment:manage"],
-      [],
-    ];
+    // The permission cases are DERIVED per item, not a hardcoded list. A fixed list only ever
+    // exercised the granted branch for items whose permissions happened to appear in it — gate a
+    // future item on settings:read and every case would land in the denied branch, so the
+    // granted branch would go unchecked and this test would pass without covering it.
+    const everyPermission = allItems.flatMap((i) => i.requiresAnyPermission ?? []);
     for (const item of allItems) {
+      const required = item.requiresAnyPermission ?? [];
+      const cases: string[][] = [
+        [], // denied (or ungated)
+        [...everyPermission], // granted, if the item is gated at all
+        ...required.map((p) => [p]), // granted by each individual permission, one at a time
+      ];
       for (const permissions of cases) {
         const r = resolveNavItem(item, permissions);
         const hasHref = r.href !== undefined;
@@ -182,6 +192,24 @@ describe("permission-gated navigation", () => {
         expect(hasHref !== hasReason, `${item.id} @ ${JSON.stringify(permissions)}`).toBe(true);
       }
     }
+  });
+
+  // Directly pins what the derived cases above make reachable: the granted branch must preserve
+  // whatever the item declared, rather than rebuilding it from a fixed field list. A rebuild that
+  // omits unavailableReason yields an item with NEITHER — legal input, invalid output.
+  it("returns a permitted item unchanged rather than rebuilding it", () => {
+    const declaredReason: NavItem = {
+      id: "hypothetical",
+      label: "Hypothetical",
+      unavailableReason: "Not available in this milestone.",
+      requiresAnyPermission: ["some:permission"],
+    };
+    const granted = resolveNavItem(declaredReason, ["some:permission"]);
+    expect(granted.unavailableReason).toBe("Not available in this milestone.");
+    expect(granted.href).toBeUndefined();
+    const hasHref = granted.href !== undefined;
+    const hasReason = (granted.unavailableReason ?? "").length > 0;
+    expect(hasHref !== hasReason).toBe(true);
   });
 
   it("leaves every ungated item exactly as it was", () => {
