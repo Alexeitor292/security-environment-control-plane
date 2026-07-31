@@ -1,9 +1,13 @@
 // Static architecture/security boundary tests for the worker-enrollment UI (SECP-PR5H-B1).
 //
-// The frontend surface must stay inside the three enrollment routes that take a browser principal.
-// It must never call the worker-authenticated exchange routes, never call the sealed claim-only
-// progression routes, never persist bearer-grade invitation material, and never reach an
-// infrastructure module.
+// The frontend surface must stay inside the four enrollment routes that take a browser principal —
+// create, status, list and revoke. It must never call the worker-authenticated exchange routes,
+// never call the sealed claim-only progression routes, never persist bearer-grade invitation
+// material, and never reach an infrastructure module.
+//
+// The surface is now two pages and a shared panel, so the properties that must hold for all of it
+// are asserted over the SURFACE list below rather than over one file — a new page cannot escape
+// them by being new.
 
 import { describe, expect, it } from "vitest";
 
@@ -13,6 +17,9 @@ import MAIN from "../main.tsx?raw";
 import VITE_CONFIG from "../../vite.config.ts?raw";
 import PAGE from "./WorkerEnrollment.tsx?raw";
 import MODULE from "./worker-enrollment.ts?raw";
+import INVENTORY from "./EnrollmentInventory.tsx?raw";
+import INVENTORY_MODULE from "./enrollment-inventory.ts?raw";
+import PANEL from "./EnrollmentStatusPanel.tsx?raw";
 
 // Descriptive comments legitimately name the forbidden routes and tokens (that is the point of the
 // documentation), so scan CODE only — the invariants are about actual usage.
@@ -22,6 +29,19 @@ function code(src: string): string {
 const CLIENT_CODE = code(CLIENT);
 const PAGE_CODE = code(PAGE);
 const MODULE_CODE = code(MODULE);
+const INVENTORY_CODE = code(INVENTORY);
+const INVENTORY_MODULE_CODE = code(INVENTORY_MODULE);
+const PANEL_CODE = code(PANEL);
+
+/** Every source file that makes up the enrollment surface. Properties that must hold across the
+ *  whole surface are asserted over this list, so adding a file cannot quietly escape them. */
+const SURFACE = [
+  ["WorkerEnrollment.tsx", PAGE_CODE],
+  ["worker-enrollment.ts", MODULE_CODE],
+  ["EnrollmentInventory.tsx", INVENTORY_CODE],
+  ["enrollment-inventory.ts", INVENTORY_MODULE_CODE],
+  ["EnrollmentStatusPanel.tsx", PANEL_CODE],
+] as const;
 
 const FORBIDDEN_IMPORT =
   /from\s+["'][^"']*(worker\/|provider|transport|opentofu|terraform|socket|subprocess|secret-resolver)[^"']*["']/i;
@@ -72,7 +92,13 @@ describe("enrollment client surface", () => {
     }
   });
 
-  it("adds no PR5H enrollment method beyond create, status and revoke", () => {
+  // The list route. Org-scoped by the server; the client must send nothing that could widen it.
+  it("calls the org-scoped list route without any organization parameter", () => {
+    expect(CLIENT_CODE).toContain('"/api/v1/enrollment"');
+    expect(CLIENT_CODE).not.toMatch(/organization_id|organisation|org_id|tenant/i);
+  });
+
+  it("adds no PR5H enrollment method beyond create, status, list and revoke", () => {
     // Scoped to the supported-enrollment names: the unrelated SECP-B5 target-discovery client
     // methods (listDiscoveryEnrollments / getDiscoveryEnrollment) are a different concept that
     // merely shares the word, and are not in scope for this boundary.
@@ -82,6 +108,7 @@ describe("enrollment client surface", () => {
     expect(methods.sort()).toEqual([
       "  createEnrollmentInvitation:",
       "  getEnrollmentStatus:",
+      "  listEnrollments:",
       "  revokeEnrollment:",
     ]);
   });
@@ -89,13 +116,15 @@ describe("enrollment client surface", () => {
 
 describe("enrollment page I/O boundary", () => {
   it("performs no direct fetch — all I/O goes through the shared api client", () => {
-    expect(PAGE_CODE).not.toMatch(/\bfetch\s*\(/);
-    expect(PAGE_CODE).not.toContain("XMLHttpRequest");
-    expect(PAGE_CODE).not.toContain("EventSource");
-    expect(PAGE_CODE).not.toContain("WebSocket");
+    for (const [name, src] of SURFACE) {
+      expect(src, name).not.toMatch(/\bfetch\s*\(/);
+      expect(src, name).not.toContain("XMLHttpRequest");
+      expect(src, name).not.toContain("EventSource");
+      expect(src, name).not.toContain("WebSocket");
+    }
   });
 
-  it("calls only the three supported client methods", () => {
+  it("calls only the three supported client methods from the hand-off page", () => {
     const calls = PAGE_CODE.match(/api\.[a-zA-Z]+/g) ?? [];
     expect([...new Set(calls)].sort()).toEqual([
       "api.createEnrollmentInvitation",
@@ -104,10 +133,49 @@ describe("enrollment page I/O boundary", () => {
     ]);
   });
 
+  // The inventory is a READ surface plus the one operator write that already exists. It must never
+  // reach the create route: minting a bearer-grade invitation from a list page would put the
+  // hand-off flow somewhere with no reveal gate and no one-time disclosure.
+  it("calls only list, status and revoke from the inventory page", () => {
+    const calls = INVENTORY_CODE.match(/api\.[a-zA-Z]+/g) ?? [];
+    expect([...new Set(calls)].sort()).toEqual([
+      "api.getEnrollmentStatus",
+      "api.listEnrollments",
+      "api.revokeEnrollment",
+    ]);
+  });
+
+  // The shared panel renders a record. It must stay presentational: a component that fetched would
+  // issue a request from wherever it happens to be mounted, and both pages mount it.
+  it("keeps the shared status panel free of I/O and of state", () => {
+    expect(PANEL_CODE).not.toMatch(/\bapi\./);
+    expect(PANEL_CODE).not.toContain("useState");
+    expect(PANEL_CODE).not.toContain("useEffect");
+  });
+
+  // The keyset cursor is opaque and is echoed, never interpreted. Decoding it would couple the
+  // browser to a server-side encoding and turn an opaque token into something a UI reasons about.
+  it("never decodes or parses the pagination cursor", () => {
+    for (const src of [INVENTORY_CODE, INVENTORY_MODULE_CODE]) {
+      expect(src).not.toContain("atob");
+      expect(src).not.toContain("JSON.parse");
+      expect(src).not.toMatch(/cursor\.(split|slice|match|replace|substring)/);
+    }
+  });
+
+  // Ordering comes from the controller and the cursor continues it. A client-side sort would put
+  // the rows in an order the cursor does not continue, so paging would skip records.
+  it("never re-sorts the server-ordered page", () => {
+    for (const src of [INVENTORY_CODE, INVENTORY_MODULE_CODE]) {
+      expect(src).not.toMatch(/\.sort\(/);
+      expect(src).not.toMatch(/\.reverse\(/);
+    }
+  });
+
   // Bearer-grade material must not outlive the component, and must never enter a URL the browser
   // persists to history.
   it("persists nothing — no storage, no cookie, no history write", () => {
-    for (const src of [PAGE_CODE, MODULE_CODE]) {
+    for (const [, src] of SURFACE) {
       expect(src).not.toContain("localStorage");
       expect(src).not.toContain("sessionStorage");
       expect(src).not.toContain("indexedDB");
@@ -126,8 +194,8 @@ describe("enrollment page I/O boundary", () => {
   // rather than assumed. The shared client is scanned whole; the enrollment methods are not
   // separable from it for this property.
   it("never logs — the invitation must not reach a console sink", () => {
-    for (const src of [PAGE_CODE, MODULE_CODE, CLIENT_CODE]) {
-      expect(src).not.toMatch(/console\.\w+/);
+    for (const [name, src] of [...SURFACE, ["client.ts", CLIENT_CODE] as const]) {
+      expect(src, name).not.toMatch(/console\.\w+/);
     }
   });
 
@@ -136,11 +204,11 @@ describe("enrollment page I/O boundary", () => {
   // an explicit operator action into background traffic against a route that costs the controller
   // a read per row, and would make the "Nothing polls" copy a lie.
   it("never refreshes on a timer — every read is an explicit operator action", () => {
-    for (const src of [PAGE_CODE, MODULE_CODE]) {
-      expect(src).not.toContain("setInterval");
-      expect(src).not.toContain("setTimeout");
-      expect(src).not.toContain("requestAnimationFrame");
-      expect(src).not.toContain("requestIdleCallback");
+    for (const [name, src] of SURFACE) {
+      expect(src, name).not.toContain("setInterval");
+      expect(src, name).not.toContain("setTimeout");
+      expect(src, name).not.toContain("requestAnimationFrame");
+      expect(src, name).not.toContain("requestIdleCallback");
     }
     // There IS one effect now — it moves focus after a dismissal, because a browser drops focus
     // to <body> when the focused control's card unmounts. So the blanket "no useEffect" ban was
@@ -150,23 +218,33 @@ describe("enrollment page I/O boundary", () => {
     // Same hardened-slice discipline as environment-publication-boundary: prove the anchor,
     // bound the slice, prove the slice has real content, and only then assert about it — a scan
     // that stops matching must fail loudly instead of scanning an empty string and passing.
-    const effects = PAGE_CODE.split("useEffect(").slice(1);
-    expect(effects, "no effect found — re-anchor this scan").toHaveLength(1);
-    for (const body of effects) {
-      const end = body.indexOf("}, [");
-      expect(end, "unterminated effect — the slice would run to end of file").toBeGreaterThan(-1);
-      const block = body.slice(0, end);
-      expect(block, "the effect slice is empty — the scan is not reading the body").toContain(
-        "focus",
-      );
-      expect(block).not.toMatch(/api\./);
-      expect(block).not.toMatch(/setInterval|setTimeout|fetch\(/);
+    // Both pages hold exactly one effect and both move focus: the hand-off page after a dismissal
+    // unmounts the focused control, the inventory after a selection renders a record below the
+    // table. Each is asserted the same way and each must stay free of I/O.
+    for (const [name, src] of [
+      ["WorkerEnrollment.tsx", PAGE_CODE],
+      ["EnrollmentInventory.tsx", INVENTORY_CODE],
+    ] as const) {
+      const effects = src.split("useEffect(").slice(1);
+      expect(effects, `${name}: no effect found - re-anchor this scan`).toHaveLength(1);
+      for (const body of effects) {
+        const end = body.indexOf("}, [");
+        expect(end, `${name}: unterminated effect - the slice would run to end of file`,
+        ).toBeGreaterThan(-1);
+        const block = body.slice(0, end);
+        expect(block, `${name}: the effect slice is empty - the scan is not reading the body`,
+        ).toContain("focus");
+        expect(block, name).not.toMatch(/api\./);
+        expect(block, name).not.toMatch(/setInterval|setTimeout|fetch\(/);
+      }
+      expect(src, name).not.toContain("useLayoutEffect");
     }
-    expect(PAGE_CODE).not.toContain("useLayoutEffect");
   });
 
   it("renders no unescaped markup", () => {
-    expect(PAGE_CODE).not.toContain("dangerouslySetInnerHTML");
+    for (const [name, src] of SURFACE) {
+      expect(src, name).not.toContain("dangerouslySetInnerHTML");
+    }
   });
 
   /**
@@ -182,13 +260,24 @@ describe("enrollment page I/O boundary", () => {
    * not render it".
    */
   it("passes a literal empty message at every closed-code error site", () => {
-    const sites = PAGE_CODE.match(/error=\{\{[^}]*\}\}/g) ?? [];
-    // Anti-vacuity: three error surfaces exist (create, look-up, revoke). A scan that found fewer
-    // has stopped matching and must fail here rather than silently checking less.
-    expect(sites).toHaveLength(3);
-    for (const site of sites) {
-      expect(site, site).toContain('message: ""');
-      expect(site, site).toMatch(/^error=\{\{ code: \w+Error\.code, message: "" \}\}$/);
+    // Anti-vacuity: the expected count per file is pinned, so a scan that stopped matching — or a
+    // file that grew an error surface without this test being looked at — fails loudly here rather
+    // than silently checking less. Two on the hand-off page (create, look-up), one on the shared
+    // panel (revoke), two on the inventory (list, re-read).
+    const expected: ReadonlyArray<readonly [string, string, number]> = [
+      ["WorkerEnrollment.tsx", PAGE_CODE, 2],
+      ["EnrollmentStatusPanel.tsx", PANEL_CODE, 1],
+      ["EnrollmentInventory.tsx", INVENTORY_CODE, 2],
+    ];
+    for (const [name, src, count] of expected) {
+      const sites = src.match(/error=\{\{[^}]*\}\}/g) ?? [];
+      expect(sites, name).toHaveLength(count);
+      for (const site of sites) {
+        expect(site, `${name}: ${site}`).toContain('message: ""');
+        expect(site, `${name}: ${site}`).toMatch(
+          /^error=\{\{ code: \w+Error\.code, message: "" \}\}$/,
+        );
+      }
     }
   });
 
@@ -243,6 +332,19 @@ describe("dev harness stays out of the product", () => {
     expect(MAIN).not.toContain("dev/");
   });
 
+  // Same property, same reasoning, for the real-DOM test harness: it pulls axe-core and a React
+  // test root into the graph of anything that imports it, so it must stay reachable only from
+  // test files. `vite build` takes index.html as its only input, which is what makes that true;
+  // this pins that no product source has started importing it anyway.
+  it("keeps the real-DOM test harness out of every product source file", () => {
+    for (const [name, src] of SURFACE) {
+      expect(src, name).not.toContain("testing/dom-a11y");
+      expect(src, name).not.toContain("axe-core");
+    }
+    expect(MAIN).not.toContain("testing/");
+    expect(CLIENT_CODE).not.toContain("testing/");
+  });
+
   // The harness renders the shipped component; the moment it stops doing that it is a second
   // implementation whose findings say nothing about the product.
   it("renders the real component and models no controller behaviour", () => {
@@ -255,11 +357,13 @@ describe("dev harness stays out of the product", () => {
 });
 
 describe("enrollment route registration", () => {
-  it("registers the route inside the authenticated shell", () => {
-    expect(MAIN).toContain('path: "worker-enrollment"');
+  it("registers both routes inside the authenticated shell", () => {
     // It is a child of the AuthBoundary-wrapped layout, not a sibling public route.
     const authIndex = MAIN.indexOf("AuthBoundary");
-    expect(MAIN.indexOf('path: "worker-enrollment"')).toBeGreaterThan(authIndex);
+    for (const path of ["worker-enrollment", "enrollment-inventory"]) {
+      expect(MAIN, path).toContain(`path: "${path}"`);
+      expect(MAIN.indexOf(`path: "${path}"`), path).toBeGreaterThan(authIndex);
+    }
   });
 
   it("adds no public route", () => {

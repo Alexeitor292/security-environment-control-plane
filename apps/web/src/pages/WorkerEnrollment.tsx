@@ -1,6 +1,6 @@
 import "./worker-enrollment.css";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../api/client";
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
@@ -12,25 +12,23 @@ import {
   CyberInput,
   CyberTable,
   EmptyState,
-  EvidenceBadge,
   HashChip,
   KeyValueList,
   MetricTile,
   SafetyNotice,
   StatusBadge,
-  StepRail,
   TabRail,
   tabId,
   tabPanelId,
   useAction,
 } from "../components/ui";
 import type { ClosedCodeCopy } from "../components/ui";
+import { Expiry, GatedAction, EnrollmentStatusPanel } from "./EnrollmentStatusPanel";
 import {
   CONTROLS_NOTICE,
   ENROLLMENT_CONTROLS,
   ENROLLMENT_ERROR_TEXT,
   ENROLLMENT_ID_HINT,
-  EVIDENCE_NOTICE,
   HANDOFF_BEARER_NOTICE,
   HANDOFF_FILE_NOTICE,
   HANDOFF_ONE_TIME_NOTICE,
@@ -39,7 +37,6 @@ import {
   MANAGE_WITHOUT_READ_NOTICE,
   NO_INVENTORY_NOTICE,
   PAST_EXPIRY_NOTICE,
-  REVOKE_CONFIRM_NOTICE,
   SITE_LABEL_HINT,
   TRACKED_FILTERS,
   TRACKED_FILTER_LABELS,
@@ -53,9 +50,6 @@ import {
   WORKER_DRIVEN_NOTICE,
   addTracked,
   createGate,
-  enrollmentEvidence,
-  enrollmentStepItems,
-  expiryView,
   filterTracked,
   handoffFields,
   handoffText,
@@ -64,12 +58,10 @@ import {
   newIdempotencyKey,
   parseEnrollmentId,
   parseTtlSeconds,
-  recoveryView,
   removeTracked,
   resolveEnrollmentPermissions,
   revokeGate,
   shouldWarnManageWithoutRead,
-  statusDetailRows,
   trackedFromInvitation,
   trackedFromStatus,
   trackedSummary,
@@ -88,54 +80,6 @@ const REVOKE_REASON = "wenr-revoke-reason";
 const HANDOFF_REGION = "wenr-handoff-region";
 const TRACKED_TABS = "wenr-tracked";
 const DISMISS_NOTICE = "wenr-dismiss-notice";
-
-/**
- * A control plus the fixed reason it is unavailable. The reason is always rendered, so a disabled
- * affordance never leaves the operator guessing which permission or gate is missing.
- *
- * The reason carries a stable id so the control can point at it with `aria-describedby`. A
- * `disabled` button is out of the tab order and most screen readers will not announce its
- * description, which is exactly why the reason is ALSO adjacent visible text: it stays reachable in
- * browse mode and to sighted keyboard users who tab past the control. `disabled` is kept over
- * `aria-disabled` deliberately — these controls gate writes, and a control that cannot be clicked
- * at all is the safer failure.
- */
-function GatedAction({
-  gate,
-  reasonId,
-  children,
-}: {
-  gate: { ok: boolean; reason?: string };
-  reasonId: string;
-  /** Receives the id to hang `aria-describedby` on, or undefined when there is no reason to
-   *  describe. Passing it in rather than letting the caller decide is what guarantees the
-   *  reference and the element it points at can only ever appear together. */
-  children: (describedBy: string | undefined) => ReactNode;
-}) {
-  const showReason = !gate.ok && Boolean(gate.reason);
-  return (
-    <div className="wenr-actions">
-      {children(showReason ? reasonId : undefined)}
-      {showReason && (
-        <p className="wenr-reason" id={reasonId} role="note">
-          {gate.reason}
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** An expiry as text, with the expired state carried by a word and not only by colour. */
-function Expiry({ at, nowMs }: { at: string; nowMs: number }) {
-  const view = expiryView(at, nowMs);
-  return (
-    <span
-      className={view.expired ? "wenr-expiry wenr-expiry--expired" : "wenr-expiry"}
-    >
-      {view.label}
-    </span>
-  );
-}
 
 export interface WorkerEnrollmentViewProps {
   permissions: EnrollmentPermissions;
@@ -258,9 +202,6 @@ export function WorkerEnrollmentView({
 
   const summary = trackedSummary(tracked, nowMs);
   const rows = filterTracked(tracked, trackedFilter);
-  const recovery = status
-    ? recoveryView(status.state, expiryView(status.expires_at, nowMs))
-    : null;
 
   return (
     <div className="wenr">
@@ -319,7 +260,7 @@ export function WorkerEnrollmentView({
       </details>
 
       <div className="wenr-grid">
-        <CyberCard heading="Create an invitation">
+        <CyberCard heading="Create an invitation" headingLevel={2}>
           <div className="wenr-form">
             <CyberInput
               label="Deployment site label"
@@ -356,7 +297,7 @@ export function WorkerEnrollmentView({
           </div>
         </CyberCard>
 
-        <CyberCard heading="Look up an enrollment">
+        <CyberCard heading="Look up an enrollment" headingLevel={2}>
           <div className="wenr-form">
             <CyberInput
               label="Enrollment id"
@@ -390,7 +331,7 @@ export function WorkerEnrollmentView({
       </div>
 
       {invitation && (
-        <CyberCard heading="Hand this to the worker" glow="danger">
+        <CyberCard heading="Hand this to the worker" glow="danger" headingLevel={2}>
           <div className="wenr-handoff">
             <SafetyNotice role="alert" tone="danger">
               {HANDOFF_BEARER_NOTICE}
@@ -444,7 +385,7 @@ export function WorkerEnrollmentView({
                     }))}
                   />
 
-                  <h4 className="wenr-subhead">Confirm this out of band</h4>
+                  <h3 className="wenr-subhead">Confirm this out of band</h3>
                   <p className="wenr-reason">{VERIFICATION_CONTEXT_NOTICE}</p>
                   <ul className="wenr-verify">
                     {verificationContext(invitation).map((row) => (
@@ -475,89 +416,18 @@ export function WorkerEnrollmentView({
       )}
 
       {status && (
-        <CyberCard heading="Enrollment status and evidence">
-          <div className="wenr-status__head">
-            <h4 className="wenr-status__state">
-              <span className="ui-sr-only">Lifecycle state: </span>
-              <StatusBadge state={status.state} domain="enrollment" />
-            </h4>
-            <Expiry at={status.expires_at} nowMs={nowMs} />
-          </div>
-
-          {recovery?.needed && (
-            <section className="wenr-recovery" aria-labelledby="wenr-recovery-title">
-              <SafetyNotice role="note" tone="warn">
-                <strong id="wenr-recovery-title">{recovery.title}</strong>
-                <p className="wenr-recovery__body">{recovery.body}</p>
-                <ul className="wenr-recovery__steps">
-                  {recovery.steps.map((step) => (
-                    <li key={step}>{step}</li>
-                  ))}
-                </ul>
-              </SafetyNotice>
-            </section>
-          )}
-
-          <KeyValueList
-            items={statusDetailRows(status).map((row) => ({
-              key: row.key,
-              value: row.value,
-              mono: row.mono,
-            }))}
-          />
-
-          <h4 className="wenr-subhead">Evidence recorded so far</h4>
-          <p className="wenr-reason">{EVIDENCE_NOTICE}</p>
-          <div className="wenr-evidence">
-            {enrollmentEvidence(status).map((item) => (
-              <EvidenceBadge
-                key={item.field}
-                title={item.field}
-                status={item.status}
-                detail={
-                  <>
-                    <span className="wenr-evidence__label">{item.label}</span>
-                    <span className="wenr-evidence__proves">{item.proves}</span>
-                    <code className="wenr-evidence__value mono">{item.value}</code>
-                  </>
-                }
-              />
-            ))}
-          </div>
-
-          <h4 className="wenr-subhead">Lifecycle</h4>
-          <div className="wenr-rail">
-            <StepRail
-              items={enrollmentStepItems(status.state)}
-              aria-label="Enrollment lifecycle"
-            />
-          </div>
-
-          <SafetyNotice role="note" tone="warn">
-            {REVOKE_CONFIRM_NOTICE}
-          </SafetyNotice>
-          <GatedAction gate={revoke} reasonId={REVOKE_REASON}>
-            {(describedBy) => (
-              <CyberButton
-                variant="danger"
-                disabled={!revoke.ok}
-                aria-describedby={describedBy}
-                onClick={onRevoke}
-              >
-                {revoking ? "Revoking…" : "Revoke enrollment"}
-              </CyberButton>
-            )}
-          </GatedAction>
-          {revokeError && (
-            <ClosedCodeError
-              error={{ code: revokeError.code, message: "" }}
-              codeText={ENROLLMENT_ERROR_TEXT}
-            />
-          )}
-        </CyberCard>
+        <EnrollmentStatusPanel
+          status={status}
+          nowMs={nowMs}
+          revokeGate={revoke}
+          revokeReasonId={REVOKE_REASON}
+          revoking={revoking}
+          onRevoke={onRevoke}
+          revokeError={revokeError}
+        />
       )}
 
-      <CyberCard heading="Tracked in this tab">
+      <CyberCard heading="Tracked in this tab" headingLevel={2}>
         <p className="wenr-reason">{TRACKED_LIST_NOTICE}</p>
         <p className="wenr-reason">{TRACKED_STALENESS_NOTICE}</p>
 
@@ -641,8 +511,8 @@ export function WorkerEnrollmentView({
                           Not known in this tab
                           <span className="ui-sr-only">
                             {" "}
-                            — this enrollment was tracked by look-up, and the status projection
-                            does not carry a site label
+                            — neither the create response nor the status this tab observed carried
+                            a site label for this enrollment
                           </span>
                         </span>
                       ) : (

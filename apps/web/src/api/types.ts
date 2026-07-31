@@ -913,11 +913,16 @@ export interface TopologyDocumentDetail extends TopologyDocument {
 
 // --- Supported worker enrollment (SECP-PR5H-B1) ---
 //
-// Mirrors apps/api/secp_api/schemas_enrollment.py. Only the three routes that take a browser
-// principal are modelled here: create invitation, read status, revoke. The worker exchange routes
+// Mirrors apps/api/secp_api/schemas_enrollment.py. Only the routes that take a browser principal
+// are modelled here: create invitation, read status, list, revoke. The worker exchange routes
 // (/exchange/bind, /exchange/result) are authenticated by the worker's Ed25519 proof-of-possession
 // and carry no principal, and the claim-only progression routes are sealed closed and hidden from
 // the schema — neither is a browser surface, so neither is typed or called from this client.
+//
+// The org-scoped list route and `deployment_site_label` on the status projection are the pinned
+// contract for this milestone and land with the backend stream that owns
+// `schemas_enrollment.py`; they are the agreed interface, not a guess. Every other shape here was
+// read off the shipped schema module.
 
 /** The closed, ordered enrollment lifecycle (worker_enrollment_contract.py). The five forward edges
  *  are driven by the worker's signed evidence; `refused` is the terminal an operator revoke reaches
@@ -970,7 +975,9 @@ export interface EnrollmentInvitation {
 /**
  * The bounded, secret-free status projection (`EnrollmentState.public_view`). Identities appear only
  * as short non-reversible fingerprints; `refusal_reason` is a bounded lowercase code, never prose.
- * It deliberately does NOT carry the invitation material or the deployment site label.
+ * It deliberately does NOT carry any invitation material — no invitation id, no trust anchor, no
+ * transaction id, no origin — so neither a status read nor a list response can hand out the
+ * bearer-grade capability that only the create response returns.
  */
 export interface EnrollmentStatus {
   enrollment_id: string;
@@ -986,4 +993,40 @@ export interface EnrollmentStatus {
   expires_at: string;
   updated_at: string;
   refusal_reason: string;
+  /**
+   * The opaque grouping label the invitation was created with, added to `public_view()` by the
+   * backend stream that owns the projection. It is never a tenant, address, region, endpoint or
+   * provider, and it grants nothing: organization remains the only authorization boundary.
+   *
+   * Readers must tolerate its absence — a controller built before that projection change returns a
+   * body without the key, and a browser cannot type-check a server response. `siteLabelOf` in
+   * pages/worker-enrollment.ts is the one place that guard lives.
+   */
+  deployment_site_label: string;
+}
+
+/**
+ * Query for the org-scoped enrollment list. Every field is optional; the server owns the defaults
+ * and the hard maximum, and re-applies both regardless of what is sent.
+ */
+export interface EnrollmentListQuery {
+  /** Repeatable lifecycle filter, from the closed contract set. Omitted means every state. */
+  state?: readonly string[];
+  /** Page size request. The server caps it; the client never assumes its request was honoured. */
+  limit?: number;
+  /** Opaque keyset cursor from a previous `next_cursor`. Never constructed or parsed here. */
+  after?: string;
+}
+
+/**
+ * One page of the org-scoped enrollment list. Items are the same bounded projection a status read
+ * returns — so a list can never carry invitation material — ordered by `(expires_at, enrollment_id)`
+ * ascending, including revoked and terminal records.
+ *
+ * `next_cursor` is null on the last page. It is opaque: it is echoed back verbatim and is never
+ * decoded, compared, or used to infer how many records exist.
+ */
+export interface EnrollmentListPage {
+  items: EnrollmentStatus[];
+  next_cursor: string | null;
 }

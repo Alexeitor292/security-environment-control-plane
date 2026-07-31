@@ -1,0 +1,87 @@
+/* Enrollment inventory. Layered on worker-enrollment.css, which the page also imports — the two
+   surfaces share the status panel, so they share its classes rather than duplicating them.
+
+   Semantic tokens only, never a raw --secp-* primitive, and text never uses --ink-muted (3.1:1,
+   below WCAG AA) — it is decorative only. Both are what keep this readable in the light theme as
+   well as the dark default, since only the semantic layer is remapped per theme. */
+
+/* The inventory carries the `wenr` class too, so it inherits the minmax(0, 1fr) column and the
+   min-width: 0 on its children from worker-enrollment.css. What it adds is the same treatment for
+   the nested containers the table actually sits in — the card body and the tab panel — since an
+   intermediate block that keeps its min-content width would reintroduce the sideways scroll the
+   parent rule removes. */
+.einv {
+  display: grid;
+  gap: 14px;
+}
+.einv .ui-card,
+.einv [role="tabpanel"] {
+  min-width: 0;
+}
+
+/* Focus lands here when a row is selected, so the landing point has to be visible even though the
+   region is not otherwise interactive. */
+.einv-selection {
+  display: grid;
+  gap: 10px;
+}
+.einv-selection:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-md);
+}
+
+/* The live region is always mounted, so it must not reserve vertical space while empty. */
+.einv-live:empty {
+  display: none;
+}
+
+.einv-scope-detail {
+  margin-bottom: 10px;
+  max-width: 92ch;
+}
+
+.einv-skeleton {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* The selected row is marked by a border AND by the row control reading "Showing" with
+   aria-pressed — never by colour alone. */
+.einv-row--selected > td {
+  background: var(--surface-raised);
+  border-top: var(--border-width) solid var(--tone-info);
+  border-bottom: var(--border-width) solid var(--tone-info);
+}
+
+.einv-worker {
+  font-family: var(--font-mono);
+  color: var(--ink-primary);
+  overflow-wrap: anywhere;
+}
+
+.einv-refusal {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+.einv-refusal code {
+  font-family: var(--font-mono);
+  color: var(--ink-primary);
+}
+
+/* On a narrow viewport the table keeps its own horizontal scroll region (CyberTable owns that);
+   the surrounding copy is what has to reflow, so nothing is pinned to a wide minimum. */
+@media (max-width: 640px) {
+  .einv-scope-detail {
+    max-width: none;
+  }
+}
+
+.einv-selection__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  color: var(--ink-primary);
+}

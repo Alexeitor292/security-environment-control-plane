@@ -1,5 +1,5 @@
 /**
- * DEV-ONLY accessibility harness for the worker-enrollment surface.
+ * DEV-ONLY accessibility harness for the enrollment surfaces.
  *
  * WHY IT EXISTS. The vitest suite runs in the `node` environment against
  * `renderToStaticMarkup`, so it can only assert MARKUP. Focus order, focus visibility, keyboard
@@ -20,6 +20,11 @@
  *
  * It is excluded from the production bundle: `vite build` takes `index.html` as its only input, so
  * neither this module nor `a11y-harness.html` is reachable from the shipped app.
+ *
+ * QUERY SWITCHES. `?view=inventory` renders the organization-wide inventory instead of the
+ * hand-off surface, and `?theme=light` sets the light theme. Both exist because a browser pass has
+ * to cover every surface in every theme the app actually has, and clicking through to reach one of
+ * them by hand is exactly how a state stops being checked.
  */
 
 import { useState } from "react";
@@ -28,6 +33,15 @@ import { MemoryRouter } from "react-router-dom";
 
 import type { EnrollmentInvitation, EnrollmentStatus, Principal } from "../api/types";
 import { Sidebar } from "../components/shell/Sidebar";
+import {
+  EnrollmentInventoryView,
+  type EnrollmentInventoryViewProps,
+} from "../pages/EnrollmentInventory";
+import {
+  EMPTY_PAGE,
+  appendPage,
+  type InventoryScope,
+} from "../pages/enrollment-inventory";
 import {
   WorkerEnrollmentView,
   type WorkerEnrollmentViewProps,
@@ -49,7 +63,15 @@ import "../styles.css";
  * it for one holding manage only — the case that would have been wrongly hidden had the entry been
  * gated on `enrollment:read` alone.
  */
-const DENIED = new URLSearchParams(window.location.search).get("nav") === "denied";
+const PARAMS = new URLSearchParams(window.location.search);
+const DENIED = PARAMS.get("nav") === "denied";
+const INVENTORY = PARAMS.get("view") === "inventory";
+
+// The app has exactly two themes: the dark default, and light via a root data attribute that
+// remaps the semantic token layer. Both must be walked, so the harness can select either.
+if (PARAMS.get("theme") === "light") {
+  document.documentElement.setAttribute("data-theme", "light");
+}
 
 const PRINCIPAL: Principal = {
   user_id: "u-1",
@@ -90,6 +112,7 @@ const STATUS: EnrollmentStatus = {
   result_fingerprint: "",
   expires_at: "2026-07-30T11:00:00+00:00",
   updated_at: "2026-07-30T10:05:00+00:00",
+  deployment_site_label: "site-one",
   refusal_reason: "",
 };
 
@@ -188,4 +211,77 @@ function Harness() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(<Harness />);
+const INVENTORY_PAGE = appendPage(EMPTY_PAGE, {
+  items: [
+    { ...STATUS, enrollment_id: ID, state: "healthy", worker_installation_id: "worker-one" },
+    { ...STATUS, enrollment_id: "sha256:" + "9".repeat(64), state: "invited", worker_installation_id: "" },
+    {
+      ...STATUS,
+      enrollment_id: "sha256:" + "8".repeat(64),
+      state: "refused",
+      refusal_reason: "operator_revoked",
+      deployment_site_label: "site-two",
+    },
+    {
+      ...STATUS,
+      enrollment_id: "sha256:" + "7".repeat(64),
+      state: "offer_transported",
+      expires_at: "2026-07-30T09:00:00+00:00",
+    },
+  ],
+  next_cursor: "opaque-cursor",
+});
+
+/** Same discipline as the hand-off harness: state moves, nothing is fetched and no controller
+ *  behaviour is modelled. Load-more deliberately does nothing but toggle the busy affordance. */
+function InventoryHarness() {
+  const [scope, setScope] = useState<InventoryScope>("all");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const props: EnrollmentInventoryViewProps = {
+    permissions: { read: true, manage: true },
+    scope,
+    onScopeChange: setScope,
+    page: INVENTORY_PAGE,
+    loading,
+    firstLoad: false,
+    listError: null,
+    onReload: () => {
+      setLoading(true);
+      window.setTimeout(() => setLoading(false), 800);
+    },
+    onLoadMore: () => {
+      setLoading(true);
+      window.setTimeout(() => setLoading(false), 800);
+    },
+    selectedId,
+    onSelect: setSelectedId,
+    onClearSelection: () => setSelectedId(null),
+    onRereadSelected: () => {},
+    rereading: false,
+    rereadError: null,
+    onRevoke: () => {},
+    revoking: false,
+    revokeError: null,
+    liveNotice: "Loaded 4 more; 4 shown. More pages remain.",
+    nowMs: NOW,
+  };
+
+  return (
+    <MemoryRouter>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: "16px" }}>
+        <div className="shell-sidebar" style={{ flex: "none" }}>
+          <Sidebar principal={PRINCIPAL} collapsed={false} />
+        </div>
+        <div className="app-shell__main" style={{ flex: 1, minWidth: 0, padding: "24px" }}>
+          <EnrollmentInventoryView {...props} />
+        </div>
+      </div>
+    </MemoryRouter>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+  INVENTORY ? <InventoryHarness /> : <Harness />,
+);

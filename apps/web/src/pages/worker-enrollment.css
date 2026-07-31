@@ -3,7 +3,19 @@
 
 .wenr {
   display: grid;
+  /* minmax(0, 1fr), not the implicit `auto`: a grid item's automatic minimum size is its
+     MIN-CONTENT width, so the widest thing on the page — the data table, or a 64-hex digest —
+     pushes this column wider than the viewport and the whole document scrolls sideways instead
+     of the table scrolling inside its own region. Measured at a 560px viewport, not assumed:
+     before this, .wenr reported scrollWidth 767 against clientWidth 497. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
+}
+
+/* Same reason, one level down: each card is itself a container for a table or a long digest, so
+   it needs to be allowed to shrink below its own min-content rather than propagate it upward. */
+.wenr > * {
+  min-width: 0;
 }
 
 .wenr-head h1 {
@@ -122,6 +134,14 @@
 .wenr .ui-table-wrap:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+
+/* Every identifier on this surface is a content address: "sha256:" plus 64 hex is a single
+   unbreakable token wider than any phone, so a key/value row holding one widened the whole page.
+   Measured at a 560px viewport — the row reported 507px inside a 463px column. Scoped here rather
+   than fixed in ui.css, which is shared with surfaces whose values are short. */
+.wenr .ui-kv__row .mono {
+  overflow-wrap: anywhere;
 }
 
 .wenr-subhead {
@@ -284,4 +304,9 @@
   margin-top: 3px;
   color: var(--tone-danger-ink);
   font-size: var(--text-sm);
+  /* Inside a horizontally scrolling table the expiry column collapses hard on a phone, and this
+     sentence rendered one character per line — legible in principle, unreadable in practice.
+     The table already scrolls sideways, so the note gets a readable minimum rather than being
+     allowed to shrink to nothing. Measured at a 560px viewport. */
+  min-width: 24ch;
 }

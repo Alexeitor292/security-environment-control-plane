@@ -10,6 +10,7 @@ import { Approvals } from "./pages/Approvals";
 import { AuditLog } from "./pages/AuditLog";
 import { Dashboard } from "./pages/Dashboard";
 import { DefinitionEditor } from "./pages/DefinitionEditor";
+import { EnrollmentInventory } from "./pages/EnrollmentInventory";
 import { EnvironmentPublication } from "./pages/EnvironmentPublication";
 import { ExerciseDetail } from "./pages/ExerciseDetail";
 import { Exercises } from "./pages/Exercises";
@@ -72,18 +73,18 @@ const router = createBrowserRouter([
       { path: "readonly-preflight", element: <ReadonlyPreflight /> },
       { path: "resolver-activation", element: <ResolverActivation /> },
       { path: "approvals", element: <Approvals /> },
-      // SECP-PR5H-B1: the supported worker-enrollment controller surface.
+      // SECP-PR5H-B1: the supported worker-enrollment controller surface, split across two routes
+      // because they are two different jobs with two different permissions.
       //
-      // It now HAS a sidebar entry. The original reasoning — that a nav item would promise an
-      // inventory the control plane cannot show — no longer holds: the page's table is explicitly
-      // this browser tab's own working set, labelled as such, and the page states in copy that no
-      // list route exists. The gap that reasoning left behind was worse: a full operator surface
-      // reachable only by typing its URL.
+      // `worker-enrollment` is the create-and-hand-over surface: it needs enrollment:manage to be
+      // useful, and its sidebar entry is gated on read OR manage — ANY rather than ALL is
+      // load-bearing, because manage without read can still run the entire hand-off flow.
       //
-      // The entry is gated on enrollment:read OR enrollment:manage, and renders disabled with the
-      // reason when the principal holds neither. ANY rather than ALL is load-bearing: manage
-      // without read can create and revoke invitations, which is the entire hand-off flow.
+      // `enrollment-inventory` is the organization-wide read, built on the list route. It is gated
+      // on enrollment:read alone, since that is exactly what the list requires and manage does not
+      // include it.
       { path: "worker-enrollment", element: <WorkerEnrollment /> },
+      { path: "enrollment-inventory", element: <EnrollmentInventory /> },
       { path: "audit", element: <AuditLog /> },
     ],
   },

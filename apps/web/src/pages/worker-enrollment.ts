@@ -5,11 +5,11 @@
 // label grammar and the TTL bounds are all mirrored from the backend contract, and the service
 // stays authoritative for all of them.
 //
-// SCOPE. The controller exposes exactly three enrollment routes to a browser principal: create an
-// invitation, read the bounded status projection, and revoke. There is deliberately no approve or
-// reject here — the enrollment lifecycle has no approval edge. Every forward transition is driven
-// by the worker's signed cryptographic evidence, and revoke is the only operator write in the
-// entire lifecycle.
+// SCOPE. The controller exposes exactly four enrollment routes to a browser principal: create an
+// invitation, read the bounded status projection, list the organization's enrollments, and revoke.
+// There is deliberately no approve or reject here — the enrollment lifecycle has no approval edge.
+// Every forward transition is driven by the worker's signed cryptographic evidence, and revoke is
+// the only operator write in the entire lifecycle.
 
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
 import type { StepRailItem } from "../components/ui/StepRail";
@@ -38,9 +38,10 @@ export const HANDOFF_REVEAL_LABEL = "Reveal invitation for hand-off";
 export const INVITATION_CLEARED_NOTICE =
   "Invitation cleared from this browser. No endpoint re-serves it, so it cannot be shown again — create a new invitation if you still need to hand one over.";
 
-/** Why there is no inventory or queue on this page. */
+/** Where the organization-wide view lives. This page stays the create-and-hand-over surface: a
+ *  look-up by id is still the fastest path when an operator already has the id in front of them. */
 export const NO_INVENTORY_NOTICE =
-  "There is no enrollment inventory or pending queue in this milestone. Status is available for one enrollment at a time, by id.";
+  "This looks up one enrollment at a time, by id. The Enrollment Inventory page lists every enrollment in your organization, including the ones waiting on a worker.";
 
 /** The truthful framing for the lifecycle rail: these states are not operator decisions. */
 export const WORKER_DRIVEN_NOTICE =
@@ -544,11 +545,33 @@ function fingerprint(value: string): string {
   return value === "" ? NOT_ESTABLISHED : value;
 }
 
+export const SITE_NOT_IN_PROJECTION = "Not carried by this controller's projection";
+
+/**
+ * The deployment site label from a status projection, or "" when this controller does not carry it.
+ *
+ * The label is part of the pinned projection contract, but the browser bundle and the controller
+ * are deployed independently: a controller built before that projection change returns a body
+ * without the key, and TypeScript cannot check a server response. Every read goes through here so
+ * the fallback is one decision in one place, and so a missing label is never rendered as the string
+ * "undefined" or quietly guessed from somewhere else.
+ */
+export function siteLabelOf(status: EnrollmentStatus): string {
+  const label: unknown = status.deployment_site_label;
+  return typeof label === "string" ? label : "";
+}
+
 /** The status projection as display rows. Every value here is already a bounded, secret-free
  *  server projection: identities appear only as short non-reversible fingerprints. */
 export function statusDetailRows(status: EnrollmentStatus): DetailRow[] {
+  const site = siteLabelOf(status);
   const rows: DetailRow[] = [
     { key: "Enrollment id", value: status.enrollment_id, mono: true },
+    {
+      key: "Deployment site",
+      value: site === "" ? SITE_NOT_IN_PROJECTION : site,
+      mono: site !== "",
+    },
     { key: "Revision", value: String(status.revision), mono: false },
     {
       key: "Controller installation",
@@ -820,10 +843,10 @@ export const ENROLLMENT_CONTROLS: readonly EnrollmentControl[] = [
   },
   {
     id: "list",
-    label: "List every enrollment on the control plane",
-    available: false,
+    label: "List the enrollments in your organization",
+    available: true,
     detail:
-      "The controller exposes no list route, so no interface can show a server-side inventory. Enrollments are found by id. The table below is this browser tab's own working set, not a query.",
+      "GET /api/v1/enrollment — requires enrollment:read. Organization-scoped and never cross-organization, one page at a time, and it returns no invitation material. The Enrollment Inventory page is built on it.",
   },
   {
     id: "decide",
@@ -844,7 +867,7 @@ export const ENROLLMENT_CONTROLS: readonly EnrollmentControl[] = [
     label: "Show an invitation again after you have left the page",
     available: false,
     detail:
-      "No route re-serves invitation material and this interface stores none. It exists in this tab until you dismiss it or leave, and then it is gone.",
+      "Decided, not missing: the create response is one-shot by design. A re-fetch route would let a stolen credential silently take over an enrolment in flight, so none exists and this interface stores nothing. Revoke and create a new invitation instead.",
   },
 ];
 
@@ -893,8 +916,11 @@ export function trackedFromInvitation(
 export function trackedFromStatus(status: EnrollmentStatus): TrackedEnrollment {
   return {
     enrollmentId: status.enrollment_id,
-    // The status projection carries neither, and inventing them would be worse than a blank.
-    siteLabel: "",
+    // The site label now comes from the projection, and "" when this controller does not carry it
+    // — `addTracked` then keeps whatever label the create response already gave this tab, rather
+    // than overwriting a value we genuinely observed with a blank.
+    siteLabel: siteLabelOf(status),
+    // Creation time is still not in the projection, and inventing it would be worse than a blank.
     createdAt: "",
     expiresAt: status.expires_at,
     state: status.state,
@@ -1010,7 +1036,7 @@ export function trackedSummary(
 
 /** The session-scoped working set is honest about being a local convenience, not a server query. */
 export const TRACKED_LIST_NOTICE =
-  "Enrollments this browser tab has created or looked up, kept only until you reload. This is not an inventory: the control plane has no endpoint that lists enrollments, so nothing created elsewhere — or before this reload — can appear here, and nothing here is removed when it disappears server-side.";
+  "Enrollments this browser tab has created or looked up, kept only until you reload. It is a scratchpad, not the inventory: nothing created elsewhere appears here, and a row stays until you forget it. The Enrollment Inventory page is the organization-wide, server-side view.";
 
 export const TRACKED_STALENESS_NOTICE =
   "Each row shows the last state this tab observed, at the revision it observed. Nothing polls: refresh a row to ask the controller again.";

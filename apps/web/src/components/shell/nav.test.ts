@@ -22,6 +22,7 @@ const KNOWN_ROUTES = [
   "/approvals",
   "/exercises",
   "/worker-enrollment",
+  "/enrollment-inventory",
   "/audit",
 ];
 
@@ -29,7 +30,7 @@ const KNOWN_ROUTES = [
  *  Frozen at the pre-approvals-queue set; /approvals is a new route, not a
  *  previously navigable one. */
 const PREVIOUS_NAV_ROUTES = KNOWN_ROUTES.filter(
-  (r) => r !== "/approvals" && r !== "/exercises",
+  (r) => r !== "/approvals" && r !== "/exercises" && r !== "/enrollment-inventory",
 );
 
 const allItems = NAV_GROUPS.flatMap((g) => g.items);
@@ -220,13 +221,41 @@ describe("permission-gated navigation", () => {
   });
 
   // Anti-vacuity: if gating were dropped from the model, every assertion above would still pass
-  // against an empty set. Pin that exactly one item is gated, and which.
+  // against an empty set. Pin exactly which items are gated, and on what.
   it("gates exactly the surfaces that need it", () => {
-    expect(gated.map((i) => i.id)).toEqual(["worker-enrollment"]);
+    expect(gated.map((i) => i.id)).toEqual([
+      "worker-enrollment",
+      "enrollment-inventory",
+    ]);
     expect(enrollment.requiresAnyPermission).toEqual([
       "enrollment:read",
       "enrollment:manage",
     ]);
+  });
+
+  /**
+   * The two enrollment entries are gated DIFFERENTLY, and the difference is the pinned backend
+   * decision that enrollment:manage does not imply enrollment:read.
+   *
+   * The hand-off surface takes read OR manage, because a manage-only principal can still run the
+   * whole create-and-hand-over flow. The inventory takes read ALONE, because the list route
+   * requires read and a manage-only principal opening it could only ever be refused. Collapsing
+   * them onto one rule would either hide a usable surface or advertise an unusable one.
+   */
+  it("gates the inventory on read alone, unlike the hand-off surface", () => {
+    const inventory = allItems.find((i) => i.id === "enrollment-inventory") as NavItem;
+    expect(inventory.requiresAnyPermission).toEqual(["enrollment:read"]);
+    expect(resolveNavItem(inventory, ["enrollment:read"]).href).toBe(
+      "/enrollment-inventory",
+    );
+    // manage alone must NOT open it
+    const manageOnly = resolveNavItem(inventory, ["enrollment:manage"]);
+    expect(manageOnly.href).toBeUndefined();
+    expect(manageOnly.unavailableReason).toContain("enrollment:read");
+    // ...while the hand-off surface stays reachable on manage alone.
+    expect(resolveNavItem(enrollment, ["enrollment:manage"]).href).toBe(
+      "/worker-enrollment",
+    );
   });
 
   it("builds the reason from whatever permissions it is given", () => {

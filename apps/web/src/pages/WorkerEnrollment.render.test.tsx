@@ -44,6 +44,7 @@ const STATUS: EnrollmentStatus = {
   result_fingerprint: "",
   expires_at: "2026-07-30T11:00:00+00:00",
   updated_at: "2026-07-30T10:05:00+00:00",
+  deployment_site_label: "site-one",
   refusal_reason: "",
 };
 
@@ -345,21 +346,28 @@ describe("WorkerEnrollmentView — no fabricated lifecycle authority", () => {
     expect(out).toContain("Approve or reject an enrollment");
     expect(out).toContain("Not available");
     expect(out).toContain("no approval edge");
-    expect(out).toContain("no list route");
     expect(out).toContain("no separate cancel route");
+    // The one-shot invitation is a decision, not a gap, and the copy has to say which.
+    expect(out).toContain("Decided, not missing");
   });
 
   it("says plainly that only the worker advances an enrollment", () => {
     expect(html()).toContain("Enrollment advances only on evidence the worker signs");
   });
 
-  it("discloses that there is no inventory or queue", () => {
-    expect(html()).toContain("no enrollment inventory or pending queue");
+  // This page is the create-and-hand-over surface and looks up ONE enrollment. It must point at
+  // where the organization-wide view lives rather than leave the operator to find it.
+  it("points at the inventory instead of implying this is the whole surface", () => {
+    const out = html();
+    expect(out).toContain("This looks up one enrollment at a time, by id");
+    expect(out).toContain("Enrollment Inventory");
   });
 
-  it("labels the tracked list as tab-local, not a server inventory", () => {
-    expect(html()).toContain("kept only until you reload");
-    expect(html()).toContain("This is not an inventory");
+  it("labels the tracked list as tab-local, not the server-side inventory", () => {
+    const out = html();
+    expect(out).toContain("kept only until you reload");
+    expect(out).toContain("It is a scratchpad, not the inventory");
+    expect(out).toContain("nothing created elsewhere appears here");
   });
 });
 
@@ -501,7 +509,7 @@ describe("WorkerEnrollmentView — tab-local working set", () => {
     expect(out).toContain("Waiting on a worker");
     expect(out).toContain("Worker healthy");
     expect(out).toContain("Past expiry");
-    expect(out).toContain("the control plane has no endpoint that lists enrollments");
+    expect(out).toContain("It is a scratchpad, not the inventory");
     expect(out).toContain("Nothing polls");
   });
 

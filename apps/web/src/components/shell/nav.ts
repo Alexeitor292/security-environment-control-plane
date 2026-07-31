@@ -108,13 +108,22 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Staging Deployments",
         href: "/staging-deployments",
       },
-      // Infrastructure, not Governance: this surface provisions a worker, and the enrollment
-      // lifecycle has no approval edge — there is nothing on it to govern.
+      // Infrastructure, not Governance: these surfaces provision a worker, and the enrollment
+      // lifecycle has no approval edge — there is nothing on either to govern.
       {
         id: "worker-enrollment",
         label: "Worker Enrollment",
         href: "/worker-enrollment",
         requiresAnyPermission: ["enrollment:read", "enrollment:manage"],
+      },
+      // The org-wide read. Gated on enrollment:read ALONE, unlike the entry above: the list route
+      // requires read, and enrollment:manage does not include it — so a manage-only principal
+      // must see this entry disabled with the reason rather than open a page that can only 403.
+      {
+        id: "enrollment-inventory",
+        label: "Enrollment Inventory",
+        href: "/enrollment-inventory",
+        requiresAnyPermission: ["enrollment:read"],
       },
     ],
   },

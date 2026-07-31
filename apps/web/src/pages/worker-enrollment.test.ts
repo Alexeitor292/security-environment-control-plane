@@ -33,6 +33,7 @@ import {
   resolveEnrollmentPermissions,
   revokeGate,
   shouldWarnManageWithoutRead,
+  siteLabelOf,
   statusDetailRows,
   trackedFromInvitation,
   trackedFromStatus,
@@ -79,6 +80,7 @@ function status(over: Partial<EnrollmentStatus> = {}): EnrollmentStatus {
     expires_at: "2026-07-30T11:00:00+00:00",
     updated_at: "2026-07-30T10:00:00+00:00",
     refusal_reason: "",
+    deployment_site_label: "site-one",
     ...over,
   };
 }
@@ -656,19 +658,39 @@ describe("out-of-band verification context", () => {
 describe("control inventory", () => {
   const byId = Object.fromEntries(ENROLLMENT_CONTROLS.map((c) => [c.id, c]));
 
-  it("offers exactly the three routes a browser principal may call", () => {
+  it("offers exactly the four routes a browser principal may call", () => {
     const available = ENROLLMENT_CONTROLS.filter((c) => c.available).map((c) => c.id);
-    expect(available.sort()).toEqual(["create", "revoke", "status"]);
+    expect(available.sort()).toEqual(["create", "list", "revoke", "status"]);
+  });
+
+  // Each available control names the route that backs it, so "available" can never drift into a
+  // claim about a route the controller does not expose.
+  it("names the backing route on every available control", () => {
+    for (const control of ENROLLMENT_CONTROLS.filter((c) => c.available)) {
+      expect(control.detail, control.id).toContain("/api/v1/enrollment");
+      expect(control.detail, control.id).toMatch(/enrollment:(read|manage)/);
+    }
+  });
+
+  // The list is org-scoped and carries no invitation material; both are stated, because both are
+  // the properties an operator would otherwise have to assume.
+  it("states the organization scope and the absence of invitation material on the list", () => {
+    expect(byId.list.available).toBe(true);
+    expect(byId.list.detail).toContain("Organization-scoped");
+    expect(byId.list.detail).toContain("no invitation material");
   });
 
   // The deliverable: a control with no route is declared absent, never simulated.
-  it("declares approval, listing, hand-driving and re-issue as having no route", () => {
-    for (const id of ["decide", "list", "advance", "reissue"]) {
+  it("declares approval, hand-driving and re-issue as having no route", () => {
+    for (const id of ["decide", "advance", "reissue"]) {
       expect(byId[id].available, id).toBe(false);
       expect(byId[id].detail.length, id).toBeGreaterThan(40);
     }
     expect(byId.decide.detail).toContain("no approval edge");
-    expect(byId.list.detail).toContain("no list route");
+    // Re-issue is a DECISION, not a gap — the copy has to say so, or an operator reads it as
+    // something that might arrive later and waits for it instead of revoking and recreating.
+    expect(byId.reissue.detail).toContain("Decided, not missing");
+    expect(byId.reissue.detail).toContain("Revoke and create a new invitation");
   });
 
   it("names revoke as the cancel, since there is no separate cancel route", () => {
@@ -736,10 +758,28 @@ describe("tab-local working set", () => {
     expect(refreshed[0].state).toBe("worker_bound");
   });
 
-  it("leaves the site label blank rather than guessing it for a looked-up enrollment", () => {
+  it("takes the site label from the status projection now that it carries one", () => {
     const list = addTracked([], trackedFromStatus(status()));
-    expect(list[0].siteLabel).toBe("");
+    expect(list[0].siteLabel).toBe("site-one");
+    // Still not in the projection, and still not guessed.
     expect(list[0].createdAt).toBe("");
+  });
+
+  // A controller built before the projection carried the label returns a body without the key.
+  // The row must then be blank rather than showing the string "undefined".
+  it("leaves the site label blank when the projection does not carry one", () => {
+    const older = status();
+    delete (older as { deployment_site_label?: string }).deployment_site_label;
+    expect(trackedFromStatus(older).siteLabel).toBe("");
+    expect(siteLabelOf(older)).toBe("");
+  });
+
+  // A blank from a later observation must not erase a label the create response already gave this
+  // tab: `addTracked` keeps what was genuinely observed.
+  it("keeps a previously observed site label when a later status has none", () => {
+    const withLabel = addTracked([], entry("a", { siteLabel: "site-one" }));
+    const blank = { ...entry("a", { siteLabel: "", revision: 1, state: "worker_bound" }) };
+    expect(addTracked(withLabel, blank)[0].siteLabel).toBe("site-one");
   });
 
   it("forgets an entry without touching the others", () => {

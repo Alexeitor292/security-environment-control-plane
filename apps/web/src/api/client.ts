@@ -12,6 +12,8 @@ import type {
   DeploymentPlan,
   EnrollmentInvitation,
   EnrollmentInvitationCreate,
+  EnrollmentListPage,
+  EnrollmentListQuery,
   EnrollmentStatus,
   EnvironmentPublicationClientResult,
   EnvironmentPublicationRequest,
@@ -148,10 +150,25 @@ export class ApiClientError extends Error {
   }
 }
 
-export function buildUrl(path: string, params?: Record<string, string>): string {
+/**
+ * Query parameters for a request. An array value is a REPEATED parameter (`?state=a&state=b`),
+ * which is how the API models a repeatable filter — not a comma-joined string, which the server
+ * would receive as one value containing a comma.
+ */
+export type QueryParams = Record<string, string | readonly string[]>;
+
+export function buildUrl(path: string, params?: QueryParams): string {
   const url = new URL(path.replace(/^\//, ""), API_BASE.replace(/\/?$/, "/"));
   if (params) {
-    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    for (const [k, v] of Object.entries(params)) {
+      // `append` for the repeated form; `set` for the scalar one, so a single-valued parameter
+      // keeps its previous last-write-wins behaviour for every existing caller.
+      if (Array.isArray(v)) {
+        for (const item of v) url.searchParams.append(k, item);
+      } else {
+        url.searchParams.set(k, v as string);
+      }
+    }
   }
   return url.toString();
 }
@@ -187,7 +204,7 @@ async function requestWithResponseMetadata<T>(
   method: string,
   path: string,
   body?: unknown,
-  params?: Record<string, string>,
+  params?: QueryParams,
   opts?: RequestOptions,
 ): Promise<ResponseMetadata<T>> {
   // Resolve the API base BEFORE retrieving any bearer token. If production same-origin resolution
@@ -245,7 +262,7 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  params?: Record<string, string>,
+  params?: QueryParams,
   opts?: RequestOptions,
 ): Promise<T> {
   const { data } = await requestWithResponseMetadata<T>(method, path, body, params, opts);
@@ -689,16 +706,31 @@ export const api = {
       { content_hash: contentHash, reason },
     ),
 
-  // SECP-PR5H-B1 — the supported worker-enrollment controller surface. These are the ONLY three
+  // SECP-PR5H-B1 — the supported worker-enrollment controller surface. These are the ONLY four
   // enrollment routes that take a browser principal (routers/enrollment.py). The worker exchange
   // routes are authenticated by the worker's own signed evidence and the claim-only progression
   // routes are sealed closed in production; neither is callable from here, by design.
   //
-  // `enrollment:manage` gates create/revoke and `enrollment:read` gates status — and manage does
-  // NOT imply read, so a manage-only principal can create an invitation and still be refused its
-  // status. The service is authoritative for all of it.
+  // `enrollment:manage` gates create/revoke and `enrollment:read` gates status AND list — and
+  // manage does NOT imply read, so a manage-only principal can create an invitation and still be
+  // refused both its status and the list. The service is authoritative for all of it.
   createEnrollmentInvitation: (body: EnrollmentInvitationCreate) =>
     request<EnrollmentInvitation>("POST", "/api/v1/enrollment/invitations", body),
+  // The org-scoped list. Never cross-org: the server scopes to the caller's organization and this
+  // client sends no organization parameter at all, so there is nothing here that could ask for
+  // another org's records.
+  //
+  // `state` is repeated rather than comma-joined, `limit` is capped client-side purely so an
+  // obviously-wrong request is not sent (the server re-applies its own hard maximum and is
+  // authoritative), and `after` is echoed back exactly as received — the cursor is opaque and is
+  // never decoded here.
+  listEnrollments: (query: EnrollmentListQuery = {}) => {
+    const params: QueryParams = {};
+    if (query.state && query.state.length > 0) params.state = [...query.state];
+    if (query.limit !== undefined) params.limit = String(query.limit);
+    if (query.after !== undefined && query.after !== "") params.after = query.after;
+    return request<EnrollmentListPage>("GET", "/api/v1/enrollment", undefined, params);
+  },
   // `enrollmentId` is a `sha256:<64 hex>` content address. Callers validate it against that grammar
   // before calling (see pages/worker-enrollment.ts), so no caller-controlled path segment is
   // interpolated unchecked.

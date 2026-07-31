@@ -9,6 +9,13 @@
 // <input>, <summary> or <a>, never a click-handling <div>, which is what makes it reachable by
 // keyboard in the first place — and contrast is held by the CSS token discipline (semantic tokens
 // only, never --ink-muted for text) that worker-enrollment.css states and follows.
+//
+// THE OTHER HALF NOW EXISTS. `WorkerEnrollment.dom.test.tsx` mounts this same component into a
+// real jsdom document and runs axe-core over it, so focus movement, tab order, idref resolution
+// and the automated rule set are machine-checked there rather than reasoned about here. Keep both:
+// this suite is fast and pins copy and structure; that one answers the questions a string cannot.
+// Rendered contrast is still checked by neither — it needs real layout, and is held by the token
+// discipline above and verified by eye in a browser, in both themes.
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -54,6 +61,7 @@ const STATUS: EnrollmentStatus = {
   result_fingerprint: "",
   expires_at: "2026-07-30T11:00:00+00:00",
   updated_at: "2026-07-30T10:05:00+00:00",
+  deployment_site_label: "site-one",
   refusal_reason: "",
 };
 
@@ -444,30 +452,33 @@ describe("worker-enrollment accessibility — document structure", () => {
   });
 
   /**
-   * RECORDED HONESTLY, not asserted away: there IS one skipped level in this document, h1 → h3,
-   * and it is not this page's. `CyberCard` renders every card title as h3 across the whole app;
-   * re-levelling that shared component would relabel every other page and is outside this stream.
-   * It is an axe "heading-order" best-practice finding, not a WCAG failure — headings are marked
-   * up as headings, and the reading order is correct.
+   * This WAS recorded as an unfixable finding: `CyberCard` rendered every card title as an h3, so
+   * a card directly under the page h1 produced an h1 -> h3 skip, and re-levelling a shared
+   * component looked like someone else's change.
    *
-   * What this page DOES own is that it adds no further skip below that, and the test asserts
-   * exactly that rather than a weaker "no skips at all" that would have to be suppressed.
+   * It is fixed rather than documented now. `CyberCard` grew an additive `headingLevel` that
+   * defaults to the 3 every other page already renders, so nothing else in the app was relabelled,
+   * and this surface passes 2 for its cards and 3 for their subheads. The real-DOM suite
+   * (WorkerEnrollment.dom.test.tsx) is what made the finding actionable: axe reports it as a
+   * `heading-order` violation against a live document, which a string could not show.
+   *
+   * What this test owns is the level SET. The DOM suite owns the ordering.
    */
-  it("adds no heading skip of its own below the shared card titles", () => {
+  it("uses a heading outline of h1, h2 and h3 with nothing skipped", () => {
     for (const [name, over] of RENDERS) {
       const out = html(over);
       const levels = [...out.matchAll(/<h([1-6])\b/g)].map((m) => Number(m[1]));
       expect(levels.length, name).toBeGreaterThan(1);
-      // Exactly three levels are in play: the page h1, CyberCard's h3, and this page's h4
-      // subheads. Anything else means a new heading was introduced without re-levelling.
+      // Exactly three levels are in play: the page h1, the card titles at h2, and the subheads
+      // inside a card at h3. Anything else means a heading was introduced without re-levelling.
       for (const level of new Set(levels)) {
-        expect([1, 3, 4], `${name}: unexpected h${level}`).toContain(level);
+        expect([1, 2, 3], `${name}: unexpected h${level}`).toContain(level);
       }
       expect(levels, name).toContain(1);
-      // Every h4 sits under an h3 that precedes it — no subhead is orphaned above its card.
+      // Every h3 sits under an h2 that precedes it - no subhead is orphaned above its card.
       for (let i = 0; i < levels.length; i += 1) {
-        if (levels[i] === 4) {
-          expect(levels.slice(0, i), `${name}: h4 at index ${i}`).toContain(3);
+        if (levels[i] === 3) {
+          expect(levels.slice(0, i), `${name}: h3 at index ${i}`).toContain(2);
         }
       }
     }

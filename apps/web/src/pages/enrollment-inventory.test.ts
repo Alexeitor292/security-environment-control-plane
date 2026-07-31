@@ -1,0 +1,395 @@
+// Enrollment inventory view model.
+//
+// The properties under test are the ones that stop a paged, server-ordered, server-filtered list
+// from quietly becoming a lie: counts that describe only what was loaded, an order that is never
+// re-derived, a cursor that is never interpreted, and a filter that is always pushed to the server.
+
+import { describe, expect, it } from "vitest";
+
+import type { EnrollmentStatus } from "../api/types";
+import {
+  ATTENTION_STATES,
+  COMPLETE_NOTICE,
+  EMPTY_PAGE,
+  INVENTORY_SCOPES,
+  PAGE_SIZE_DEFAULT,
+  PAGE_SIZE_MAX,
+  PARTIAL_COUNT_NOTICE,
+  PENDING_STATES,
+  SCOPE_DESCRIPTIONS,
+  SCOPE_LABELS,
+  appendPage,
+  clampPageSize,
+  emptyScopeBody,
+  findEnrollment,
+  inventoryRevokeGate,
+  inventoryRow,
+  inventoryRows,
+  inventorySummary,
+  isInventoryScope,
+  listGate,
+  loadMoreGate,
+  replaceRow,
+  scopeStates,
+  type InventoryPage,
+} from "./enrollment-inventory";
+import { ENROLLMENT_FORWARD_STATES, MISSING_READ_REASON } from "./worker-enrollment";
+
+const NOW = Date.parse("2026-07-30T10:00:00+00:00");
+const LATER = "2026-07-30T11:00:00+00:00";
+const EARLIER = "2026-07-30T09:00:00+00:00";
+
+function id(char: string): string {
+  return "sha256:" + char.repeat(64);
+}
+
+function status(over: Partial<EnrollmentStatus> = {}): EnrollmentStatus {
+  return {
+    enrollment_id: id("a"),
+    state: "invited",
+    revision: 0,
+    controller_installation_id: "controller-aaaaaaaa",
+    controller_key_fingerprint: "cccccccccccc",
+    worker_installation_id: "",
+    worker_key_fingerprint: "",
+    release_fingerprint: "eeeeeeeeeeee",
+    offer_fingerprint: "",
+    result_fingerprint: "",
+    expires_at: LATER,
+    updated_at: "2026-07-30T10:00:00+00:00",
+    refusal_reason: "",
+    deployment_site_label: "site-one",
+    ...over,
+  };
+}
+
+function page(items: EnrollmentStatus[], cursor: string | null = null): InventoryPage {
+  return appendPage(EMPTY_PAGE, { items, next_cursor: cursor });
+}
+
+// --------------------------------------------------------------------- scopes
+
+describe("scopes", () => {
+  it("names every scope and describes what it asks for", () => {
+    for (const scope of INVENTORY_SCOPES) {
+      expect(SCOPE_LABELS[scope], scope).toBeTruthy();
+      expect(SCOPE_DESCRIPTIONS[scope].length, scope).toBeGreaterThan(40);
+      expect(emptyScopeBody(scope).length, scope).toBeGreaterThan(30);
+    }
+  });
+
+  it("recognises exactly the closed scope set", () => {
+    for (const scope of INVENTORY_SCOPES) expect(isInventoryScope(scope)).toBe(true);
+    expect(isInventoryScope("everything")).toBe(false);
+    expect(isInventoryScope("")).toBe(false);
+    // Prototype keys must not resolve as scopes.
+    expect(isInventoryScope("constructor")).toBe(false);
+  });
+
+  it("splits the forward lifecycle so healthy is the worker inventory and the rest is the queue", () => {
+    expect(scopeStates("workers")).toEqual(["healthy"]);
+    expect(PENDING_STATES).toEqual(
+      ENROLLMENT_FORWARD_STATES.filter((s) => s !== "healthy"),
+    );
+    expect(scopeStates("queue")).toEqual(PENDING_STATES);
+    expect(scopeStates("queue")).not.toContain("healthy");
+  });
+
+  it("puts both terminals under the attention scope", () => {
+    expect(ATTENTION_STATES).toEqual(["refused", "recovery_required"]);
+    expect(scopeStates("attention")).toEqual(ATTENTION_STATES);
+  });
+
+  /**
+   * The load-bearing one. "Everything" must send NO state parameter rather than enumerate the
+   * closed set: a controller that grows a state this build has never heard of would otherwise have
+   * that state permanently invisible in every scope, which is exactly the failure the unknown-state
+   * counter exists to make visible.
+   */
+  it("sends no state filter at all for the everything scope", () => {
+    expect(scopeStates("all")).toEqual([]);
+  });
+});
+
+// --------------------------------------------------------------------- paging
+
+describe("page size", () => {
+  it("keeps a sane request inside the server's documented bounds", () => {
+    expect(clampPageSize(PAGE_SIZE_DEFAULT)).toBe(PAGE_SIZE_DEFAULT);
+    expect(clampPageSize(PAGE_SIZE_MAX)).toBe(PAGE_SIZE_MAX);
+    expect(clampPageSize(PAGE_SIZE_MAX + 1)).toBe(PAGE_SIZE_MAX);
+    expect(clampPageSize(0)).toBe(1);
+    expect(clampPageSize(-5)).toBe(1);
+    expect(clampPageSize(12.7)).toBe(12);
+    expect(clampPageSize(Number.NaN)).toBe(PAGE_SIZE_DEFAULT);
+    expect(clampPageSize(Number.POSITIVE_INFINITY)).toBe(PAGE_SIZE_DEFAULT);
+  });
+});
+
+describe("accumulating pages", () => {
+  it("starts from nothing loaded, which is not the same as an empty result", () => {
+    expect(EMPTY_PAGE.pages).toBe(0);
+    expect(EMPTY_PAGE.items).toEqual([]);
+    // `complete` must be false before anything is loaded — otherwise an unloaded page would claim
+    // to be a complete count of zero.
+    expect(inventorySummary(EMPTY_PAGE, NOW).complete).toBe(false);
+  });
+
+  it("appends the next page in server order without reordering", () => {
+    const first = page([status({ enrollment_id: id("a") })], "cursor-1");
+    const next = appendPage(first, {
+      items: [status({ enrollment_id: id("b") })],
+      next_cursor: null,
+    });
+    expect(next.items.map((i) => i.enrollment_id)).toEqual([id("a"), id("b")]);
+    expect(next.pages).toBe(2);
+    expect(next.cursor).toBeNull();
+  });
+
+  it("replaces a repeated id in place rather than growing a second row", () => {
+    const first = page([status({ enrollment_id: id("a"), revision: 1 }), status({ enrollment_id: id("b") })], "c1");
+    const next = appendPage(first, {
+      items: [status({ enrollment_id: id("a"), revision: 2, state: "worker_bound" })],
+      next_cursor: null,
+    });
+    expect(next.items).toHaveLength(2);
+    expect(next.items[0].state).toBe("worker_bound");
+    // still first: a refresh must not make a row jump
+    expect(next.items.map((i) => i.enrollment_id)).toEqual([id("a"), id("b")]);
+  });
+
+  it("discards a row whose revision has gone backwards", () => {
+    const first = page([status({ revision: 5, state: "verified" })], "c1");
+    const next = appendPage(first, {
+      items: [status({ revision: 4, state: "worker_bound" })],
+      next_cursor: null,
+    });
+    expect(next.items[0].revision).toBe(5);
+    expect(next.items[0].state).toBe("verified");
+  });
+
+  it("treats the cursor as the only end-of-list signal", () => {
+    // A short page is permitted and must NOT be read as the end.
+    const short = page([status()], "cursor-1");
+    expect(inventorySummary(short, NOW).complete).toBe(false);
+    expect(short.cursor).toBe("cursor-1");
+    const done = appendPage(short, { items: [], next_cursor: null });
+    expect(inventorySummary(done, NOW).complete).toBe(true);
+  });
+});
+
+describe("replacing one observed row", () => {
+  it("updates in place without reordering or changing the cursor", () => {
+    const loaded = page(
+      [status({ enrollment_id: id("a") }), status({ enrollment_id: id("b"), revision: 1 })],
+      "cursor-9",
+    );
+    const after = replaceRow(loaded, status({ enrollment_id: id("b"), revision: 2, state: "refused" }));
+    expect(after.items.map((i) => i.enrollment_id)).toEqual([id("a"), id("b")]);
+    expect(after.items[1].state).toBe("refused");
+    expect(after.cursor).toBe("cursor-9");
+    expect(after.pages).toBe(loaded.pages);
+  });
+
+  it("ignores a record that is not loaded, and one whose revision went backwards", () => {
+    const loaded = page([status({ revision: 3 })]);
+    expect(replaceRow(loaded, status({ enrollment_id: id("z") }))).toBe(loaded);
+    expect(replaceRow(loaded, status({ revision: 2 })).items[0].revision).toBe(3);
+  });
+});
+
+describe("finding a selected record", () => {
+  it("resolves only from what is loaded, and never from a null selection", () => {
+    const loaded = page([status({ enrollment_id: id("a") })]);
+    expect(findEnrollment(loaded, id("a"))?.enrollment_id).toBe(id("a"));
+    expect(findEnrollment(loaded, id("z"))).toBeNull();
+    expect(findEnrollment(loaded, null)).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------------- rows
+
+describe("row projection", () => {
+  it("carries the site label from the projection and never guesses one", () => {
+    expect(inventoryRow(status(), NOW).siteLabel).toBe("site-one");
+    const older = status();
+    delete (older as { deployment_site_label?: string }).deployment_site_label;
+    expect(inventoryRow(older, NOW).siteLabel).toBe("");
+  });
+
+  it("shows a worker identity only once the worker has bound", () => {
+    expect(inventoryRow(status(), NOW).workerInstallationId).toBe("");
+    expect(
+      inventoryRow(status({ worker_installation_id: "worker-one" }), NOW)
+        .workerInstallationId,
+    ).toBe("worker-one");
+  });
+
+  it("keeps the raw expiry alongside the derived view", () => {
+    const row = inventoryRow(status({ expires_at: LATER }), NOW);
+    expect(row.expiresAt).toBe(LATER);
+    expect(row.expiry.expired).toBe(false);
+    expect(row.expiry.label).toContain("Expires in");
+  });
+
+  it("flags an unfinished record past its expiry, but never a finished one", () => {
+    expect(inventoryRow(status({ expires_at: EARLIER }), NOW).pastExpiry).toBe(true);
+    expect(
+      inventoryRow(status({ state: "healthy", expires_at: EARLIER }), NOW).pastExpiry,
+    ).toBe(false);
+    expect(
+      inventoryRow(status({ state: "refused", expires_at: EARLIER }), NOW).pastExpiry,
+    ).toBe(false);
+    expect(
+      inventoryRow(status({ state: "recovery_required", expires_at: EARLIER }), NOW)
+        .pastExpiry,
+    ).toBe(false);
+  });
+
+  it("never invents a past-expiry flag from an unparseable timestamp", () => {
+    const row = inventoryRow(status({ expires_at: "not a date" }), NOW);
+    expect(row.expiry.valid).toBe(false);
+    expect(row.pastExpiry).toBe(false);
+  });
+
+  it("preserves the order the controller returned", () => {
+    const loaded = page([
+      status({ enrollment_id: id("c"), expires_at: EARLIER }),
+      status({ enrollment_id: id("a"), expires_at: LATER }),
+      status({ enrollment_id: id("b"), expires_at: LATER }),
+    ]);
+    expect(inventoryRows(loaded, NOW).map((r) => r.enrollmentId)).toEqual([
+      id("c"),
+      id("a"),
+      id("b"),
+    ]);
+  });
+
+  it("shows a bounded refusal code verbatim and nothing when there is none", () => {
+    expect(inventoryRow(status(), NOW).refusalReason).toBe("");
+    expect(
+      inventoryRow(status({ state: "refused", refusal_reason: "operator_revoked" }), NOW)
+        .refusalReason,
+    ).toBe("operator_revoked");
+  });
+});
+
+// --------------------------------------------------------------------- summary
+
+describe("summary", () => {
+  const mixed = page(
+    [
+      status({ enrollment_id: id("1"), state: "healthy" }),
+      status({ enrollment_id: id("2"), state: "invited" }),
+      status({ enrollment_id: id("3"), state: "worker_bound", expires_at: EARLIER }),
+      status({ enrollment_id: id("4"), state: "refused" }),
+      status({ enrollment_id: id("5"), state: "recovery_required" }),
+      status({ enrollment_id: id("6"), state: "a_state_from_the_future" }),
+    ],
+    "cursor-next",
+  );
+
+  it("counts each lifecycle group separately", () => {
+    const s = inventorySummary(mixed, NOW);
+    expect(s.loaded).toBe(6);
+    expect(s.workers).toBe(1);
+    expect(s.queue).toBe(2);
+    expect(s.attention).toBe(2);
+    expect(s.unknown).toBe(1);
+    expect(s.pastExpiry).toBe(1);
+  });
+
+  /** An unrecognised state must never be filed as progress. */
+  it("counts an unknown state on its own rather than as pending", () => {
+    const s = inventorySummary(page([status({ state: "a_state_from_the_future" })]), NOW);
+    expect(s.unknown).toBe(1);
+    expect(s.queue).toBe(0);
+    expect(s.workers).toBe(0);
+    expect(s.attention).toBe(0);
+  });
+
+  it("reports incomplete while a cursor remains and complete only when it is null", () => {
+    expect(inventorySummary(mixed, NOW).complete).toBe(false);
+    const done = appendPage(mixed, { items: [], next_cursor: null });
+    expect(inventorySummary(done, NOW).complete).toBe(true);
+  });
+
+  // The counts are of loaded rows. Both sentences must say so, in opposite directions.
+  it("has copy for both the partial and the complete case", () => {
+    expect(PARTIAL_COUNT_NOTICE).toContain("rows loaded");
+    expect(PARTIAL_COUNT_NOTICE).toContain("not your whole organization");
+    expect(COMPLETE_NOTICE).toContain("Every page has been loaded");
+  });
+});
+
+// --------------------------------------------------------------------- gates
+
+describe("gates", () => {
+  const READ = { read: true, manage: false };
+  const MANAGE = { read: false, manage: true };
+  const BOTH = { read: true, manage: true };
+  const NONE = { read: false, manage: false };
+
+  it("requires enrollment:read to list, and says so by name", () => {
+    expect(listGate(READ, false).ok).toBe(true);
+    expect(listGate(NONE, false)).toEqual({ ok: false, reason: MISSING_READ_REASON });
+    // manage does NOT imply read
+    expect(listGate(MANAGE, false).ok).toBe(false);
+    expect(listGate(READ, true).ok).toBe(false);
+  });
+
+  it("offers load-more only when the server said there is another page", () => {
+    expect(loadMoreGate(READ, EMPTY_PAGE, false).ok).toBe(false);
+    expect(loadMoreGate(READ, EMPTY_PAGE, false).reason).toContain("Load the list first");
+
+    const more = page([status()], "cursor-1");
+    expect(loadMoreGate(READ, more, false).ok).toBe(true);
+    expect(loadMoreGate(READ, more, true).ok).toBe(false);
+
+    const done = page([status()], null);
+    expect(loadMoreGate(READ, done, false).ok).toBe(false);
+    expect(loadMoreGate(READ, done, false).reason).toContain("Every page has been loaded");
+  });
+
+  it("requires enrollment:manage to revoke and explains that read is not enough", () => {
+    const selected = status();
+    expect(inventoryRevokeGate(READ, selected, false).ok).toBe(false);
+    expect(inventoryRevokeGate(READ, selected, false).reason).toContain("enrollment:manage");
+    expect(inventoryRevokeGate(READ, selected, false).reason).toContain("enrollment:read");
+    expect(inventoryRevokeGate(BOTH, selected, false).ok).toBe(true);
+  });
+
+  it("refuses to offer revoke without a selected record", () => {
+    expect(inventoryRevokeGate(BOTH, null, false).ok).toBe(false);
+    expect(inventoryRevokeGate(BOTH, null, false).reason).toContain("Select an enrollment");
+  });
+
+  it("refuses to offer revoke on a record that already ended", () => {
+    const refused = inventoryRevokeGate(BOTH, status({ state: "refused" }), false);
+    expect(refused.ok).toBe(false);
+    expect(refused.reason).toContain("already refused");
+
+    const recovery = inventoryRevokeGate(
+      BOTH,
+      status({ state: "recovery_required" }),
+      false,
+    );
+    expect(recovery.ok).toBe(false);
+    expect(recovery.reason).toContain("recovery");
+  });
+
+  it("never returns an unavailable gate without a reason", () => {
+    const gates = [
+      listGate(NONE, false),
+      loadMoreGate(READ, EMPTY_PAGE, false),
+      inventoryRevokeGate(READ, status(), false),
+      inventoryRevokeGate(BOTH, null, false),
+      inventoryRevokeGate(BOTH, status({ state: "refused" }), false),
+      inventoryRevokeGate(BOTH, status(), true),
+    ];
+    for (const gate of gates) {
+      expect(gate.ok).toBe(false);
+      expect((gate.reason ?? "").length, JSON.stringify(gate)).toBeGreaterThan(10);
+    }
+  });
+});
