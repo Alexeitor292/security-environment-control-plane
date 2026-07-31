@@ -539,8 +539,18 @@ describe("EnrollmentInventoryView - renders no single-producer claim about recov
       "the default case now selects a row, so the empty state is no longer scanned",
     ).toBeNull();
 
-    // The state is genuinely reached: this sentence exists in no other branch.
-    expect(html(overrides)).toContain("Select an enrollment above to see its evidence");
+    // The state is genuinely reached — and asserted THROUGH THE TAIL, not to the shared prefix.
+    //
+    // "Select an enrollment above to see its evidence" is byte-identical in the corrected wording
+    // and the one it replaced, so stopping there proved the state renders while proving nothing
+    // about what it says. That is the root cause of H4: the count pins close the route IN (you
+    // cannot reach it by trimming the lists), but the claim itself stayed unasserted, so a future
+    // edit that legitimately grows both lists and updates the counts would reopen it — and that
+    // edit would look entirely routine. The tail is the part that differs, so the tail is the part
+    // worth asserting.
+    expect(html(overrides)).toContain(
+      "Select an enrollment above to see its evidence, lifecycle and the two operator actions that exist for it.",
+    );
   });
 
   /** Shared-list integrity, asserted from THIS consumer: a pattern deleted from the module is
