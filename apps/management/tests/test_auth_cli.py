@@ -10,6 +10,7 @@ and no other.
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import jwt
@@ -299,6 +300,76 @@ def test_login_stops_when_the_device_code_expires():
     code, report = auth_login(deps, gate=WRITE)
     assert report["reason_code"] == "secpctl_device_code_expired"
     assert code == EXIT_AUTH_UNAVAILABLE
+
+
+# --- the no-plaintext-fallback floor, end to end --------------------------------------------------
+#
+# Adding a Linux backend must not weaken the fail-closed behaviour that shipped before it. These
+# drive the WHOLE command with `secretstorage` importable but the Secret Service unusable, which is
+# the realistic Linux failure (headless host, no session bus, locked keyring). The floor is: the
+# store still seals, `auth login` still refuses with `secpctl_credential_store_unavailable` and exit
+# 3, and nothing is written anywhere.
+
+
+class _NoConnection:
+    def close(self):
+        return None
+
+
+class _LockedCollection:
+    def is_locked(self):
+        return True
+
+
+class _UnusableSecretStorage:
+    """`secretstorage` present and importable, but the Secret Service is not usable."""
+
+    def __init__(self, mode):
+        self.mode = mode
+
+    def dbus_init(self):
+        if self.mode == "no_dbus":
+            raise RuntimeError("cannot connect to the session bus")
+        return _NoConnection()
+
+    def get_default_collection(self, connection):
+        if self.mode == "no_service":
+            raise RuntimeError("org.freedesktop.secrets is not available")
+        return _LockedCollection()
+
+
+@pytest.mark.parametrize("mode", ["no_dbus", "no_service", "locked"])
+def test_an_unusable_secret_service_still_seals_the_store(mode, monkeypatch):
+    import secp_management.operator_credential_backends as backends
+    from secp_management.operator_credential_store import build_operator_credential_store
+
+    monkeypatch.setattr(backends.sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "secretstorage", _UnusableSecretStorage(mode))
+    assert backends.resolve_secret_store_binding() is None
+    assert isinstance(build_operator_credential_store(), SealedOperatorCredentialStore)
+
+
+@pytest.mark.parametrize("mode", ["no_dbus", "no_service", "locked"])
+def test_login_still_refuses_with_exit_3_when_the_secret_service_is_unusable(mode, monkeypatch):
+    """The floor the new backend must not lower: an unusable keystore is a refusal, never a file."""
+    import secp_management.operator_credential_backends as backends
+    from secp_management.operator_credential_store import build_operator_credential_store
+
+    monkeypatch.setattr(backends.sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "secretstorage", _UnusableSecretStorage(mode))
+
+    client = _FakeDeviceClient()
+    deps, _waits, prompts = _deps(client=client, store=build_operator_credential_store())
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE == 3
+    assert report == {
+        "command": "auth login",
+        "reason_code": "secpctl_credential_store_unavailable",
+    }
+    # the grant really ran and really reached the persist step before refusing
+    assert client.calls == ["authority", "discover", "device_authorization", "token", "jwks"]
+    assert prompts
 
 
 def test_an_unverifiable_token_is_never_offered_for_storage():

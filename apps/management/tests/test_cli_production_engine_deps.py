@@ -9,8 +9,60 @@ or acting on an unverified adapter.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from secp_management import ManagementError, cli
+
+# --- Stream B integration tripwire ----------------------------------------------------------------
+
+
+def test_enrollment_deps_compose_a_real_controller_ca_bundle_provider():
+    """``secpctl enrollment invite create`` must compose a REAL controller-CA provider, never the
+    sealed one — with the sealed default every invitation fails
+    ``secpctl_controller_ca_unavailable`` and the whole enrollment feature is inert while every
+    test still passes.
+
+    ``ca_bundle`` and ``LocatorControllerCaBundleProvider`` are Stream B's, and at this branch's
+    merge base (``e72f28f``) they do not exist: ``EnrollmentCliDeps`` has no ``ca_bundle`` field.
+    Wiring them here today would raise inside ``_production_enrollment_deps``'s ``except Exception``
+    and silently return FULLY sealed deps — strictly worse than the current state, and invisible.
+
+    So this asserts the wiring the moment the field appears, and explains itself until then. It is
+    deliberately NOT a permanent conditional skip: once Stream B merges, it fails until
+    ``_production_enrollment_deps`` passes ``ca_bundle=LocatorControllerCaBundleProvider(fs,
+    locator_provider)`` reusing the SAME locator instance the controller client is built from.
+    """
+    from secp_management.enrollment_cli import EnrollmentCliDeps
+
+    field_names = {field.name for field in dataclasses.fields(EnrollmentCliDeps)}
+    if "ca_bundle" not in field_names:
+        pytest.skip(
+            "EnrollmentCliDeps has no `ca_bundle` field at this merge base; Stream B "
+            "(feature/secp-production-worker-installation) has not landed. This test starts "
+            "enforcing the cli.py wiring the moment it does."
+        )
+
+    import secp_commissioning.runtime as runtime
+    from secp_management.enrollment_cli import (  # type: ignore[attr-defined]
+        LocatorControllerCaBundleProvider,
+        SealedControllerCaBundleProvider,
+    )
+
+    # the composition is POSIX-gated through RealFilesystem; stub it so this asserts the WIRING
+    # rather than the host, exactly as the auth-deps tests below do.
+    class _StubFilesystem:
+        pass
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime, "RealFilesystem", _StubFilesystem)
+        deps = cli._production_enrollment_deps()
+
+    assert not isinstance(deps.ca_bundle, SealedControllerCaBundleProvider), (
+        "enrollment invite create composed the SEALED CA provider: every invitation will fail "
+        "secpctl_controller_ca_unavailable"
+    )
+    assert isinstance(deps.ca_bundle, LocatorControllerCaBundleProvider)
 
 
 def test_production_engine_deps_falls_back_to_sealed_when_unprovisioned(monkeypatch):
