@@ -490,6 +490,10 @@ def test_health_result_cannot_apply_across_container_generations():
 
 
 def test_adapter_invokes_no_mutation_subcommand():
+    """The near-duplicate of ``test_adapters_expose_no_mutation_verb``, sharing its blind spot
+    (WS-E): both are substring checks that see only a quoted verb followed by a comma, so what
+    looked like defence in depth was one check written twice. The structural guarantee is
+    ``test_operator_adapter_mutation_surface.py``; this stays as a fast textual smoke check."""
     text = pathlib.Path(
         __import__("secp_operator_deployment.host_adapters", fromlist=["x"]).__file__
     ).read_text(encoding="utf-8")

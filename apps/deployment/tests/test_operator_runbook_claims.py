@@ -28,9 +28,17 @@ prose, and saying so is cheaper than implying a coverage that does not exist.
 One further limit on the zero-match pin, stated because it is the sort of thing that decays into a
 false alarm: `secp_commissioning` delegates service observation to an INJECTED
 `ServiceStateAdapter`, so "no enable path here" is necessary but not sufficient on its own. The
-real adapter lives in this package and its absence of mutation verbs is pinned separately by
-``test_deployment_r4_regressions.py::test_adapters_expose_no_mutation_verb``. Together they cover
-the claim; either alone does not.
+real adapter lives in this package, and its inability to mutate is pinned by
+``test_operator_adapter_mutation_surface.py`` — structurally, via the AST of every ``runner.run``
+call site and the adapters' exact public surface. Together they cover the claim; either alone does
+not.
+
+That linkage previously named the two SUBSTRING guards
+(``test_adapters_expose_no_mutation_verb`` and ``test_adapter_invokes_no_mutation_subcommand``),
+which was an over-claim: both match only a double-quoted verb followed by a comma, so a constructed
+verb (``"en" + "able"``) passed them both. They remain as cheap textual smoke checks; the
+structural module is what actually carries the half of this linkage that is not about
+``secp_commissioning``.
 
 Nothing here runs a command; parsers are built, signatures introspected, sources read.
 """
@@ -184,6 +192,12 @@ def test_install_prepared_is_dry_run_by_default_as_the_runbook_claims():
         assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
 
 
+def _package_sources(pkg: pathlib.Path) -> list[pathlib.Path]:
+    """Every ``.py`` under ``pkg`` at ANY depth. Recursive by construction — see
+    :func:`test_the_enable_scan_reaches_into_subpackages` for the proof that it is."""
+    return sorted(p for p in pkg.rglob("*.py") if "__pycache__" not in p.parts)
+
+
 _ENABLE_MECHANISMS = (
     r"systemctl",  # the only binary that could enable a unit
     r"\.enable\(",
@@ -196,6 +210,13 @@ _ENABLE_MECHANISMS = (
 def test_secp_commissioning_contains_no_mechanism_to_enable_or_start_the_operator():
     """The runbook says the unit is installed **disabled**. That reads as a default something could
     later flip unless the stronger fact is pinned: there is no enable path to flip.
+
+    RECURSIVE. It scanned ``glob("*.py")`` — top level only — and the package is flat today, so it
+    reported green while covering everything. It would have stopped covering the moment anyone added
+    a subdirectory: a ``secp_commissioning/adapters/systemd.py`` running
+    ``systemctl enable`` sat entirely outside the scan and the suite stayed green. The guard's whole
+    value is the completeness of "there is no enable path in this package", so a scan that silently
+    narrows is worse than none.
 
     Known false-positive risk, recorded rather than hidden: ``\\.start\\(`` would also match a regex
     match object's ``.start()``. There are none today. If one appears, the fix is to narrow the
@@ -210,7 +231,7 @@ def test_secp_commissioning_contains_no_mechanism_to_enable_or_start_the_operato
         / "commissioning"
         / "secp_commissioning"
     )
-    sources = sorted(pkg.glob("*.py"))
+    sources = _package_sources(pkg)
     assert sources, f"no sources found under {pkg} — the check would vacuously pass"
 
     offenders: list[str] = []
@@ -224,6 +245,36 @@ def test_secp_commissioning_contains_no_mechanism_to_enable_or_start_the_operato
         "secp_commissioning gained something that could enable or start the operator unit: "
         f"{offenders} — the runbook's 'installed disabled' claim is no longer structural"
     )
+
+
+def test_the_enable_scan_reaches_into_subpackages(tmp_path):
+    """Prove the scan's COVERAGE, not just its patterns.
+
+    The previous version used non-recursive ``glob``. The package is flat, so it was green while
+    covering everything — and would have gone on being green the moment a subdirectory appeared,
+    which is the failure mode that matters. This builds the exact tree that defeated it and
+    requires the scan to reach the nested file.
+    """
+    import re
+
+    pkg = tmp_path / "secp_commissioning"
+    (pkg / "adapters").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "adapters" / "systemd.py").write_text(
+        'subprocess.run(["/usr/bin/systemctl", "enable", name])\ndef enable_unit(n): ...\n',
+        encoding="utf-8",
+    )
+
+    sources = _package_sources(pkg)
+    assert pkg / "adapters" / "systemd.py" in sources, "the scan does not reach subpackages"
+
+    offenders = [
+        f"{s.name}: {p}"
+        for s in sources
+        for p in _ENABLE_MECHANISMS
+        if re.search(p, s.read_text(encoding="utf-8"))
+    ]
+    assert offenders, "a nested enable path went undetected"
 
 
 def test_the_enable_detector_actually_detects():
