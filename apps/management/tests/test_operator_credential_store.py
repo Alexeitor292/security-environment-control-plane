@@ -183,6 +183,7 @@ def test_no_in_memory_binding_is_reachable_from_production(monkeypatch):
         assert binding is None or binding.backend_id in {
             backends_module.BACKEND_WINDOWS_CREDENTIAL_MANAGER,
             backends_module.BACKEND_MACOS_KEYCHAIN,
+            backends_module.BACKEND_SECRET_SERVICE,
         }
 
 

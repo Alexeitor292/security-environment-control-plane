@@ -23,6 +23,13 @@ dependencies = [
     "python-multipart>=0.0.9",
     "httpx>=0.27",
     "cryptography>=49.0.0",
+    # secpctl's Linux OS-credential backend (SECP-PR5H-B2 WS-C). Pure Python over jeepney, and it
+    # speaks the freedesktop Secret Service D-Bus API DIRECTLY — so unlike `keyring` it cannot
+    # resolve the cleartext `keyrings.alt` family, and there is no plaintext backend to fall back
+    # to. Linux-only marker: Windows and macOS use their OS keystore through stdlib ctypes, and no
+    # other plane imports it. The management installer may not spawn a process (PR5E §12), which
+    # rules out libsecret's `secret-tool`.
+    "secretstorage>=3.3.3 ; sys_platform == 'linux'",
 ]
 
 # `secpctl` is the customer-facing management-plane installer (SECP-PR5E). The PR5F proxy entry is

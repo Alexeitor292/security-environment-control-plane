@@ -6,41 +6,46 @@ derivation. :mod:`secp_management.operator_credential_store` owns all of that an
 through the narrow :class:`SecretStoreBinding` seam, so the no-plaintext-fallback rules are enforced
 in ONE reviewed place and are not restated per platform.
 
-Two bindings ship, both through :mod:`ctypes` — no process is ever spawned:
+Three bindings ship, one per supported operator workstation, and **no process is ever spawned**:
 
 * **Windows** — Credential Manager via ``advapi32`` ``CredWriteW`` / ``CredReadW`` / ``CredDeleteW``
-  (``wincred.h``). A ``CRED_TYPE_GENERIC`` credential is "stored securely" by the OS and its blob is
-  bounded by ``CRED_MAX_CREDENTIAL_BLOB_SIZE`` (5*512 bytes).
+  (``wincred.h``), through :mod:`ctypes`. A ``CRED_TYPE_GENERIC`` credential is "stored securely" by
+  the OS and its blob is bounded by ``CRED_MAX_CREDENTIAL_BLOB_SIZE`` (5*512 bytes).
 * **macOS** — Keychain Services via the CURRENT ``SecItemAdd`` / ``SecItemCopyMatching`` /
   ``SecItemUpdate`` / ``SecItemDelete`` API (the ``SecKeychain*`` family has been deprecated since
-  10.10 and is deliberately not used), against the system frameworks at their fixed absolute paths.
+  10.10 and is deliberately not used), through :mod:`ctypes` against the system frameworks at their
+  fixed absolute paths.
+* **Linux** — the freedesktop Secret Service (GNOME Keyring / KWallet) through ``secretstorage``,
+  which speaks the Secret Service D-Bus API directly over pure-Python jeepney.
 
-**Linux ships NO binding in this slice, and that is a refusal rather than an oversight.** The
-freedesktop Secret Service is reachable three ways, and each is blocked or unreviewed here:
+The Linux choice is the one that needed a dependency, so the reasoning is recorded here. libsecret's
+``secret-tool`` is the obvious route and is NOT usable: it needs a subprocess, and SECP-PR5E §12
+forbids the management installer from importing ``subprocess`` at all
+(``tests/test_management_plane_boundary.py``) — it is a local-first installer, never a process
+driver. The plane's one reviewed exec seam,
+``secp_operator_deployment.host_process.RealCommandRunner``, cannot carry it either: it pins
+``stdin=DEVNULL``, and the secret has to travel on stdin precisely so it never reaches ``argv``.
+Hand-rolling the D-Bus client is several hundred lines no host in this repository can execute.
+``secretstorage`` is preferred over ``keyring`` because it CANNOT resolve the cleartext
+``keyrings.alt`` family — there is no plaintext backend for it to fall through to.
 
-* libsecret's ``secret-tool`` needs a subprocess, and SECP-PR5E §12 forbids the management installer
-  from importing ``subprocess`` at all (``tests/test_management_plane_boundary.py``) — it is a
-  local-first installer, never a process driver. The plane's ONE reviewed exec seam,
-  ``secp_operator_deployment.host_process.RealCommandRunner``, cannot carry this anyway: it pins
-  ``stdin=DEVNULL``, and the secret has to travel on stdin precisely so it never reaches ``argv``.
-* a hand-rolled D-Bus client (session-bus SASL, message marshalling, ``Prompt`` handling for a
-  locked collection) is several hundred lines that no host in this repository can execute, which is
-  not something to introduce alongside the protocol work.
-* a dependency (``secretstorage``, which speaks the Secret Service D-Bus API directly and has no
-  plaintext fallback) is the right answer, and it needs a reviewed change to the distribution's
-  dependency set rather than a quiet import.
+Three deliberate non-goals, so the omissions are legible rather than accidental:
 
-Until one of those lands, a Linux operator gets ``secpctl_credential_store_unavailable`` and no
-credential is stored anywhere. That is the designed failure, not a degradation.
-
-Two further deliberate non-goals, so the omissions are legible:
-
-* There is NO fallback binding. An unsupported platform or a missing framework resolves to ``None``
-  and the store above fails closed. Nothing is ever written to a file, an environment variable, or a
-  process-lifetime cache.
+* There is NO fallback binding. An unsupported platform, a missing framework, an absent
+  ``secretstorage``, or an unreachable Secret Service resolves to ``None`` and the store above fails
+  closed. Nothing is ever written to a file, an environment variable, or a process-lifetime cache.
+* **A locked keyring is refused, never unlocked.** ``Collection.unlock()`` raises a GUI prompt and a
+  read-only ``secpctl auth status`` must not make one appear. A locked collection is
+  ``secpctl_credential_store_locked``, which tells the operator exactly what to do. (Note the
+  inverted return: ``unlock()`` returns ``True`` when the prompt was DISMISSED, i.e. still locked.
+  Not calling it sidesteps that trap entirely.)
 * No binding enumerates credentials. secpctl can only ever USE the account named by the reviewed
   controller locator, so listing would be output with no operation behind it and more OS paths that
   no test here can exercise.
+
+``secretstorage``/jeepney read the session D-Bus address from the environment — that is inherent to
+reaching the operator's own session bus. No code HERE reads, writes, or branches on an environment
+variable, and no binding resolves an executable through ``PATH``.
 
 Every failure is one bounded reason code. A binding never returns, logs, or embeds the secret, the
 account, the target name, an OS error string, or an upstream exception.
@@ -56,6 +61,7 @@ from secp_management import ManagementError
 #: Backend identifiers reported by ``StoredCredentialStatus.backend``.
 BACKEND_WINDOWS_CREDENTIAL_MANAGER = "windows_credential_manager"
 BACKEND_MACOS_KEYCHAIN = "macos_keychain"
+BACKEND_SECRET_SERVICE = "secret_service"
 
 #: The TIGHTEST secret size any supported keystore accepts, applied on EVERY platform so a
 #: credential that stores on one operator workstation stores on all of them. The bound is Windows'
@@ -519,6 +525,142 @@ class MacOSKeychainBinding:
             fw.release(*owned)
 
 
+# --- Linux: the freedesktop Secret Service through secretstorage ----------------------------------
+
+
+#: The label an operator sees beside this credential in their keyring UI. Code-owned and non-secret.
+SECRET_SERVICE_LABEL = "SECP secpctl operator credential"
+
+#: The fixed attribute that scopes every search and delete to items THIS tool created, so a logout
+#: can never remove an unrelated application's entry that happens to share a service/account pair.
+SECRET_SERVICE_APPLICATION = "secpctl"
+
+_ATTRIBUTE_SERVICE = "service"
+_ATTRIBUTE_ACCOUNT = "account"
+_ATTRIBUTE_APPLICATION = "application"
+
+
+def _secretstorage() -> Any:
+    """The ``secretstorage`` module, or a bounded refusal.
+
+    Imported lazily and locally: the distribution installs it only under a ``sys_platform ==
+    'linux'`` marker, so a top-level import would break every non-Linux host at module load.
+    """
+    try:
+        import secretstorage
+    except Exception:  # noqa: BLE001 - an absent backend library is a bounded refusal
+        _reject("secpctl_credential_store_unavailable")
+    return secretstorage
+
+
+def secret_service_attributes(service: str, account: str) -> dict[str, str]:
+    """The exact attribute set one credential is stored and searched under.
+
+    Pure and separately tested. The Secret Service matches an item when it carries AT LEAST the
+    searched attributes, so including the fixed application attribute narrows every lookup to this
+    tool's own items rather than anything that happens to share a service/account pair.
+    """
+    return {
+        _ATTRIBUTE_SERVICE: require_identifier(service),
+        _ATTRIBUTE_ACCOUNT: require_identifier(account),
+        _ATTRIBUTE_APPLICATION: SECRET_SERVICE_APPLICATION,
+    }
+
+
+class SecretServiceBinding:
+    """The freedesktop Secret Service (GNOME Keyring / KWallet) via ``secretstorage``.
+
+    Each operation opens and closes its own session-bus connection. jeepney's ``DBusConnection`` is
+    not closed automatically and objects created inside a connection do not outlive it, so a
+    per-operation connection is both simpler and safer than a long-lived one in a short-lived CLI.
+
+    A locked collection is a REFUSAL and never an implicit unlock — see the module docstring.
+    """
+
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        if not sys.platform.startswith("linux"):
+            _reject("secpctl_credential_store_unavailable")
+        # Probe once at construction so an absent library or an unreachable Secret Service resolves
+        # to the SEALED store, rather than advertising a backend that refuses on every command.
+        connection, _collection = self._connect()
+        connection.close()
+
+    def __repr__(self) -> str:  # never a service / account / secret
+        return "SecretServiceBinding(<bound>)"
+
+    @property
+    def backend_id(self) -> str:
+        return BACKEND_SECRET_SERVICE
+
+    def _connect(self) -> tuple[Any, Any]:
+        """``(connection, collection)`` for one operation. The caller MUST close the connection.
+
+        Named ``_connect`` rather than ``_open`` on purpose: the credential-surface source scan
+        forbids the substring ``open(``, and ``self._open(`` would satisfy it spuriously.
+        """
+        module = _secretstorage()
+        try:
+            connection = module.dbus_init()
+        except Exception:  # noqa: BLE001 - no session bus / no Secret Service is a bounded refusal
+            _reject("secpctl_credential_store_unavailable")
+        try:
+            collection = module.get_default_collection(connection)
+            locked = collection.is_locked()
+        except Exception:  # noqa: BLE001
+            connection.close()
+            _reject("secpctl_credential_store_unavailable")
+        if locked:
+            connection.close()
+            _reject("secpctl_credential_store_locked")
+        return connection, collection
+
+    def set_secret(self, *, service: str, account: str, secret: bytes) -> None:
+        blob = require_storable(secret)
+        attributes = secret_service_attributes(service, account)
+        connection, collection = self._connect()
+        try:
+            # `replace=True` makes this an atomic replace of the item with these exact attributes,
+            # so a renewal never leaves two credentials for one controller.
+            collection.create_item(SECRET_SERVICE_LABEL, attributes, blob, replace=True)
+        except Exception:  # noqa: BLE001 - never leaks the item, the attributes, or a D-Bus message
+            _reject("secpctl_credential_backend_failed")
+        finally:
+            connection.close()
+
+    def get_secret(self, *, service: str, account: str) -> bytes | None:
+        attributes = secret_service_attributes(service, account)
+        connection, collection = self._connect()
+        try:
+            items = list(collection.search_items(attributes))
+            if not items:
+                return None
+            raw = bytes(items[0].get_secret())
+            if not (0 < len(raw) <= MAX_SECRET_BYTES):
+                _reject("secpctl_credential_record_invalid")
+            return raw
+        except ManagementError:
+            raise
+        except Exception:  # noqa: BLE001
+            _reject("secpctl_credential_backend_failed")
+        finally:
+            connection.close()
+
+    def delete_secret(self, *, service: str, account: str) -> bool:
+        attributes = secret_service_attributes(service, account)
+        connection, collection = self._connect()
+        try:
+            items = list(collection.search_items(attributes))
+            for item in items:
+                item.delete()
+            return bool(items)
+        except Exception:  # noqa: BLE001
+            _reject("secpctl_credential_backend_failed")
+        finally:
+            connection.close()
+
+
 # --- resolution -----------------------------------------------------------------------------------
 
 
@@ -526,15 +668,17 @@ def resolve_secret_store_binding() -> SecretStoreBinding | None:
     """The OS keystore binding for THIS platform, or ``None`` when none is available.
 
     ``None`` is the whole no-plaintext-fallback rule in one return value: the caller composes the
-    SEALED store and every credential operation refuses. Linux reaches this return deliberately —
-    see the module docstring for why the Secret Service binding is not in this slice — and so does
-    any platform whose framework fails to load. There is no third binding to fall through to.
+    SEALED store and every credential operation refuses. A platform with no binding, a framework
+    that will not load, an absent ``secretstorage``, an unreachable Secret Service and a locked
+    keyring all land here. There is no fourth binding to fall through to.
     """
     try:
         if sys.platform == "win32":
             return WindowsCredentialManagerBinding()
         if sys.platform == "darwin":
             return MacOSKeychainBinding()
+        if sys.platform.startswith("linux"):
+            return SecretServiceBinding()
     except ManagementError:
         return None
     except Exception:  # noqa: BLE001 - an unexpected platform failure still fails CLOSED
@@ -544,14 +688,19 @@ def resolve_secret_store_binding() -> SecretStoreBinding | None:
 
 __all__ = [
     "BACKEND_MACOS_KEYCHAIN",
+    "BACKEND_SECRET_SERVICE",
     "BACKEND_WINDOWS_CREDENTIAL_MANAGER",
     "MAX_SECRET_BYTES",
+    "SECRET_SERVICE_APPLICATION",
+    "SECRET_SERVICE_LABEL",
     "MacOSKeychainBinding",
     "OperatorCredentialBackendError",
+    "SecretServiceBinding",
     "SecretStoreBinding",
     "WindowsCredentialManagerBinding",
     "require_identifier",
     "require_storable",
     "resolve_secret_store_binding",
+    "secret_service_attributes",
     "target_name",
 ]

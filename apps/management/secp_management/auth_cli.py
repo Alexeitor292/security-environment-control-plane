@@ -72,6 +72,7 @@ EXIT_MALFORMED = 7
 _EXIT_BY_REASON: dict[str, int] = {
     # --- credential storage ---
     "secpctl_credential_store_unavailable": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_credential_store_locked": EXIT_AUTH_UNAVAILABLE,
     "secpctl_credential_account_invalid": EXIT_AUTH_UNAVAILABLE,
     "secpctl_credential_store_not_serializable": EXIT_AUTH_UNAVAILABLE,
     "secpctl_credential_absent": EXIT_AUTH_UNAVAILABLE,
