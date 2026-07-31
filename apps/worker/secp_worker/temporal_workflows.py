@@ -173,11 +173,27 @@ class EnrollmentRecoverySweepWorkflow:
 
     @workflow.run
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        from datetime import timedelta
+
+        from temporalio.common import RetryPolicy
+
         return await workflow.execute_activity(
             ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME,
             arg,
             result_type=str,
-            start_to_close_timeout=_activity_timeout(),
+            # A longer budget than the shared 10-minute default: the first sweep after this ships
+            # clears whatever backlog accumulated while `recovery_required` had no producer, which
+            # is the single most likely moment to exceed it.
+            start_to_close_timeout=timedelta(minutes=30),
+            # The activity heartbeats per organization, so a stall is visible and a slow run can be
+            # cancelled rather than silently occupying the schedule.
+            heartbeat_timeout=timedelta(minutes=5),
+            # BOUNDED retries. Temporal's default is unlimited, which for a cron job means a
+            # persistently failing sweep retries forever and overlaps its own next scheduled run.
+            # The sweep is self-healing — committed recoveries leave the candidate set, so every
+            # attempt makes forward progress — so a few attempts then waiting for the next cron
+            # tick is strictly better than an unbounded retry storm.
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
 

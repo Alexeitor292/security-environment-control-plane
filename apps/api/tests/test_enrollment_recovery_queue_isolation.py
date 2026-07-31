@@ -169,3 +169,89 @@ def test_the_sweep_driver_performs_no_privileged_action():
         "docker",
     }
     assert not (imported & forbidden), imported & forbidden
+
+
+# --- the scheduler must survive a relocated Temporal symbol ---------------------------------------
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+class _AlreadyStartedClient:
+    """A client whose ``start_workflow`` raises the real already-started error."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.calls: list[dict] = []
+
+    async def start_workflow(self, *args, **kwargs):
+        self.calls.append(kwargs)
+        raise self._error
+
+
+def test_an_already_scheduled_sweep_is_a_no_op_not_an_error():
+    pytest.importorskip("temporalio")
+    from secp_worker.main import _ensure_enrollment_recovery_schedule
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    try:
+        error = WorkflowAlreadyStartedError("id", "type", run_id=None)
+    except TypeError:  # constructor shape differs across temporalio versions
+        error = WorkflowAlreadyStartedError.__new__(WorkflowAlreadyStartedError)
+        BaseException.__init__(error, "already started")
+
+    client = _AlreadyStartedClient(error)
+    _run(_ensure_enrollment_recovery_schedule(client, "secp-orchestration"))
+
+    assert client.calls, "the scheduler must have attempted the start"
+    assert client.calls[0]["task_queue"] == "secp-orchestration"
+
+
+def test_a_relocated_temporal_symbol_does_not_kill_worker_startup(monkeypatch):
+    """THE REGRESSION GUARD for a defect this file's own fix originally shipped.
+
+    Resolving the exception name INSIDE the try does not work: the name is also the ``except``
+    clause, so an ImportError makes Python raise ``UnboundLocalError`` while MATCHING the handler,
+    which the generic ``except Exception`` never sees. It escapes into ``_run_temporal``, whose
+    fail-closed path exits the process — turning a scheduling hiccup into a full worker outage.
+
+    Simulate the relocation by making the import fail, and assert the scheduler returns normally.
+    """
+    pytest.importorskip("temporalio")
+    import builtins
+
+    from secp_worker.main import _ensure_enrollment_recovery_schedule
+
+    real_import = builtins.__import__
+
+    def _fail_temporal_exceptions(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "temporalio.exceptions" or (
+            name == "temporalio" and fromlist and "exceptions" in fromlist
+        ):
+            raise ImportError("simulated relocation of WorkflowAlreadyStartedError")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _fail_temporal_exceptions)
+
+    class _Boom:
+        async def start_workflow(self, *args, **kwargs):
+            raise RuntimeError("scheduling unavailable")
+
+    # must RETURN, not raise: neither UnboundLocalError nor the RuntimeError may escape
+    _run(_ensure_enrollment_recovery_schedule(_Boom(), "secp-orchestration"))
+
+
+def test_a_scheduling_failure_never_escapes_to_kill_the_worker():
+    """Any scheduling error is logged and swallowed — an unscheduled sweep delays recovery, it does
+    not corrupt anything, so it must never trade a small delay for a process exit."""
+    pytest.importorskip("temporalio")
+    from secp_worker.main import _ensure_enrollment_recovery_schedule
+
+    class _Boom:
+        async def start_workflow(self, *args, **kwargs):
+            raise RuntimeError("temporal unreachable")
+
+    _run(_ensure_enrollment_recovery_schedule(_Boom(), "secp-orchestration"))

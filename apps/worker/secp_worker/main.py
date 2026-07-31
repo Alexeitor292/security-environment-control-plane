@@ -124,12 +124,27 @@ async def _ensure_enrollment_recovery_schedule(client, task_queue: str) -> None:
     activities registered above serve the product's primary paths. Killing the worker over a
     scheduling hiccup would trade a small delay for a full outage, so this logs and continues.
     """
-    # ``WorkflowAlreadyStartedError`` lives in temporalio.exceptions, NOT temporalio.client. The
-    # import is inside the try so a future relocation degrades to the generic handler below (a
-    # logged scheduling failure) instead of raising out of worker startup and killing the process.
+    # ``WorkflowAlreadyStartedError`` lives in temporalio.exceptions, NOT temporalio.client.
+    #
+    # The name is RESOLVED BEFORE the try, into a tuple. Putting the import inside the try does NOT
+    # work, and is the subtler version of the same bug: the name is also the ``except`` clause, so
+    # on an ImportError Python evaluates ``except WorkflowAlreadyStartedError:`` while matching,
+    # hits an unbound local, and raises ``UnboundLocalError`` DURING handler matching — which the
+    # later ``except Exception`` never sees. It would escape into ``_run_temporal``, whose
+    # fail-closed path exits the process: precisely the outage this function exists to avoid.
+    #
+    # An empty tuple matches nothing, so a relocated or renamed symbol degrades to the generic
+    # handler below (a logged scheduling failure, worker keeps running) — genuinely, not just in
+    # the comment.
+    already_started: tuple[type[BaseException], ...]
     try:
         from temporalio.exceptions import WorkflowAlreadyStartedError
 
+        already_started = (WorkflowAlreadyStartedError,)
+    except ImportError:  # pragma: no cover - exercised by the relocation regression test
+        already_started = ()
+
+    try:
         await client.start_workflow(
             EnrollmentRecoverySweepWorkflow.run,
             {},
@@ -142,7 +157,7 @@ async def _ensure_enrollment_recovery_schedule(client, task_queue: str) -> None:
             task_queue,
             ENROLLMENT_RECOVERY_SWEEP_CRON,
         )
-    except WorkflowAlreadyStartedError:
+    except already_started:
         logger.info("Enrollment recovery sweep already scheduled; leaving the existing schedule")
     except Exception as exc:  # noqa: BLE001 - a scheduling failure must not kill the worker
         logger.error("Could not schedule the enrollment recovery sweep: %s", exc)

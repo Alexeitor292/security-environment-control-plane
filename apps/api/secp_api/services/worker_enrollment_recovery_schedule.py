@@ -37,7 +37,9 @@ detail is ever returned or logged.
 
 from __future__ import annotations
 
+import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -51,6 +53,8 @@ from secp_api.services.worker_enrollment_recovery import (
     RecoverySweepResult,
     drain_expired,
 )
+
+_LOG = logging.getLogger("secp.enrollment.recovery_sweep")
 
 #: A hard, code-owned ceiling on how many organizations ONE run will sweep. Reaching it is reported
 #: truthfully via ``organizations_truncated`` rather than silently ignored: the remaining
@@ -68,22 +72,38 @@ class ScheduledSweepReport:
     reason; this report does not carry a cursor at all.)
     """
 
-    organizations: int  # organizations actually swept in this run
+    #: Organizations whose sweep COMPLETED. An organization whose sweep raised is counted in
+    #: ``organizations_failed`` instead, never here — the field name says "swept", so counting an
+    #: attempt would contradict it in the one report that exists to be truthful.
+    organizations: int
     examined: int
     recovered: int
     skipped: int
     conflicts: int
     corrupt: int
+    #: Per-CANDIDATE failures, summed from the per-organization sweeps.
     failed: int
     #: True when the run stopped at :data:`DEFAULT_MAX_ORGANIZATIONS` with organizations still
     #: unswept. Not an error — the next scheduled run continues — but it is reported rather than
     #: hidden, because a permanently truncated run means enrollments in the tail never recover.
     organizations_truncated: bool = False
+    #: Organizations whose sweep raised and was isolated. Kept SEPARATE from ``failed`` on purpose:
+    #: previously an entire tenant failing was byte-identical to one poison row, so an organization
+    #: failing persistently — a bad connection, a migration mid-flight, a schema gate — reported
+    #: ``failed: 1`` forever while that tenant was never swept at all, and nothing distinguished it.
+    organizations_failed: int = 0
+    #: The bounded EXCEPTION TYPE NAMES seen across failing organizations, sorted and de-duplicated.
+    #: A type name is code-owned and carries no tenant identifier, enrollment id, reason string or
+    #: connection detail — so it is safe to log, while still saying *what kind* of failure to go
+    #: look for. This is the diagnosis hook: without it the isolation works but is unobservable.
+    failure_kinds: tuple[str, ...] = ()
 
-    def as_log_fields(self) -> dict[str, int | bool]:
-        """The surfaceable log/metric projection. Counts and one flag — never an identifier."""
+    def as_log_fields(self) -> dict[str, int | bool | str]:
+        """The surfaceable log/metric projection. Counts, one flag, and bounded type names — never
+        an identifier."""
         return {
             "organizations": self.organizations,
+            "organizations_failed": self.organizations_failed,
             "examined": self.examined,
             "recovered": self.recovered,
             "skipped": self.skipped,
@@ -91,7 +111,24 @@ class ScheduledSweepReport:
             "corrupt": self.corrupt,
             "failed": self.failed,
             "organizations_truncated": self.organizations_truncated,
+            "failure_kinds": ",".join(self.failure_kinds),
         }
+
+
+def _report_progress(on_progress: Callable[[], None] | None) -> None:
+    """Signal that one organization finished, for a caller that wants liveness (a Temporal
+    heartbeat).
+
+    Never lets progress reporting affect the sweep: a heartbeat that raises — an expired activity,
+    a missing context — must not abort a run that is otherwise making forward progress, and must
+    not be mistaken for an organization failure.
+    """
+    if on_progress is None:
+        return
+    try:
+        on_progress()
+    except Exception:  # noqa: BLE001 - liveness reporting is never worth failing the sweep for
+        pass
 
 
 def _organization_ids(session: Session, *, limit: int) -> list[uuid.UUID]:
@@ -115,6 +152,7 @@ def sweep_all_organizations(
     batch_size: int = DEFAULT_SWEEP_BATCH,
     max_passes: int = DEFAULT_MAX_PASSES,
     max_organizations: int = DEFAULT_MAX_ORGANIZATIONS,
+    on_progress: Callable[[], None] | None = None,
 ) -> ScheduledSweepReport:
     """Drain due, active enrollments to ``recovery_required`` for every organization.
 
@@ -138,6 +176,8 @@ def sweep_all_organizations(
 
     totals = dict(examined=0, recovered=0, skipped=0, conflicts=0, corrupt=0, failed=0)
     swept = 0
+    organizations_failed = 0
+    failure_kinds: set[str] = set()
     for organization_id in organization_ids:
         try:
             result = drain_expired(
@@ -147,12 +187,25 @@ def sweep_all_organizations(
                 batch_size=batch_size,
                 max_passes=max_passes,
             )
-        except Exception:  # noqa: BLE001 - one organization must not abort the whole run
-            # Deliberately counted as a failure rather than re-raised or reported as corruption: an
-            # unexpected error is not evidence that any row is corrupt, and mislabelling it would be
-            # untruthful. Nothing was committed for this organization.
-            totals["failed"] += 1
-            swept += 1
+        except Exception as exc:  # noqa: BLE001 - one organization must not abort the whole run
+            # Isolated, and now OBSERVABLE. Counted on its own axis rather than folded into the
+            # per-candidate ``failed`` counter: an entire tenant failing was previously
+            # indistinguishable from a single poison row, so a persistent per-organization failure
+            # reported ``failed: 1`` forever while that tenant was never swept.
+            #
+            # Still not reported as corruption — an unexpected error is not evidence that any row is
+            # corrupt, and mislabelling it would be untruthful. Nothing was committed here.
+            #
+            # The exception TYPE NAME is recorded (never the message, which can carry a connection
+            # string, a path or a tenant identifier) and logged with the organization COUNT only.
+            organizations_failed += 1
+            failure_kinds.add(type(exc).__name__)
+            _report_progress(on_progress)  # a failing org is still progress through the run
+            _LOG.warning(
+                "enrollment recovery sweep: an organization failed and was isolated (kind=%s); "
+                "the run continues",
+                type(exc).__name__,
+            )
             continue
         swept += 1
         totals["examined"] += result.examined
@@ -161,8 +214,15 @@ def sweep_all_organizations(
         totals["conflicts"] += result.conflicts
         totals["corrupt"] += result.corrupt
         totals["failed"] += result.failed
+        _report_progress(on_progress)
 
-    return ScheduledSweepReport(organizations=swept, organizations_truncated=truncated, **totals)
+    return ScheduledSweepReport(
+        organizations=swept,
+        organizations_truncated=truncated,
+        organizations_failed=organizations_failed,
+        failure_kinds=tuple(sorted(failure_kinds)),
+        **totals,
+    )
 
 
 __all__ = [

@@ -151,6 +151,7 @@ def test_every_organization_is_swept_and_they_stay_isolated(factory):
     report = sched.sweep_all_organizations(factory, now=AFTER)
 
     assert report.organizations == 2
+    assert report.organizations_failed == 0
     assert report.recovered == 2
     assert _state_of(factory, org_a, a_enrollment) == "recovery_required"
     assert _state_of(factory, org_b, b_enrollment) == "recovery_required"
@@ -176,8 +177,8 @@ def test_one_organizations_failure_does_not_starve_the_others(factory, monkeypat
     report = sched.sweep_all_organizations(factory, now=AFTER)
 
     assert failed_for == [org_a]
-    assert report.failed >= 1
-    assert report.organizations == 2, "the run must continue past the failing organization"
+    assert report.organizations_failed == 1
+    assert report.organizations == 1, "only the organization that COMPLETED is counted as swept"
     # ...and the healthy organization was still recovered
     assert _state_of(factory, org_b, b_enrollment) == "recovery_required"
 
@@ -192,8 +193,8 @@ def test_a_failing_organization_is_not_reported_as_corruption(factory, monkeypat
     monkeypatch.setattr(sched, "drain_expired", _boom)
     report = sched.sweep_all_organizations(factory, now=AFTER)
 
-    assert report.failed == 1
-    assert report.corrupt == 0
+    assert report.organizations_failed == 1
+    assert report.corrupt == 0, "an unexpected error is not evidence any row is corrupt"
 
 
 # --- bounded + identifier-free ------------------------------------------------------------------
@@ -225,7 +226,16 @@ def test_the_report_can_never_carry_an_identifier_into_a_log(factory):
     rendered = repr(report) + str(report.as_log_fields())
     assert enrollment_id not in rendered
     assert str(org) not in rendered
-    assert all(isinstance(value, (int, bool)) for value in report.as_log_fields().values())
+    # Counts and flags, plus ONE bounded string: the exception type names of failing organizations.
+    # A type name is code-owned, so it can carry no tenant id, enrollment id or connection detail —
+    # which is what makes it safe to log while still saying what kind of failure to look for.
+    fields = report.as_log_fields()
+    for name, value in fields.items():
+        if name == "failure_kinds":
+            assert isinstance(value, str)
+            assert all(part.isidentifier() for part in value.split(",") if part)
+        else:
+            assert isinstance(value, (int, bool)), name
 
 
 def test_a_malformed_now_refuses_rather_than_sweeping(factory):
@@ -237,3 +247,119 @@ def test_a_malformed_now_refuses_rather_than_sweeping(factory):
 
     assert report.recovered == 0
     assert _state_of(factory, org, enrollment_id) == "invited"
+
+
+# --- an organization failing must be DISTINGUISHABLE from a candidate failing --------------------
+
+
+def test_an_organization_failure_is_not_confused_with_a_candidate_failure(factory, monkeypatch):
+    """Previously byte-identical. A whole tenant never being swept must not look like one bad row.
+
+    Without a separate axis, an organization failing persistently reports `failed: 1` forever while
+    that tenant is never swept at all — the isolation works but is unobservable.
+    """
+    _organization(factory, "org-a")
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("simulated organization failure")
+
+    monkeypatch.setattr(sched, "drain_expired", _boom)
+    org_failure = sched.sweep_all_organizations(factory, now=AFTER)
+
+    assert org_failure.organizations_failed == 1
+    assert org_failure.failed == 0, "a per-CANDIDATE counter must not absorb an org-level failure"
+    assert org_failure.as_log_fields()["organizations_failed"] == 1
+
+
+def test_the_failure_kind_is_recorded_so_the_condition_is_diagnosable(factory, monkeypatch):
+    """A bounded exception TYPE name says what to go look for, without naming a tenant."""
+    _organization(factory, "org-a")
+
+    class _SchemaGateError(RuntimeError):
+        pass
+
+    def _boom(*_a, **_kw):
+        raise _SchemaGateError("migration in flight")
+
+    monkeypatch.setattr(sched, "drain_expired", _boom)
+    report = sched.sweep_all_organizations(factory, now=AFTER)
+
+    assert report.failure_kinds == ("_SchemaGateError",)
+    assert "_SchemaGateError" in report.as_log_fields()["failure_kinds"]
+
+
+def test_the_failure_kind_never_carries_an_identifier_or_message(factory, monkeypatch):
+    """The message can carry a connection string, a path or a tenant id — only the TYPE is kept."""
+    org = _organization(factory, "org-a")
+    secret = f"secret-detail-{org}"
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(sched, "drain_expired", _boom)
+    report = sched.sweep_all_organizations(factory, now=AFTER)
+
+    rendered = repr(report) + str(report.as_log_fields())
+    assert secret not in rendered
+    assert str(org) not in rendered
+    assert report.failure_kinds == ("RuntimeError",)
+
+
+def test_organizations_counts_completions_not_attempts(factory, monkeypatch):
+    """The field docstring says 'swept'; counting an attempt would contradict it."""
+    org_a = _organization(factory, "org-a")
+    _organization(factory, "org-b")
+    real_drain = sched.drain_expired
+
+    def _drain(session_factory, *, organization_id, **kw):
+        if organization_id == org_a:
+            raise RuntimeError("boom")
+        return real_drain(session_factory, organization_id=organization_id, **kw)
+
+    monkeypatch.setattr(sched, "drain_expired", _drain)
+    report = sched.sweep_all_organizations(factory, now=AFTER)
+
+    assert report.organizations == 1
+    assert report.organizations_failed == 1
+    assert report.organizations + report.organizations_failed == 2, "every org lands in one bucket"
+
+
+# --- liveness: one progress signal per organization ----------------------------------------------
+
+
+def test_progress_is_reported_once_per_organization(factory):
+    """The Temporal heartbeat rides on this; without it a stalled sweep is invisible."""
+    for index in range(3):
+        _organization(factory, f"org-{index}")
+    beats: list[int] = []
+
+    sched.sweep_all_organizations(factory, now=AFTER, on_progress=lambda: beats.append(1))
+
+    assert len(beats) == 3
+
+
+def test_a_failing_organization_still_reports_progress(factory, monkeypatch):
+    """A failing org is still forward movement through the run — a heartbeat must not be skipped,
+    or a run whose head organizations all fail would look stalled and be cancelled."""
+    _organization(factory, "org-a")
+    monkeypatch.setattr(sched, "drain_expired", lambda *a, **k: (_ for _ in ()).throw(RuntimeError))
+    beats: list[int] = []
+
+    sched.sweep_all_organizations(factory, now=AFTER, on_progress=lambda: beats.append(1))
+
+    assert len(beats) == 1
+
+
+def test_a_raising_progress_callback_never_aborts_the_sweep(factory):
+    """An expired activity or missing context must not kill a run making forward progress."""
+    org = _organization(factory, "org-a")
+    enrollment_id = _seed_expiring_enrollment(factory, org, "b")
+
+    def _boom() -> None:
+        raise RuntimeError("heartbeat failed")
+
+    report = sched.sweep_all_organizations(factory, now=AFTER, on_progress=_boom)
+
+    assert report.recovered == 1
+    assert report.organizations_failed == 0, "a heartbeat failure is not an organization failure"
+    assert _state_of(factory, org, enrollment_id) == "recovery_required"

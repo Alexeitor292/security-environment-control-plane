@@ -573,7 +573,25 @@ async def enrollment_recovery_sweep_activity(arg: dict) -> str:
     # The impure clock read lives HERE, in the activity — never in the workflow, which must stay
     # deterministic. The canonical UTC form is what the pure contract parses.
     now = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
-    report = await asyncio.to_thread(sweep_all_organizations, get_sessionmaker(), now=now)
+
+    def _heartbeat() -> None:
+        """One heartbeat per organization, so a stalled sweep is VISIBLE and can be cancelled.
+
+        ``asyncio.to_thread`` copies the current context, so the activity context propagates into
+        the worker thread and ``activity.heartbeat()`` is valid there. Guarded anyway: outside a
+        real activity (tests, a direct call) there is no context and this must be a no-op rather
+        than an error — the sweep's correctness does not depend on liveness reporting.
+        """
+        if not TEMPORAL_AVAILABLE:
+            return
+        try:
+            activity.heartbeat()
+        except Exception:  # noqa: BLE001 - never fail a sweep over a heartbeat
+            pass
+
+    report = await asyncio.to_thread(
+        sweep_all_organizations, get_sessionmaker(), now=now, on_progress=_heartbeat
+    )
     # Aggregate counts only — the report is identifier-free by construction, so this result and any
     # log line derived from it can never carry an enrollment id or an organization id.
     return json.dumps(report.as_log_fields(), sort_keys=True)

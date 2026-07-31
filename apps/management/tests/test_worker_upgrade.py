@@ -22,7 +22,9 @@ Hermetic: the shared in-memory hardened filesystem and the closed fake worker ad
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from _mgmt_support import (
@@ -341,3 +343,102 @@ def test_an_upgrade_still_requires_the_write_confirm_gate_and_root():
     not_root = deps_for(fs, fresh_worker_world(**_upgrade_world(is_root=False)), deps.trust_root)
     code, rep = run(["bootstrap", "worker", "--bundle", bundle_b, "--write", "--confirm"], not_root)
     assert code == 2 and rep["reason_code"] == "root_required_for_write"
+
+
+# --- the two upgrade-eligibility refusals that guard the PRIOR install ---------------------------
+#
+# These are the checks that stop an upgrade being driven over a tampered or drifted prior
+# installation. They are load-bearing rather than redundant: `_classify_preexisting` returns
+# `preexisting_changed_release` BEFORE running the attestation and installed-document checks, so
+# `_classify_worker_upgrade_eligibility` is the only place they ever run. Both are reachable.
+
+_ID_DOC = "/var/lib/secp/bootstrap/worker-identity.json"
+_RR_DOC = "/var/lib/secp/bootstrap/worker-installed-release.json"
+_SIG_DOC = "/var/lib/secp/bootstrap/worker-installed-release.sig.json"
+_ATT_DOC = "/var/lib/secp/bootstrap/worker-evidence.attestation.json"
+
+
+def _read_doc(fs, path):
+    return fs.safe_read(path, max_bytes=1 << 20, expected_uid=0)
+
+
+def _upgrade_after(fs, trust, kid, priv, tamper, **world):
+    """Install A, seed successor B, apply ``tamper``, then attempt the upgrade."""
+    bundle_b = _seed_b(fs, kid, priv)
+    tamper(fs)
+    deps = deps_for(fs, fresh_worker_world(**_upgrade_world(**world)), trust)
+    code, rep = run(["bootstrap", "worker", "--bundle", bundle_b, "--write", "--confirm"], deps)
+    return code, rep, deps
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param("signature", id="forged_attestation_signature"),
+        pytest.param("key_id", id="attestation_from_an_untrusted_anchor"),
+    ],
+)
+def test_an_unauthenticated_prior_install_cannot_be_upgraded(mutate):
+    """The prior install's evidence attestation must still verify before it may be upgraded.
+
+    Without this, an attacker who re-authored the evidence of a running worker could then drive a
+    'managed upgrade' over it — the upgrade path would be trusting a record nothing authenticated.
+    """
+    deps, fs, trust, kid, priv = _installed_a()
+
+    def _tamper(filesystem):
+        document = json.loads(_read_doc(filesystem, _ATT_DOC).decode())
+        if mutate == "signature":
+            signature = document.get("signature") or ""
+            document["signature"] = ("0" if signature[:1] != "0" else "1") + signature[1:]
+        else:
+            document["key_id"] = "some-other-anchor/v1"
+        filesystem.seed_file(_ATT_DOC, json.dumps(document).encode(), mode=0o640)
+
+    code, rep, upgrade_deps = _upgrade_after(fs, deps.trust_root, kid, priv, _tamper)
+
+    assert code == 2
+    assert rep["reason_code"] == "worker_upgrade_prior_unauthenticated"
+    assert upgrade_deps.worker_adapter._w.ops == [], "classification must precede every host op"
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param(_RR_DOC, id="installed_release_record"),
+        pytest.param(_ID_DOC, id="identity_document"),
+        pytest.param(_SIG_DOC, id="release_signature"),
+    ],
+)
+def test_a_drifted_prior_install_cannot_be_upgraded(document):
+    """A managed document whose CONTENT drifted refuses — reachable, and this is how.
+
+    A single appended byte is the sharpest case: the document still parses and still cross-binds, so
+    `_classify_preexisting` passes it, and only the installed-document content verifier catches it.
+    That is precisely why this check cannot be folded into the earlier classification.
+    """
+    deps, fs, trust, kid, priv = _installed_a()
+
+    def _tamper(filesystem):
+        filesystem.seed_file(document, _read_doc(filesystem, document) + b"\n", mode=0o640)
+
+    code, rep, upgrade_deps = _upgrade_after(fs, deps.trust_root, kid, priv, _tamper)
+
+    assert code == 2
+    assert rep["reason_code"] == "worker_upgrade_prior_drifted"
+    assert upgrade_deps.worker_adapter._w.ops == [], "classification must precede every host op"
+
+
+def test_the_three_upgrade_refusals_are_distinct_and_all_reachable():
+    """Anti-vacuity: three separate prior-install failure modes, three distinct bounded codes."""
+    codes = {
+        "worker_upgrade_not_linear_successor",
+        "worker_upgrade_prior_unauthenticated",
+        "worker_upgrade_prior_drifted",
+    }
+    source = (Path(__file__).resolve().parents[1] / "secp_management" / "engine.py").read_text(
+        encoding="utf-8"
+    )
+    for code in codes:
+        assert source.count(code) >= 1, code
+    assert len(codes) == 3
