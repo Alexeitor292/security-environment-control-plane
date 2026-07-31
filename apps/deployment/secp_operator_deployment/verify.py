@@ -444,6 +444,47 @@ def _queue_section(profile_parsed: bool, profile: object | None) -> dict:
     }
 
 
+def _release_identity_section(expected: object | None, expected_reason: str | None) -> dict:
+    """The RELEASE this deployment claims to be, taken from the INDEPENDENT trusted pins.
+
+    Sourced from :class:`ExpectedDeploymentIdentities` — the separate root-controlled file — and
+    never from the profile, so a profile cannot name its own release. A foreign object is refused
+    by EXACT type without attribute access.
+
+    These three values are release IDENTIFIERS, not secrets and not profile configuration: they are
+    exactly what an operator has to read off the deployment and compare against the signed release.
+    Emitting them is the point of the command. ``release_signature_checked`` is always ``False`` —
+    this package performs no signature verification, and says so rather than letting
+    ``provenance_ok`` be read as one.
+    """
+    from secp_operator_deployment.identities import ExpectedDeploymentIdentities
+
+    if type(expected) is not ExpectedDeploymentIdentities:
+        return {
+            "available": False,
+            "release_source_sha": None,
+            "source_tree_sha": None,
+            "parent_sha": None,
+            "authority": "independent_expected_identities",
+            "release_signature_checked": False,
+            "reason_code": expected_reason
+            or (
+                "expected_identities_type_invalid"
+                if expected is not None
+                else "expected_identities_not_provisioned"
+            ),
+        }
+    return {
+        "available": True,
+        "release_source_sha": expected.release_source_sha,
+        "source_tree_sha": expected.source_tree_sha,
+        "parent_sha": expected.parent_sha,
+        "authority": "independent_expected_identities",
+        "release_signature_checked": False,
+        "reason_code": None,
+    }
+
+
 def build_provenance_report(
     *,
     source_aggregate: str | None = None,
@@ -452,14 +493,23 @@ def build_provenance_report(
     installed_trust_ok: bool = False,
     installed_trust_reason: str | None = None,
     covered_module_count: int = 0,
+    expected: object | None = None,
+    expected_reason: str | None = None,
 ) -> dict:
     """Build the deterministic read-only PROVENANCE report from already-resolved inputs.
 
     PURE, like :func:`build_verification`: the caller (the CLI) performs the filesystem reads and
-    passes the results in. It answers the one question the verification report cannot — *what
+    passes the results in. It answers the two questions the verification report cannot — *what
     implementation aggregate is actually installed here, and does it recompute cleanly under the
-    trusted directory-fd walk* — so an operator can compare it against the aggregate bound into a
-    signed release before trusting the deployment. It contacts nothing and mutates nothing.
+    trusted directory-fd walk*, and *which RELEASE do the independent trusted pins say this is* —
+    so an operator can compare both against a signed release before trusting the deployment. It
+    contacts nothing and mutates nothing.
+
+    Scope, stated rather than implied. ``provenance_ok`` means the installed content recomputed to
+    its reviewed aggregate. It does NOT mean a release signature was checked (this package checks
+    none — see :func:`_release_identity_section`), and it does NOT mean the deployment-local
+    profile agrees with the trusted pins: that is dimension B, resolved by ``verify``, and is
+    deliberately not re-derived here rather than half-derived in two places.
     """
     agreement: bool | None = None
     if source_aggregate and installed_aggregate:
@@ -497,6 +547,7 @@ def build_provenance_report(
             if agreement is not False
             else "manifest_installed_aggregate_mismatch",
         },
+        "release_identity": _release_identity_section(expected, expected_reason),
         "effects_of_this_provenance_check": {
             "worker_constructed": False,
             "workflow_submitted": False,

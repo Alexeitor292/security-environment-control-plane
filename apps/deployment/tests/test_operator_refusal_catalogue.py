@@ -18,23 +18,24 @@ and covers **27 of the 84** catalogued codes: 26 in ``verify.py``, and exactly o
 Of the other 57, measured by asking whether the literal appears in each module outside the
 catalogue block itself:
 
-* **22 appear in ``verify.py``** in shapes no pattern matches: inline positional arguments to
+* **23 appear in ``verify.py``** in shapes no pattern matches: inline positional arguments to
   ``rung()`` (bare, or as the ``x or "literal"`` fallback), ``compositions_not_supplied`` inside a
-  parenthesised conditional, and ``queue_not_distinct`` as a conditional dict-literal value in
-  ``_queue_section``. Two of the 22 (``identity_mismatch``, ``install_untrusted``) are filtered out
-  DELIBERATELY because they double as status names. This measure OVER-COUNTS slightly and is left
-  that way rather than tuned: ``operator_activation_sealed`` is matched because it is a report
-  FIELD name in ``_read_seals``, not because ``verify.py`` refuses with it.
+  parenthesised conditional, ``queue_not_distinct`` as a conditional dict-literal value in
+  ``_queue_section``, and the two ``expected_identities_*`` codes inside the conditional expression
+  in ``_release_identity_section``. Two of the 23 (``identity_mismatch``, ``install_untrusted``)
+  are filtered out DELIBERATELY because they double as status names. This measure OVER-COUNTS
+  slightly and is left that way rather than tuned: ``operator_activation_sealed`` is matched
+  because it is a report FIELD name in ``_read_seals``, not because ``verify.py`` refuses with it.
 * **5 appear only in ``queue_check.py``** — ``attestation_provider_not_reviewed`` and
   ``controlled_live_runtime_not_provisioned``, passed positionally to ``SubmissionStop`` (the other
   two stop codes also occur in ``verify.py`` and are counted above);
   ``operator_consumer_unobservable`` as an ``x or "literal"`` fallback; ``submission_stop_open`` as
   a conditional dict-literal value; and ``submission_stop_unobservable`` reached through the
   ``STOP_UNOBSERVABLE`` module constant.
-* **30 are raised elsewhere** — ``profile.py``, ``manifest.py``, ``compositions.py``,
+* **29 are raised elsewhere** — ``profile.py``, ``manifest.py``, ``compositions.py``,
   ``runtime_seams.py``, ``cli.py``, ``runner.py`` and ``secp_worker``.
 
-This 22/5/30 split is re-measured on every run by
+This 23/5/29 split is re-measured on every run by
 :func:`test_the_blind_spot_breakdown_is_re_measured_not_remembered`, so the prose above cannot
 quietly stop describing the code.
 
@@ -75,7 +76,7 @@ _SCANNED_SOURCES = (_PKG / "verify.py", _PKG / "queue_check.py")
 # The measured coverage the module docstring states. Asserted below so the prose cannot drift.
 _EXPECTED_COVERAGE = (27, 84)
 # The measured blind-spot split: (in verify.py, in queue_check.py only, elsewhere).
-_EXPECTED_BLIND_SPOTS = (22, 5, 30)
+_EXPECTED_BLIND_SPOTS = (23, 5, 29)
 
 # The exact shapes a bounded reason code is produced in inside the scanned sources.
 _REFUSAL_PATTERNS = (

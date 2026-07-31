@@ -126,6 +126,7 @@ def _provenance_kwargs(deps: VerifyDeps | None) -> dict:
             installed_trust_ok=bool(deps.installed_trust_ok),
             installed_trust_reason=deps.installed_trust_reason,
             covered_module_count=covered,
+            expected=deps.expected,
         )
 
     from secp_operator_deployment import package_implementation_digest
@@ -149,6 +150,21 @@ def _provenance_kwargs(deps: VerifyDeps | None) -> dict:
     except Exception as exc:
         installed_trust_reason = getattr(exc, "reason_code", "install_untrusted")
 
+    # The RELEASE identity comes from the INDEPENDENT root-controlled expected-identities file, not
+    # from the profile — a profile must not be able to name its own release. Fail closed: an absent
+    # or unreadable file yields a bounded reason and a report that says the identity is unavailable
+    # rather than one that omits the question.
+    expected: object | None = None
+    expected_reason: str | None = None
+    try:
+        from secp_operator_deployment.identities import read_expected_identities
+        from secp_operator_deployment.production_context import _production_fs
+
+        expected = read_expected_identities(fs=_production_fs())
+    except Exception as exc:
+        expected = None
+        expected_reason = getattr(exc, "reason_code", "expected_identities_not_provisioned")
+
     return dict(
         source_aggregate=source_aggregate,
         source_reason=source_reason,
@@ -156,6 +172,8 @@ def _provenance_kwargs(deps: VerifyDeps | None) -> dict:
         installed_trust_ok=installed_trust_ok,
         installed_trust_reason=installed_trust_reason,
         covered_module_count=covered,
+        expected=expected,
+        expected_reason=expected_reason,
     )
 
 

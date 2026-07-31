@@ -225,15 +225,45 @@ the deployment:
   "status": "provenance_ok",
   "source_aggregate":    {"implementation_manifest_digest": "sha256:..."},
   "installed_aggregate": {"implementation_manifest_digest": "sha256:...", "trusted": true},
-  "agreement": {"source_equals_installed": true}
+  "agreement": {"source_equals_installed": true},
+  "release_identity": {
+    "available": true,
+    "release_source_sha": "...", "source_tree_sha": "...", "parent_sha": null,
+    "authority": "independent_expected_identities",
+    "release_signature_checked": false
+  }
 }
 ```
+
+### `release_identity` — *which* release is this?
+
+The aggregate tells you the installed content is internally consistent. It does not tell you which
+release you are holding. `release_identity` does, and it takes those values from the **independent
+root-controlled expected-identities file** — never from the profile, because a profile must not be
+able to name its own release. `build_provenance_report` takes no profile input at all, which is the
+structural guarantee rather than a convention.
+
+These three values are release **identifiers**, not configuration and not secrets: they are exactly
+what you read off the deployment and compare against the signed release. When the pins are absent
+or malformed the section reports `available: false` with a bounded reason, rather than omitting the
+question.
+
+**Read `release_signature_checked` before you conclude anything.** It is always `false`. This
+package verifies no signature — it supplies the values for a comparison you perform. The section is
+also reported on the *failure* paths, because the release identity is what you escalate with.
 
 | Status | Exit | Meaning |
 | --- | --- | --- |
 | `provenance_ok` | 0 | The installed package recomputed to its reviewed aggregate. |
 | `provenance_untrusted` | 15 | The dir-fd walk refused, or the aggregates disagree. |
 | `provenance_unavailable` | 20 | The aggregate could not be computed at all. |
+
+What `provenance_ok` does **not** mean, stated because the misreading is the risk: it does not mean
+a release signature was checked, and it does not mean the deployment-local profile agrees with the
+trusted pins. Profile-to-pins agreement is dimension **B**, answered by `verify`, and is
+deliberately not re-derived here — half-deriving one fact in two commands is how the two come to
+disagree. A missing release identity does not make the aggregate untrusted, and an untrusted
+aggregate does not blank the release identity; they are separate facts and stay separate.
 
 The aggregate is a hash over the **content** of every covered module. Any change to any module in
 the package changes it — which is the point: a package whose content drifted while keeping its
@@ -298,7 +328,7 @@ implements a second copy of something that already exists under a different name
 | Supported operator packaging | `manifest.py` (`COVERED_MODULES`, `compute_manifest`, `verify_installed_package_trust`); versions and identity in `__init__.py` | `test_deployment_wheel.py` builds the real wheel and proves wheel aggregate == source aggregate, exact inventory, and tamper detection; `test_deployment_manifest.py`, `test_deployment_root_manifest.py` |
 | Install + status diagnostics — *why* not ready, as distinct from the verdict | `PREREQUISITE_LADDER` + `build_prerequisite_ladder` (§2), `REFUSAL_CATALOGUE` + remediation classes (§2) | `test_operator_productization.py`, `test_operator_refusal_catalogue.py` |
 | Readiness validation — the verdict | `_resolve_status` + `STATUS_EXIT_CODES` (§2) | `test_operator_productization.py`, `test_deployment_verify.py` |
-| Release + provenance verification | `provenance` command, `build_provenance_report` (§4) | `test_operator_productization.py`, `test_operator_cli_surface.py` |
+| Release + provenance verification | `provenance` command, `build_provenance_report` + `_release_identity_section` (§4) — the installed aggregate **and** the release identity from the independent pins | `test_operator_productization.py`, `test_operator_cli_surface.py`, `test_operator_release_provenance.py` |
 | Queue configuration validation | the `queue` command, `queue_check.py` (§3); parse time `profile.py::_v_queue_separation`; report time `verify.py::_queue_section` | `test_operator_queue_isolation.py`, `test_deployment_profile.py::test_queue_equality_refused`, `test_operator_productization.py` |
 | Evidence observation | `host_adapters.py` → `HostObservationEvidence`, reported by `verify.py::_host_section` and by `queue_check.py` as consumer dormancy (§3) | `test_deployment_adapters.py` — generation/ABA refusal, fail-closed on malformed or ambiguous readings, no mutation subcommand, exact argv; `test_operator_queue_isolation.py` |
 | Refusal paths | `REFUSAL_CATALOGUE` + every rung's bounded `reason_code` (§2); the queue ladder + submission stops (§3) | `test_operator_refusal_catalogue.py`, `test_operator_queue_isolation.py` |
