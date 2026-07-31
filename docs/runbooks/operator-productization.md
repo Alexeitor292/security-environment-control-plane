@@ -481,7 +481,17 @@ runtime check of the imported-module set has nothing to observe and cannot fail.
 hold in any environment, including one that does install the extra, and for any import shape — they
 are what the guarantee rests on. The exit code adds a runtime observation of one shape only: a bare
 import *deferred into a function on the queue path* raises where the extra is absent, the CLI's
-bounded guard turns that into exit 20, and the test asserting a clean exit fails. A guarded
-`try: import temporalio / except Exception: pass` — how an optional dependency is normally written
-— raises nothing and passes that assertion; only the static scans catch it. That is why the static
-scans, and not the exit code, are the load-bearing half.
+bounded guard turns that into exit 20, and the test asserting a clean exit fails.
+
+Three import shapes, three reporters, and none of them is silent — which is the point, so read the
+list as a division of labour rather than as two covered cases and a gap:
+
+| shape | what reports it |
+|---|---|
+| bare, at module level | collection error — the test file imports `queue_check` at module scope, so pytest exits 2 and the whole run fails before any test executes |
+| bare, deferred into a function on the queue path | the exit-code assertion, via the CLI's bounded guard (exit 20) |
+| guarded `try: import temporalio / except Exception: pass` | the two static scans; it raises nothing, so the exit-code assertion passes |
+
+The guarded form is how an optional dependency is normally written, so it is the likeliest shape
+rather than a contrived one. The static scans remain the load-bearing half — they are the only
+reporter blind to none of the three, where the other two each cover exactly one.
