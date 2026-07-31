@@ -14,6 +14,54 @@ export interface NavItem {
   end?: boolean;
   /** Why this surface is not available yet — shown on the disabled item. */
   unavailableReason?: string;
+  /**
+   * Permissions the principal needs AT LEAST ONE of before the route is usable. Absent means the
+   * item is not permission-gated, which is every item but one today.
+   *
+   * This is orthogonal to href / unavailableReason rather than a third alternative to them: a
+   * gated item still declares an `href` and nothing else, and `resolveNavItem` turns it into one
+   * or the other at render time. That deliberately leaves the model's exactly-one invariant
+   * untouched — it holds for the static item AND for the resolved one.
+   *
+   * ANY, not ALL. Two permissions can each unlock a different part of one surface: an operator
+   * with enrollment:manage but not enrollment:read can create and revoke invitations — the whole
+   * hand-off flow — and is only refused status look-ups. Requiring both would hide the page from
+   * the operator it was built for.
+   */
+  requiresAnyPermission?: readonly string[];
+}
+
+/** Fixed, actionable copy for a route the principal cannot use. It names what to ask for rather
+ *  than saying "unavailable", because an operator who cannot see why has no next step. */
+export function navPermissionReason(required: readonly string[]): string {
+  return `Requires ${required.join(" or ")}. Ask an organization administrator to grant one.`;
+}
+
+/**
+ * Resolve one nav item against the principal's permissions.
+ *
+ * A permitted item keeps its route; a refused one becomes a disabled entry carrying the reason,
+ * reusing the affordance that already exists for surfaces this milestone does not have. It is
+ * DISABLED, never hidden: the existence of an internal control-plane page is not sensitive, and
+ * hiding it buys nothing while leaving the operator with no way to find out what to request.
+ *
+ * The result always has exactly one of href / unavailableReason, the same invariant the static
+ * model holds — so gating cannot produce an item that is both live and explained, or neither.
+ */
+export function resolveNavItem(
+  item: NavItem,
+  permissions: readonly string[] | null | undefined,
+): NavItem {
+  const required = item.requiresAnyPermission;
+  if (required === undefined || required.length === 0) return item;
+  if (required.some((permission) => permissions?.includes(permission))) {
+    return { id: item.id, label: item.label, href: item.href, end: item.end };
+  }
+  return {
+    id: item.id,
+    label: item.label,
+    unavailableReason: navPermissionReason(required),
+  };
 }
 
 export interface NavGroup {
@@ -54,6 +102,14 @@ export const NAV_GROUPS: NavGroup[] = [
         id: "staging-deployments",
         label: "Staging Deployments",
         href: "/staging-deployments",
+      },
+      // Infrastructure, not Governance: this surface provisions a worker, and the enrollment
+      // lifecycle has no approval edge — there is nothing on it to govern.
+      {
+        id: "worker-enrollment",
+        label: "Worker Enrollment",
+        href: "/worker-enrollment",
+        requiresAnyPermission: ["enrollment:read", "enrollment:manage"],
       },
     ],
   },

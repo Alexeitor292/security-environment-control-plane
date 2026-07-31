@@ -72,9 +72,17 @@ const router = createBrowserRouter([
       { path: "readonly-preflight", element: <ReadonlyPreflight /> },
       { path: "resolver-activation", element: <ResolverActivation /> },
       { path: "approvals", element: <Approvals /> },
-      // SECP-PR5H-B1: the supported worker-enrollment controller surface. Reached directly, with
-      // no sidebar entry — the control plane has no endpoint that lists enrollments, so a nav item
-      // would promise an inventory this milestone cannot show.
+      // SECP-PR5H-B1: the supported worker-enrollment controller surface.
+      //
+      // It now HAS a sidebar entry. The original reasoning — that a nav item would promise an
+      // inventory the control plane cannot show — no longer holds: the page's table is explicitly
+      // this browser tab's own working set, labelled as such, and the page states in copy that no
+      // list route exists. The gap that reasoning left behind was worse: a full operator surface
+      // reachable only by typing its URL.
+      //
+      // The entry is gated on enrollment:read OR enrollment:manage, and renders disabled with the
+      // reason when the principal holds neither. ANY rather than ALL is load-bearing: manage
+      // without read can create and revoke invitations, which is the entire hand-off flow.
       { path: "worker-enrollment", element: <WorkerEnrollment /> },
       { path: "audit", element: <AuditLog /> },
     ],

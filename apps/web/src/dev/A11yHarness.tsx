@@ -24,8 +24,10 @@
 
 import { useState } from "react";
 import ReactDOM from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 
-import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
+import type { EnrollmentInvitation, EnrollmentStatus, Principal } from "../api/types";
+import { Sidebar } from "../components/shell/Sidebar";
 import {
   WorkerEnrollmentView,
   type WorkerEnrollmentViewProps,
@@ -37,8 +39,25 @@ import {
   type TrackedFilter,
 } from "../pages/worker-enrollment";
 
+import "../components/shell/shell.css";
 import "../design/tokens.css";
 import "../styles.css";
+
+/**
+ * The nav entry is permission-gated, so a keyboard pass has to see BOTH outcomes. `?nav=denied`
+ * renders the sidebar for a principal holding neither enrollment permission; the default renders
+ * it for one holding manage only — the case that would have been wrongly hidden had the entry been
+ * gated on `enrollment:read` alone.
+ */
+const DENIED = new URLSearchParams(window.location.search).get("nav") === "denied";
+
+const PRINCIPAL: Principal = {
+  user_id: "u-1",
+  organization_id: "org-1",
+  email: "operator@example.test",
+  permissions: DENIED ? ["exercise:read"] : ["enrollment:manage"],
+  is_dev_fallback: false,
+};
 
 const ID = "sha256:" + "a".repeat(64);
 
@@ -156,9 +175,16 @@ function Harness() {
   };
 
   return (
-    <div className="app-shell__main" style={{ padding: "24px" }}>
-      <WorkerEnrollmentView {...props} />
-    </div>
+    <MemoryRouter>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: "16px" }}>
+        <div className="shell-sidebar" style={{ flex: "none" }}>
+          <Sidebar principal={PRINCIPAL} collapsed={false} />
+        </div>
+        <div className="app-shell__main" style={{ flex: 1, minWidth: 0, padding: "24px" }}>
+          <WorkerEnrollmentView {...props} />
+        </div>
+      </div>
+    </MemoryRouter>
   );
 }
 
