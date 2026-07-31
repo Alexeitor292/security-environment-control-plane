@@ -249,18 +249,27 @@ the two commands can never disagree about it.
 
 #### Which pair this reads — read `authority` before you conclude
 
-The split is expressed **twice**, in two different artefacts, and this section reads one of them:
+The same two key names appear in **three** different artefacts, describing different components.
+This section reads one of them:
 
-| Pair | Where | Read here? |
+| Artefact | Names | Read here? |
 | --- | --- | --- |
-| `ordinary_task_queue` / `operator_task_queue` | the deployment profile and the commissioning plan | **yes** — `authority: "deployment_profile"` |
-| `temporal_task_queue` / `temporal_operator_task_queue` | `Settings`, what a **running worker process** actually polls | no |
+| the **operator deployment profile** (and the commissioning plan) | `ordinary_task_queue` / `operator_task_queue` | **yes** — `authority: "deployment_profile"` |
+| the **worker evidence document** — the installed-state proof the management plane enforces | the same two names | no — different component, different package |
+| `Settings` — what a **running worker process** polls | `temporal_task_queue` / `temporal_operator_task_queue` | no |
+
+Matching names across three artefacts is exactly why `authority` is in the payload: it says which
+one a given green describes.
 
 The profile pair is well-founded rather than self-asserted: the plan validates both against the
 independent root-controlled expected pins and separately requires them distinct, so this report is
-the third independent enforcement of the same fact. The two pairs also differ in kind — the profile
-requires a non-empty operator queue, while the runtime one is **empty by default**, meaning no
-operator worker is deployed and controlled-live work stays on the shipped sealed queue.
+the third independent enforcement of the same fact.
+
+They also differ **in kind**, which is the part most likely to mislead. This package requires a
+non-empty operator queue. The running worker's `temporal_operator_task_queue` is empty by default
+and the shipped worker entrypoint **never reads it on any path** — so on the runtime side the
+operator queue is disabled by *structural absence*, not by configuration. "Operator queue not
+configured" is therefore a fault in this artefact and the correct, safe state in that one.
 
 So a green here says the deployment **material** is isolated. It does not by itself establish that
 a running process matches it. The independent check on the running side is **consumer dormancy**

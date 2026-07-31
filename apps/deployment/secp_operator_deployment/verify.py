@@ -458,19 +458,26 @@ def _queue_section(profile_parsed: bool, profile: object | None) -> dict:
     queues configured, and are they distinct? A shared queue would let the shipped sealed worker
     pick up controlled-live work, which the profile validator already refuses at parse time.
 
-    WHICH FACT THIS IS, EXACTLY. The split is expressed TWICE, in two different artefacts, and
-    this section reads one of them:
+    WHICH FACT THIS IS, EXACTLY. The same two key names appear in THREE different artefacts —
+    this package's deployment profile, the worker evidence document the management plane enforces,
+    and the ``Settings`` pair a running worker polls. They describe different components, and this
+    section reads the first. That is what ``authority`` in the emitted section is for.
 
     * the **profile/plan** pair — ``ordinary_task_queue`` / ``operator_task_queue`` — which is what
       this reads. It is well-founded: ``plan.py`` validates both against the independent
       root-controlled expected pins (``ordinary_queue_mismatch`` / ``operator_queue_mismatch``) and
       separately requires them distinct (``operator_queue_not_distinct``), so this is the third
       independent enforcement of the same fact, not the only one.
+    * the **worker evidence document** — the installed-state proof the management plane writes and
+      enforces, carrying the same two names for a DIFFERENT component. Not read here, and not this
+      package's to read.
     * the **runtime** pair — ``Settings.temporal_task_queue`` /
       ``Settings.temporal_operator_task_queue`` — which is what a RUNNING worker process actually
-      polls, and which this section does not read. They also differ in kind: the profile requires a
-      non-empty operator queue, while the runtime one is EMPTY by default, meaning no operator
-      worker is deployed and controlled-live work stays on the shipped sealed queue.
+      polls, and which this section does not read. It differs IN KIND, which is the part most
+      likely to mislead: this package requires a non-empty operator queue, while the runtime one is
+      empty by default AND the shipped worker entrypoint never reads it on any path — the operator
+      queue is disabled there by STRUCTURAL ABSENCE, not by configuration. "Operator queue not
+      configured" is a fault in this artefact and the correct, safe state in that one.
 
     So a green here says the deployment MATERIAL is isolated; it does not by itself establish that
     a running process matches it. The independent observation of the running side is consumer

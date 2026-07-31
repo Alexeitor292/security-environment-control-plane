@@ -39,10 +39,20 @@ What remains outside these three, stated without an absolute this time:
   — is not matched by the finder. There is none in the module today (checked), and the
   behavioural tests are what cover it: a private method wired into a public one fails them hard,
   including the count-equality test, because the commands actually run.
-* a private method that is never called is invisible to every check here, and harmless for the
-  same reason.
+* a private method that is never called is invisible to the PUBLIC-SURFACE check only — not to the
+  other two. Measured: an uncalled private ``_enable`` with a recognised receiver and a literal
+  verb trips both the site-count check (5 runner calls where 4 are expected) and the mutation-verb
+  literal scan. Only a private method that ALSO evades those two — an aliased receiver or a
+  constructed verb — is invisible here, and that is bullet one.
 * a verb reaching the runner from OUTSIDE this module. The runner is only ever constructed with
   pinned executables, which is a separate property tested elsewhere.
+
+The bullet above is a correction of a correction, and worth naming as such. The first version of
+this docstring over-claimed ("cannot reach ``runner.run`` at all"); the rewrite that replaced it
+under-claimed ("invisible to every check here"), which misleads a maintainer just as effectively,
+only toward under-trust — someone reading it might add a redundant guard, or conclude these checks
+are weaker than they are. **A limit statement is what a future reader relies on when deciding
+whether a guard is needed, so it has to be exact in both directions, not merely humble.**
 
 The general point, since it is what this file keeps demonstrating: a static check should refuse
 what it cannot analyse rather than pass over it, because silence and success are indistinguishable
@@ -175,19 +185,28 @@ def test_no_mutation_verb_appears_as_a_string_literal_anywhere():
     assert not offenders, f"mutation verb literal(s) in the adapters: {offenders}"
 
 
+# The permitted public surface of each concrete adapter. Declared ONCE: the guard-the-guard below
+# references this rather than restating it, so a change to the real allowed-set cannot leave the
+# guard validating against a stale copy of it.
+ALLOWED_PUBLIC_METHODS: dict[type, frozenset[str]] = {
+    LocalContainerRuntimeAdapter: frozenset({"image_present"}),
+    LocalServiceStateAdapter: frozenset({"snapshot", "observe", "observe_generation"}),
+}
+
+
+def _public_methods(cls: type) -> set[str]:
+    return {
+        name for name, value in vars(cls).items() if not name.startswith("_") and callable(value)
+    }
+
+
 def test_the_concrete_adapters_expose_no_method_beyond_their_protocols():
     """The mutation added a public ``enable_operator_unit``. An exact set catches that; a
     ``>=`` style check would not."""
-    for cls, allowed in (
-        (LocalContainerRuntimeAdapter, {"image_present"}),
-        (LocalServiceStateAdapter, {"snapshot", "observe", "observe_generation"}),
-    ):
-        public = {
-            name
-            for name, value in vars(cls).items()
-            if not name.startswith("_") and callable(value)
-        }
-        assert public == allowed, f"{cls.__name__} public surface moved: {sorted(public)}"
+    for cls, allowed in ALLOWED_PUBLIC_METHODS.items():
+        assert _public_methods(cls) == allowed, (
+            f"{cls.__name__} public surface moved: {sorted(_public_methods(cls))}"
+        )
 
 
 # --------------------------------------------------------------------------- guard the guards
@@ -279,18 +298,19 @@ def test_the_runner_call_finder_is_not_vacuous():
 def test_the_public_surface_check_catches_an_added_method(extra):
     """Re-runs the REAL assertion against a mutated class, rather than re-implementing the
     technique beside it. The weaker form verified that ``vars()`` sees an added method — true of
-    Python, not of this check — and would have kept passing if the real assertion changed."""
+    Python, not of this check — and would have kept passing if the real assertion changed.
+
+    Both the helper and the allowed-set are the REAL ones. An earlier version restated the set as
+    a literal here, so a change to the real one would have left this guard validating a stale copy
+    and still passing — a guard-the-guard drifting from the guard it guards.
+    """
 
     class _Mutated(LocalServiceStateAdapter):  # type: ignore[misc]
         pass
 
     setattr(_Mutated, extra, lambda self: None)
 
-    allowed = {"snapshot", "observe", "observe_generation"}
-    public = {
-        name
-        for name, value in vars(_Mutated).items()
-        if not name.startswith("_") and callable(value)
-    }
+    allowed = ALLOWED_PUBLIC_METHODS[LocalServiceStateAdapter]
+    public = _public_methods(_Mutated)
     assert public != allowed, f"the public-surface check would not have caught {extra}"
     assert extra in public - allowed

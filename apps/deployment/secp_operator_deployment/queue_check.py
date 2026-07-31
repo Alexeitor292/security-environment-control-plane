@@ -34,14 +34,18 @@ rung requires the operator unit to be PRESENT (a prepared host has it installed-
 check asks only whether anything CONSUMES the queue, and an absent unit consumes nothing. The two
 answers differ on exactly one host state — unit absent — and they differ correctly.
 
-THE SPLIT IS EXPRESSED TWICE, AND ISOLATION READS ONE OF THEM. The deployment profile carries
-``ordinary_task_queue`` / ``operator_task_queue``; a RUNNING worker process polls
-``Settings.temporal_task_queue`` / ``Settings.temporal_operator_task_queue``, which this check does
-not read. The commissioning chain binds them — the plan validates the profile pair against the
-independent expected pins and separately requires them distinct — but a green isolation result
-still describes the deployment MATERIAL, not the process. They differ in kind as well: the profile
-requires a non-empty operator queue, while the runtime one is empty by default, meaning no operator
-worker is deployed and controlled-live work stays on the shipped sealed queue.
+THE SAME TWO NAMES APPEAR IN THREE ARTEFACTS, AND ISOLATION READS ONE. This package's deployment
+profile carries ``ordinary_task_queue`` / ``operator_task_queue``; the management plane's worker
+EVIDENCE DOCUMENT carries the same two names for a different component; and a RUNNING worker
+process polls ``Settings.temporal_task_queue`` / ``Settings.temporal_operator_task_queue``. This
+check reads only the first, and ``isolation.authority`` says so — which is what matching names
+across three artefacts make necessary.
+
+A green isolation result therefore describes the deployment MATERIAL, not the process. The runtime
+pair also differs IN KIND: this package requires a non-empty operator queue, while the runtime one
+is empty by default AND the shipped worker entrypoint never reads it on any path — there, the
+operator queue is disabled by STRUCTURAL ABSENCE rather than by configuration. So "operator queue
+not configured" is a fault in this artefact and the correct, safe state in that one.
 
 This is exactly why isolation and dormancy are separate facts here. Dormancy is observed from the
 HOST, so it is the independent check on the running side that isolation cannot make. Merging them
