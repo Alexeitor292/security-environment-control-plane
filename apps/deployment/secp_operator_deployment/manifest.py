@@ -76,6 +76,28 @@ class ManifestError(DeploymentPackageError):
     """A covered module failed the implementation-manifest integrity check (bounded reason code)."""
 
 
+def _refuse_symlinked_directory(st_mode: int) -> None:
+    """THE symlinked-directory refusal — one rule, one expression, reused by every enumeration site.
+
+    Three sites enumerate directory entries: :meth:`RealManifestReader.list_modules` per walk level,
+    :meth:`TrustedManifestReader.list_modules` at the package dir, and
+    :meth:`TrustedManifestReader._list_subdirectory` one level down. A symlinked directory is never
+    DESCENDED by any of them, so any site that does not refuse one enumerates it as nothing,
+    silently — and an attacker only has to find the most lenient of the three.
+
+    That is not hypothetical here: the rule was added at the first two sites and missed at the
+    third, in the same function as the descent it guards, which is what a rule copied per site
+    invites. Written once, a site can only fail to CALL it — visible at the call sites — rather
+    than fail to restate it correctly. It also survives the descent bound moving past one level,
+    where a fourth hand-written copy would be the same defect again.
+
+    Takes an ``lstat`` mode: the caller must have stat'd WITHOUT following the link, because a
+    followed symlink to a directory reports ``S_ISDIR`` and is indistinguishable from a real one.
+    """
+    if stat.S_ISLNK(st_mode):
+        raise ManifestError("manifest_symlinked_directory")
+
+
 class ManifestReader(Protocol):
     def list_modules(self) -> tuple[str, ...]: ...
     def read(self, name: str) -> bytes: ...
@@ -120,9 +142,17 @@ class RealManifestReader:
             # which is the same "contributes nothing" failure. A plain nested directory is refused,
             # so a symlinked one must be too: placing it needs the same write access to the
             # root-owned package dir, and the asymmetry is what an attacker would use.
+            #
+            # ``os.lstat`` rather than ``os.path.islink`` so this site reaches the SHARED refusal on
+            # a mode, like the other two. It also stops an entry that cannot be stat'd from being
+            # read as "not a symlink": islink() returns False on error, which is the silent
+            # not-readable-looks-like-clean failure ``_walk_error`` exists to prevent, one level in.
             for d in dirs:
-                if os.path.islink(os.path.join(root, d)):
-                    raise ManifestError("manifest_symlinked_directory")
+                try:
+                    st_mode = os.lstat(os.path.join(root, d)).st_mode
+                except OSError:
+                    raise ManifestError("manifest_dir_unreadable") from None
+                _refuse_symlinked_directory(st_mode)
             rel_root = os.path.relpath(root, self._dir)
             for n in names:
                 if not n.endswith(".py"):
@@ -269,12 +299,11 @@ class TrustedManifestReader:
                 st = os.stat(entry, dir_fd=self._fd, follow_symlinks=False)
             except OSError:
                 raise ManifestError("manifest_dir_unreadable") from None
-            if stat.S_ISLNK(st.st_mode):
-                # Stat'd with follow_symlinks=False, so a symlink to a directory is NOT S_ISDIR and
-                # would fall through to `continue` — enumerating nothing, silently. Refused, to
-                # match the plain nested-directory case: both need the same write access to the
-                # root-owned package dir, so treating them differently is the gap.
-                raise ManifestError("manifest_symlinked_directory")
+            # Stat'd with follow_symlinks=False, so a symlink to a directory is NOT S_ISDIR and
+            # would fall through to `continue` — enumerating nothing, silently. Refused, to match
+            # the plain nested-directory case: both need the same write access to the root-owned
+            # package dir, so treating them differently is the gap.
+            _refuse_symlinked_directory(st.st_mode)
             if not stat.S_ISDIR(st.st_mode):
                 continue  # a non-.py regular file is not a module and never was
             found.extend(f"{entry}/{n}" for n in self._list_subdirectory(entry, flags))
@@ -290,11 +319,18 @@ class TrustedManifestReader:
         root-controlled, and the trust the fd chain establishes from ``/`` stopped one level short
         of the content it was being used to vouch for.
 
-        A SYMLINKED directory here is refused with the same bounded code the top level and the
-        source-side reader use. Stat'd with ``follow_symlinks=False`` a symlink is NOT ``S_ISDIR``,
-        so it fell through the ``continue`` below and enumerated nothing SILENTLY — the very
-        failure this descent exists to close, surviving one level down. Refusing it at all three
-        sites is the property; an attacker picks whichever of the three is the most lenient.
+        The gate is applied WITHOUT a name-keyed exemption, ``__pycache__`` included — the same
+        rule the enumeration itself follows, for the same reason. On a package dir that is already
+        root-owned and non-group/other-writable, only root can create a subdirectory in it at all,
+        so a byte-compilation cache written by the install passes; one that does not pass is a
+        directory the trust rule genuinely does not cover, and it is refused with a bounded code
+        rather than excused for its name.
+
+        A SYMLINKED directory here reaches :func:`_refuse_symlinked_directory` — the same call the
+        other two enumeration sites make, not a third copy of the rule. Stat'd with
+        ``follow_symlinks=False`` a symlink is NOT ``S_ISDIR``, so it fell through the ``continue``
+        below and enumerated nothing SILENTLY — the very failure this descent exists to close,
+        surviving one level down.
         """
         try:
             sub_fd = os.open(entry, flags, dir_fd=self._fd)
@@ -313,10 +349,8 @@ class TrustedManifestReader:
                     st = os.stat(n, dir_fd=sub_fd, follow_symlinks=False)
                 except OSError:
                     raise ManifestError("manifest_dir_unreadable") from None
-                if stat.S_ISLNK(st.st_mode):
-                    # Same refusal as the top level: a symlinked directory is not S_ISDIR under
-                    # lstat, so without this it is skipped rather than walked or refused.
-                    raise ManifestError("manifest_symlinked_directory")
+                # The same call the other two sites make, not a third copy of the rule.
+                _refuse_symlinked_directory(st.st_mode)
                 if stat.S_ISDIR(st.st_mode):
                     # Beyond the bounded descent. Refuse rather than enumerate nothing.
                     raise ManifestError("manifest_nested_directory_unverifiable")

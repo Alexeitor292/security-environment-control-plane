@@ -363,6 +363,49 @@ def test_a_directory_below_the_bounded_descent_is_refused_not_skipped(root_base)
     assert exc.value.reason_code == "manifest_nested_directory_unverifiable"
 
 
+def test_the_descent_has_no_pycache_name_exemption(root_base):
+    """The trusted reader's half of ``test_pycache_needs_no_name_exemption``.
+
+    That test pins the property for the SOURCE reader only, and a name-keyed skip is precisely
+    the trap that makes a recursive enumeration worse than a flat one — something could hide
+    behind the exempt name. The descent must reach ``__pycache__`` on its content, like any other
+    directory: ``.pyc`` is not a module and contributes nothing, a ``.py`` inside it is reported.
+
+    It matters more here than for the source reader, because a real run of this package's own test
+    suite WRITES a ``__pycache__`` into the package directory the enumeration walks — the observed
+    tree is not static, and the answer must not depend on whether pytest ran first.
+    """
+    pkg = _make_trusted_pkg(root_base)
+    cache = _add_subdir(pkg, "__pycache__")
+    _write_module(cache, "verify.cpython-311.pyc", b"\x00")
+
+    # a cache holding only bytecode contributes nothing AND does not refuse
+    assert verify_installed_package_trust(pkg) == _source_aggregate()
+
+    # but nothing is keyed on the name, so a .py placed there is REPORTED, not skipped
+    _write_module(cache, "sneaky.py")
+    reader = TrustedManifestReader.open(pkg)
+    try:
+        assert "__pycache__/sneaky.py" in reader.list_modules()
+    finally:
+        reader.close()
+    with pytest.raises(ManifestError) as exc:
+        verify_installed_package_trust(pkg)
+    assert exc.value.reason_code == "manifest_inventory_mismatch"
+
+
+def test_the_subdirectory_trust_gate_has_no_pycache_exemption_either(root_base):
+    """And the trust gate is applied to it by the same rule, for the same reason — a cache
+    directory an unprivileged user can write is not made trustworthy by its name."""
+    pkg = _make_trusted_pkg(root_base)
+    cache = _add_subdir(pkg, "__pycache__", mode=0o757)
+    _write_module(cache, "verify.cpython-311.pyc", b"\x00")
+
+    with pytest.raises(ManifestError) as exc:
+        verify_installed_package_trust(pkg)
+    assert exc.value.reason_code == "manifest_ancestor_world_writable"
+
+
 def test_a_non_root_owned_subdirectory_is_refused(root_base):
     """The subdirectory was the ONE directory in the chain opened without ``_require_trusted_dir``.
 

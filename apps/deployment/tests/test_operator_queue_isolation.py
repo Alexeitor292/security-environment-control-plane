@@ -9,9 +9,10 @@ properties pinned here are, in order of what they protect:
   report's ``effects_of_this_queue_check`` section is a CLAIM; these tests are the observation. The
   operator run hook, the composition builders and the real command runner are each replaced by a
   tripwire that RECORDS and raises if reached, and the assertion is made on the record.
-  ``temporalio`` — the only way to submit a workflow or run a worker — is covered by two STATIC
-  scans instead, for the reason given at the tripwire itself: it is an optional extra installed in
-  no environment this suite runs in, so no runtime observation of this process can see it.
+  ``temporalio`` — the only way to submit a workflow or run a worker — is covered by two static
+  import scans plus the ``main`` exit code, for the reason given at the tripwire itself: it is an
+  optional extra installed in no environment this suite runs in, so an imported-module snapshot has
+  nothing to observe, while an import reached on this path still fails the exit-code assertion.
 * :func:`test_the_guard_order_is_exactly_the_ladder_order_on_every_fact_combination` — the ordering
   proof, exhaustive over all 32 combinations of the five facts rather than sampled. ``QUEUE_LADDER``
   and ``_resolve_queue_status`` are independent derivations of the same order; if either moves, or
@@ -535,24 +536,30 @@ def test_the_queue_command_submits_nothing_and_starts_no_consumer(prepared_conte
 
     assert reached == [], f"the queue check reached a tripwired seam: {reached}"
 
-    # ``temporalio`` is the ONLY way to submit a workflow or run a worker, and this test used to
-    # assert a ``sys.modules`` delta across the ``main()`` call above, credited — here and in the
-    # runbook — with observing that no such module was imported. It observed nothing.
-    # ``temporalio`` is an optional extra installed in NO environment this suite runs in, CI
-    # included, so the key can never appear and the assertion can never fail. Worse, the failure
-    # was ORDER-DEPENDENT even in principle: the snapshot is taken twenty-odd tests into this file,
-    # after earlier tests have already driven the same loader, so with the extra installed it would
-    # pass in a full-file run and fail when run alone. A guard whose result depends on collection
-    # order is not a guard, and one that reads as a strong runtime observation is worse than none.
+    # ``temporalio`` is the ONLY way to submit a workflow or run a worker. What covers that, stated
+    # as what each guard PROVES rather than as what some other guard fails to see:
     #
-    # The property is real; it is carried STATICALLY by two scans that do fail when the code moves:
-    #   * ``test_deployment_boundary.test_no_temporalio_imports_anywhere`` — an AST import scan over
-    #     every ``.py`` in the package at ANY depth, so the import cannot be added anywhere in it,
-    #     and its own coverage is proven by ``test_the_boundary_scan_reaches_into_subpackages``;
-    #   * ``test_the_queue_check_module_calls_and_imports_no_submission_symbol`` at the bottom of
-    #     this file — the import and call shapes in the queue-check module specifically.
-    # Those cover the static reach. The tripwires above are what cover the indirect one, which is
-    # the half a source scan genuinely cannot see — so the two are kept, and the delta is not.
+    #   * NO module in this package imports ``temporalio``, structurally, at any depth —
+    #     ``test_deployment_boundary.test_no_temporalio_imports_anywhere``, an AST import scan whose
+    #     own reach is proven by ``test_the_boundary_scan_reaches_into_subpackages``. It is
+    #     environment-independent, so it holds in an environment that HAS the extra installed.
+    #   * the queue-check module names no submission symbol in an import or call shape —
+    #     ``test_the_queue_check_module_calls_and_imports_no_submission_symbol``, at the bottom of
+    #     this file.
+    #   * the assertion above that ``main`` returned 0 — an ``import temporalio`` reached on this
+    #     path would raise ``ImportError`` wherever the extra is absent, ``cli.py``'s bounded guard
+    #     turns any escaping exception into ``UNAVAILABLE_EXIT_CODE`` (20), and this test fails on
+    #     the exit code. That is a real runtime observation, and it is the one doing the work.
+    #   * the tripwires above — the INDIRECT reach, which a source scan genuinely cannot see.
+    #
+    # A ``sys.modules`` delta across the ``main()`` call used to sit here, credited both in this
+    # file and in the runbook with observing that no such module was imported. It observed nothing:
+    # ``temporalio`` is an optional extra (``[project.optional-dependencies] worker``) and every CI
+    # job installs ``.[dev]`` only, so the key can never appear and the assertion can never fail.
+    # Even where it IS installed the result would depend on collection order — the snapshot was
+    # taken twenty-odd tests into this file, after earlier tests had already driven the same
+    # loader, so it would pass in a full-file run and fail when run alone. Removed rather than
+    # conditioned: the four guards above already cover the property in every environment.
 
 
 def test_the_queue_command_reads_the_same_context_verify_does_exactly_once(monkeypatch):

@@ -183,6 +183,61 @@ def test_a_symlinked_subdirectory_is_refused_not_skipped(tmp_path):
     assert excinfo.value.reason_code == "manifest_symlinked_directory"
 
 
+def test_the_symlinked_directory_refusal_is_expressed_once_and_reused_at_every_site():
+    """One rule, one expression — the property, not "site 3 now also refuses".
+
+    Three sites enumerate directory entries and none of them descends a symlinked directory, so
+    each must refuse one. The rule was written at two of them and missed at the third, inside the
+    very function the descent lives in. Three hand-written copies is the enumeration problem in
+    miniature: an attacker needs only the most lenient copy, and a fourth site — the descent bound
+    moving past one level — would invite a fourth.
+
+    So this asserts the SHAPE that makes that unrepeatable: the ``raise`` exists exactly once, and
+    each of the three sites reaches it through the shared helper. A site can then fail to CALL the
+    rule, which is visible here, but cannot restate it differently.
+
+    Structural on purpose, and it is not the whole guard: the behavioural half is
+    ``test_a_symlinked_subdirectory_is_refused_not_skipped`` above for the source reader, and the
+    two trusted-reader cases in ``test_deployment_root_manifest.py``, which need POSIX + root.
+    """
+    import ast
+    import pathlib
+
+    from secp_operator_deployment import manifest
+
+    tree = ast.parse(pathlib.Path(manifest.__file__).read_text(encoding="utf-8"))
+
+    def _calls_in(node: ast.AST) -> int:
+        return sum(
+            1
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call)
+            and getattr(n.func, "id", None) == "_refuse_symlinked_directory"
+        )
+
+    raises = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Raise)
+        and isinstance(n.exc, ast.Call)
+        and getattr(n.exc.func, "id", None) == "ManifestError"
+        and n.exc.args
+        and isinstance(n.exc.args[0], ast.Constant)
+        and n.exc.args[0].value == "manifest_symlinked_directory"
+    ]
+    assert len(raises) == 1, (
+        f"the refusal is raised at {len(raises)} places — express it once and call it, so a site "
+        "can only fail to apply the rule, never restate it differently"
+    )
+
+    classes = {c.name: c for c in tree.body if isinstance(c, ast.ClassDef)}
+    assert _calls_in(classes["RealManifestReader"]) == 1, "the source-side walk must call it"
+    assert _calls_in(classes["TrustedManifestReader"]) == 2, (
+        "the trusted reader has TWO enumeration sites — the package dir and the one-level "
+        "descent — and both must call it; one call means the descent is unguarded again"
+    )
+
+
 def test_the_new_manifest_reason_codes_are_catalogued():
     """An operator meeting either must be able to look it up like any other."""
     from secp_operator_deployment.verify import classify_reason_code

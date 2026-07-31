@@ -476,6 +476,9 @@ those regardless of what its `effects_of_this_*` section says.
 
 Those two `temporalio` scans are STATIC deliberately, and this sentence used to say something
 weaker and untrue: that a real `main()` run was observed not to import the module. It never could
-be. `temporalio` is an optional extra installed in no test environment, CI included, so a runtime
-check of the imported-module set has nothing to observe and cannot fail. The static scans do fail
-when the code moves, which is the only reason to state them.
+be. `temporalio` is an optional extra (`worker`) and every CI job installs `.[dev]` only, so a
+runtime check of the imported-module set has nothing to observe and cannot fail. The static scans
+hold in any environment, including one that does install the extra. The runtime half of the
+guarantee is carried by the exit code instead: an import reached on the queue path raises where the
+extra is absent, the CLI's bounded guard turns that into exit 20, and the test asserting a clean
+exit fails.
