@@ -481,6 +481,26 @@ PLAINTEXT_CAPABLE_BACKENDS = (
 FILE_WRITE_SHAPES = ("open(", "Path(", "os.makedirs", "mkdir", "write_text", "write_bytes")
 
 
+#: The POSITIVE control for every negative source scan below. A scan that says "this string is
+#: absent" proves nothing if the blob it scans is empty or is the wrong module — and `_code()`
+#: silently returns something for any importable module. Each blob must therefore also be shown to
+#: contain a sentinel that only THAT module can contain.
+SCANNED_MODULES = (
+    (lambda: STORE_CODE, "SealedOperatorCredentialStore"),
+    (lambda: BACKENDS_CODE, "resolve_secret_store_binding"),
+    (lambda: AUTH_CLI_CODE, "auth_login"),
+)
+
+
+@pytest.mark.parametrize(("blob", "sentinel"), SCANNED_MODULES)
+def test_each_scanned_blob_is_really_the_module_it_claims_to_be(blob, sentinel):
+    """Without this, pointing ``_code()`` at the wrong module in a refactor would leave every scan
+    below passing while checking nothing at all."""
+    code = blob()
+    assert len(code) > 500, "an empty or truncated blob would satisfy every negative scan"
+    assert sentinel in code, f"expected {sentinel!r} in the scanned code"
+
+
 @pytest.mark.parametrize("forbidden", PLAINTEXT_CAPABLE_BACKENDS)
 def test_no_module_in_the_credential_surface_references_a_plaintext_capable_backend(forbidden):
     for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE):
@@ -512,9 +532,13 @@ def test_the_only_write_call_in_the_auth_surface_is_the_operator_presenter():
 
 
 def test_no_module_in_the_credential_surface_reads_an_environment_variable():
-    """No token, and no backend selection, may come from the environment. The Linux binding INHERITS
-    the ambient environment for its subprocess (reaching the session Secret Service requires the
-    session D-Bus address), but no code here reads, writes or branches on a variable."""
+    """No token, and no backend selection, may come from the environment.
+
+    ``secretstorage``/jeepney read the session D-Bus address from the environment inside the
+    library — that is inherent to reaching the operator's own session bus, and it happens in-process
+    with no subprocess anywhere (avoiding one is the whole reason ``secretstorage`` was chosen over
+    ``secret-tool``; the test below pins that). No code in these three modules reads, writes or
+    branches on a variable."""
     for forbidden in ("os.environ", "os.getenv", "getenv", "environb"):
         for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE):
             assert forbidden not in code

@@ -330,20 +330,37 @@ def test_two_controllers_are_two_items_in_the_secret_service(monkeypatch):
     assert len(fake.collection.items) == 1
 
 
-def test_a_locked_collection_is_refused_and_never_unlocked(monkeypatch):
+def test_every_operation_on_a_locked_collection_refuses_and_never_unlocks(monkeypatch):
     """`Collection.unlock()` raises a GUI prompt — and returns True when the prompt was DISMISSED,
-    an inversion that is easy to get backwards. The binding must not call it at all."""
+    an inversion that is easy to get backwards. The binding must not call it at all.
+
+    The binding still CONSTRUCTS on a locked keyring: the Secret Service is reachable, so refusing
+    construction would collapse the most likely Linux failure into the generic unavailable code and
+    lose the one diagnostic that tells the operator what to do. Every operation still refuses."""
     fake = _linux_with(_FakeSecretStorage(_FakeCollection(locked=True)), monkeypatch)
-    with pytest.raises(ManagementError) as ei:
-        SecretServiceBinding()
-    assert ei.value.reason_code == "secpctl_credential_store_locked"
-    assert fake.opened == fake.closed == 1
+    binding = SecretServiceBinding()
+    assert binding.backend_id == BACKEND_SECRET_SERVICE
+    for attempt in (
+        lambda: binding.get_secret(service=SERVICE, account=ACCOUNT),
+        lambda: binding.set_secret(service=SERVICE, account=ACCOUNT, secret=RECORD),
+        lambda: binding.delete_secret(service=SERVICE, account=ACCOUNT),
+    ):
+        with pytest.raises(ManagementError) as ei:
+            attempt()
+        assert ei.value.reason_code == "secpctl_credential_store_locked"
+    assert fake.opened == fake.closed, "the probe and every refused operation must close"
     assert not hasattr(_FakeCollection, "unlock"), "the stand-in offers no unlock to call"
 
 
-def test_a_locked_keyring_seals_the_store_rather_than_degrading(monkeypatch):
+def test_a_locked_keyring_keeps_its_distinct_code_instead_of_collapsing_to_unavailable(monkeypatch):
+    """N1: the locked code must be REACHABLE, not merely documented. A locked keyring resolves to a
+    real binding whose operations say `locked`, rather than to `None` and the generic code."""
     _linux_with(_FakeSecretStorage(_FakeCollection(locked=True)), monkeypatch)
-    assert resolve_secret_store_binding() is None
+    binding = resolve_secret_store_binding()
+    assert binding is not None and binding.backend_id == BACKEND_SECRET_SERVICE
+    with pytest.raises(ManagementError) as ei:
+        binding.get_secret(service=SERVICE, account=ACCOUNT)
+    assert ei.value.reason_code == "secpctl_credential_store_locked"
 
 
 @pytest.mark.parametrize(

@@ -306,9 +306,13 @@ def test_login_stops_when_the_device_code_expires():
 #
 # Adding a Linux backend must not weaken the fail-closed behaviour that shipped before it. These
 # drive the WHOLE command with `secretstorage` importable but the Secret Service unusable, which is
-# the realistic Linux failure (headless host, no session bus, locked keyring). The floor is: the
-# store still seals, `auth login` still refuses with `secpctl_credential_store_unavailable` and exit
-# 3, and nothing is written anywhere.
+# the realistic Linux failure (headless host, no session bus, locked keyring). The floor is: nothing
+# is written anywhere and `auth login` refuses at exit 3.
+#
+# The two unreachable modes seal the store and report `secpctl_credential_store_unavailable`. A
+# LOCKED keyring deliberately keeps its own code (`secpctl_credential_store_locked`) rather than
+# collapsing into the generic one — same exit, same refusal, but the operator is told to unlock
+# rather than told nothing. Both halves are asserted, per mode, so neither can drift.
 
 
 class _NoConnection:
@@ -338,18 +342,31 @@ class _UnusableSecretStorage:
         return _LockedCollection()
 
 
-@pytest.mark.parametrize("mode", ["no_dbus", "no_service", "locked"])
-def test_an_unusable_secret_service_still_seals_the_store(mode, monkeypatch):
+#: mode -> (does the store seal?, the reason the operator is given)
+UNUSABLE_MODES = {
+    "no_dbus": (True, "secpctl_credential_store_unavailable"),
+    "no_service": (True, "secpctl_credential_store_unavailable"),
+    "locked": (False, "secpctl_credential_store_locked"),
+}
+
+
+@pytest.mark.parametrize("mode", sorted(UNUSABLE_MODES))
+def test_an_unusable_secret_service_never_yields_a_usable_store(mode, monkeypatch):
     import secp_management.operator_credential_backends as backends
     from secp_management.operator_credential_store import build_operator_credential_store
 
     monkeypatch.setattr(backends.sys, "platform", "linux")
     monkeypatch.setitem(sys.modules, "secretstorage", _UnusableSecretStorage(mode))
-    assert backends.resolve_secret_store_binding() is None
-    assert isinstance(build_operator_credential_store(), SealedOperatorCredentialStore)
+    seals, _reason = UNUSABLE_MODES[mode]
+
+    store = build_operator_credential_store()
+    assert (backends.resolve_secret_store_binding() is None) is seals
+    assert isinstance(store, SealedOperatorCredentialStore) is seals
+    # sealed or bound, it can hold nothing and reports itself unusable
+    assert store.for_account(ORIGIN).describe().available is False
 
 
-@pytest.mark.parametrize("mode", ["no_dbus", "no_service", "locked"])
+@pytest.mark.parametrize("mode", sorted(UNUSABLE_MODES))
 def test_login_still_refuses_with_exit_3_when_the_secret_service_is_unusable(mode, monkeypatch):
     """The floor the new backend must not lower: an unusable keystore is a refusal, never a file."""
     import secp_management.operator_credential_backends as backends
@@ -357,19 +374,40 @@ def test_login_still_refuses_with_exit_3_when_the_secret_service_is_unusable(mod
 
     monkeypatch.setattr(backends.sys, "platform", "linux")
     monkeypatch.setitem(sys.modules, "secretstorage", _UnusableSecretStorage(mode))
+    _seals, reason = UNUSABLE_MODES[mode]
 
     client = _FakeDeviceClient()
     deps, _waits, prompts = _deps(client=client, store=build_operator_credential_store())
     code, report = auth_login(deps, gate=WRITE)
 
     assert code == EXIT_AUTH_UNAVAILABLE == 3
-    assert report == {
-        "command": "auth login",
-        "reason_code": "secpctl_credential_store_unavailable",
-    }
+    assert report == {"command": "auth login", "reason_code": reason}
     # the grant really ran and really reached the persist step before refusing
     assert client.calls == ["authority", "discover", "device_authorization", "token", "jwks"]
     assert prompts
+
+
+def test_a_locked_keyring_tells_the_operator_to_unlock_rather_than_nothing(monkeypatch):
+    """N1: the locked code must reach the OPERATOR, not just exist in the backend. Collapsing it
+    into the generic unavailable code would hand them the one message that says nothing."""
+    import secp_management.operator_credential_backends as backends
+    from secp_management.operator_credential_store import build_operator_credential_store
+
+    monkeypatch.setattr(backends.sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "secretstorage", _UnusableSecretStorage("locked"))
+
+    deps, _waits, _prompts = _deps(store=build_operator_credential_store())
+    for command, result in (
+        ("auth login", auth_login(deps, gate=WRITE)),
+        ("auth logout", auth_logout(deps, gate=WRITE)),
+    ):
+        code, report = result
+        assert code == EXIT_AUTH_UNAVAILABLE
+        assert report == {"command": command, "reason_code": "secpctl_credential_store_locked"}
+    # and `auth status` names the real backend rather than reporting a sealed one
+    status = auth_status(deps)[1]
+    assert status["credential_backend"] == "secret_service"
+    assert status["credential_store_available"] is False
 
 
 def test_an_unverifiable_token_is_never_offered_for_storage():

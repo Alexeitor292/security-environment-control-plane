@@ -35,10 +35,14 @@ Three deliberate non-goals, so the omissions are legible rather than accidental:
   ``secretstorage``, or an unreachable Secret Service resolves to ``None`` and the store above fails
   closed. Nothing is ever written to a file, an environment variable, or a process-lifetime cache.
 * **A locked keyring is refused, never unlocked.** ``Collection.unlock()`` raises a GUI prompt and a
-  read-only ``secpctl auth status`` must not make one appear. A locked collection is
-  ``secpctl_credential_store_locked``, which tells the operator exactly what to do. (Note the
-  inverted return: ``unlock()`` returns ``True`` when the prompt was DISMISSED, i.e. still locked.
-  Not calling it sidesteps that trap entirely.)
+  read-only ``secpctl auth status`` must not make one appear. (Note the inverted return:
+  ``unlock()`` returns ``True`` when the prompt was DISMISSED, i.e. still locked. Not calling it
+  sidesteps that trap entirely.) A locked collection is ``secpctl_credential_store_locked`` — a
+  DISTINCT code from
+  the generic unavailable one, and reachable, because the binding still constructs on a locked
+  keyring so every operation can carry that code to the operator. On Linux a locked keyring is the
+  most likely failure, so collapsing it into "no credential store" would hand the operator the one
+  message that does not say what to do.
 * No binding enumerates credentials. secpctl can only ever USE the account named by the reviewed
   controller locator, so listing would be output with no operation behind it and more OS paths that
   no test here can exercise.
@@ -584,7 +588,20 @@ class SecretServiceBinding:
             _reject("secpctl_credential_store_unavailable")
         # Probe once at construction so an absent library or an unreachable Secret Service resolves
         # to the SEALED store, rather than advertising a backend that refuses on every command.
-        connection, _collection = self._connect()
+        #
+        # A LOCKED collection is deliberately NOT such a failure. The Secret Service is present and
+        # reachable; the operator has simply not unlocked it, and they may well unlock it before the
+        # next command. Refusing construction here would collapse that into the generic
+        # `secpctl_credential_store_unavailable` — which on Linux is the MOST LIKELY failure and the
+        # message that tells the operator the least. Constructing anyway lets every operation carry
+        # `secpctl_credential_store_locked` through to them, which says what to do. Nothing is
+        # weakened: a locked collection still refuses every read, write and delete.
+        try:
+            connection, _collection = self._connect()
+        except OperatorCredentialBackendError as exc:
+            if exc.reason_code != "secpctl_credential_store_locked":
+                raise
+            return  # reachable, merely locked; `_connect` already closed the probe connection
         connection.close()
 
     def __repr__(self) -> str:  # never a service / account / secret
@@ -669,8 +686,12 @@ def resolve_secret_store_binding() -> SecretStoreBinding | None:
 
     ``None`` is the whole no-plaintext-fallback rule in one return value: the caller composes the
     SEALED store and every credential operation refuses. A platform with no binding, a framework
-    that will not load, an absent ``secretstorage``, an unreachable Secret Service and a locked
-    keyring all land here. There is no fourth binding to fall through to.
+    that will not load, an absent ``secretstorage`` and an unreachable Secret Service all land here.
+    There is no fourth binding to fall through to.
+
+    A LOCKED keyring deliberately does NOT land here — the service is reachable, so the binding is
+    returned and every operation refuses with ``secpctl_credential_store_locked`` instead of the
+    generic unavailable code. Fail-closed either way; only the diagnostic differs.
     """
     try:
         if sys.platform == "win32":
