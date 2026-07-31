@@ -87,14 +87,70 @@ def test_main_wires_auth_deps_only_for_the_auth_group(monkeypatch):
     assert captured == {"deps": None, "enr": None, "auth": "AUTH_DEPS"}
 
 
+class _StubFilesystem:
+    """A stand-in for the POSIX-only ``RealFilesystem``.
+
+    Without it these two tests are vacuous on a Windows development host: ``RealFilesystem()``
+    refuses off-POSIX, so ``_production_auth_deps`` would take the fallback branch on BOTH of them
+    and neither would be able to tell the branches apart.
+    """
+
+
+def _composable_runtime(monkeypatch) -> None:
+    import secp_commissioning.runtime as runtime
+
+    monkeypatch.setattr(runtime, "RealFilesystem", _StubFilesystem)
+
+
+def test_production_auth_deps_wires_the_recorded_controller_locator(monkeypatch):
+    """The success path, so the fallback test below can actually distinguish the two."""
+    import secp_management.controller_api_locator as locator_module
+
+    _composable_runtime(monkeypatch)
+    deps = cli._production_auth_deps()
+    assert isinstance(deps.locator_provider, locator_module.FileControllerApiLocatorProvider)
+
+
 def test_production_auth_deps_falls_back_to_sealed_defaults(monkeypatch):
-    """An unprovisioned / non-POSIX host must yield sealed auth deps, never a crash."""
+    """An unprovisioned / non-POSIX host must yield sealed auth deps, never a crash.
+
+    The assertion is on the LOCATOR, not the credential store. ``_production_auth_deps`` evaluates
+    its arguments left to right, so ``build_operator_credential_store()`` has already returned
+    before the locator raises — the store therefore looks the same on the success and fallback
+    paths and cannot distinguish them. The locator can: it is sealed only on the fallback.
+    """
     import secp_management.controller_api_locator as locator_module
 
     def _boom(*_args, **_kw):
         raise ManagementError("locator_unavailable")
 
+    _composable_runtime(monkeypatch)  # so the LOCATOR is the only thing that fails
     monkeypatch.setattr(locator_module, "FileControllerApiLocatorProvider", _boom)
     deps = cli._production_auth_deps()
+    assert isinstance(deps.locator_provider, locator_module.SealedControllerApiLocatorProvider)
     with pytest.raises(ManagementError):
-        deps.credential_store.access_token()
+        deps.locator_provider.locate()
+
+
+def test_main_wires_auth_deps_for_every_auth_subcommand(monkeypatch):
+    """The engine must stay ``None`` for the whole auth group, not just for ``status`` — a login,
+    refresh or logout must be equally unable to reach a filesystem/service mutation adapter."""
+    captured: list[dict] = []
+
+    def _fake_run(argv, deps=None, *, enrollment_deps=None, auth_deps=None):
+        captured.append({"deps": deps, "enr": enrollment_deps, "auth": auth_deps})
+        return (0, {})
+
+    monkeypatch.setattr(cli, "_production_engine_deps", lambda: "ENGINE_DEPS")
+    monkeypatch.setattr(cli, "_production_enrollment_deps", lambda: "ENR_DEPS")
+    monkeypatch.setattr(cli, "_production_auth_deps", lambda: "AUTH_DEPS")
+    monkeypatch.setattr(cli, "run", _fake_run)
+
+    for argv in (
+        ["auth", "login", "--write", "--confirm"],
+        ["auth", "refresh", "--write", "--confirm"],
+        ["auth", "logout", "--write", "--confirm"],
+        ["--json", "auth", "status"],
+    ):
+        cli.main(argv)
+    assert captured == [{"deps": None, "enr": None, "auth": "AUTH_DEPS"}] * 4

@@ -1,0 +1,557 @@
+"""OS secret-storage bindings for the operator credential — SECP-PR5H-B2, Workstream C.
+
+This module is the ONLY place in the ``secpctl auth`` surface that talks to an operating-system
+keystore. It contains bindings and nothing else: no policy, no lifecycle, no expiry rule, no account
+derivation. :mod:`secp_management.operator_credential_store` owns all of that and drives a binding
+through the narrow :class:`SecretStoreBinding` seam, so the no-plaintext-fallback rules are enforced
+in ONE reviewed place and are not restated per platform.
+
+Two bindings ship, both through :mod:`ctypes` — no process is ever spawned:
+
+* **Windows** — Credential Manager via ``advapi32`` ``CredWriteW`` / ``CredReadW`` / ``CredDeleteW``
+  (``wincred.h``). A ``CRED_TYPE_GENERIC`` credential is "stored securely" by the OS and its blob is
+  bounded by ``CRED_MAX_CREDENTIAL_BLOB_SIZE`` (5*512 bytes).
+* **macOS** — Keychain Services via the CURRENT ``SecItemAdd`` / ``SecItemCopyMatching`` /
+  ``SecItemUpdate`` / ``SecItemDelete`` API (the ``SecKeychain*`` family has been deprecated since
+  10.10 and is deliberately not used), against the system frameworks at their fixed absolute paths.
+
+**Linux ships NO binding in this slice, and that is a refusal rather than an oversight.** The
+freedesktop Secret Service is reachable three ways, and each is blocked or unreviewed here:
+
+* libsecret's ``secret-tool`` needs a subprocess, and SECP-PR5E §12 forbids the management installer
+  from importing ``subprocess`` at all (``tests/test_management_plane_boundary.py``) — it is a
+  local-first installer, never a process driver. The plane's ONE reviewed exec seam,
+  ``secp_operator_deployment.host_process.RealCommandRunner``, cannot carry this anyway: it pins
+  ``stdin=DEVNULL``, and the secret has to travel on stdin precisely so it never reaches ``argv``.
+* a hand-rolled D-Bus client (session-bus SASL, message marshalling, ``Prompt`` handling for a
+  locked collection) is several hundred lines that no host in this repository can execute, which is
+  not something to introduce alongside the protocol work.
+* a dependency (``secretstorage``, which speaks the Secret Service D-Bus API directly and has no
+  plaintext fallback) is the right answer, and it needs a reviewed change to the distribution's
+  dependency set rather than a quiet import.
+
+Until one of those lands, a Linux operator gets ``secpctl_credential_store_unavailable`` and no
+credential is stored anywhere. That is the designed failure, not a degradation.
+
+Two further deliberate non-goals, so the omissions are legible:
+
+* There is NO fallback binding. An unsupported platform or a missing framework resolves to ``None``
+  and the store above fails closed. Nothing is ever written to a file, an environment variable, or a
+  process-lifetime cache.
+* No binding enumerates credentials. secpctl can only ever USE the account named by the reviewed
+  controller locator, so listing would be output with no operation behind it and more OS paths that
+  no test here can exercise.
+
+Every failure is one bounded reason code. A binding never returns, logs, or embeds the secret, the
+account, the target name, an OS error string, or an upstream exception.
+"""
+
+from __future__ import annotations
+
+import sys
+from typing import Any, NoReturn, Protocol, runtime_checkable
+
+from secp_management import ManagementError
+
+#: Backend identifiers reported by ``StoredCredentialStatus.backend``.
+BACKEND_WINDOWS_CREDENTIAL_MANAGER = "windows_credential_manager"
+BACKEND_MACOS_KEYCHAIN = "macos_keychain"
+
+#: The TIGHTEST secret size any supported keystore accepts, applied on EVERY platform so a
+#: credential that stores on one operator workstation stores on all of them. The bound is Windows'
+#: documented ``CRED_MAX_CREDENTIAL_BLOB_SIZE`` (wincred.h, ``CREDENTIALW.CredentialBlobSize``).
+MAX_SECRET_BYTES = 5 * 512
+
+#: Windows ``CRED_MAX_GENERIC_TARGET_NAME_LENGTH`` (wincred.h).
+_MAX_TARGET_NAME_LEN = 32767
+_MAX_IDENTIFIER_LEN = 255
+
+
+class OperatorCredentialBackendError(ManagementError):
+    """A bounded, closed keystore refusal — carries ONLY a reason code, never the secret, the
+    account, the target name, an OS status, or a raw exception."""
+
+
+def _reject(reason_code: str) -> NoReturn:
+    raise OperatorCredentialBackendError(reason_code)
+
+
+@runtime_checkable
+class SecretStoreBinding(Protocol):
+    """The narrow seam between the credential store's policy and one OS keystore.
+
+    ``service`` and ``account`` are bounded, non-secret identifiers chosen by code above; ``secret``
+    is opaque bytes. A binding performs NO validation of the secret's meaning and NO expiry logic —
+    it stores and retrieves bytes under a key, or refuses.
+    """
+
+    @property
+    def backend_id(self) -> str:
+        """The stable, code-owned identifier reported in ``auth status``."""
+        ...
+
+    def set_secret(self, *, service: str, account: str, secret: bytes) -> None:
+        """Replace any existing secret stored under ``(service, account)``."""
+        ...
+
+    def get_secret(self, *, service: str, account: str) -> bytes | None:
+        """The stored secret, or ``None`` when no entry exists. A backend FAILURE is a refusal, not
+        a ``None`` — an unreachable keystore must never look like an absent credential."""
+        ...
+
+    def delete_secret(self, *, service: str, account: str) -> bool:
+        """Remove ONLY the entry under ``(service, account)``. Returns whether one was removed."""
+        ...
+
+
+def require_identifier(value: object, *, reason: str = "secpctl_credential_account_invalid") -> str:
+    """A bounded, printable, whitespace-free, control-free non-secret identifier."""
+    if (
+        not isinstance(value, str)
+        or not (1 <= len(value) <= _MAX_IDENTIFIER_LEN)
+        or any(ch.isspace() or ord(ch) < 0x21 or ord(ch) == 0x7F for ch in value)
+    ):
+        _reject(reason)
+    return value
+
+
+def require_storable(secret: object) -> bytes:
+    """Bound the secret to what EVERY supported keystore accepts.
+
+    Refusing here — before any OS call — means an oversized credential is one bounded refusal on
+    every platform rather than a silent truncation on one of them.
+    """
+    if not isinstance(secret, (bytes, bytearray)) or not secret:
+        _reject("secpctl_credential_record_invalid")
+    if len(secret) > MAX_SECRET_BYTES:
+        _reject("secpctl_credential_too_large")
+    return bytes(secret)
+
+
+def target_name(service: str, account: str) -> str:
+    """The single flat key a keystore addressing one string (Windows) uses.
+
+    :func:`require_identifier` makes both parts whitespace-free but NOT colon-free (a colon is
+    printable), so the separator alone does not guarantee an unambiguous split. It does not need
+    to: the key is only ever WRITTEN by this function and is never parsed back.
+    """
+    key = f"{require_identifier(service)}:{require_identifier(account)}"
+    if len(key) > _MAX_TARGET_NAME_LEN:
+        _reject("secpctl_credential_account_invalid")
+    return key
+
+
+# --- Windows: Credential Manager ------------------------------------------------------------------
+
+
+_CRED_TYPE_GENERIC = 1
+_CRED_PERSIST_LOCAL_MACHINE = 2
+_ERROR_NOT_FOUND = 1168
+
+
+def _windows_structures() -> tuple[Any, Any]:
+    """The ``advapi32`` handle and the ``CREDENTIALW`` structure, built on first use.
+
+    ``ctypes.wintypes`` does not import off Windows, so the whole binding is constructed lazily and
+    a non-Windows import can never fail at module load.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class _CREDENTIALW(ctypes.Structure):
+        # wincred.h ``_CREDENTIALW``, in declaration order. The order is load-bearing: a
+        # transposed field would hand the OS a pointer where it expects a length.
+        _fields_ = (
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_byte)),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        )
+
+    try:
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.CredWriteW.argtypes = (ctypes.POINTER(_CREDENTIALW), wintypes.DWORD)
+        advapi32.CredWriteW.restype = wintypes.BOOL
+        advapi32.CredReadW.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.POINTER(_CREDENTIALW)),
+        )
+        advapi32.CredReadW.restype = wintypes.BOOL
+        advapi32.CredDeleteW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD)
+        advapi32.CredDeleteW.restype = wintypes.BOOL
+        advapi32.CredFree.argtypes = (ctypes.c_void_p,)
+        advapi32.CredFree.restype = None
+    except Exception:  # noqa: BLE001 - an unusable API surface is a bounded refusal
+        _reject("secpctl_credential_store_unavailable")
+    return advapi32, _CREDENTIALW
+
+
+class WindowsCredentialManagerBinding:
+    """Windows Credential Manager (``CRED_TYPE_GENERIC``), persisted for this user on this machine.
+
+    ``CRED_PERSIST_LOCAL_MACHINE`` is chosen over ``CRED_PERSIST_ENTERPRISE`` deliberately: the
+    operator credential must not roam to other machines through a roaming profile.
+    """
+
+    __slots__ = ("_advapi32", "_credential_type")
+
+    def __init__(self) -> None:
+        if sys.platform != "win32":
+            _reject("secpctl_credential_store_unavailable")
+        self._advapi32, self._credential_type = _windows_structures()
+
+    def __repr__(self) -> str:  # never a target name or a secret
+        return "WindowsCredentialManagerBinding(<bound>)"
+
+    @property
+    def backend_id(self) -> str:
+        return BACKEND_WINDOWS_CREDENTIAL_MANAGER
+
+    def set_secret(self, *, service: str, account: str, secret: bytes) -> None:
+        import ctypes
+
+        blob = require_storable(secret)
+        credential = self._credential_type()
+        credential.Flags = 0
+        credential.Type = _CRED_TYPE_GENERIC
+        credential.TargetName = target_name(service, account)
+        credential.Comment = None
+        credential.CredentialBlobSize = len(blob)
+        buffer = ctypes.create_string_buffer(blob, len(blob))
+        credential.CredentialBlob = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte))
+        credential.Persist = _CRED_PERSIST_LOCAL_MACHINE
+        credential.AttributeCount = 0
+        credential.Attributes = None
+        credential.TargetAlias = None
+        credential.UserName = None
+        if not self._advapi32.CredWriteW(ctypes.byref(credential), 0):
+            _reject("secpctl_credential_backend_failed")
+
+    def get_secret(self, *, service: str, account: str) -> bytes | None:
+        import ctypes
+
+        target = target_name(service, account)
+        pointer = ctypes.POINTER(self._credential_type)()
+        if not self._advapi32.CredReadW(target, _CRED_TYPE_GENERIC, 0, ctypes.byref(pointer)):
+            if ctypes.get_last_error() == _ERROR_NOT_FOUND:
+                return None
+            _reject("secpctl_credential_backend_failed")
+        try:
+            credential = pointer.contents
+            size = int(credential.CredentialBlobSize)
+            if size <= 0:
+                return None
+            address = ctypes.cast(credential.CredentialBlob, ctypes.c_void_p)
+            return ctypes.string_at(address, size)
+        finally:
+            self._advapi32.CredFree(pointer)
+
+    def delete_secret(self, *, service: str, account: str) -> bool:
+        import ctypes
+
+        target = target_name(service, account)
+        if self._advapi32.CredDeleteW(target, _CRED_TYPE_GENERIC, 0):
+            return True
+        if ctypes.get_last_error() == _ERROR_NOT_FOUND:
+            return False
+        _reject("secpctl_credential_backend_failed")
+
+
+# --- macOS: Keychain Services (SecItem) -----------------------------------------------------------
+
+
+_CORE_FOUNDATION_PATH = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+_SECURITY_PATH = "/System/Library/Frameworks/Security.framework/Security"
+
+_ERR_SEC_SUCCESS = 0
+_ERR_SEC_DUPLICATE_ITEM = -25299
+_ERR_SEC_ITEM_NOT_FOUND = -25300
+_K_CF_STRING_ENCODING_UTF8 = 0x08000100
+
+
+class _MacOSFrameworks:
+    """The CoreFoundation + Security entry points and constants this binding needs.
+
+    Every signature is pinned with explicit ``argtypes``/``restype``. Leaving them to ctypes'
+    defaults truncates pointers to ``int`` on 64-bit builds, which would hand the Security framework
+    a malformed dictionary rather than fail loudly.
+    """
+
+    __slots__ = ("cf", "sec", "constants", "_ctypes")
+
+    def __init__(self) -> None:
+        import ctypes
+
+        self._ctypes = ctypes
+        try:
+            cf = ctypes.CDLL(_CORE_FOUNDATION_PATH, use_errno=True)
+            sec = ctypes.CDLL(_SECURITY_PATH, use_errno=True)
+        except Exception:  # noqa: BLE001 - a missing framework is a bounded refusal
+            _reject("secpctl_credential_store_unavailable")
+
+        void_p = ctypes.c_void_p
+        index = ctypes.c_ssize_t
+        try:
+            cf.CFStringCreateWithBytes.argtypes = (
+                void_p,
+                ctypes.POINTER(ctypes.c_ubyte),
+                index,
+                ctypes.c_uint32,
+                ctypes.c_ubyte,
+            )
+            cf.CFStringCreateWithBytes.restype = void_p
+            cf.CFDataCreate.argtypes = (void_p, ctypes.POINTER(ctypes.c_ubyte), index)
+            cf.CFDataCreate.restype = void_p
+            cf.CFDictionaryCreate.argtypes = (
+                void_p,
+                ctypes.POINTER(void_p),
+                ctypes.POINTER(void_p),
+                index,
+                void_p,
+                void_p,
+            )
+            cf.CFDictionaryCreate.restype = void_p
+            cf.CFRelease.argtypes = (void_p,)
+            cf.CFRelease.restype = None
+            cf.CFDataGetLength.argtypes = (void_p,)
+            cf.CFDataGetLength.restype = index
+            cf.CFDataGetBytePtr.argtypes = (void_p,)
+            cf.CFDataGetBytePtr.restype = void_p
+            cf.CFGetTypeID.argtypes = (void_p,)
+            cf.CFGetTypeID.restype = ctypes.c_ulong
+            cf.CFDataGetTypeID.argtypes = ()
+            cf.CFDataGetTypeID.restype = ctypes.c_ulong
+
+            sec.SecItemAdd.argtypes = (void_p, ctypes.POINTER(void_p))
+            sec.SecItemAdd.restype = ctypes.c_int32
+            sec.SecItemCopyMatching.argtypes = (void_p, ctypes.POINTER(void_p))
+            sec.SecItemCopyMatching.restype = ctypes.c_int32
+            sec.SecItemUpdate.argtypes = (void_p, void_p)
+            sec.SecItemUpdate.restype = ctypes.c_int32
+            sec.SecItemDelete.argtypes = (void_p,)
+            sec.SecItemDelete.restype = ctypes.c_int32
+
+            constants = {
+                name: ctypes.c_void_p.in_dll(sec, name).value
+                for name in (
+                    "kSecClass",
+                    "kSecClassGenericPassword",
+                    "kSecAttrService",
+                    "kSecAttrAccount",
+                    "kSecValueData",
+                    "kSecReturnData",
+                    "kSecMatchLimit",
+                    "kSecMatchLimitOne",
+                )
+            }
+            constants["kCFBooleanTrue"] = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+            # The two callback tables are STRUCTS, so the dictionary needs their ADDRESS, not the
+            # value of their first field -- `in_dll(...).value` would silently pass garbage.
+            for name in ("kCFTypeDictionaryKeyCallBacks", "kCFTypeDictionaryValueCallBacks"):
+                constants[name] = ctypes.addressof(ctypes.c_void_p.in_dll(cf, name))
+        except Exception:  # noqa: BLE001 - an unusable framework surface is a bounded refusal
+            _reject("secpctl_credential_store_unavailable")
+
+        self.cf = cf
+        self.sec = sec
+        self.constants = constants
+
+    def string(self, value: str) -> int:
+        """A ``CFStringRef`` (owned by the caller) for a UTF-8 Python string."""
+        ctypes = self._ctypes
+        raw = value.encode("utf-8")
+        buffer = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+        ref = self.cf.CFStringCreateWithBytes(
+            None, buffer, len(raw), _K_CF_STRING_ENCODING_UTF8, False
+        )
+        if not ref:
+            _reject("secpctl_credential_backend_failed")
+        return ref
+
+    def data(self, value: bytes) -> int:
+        """A ``CFDataRef`` (owned by the caller) for opaque bytes."""
+        ctypes = self._ctypes
+        buffer = (ctypes.c_ubyte * len(value)).from_buffer_copy(value)
+        ref = self.cf.CFDataCreate(None, buffer, len(value))
+        if not ref:
+            _reject("secpctl_credential_backend_failed")
+        return ref
+
+    def dictionary(self, pairs: list[tuple[int, int]]) -> int:
+        """A ``CFDictionaryRef`` (owned by the caller) over already-created CF values."""
+        ctypes = self._ctypes
+        count = len(pairs)
+        keys = (ctypes.c_void_p * count)(*[k for k, _ in pairs])
+        values = (ctypes.c_void_p * count)(*[v for _, v in pairs])
+        ref = self.cf.CFDictionaryCreate(
+            None,
+            keys,
+            values,
+            count,
+            self.constants["kCFTypeDictionaryKeyCallBacks"],
+            self.constants["kCFTypeDictionaryValueCallBacks"],
+        )
+        if not ref:
+            _reject("secpctl_credential_backend_failed")
+        return ref
+
+    def release(self, *refs: int) -> None:
+        for ref in refs:
+            if ref:
+                self.cf.CFRelease(ref)
+
+    def data_bytes(self, ref: int) -> bytes:
+        """Copy a ``CFDataRef``'s contents out, refusing anything that is not CFData."""
+        ctypes = self._ctypes
+        if self.cf.CFGetTypeID(ref) != self.cf.CFDataGetTypeID():
+            _reject("secpctl_credential_record_invalid")
+        length = int(self.cf.CFDataGetLength(ref))
+        if length <= 0 or length > MAX_SECRET_BYTES:
+            _reject("secpctl_credential_record_invalid")
+        pointer = self.cf.CFDataGetBytePtr(ref)
+        if not pointer:
+            _reject("secpctl_credential_record_invalid")
+        return ctypes.string_at(pointer, length)
+
+
+class MacOSKeychainBinding:
+    """macOS Keychain Services generic-item storage through the current ``SecItem`` API."""
+
+    __slots__ = ("_fw",)
+
+    def __init__(self) -> None:
+        if sys.platform != "darwin":
+            _reject("secpctl_credential_store_unavailable")
+        self._fw = _MacOSFrameworks()
+
+    def __repr__(self) -> str:  # never a service / account / secret
+        return "MacOSKeychainBinding(<bound>)"
+
+    @property
+    def backend_id(self) -> str:
+        return BACKEND_MACOS_KEYCHAIN
+
+    def _query(self, service: str, account: str, extra: list[tuple[int, int]]) -> tuple[int, list]:
+        fw = self._fw
+        owned: list[int] = []
+        service_ref = fw.string(require_identifier(service))
+        account_ref = fw.string(require_identifier(account))
+        owned += [service_ref, account_ref]
+        pairs = [
+            (fw.constants["kSecClass"], fw.constants["kSecClassGenericPassword"]),
+            (fw.constants["kSecAttrService"], service_ref),
+            (fw.constants["kSecAttrAccount"], account_ref),
+            *extra,
+        ]
+        query = fw.dictionary(pairs)
+        owned.append(query)
+        return query, owned
+
+    def set_secret(self, *, service: str, account: str, secret: bytes) -> None:
+        fw = self._fw
+        blob = require_storable(secret)
+        query, owned = self._query(service, account, [])
+        value = fw.data(blob)
+        owned.append(value)
+        try:
+            update = fw.dictionary([(fw.constants["kSecValueData"], value)])
+            owned.append(update)
+            status = fw.sec.SecItemUpdate(query, update)
+            if status == _ERR_SEC_ITEM_NOT_FOUND:
+                add_query, add_owned = self._query(
+                    service, account, [(fw.constants["kSecValueData"], value)]
+                )
+                owned += add_owned
+                status = fw.sec.SecItemAdd(add_query, None)
+                if status == _ERR_SEC_DUPLICATE_ITEM:
+                    status = fw.sec.SecItemUpdate(query, update)
+            if status != _ERR_SEC_SUCCESS:
+                _reject("secpctl_credential_backend_failed")
+        finally:
+            fw.release(*owned)
+
+    def get_secret(self, *, service: str, account: str) -> bytes | None:
+        import ctypes
+
+        fw = self._fw
+        query, owned = self._query(
+            service,
+            account,
+            [
+                (fw.constants["kSecReturnData"], fw.constants["kCFBooleanTrue"]),
+                (fw.constants["kSecMatchLimit"], fw.constants["kSecMatchLimitOne"]),
+            ],
+        )
+        result = ctypes.c_void_p()
+        try:
+            status = fw.sec.SecItemCopyMatching(query, ctypes.byref(result))
+            if status == _ERR_SEC_ITEM_NOT_FOUND:
+                return None
+            if status != _ERR_SEC_SUCCESS or not result.value:
+                _reject("secpctl_credential_backend_failed")
+            return fw.data_bytes(result.value)
+        finally:
+            fw.release(*owned)
+            if result.value:
+                fw.release(result.value)
+
+    def delete_secret(self, *, service: str, account: str) -> bool:
+        fw = self._fw
+        query, owned = self._query(service, account, [])
+        try:
+            status = fw.sec.SecItemDelete(query)
+            if status == _ERR_SEC_ITEM_NOT_FOUND:
+                return False
+            if status != _ERR_SEC_SUCCESS:
+                _reject("secpctl_credential_backend_failed")
+            return True
+        finally:
+            fw.release(*owned)
+
+
+# --- resolution -----------------------------------------------------------------------------------
+
+
+def resolve_secret_store_binding() -> SecretStoreBinding | None:
+    """The OS keystore binding for THIS platform, or ``None`` when none is available.
+
+    ``None`` is the whole no-plaintext-fallback rule in one return value: the caller composes the
+    SEALED store and every credential operation refuses. Linux reaches this return deliberately —
+    see the module docstring for why the Secret Service binding is not in this slice — and so does
+    any platform whose framework fails to load. There is no third binding to fall through to.
+    """
+    try:
+        if sys.platform == "win32":
+            return WindowsCredentialManagerBinding()
+        if sys.platform == "darwin":
+            return MacOSKeychainBinding()
+    except ManagementError:
+        return None
+    except Exception:  # noqa: BLE001 - an unexpected platform failure still fails CLOSED
+        return None
+    return None
+
+
+__all__ = [
+    "BACKEND_MACOS_KEYCHAIN",
+    "BACKEND_WINDOWS_CREDENTIAL_MANAGER",
+    "MAX_SECRET_BYTES",
+    "MacOSKeychainBinding",
+    "OperatorCredentialBackendError",
+    "SecretStoreBinding",
+    "WindowsCredentialManagerBinding",
+    "require_identifier",
+    "require_storable",
+    "resolve_secret_store_binding",
+    "target_name",
+]

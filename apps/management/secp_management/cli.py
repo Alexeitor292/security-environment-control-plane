@@ -10,7 +10,7 @@ Command surface (there is deliberately NO ``activate``/``apply``/``destroy``/``p
     secpctl status    controller|worker
     secpctl evidence  controller|worker
     secpctl rollback  controller|worker                 [--write --confirm]
-    secpctl auth      login|logout                      [--write --confirm]
+    secpctl auth      login|refresh|logout              [--write --confirm]
     secpctl auth      status
 
 Every mutation defaults to DRY-RUN; a real write requires BOTH ``--write`` and ``--confirm``.
@@ -28,7 +28,13 @@ import json
 import sys
 
 from secp_management import ManagementError
-from secp_management.auth_cli import AuthCliDeps, auth_login, auth_logout, auth_status
+from secp_management.auth_cli import (
+    AuthCliDeps,
+    auth_login,
+    auth_logout,
+    auth_refresh,
+    auth_status,
+)
 from secp_management.engine import (
     EngineDeps,
     adopt,
@@ -102,17 +108,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_auth_parser(groups) -> None:
-    """``secpctl auth login|status|logout`` — operator authentication by OAuth 2.0 Device
+    """``secpctl auth login|status|refresh|logout`` — operator authentication by OAuth 2.0 Device
     Authorization Grant (RFC 8628), per ADR-028 §3. There is NO ``--issuer``/``--client-id``/
     ``--endpoint``/``--token``/``--password`` argument: the reviewed authority is discovered from
-    the bootstrap-recorded controller, and no password is ever collected. ``login`` and ``logout``
-    mutate credential state and keep the standard dry-run default; ``status`` is read-only."""
+    the bootstrap-recorded controller, and no password is ever collected. There is likewise no
+    ``--account``/``--controller`` argument — the credential account is DERIVED from the recorded
+    controller locator, so a command can never be pointed at another controller's credential.
+    ``login``, ``refresh`` and ``logout`` mutate credential state and keep the standard dry-run
+    default; ``status`` is read-only."""
     auth = groups.add_parser("auth", help="operator authentication operations")
     actions = auth.add_subparsers(dest="action", required=True)
     _add_write_confirm(
         actions.add_parser("login", help="authenticate this operator via device authorization")
     )
     actions.add_parser("status", help="read-only local credential status")
+    _add_write_confirm(
+        actions.add_parser("refresh", help="renew this controller's stored operator credential")
+    )
     _add_write_confirm(
         actions.add_parser("logout", help="delete only the credential material secpctl owns")
     )
@@ -285,6 +297,8 @@ def _dispatch_auth(args: argparse.Namespace, auth: AuthCliDeps) -> tuple[int, di
         return auth_login(auth, gate=_gate(args))
     if args.action == "status":
         return auth_status(auth)
+    if args.action == "refresh":
+        return auth_refresh(auth, gate=_gate(args))
     if args.action == "logout":
         return auth_logout(auth, gate=_gate(args))
     return EXIT_REFUSED, {"command": "auth", "reason_code": "unknown_command"}

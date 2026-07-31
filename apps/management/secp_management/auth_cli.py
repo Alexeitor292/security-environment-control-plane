@@ -1,4 +1,4 @@
-"""``secpctl auth login|status|logout`` engine — SECP-PR5H-B2, Workstream C.
+"""``secpctl auth login|status|refresh|logout`` engine — SECP-PR5H-B2, Workstream C.
 
 The operator-authentication command engine. It composes ONLY management-plane collaborators — the
 bootstrap-recorded controller locator, the hardened device-auth client, the pure RFC 8628 scheduler,
@@ -11,14 +11,21 @@ deterministic, SECRET-FREE report. A report never carries an access token, a dev
 header, a CA path, a controller origin, an issuer, a provider response body, or an exception chain.
 The ``user_code`` and ``verification_uri`` ARE emitted — they are the operator-facing values the
 grant exists to display, and the flow cannot work without them — but they are short-lived and
-useless to anyone who cannot also authenticate to the identity provider as that operator.
+useless to anyone who cannot also authenticate to the identity provider as that operator. The
+credential ACCOUNT (a controller's canonical origin) is emitted only as a non-reversing fingerprint,
+so ``--json`` output pasted into a ticket does not carry a deployment's address.
 
-**This slice cannot complete a login.** ``auth login`` runs the entire grant and verifies the
-resulting token, then refuses to PERSIST it because no OS credential backend is wired
-(:mod:`secp_management.operator_credential_store` ships only the sealed default). That refusal is
-the designed behaviour, not a defect: there is deliberately no fallback to a file, an environment
-variable, or a process-lifetime cache. See the credential-store module docstring for why the backend
-is deferred to its own reviewed slice.
+Three properties are worth stating because they are easy to lose in a later edit:
+
+* **The account is derived, never chosen.** It comes from the reviewed controller locator, so a
+  credential minted against one controller can never be selected for another, and there is no
+  ``--account`` / ``--controller`` flag to smuggle an identity in through.
+* **Polling is bounded three ways** — the provider's ``interval`` (with the permanent ``slow_down``
+  increase), a LOCAL deadline from ``expires_in``, and an attempt budget — and is additionally
+  cancellable, so neither a hostile provider nor an inattentive operator can pin the CLI.
+* **Persistence is the last step and has no alternative.** The token is verified before it is
+  offered to the store, and a store that refuses ends the command. There is deliberately no
+  ``except`` around the persist call that writes the token somewhere else instead.
 """
 
 from __future__ import annotations
@@ -43,6 +50,10 @@ from secp_management.operator_auth import OperatorAccessToken
 from secp_management.operator_credential_store import (
     OperatorCredentialStore,
     SealedOperatorCredentialStore,
+    StoredCredentialStatus,
+    account_fingerprint,
+    account_for_controller,
+    subject_fingerprint,
 )
 from secp_management.operator_device_auth import DeviceAuthorizationClient
 from secp_management.operator_token_verify import jwks_by_kid, verify_operator_token
@@ -59,12 +70,20 @@ EXIT_TRANSPORT = 5
 EXIT_MALFORMED = 7
 
 _EXIT_BY_REASON: dict[str, int] = {
-    # --- credential storage (this slice's expected terminal state) ---
+    # --- credential storage ---
     "secpctl_credential_store_unavailable": EXIT_AUTH_UNAVAILABLE,
     "secpctl_credential_account_invalid": EXIT_AUTH_UNAVAILABLE,
     "secpctl_credential_store_not_serializable": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_credential_absent": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_credential_expired": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_credential_account_mismatch": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_credential_backend_failed": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_credential_too_large": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_credential_subject_changed": EXIT_REFUSED,
+    "secpctl_credential_record_invalid": EXIT_MALFORMED,
     # --- device grant outcomes ---
     "secpctl_device_authorization_denied": EXIT_REFUSED,
+    "secpctl_device_authorization_cancelled": EXIT_REFUSED,
     "secpctl_device_code_expired": EXIT_AUTH_UNAVAILABLE,
     "secpctl_device_poll_exhausted": EXIT_AUTH_UNAVAILABLE,
     "secpctl_device_grant_unsupported": EXIT_AUTH_UNAVAILABLE,
@@ -109,7 +128,8 @@ def present_device_prompt(prompt: dict) -> None:
     RFC 8628 §5.4 recommends telling the operator they are authorizing a DEVICE and confirming it is
     the one in front of them. §5.5 notes the code is displayed in whatever environment the tool runs
     in — on a shared or recorded terminal it is observable, so the wording says so plainly rather
-    than implying the channel is private.
+    than implying the channel is private. It also tells the operator how to abandon the grant, which
+    is the cancellation path ``_poll_for_token`` honours.
     """
     import sys
 
@@ -129,7 +149,7 @@ def present_device_prompt(prompt: dict) -> None:
         f"  This code expires in {prompt['expires_in']}s. Anyone who can see this terminal",
         "  can see the code, so do not share your screen while it is displayed.",
         "",
-        "Waiting for approval...",
+        "Waiting for approval... (press Ctrl-C to cancel; nothing is stored until you approve)",
         "",
     ]
     sys.stderr.write("\n".join(lines) + "\n")
@@ -138,6 +158,11 @@ def present_device_prompt(prompt: dict) -> None:
 
 def _build_device_client(locator: ControllerApiLocator) -> DeviceAuthorizationClient:
     return DeviceAuthorizationClient(locator=locator)
+
+
+def _never_cancelled() -> bool:
+    """The default cooperative-cancellation probe: nothing cancels a grant on its own."""
+    return False
 
 
 @dataclass
@@ -156,6 +181,30 @@ class AuthCliDeps:
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
     now_epoch: Callable[[], float] = time.time
+    cancelled: Callable[[], bool] = _never_cancelled
+
+
+@dataclass(frozen=True)
+class _Selection:
+    """The controller this invocation acts on and the credential store bound to its account."""
+
+    locator: ControllerApiLocator
+    account: str
+    store: OperatorCredentialStore
+
+
+def _select(deps: AuthCliDeps) -> _Selection:
+    """Resolve the reviewed controller and bind the credential store to ITS account.
+
+    This is the multi-controller selection point, and it is the ONLY one: the account comes from the
+    bootstrap-recorded locator, so no flag, environment variable or provider response can steer a
+    command at a different controller's credential.
+    """
+    locator = deps.locator_provider.locate()
+    account = account_for_controller(locator)
+    return _Selection(
+        locator=locator, account=account, store=deps.credential_store.for_account(account)
+    )
 
 
 def _prompt_payload(authorization: DeviceAuthorization) -> dict:
@@ -172,49 +221,125 @@ def _prompt_payload(authorization: DeviceAuthorization) -> dict:
     return payload
 
 
+def _credential_report(account: str, status: StoredCredentialStatus) -> dict:
+    """The bounded credential facts every auth report carries. The account appears ONLY as a
+    non-reversing fingerprint, never as the controller's origin."""
+    return {
+        "account": account_fingerprint(account) if account else "",
+        "account_selected": bool(account),
+        "credential_subject": status.subject_fingerprint,
+        **status.to_report(),
+    }
+
+
+def _discover(deps: AuthCliDeps, locator: ControllerApiLocator) -> tuple[Any, Any, Any]:
+    """The READ-ONLY half of the grant: the reviewed authority and the issuer's endpoints."""
+    client = deps.device_client(locator)
+    authority = client.reviewed_authority()
+    return client, authority, client.discover(authority)
+
+
+def _authenticate(
+    deps: AuthCliDeps, client: Any, endpoints: Any, authority: Any
+) -> tuple[str, Any]:
+    """Run the interactive grant and VERIFY the issued token. Returns ``(token, verified)``.
+
+    Verification happens here, before the caller can reach a store, so no caller can persist an
+    unverified token by forgetting a step (ADR-028 §3).
+    """
+    authorization = client.request_device_authorization(endpoints)
+    deps.present(_prompt_payload(authorization))
+    token = _poll_for_token(deps, client, endpoints, authorization)
+    return token, _verify(deps, client, endpoints, authority, token)
+
+
 def auth_login(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
     """``secpctl auth login`` — obtain an operator access token by OAuth 2.0 Device Authorization
-    Grant (RFC 8628) and persist it in the OS credential store.
+    Grant (RFC 8628) and persist it in the OS credential store for THIS controller's account.
 
     Dry-run (the default) performs the READ-ONLY half only: it resolves the reviewed authority and
     discovers the issuer's endpoints, then reports whether the provider actually advertises the
     device grant. It never starts a grant, so it never produces a user code.
 
-    ``--write --confirm`` runs the full grant. In THIS slice the final persist step refuses, because
-    no OS credential backend is wired; the token is verified and then discarded rather than written
-    to any consolation location.
+    ``--write --confirm`` runs the full grant, verifies the token, and offers it to the store. When
+    no OS keystore is available the store refuses and the token is discarded — there is deliberately
+    no fallback location.
     """
     command = "auth login"
     try:
-        locator = deps.locator_provider.locate()
-        client = deps.device_client(locator)
-        authority = client.reviewed_authority()
-        endpoints = client.discover(authority)
+        selection = _select(deps)
+        client, authority, endpoints = _discover(deps, selection.locator)
 
         if not gate.is_write:
             return EXIT_OK, {
                 "command": command,
                 "mode": "dry_run",
-                "device_grant_supported": True,
-                "credential_store": deps.credential_store.describe().to_report(),
+                "device_grant_supported": bool(endpoints.device_authorization_endpoint),
+                **_credential_report(selection.account, selection.store.describe()),
             }
 
-        authorization = client.request_device_authorization(endpoints)
-        deps.present(_prompt_payload(authorization))
+        token, verified = _authenticate(deps, client, endpoints, authority)
 
-        token = _poll_for_token(deps, client, endpoints, authorization)
-        verified = _verify(deps, client, endpoints, authority, token)
-
-        # The one place a real backend would persist. It refuses in this slice — and there is
-        # deliberately no `except` here that writes the token somewhere else instead.
-        deps.credential_store.store(
-            OperatorAccessToken(token), expires_at_epoch=verified.expires_at_epoch
+        # The one place the token is persisted. There is deliberately no `except` here that writes
+        # it somewhere else instead: a store that refuses ends the command.
+        selection.store.store(
+            OperatorAccessToken(token),
+            expires_at_epoch=verified.expires_at_epoch,
+            subject_fingerprint=subject_fingerprint(verified.subject),
         )
         return EXIT_OK, {
             "command": command,
             "mode": "written",
             "authenticated": True,
-            "credential_store": deps.credential_store.describe().to_report(),
+            **_credential_report(selection.account, selection.store.describe()),
+        }
+    except ManagementError as exc:
+        return _refused(command, exc.reason_code)
+
+
+def auth_refresh(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
+    """``secpctl auth refresh`` — renew THIS controller's stored operator credential.
+
+    Renewal re-runs the device grant rather than redeeming an OAuth refresh token, and that is a
+    deliberate posture, not an omission: ``secp-cli`` is a PUBLIC client with ``use.refresh.tokens``
+    explicitly off and the CLI never requests ``offline_access``, mirroring the browser posture
+    ADR-018 established. A long-lived renewal credential sitting in an operator's keystore is a much
+    larger blast radius than a short-lived access token that expires on its own.
+
+    It refuses when there is nothing to renew, and it refuses when the renewed token belongs to a
+    DIFFERENT operator than the stored one — a refresh must never silently switch identity.
+    """
+    command = "auth refresh"
+    try:
+        selection = _select(deps)
+        current = selection.store.describe()
+        if not current.has_credential:
+            return _refused(command, "secpctl_credential_absent")
+
+        if not gate.is_write:
+            return EXIT_OK, {
+                "command": command,
+                "mode": "dry_run",
+                "renewal_required": current.expired,
+                **_credential_report(selection.account, current),
+            }
+
+        client, authority, endpoints = _discover(deps, selection.locator)
+        token, verified = _authenticate(deps, client, endpoints, authority)
+        fingerprint = subject_fingerprint(verified.subject)
+        if current.subject_fingerprint and fingerprint != current.subject_fingerprint:
+            return _refused(command, "secpctl_credential_subject_changed")
+
+        selection.store.store(
+            OperatorAccessToken(token),
+            expires_at_epoch=verified.expires_at_epoch,
+            subject_fingerprint=fingerprint,
+        )
+        return EXIT_OK, {
+            "command": command,
+            "mode": "written",
+            "authenticated": True,
+            **_credential_report(selection.account, selection.store.describe()),
         }
     except ManagementError as exc:
         return _refused(command, exc.reason_code)
@@ -227,20 +352,36 @@ def _poll_for_token(
     authorization: DeviceAuthorization,
 ) -> str:
     """Drive the RFC 8628 §3.5 poll loop. Every scheduling decision comes from the PURE scheduler;
-    this function only sleeps and posts."""
+    this function only sleeps, posts, and honours cancellation.
+
+    The authoritative wait is ``next_attempt``'s, which re-reads the CURRENT interval including
+    every permanent ``slow_down`` increase. ``record_error`` reports the same number for the same
+    schedule — ``test_device_grant`` pins that they never diverge — so reading one and not the
+    other cannot silently poll faster than the provider licensed.
+
+    Cancellation is honoured in TWO forms: a cooperative probe checked before every attempt, and a
+    ``KeyboardInterrupt`` from the operator's terminal. Both end the grant with a bounded reason and
+    leave nothing persisted, because persistence is the caller's next step and is never reached.
+    """
     scheduler = DevicePollScheduler.for_authorization(authorization)
     started = deps.monotonic()
-    while True:
-        decision = scheduler.next_attempt(elapsed_seconds=deps.monotonic() - started)
-        if decision.action == ACTION_STOP:
-            raise ManagementError(decision.reason_code)
-        deps.sleep(decision.wait_seconds)
-        token, error = client.request_token(endpoints, authorization.device_code)
-        if not error:
-            return token
-        decision = scheduler.record_error(error)
-        if decision.action == ACTION_STOP:
-            raise ManagementError(decision.reason_code)
+    try:
+        while True:
+            if deps.cancelled():
+                raise ManagementError("secpctl_device_authorization_cancelled")
+            decision = scheduler.next_attempt(elapsed_seconds=deps.monotonic() - started)
+            if decision.action == ACTION_STOP:
+                raise ManagementError(decision.reason_code)
+            deps.sleep(decision.wait_seconds)
+            token, error = client.request_token(endpoints, authorization.device_code)
+            if not error:
+                return token
+            decision = scheduler.record_error(error)
+            if decision.action == ACTION_STOP:
+                raise ManagementError(decision.reason_code)
+    except KeyboardInterrupt:
+        # `from None` so there is no traceback chain: a Ctrl-C is a bounded outcome, not a crash.
+        raise ManagementError("secpctl_device_authorization_cancelled") from None
 
 
 def _verify(
@@ -264,37 +405,67 @@ def _verify(
 
 def auth_status(deps: AuthCliDeps) -> tuple[int, dict]:
     """``secpctl auth status`` — read-only. Reports the credential store's bounded, secret-free
-    state; it makes no mutation, starts no grant, and never prints a token.
+    state for the selected controller; it makes no mutation, starts no grant, opens no socket, and
+    never prints a token.
 
-    Resolving the authoritative operator principal from ``/api/v1/me`` lands with the credential
-    backend: with the sealed store no credential can exist, so that path would be unreachable code
-    in this slice. The DB remains the sole authority for organization, role and permission — a token
-    claim never determines them.
+    An UNRECORDED locator is not an error here: the backend is still reportable, and "a keystore is
+    available but no controller is selected" is exactly what an operator needs to see on a host that
+    has not been bootstrapped yet.
+
+    Resolving the authoritative operator principal from ``/api/v1/me`` remains out of scope: the DB
+    is the sole authority for organization, role and permission, and a token claim never determines
+    them. This command reports LOCAL credential state only.
     """
     command = "auth status"
     try:
-        status = deps.credential_store.describe()
+        selection = _select(deps)
+    except ManagementError:
+        backend = _describe_unbound(deps)
+        return EXIT_OK, {"command": command, "mode": "read", **_credential_report("", backend)}
+    try:
+        status = selection.store.describe()
     except ManagementError as exc:
         return _refused(command, exc.reason_code)
-    return EXIT_OK, {"command": command, "mode": "read", **status.to_report()}
+    return EXIT_OK, {
+        "command": command,
+        "mode": "read",
+        **_credential_report(selection.account, status),
+    }
+
+
+def _describe_unbound(deps: AuthCliDeps) -> StoredCredentialStatus:
+    """The backend's own state, with no controller selected. ``describe`` is specified never to
+    raise, but a third-party store is not this module's to trust, so a refusal degrades to the
+    sealed projection rather than escaping as an unbounded failure."""
+    try:
+        return deps.credential_store.describe()
+    except ManagementError:
+        return StoredCredentialStatus(backend="sealed", available=False)
 
 
 def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
-    """``secpctl auth logout`` — delete ONLY credential material this store owns. Dry-run unless
-    ``--write --confirm``. It never touches an unrelated OS keyring entry and never revokes anything
+    """``secpctl auth logout`` — delete ONLY the credential material this store owns for THIS
+    controller's account. Dry-run unless ``--write --confirm``. It never touches an unrelated OS
+    keyring entry, never touches another controller's account, and never revokes anything
     server-side (revocation is the identity provider's surface, not secpctl's)."""
     command = "auth logout"
-    if not gate.is_write:
-        try:
-            status = deps.credential_store.describe()
-        except ManagementError as exc:
-            return _refused(command, exc.reason_code)
-        return EXIT_OK, {"command": command, "mode": "dry_run", **status.to_report()}
     try:
-        removed = deps.credential_store.delete()
+        selection = _select(deps)
+        if not gate.is_write:
+            return EXIT_OK, {
+                "command": command,
+                "mode": "dry_run",
+                **_credential_report(selection.account, selection.store.describe()),
+            }
+        removed = selection.store.delete()
+        return EXIT_OK, {
+            "command": command,
+            "mode": "written",
+            "removed": bool(removed),
+            "account": account_fingerprint(selection.account),
+        }
     except ManagementError as exc:
         return _refused(command, exc.reason_code)
-    return EXIT_OK, {"command": command, "mode": "written", "removed": bool(removed)}
 
 
 __all__ = [
@@ -305,6 +476,7 @@ __all__ = [
     "AuthCliDeps",
     "auth_login",
     "auth_logout",
+    "auth_refresh",
     "auth_status",
     "exit_for",
     "present_device_prompt",
