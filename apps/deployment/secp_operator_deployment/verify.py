@@ -10,6 +10,17 @@ A/B/C/F but NOT D/E — the controlled-live runtime and composition may remain t
 unprovisioned until the separate activation milestone; D and E are reported separately and never
 gate the prepared result.
 
+On top of the six dimensions this module answers the OPERATOR's question, which a single status
+enum cannot: *what stands between this host and a controlled-live plan, and in what order?* The
+:data:`PREREQUISITE_LADDER` enumerates every rung in the SAME priority order
+:func:`_resolve_status` evaluates, so the first unmet blocking rung is exactly the one that
+determines the reported status; :data:`REFUSAL_CATALOGUE` classifies every bounded reason code by
+dimension and by REMEDIATION CLASS, separating a gap an operator can close on the host from one
+that only a separately reviewed code change could — this module performs neither, and reporting
+that a gap is not operator-closable is precisely what stops an operator hunting for a flag that
+does not exist. :func:`build_provenance_report` answers the remaining question — which
+implementation aggregate is installed here — so it can be compared against a signed release.
+
 Structurally PURE + exact-typed: verification does NO I/O and consumes ALREADY-RESOLVED, EXACT-typed
 inputs (a :class:`DeploymentProfile`, an :class:`ExpectedDeploymentIdentities`, a
 :class:`HostObservationEvidence`, a :class:`RuntimeProvisioningAttestation`, a
@@ -23,6 +34,7 @@ PostgreSQL / Proxmox / OpenBao / remote state / registry. It never emits a raw p
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from secp_operator_deployment import (
@@ -44,11 +56,272 @@ STATUS_EXIT_CODES = {
     "seals_unsafe": 20,
 }
 
+# Provenance-report status classes → stable exit codes (the read-only provenance command).
+PROVENANCE_EXIT_CODES = {
+    "provenance_ok": 0,  # the installed package recomputed to its reviewed aggregate
+    "provenance_untrusted": 15,  # the trusted directory-fd verification refused
+    "provenance_unavailable": 20,  # the aggregate could not be computed at all
+}
+
 _COMPOSITION_TYPES = {
     "plan_execution": "secp_worker.plan_gen.composition.PlanExecutionComposition",
     "readiness": "secp_worker.readiness.composition.ReadinessComposition",
     "eligibility": "secp_worker.onboarding.eligibility_preflight.EligibilityPreflightComposition",
 }
+
+# =================================================================================================
+# REMEDIATION CLASSES — what it would TAKE to satisfy a gap.
+#
+# These are CLASSES, never instructions and never an action this package performs. In particular
+# ``REMEDIATION_REVIEWED_CODE`` marks a gap that only a separately reviewed change to a reviewed
+# code constant can close (the operator-activation seal, the plan-execution gate, the reviewed
+# runtime-provider set) — this module neither performs nor recommends such a change; it reports
+# that the gap is not operator-closable so an operator stops rather than searching for a flag.
+# =================================================================================================
+REMEDIATION_REVIEWED_CODE = "reviewed_code_change"
+REMEDIATION_REVIEWED_DEPLOYMENT = "reviewed_deployment_material"
+REMEDIATION_OPERATOR = "operator_host_action"
+
+REMEDIATION_CLASSES = frozenset(
+    {REMEDIATION_REVIEWED_CODE, REMEDIATION_REVIEWED_DEPLOYMENT, REMEDIATION_OPERATOR}
+)
+
+# The six reported dimensions (see the module docstring).
+DIMENSIONS = frozenset({"A", "B", "C", "D", "E", "F"})
+
+
+@dataclass(frozen=True)
+class Prerequisite:
+    """One rung of the operator prerequisite ladder.
+
+    Pure metadata: an identity, the dimension it belongs to, whether it blocks the prepared
+    result, its remediation class, and — for a blocking rung — the EXACT status
+    :func:`_resolve_status` returns when it is the first unmet rung. It carries no host value,
+    no path, and no profile value.
+    """
+
+    id: str
+    dimension: str
+    blocking: bool
+    remediation: str
+    status_when_unmet: str | None
+
+
+# The ladder, in the SAME priority order ``_resolve_status`` evaluates. The first unmet BLOCKING
+# rung is therefore the one that determines the reported status — an invariant the tests assert
+# against ``_resolve_status`` directly, so the two can never silently diverge.
+PREREQUISITE_LADDER: tuple[Prerequisite, ...] = (
+    Prerequisite("seals_correct", "F", True, REMEDIATION_REVIEWED_CODE, "seals_unsafe"),
+    Prerequisite(
+        "profile_installed", "B", True, REMEDIATION_REVIEWED_DEPLOYMENT, "sealed_but_unprovisioned"
+    ),
+    Prerequisite(
+        "profile_schema_valid", "B", True, REMEDIATION_REVIEWED_DEPLOYMENT, "profile_invalid"
+    ),
+    Prerequisite(
+        "expected_identities_installed",
+        "B",
+        True,
+        REMEDIATION_REVIEWED_DEPLOYMENT,
+        "sealed_but_unprovisioned",
+    ),
+    Prerequisite(
+        "identity_agreement", "B", True, REMEDIATION_REVIEWED_DEPLOYMENT, "identity_mismatch"
+    ),
+    Prerequisite("installed_package_trusted", "A", True, REMEDIATION_OPERATOR, "install_untrusted"),
+    Prerequisite("host_observed", "C", True, REMEDIATION_OPERATOR, "sealed_but_unprovisioned"),
+    Prerequisite("host_observation_coherent", "C", True, REMEDIATION_OPERATOR, "host_unavailable"),
+    Prerequisite(
+        "operator_prepared_and_disabled", "C", True, REMEDIATION_OPERATOR, "host_not_ready"
+    ),
+    Prerequisite("ordinary_worker_running", "C", True, REMEDIATION_OPERATOR, "host_not_ready"),
+    # D and E are reported but NEVER gate the prepared result (see the module docstring).
+    Prerequisite("runtime_provisioned", "D", False, REMEDIATION_REVIEWED_DEPLOYMENT, None),
+    Prerequisite("compositions_verified", "E", False, REMEDIATION_REVIEWED_DEPLOYMENT, None),
+)
+
+# =================================================================================================
+# THE REFUSAL CATALOGUE — every bounded reason code an operator can meet, classified.
+#
+# Each entry maps a BOUNDED reason code to the dimension it belongs to and what would close it.
+#
+# A scan in ``test_operator_refusal_catalogue.py`` fails when a code appears in one of five
+# recognised syntactic shapes without being catalogued. State its reach accurately, because
+# over-trusting it is how a code reaches an operator unexplained: it MATCHES ONLY THOSE SHAPES. A
+# bare positional literal passed to ``rung()``, a code reached through a variable, and a
+# conditional dict-literal value are NOT seen, and a substantial minority of the codes in this
+# module sit in exactly those shapes.
+#
+# NO COUNT IS WRITTEN HERE, deliberately. The two that used to be — a coverage ratio and an
+# in-module total — were both wrong, and the ratio was already wrong on the commit that introduced
+# it, overstating the scan's reach by a fifth. A number in a comment cannot be re-measured, so it
+# only ever decays, and this one decayed in the direction that flattered the guard. The measured
+# numbers live in ``test_operator_refusal_catalogue``'s docstring, next to ``_EXPECTED_COVERAGE``
+# and ``_EXPECTED_BLIND_SPOTS``, which recompute them on every run and fail when they move.
+#
+# The scan is a partial net, not a guarantee; the behavioural guard (an all-unmet ladder whose
+# every reason code must classify) and the visible ``reason_catalogued: False`` at the point of use
+# are what cover the rest.
+# =================================================================================================
+_C = REMEDIATION_REVIEWED_CODE
+_D = REMEDIATION_REVIEWED_DEPLOYMENT
+_O = REMEDIATION_OPERATOR
+
+REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
+    # --- (F) seals ------------------------------------------------------------------------------
+    "seal_drift_detected": {"dimension": "F", "remediation": _C},
+    # The operator-activation seal: the bounded code the run hook refuses with, and the codes the
+    # queue check reports when a reviewed submission stop is open or cannot be read at all. None is
+    # operator-closable — there is no flag that opens or repairs a reviewed constant.
+    "operator_activation_sealed": {"dimension": "F", "remediation": _C},
+    "submission_stop_open": {"dimension": "F", "remediation": _C},
+    "submission_stop_unobservable": {"dimension": "F", "remediation": _C},
+    # --- (A) installed-package trust (the trusted directory-fd walk) -----------------------------
+    "install_untrusted": {"dimension": "A", "remediation": _O},
+    "install_trust_not_evaluated": {"dimension": "A", "remediation": _O},
+    "manifest_unavailable": {"dimension": "A", "remediation": _O},
+    "manifest_inventory_mismatch": {"dimension": "A", "remediation": _O},
+    # A subdirectory the trusted enumeration cannot walk within its bounded descent. Refused rather
+    # than skipped: a directory that contributes nothing to the aggregate is exactly how a module
+    # would sit outside it undetected.
+    "manifest_nested_directory_unverifiable": {"dimension": "A", "remediation": _O},
+    # A symlinked subdirectory in the package. Neither reader descends one, so it would enumerate
+    # nothing silently — refused instead, matching the plain nested-directory case.
+    "manifest_symlinked_directory": {"dimension": "A", "remediation": _O},
+    "manifest_dir_unreadable": {"dimension": "A", "remediation": _O},
+    "manifest_module_unreadable": {"dimension": "A", "remediation": _O},
+    "manifest_module_not_regular": {"dimension": "A", "remediation": _O},
+    "manifest_module_hardlinked": {"dimension": "A", "remediation": _O},
+    "manifest_module_not_root_owned": {"dimension": "A", "remediation": _O},
+    "manifest_module_untrusted_mode": {"dimension": "A", "remediation": _O},
+    "manifest_module_too_large": {"dimension": "A", "remediation": _O},
+    "manifest_ancestor_not_directory": {"dimension": "A", "remediation": _O},
+    "manifest_ancestor_not_root_owned": {"dimension": "A", "remediation": _O},
+    "manifest_ancestor_world_writable": {"dimension": "A", "remediation": _O},
+    "manifest_ancestor_open_failed": {"dimension": "A", "remediation": _O},
+    "manifest_package_path_not_absolute": {"dimension": "A", "remediation": _O},
+    "manifest_package_path_not_normalized": {"dimension": "A", "remediation": _O},
+    "manifest_trust_non_posix": {"dimension": "A", "remediation": _O},
+    # The hardened filesystem / command backends are POSIX + root only, and the CLI's bounded
+    # top-level guard turns any refusal that escapes a per-dimension handler into one of these
+    # rather than a traceback.
+    "filesystem_backend_non_posix": {"dimension": "A", "remediation": _O},
+    "production_filesystem_unavailable": {"dimension": "A", "remediation": _O},
+    "command_backend_non_posix": {"dimension": "A", "remediation": _O},
+    "unhandled_command_failure": {"dimension": "A", "remediation": _O},
+    "manifest_installed_aggregate_mismatch": {"dimension": "A", "remediation": _O},
+    # --- (B) profile + independent expected identities -------------------------------------------
+    "profile_not_installed": {"dimension": "B", "remediation": _D},
+    "profile_type_invalid": {"dimension": "B", "remediation": _D},
+    "profile_schema_invalid": {"dimension": "B", "remediation": _D},
+    "profile_unreadable": {"dimension": "B", "remediation": _D},
+    "profile_reader_unavailable": {"dimension": "B", "remediation": _D},
+    "profile_not_json": {"dimension": "B", "remediation": _D},
+    "profile_not_utf8": {"dimension": "B", "remediation": _D},
+    "profile_not_object": {"dimension": "B", "remediation": _D},
+    "profile_duplicate_key": {"dimension": "B", "remediation": _D},
+    "profile_forbidden_secret": {"dimension": "B", "remediation": _D},
+    "profile_manifest_digest_mismatch": {"dimension": "B", "remediation": _D},
+    "expected_identities_not_provisioned": {"dimension": "B", "remediation": _D},
+    "expected_identities_type_invalid": {"dimension": "B", "remediation": _D},
+    # The codes ``read_expected_identities`` ACTUALLY raises. Every one is reachable from the
+    # ``provenance`` pins read, and all were uncatalogued — so the precise production codes
+    # classified as unknown while the synthetic ones the tests used classified fine.
+    #
+    # ``expected_identities_not_installed`` names the SAME fact as
+    # ``expected_identities_not_provisioned`` above; they differ only in which layer produced it —
+    # the reader raises the specific one, ``build_verification`` synthesises the generic one for an
+    # absent rung. Both are catalogued so an operator can look up whichever they meet.
+    "expected_identities_not_installed": {"dimension": "B", "remediation": _D},
+    "expected_identities_unreadable": {"dimension": "B", "remediation": _D},
+    "expected_identities_reader_unavailable": {"dimension": "B", "remediation": _D},
+    "expected_identities_not_json": {"dimension": "B", "remediation": _D},
+    "expected_identities_not_utf8": {"dimension": "B", "remediation": _D},
+    "expected_identities_not_object": {"dimension": "B", "remediation": _D},
+    "expected_identities_duplicate_key": {"dimension": "B", "remediation": _D},
+    "expected_identities_forbidden_secret": {"dimension": "B", "remediation": _D},
+    "expected_identities_invalid": {"dimension": "B", "remediation": _D},
+    "identity_mismatch": {"dimension": "B", "remediation": _D},
+    "verify_context_type_invalid": {"dimension": "B", "remediation": _D},
+    "queue_not_distinct": {"dimension": "B", "remediation": _D},
+    "queue_separation_unavailable": {"dimension": "B", "remediation": _D},
+    # --- (C) the controlled-live queue CONSUMER (queue_check) -------------------------------------
+    "operator_consumer_unobservable": {"dimension": "C", "remediation": _O},
+    "operator_consumer_active": {"dimension": "C", "remediation": _O},
+    # --- (C) prepared host ------------------------------------------------------------------------
+    "host_observation_type_invalid": {"dimension": "C", "remediation": _O},
+    "host_not_observed": {"dimension": "C", "remediation": _O},
+    "host_observation_incoherent": {"dimension": "C", "remediation": _O},
+    "operator_not_prepared_and_disabled": {"dimension": "C", "remediation": _O},
+    "ordinary_worker_not_running": {"dimension": "C", "remediation": _O},
+    # --- (D) runtime provisioning attestation -----------------------------------------------------
+    "attestation_type_invalid": {"dimension": "D", "remediation": _D},
+    "attestation_inputs_invalid": {"dimension": "D", "remediation": _D},
+    "attestation_contract_version_invalid": {"dimension": "D", "remediation": _D},
+    "attestation_profile_binding_invalid": {"dimension": "D", "remediation": _D},
+    "attestation_expected_binding_invalid": {"dimension": "D", "remediation": _D},
+    "attestation_provider_digest_invalid": {"dimension": "D", "remediation": _D},
+    "attestation_hash_invalid": {"dimension": "D", "remediation": _D},
+    "attestation_not_provisioned": {"dimension": "D", "remediation": _D},
+    # The reviewed runtime-provider set is a CODE constant and is empty in this milestone, so this
+    # gap is deliberately NOT operator-closable.
+    "attestation_provider_not_reviewed": {"dimension": "D", "remediation": _C},
+    "controlled_live_runtime_not_provisioned": {"dimension": "D", "remediation": _D},
+    # --- (E) controlled-live composition readiness ------------------------------------------------
+    "compositions_not_supplied": {"dimension": "E", "remediation": _D},
+    "compositions_object_invalid": {"dimension": "E", "remediation": _D},
+    "provenance_type_invalid": {"dimension": "E", "remediation": _D},
+    "provenance_contract_version_invalid": {"dimension": "E", "remediation": _D},
+    "provenance_package_version_invalid": {"dimension": "E", "remediation": _D},
+    "provenance_implementation_id_invalid": {"dimension": "E", "remediation": _D},
+    "provenance_manifest_digest_invalid": {"dimension": "E", "remediation": _D},
+    "provenance_untrusted_install": {"dimension": "E", "remediation": _O},
+    "provenance_expected_binding_invalid": {"dimension": "E", "remediation": _D},
+    "provenance_profile_binding_invalid": {"dimension": "E", "remediation": _D},
+    "composition_type_invalid": {"dimension": "E", "remediation": _D},
+    "plan_execution_composition_invalid": {"dimension": "E", "remediation": _D},
+    # The shipped plan-execution gate is a reviewed code default; a disabled gate is not something
+    # an operator can turn on.
+    "plan_gate_disabled": {"dimension": "E", "remediation": _C},
+    "composition_sealed": {"dimension": "E", "remediation": _C},
+    "readiness_gate_disabled": {"dimension": "E", "remediation": _C},
+    "eligibility_gate_disabled": {"dimension": "E", "remediation": _C},
+    "classification_invalid": {"dimension": "E", "remediation": _D},
+    "executor_factory_invalid": {"dimension": "E", "remediation": _D},
+    "renderer_registration_invalid": {"dimension": "E", "remediation": _D},
+    "renderer_digest_invalid": {"dimension": "E", "remediation": _D},
+    "process_registration_invalid": {"dimension": "E", "remediation": _D},
+    "process_digest_invalid": {"dimension": "E", "remediation": _D},
+    "provider_source_invalid": {"dimension": "E", "remediation": _D},
+    "provider_identity_invalid": {"dimension": "E", "remediation": _D},
+    "plan_provider_identity_invalid": {"dimension": "E", "remediation": _D},
+    "readiness_provider_identity_invalid": {"dimension": "E", "remediation": _D},
+    "eligibility_provider_identity_invalid": {"dimension": "E", "remediation": _D},
+}
+
+# Reason codes that carry a bounded, sanitised suffix (``profile_invalid:<field>``). The prefix is
+# catalogued; the suffix is the already-sanitised field name produced by the profile parser.
+CATALOGUE_PREFIXES: tuple[str, ...] = ("profile_invalid:", "profile_unknown_field:")
+
+
+def classify_reason_code(code: str | None) -> dict[str, str] | None:
+    """Classify a bounded reason code into ``{dimension, remediation}``; ``None`` when uncatalogued.
+
+    Pure and total: it accepts ``None``, an unknown code, and a prefixed code
+    (``profile_invalid:<field>``) without raising, so a report can always be built.
+    """
+    if not code or not isinstance(code, str):
+        return None
+    entry = REFUSAL_CATALOGUE.get(code)
+    if entry is not None:
+        return dict(entry)
+    for prefix in CATALOGUE_PREFIXES:
+        if code.startswith(prefix):
+            base = REFUSAL_CATALOGUE.get(prefix.rstrip(":"))
+            if base is not None:
+                return dict(base)
+            return {"dimension": "B", "remediation": REMEDIATION_REVIEWED_DEPLOYMENT}
+    return None
 
 
 def _read_seals() -> dict:
@@ -87,6 +360,317 @@ def _manifest_section() -> dict:
         }
 
 
+def build_prerequisite_ladder(
+    *,
+    seals: dict,
+    profile: dict,
+    identity: dict,
+    installed_trust_ok: bool,
+    installed_trust_reason: str | None,
+    host: dict,
+    runtime_provisioned: bool,
+    runtime_reason: str | None,
+    compositions_supplied: bool,
+    compositions_verified: bool,
+    compositions_reason: str | None,
+) -> list[dict]:
+    """Build the ORDERED operator prerequisite ladder from already-derived section facts.
+
+    PURE: it consumes the same section dicts :func:`build_verification` has already computed and
+    performs no I/O, no type resolution, and no host access. Every rung is reported honestly —
+    including rungs below the first unmet one — so an operator sees the whole remaining path
+    rather than one gap at a time. Each rung carries its bounded reason code, the dimension it
+    belongs to, and its remediation class.
+    """
+    by_id = {p.id: p for p in PREREQUISITE_LADDER}
+
+    def rung(spec_id: str, satisfied: object, reason: str | None) -> dict:
+        spec = by_id[spec_id]
+        ok = bool(satisfied)
+        code = None if ok else (reason or "unspecified_refusal")
+        row = {
+            "id": spec.id,
+            "dimension": spec.dimension,
+            "satisfied": ok,
+            "blocking": spec.blocking,
+            "remediation": spec.remediation,
+            "reason_code": code,
+        }
+        # NULL when there is no reason code at all — a SATISFIED rung. ``False`` here would read as
+        # "this rung's reason is uncatalogued", a negative claim about a code that does not exist.
+        # ``False`` is reserved for its one real meaning: there IS a code and it is uncatalogued.
+        row["reason_catalogued"] = (
+            None if code is None else (classify_reason_code(code) is not None)
+        )
+        return row
+
+    attempted = bool(host.get("attempted"))
+    coherent = attempted and bool(host.get("inspected")) and bool(host.get("coherent"))
+    host_reason = host.get("reason_code")
+    profile_reason = profile.get("reason_code")
+
+    return [
+        rung("seals_correct", seals["seals_correct"], "seal_drift_detected"),
+        rung("profile_installed", profile["present"], profile_reason or "profile_not_installed"),
+        rung(
+            "profile_schema_valid",
+            profile["schema_valid"],
+            profile_reason or "profile_schema_invalid",
+        ),
+        rung(
+            "expected_identities_installed",
+            identity["expected_provided"],
+            "expected_identities_not_provisioned",
+        ),
+        rung(
+            "identity_agreement",
+            identity["agrees"],
+            identity.get("reason_code") or "identity_mismatch",
+        ),
+        rung(
+            "installed_package_trusted",
+            installed_trust_ok,
+            installed_trust_reason or "install_untrusted",
+        ),
+        rung("host_observed", attempted, host_reason or "host_not_observed"),
+        rung("host_observation_coherent", coherent, host_reason or "host_observation_incoherent"),
+        rung(
+            "operator_prepared_and_disabled",
+            host.get("operator_prepared_and_disabled"),
+            "operator_not_prepared_and_disabled",
+        ),
+        rung(
+            "ordinary_worker_running",
+            host.get("ordinary_running_and_healthy"),
+            "ordinary_worker_not_running",
+        ),
+        rung(
+            "runtime_provisioned",
+            runtime_provisioned,
+            runtime_reason or "attestation_not_provisioned",
+        ),
+        rung(
+            "compositions_verified",
+            compositions_verified,
+            compositions_reason or (None if compositions_supplied else "compositions_not_supplied"),
+        ),
+    ]
+
+
+def next_blocking_prerequisite(ladder: list[dict]) -> dict | None:
+    """The first unmet BLOCKING rung — the single thing standing in the way — or ``None``."""
+    for row in ladder:
+        if row["blocking"] and not row["satisfied"]:
+            return row
+    return None
+
+
+def _queue_section(profile_parsed: bool, profile: object | None) -> dict:
+    """Report queue separation as BOOLEANS only, from the DEPLOYMENT PROFILE.
+
+    The queue NAMES are profile values and are deliberately never emitted (this module never
+    emits a raw profile value). What an operator needs is the answer, not the value: are both
+    queues configured, and are they distinct? A shared queue would let the shipped sealed worker
+    pick up controlled-live work, which the profile validator already refuses at parse time.
+
+    WHICH FACT THIS IS, EXACTLY. The same two key names appear in THREE different artefacts —
+    this package's deployment profile, the worker evidence document the management plane enforces,
+    and the ``Settings`` pair a running worker polls. They describe different components, and this
+    section reads the first. That is what ``authority`` in the emitted section is for.
+
+    * the **profile/plan** pair — ``ordinary_task_queue`` / ``operator_task_queue`` — which is what
+      this reads. It is well-founded: ``plan.py`` validates both against the independent
+      root-controlled expected pins (``ordinary_queue_mismatch`` / ``operator_queue_mismatch``) and
+      separately requires them distinct (``operator_queue_not_distinct``), so this is the third
+      independent enforcement of the same fact, not the only one.
+    * the **worker evidence document** — the installed-state proof the management plane writes and
+      enforces, carrying the same two names for a DIFFERENT component. Not read here, and not this
+      package's to read.
+    * the **runtime** pair — ``Settings.temporal_task_queue`` /
+      ``Settings.temporal_operator_task_queue`` — which is what a RUNNING worker process actually
+      polls, and which this section does not read. It differs IN KIND, which is the part most
+      likely to mislead: this package requires a non-empty operator queue, while the runtime one is
+      empty by default AND the shipped worker entrypoint never reads it on any path — the operator
+      queue is disabled there by STRUCTURAL ABSENCE, not by configuration. "Operator queue not
+      configured" is a fault in this artefact and the correct, safe state in that one.
+
+    So a green here says the deployment MATERIAL is isolated; it does not by itself establish that
+    a running process matches it. The independent observation of the running side is consumer
+    dormancy (dimension C), taken from the host rather than from any configuration file — which is
+    precisely why the two are reported as separate facts and never merged.
+    """
+    if not profile_parsed:
+        return {
+            "ok": False,
+            "ordinary_configured": False,
+            "operator_configured": False,
+            "distinct": False,
+            "authority": "deployment_profile",
+            "reason_code": "queue_separation_unavailable",
+        }
+    pf: Any = profile
+    ordinary = bool(pf.ordinary_task_queue)
+    operator = bool(pf.operator_task_queue)
+    distinct = pf.ordinary_task_queue != pf.operator_task_queue
+    ok = ordinary and operator and distinct
+    return {
+        "ok": ok,
+        "ordinary_configured": ordinary,
+        "operator_configured": operator,
+        "distinct": distinct,
+        # Names the artefact that was READ, so a green cannot be mistaken for a statement about
+        # the running process (see the docstring). Mirrors ``release_identity.authority``.
+        "authority": "deployment_profile",
+        "reason_code": None if ok else "queue_not_distinct",
+    }
+
+
+def _release_identity_section(expected: object | None, expected_reason: str | None) -> dict:
+    """The RELEASE this deployment claims to be, taken from the INDEPENDENT trusted pins.
+
+    Sourced from :class:`ExpectedDeploymentIdentities` — the separate root-controlled file — and
+    never from the profile, so a profile cannot name its own release. A foreign object is refused
+    by EXACT type without attribute access.
+
+    These TWO values are release IDENTIFIERS, not secrets and not profile configuration: they are
+    exactly what an operator has to read off the deployment and compare against the signed release.
+    Emitting them is the point of the command. ``release_signature_checked`` is always ``False`` —
+    this package performs no signature verification, and says so rather than letting
+    ``provenance_ok`` be read as one.
+
+    Emission is bounded STRUCTURALLY, not by convention: ``ExpectedDeploymentIdentities`` carries
+    thirty fields and exactly two are read, by named attribute — never ``asdict()``, ``__dict__``
+    or iteration — so adding a field to the dataclass cannot auto-leak it. The suppressed fields
+    are the sensitive class: both queue names, both host executable paths, service and container
+    names, uid/gids and image digests. The distinction is principled: what is emitted identifies an
+    IMMUTABLE ARTEFACT that already exists; what is suppressed is the ADDRESS OF A LIVE RESOURCE —
+    a queue that could be published to, an executable that could be targeted.
+
+    ``parent_sha`` was emitted here and has been REMOVED. It could not carry its own weight: a
+    signed release names its own commit and tree, not its parent, so the compare-against-the-release
+    justification never reached it — and it was the only one of the three carrying commit-graph
+    shape. A field that cannot be justified individually does not belong in a section whose entire
+    defence is that every value in it is one an operator must compare.
+    """
+    from secp_operator_deployment.identities import ExpectedDeploymentIdentities
+
+    if type(expected) is not ExpectedDeploymentIdentities:
+        return {
+            "available": False,
+            "release_source_sha": None,
+            "source_tree_sha": None,
+            "authority": "independent_expected_identities",
+            "release_signature_checked": False,
+            "reason_code": expected_reason
+            or (
+                "expected_identities_type_invalid"
+                if expected is not None
+                else "expected_identities_not_provisioned"
+            ),
+        }
+    return {
+        "available": True,
+        "release_source_sha": expected.release_source_sha,
+        "source_tree_sha": expected.source_tree_sha,
+        "authority": "independent_expected_identities",
+        "release_signature_checked": False,
+        "reason_code": None,
+    }
+
+
+def build_provenance_report(
+    *,
+    source_aggregate: str | None = None,
+    source_reason: str | None = None,
+    installed_aggregate: str | None = None,
+    installed_trust_ok: bool = False,
+    installed_trust_reason: str | None = None,
+    covered_module_count: int = 0,
+    expected: object | None = None,
+    expected_reason: str | None = None,
+) -> dict:
+    """Build the deterministic read-only PROVENANCE report from already-resolved inputs.
+
+    PURE, like :func:`build_verification`: the caller (the CLI) performs the filesystem reads and
+    passes the results in. It answers the two questions the verification report cannot — *what
+    implementation aggregate is actually installed here, and does it recompute cleanly under the
+    trusted directory-fd walk*, and *which RELEASE do the independent trusted pins say this is* —
+    so an operator can compare both against a signed release before trusting the deployment. It
+    contacts nothing and mutates nothing.
+
+    Scope, stated rather than implied. ``provenance_ok`` means the installed content recomputed to
+    its reviewed aggregate. It does NOT mean a release signature was checked (this package checks
+    none — see :func:`_release_identity_section`), and it does NOT mean the deployment-local
+    profile agrees with the trusted pins: that is dimension B, resolved by ``verify``, and is
+    deliberately not re-derived here rather than half-derived in two places.
+    """
+    agreement: bool | None = None
+    if source_aggregate and installed_aggregate:
+        agreement = source_aggregate == installed_aggregate
+
+    if source_aggregate is None:
+        status = "provenance_unavailable"
+    elif not installed_trust_ok or agreement is False:
+        status = "provenance_untrusted"
+    else:
+        status = "provenance_ok"
+
+    return {
+        "phase": "provenance",
+        "status": status,
+        "exit_code": PROVENANCE_EXIT_CODES[status],
+        "package_artifact": {
+            "package_contract_version": PACKAGE_CONTRACT_VERSION,
+            "package_version": PACKAGE_VERSION,
+            "package_implementation_id": PACKAGE_IMPLEMENTATION_ID,
+            "covered_module_count": int(covered_module_count),
+        },
+        "source_aggregate": {
+            "implementation_manifest_digest": source_aggregate,
+            "reason_code": source_reason,
+        },
+        "installed_aggregate": {
+            "implementation_manifest_digest": installed_aggregate,
+            "trusted": bool(installed_trust_ok),
+            "reason_code": installed_trust_reason,
+        },
+        "agreement": {
+            "source_equals_installed": agreement,
+            "reason_code": None
+            if agreement is not False
+            else "manifest_installed_aggregate_mismatch",
+        },
+        "release_identity": _release_identity_section(expected, expected_reason),
+        # NOT called "measured", deliberately. The other two reports COUNT host commands as they
+        # run; this path has no counter because it constructs no command runner at all — it does
+        # filesystem reads and spawns no process. An earlier version took a
+        # ``host_commands_executed`` parameter that NO caller ever supplied, so the zero rendered
+        # under a "measured" label was a signature default that nothing set: structurally the same
+        # hardcoded zero, relocated from a dict literal into a parameter.
+        #
+        # Instrumenting a path that provably never execs would be weight for no information. So the
+        # honest claim is stated instead — the zero rests on the ABSENCE of a runner — and it is
+        # made checkable: ``test_operator_provenance_contact.py`` tripwires the runner construction
+        # seams and requires this command to complete without touching them. If this path ever
+        # grows a host command, that guard fires rather than this report quietly continuing to say
+        # zero.
+        "effects_of_this_provenance_check": {
+            "host_contact": {
+                "host_commands_executed": 0,
+                "local_host_contact_performed": False,
+                "basis": "no_command_runner_is_constructed_on_this_path",
+            },
+            "structural_invariants": {
+                "worker_constructed": False,
+                "workflow_submitted": False,
+                "run_plan_generation_called": False,
+                "secret_resolver_constructed": False,
+                "host_mutated": False,
+            },
+        },
+    }
+
+
 def build_verification(
     *,
     profile: object | None = None,
@@ -97,6 +681,7 @@ def build_verification(
     attestation: object | None = None,
     compositions: object | None = None,
     host_observation: object | None = None,
+    host_commands_executed: int = 0,
 ) -> dict:
     """Build the deterministic, sectioned verification report + resolve the honest status. PURE +
     exact-typed: every input is a pre-resolved exact type (or ``None``); a foreign object is refused
@@ -144,9 +729,7 @@ def build_verification(
         "reason_code": identity_reason,
     }
 
-    queue_separation_ok = bool(
-        profile_parsed and profile.ordinary_task_queue != profile.operator_task_queue  # type: ignore[union-attr]
-    )
+    queue_section = _queue_section(profile_parsed, profile)
 
     # --- (D) runtime provisioning: validate the BOUND attestation; NEVER call a runtime method ---
     from secp_operator_deployment.runtime_seams import (
@@ -188,6 +771,21 @@ def build_verification(
         host=host_section,
     )
 
+    ladder = build_prerequisite_ladder(
+        seals=seals,
+        profile=profile_section,
+        identity=identity_section,
+        installed_trust_ok=installed_trust_ok,
+        installed_trust_reason=installed_trust_reason,
+        host=host_section,
+        runtime_provisioned=runtime_provisioned,
+        runtime_reason=runtime_reason,
+        compositions_supplied=compositions_supplied,
+        compositions_verified=compositions_verified,
+        compositions_reason=compositions_reason,
+    )
+    blocking = next_blocking_prerequisite(ladder)
+
     return {
         "phase": "verify",
         "status": status,
@@ -204,7 +802,15 @@ def build_verification(
         },
         "profile": profile_section,
         "identity_agreement": identity_section,
-        "queue_separation": {"ok": queue_separation_ok},
+        "queue_separation": queue_section,
+        "prerequisites": {
+            "ladder": ladder,
+            "next_blocking": blocking["id"] if blocking else None,
+            "next_blocking_reason_code": blocking["reason_code"] if blocking else None,
+            "next_blocking_remediation": blocking["remediation"] if blocking else None,
+            "blocking_unmet_count": sum(1 for r in ladder if r["blocking"] and not r["satisfied"]),
+            "unmet_count": sum(1 for r in ladder if not r["satisfied"]),
+        },
         "runtime_provisioning": {
             "attested": attestation_provided,
             "provisioned": runtime_provisioned,
@@ -223,12 +829,20 @@ def build_verification(
             "runtime_provisioned": runtime_provisioned,
             "compositions_verified": compositions_verified,
         },
+        # Same split, and for the same reason, as the queue report: ``verify`` resolves the SAME
+        # context and therefore runs the SAME host commands, so an unconditional
+        # ``external_contact_performed: False`` was wrong here too — not just in queue_check.
         "effects_of_this_verification": {
-            "worker_constructed": False,
-            "workflow_submitted": False,
-            "run_plan_generation_called": False,
-            "secret_resolver_constructed": False,
-            "external_contact_performed": False,
+            "measured_this_invocation": {
+                "host_commands_executed": int(host_commands_executed),
+                "local_host_contact_performed": int(host_commands_executed) > 0,
+            },
+            "structural_invariants": {
+                "worker_constructed": False,
+                "workflow_submitted": False,
+                "run_plan_generation_called": False,
+                "secret_resolver_constructed": False,
+            },
         },
     }
 

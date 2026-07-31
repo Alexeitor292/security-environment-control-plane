@@ -19,6 +19,7 @@ from _deploy_support import (
     OPERATOR_SERVICE,
     ORDINARY_CONTAINER,
     FakeCommandRunner,
+    prepared_host_runner,
     valid_expected,
     valid_profile,
 )
@@ -489,6 +490,10 @@ def test_health_result_cannot_apply_across_container_generations():
 
 
 def test_adapter_invokes_no_mutation_subcommand():
+    """The near-duplicate of ``test_adapters_expose_no_mutation_verb``, sharing its blind spot
+    (WS-E): both are substring checks that see only a quoted verb followed by a comma, so what
+    looked like defence in depth was one check written twice. The structural guarantee is
+    ``test_operator_adapter_mutation_surface.py``; this stays as a fast textual smoke check."""
     text = pathlib.Path(
         __import__("secp_operator_deployment.host_adapters", fromlist=["x"]).__file__
     ).read_text(encoding="utf-8")
@@ -530,11 +535,21 @@ def test_host_observation_evidence_is_exact_typed_and_derives_snapshot():
 def test_build_real_host_adapters_requires_profile_agreement():
     bad = valid_profile(container_runtime_executable_digest="sha256:" + "0" * 64)
     with pytest.raises(DeploymentPackageError):
-        build_real_host_adapters(bad, valid_expected())
+        build_real_host_adapters(bad, valid_expected(), command_runner=prepared_host_runner())
+
+
+def test_build_real_host_adapters_requires_an_explicit_command_runner():
+    """WS-E: the runner used to default to an unwrapped ``RealCommandRunner``, which was a bypass
+    of the counting wrapper the reports derive their contact statement from. Omitting it now fails
+    at the call rather than silently executing host commands nothing counted."""
+    with pytest.raises(TypeError):
+        build_real_host_adapters(valid_profile(), valid_expected())  # type: ignore[call-arg]
 
 
 def test_build_real_host_adapters_wires_pins():
-    container, service = build_real_host_adapters(valid_profile(), valid_expected())
+    container, service = build_real_host_adapters(
+        valid_profile(), valid_expected(), command_runner=prepared_host_runner()
+    )
     assert container.container_runtime.path == CONTAINER_EXE
     assert service.ordinary_container == ORDINARY_CONTAINER
     assert service.service_inspector.path == INSPECTOR_EXE

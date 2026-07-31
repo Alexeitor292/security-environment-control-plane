@@ -47,6 +47,11 @@ class VerifyContext:
     installed_trust_reason: str | None
     attestation: object
     host_observation: object
+    # How many pinned host commands were actually EXECUTED while resolving this context. Counted,
+    # not assumed: resolving a context on a provisioned POSIX host runs `systemctl show` and
+    # `docker inspect`/`docker exec`, so a report that declares "no external contact" would be
+    # false on the only host that matters. Reports derive their contact statement from this.
+    host_commands_executed: int = 0
 
 
 # --------------------------------------------------------------------------- test seams (private;
@@ -71,6 +76,29 @@ def _command_runner():  # noqa: ANN202
     from secp_operator_deployment.host_process import RealCommandRunner
 
     return RealCommandRunner()
+
+
+@dataclass
+class _CountingCommandRunner:
+    """Wraps a command runner and COUNTS every invocation.
+
+    This is the measurement behind a report's contact statement. Every host read in
+    :mod:`host_adapters` goes through ``runner.run`` — there is no direct ``subprocess`` use in
+    that module — so this count is complete for host command execution.
+
+    The counter increments BEFORE delegating, deliberately: a command that started and then failed
+    still made contact, and reporting otherwise would understate exactly the case an operator most
+    needs to know about.
+    """
+
+    inner: object
+    calls: int = 0
+
+    def run(self, pin, argv_tail, *, timeout_seconds, max_output_bytes):  # noqa: ANN001, ANN201
+        self.calls += 1
+        return self.inner.run(  # type: ignore[attr-defined]
+            pin, argv_tail, timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes
+        )
 
 
 # --------------------------------------------------------------------------- production loaders
@@ -111,21 +139,32 @@ def load_verify_context() -> VerifyContext:
     from secp_operator_deployment.profile import read_deployment_profile
     from secp_operator_deployment.runtime_seams import attest_runtime
 
-    fs = _production_fs()
+    # The hardened filesystem itself can refuse to CONSTRUCT (it is POSIX + root only), and that
+    # refusal used to escape every per-dimension handler below and leave the CLI with an unbounded
+    # traceback. It is a dimension like any other: resolve it fail-closed and carry the bounded
+    # reason into the profile dimension, so a non-POSIX host yields a report rather than a stack.
+    fs = None
+    fs_reason: str | None = None
+    try:
+        fs = _production_fs()
+    except Exception as exc:
+        fs_reason = getattr(exc, "reason_code", "production_filesystem_unavailable")
 
     profile = None
-    profile_load_reason: str | None = None
-    try:
-        profile = read_deployment_profile(fs=fs)
-    except Exception as exc:
-        profile = None
-        profile_load_reason = getattr(exc, "reason_code", "profile_unreadable")
+    profile_load_reason: str | None = fs_reason
+    if fs is not None:
+        try:
+            profile = read_deployment_profile(fs=fs)
+        except Exception as exc:
+            profile = None
+            profile_load_reason = getattr(exc, "reason_code", "profile_unreadable")
 
     expected = None
-    try:
-        expected = read_expected_identities(fs=fs)
-    except Exception:
-        expected = None
+    if fs is not None:
+        try:
+            expected = read_expected_identities(fs=fs)
+        except Exception:
+            expected = None
 
     # Installed-package trust: the trusted dir-fd walk over the INSTALLED module dir, compared to
     # the independent expected aggregate when available.
@@ -153,20 +192,33 @@ def load_verify_context() -> VerifyContext:
         except Exception:
             attestation = None
 
-    # A strong, generation-checked host observation through the reviewed read-only adapters.
+    # A strong, generation-checked host observation through the reviewed read-only adapters. This
+    # is where real host commands are executed, so it is also where they are COUNTED — the count is
+    # what a report's contact statement is derived from, instead of being declared.
     host_observation: object = None
+    host_commands_executed = 0
     if profile is not None and expected is not None:
+        counting: _CountingCommandRunner | None = None
         try:
-            from secp_operator_deployment.host_adapters import build_real_host_adapters
-
-            _container, service = build_real_host_adapters(
-                profile, expected, command_runner=_command_runner()
-            )
-            host_observation = service.observe()
+            counting = _CountingCommandRunner(_command_runner())
         except Exception:
-            host_observation = None
+            counting = None
+        if counting is not None:
+            try:
+                from secp_operator_deployment.host_adapters import build_real_host_adapters
+
+                _container, service = build_real_host_adapters(
+                    profile, expected, command_runner=counting
+                )
+                host_observation = service.observe()
+            except Exception:
+                host_observation = None
+            # Read the count OUTSIDE the try: commands executed before a later failure still ran,
+            # and a failed observation is exactly when an operator needs the contact count.
+            host_commands_executed = counting.calls
 
     return VerifyContext(
+        host_commands_executed=host_commands_executed,
         profile=profile,
         profile_load_reason=profile_load_reason,
         expected=expected,

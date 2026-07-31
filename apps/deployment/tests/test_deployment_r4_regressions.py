@@ -92,6 +92,19 @@ def test_no_apply_destroy_or_run_plan_generation_in_package():
 
 
 def test_adapters_expose_no_mutation_verb():
+    """A cheap TEXTUAL smoke check, and only that (WS-E).
+
+    It matches a double-quoted verb followed immediately by a comma, so it catches the accidental
+    regression — someone typing ``("enable", self.operator_service)`` — and nothing subtler. A
+    constructed verb (``verb = "en" + "able"``) passes it, and so does ``("enable")`` with no
+    trailing comma.
+
+    The real guarantee is structural and lives in ``test_operator_adapter_mutation_surface.py``:
+    every ``runner.run`` argv must begin with a string LITERAL drawn from a read-only allowlist, no
+    mutation verb may appear as any string constant, and the concrete adapters' public surface is
+    pinned to an exact set. This check is kept because it is nearly free, not because it is
+    sufficient.
+    """
     text = pathlib.Path(
         __import__("secp_operator_deployment.host_adapters", fromlist=["x"]).__file__
     ).read_text(encoding="utf-8")
@@ -108,10 +121,19 @@ def test_verify_effects_are_structurally_true():
     )
     _code, payload = run(["verify", "--json"], deps)
     assert payload["status"] == "sealed_prepared"
+    # WS-E: the effects section separates MEASURED-this-invocation from structural. The old flat
+    # `external_contact_performed: False` was false on a provisioned POSIX host, where resolving
+    # the context runs systemctl/docker commands; contact is now counted as those commands run.
+    # These deps are injected, so no context is resolved and zero is the honest count.
     assert payload["effects_of_this_verification"] == {
-        "worker_constructed": False,
-        "workflow_submitted": False,
-        "run_plan_generation_called": False,
-        "secret_resolver_constructed": False,
-        "external_contact_performed": False,
+        "measured_this_invocation": {
+            "host_commands_executed": 0,
+            "local_host_contact_performed": False,
+        },
+        "structural_invariants": {
+            "worker_constructed": False,
+            "workflow_submitted": False,
+            "run_plan_generation_called": False,
+            "secret_resolver_constructed": False,
+        },
     }
