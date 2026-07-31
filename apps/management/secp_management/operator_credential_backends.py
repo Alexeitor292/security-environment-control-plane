@@ -298,6 +298,9 @@ class _MacOSFrameworks:
     """
 
     __slots__ = ("cf", "sec", "constants", "_ctypes")
+    #: Annotation only, so the slot is typed without creating a colliding class attribute. Every
+    #: value is a resolved, NON-NULL address — see the NULL check in ``__init__``.
+    constants: dict[str, int]
 
     def __init__(self) -> None:
         import ctypes
@@ -351,7 +354,7 @@ class _MacOSFrameworks:
             sec.SecItemDelete.argtypes = (void_p,)
             sec.SecItemDelete.restype = ctypes.c_int32
 
-            constants = {
+            resolved: dict[str, int | None] = {
                 name: ctypes.c_void_p.in_dll(sec, name).value
                 for name in (
                     "kSecClass",
@@ -364,7 +367,16 @@ class _MacOSFrameworks:
                     "kSecMatchLimitOne",
                 )
             }
-            constants["kCFBooleanTrue"] = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+            resolved["kCFBooleanTrue"] = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+            # `c_void_p.value` is None for a NULL pointer. A constant that resolved to NULL means an
+            # unusable framework surface, and passing it on would build a dictionary with a NULL key
+            # for SecItem* rather than fail loudly -- exactly the "fail quietly" shape the explicit
+            # argtypes above exist to prevent. Refuse instead.
+            constants: dict[str, int] = {}
+            for name, address in resolved.items():
+                if address is None:
+                    _reject("secpctl_credential_store_unavailable")
+                constants[name] = address
             # The two callback tables are STRUCTS, so the dictionary needs their ADDRESS, not the
             # value of their first field -- `in_dll(...).value` would silently pass garbage.
             for name in ("kCFTypeDictionaryKeyCallBacks", "kCFTypeDictionaryValueCallBacks"):
@@ -438,6 +450,10 @@ class MacOSKeychainBinding:
     """macOS Keychain Services generic-item storage through the current ``SecItem`` API."""
 
     __slots__ = ("_fw",)
+    # Annotation only (no assignment), so it declares the slot's type without creating a class
+    # attribute that would collide with ``__slots__``. Without it the frameworks handle infers as
+    # untyped and every method that touches it loses checking.
+    _fw: _MacOSFrameworks
 
     def __init__(self) -> None:
         if sys.platform != "darwin":

@@ -493,3 +493,90 @@ def test_windows_credential_manager_refuses_an_oversized_blob_before_calling_the
         )
     assert ei.value.reason_code == "secpctl_credential_too_large"
     assert binding.get_secret(service=SELFTEST_SERVICE, account=ACCOUNT) is None
+
+
+# --- platform coverage, stated rather than assumed ------------------------------------------------
+#
+# Only one binding can execute on any given host, so most of this file necessarily drives stand-ins.
+# That makes a green run easy to MISREAD: "the credential backend tests passed" can mean the real OS
+# keystore round-tripped, or it can mean every test that would have touched one was skipped. The
+# tests below exist so the difference is asserted rather than inferred.
+#
+# The concrete situation in this repository:
+#   * the developer host is Windows 11, where `test_windows_credential_manager_round_trip` is a
+#     genuine end-to-end exercise of the ctypes binding against the real Credential Manager;
+#   * CI runs exclusively on ubuntu (`.github/workflows`), where that test SKIPS and a headless
+#     runner has no session D-Bus and therefore no Secret Service — so NO live OS keystore is
+#     exercised on CI at all, and the Linux binding is covered structurally only.
+# Neither fact is a defect, but a silently skipped backend must never read as a passing one.
+
+#: The binding each platform MUST resolve when its keystore is genuinely reachable.
+_EXPECTED_BINDING = {
+    "win32": (WindowsCredentialManagerBinding, BACKEND_WINDOWS_CREDENTIAL_MANAGER),
+    "darwin": (MacOSKeychainBinding, BACKEND_MACOS_KEYCHAIN),
+    "linux": (SecretServiceBinding, BACKEND_SECRET_SERVICE),
+}
+
+
+def _platform_key() -> str:
+    return "linux" if sys.platform.startswith("linux") else sys.platform
+
+
+def test_the_host_keystore_resolves_where_the_platform_guarantees_one():
+    """On Windows and macOS the OS keystore is always present, so a `None` here is a BROKEN BINDING
+    — a ctypes signature that stopped loading, say — and must fail rather than quietly degrade the
+    whole suite to stand-ins. On Linux `None` is legitimate (a headless CI runner has no session bus
+    and no Secret Service), so it is permitted there and nowhere else."""
+    binding = resolve_secret_store_binding()
+    key = _platform_key()
+
+    if key in ("win32", "darwin"):
+        expected_type, expected_id = _EXPECTED_BINDING[key]
+        assert binding is not None, (
+            f"{key} always has an OS keystore; resolving None means the binding is broken, "
+            "not that the platform lacks one"
+        )
+        assert isinstance(binding, expected_type)
+        assert binding.backend_id == expected_id
+    elif key == "linux":
+        # Permitted to be absent — but if one DOES resolve it must be the Secret Service and
+        # nothing else.
+        if binding is not None:
+            assert isinstance(binding, SecretServiceBinding)
+            assert binding.backend_id == BACKEND_SECRET_SERVICE
+    else:
+        # No fallback exists for an unsupported platform, and none may be invented.
+        assert binding is None
+
+
+def test_the_live_backend_coverage_of_this_run_is_recorded(record_testsuite_property):
+    """Publish which backend this run actually exercised against a real OS keystore, so a reader of
+    the CI report can see it rather than assume it.
+
+    ``record_testsuite_property`` rather than ``record_property``: CI runs pytest with
+    ``--junitxml`` under the default ``xunit2`` family, where a per-test property is dropped with a
+    warning. A testsuite-level property is the form xunit2 actually carries, so the ledger survives
+    into the uploaded artifact instead of quietly vanishing — which would have reproduced, in the
+    reporting, exactly the "absence reads as coverage" problem this test exists to prevent.
+
+    This test never fails on the ANSWER — a host without a keystore is a legitimate environment. It
+    fails only if the answer cannot be determined, which would mean the ledger had gone stale.
+    """
+    binding = resolve_secret_store_binding()
+    live = binding.backend_id if binding is not None else "none"
+    structural_only = sorted(
+        backend_id
+        for _platform, (_type, backend_id) in _EXPECTED_BINDING.items()
+        if backend_id != live
+    )
+    record_testsuite_property("live_os_keystore_backend", live)
+    record_testsuite_property("structural_only_backends", ",".join(structural_only))
+
+    assert live in {
+        BACKEND_WINDOWS_CREDENTIAL_MANAGER,
+        BACKEND_MACOS_KEYCHAIN,
+        BACKEND_SECRET_SERVICE,
+        "none",
+    }
+    # exactly one backend can be live, so the other two are always structural-only
+    assert len(structural_only) == (2 if live != "none" else 3)
