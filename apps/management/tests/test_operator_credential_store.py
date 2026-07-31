@@ -747,7 +747,20 @@ def test_every_exit_map_entry_is_a_reason_code_the_package_can_actually_produce(
     `revocation_credential_unreadable()` passes the STORE's reason code through unchanged.
 
     Every key must appear as a string literal somewhere in the management package that is NOT this
-    table -- i.e. somewhere that could raise or return it.
+    table and NOT prose -- i.e. somewhere that could actually raise or return it.
+
+    DOCSTRINGS ARE EXCLUDED — but the scope of what that buys is narrower than it first appears, and
+    the narrow truth is worth recording so nobody widens the claim later.
+
+    Membership here is EXACT: a key counts as emitted only when some string literal equals it. So a
+    docstring that MENTIONS a retired code in prose — the natural instinct when removing one, and
+    the shape this exclusion was proposed to defend against — never made it look emitted. That case
+    was already handled, and not by luck of using a comment.
+
+    The exclusion closes a real but degenerate case: a docstring that IS the reason code and nothing
+    else. Verified by mutation both ways — with the exclusion removed, a dead entry plus a
+    ``\"\"\"secpctl_never_emitted_anywhere\"\"\"`` docstring PASSES; with it, that fails. Cheap and
+    structural, so it stays; but it is hardening, not the repair of a live hole.
     """
     import ast
     import pathlib
@@ -762,17 +775,28 @@ def test_every_exit_map_entry_is_a_reason_code_the_package_can_actually_produce(
         # exactly what we are testing. Exclude by node identity, not by set subtraction: several
         # codes appear both in the table AND as a genuine `_refused(...)` / `raise` argument in the
         # same file, and subtracting afterwards would wrongly erase the real emission too.
-        inside_table: set[int] = set()
+        excluded: set[int] = set()
         for node in ast.walk(tree):
             targets = getattr(node, "targets", []) or [getattr(node, "target", None)]
             if any(getattr(t, "id", "") == "_EXIT_BY_REASON" for t in targets if t is not None):
                 for inner in ast.walk(node):
-                    inside_table.add(id(inner))
+                    excluded.add(id(inner))
+            # ...and prose is not an emission either. A docstring is the FIRST statement of a
+            # module, class or function and is an `Expr` wrapping a string constant.
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", [])
+                if (
+                    body
+                    and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)
+                ):
+                    excluded.add(id(body[0].value))
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Constant)
                 and isinstance(node.value, str)
-                and id(node) not in inside_table
+                and id(node) not in excluded
             ):
                 emitted.add(node.value)
 
