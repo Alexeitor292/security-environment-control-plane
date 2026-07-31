@@ -206,3 +206,41 @@ def test_the_real_provenance_path_reports_the_covered_module_count(capsys):
     main(["provenance", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["package_artifact"]["covered_module_count"] == len(COVERED_MODULES)
+
+
+# --------------------------------------------------------------------------- the no-effect claim,
+# OBSERVED rather than declared
+
+
+def test_running_both_commands_leaves_the_installed_package_byte_identical(
+    prepared_context, capsys
+):
+    """``host_mutated: False`` is a hardcoded dict value — the builder asserts its own innocence.
+
+    This is the half that cannot be faked: snapshot the installed package before running BOTH
+    production commands and after, and require the aggregate digest and every covered module's
+    size and mtime to be unchanged. A command that wrote anything into the tree it reports on
+    would fail here regardless of what its effects section claims.
+    """
+    import pathlib
+
+    from secp_operator_deployment import package_implementation_digest
+    from secp_operator_deployment.manifest import COVERED_MODULES
+    from secp_operator_deployment.production_context import _installed_package_dir
+
+    pkg = pathlib.Path(_installed_package_dir())
+
+    def snapshot() -> tuple:
+        rows = []
+        for name in sorted(COVERED_MODULES):
+            st = (pkg / name).stat()
+            rows.append((name, st.st_size, st.st_mtime_ns))
+        return (package_implementation_digest(), tuple(rows))
+
+    before = snapshot()
+    main(["verify", "--json"])
+    main(["provenance", "--json"])
+    capsys.readouterr()
+    after = snapshot()
+
+    assert after == before, "a read-only command modified the package it reports on"
