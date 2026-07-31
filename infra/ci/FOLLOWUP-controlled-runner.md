@@ -71,6 +71,30 @@ depend on identifying it.
 Every property above has a mutation regression that was **observed failing before the check
 existed** — the nine listed in "Proof discipline" below.
 
+### What the first real run of this environment taught us
+
+Run `30609943702` is the first execution of the controlled fences. Three of the four passed
+outright. `backend-deployment-root` **failed, correctly**, and the failure was worth more than a
+green would have been.
+
+Its attestation gate passed, so the environment's ancestry was trusted; the failure was in the
+product tests, exactly the classification this work exists to make possible.
+`test_timeout_proves_full_group_disappearance_no_orphan` refused with reason code
+`command_group_not_terminated`. A GitHub `container:` job's PID 1 does not reap, so after the
+deployment runner's bounded `SIGTERM → grace → SIGKILL` sequence the killed grandchild remained a
+**zombie**: `killpg(pgid, 0)` kept succeeding instead of returning `ESRCH`, and the runner could
+not prove the process group had disappeared. It refused rather than reporting a termination it had
+not proven.
+
+That is the fence working. The defect was in the environment definition, which lacked an orphan
+reaper — a property every real machine has. All four fences now declare `options: --init`,
+recorded in the manifest and machine-checked against every copy. It grants no capability, mounts no
+host path, and leaves the runner's proof obligation and the attested ancestry untouched.
+
+The general lesson, which is the same one this document keeps arriving at: the container is only
+*trusted*, not *complete*. Differences from a real machine surface as fences refusing, and a
+refusal is the correct outcome — the response is to fix the environment, never to relax the fence.
+
 ## Proof discipline
 
 The properties in this document are only worth what their proofs are worth, so each one was broken

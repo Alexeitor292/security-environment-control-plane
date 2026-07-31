@@ -6,6 +6,8 @@
   "digest": "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90",
   "digest_kind": "oci-image-index",
   "resolved_on": "2026-07-30",
+  "options": "--init",
+  "options_reason": "--init runs a real init as PID 1 so orphaned processes are REAPED. Without it the first CI run of this environment (30609943702) failed backend-deployment-root's test_timeout_proves_full_group_disappearance_no_orphan with reason_code command_group_not_terminated: a GitHub `container:` job's PID 1 does not reap, so after the deployment runner's bounded SIGTERM -> grace -> SIGKILL sequence the killed grandchild remained a ZOMBIE, killpg(pgid, 0) kept succeeding instead of returning ESRCH, and the runner could not prove the process group had disappeared. It refused rather than reporting a termination it had not proven — the fence working exactly as designed — so the defect was in this environment definition, which lacked a property every real machine has. This is NOT a relaxation: the runner's proof obligation is unchanged, no capability is granted, no host path is mounted, and the ancestry the gate attests is untouched. The same option is applied to all four controlled fences so there is ONE reviewed environment rather than four drifting ones; tests/test_trusted_ancestry_isolation.py checks every copy against this value.",
   "packages": [
     "ca-certificates",
     "curl",

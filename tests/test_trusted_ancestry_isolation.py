@@ -753,15 +753,20 @@ def _assert_runs_in_this_environment(job: str, role: str, run: str) -> None:
         )
 
 
-def _assert_no_host_state_is_imported(job: str, container: dict | str) -> None:
-    """The environment must be the pinned image and NOTHING ELSE.
+def _assert_no_host_state_is_imported(job: str, container: dict | str, manifest: dict) -> None:
+    """The environment must be the pinned image plus exactly the reviewed options, and NOTHING ELSE.
 
     A digest pin only fixes what the image layer contains; it says nothing about what is mounted
     over it afterwards. ``container.volumes: ["/etc:/etc"]`` -- or the same thing spelled
     ``options: -v /:/host`` -- would put the hosted VM's nondeterministic `/etc` back inside the
     very namespace the gate attests, while `container:`, the digest pin, the manifest cross-check
     and every redirect scan all stayed green. That is the exact "green while proving less" shape
-    this suite exists to refuse, so it is checked rather than assumed."""
+    this suite exists to refuse, so it is checked rather than assumed.
+
+    `options` is additionally required to EQUAL the manifest's, for the same reason the image is:
+    one reviewed environment, not four that drift apart. It is not enough to denylist the harmful
+    spellings, because the denylist cannot anticipate every flag that changes what the fences
+    observe -- equality means any change to the environment is a change to the reviewed manifest."""
     if not isinstance(container, dict):
         return  # the bare-string form has no volumes and no options to import anything through
     assert "volumes" not in container, (
@@ -774,6 +779,11 @@ def _assert_no_host_state_is_imported(job: str, container: dict | str) -> None:
             f"{job}: `container.options` contains {flag.strip()}, which imports host state into "
             "the environment the gate attests"
         )
+    declared = _normalised(str(manifest.get("options", "")))
+    assert options == declared, (
+        f"{job}: `container.options` is {options!r}, the manifest declares {declared!r}; the four "
+        "controlled fences must be ONE reviewed environment"
+    )
 
 
 def _assert_the_prelude_matches_the_manifest(job: str, steps: list[dict], manifest: dict) -> None:
@@ -819,7 +829,7 @@ def assert_controlled_environment(workflow: dict, manifest: dict) -> None:
         assert _is_digest_pinned(image), f"{job}: environment is not digest-pinned: {image}"
         # one reviewed environment, not four independently drifting ones
         assert image == pinned, f"{job}: pin drifted from the manifest ({image} != {pinned})"
-        _assert_no_host_state_is_imported(job, container)
+        _assert_no_host_state_is_imported(job, container, manifest)
 
         # A STEP-level scan cannot see either of these. A job-level `continue-on-error: true` makes
         # the whole fence non-blocking and a job-level `if` can switch it off entirely -- in both
@@ -1125,11 +1135,39 @@ def test_the_controlled_proof_fails_when_the_host_etc_is_mounted_over_the_pinned
     ["--privileged", "-v /:/host", "--volume /etc:/etc", "--mount type=bind,src=/etc,dst=/etc"],
 )
 def test_the_controlled_proof_fails_when_options_import_host_state(options: str) -> None:
-    """The same defect spelled through raw docker `options:` instead of the `volumes:` key."""
+    """The same defect spelled through raw docker `options:` instead of the `volumes:` key.
+
+    Driven with a manifest that DECLARES the harmful options, so the options-equality check cannot
+    be what fires. The denylist has to catch this on its own, which is the property under test."""
+    manifest = dict(_manifest())
+    manifest["options"] = options
+    container = {"image": manifest["image"], "options": options}
+    with pytest.raises(AssertionError, match="imports host state"):
+        _assert_no_host_state_is_imported("backend-deployment-root", container, manifest)
+
+
+def test_the_controlled_proof_fails_when_a_fence_option_drifts_from_the_manifest() -> None:
+    """Four fences declaring four different option strings is four environments, which is what the
+    manifest exists to prevent -- the image alone is not the whole environment."""
     workflow = _mutated()
-    workflow["jobs"]["backend-deployment-root"]["container"]["options"] = options
+    workflow["jobs"]["backend-realfs-root"]["container"]["options"] = "--init --cpus 2"
     with pytest.raises(AssertionError):
         assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_environment_provides_an_orphan_reaper() -> None:
+    """Discovered by running it, not by reasoning about it.
+
+    The first CI run of this environment (30609943702) failed `backend-deployment-root`'s
+    `test_timeout_proves_full_group_disappearance_no_orphan` with reason_code
+    `command_group_not_terminated`. A GitHub `container:` job's PID 1 does not reap, so after the
+    deployment runner's bounded SIGTERM -> grace -> SIGKILL sequence the killed grandchild stayed a
+    ZOMBIE; `killpg(pgid, 0)` kept succeeding instead of returning ESRCH, and the runner could not
+    prove the group had disappeared. It refused rather than reporting a termination it had not
+    proven -- the fence working -- so the defect was in the environment, which lacked a property
+    every real machine has. Pinned here so the requirement cannot be dropped as an unexplained flag.
+    """
+    assert "--init" in _normalised(str(_manifest()["options"]))
 
 
 def test_the_controlled_proof_fails_when_a_step_is_inserted_above_the_canary() -> None:
