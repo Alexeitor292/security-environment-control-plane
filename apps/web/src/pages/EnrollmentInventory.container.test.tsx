@@ -267,6 +267,49 @@ describe("EnrollmentInventory container - the ordinary paths still work", () => 
     }
   });
 
+  /**
+   * The weak reading of `next_cursor`, pinned at the EMITTER rather than at a fixture.
+   *
+   * The controller returns a cursor whenever a page came back full, which includes the case where
+   * the next page turns out to be empty — so a cursor means "there may be more", never "more
+   * remain". Saying the stronger thing would be a claim the response does not support.
+   *
+   * This was regressed-able, and asymmetrically: rewriting the non-null branch of `announce` to
+   * "More pages remain." left the whole suite green, while rewording the null branch went red. The
+   * two guards that forbid that wording both scan the A11yHarness FIXTURE, so the one place the
+   * product actually emits the claim fell between them. Both branches are pinned here, against the
+   * running container, so the guard sits on the code that speaks rather than on an example of it.
+   */
+  it("says a full page MAY have more behind it, and never that more remain", async () => {
+    const view = render();
+    const live = () => view.container.querySelector("#einv-status")?.textContent ?? "";
+    try {
+      click(view.container, "Load enrollments", view);
+      listQueue[0].resolve({
+        items: [status({ enrollment_id: id("1") })],
+        next_cursor: "page-2",
+      });
+      await settle(view);
+
+      expect(live()).toContain("There may be more.");
+      expect(live()).not.toMatch(/more pages remain/i);
+
+      // The other branch, so this pins the whole of `announce` rather than the half that already
+      // had a test — a cursor that came back null is the only thing that means the list is done.
+      click(view.container, "Load more", view);
+      listQueue[1].resolve({
+        items: [status({ enrollment_id: id("2") })],
+        next_cursor: null,
+      });
+      await settle(view);
+
+      expect(live()).toContain("No further pages.");
+      expect(live()).not.toMatch(/may be more/i);
+    } finally {
+      view.unmount();
+    }
+  });
+
   it("continues the same filter with the cursor it was given", async () => {
     const view = render();
     try {

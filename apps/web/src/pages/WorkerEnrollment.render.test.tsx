@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
-import { singleProducerClaims } from "../testing/single-producer-copy";
+import { singleProducerClaims, unrejectedShippedCopy } from "../testing/single-producer-copy";
 import { WorkerEnrollmentView, type WorkerEnrollmentViewProps } from "./WorkerEnrollment";
 import {
   handoffText,
@@ -704,6 +704,30 @@ describe("WorkerEnrollmentView — renders no single-producer claim about recove
       );
       expect(singleProducerClaims(out), name).toEqual([]);
     }
+  });
+
+  /**
+   * The scan is only as good as the states it walks, so the states are pinned too. A future edit
+   * that trims this matrix should go red rather than quietly narrowing what is checked — which is
+   * the exact shape of the defect this whole surface keeps meeting: a guard walking a set the
+   * offending case is not in.
+   */
+  it("scans the states that actually render the recovery copy", () => {
+    const names = CASES.map(([name]) => name);
+    for (const required of [
+      "default page",
+      "status needing recovery",
+      "live enrollment past its expiry",
+      "tracked row past its expiry",
+    ]) {
+      expect(names, `${required} dropped from the scanned states`).toContain(required);
+    }
+  });
+
+  /** Shared-list integrity, asserted from THIS consumer: a pattern deleted from the module is
+   *  invisible to a "document makes no claim" check, so the teeth are verified here directly. */
+  it("reads a denylist that still rejects the wording that shipped", () => {
+    expect(unrejectedShippedCopy()).toEqual([]);
   });
 
   /** The control inventory renders as the page's own account of what it can do, so the operator

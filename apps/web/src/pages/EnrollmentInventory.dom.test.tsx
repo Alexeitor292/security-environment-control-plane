@@ -139,7 +139,9 @@ const STATES: ReadonlyArray<readonly [string, Partial<EnrollmentInventoryViewPro
     "revoke refused on a selected row",
     { selectedId: id("2"), revokeError: { code: "enrollment_revision_conflict", text: "" } },
   ],
-  ["a live notice present", { liveNotice: "Loaded 3 more; 3 shown. More pages remain." }],
+  // Product-emittable wording. A fixture saying "More pages remain." would present as normal output
+  // a claim the emitter must never make, and is where someone copying from a test reintroduces it.
+  ["a live notice present", { liveNotice: "Loaded 3 more; 3 shown. There may be more." }],
   ["an unrecognised state", { page: loaded([status({ state: "a_state_from_the_future" })]) }],
 ];
 
@@ -376,7 +378,14 @@ describe("EnrollmentInventoryView - live region", () => {
       const before = view.container.querySelector("#einv-status");
       view.run(() => {
         view.root.render(
-          createElement(EnrollmentInventoryView, props({ liveNotice: "Loaded 3 more; 3 shown." })),
+          // The notice content is incidental here — this is about the element not being remounted —
+          // but it is still a fixture, so it says what the product would say. `announce` always
+          // appends one of the two cursor clauses; a bare "Loaded 3 more; 3 shown." is not output
+          // this page can produce.
+          createElement(
+            EnrollmentInventoryView,
+            props({ liveNotice: "Loaded 3 more; 3 shown. There may be more." }),
+          ),
         );
       });
       const after = view.container.querySelector("#einv-status");

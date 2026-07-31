@@ -9,6 +9,7 @@ import {
   SHIPPED_SINGLE_PRODUCER_COPY,
   SINGLE_PRODUCER_CLAIMS,
   singleProducerClaims,
+  unrejectedShippedCopy,
 } from "../testing/single-producer-copy";
 import {
   ENROLLMENT_CONTROLS,
@@ -1053,6 +1054,9 @@ describe("operator-facing copy never asserts a single producer for recovery requ
     for (const pattern of SINGLE_PRODUCER_CLAIMS) {
       expect(exercised, `${pattern.source} has no shipped example`).toContain(pattern.source);
     }
+    // The same property the two rendered consumers assert, through the same shared object, so
+    // deleting a pattern reddens all three rather than only this one.
+    expect(unrejectedShippedCopy()).toEqual([]);
   });
 
   /**

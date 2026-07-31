@@ -78,3 +78,19 @@ export const SHIPPED_SINGLE_PRODUCER_COPY: ReadonlyArray<readonly [string, RegEx
 export function singleProducerClaims(text: string): string[] {
   return SINGLE_PRODUCER_CLAIMS.filter((pattern) => pattern.test(text)).map((p) => p.source);
 }
+
+/**
+ * Every shipped example that nothing in the list rejects any more. `[]` is the healthy state.
+ *
+ * This is what makes the shared list worth sharing. Three consumers of one object is only a real
+ * property if REMOVING an element is observable in all three — three copies that agree today would
+ * satisfy an equality check and diverge on the first edit. The rendered guards assert "this
+ * document makes no claim", which stays true when a pattern is deleted, so on their own they cannot
+ * see the list losing teeth. Each of the three calls this as well, through the shared object, so a
+ * deleted pattern reddens every one of them.
+ */
+export function unrejectedShippedCopy(): string[] {
+  return SHIPPED_SINGLE_PRODUCER_COPY.filter(
+    ([text]) => singleProducerClaims(text).length === 0,
+  ).map(([text]) => text);
+}

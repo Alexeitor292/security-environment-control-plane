@@ -14,6 +14,10 @@ import { describe, expect, it } from "vitest";
 import { ENROLLMENT_CONTROLS } from "./worker-enrollment";
 import CLIENT from "../api/client.ts?raw";
 import HARNESS from "../dev/A11yHarness.tsx?raw";
+// Suite fixtures, scanned for the same live-region constraint as the harness — a fixture is where
+// the next person copies from, so wording the product cannot emit must not sit in one.
+import INVENTORY_DOM_TEST from "./EnrollmentInventory.dom.test.tsx?raw";
+import INVENTORY_RENDER_TEST from "./EnrollmentInventory.render.test.tsx?raw";
 import CONTRAST_PROBE from "../dev/contrast-probe.js?raw";
 import MAIN from "../main.tsx?raw";
 import VITE_CONFIG from "../../vite.config.ts?raw";
@@ -209,7 +213,7 @@ describe("enrollment page I/O boundary", () => {
     ]);
   });
 
-  // The inventory is a READ surface plus the one operator write that already exists. It must never
+  // The inventory is a READ surface plus the two operator writes that exist. It must never
   // reach the create route: minting a bearer-grade invitation from a list page would put the
   // hand-off flow somewhere with no reveal gate and no one-time disclosure.
   it("calls only the read and the two operator writes from the inventory page", () => {
@@ -523,6 +527,41 @@ describe("dev harness stays out of the product", () => {
     for (const notice of notices) {
       expect(notice, notice).toMatch(/(There may be more\.|No further pages\.)"$/);
     }
+  });
+
+  /**
+   * The same rule, over every fixture rather than only the harness.
+   *
+   * Scoping the guard above to `A11yHarness.tsx` is what let two SUITE fixtures keep feeding
+   * "More pages remain." in as though it were ordinary product output — one of them asserting it
+   * renders verbatim, which reads as a worked example of the retired claim. A fixture is where the
+   * next person copies from, so the constraint belongs on all of them, not on the one that drifted
+   * first.
+   *
+   * The emitter itself is pinned in `EnrollmentInventory.container.test.tsx`, against the running
+   * container. This is the fixture half; that is the product half. Neither substitutes for the
+   * other — a fixture guard cannot see what the code emits, and this one had proved that.
+   */
+  it("keeps every liveNotice fixture in the suite to product-emittable copy", () => {
+    const FIXTURE_SOURCES: ReadonlyArray<readonly [string, string]> = [
+      ["dev/A11yHarness.tsx", HARNESS],
+      ["EnrollmentInventory.dom.test.tsx", INVENTORY_DOM_TEST],
+      ["EnrollmentInventory.render.test.tsx", INVENTORY_RENDER_TEST],
+    ];
+    let checked = 0;
+    for (const [name, src] of FIXTURE_SOURCES) {
+      for (const notice of code(src).match(/liveNotice: "[^"]*"/g) ?? []) {
+        checked += 1;
+        expect(notice, `${name}: ${notice}`).toMatch(
+          /(There may be more\.|No further pages\.)"$/,
+        );
+      }
+    }
+    // Anti-vacuity, pinned as an exact count like the error-site scan above rather than a floor: a
+    // scan that matched nothing passes against any wording at all, and a NEW fixture is exactly the
+    // thing that should be looked at rather than silently absorbed. Four today — one in the
+    // harness, two in the inventory DOM suite, one in its render suite.
+    expect(checked, "liveNotice fixture count moved - look at the new one, then re-anchor").toBe(4);
   });
 
   // The harness renders the shipped component; the moment it stops doing that it is a second

@@ -9,7 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { EnrollmentStatus } from "../api/types";
-import { singleProducerClaims } from "../testing/single-producer-copy";
+import { singleProducerClaims, unrejectedShippedCopy } from "../testing/single-producer-copy";
 import {
   EnrollmentInventoryView,
   type EnrollmentInventoryViewProps,
@@ -255,8 +255,10 @@ describe("EnrollmentInventoryView - loading and error states", () => {
     expect(html({ firstLoad: true, loading: true, page: EMPTY_PAGE })).toContain(
       "Loading enrollments",
     );
-    expect(html({ liveNotice: "Loaded 2 more; 5 shown. More pages remain." })).toContain(
-      "Loaded 2 more; 5 shown. More pages remain.",
+    // The notice is rendered verbatim, so this is a pass-through test — but it is fed wording the
+    // product can actually emit, so it cannot double as a worked example of the retired claim.
+    expect(html({ liveNotice: "Loaded 2 more; 5 shown. There may be more." })).toContain(
+      "Loaded 2 more; 5 shown. There may be more.",
     );
   });
 
@@ -490,5 +492,38 @@ describe("EnrollmentInventoryView - renders no single-producer claim about recov
       );
       expect(singleProducerClaims(out), name).toEqual([]);
     }
+  });
+
+  /**
+   * The site this scan caught — the selection region's inline prose — renders ONLY when
+   * `selected === null`. A matrix in which some row is always selected would pass while leaving
+   * that string live, which is the failure this surface keeps meeting in new costumes: a guard
+   * walking a set the defect is not in.
+   *
+   * So the unselected default is pinned three ways: present by name, genuinely carrying no
+   * selection, and actually producing the empty state. Name alone would survive someone adding a
+   * `selectedId` to that case's overrides.
+   */
+  it("scans the unselected default, where the selection region's empty state lives", () => {
+    const names = CASES.map(([name]) => name);
+    expect(names, "the unselected default dropped out of the scanned states").toContain(
+      "default page",
+    );
+
+    const unselected = CASES.find(([name]) => name === "default page");
+    expect(unselected, "default page case missing").toBeDefined();
+    expect(
+      unselected?.[1].selectedId ?? null,
+      "the default case now selects a row, so the empty state is no longer scanned",
+    ).toBeNull();
+
+    // The state is genuinely reached: this sentence exists in no other branch.
+    expect(html(unselected?.[1])).toContain("Select an enrollment above to see its evidence");
+  });
+
+  /** Shared-list integrity, asserted from THIS consumer: a pattern deleted from the module is
+   *  invisible to a "document makes no claim" check, so the teeth are verified here directly. */
+  it("reads a denylist that still rejects the wording that shipped", () => {
+    expect(unrejectedShippedCopy()).toEqual([]);
   });
 });
