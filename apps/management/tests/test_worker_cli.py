@@ -198,14 +198,103 @@ def test_no_url_ca_or_token_argument_on_worker_commands(tmp_path):
 # --- the concrete adapter reaches the real (sealed-default) secp_worker driver -------------------
 
 
-def test_concrete_worker_enroller_status_is_local_and_enroll_is_inert_by_default():
+def test_concrete_worker_enroller_status_is_local_and_reads_the_durable_marker():
+    """``status`` must never drive the exchange or contact the controller, and must not raise on a
+    host that has never enrolled — an absent marker is simply ``unknown``."""
+    from secp_commissioning.runtime import InMemoryFilesystem
+    from secp_management.worker_enroller import build_worker_enroller
+    from secp_worker.enrollment_state_store import DurableWorkerEnrollmentStateStore
+
+    fs = InMemoryFilesystem()
+    enroller = build_worker_enroller(fs)
+
+    assert enroller.status(_INVITATION)["state"] == "unknown"
+
+    DurableWorkerEnrollmentStateStore(fs).record(_INVITATION["enrollment_id"], "offer_verified")
+    assert enroller.status(_INVITATION)["state"] == "offer_verified"
+
+
+def test_the_production_composition_is_real_and_provisions_the_protected_key():
+    """The composition is REAL, not sealed: it reaches the protected key seam, provisions the
+    fixed-path pair under the CLI's ``--write --confirm`` authority, and then genuinely attempts the
+    invitation-pinned transport. The controller origin is an RFC 6761 ``.test`` name, so the attempt
+    fails closed with a bounded transport code — proving the transport is wired, not stubbed.
+
+    (The health-gate refusal on an unprepared host is proven end to end against a faithful
+    in-process controller in ``test_enrollment_health_probes.py``; duplicating it here would only
+    re-test the driver.)"""
+    from secp_commissioning.runtime import InMemoryFilesystem
     from secp_management.worker_enroller import build_worker_enroller
     from secp_worker.enrollment_driver import WorkerEnrollmentDriverError
+    from secp_worker.enrollment_key import observe_local_worker_enrollment_key
 
-    enroller = build_worker_enroller()
-    # status is read-only + local (no driver run, no controller contact)
-    assert enroller.status(_INVITATION)["state"] == "unknown"
-    # enroll reaches the real driver, which is inert by default (sealed worker key) -> fails closed
+    fs = InMemoryFilesystem()
+    enroller = build_worker_enroller(fs)
+
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
         enroller.enroll(_INVITATION, now="2026-07-27T00:00:00+00:00")
-    assert ei.value.reason_code == "enrollment_worker_key_sealed"
+
+    assert ei.value.reason_code == "enrollment_transport_failed"
+    # the sealed default could never have got this far: the key seam really ran
+    assert observe_local_worker_enrollment_key(fs)
+    # and nothing was recorded, because no exchange step completed
+    assert enroller.status(_INVITATION)["state"] == "unknown"
+
+
+def test_an_invitation_without_a_ca_refuses_before_the_key_seam_runs():
+    """The driver validates the invitation first, so a CA-less invitation cannot even cause a key to
+    be provisioned on the host."""
+    from secp_commissioning.runtime import InMemoryFilesystem
+    from secp_management.worker_enroller import build_worker_enroller
+    from secp_worker.enrollment_driver import WorkerEnrollmentDriverError
+    from secp_worker.enrollment_key import observe_local_worker_enrollment_key
+
+    fs = InMemoryFilesystem()
+    enroller = build_worker_enroller(fs)
+
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        enroller.enroll(
+            {**_INVITATION, "controller_ca_bundle_pem": "  "},
+            now="2026-07-27T00:00:00+00:00",
+        )
+
+    assert ei.value.reason_code == "enrollment_invitation_ca_missing"
+    assert not observe_local_worker_enrollment_key(fs)  # no key was provisioned
+
+
+def test_the_production_composition_builds_one_driver_per_invitation():
+    """The transport carries the per-invitation origin + CA, and the probes pin the invitation at
+    construction. A driver reused across enrollments would pin the FIRST invitation's origin/CA for
+    every later one."""
+    from secp_commissioning.runtime import InMemoryFilesystem
+    from secp_management.worker_enroller import DriverWorkerEnroller
+    from secp_worker.enrollment_state_store import DurableWorkerEnrollmentStateStore
+
+    fs = InMemoryFilesystem()
+    seen = []
+
+    class _Driver:
+        def __init__(self, inputs) -> None:
+            self.inputs = inputs
+
+        def enroll(self, inputs, *, now):
+            from secp_worker.enrollment_driver import DriverOutcome
+
+            return DriverOutcome(inputs.enrollment_id, "healthy", revision=5, already_healthy=False)
+
+    def factory(inputs):
+        driver = _Driver(inputs)
+        seen.append(driver)
+        return driver
+
+    enroller = DriverWorkerEnroller(
+        fs=fs, state_store=DurableWorkerEnrollmentStateStore(fs), driver_factory=factory
+    )
+    other = {**_INVITATION, "enrollment_id": "sha256:" + "e" * 64}
+    enroller.enroll(_INVITATION, now="2026-07-27T00:00:00+00:00")
+    enroller.enroll(other, now="2026-07-27T00:00:00+00:00")
+
+    assert len(seen) == 2 and seen[0] is not seen[1]
+    assert seen[0].inputs.enrollment_id != seen[1].inputs.enrollment_id
+    # each driver was pinned to the CA chain of its own invitation
+    assert all(d.inputs.controller_ca_bundle_pem == CA_PEM for d in seen)
