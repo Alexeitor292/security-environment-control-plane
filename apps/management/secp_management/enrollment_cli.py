@@ -445,9 +445,41 @@ def controller_key_fingerprint(controller_key_id: str) -> str:
     return " ".join(body[i : i + 8] for i in range(0, min(len(body), 32), 8))
 
 
+#: The controller-authoritative state a completed drive must reach.
+_STATE_HEALTHY = "healthy"
+#: Terminal controller states: no retry can fix these, an operator must intervene.
+_TERMINAL_STATES = ("refused", "recovery_required")
+
+
+def _exit_for_drive(state: object) -> int:
+    """The exit code for a COMPLETED drive, from the controller's authoritative reported state.
+
+    A drive that ends anywhere other than ``healthy`` is not a success, and must not exit 0 — an
+    operator scripting ``secpctl worker enroll`` would otherwise treat a refused or
+    recovery-required enrollment as a successful one. A terminal state gets the terminal category
+    (no retry can fix it); an active state means the exchange stopped short, which is the
+    worker-health category."""
+    if state == _STATE_HEALTHY:
+        return EXIT_OK
+    if state in _TERMINAL_STATES:
+        return EXIT_ENROLLMENT_TERMINAL
+    return EXIT_WORKER_HEALTH
+
+
 def _worker_outcome(
-    command: str, mode: str, outcome: dict, *, controller_key_id: str | None = None
+    command: str,
+    mode: str,
+    outcome: dict,
+    *,
+    controller_key_id: str | None = None,
+    exit_on_state: bool = False,
 ) -> tuple[int, dict]:
+    """Project a bounded worker outcome.
+
+    ``exit_on_state`` is set by the DRIVING commands (enroll/retry), whose ``state`` is the
+    controller's authoritative enrollment state. It is NOT set by ``status``, whose ``state`` is the
+    local restart marker (``unknown``/``offer_verified``/``healthy``) — a read that reports an
+    in-progress marker is a successful read, not a failed enrollment."""
     report = {"command": command, "mode": mode}
     if controller_key_id is not None:
         report["controller_key_id"] = controller_key_id
@@ -455,7 +487,17 @@ def _worker_outcome(
     for key in ("enrollment_id", "state", "revision", "already_healthy"):
         if key in outcome:
             report[key] = outcome[key]
-    return EXIT_OK, report
+    if not exit_on_state:
+        return EXIT_OK, report
+    code = _exit_for_drive(outcome.get("state"))
+    if code != EXIT_OK:
+        # name the terminal/incomplete outcome so the report is actionable, not just a bare state
+        report["reason_code"] = (
+            f"enrollment_{outcome.get('state')}"
+            if outcome.get("state") in _TERMINAL_STATES
+            else "enrollment_health_incomplete"
+        )
+    return code, report
 
 
 def _drive_worker(
@@ -506,6 +548,7 @@ def worker_enroll(
             "written",
             deps.worker_enroller.enroll(inv, now=deps.now()),
             controller_key_id=inv["controller_key_id"],
+            exit_on_state=True,
         ),
     )
 
@@ -537,7 +580,10 @@ def worker_retry(
         command,
         invitation_file,
         lambda inv: _worker_outcome(
-            command, "written", deps.worker_enroller.retry(inv, now=deps.now())
+            command,
+            "written",
+            deps.worker_enroller.retry(inv, now=deps.now()),
+            exit_on_state=True,
         ),
     )
 

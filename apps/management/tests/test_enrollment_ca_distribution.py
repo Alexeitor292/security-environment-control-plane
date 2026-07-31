@@ -21,7 +21,9 @@ import pytest
 from secp_management import ManagementError
 from secp_management.enrollment_cli import (
     EXIT_CONTROLLER_UNAVAILABLE,
+    EXIT_ENROLLMENT_TERMINAL,
     EXIT_MALFORMED,
+    EXIT_WORKER_HEALTH,
     EnrollmentCliDeps,
     LocatorControllerCaBundleProvider,
     SealedControllerCaBundleProvider,
@@ -29,8 +31,16 @@ from secp_management.enrollment_cli import (
     controller_key_fingerprint,
     invite_create,
     load_invitation_file,
+    worker_enroll,
+    worker_retry,
+    worker_status,
 )
 from secp_management.transaction import WriteGate
+
+
+class _FakeCa:
+    def read_pem(self) -> str:
+        return CA_PEM
 
 
 def _pem(body: str) -> str:
@@ -271,3 +281,104 @@ def test_exit_categories_for_the_new_ca_refusals_are_stable():
     assert exit_for("secpctl_invitation_ca_too_large") == EXIT_MALFORMED
     assert exit_for("secpctl_invitation_field_too_large") == EXIT_MALFORMED
     assert exit_for("secpctl_controller_ca_unavailable") == EXIT_CONTROLLER_UNAVAILABLE
+
+
+# --- a completed drive that did not reach healthy must not exit 0 ---------------------------------
+
+
+class _StateEnroller:
+    """Reports whatever authoritative state the controller would have reported."""
+
+    def __init__(self, state: str) -> None:
+        self._state = state
+
+    def enroll(self, invitation, *, now):
+        return {
+            "enrollment_id": invitation["enrollment_id"],
+            "state": self._state,
+            "revision": 3,
+            "already_healthy": False,
+        }
+
+    def retry(self, invitation, *, now):
+        return self.enroll(invitation, now=now)
+
+    def status(self, invitation):
+        return {"enrollment_id": invitation["enrollment_id"], "state": self._state}
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_exit"),
+    [
+        ("healthy", 0),
+        ("refused", EXIT_ENROLLMENT_TERMINAL),
+        ("recovery_required", EXIT_ENROLLMENT_TERMINAL),
+        ("verified", EXIT_WORKER_HEALTH),  # the exchange stopped short of healthy
+        ("invited", EXIT_WORKER_HEALTH),
+    ],
+)
+def test_worker_enroll_exit_code_follows_the_authoritative_state(tmp_path, state, expected_exit):
+    """An operator scripting `secpctl worker enroll` must not read a refused or recovery-required
+    enrollment as a success. Only `healthy` is exit 0."""
+    deps = EnrollmentCliDeps(worker_enroller=_StateEnroller(state), ca_bundle=_FakeCa())
+
+    code, report = worker_enroll(
+        deps, invitation_file=_write(tmp_path), gate=WriteGate(write=True, confirm=True)
+    )
+
+    assert code == expected_exit
+    assert report["state"] == state
+    if expected_exit != 0:
+        assert report["reason_code"]  # the non-zero outcome is named, not just a bare state
+
+
+def test_worker_retry_uses_the_same_exit_semantics_as_enroll(tmp_path):
+    deps = EnrollmentCliDeps(
+        worker_enroller=_StateEnroller("recovery_required"), ca_bundle=_FakeCa()
+    )
+
+    code, report = worker_retry(
+        deps, invitation_file=_write(tmp_path), gate=WriteGate(write=True, confirm=True)
+    )
+
+    assert code == EXIT_ENROLLMENT_TERMINAL
+    assert report["reason_code"] == "enrollment_recovery_required"
+
+
+def test_worker_status_is_a_read_and_stays_exit_zero_on_an_in_progress_marker(tmp_path):
+    """`status` reports the LOCAL restart marker, not a controller state. Reporting `offer_verified`
+    is a successful read of an in-progress enrollment, not a failed one."""
+    deps = EnrollmentCliDeps(worker_enroller=_StateEnroller("offer_verified"), ca_bundle=_FakeCa())
+
+    code, report = worker_status(deps, invitation_file=_write(tmp_path))
+
+    assert code == 0
+    assert report["state"] == "offer_verified"
+    assert "reason_code" not in report
+
+
+def test_the_enroll_report_carries_the_fingerprint_for_out_of_band_verification(tmp_path):
+    deps = EnrollmentCliDeps(worker_enroller=_StateEnroller("healthy"), ca_bundle=_FakeCa())
+
+    _code, report = worker_enroll(
+        deps, invitation_file=_write(tmp_path), gate=WriteGate(write=True, confirm=True)
+    )
+
+    assert report["controller_key_id"] == _INVITATION["controller_key_id"]
+    assert report["controller_key_fingerprint"] == controller_key_fingerprint(
+        _INVITATION["controller_key_id"]
+    )
+
+
+def test_the_dry_run_shows_the_fingerprint_before_the_worker_commits(tmp_path):
+    """The dry run is where an operator verifies the controller identity out of band."""
+    deps = EnrollmentCliDeps(worker_enroller=_StateEnroller("healthy"), ca_bundle=_FakeCa())
+
+    code, report = worker_enroll(
+        deps, invitation_file=_write(tmp_path), gate=WriteGate(write=False, confirm=False)
+    )
+
+    assert code == 0 and report["mode"] == "dry_run"
+    assert report["controller_key_fingerprint"] == controller_key_fingerprint(
+        _INVITATION["controller_key_id"]
+    )
