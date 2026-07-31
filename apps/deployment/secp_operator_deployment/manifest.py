@@ -89,11 +89,36 @@ class RealManifestReader:
         self._dir = package_dir
 
     def list_modules(self) -> tuple[str, ...]:
+        """Every ``.py`` under the package dir, at ANY depth, as a package-relative POSIX name.
+
+        This was a flat ``os.listdir`` filtered to ``.py``. A nested module therefore appeared in
+        neither the listing nor :data:`COVERED_MODULES`, so the inventory equality check did not
+        trip and the file sat SILENTLY OUTSIDE the implementation aggregate — tampering with it
+        would not change the digest. That is a hole in a tamper-detection guarantee, and it makes
+        ``provenance``'s "the installed content recomputes to its reviewed aggregate" true of a
+        subset while reading as true of the package.
+
+        The reviewed inventory is FLAT, so a nested name can never be in it: returning the nested
+        name is what makes ``compute_manifest`` refuse with ``manifest_inventory_mismatch``.
+
+        Note there is NO name-keyed exemption here, deliberately. ``__pycache__`` needs none — it
+        contains ``.pyc`` and no ``.py``, so the content filter already ignores it. A name-based
+        skip would be the very trap that makes a recursive scan worse than a flat one: something
+        could then hide behind the exempt name.
+        """
+        found: list[str] = []
         try:
-            names = os.listdir(self._dir)
+            # followlinks=False (the default) — a symlinked subdirectory is not descended.
+            for root, _dirs, names in os.walk(self._dir):
+                rel_root = os.path.relpath(root, self._dir)
+                for n in names:
+                    if not n.endswith(".py"):
+                        continue
+                    rel = n if rel_root == "." else f"{rel_root}/{n}"
+                    found.append(rel.replace(os.sep, "/"))
         except OSError:
             raise ManifestError("manifest_dir_unreadable") from None
-        return tuple(sorted(n for n in names if n.endswith(".py")))
+        return tuple(sorted(found))
 
     def read(self, name: str) -> bytes:
         path = os.path.join(self._dir, name)
@@ -197,11 +222,67 @@ class TrustedManifestReader:
         return cls(open_trusted_package_dir_fd(package_dir))
 
     def list_modules(self) -> tuple[str, ...]:
+        """Every ``.py`` at ANY depth, package-relative, enumerated through the trusted dir fd.
+
+        Same defect and same fix as :meth:`RealManifestReader.list_modules` — a nested module was
+        invisible to the flat listing and so sat outside the aggregate without tripping the
+        inventory check. Enumeration descends by FD (``O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`` relative
+        to the parent fd), never by a re-resolvable path, so the property that makes this reader
+        trusted is preserved: a directory-replacement race at the path cannot substitute a tree.
+
+        Descent is bounded to ONE level and refuses deeper rather than guessing. That is
+        deliberate: the reviewed inventory is flat, so anything nested already fails, and a
+        directory it cannot enumerate within that bound is refused
+        (``manifest_nested_directory_unverifiable``) instead of silently contributing nothing —
+        which is the failure mode this whole change is about.
+
+        No name-keyed exemption: ``__pycache__`` holds no ``.py`` and is ignored by the content
+        filter, so nothing can hide behind an exempt name.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
         try:
             names = os.listdir(self._fd)
         except OSError:
             raise ManifestError("manifest_dir_unreadable") from None
-        return tuple(sorted(n for n in names if n.endswith(".py")))
+
+        found = [n for n in names if n.endswith(".py")]
+        for entry in names:
+            if entry.endswith(".py"):
+                continue
+            try:
+                st = os.stat(entry, dir_fd=self._fd, follow_symlinks=False)
+            except OSError:
+                raise ManifestError("manifest_dir_unreadable") from None
+            if not stat.S_ISDIR(st.st_mode):
+                continue  # a non-.py regular file is not a module and never was
+            found.extend(f"{entry}/{n}" for n in self._list_subdirectory(entry, flags))
+        return tuple(sorted(found))
+
+    def _list_subdirectory(self, entry: str, flags: int) -> list[str]:
+        """The ``.py`` names one level down, by fd. Refuses a further nested directory."""
+        try:
+            sub_fd = os.open(entry, flags, dir_fd=self._fd)
+        except OSError:
+            raise ManifestError("manifest_dir_unreadable") from None
+        try:
+            try:
+                names = os.listdir(sub_fd)
+            except OSError:
+                raise ManifestError("manifest_dir_unreadable") from None
+            for n in names:
+                if n.endswith(".py"):
+                    continue
+                try:
+                    st = os.stat(n, dir_fd=sub_fd, follow_symlinks=False)
+                except OSError:
+                    raise ManifestError("manifest_dir_unreadable") from None
+                if stat.S_ISDIR(st.st_mode):
+                    # Beyond the bounded descent. Refuse rather than enumerate nothing.
+                    raise ManifestError("manifest_nested_directory_unverifiable")
+            return [n for n in names if n.endswith(".py")]
+        finally:
+            os.close(sub_fd)
 
     def read(self, name: str) -> bytes:
         no_follow = getattr(os, "O_NOFOLLOW", 0)

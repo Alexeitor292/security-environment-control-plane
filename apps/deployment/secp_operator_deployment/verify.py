@@ -173,6 +173,10 @@ REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
     "install_trust_not_evaluated": {"dimension": "A", "remediation": _O},
     "manifest_unavailable": {"dimension": "A", "remediation": _O},
     "manifest_inventory_mismatch": {"dimension": "A", "remediation": _O},
+    # A subdirectory the trusted enumeration cannot walk within its bounded descent. Refused rather
+    # than skipped: a directory that contributes nothing to the aggregate is exactly how a module
+    # would sit outside it undetected.
+    "manifest_nested_directory_unverifiable": {"dimension": "A", "remediation": _O},
     "manifest_dir_unreadable": {"dimension": "A", "remediation": _O},
     "manifest_module_unreadable": {"dimension": "A", "remediation": _O},
     "manifest_module_not_regular": {"dimension": "A", "remediation": _O},
