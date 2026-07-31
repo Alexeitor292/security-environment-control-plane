@@ -147,13 +147,21 @@ PREREQUISITE_LADDER: tuple[Prerequisite, ...] = (
 #
 # A scan in ``test_operator_refusal_catalogue.py`` fails when a code appears in one of five
 # recognised syntactic shapes without being catalogued. State its reach accurately, because
-# over-trusting it is how a code reaches an operator unexplained: it MATCHES ONLY THOSE SHAPES —
-# measured at 27 of the 84 codes here. A bare positional literal passed to ``rung()``, a code
-# reached through a variable, and a conditional dict-literal value are NOT seen, and 22 codes in
-# this module sit in exactly those shapes. The scan is a partial net, not a guarantee; the
-# behavioural guard (an all-unmet ladder whose every reason code must classify) and the visible
-# ``reason_catalogued: False`` at the point of use are what cover the rest. That test's docstring
-# carries the full measured breakdown, re-measured on every run.
+# over-trusting it is how a code reaches an operator unexplained: it MATCHES ONLY THOSE SHAPES. A
+# bare positional literal passed to ``rung()``, a code reached through a variable, and a
+# conditional dict-literal value are NOT seen, and a substantial minority of the codes in this
+# module sit in exactly those shapes.
+#
+# NO COUNT IS WRITTEN HERE, deliberately. The two that used to be — a coverage ratio and an
+# in-module total — were both wrong, and the ratio was already wrong on the commit that introduced
+# it, overstating the scan's reach by a fifth. A number in a comment cannot be re-measured, so it
+# only ever decays, and this one decayed in the direction that flattered the guard. The measured
+# numbers live in ``test_operator_refusal_catalogue``'s docstring, next to ``_EXPECTED_COVERAGE``
+# and ``_EXPECTED_BLIND_SPOTS``, which recompute them on every run and fail when they move.
+#
+# The scan is a partial net, not a guarantee; the behavioural guard (an all-unmet ladder whose
+# every reason code must classify) and the visible ``reason_catalogued: False`` at the point of use
+# are what cover the rest.
 # =================================================================================================
 _C = REMEDIATION_REVIEWED_CODE
 _D = REMEDIATION_REVIEWED_DEPLOYMENT

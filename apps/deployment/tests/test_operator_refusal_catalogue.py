@@ -48,6 +48,12 @@ This 23/5/44 split is re-measured on every run by
 :func:`test_the_blind_spot_breakdown_is_re_measured_not_remembered`, so the prose above cannot
 quietly stop describing the code.
 
+This file is the ONLY place these numbers are written. ``verify.py`` used to restate the coverage
+ratio and the in-module count in a comment, and both had drifted — the ratio was wrong on the
+commit that introduced it, overstating the scan's reach. That comment now describes the shapes and
+points here, because a number stated where nothing re-measures it can only rot. If a count is
+wanted somewhere else, take it from these constants rather than copying it.
+
 The scan also proves only one direction — every scanned literal is catalogued, never that every
 catalogued entry is still reachable — so a STALE entry is unpoliced here.
 

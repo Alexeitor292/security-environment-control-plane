@@ -6,10 +6,12 @@ CHECK, and checking it must never be a way to cause the thing it is checking aga
 properties pinned here are, in order of what they protect:
 
 * :func:`test_the_queue_command_submits_nothing_and_starts_no_consumer` — the tripwire suite. The
-  report's ``effects_of_this_queue_check`` section is a CLAIM; these tests are the observation.
-  ``temporalio`` is the only way to submit, so the ``sys.modules`` delta across a real ``main()``
-  run is measured; the operator run hook, the composition builders and the real command runner are
-  each replaced by a tripwire that raises if reached.
+  report's ``effects_of_this_queue_check`` section is a CLAIM; these tests are the observation. The
+  operator run hook, the composition builders and the real command runner are each replaced by a
+  tripwire that RECORDS and raises if reached, and the assertion is made on the record.
+  ``temporalio`` — the only way to submit a workflow or run a worker — is covered by two STATIC
+  scans instead, for the reason given at the tripwire itself: it is an optional extra installed in
+  no environment this suite runs in, so no runtime observation of this process can see it.
 * :func:`test_the_guard_order_is_exactly_the_ladder_order_on_every_fact_combination` — the ordering
   proof, exhaustive over all 32 combinations of the five facts rather than sampled. ``QUEUE_LADDER``
   and ``_resolve_queue_status`` are independent derivations of the same order; if either moves, or
@@ -498,10 +500,8 @@ def test_main_queue_output_is_byte_identical_across_runs(prepared_context, capsy
 
 
 def test_the_queue_command_submits_nothing_and_starts_no_consumer(prepared_context, monkeypatch):
-    """Measure, do not trust: no submission machinery is imported, and every path that could
-    submit, start a consumer, build a composition aggregate or shell out is a tripwire."""
-    import sys
-
+    """Measure, do not trust: every path that could submit, start a consumer, build a composition
+    aggregate or shell out is a tripwire, and the assertion is made on what the tripwires RECORD."""
     from secp_operator_deployment import compositions, host_process, runner
 
     # The tripwires RECORD as well as raise, and the assertion below is made on the record.
@@ -531,15 +531,28 @@ def test_the_queue_command_submits_nothing_and_starts_no_consumer(prepared_conte
         host_process.RealCommandRunner, "run", _tripwire("RealCommandRunner.run"), raising=False
     )
 
-    before = set(sys.modules)
     assert main(["queue", "--json"]) == 0
-    new_modules = set(sys.modules) - before
 
     assert reached == [], f"the queue check reached a tripwired seam: {reached}"
 
-    # ``temporalio`` is the ONLY way to submit a workflow or run a worker. If the check had gone
-    # anywhere near a submission it would be here.
-    assert not [m for m in new_modules if m.split(".")[0] == "temporalio"], sorted(new_modules)
+    # ``temporalio`` is the ONLY way to submit a workflow or run a worker, and this test used to
+    # assert a ``sys.modules`` delta across the ``main()`` call above, credited — here and in the
+    # runbook — with observing that no such module was imported. It observed nothing.
+    # ``temporalio`` is an optional extra installed in NO environment this suite runs in, CI
+    # included, so the key can never appear and the assertion can never fail. Worse, the failure
+    # was ORDER-DEPENDENT even in principle: the snapshot is taken twenty-odd tests into this file,
+    # after earlier tests have already driven the same loader, so with the extra installed it would
+    # pass in a full-file run and fail when run alone. A guard whose result depends on collection
+    # order is not a guard, and one that reads as a strong runtime observation is worse than none.
+    #
+    # The property is real; it is carried STATICALLY by two scans that do fail when the code moves:
+    #   * ``test_deployment_boundary.test_no_temporalio_imports_anywhere`` — an AST import scan over
+    #     every ``.py`` in the package at ANY depth, so the import cannot be added anywhere in it,
+    #     and its own coverage is proven by ``test_the_boundary_scan_reaches_into_subpackages``;
+    #   * ``test_the_queue_check_module_calls_and_imports_no_submission_symbol`` at the bottom of
+    #     this file — the import and call shapes in the queue-check module specifically.
+    # Those cover the static reach. The tripwires above are what cover the indirect one, which is
+    # the half a source scan genuinely cannot see — so the two are kept, and the delta is not.
 
 
 def test_the_queue_command_reads_the_same_context_verify_does_exactly_once(monkeypatch):

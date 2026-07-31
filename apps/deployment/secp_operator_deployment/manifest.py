@@ -247,7 +247,9 @@ class TrustedManifestReader:
         deliberate: the reviewed inventory is flat, so anything nested already fails, and a
         directory it cannot enumerate within that bound is refused
         (``manifest_nested_directory_unverifiable``) instead of silently contributing nothing —
-        which is the failure mode this whole change is about.
+        which is the failure mode this whole change is about. The subdirectory it descends into is
+        itself put through :func:`_require_trusted_dir`, so the trust the fd chain establishes from
+        ``/`` reaches every directory this reader reads through, not merely the ancestors.
 
         No name-keyed exemption: ``__pycache__`` holds no ``.py`` and is ignored by the content
         filter, so nothing can hide behind an exempt name.
@@ -279,12 +281,27 @@ class TrustedManifestReader:
         return tuple(sorted(found))
 
     def _list_subdirectory(self, entry: str, flags: int) -> list[str]:
-        """The ``.py`` names one level down, by fd. Refuses a further nested directory."""
+        """The ``.py`` names one level down, by fd. Refuses a further nested directory.
+
+        The subdirectory is held to exactly the trust rule every OTHER directory in the chain is
+        held to — :func:`_require_trusted_dir` on its own fd: a real directory, root-owned, and
+        non-group/other-writable. It was the one directory this walk descended into WITHOUT that
+        gate, so a subdirectory an unprivileged user could write was enumerated as if it were
+        root-controlled, and the trust the fd chain establishes from ``/`` stopped one level short
+        of the content it was being used to vouch for.
+
+        A SYMLINKED directory here is refused with the same bounded code the top level and the
+        source-side reader use. Stat'd with ``follow_symlinks=False`` a symlink is NOT ``S_ISDIR``,
+        so it fell through the ``continue`` below and enumerated nothing SILENTLY — the very
+        failure this descent exists to close, surviving one level down. Refusing it at all three
+        sites is the property; an attacker picks whichever of the three is the most lenient.
+        """
         try:
             sub_fd = os.open(entry, flags, dir_fd=self._fd)
         except OSError:
             raise ManifestError("manifest_dir_unreadable") from None
         try:
+            _require_trusted_dir(sub_fd)
             try:
                 names = os.listdir(sub_fd)
             except OSError:
@@ -296,6 +313,10 @@ class TrustedManifestReader:
                     st = os.stat(n, dir_fd=sub_fd, follow_symlinks=False)
                 except OSError:
                     raise ManifestError("manifest_dir_unreadable") from None
+                if stat.S_ISLNK(st.st_mode):
+                    # Same refusal as the top level: a symlinked directory is not S_ISDIR under
+                    # lstat, so without this it is skipped rather than walked or refused.
+                    raise ManifestError("manifest_symlinked_directory")
                 if stat.S_ISDIR(st.st_mode):
                     # Beyond the bounded descent. Refuse rather than enumerate nothing.
                     raise ManifestError("manifest_nested_directory_unverifiable")

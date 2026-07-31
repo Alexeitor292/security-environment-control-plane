@@ -468,7 +468,14 @@ would stop it?"* by reading the stop constants rather than by attempting anythin
 
 The read-only guarantee itself is delivered by making the no-effect claim checkable rather than
 declarable. `effects_of_this_*` is a claim; the observations are: reports byte-identical across
-runs, the installed package unchanged afterwards, no `temporalio` module imported during a real
-`main()` run, and tripwires on the operator run hook, the composition builder and the real command
-runner. A command that submitted, started a consumer or wrote anything fails those regardless of
-what its `effects_of_this_*` section says.
+runs, the installed package unchanged afterwards, no import of and no call to `temporalio` anywhere
+in the package — an AST import scan over every module at any depth, plus an import- and call-shape
+scan of the queue check itself — and tripwires on the operator run hook, the composition builder
+and the real command runner. A command that submitted, started a consumer or wrote anything fails
+those regardless of what its `effects_of_this_*` section says.
+
+Those two `temporalio` scans are STATIC deliberately, and this sentence used to say something
+weaker and untrue: that a real `main()` run was observed not to import the module. It never could
+be. `temporalio` is an optional extra installed in no test environment, CI included, so a runtime
+check of the imported-module set has nothing to observe and cannot fail. The static scans do fail
+when the code moves, which is the only reason to state them.
