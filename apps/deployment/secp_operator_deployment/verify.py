@@ -566,7 +566,6 @@ def build_provenance_report(
     covered_module_count: int = 0,
     expected: object | None = None,
     expected_reason: str | None = None,
-    host_commands_executed: int = 0,
 ) -> dict:
     """Build the deterministic read-only PROVENANCE report from already-resolved inputs.
 
@@ -620,15 +619,24 @@ def build_provenance_report(
             else "manifest_installed_aggregate_mismatch",
         },
         "release_identity": _release_identity_section(expected, expected_reason),
-        # The same split as the other two reports. The old flat ``external_contact_performed:
-        # False`` was, unusually, TRUE here — the provenance path spawns no process, doing only
-        # filesystem reads — but it was the last surviving instance of the shape that was false
-        # elsewhere, and an operator reading all three reports should not find two that measure and
-        # one that merely declares. The count is genuinely zero and is now reported as a count.
+        # NOT called "measured", deliberately. The other two reports COUNT host commands as they
+        # run; this path has no counter because it constructs no command runner at all — it does
+        # filesystem reads and spawns no process. An earlier version took a
+        # ``host_commands_executed`` parameter that NO caller ever supplied, so the zero rendered
+        # under a "measured" label was a signature default that nothing set: structurally the same
+        # hardcoded zero, relocated from a dict literal into a parameter.
+        #
+        # Instrumenting a path that provably never execs would be weight for no information. So the
+        # honest claim is stated instead — the zero rests on the ABSENCE of a runner — and it is
+        # made checkable: ``test_operator_provenance_contact.py`` tripwires the runner construction
+        # seams and requires this command to complete without touching them. If this path ever
+        # grows a host command, that guard fires rather than this report quietly continuing to say
+        # zero.
         "effects_of_this_provenance_check": {
-            "measured_this_invocation": {
-                "host_commands_executed": int(host_commands_executed),
-                "local_host_contact_performed": int(host_commands_executed) > 0,
+            "host_contact": {
+                "host_commands_executed": 0,
+                "local_host_contact_performed": False,
+                "basis": "no_command_runner_is_constructed_on_this_path",
             },
             "structural_invariants": {
                 "worker_constructed": False,

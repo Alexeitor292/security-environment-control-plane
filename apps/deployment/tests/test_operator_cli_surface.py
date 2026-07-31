@@ -187,12 +187,16 @@ def test_main_provenance_against_the_real_installed_tree_stays_bounded(capsys):
         if reason is not None:
             assert classify_reason_code(reason) is not None, f"{section} -> {reason}"
 
-    # Through the REAL production path, so the zero here is measured rather than assumed: the
-    # provenance command does filesystem reads and spawns no process.
+    # This comment used to say the zero was "measured rather than assumed" because the test runs
+    # the real production path. That was wrong: running the real path does not make a value
+    # measured when nothing counts and nothing supplies it. The zero rests on the ABSENCE of a
+    # command runner on this path, which is stated in `basis` and proven by tripwire in
+    # test_operator_provenance_contact.py — not by this assertion.
     assert payload["effects_of_this_provenance_check"] == {
-        "measured_this_invocation": {
+        "host_contact": {
             "host_commands_executed": 0,
             "local_host_contact_performed": False,
+            "basis": "no_command_runner_is_constructed_on_this_path",
         },
         "structural_invariants": {
             "worker_constructed": False,
