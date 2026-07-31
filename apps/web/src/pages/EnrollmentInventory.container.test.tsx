@@ -354,3 +354,125 @@ describe("EnrollmentInventory container - the ordinary paths still work", () => 
     }
   });
 });
+
+describe("EnrollmentInventory container - continuing past an unreadable row", () => {
+  /** The refusal shape read off Stream B's source: `{code, recovery_cursor}`, 409. */
+  const pageIntegrity = (recoveryCursor?: string) =>
+    Object.assign(new Error("page integrity"), {
+      code: "enrollment_page_integrity",
+      status: 409,
+      ...(recoveryCursor === undefined ? {} : { recoveryCursor }),
+    });
+
+  it("offers the continue control only once the server supplies a position", async () => {
+    const view = render();
+    try {
+      click(view.container, "Load enrollments", view);
+      listQueue[0].reject(pageIntegrity("past-the-bad-row"));
+      await settle(view);
+
+      expect(view.container.textContent).toContain(
+        "One enrollment on this page failed its own integrity check",
+      );
+      expect(view.container.textContent).toContain("supplied a position past the failing row");
+      const control = buttons(view.container).find((b) =>
+        (b.textContent ?? "").includes("Continue past the unreadable row"),
+      );
+      expect(control).toBeDefined();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  /**
+   * The older fallback refusal carries no position. A control must NOT appear, and the copy must
+   * admit the dead end — an aim-less button is the thing this surface refused to build.
+   */
+  it("offers no continue control when the refusal carried no position", async () => {
+    const view = render();
+    try {
+      click(view.container, "Load enrollments", view);
+      listQueue[0].reject(
+        Object.assign(new Error("corrupt"), { code: "enrollment_state_corrupt", status: 409 }),
+      );
+      await settle(view);
+
+      expect(view.container.textContent).toContain(
+        "One enrollment on this page failed its own integrity check",
+      );
+      expect(view.container.textContent).toContain("cannot be reached through this list");
+      expect(
+        buttons(view.container).some((b) =>
+          (b.textContent ?? "").includes("Continue past the unreadable row"),
+        ),
+      ).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  /** The cursor is echoed back verbatim as `after`, under the same filter. */
+  it("resumes from the server-supplied position, unmodified", async () => {
+    const view = render();
+    try {
+      click(view.container, "Load enrollments", view);
+      listQueue[0].reject(pageIntegrity("past-the-bad-row"));
+      await settle(view);
+
+      click(view.container, "Continue past the unreadable row", view);
+      expect(listCalls[1]).toMatchObject({
+        after: "past-the-bad-row",
+        state: ["healthy"],
+      });
+
+      listQueue[1].resolve({
+        items: [status({ enrollment_id: id("9") })],
+        next_cursor: null,
+      });
+      await settle(view);
+      expect(rowIds(view.container)).toHaveLength(1);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  /** A success must retire the aim, or a stale control outlives the failure that produced it. */
+  it("withdraws the continue control once a load succeeds", async () => {
+    const view = render();
+    try {
+      click(view.container, "Load enrollments", view);
+      listQueue[0].reject(pageIntegrity("past-the-bad-row"));
+      await settle(view);
+      click(view.container, "Continue past the unreadable row", view);
+      listQueue[1].resolve({ items: [status()], next_cursor: null });
+      await settle(view);
+
+      expect(
+        buttons(view.container).some((b) =>
+          (b.textContent ?? "").includes("Continue past the unreadable row"),
+        ),
+      ).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  /** Changing the filter must retire it too: the position is bound to the filter it came from. */
+  it("withdraws the continue control when the filter changes", async () => {
+    const view = render();
+    try {
+      click(view.container, "Load enrollments", view);
+      listQueue[0].reject(pageIntegrity("past-the-bad-row"));
+      await settle(view);
+      click(view.container, "Waiting on a worker", view);
+
+      expect(
+        buttons(view.container).some((b) =>
+          (b.textContent ?? "").includes("Continue past the unreadable row"),
+        ),
+      ).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  });
+});

@@ -101,6 +101,8 @@ export const ENROLLMENT_ERROR_TEXT: Record<string, string> = {
   // Both are list-route codes. They are in the shared map because the map is what any enrollment
   // call resolves against; the inventory layers a page-specific message over the first of them,
   // where "corrupt" means one row in a page rather than the record you asked for.
+  enrollment_page_integrity:
+    "One enrollment on this page failed its own integrity check, so the whole page was refused rather than that row being left out. Nothing is missing from your organization and nothing was written.",
   enrollment_cursor_invalid:
     "The page position this request carried was not valid, so no page was returned. Load the list again from the first page.",
   enrollment_state_invalid:

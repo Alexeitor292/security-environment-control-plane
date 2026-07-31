@@ -178,6 +178,28 @@ describe("enrollment page I/O boundary", () => {
     }
   });
 
+  /**
+   * The recovery cursor makes "continue past the unreadable row" possible, and that is precisely
+   * where a client could start deciding which records an operator does not see. It must not.
+   *
+   * The rule the whole surface turns on: a SERVER-supplied position is not a client-side skip. So
+   * the cursor may only ever arrive from a refusal and be echoed back — never built here, never
+   * derived from a row, and never used to filter what has already been loaded.
+   */
+  it("never constructs a recovery position, only echoes the one it was given", () => {
+    for (const src of [INVENTORY_CODE, INVENTORY_MODULE_CODE]) {
+      // no encoding of a position
+      expect(src).not.toContain("btoa");
+      expect(src).not.toMatch(/encodeCursor|buildCursor|makeCursor/);
+      // no assembling one out of the fields the server encodes into it
+      expect(src).not.toMatch(/expires_at\s*\+|enrollment_id\s*\+/);
+      // and no dropping rows to work around a bad one
+      expect(src).not.toMatch(/\.filter\(\s*\(?\s*\w+\s*\)?\s*=>\s*\w+\.enrollment_id\s*!==/);
+    }
+    // The one legitimate read is a plain property access off the refusal.
+    expect(INVENTORY_MODULE_CODE).toContain("recoveryCursor");
+  });
+
   // Ordering comes from the controller and the cursor continues it. A client-side sort would put
   // the rows in an order the cursor does not continue, so paging would skip records.
   it("never re-sorts the server-ordered page", () => {

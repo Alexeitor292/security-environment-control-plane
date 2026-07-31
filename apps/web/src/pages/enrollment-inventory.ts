@@ -445,50 +445,112 @@ export const NO_INVITATION_IN_LIST_NOTICE =
 // and only the last of them is an administrator's problem.
 
 /**
- * The code the controller returns when a row in the page could not be projected.
- *
- * It is `enrollment_state_corrupt` — the SAME code a single-record read returns for the record you
- * asked for. On a list it means something materially different: not "the enrollment you opened is
- * corrupt" but "one of the enrollments on this page is, and none of the page can be shown". That is
- * why the inventory layers its own copy over the shared map instead of reusing it.
- *
- * A distinct code, and the failing keyset position, are requested but NOT yet shipped — so this
- * interface deliberately offers no "skip past the bad row" control. It could not aim one.
+ * The distinct code the controller returns when a row in the page could not be projected: "this
+ * page contains a row I cannot render", not "the enrollment you asked for is corrupt". It carries
+ * an opaque `recovery_cursor` positioned AT the failing row and bound to the same state filter, so
+ * `after=<cursor>` steps past it.
  */
-export const PAGE_INTEGRITY_CODE = "enrollment_state_corrupt";
+export const PAGE_INTEGRITY_CODE = "enrollment_page_integrity";
+
+/**
+ * The older, weaker signal for the same class of failure, and still reachable: the list service
+ * falls back to `enrollment_state_corrupt` for a projection failure that escapes the repository's
+ * own page-integrity refusal. It means the same thing to an operator — this page cannot be
+ * shown — but it carries NO recovery cursor.
+ *
+ * Both are recognised so the explanation appears either way. Whether a "continue past" control is
+ * OFFERED is decided separately, by whether a cursor actually arrived: see `recoveryCursorOf`.
+ * Gating the control on the code instead would put a button on screen that cannot aim at anything.
+ */
+export const PAGE_INTEGRITY_FALLBACK_CODE = "enrollment_state_corrupt";
 
 export function isPageIntegrityFailure(code: string | null | undefined): boolean {
-  return code === PAGE_INTEGRITY_CODE;
+  return code === PAGE_INTEGRITY_CODE || code === PAGE_INTEGRITY_FALLBACK_CODE;
+}
+
+/**
+ * The server-supplied position to resume from, or null when the refusal carried none.
+ *
+ * This is deliberately the ONLY thing that unlocks the "continue past" control. The cursor is
+ * opaque and is echoed back verbatim as `after` — never parsed, never constructed. A client that
+ * built its own position would be doing exactly the row-skipping this surface refuses to do; a
+ * server-supplied cursor is a different thing, because the server decided what is skipped.
+ */
+export function recoveryCursorOf(error: unknown): string | null {
+  if (error === null || typeof error !== "object") return null;
+  const cursor = (error as { recoveryCursor?: unknown }).recoveryCursor;
+  return typeof cursor === "string" && cursor !== "" ? cursor : null;
 }
 
 /** The inventory's closed-code copy: the shared map, with the page-scoped meaning layered over it. */
+const PAGE_INTEGRITY_TEXT =
+  "One enrollment on this page failed its own integrity check, so the controller refused the whole page rather than quietly leaving that row out. Nothing is missing from your organization and nothing was written.";
+
 export const INVENTORY_ERROR_TEXT: Record<string, string> = {
   ...ENROLLMENT_ERROR_TEXT,
-  [PAGE_INTEGRITY_CODE]:
-    "One enrollment on this page failed its own integrity check, so the controller refused the whole page rather than quietly leaving that row out. Nothing is missing from your organization and nothing was written.",
+  // Both codes mean the same thing to an operator, so both carry the same copy. They differ only
+  // in whether a recovery position came with them, which is a question about the CONTROL to offer,
+  // not about the text to show.
+  [PAGE_INTEGRITY_CODE]: PAGE_INTEGRITY_TEXT,
+  [PAGE_INTEGRITY_FALLBACK_CODE]: PAGE_INTEGRITY_TEXT,
 };
 
-/** Shown alongside that error, because the operator's next step is not obvious from the code. */
-export const PAGE_INTEGRITY_STEPS: readonly string[] = [
+/**
+ * Shown alongside that error, because the operator's next step is not obvious from the code.
+ *
+ * Two versions, because the honest next step genuinely differs. When the refusal carried a
+ * position the rest of the inventory is one action away; when it did not, it is unreachable
+ * through this list, and saying otherwise would send an operator clicking at nothing.
+ */
+const PAGE_INTEGRITY_SHARED_STEPS: readonly string[] = [
   "The record is preserved, not repaired, and it is not deleted. This needs an administrator.",
   "No row was silently dropped — that is why the whole page refused rather than returning a shorter one.",
-  // The consequence an operator will otherwise discover by paging into a wall. The controller
-  // returns no position to resume from, so there is no way to page past the failing row: every
-  // request that would cross it refuses, and the rows ordered after it cannot be reached from this
-  // view at all. Saying so is the difference between a confusing dead end and a known limitation.
-  "There is no way to page past it from here: the refusal carries no position to resume from, so enrollments ordered after the failing one cannot be reached through this list.",
-  "A different lifecycle filter asks for a different set of rows, and may not include the failing one.",
-  "Every other enrollment is still readable by id on the Worker Enrollment page, including ones this list cannot reach.",
 ];
+
+const PAGE_INTEGRITY_TAIL_STEPS: readonly string[] = [
+  "A different lifecycle filter asks for a different set of rows, and may not include the failing one.",
+  "Every other enrollment is still readable by id on the Worker Enrollment page.",
+];
+
+export function pageIntegritySteps(recoveryCursor: string | null): readonly string[] {
+  if (recoveryCursor === null) {
+    return [
+      ...PAGE_INTEGRITY_SHARED_STEPS,
+      "This refusal carried no position to resume from, so enrollments ordered after the failing one cannot be reached through this list.",
+      ...PAGE_INTEGRITY_TAIL_STEPS,
+    ];
+  }
+  return [
+    ...PAGE_INTEGRITY_SHARED_STEPS,
+    "The controller supplied a position past the failing row, so the rest of the inventory is still reachable — continuing below resumes from immediately after it.",
+    "Continuing does not hide or repair that record. It stays unreadable, and it stays a gap in what you are looking at.",
+    ...PAGE_INTEGRITY_TAIL_STEPS,
+  ];
+}
+
+export const SKIP_PAST_LABEL = "Continue past the unreadable row";
+
+/**
+ * The load that resumes after a page-integrity refusal, framed honestly: the operator is choosing
+ * to see the REST of the inventory, not to make the problem go away.
+ */
+export const SKIP_PAST_NOTICE =
+  "This resumes from the position the controller supplied, immediately after the row it could not render. That row is skipped by the controller, not by this browser — nothing here decides which records you do not see — and it stays broken until an administrator looks at it.";
 
 // --------------------------------------------------------------------------- listed vs readable
 //
-// A row can be LISTED and still refuse its own detail. The list projects each row; the
-// single-enrollment read additionally verifies the append-only history chain. A record whose chain
-// is broken therefore appears in the page and answers 409 `enrollment_history_inconsistent` when
-// opened. That is a backend inconsistency, not something this interface can fix or should hide —
-// but an operator who clicks a row they can see and gets "not found" would reasonably conclude the
-// record had just been deleted, which is the wrong conclusion entirely.
+// A row that is listed and still refuses its own detail.
+//
+// This WAS reachable: the list projected each row while the single-enrollment read additionally
+// verified the append-only history chain, so a record with a broken chain appeared in the page and
+// answered 409 when opened. The controller now runs that verification per row on the list path too,
+// so it should no longer occur — a page containing such a row refuses as a page.
+//
+// The handling is kept deliberately. It costs a copy string and a predicate, it is the correct
+// thing to render if the two paths ever diverge again, and the alternative failure is silent and
+// bad: an operator who clicks a row they can see and reads "not found" concludes the record was
+// just deleted, which is the wrong conclusion entirely. Unreachable-by-construction is a reason to
+// stop expecting a state, not a reason to handle it dishonestly.
 
 /**
  * Closed-code copy for reading ONE enrollment that came from the list.

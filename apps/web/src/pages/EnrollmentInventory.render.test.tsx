@@ -65,6 +65,8 @@ function html(over: Partial<EnrollmentInventoryViewProps> = {}): string {
     loading: false,
     firstLoad: false,
     listError: null,
+    recoveryCursor: null,
+    onContinuePastFailure: () => {},
     onReload: () => {},
     onLoadMore: () => {},
     selectedId: null,

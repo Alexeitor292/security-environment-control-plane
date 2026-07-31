@@ -254,6 +254,8 @@ function InventoryHarness() {
     loading,
     firstLoad: false,
     listError: null,
+    recoveryCursor: null,
+    onContinuePastFailure: () => {},
     onReload: () => {
       setLoading(true);
       window.setTimeout(() => setLoading(false), 800);

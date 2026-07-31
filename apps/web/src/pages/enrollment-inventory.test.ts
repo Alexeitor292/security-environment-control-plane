@@ -16,7 +16,8 @@ import {
   LISTED_BUT_UNREADABLE_NOTICE,
   MORE_MAY_REMAIN_NOTICE,
   PAGE_INTEGRITY_CODE,
-  PAGE_INTEGRITY_STEPS,
+  PAGE_INTEGRITY_FALLBACK_CODE,
+  SKIP_PAST_NOTICE,
   INVENTORY_SCOPES,
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
@@ -40,6 +41,8 @@ import {
   isListedButUnreadable,
   isPageIntegrityFailure,
   pageDelta,
+  pageIntegritySteps,
+  recoveryCursorOf,
   scopeStates,
   type InventoryPage,
   type InventoryScope,
@@ -422,15 +425,34 @@ describe("a page refused because one row cannot be projected", () => {
    * record makes a whole page unreadable, and the interface has to distinguish that from the two
    * other ways a table ends up empty.
    */
-  it("recognises the code the controller actually returns", () => {
-    // Read off the shipped service: a projection failure raises the same state_corrupt code a
-    // single-record read does. If that ever becomes a distinct code, this is the one place to change.
-    expect(PAGE_INTEGRITY_CODE).toBe("enrollment_state_corrupt");
+  it("recognises the distinct code the controller now returns, and the older fallback", () => {
+    // Read off the shipped service, not relayed: enums.py declares
+    // page_integrity = "enrollment_page_integrity" and errors.py maps it to 409. The list service
+    // still falls back to state_corrupt for a projection failure that escapes the repository
+    // refusal, so both mean "this page cannot be shown" to an operator.
+    expect(PAGE_INTEGRITY_CODE).toBe("enrollment_page_integrity");
+    expect(PAGE_INTEGRITY_FALLBACK_CODE).toBe("enrollment_state_corrupt");
     expect(isPageIntegrityFailure(PAGE_INTEGRITY_CODE)).toBe(true);
+    expect(isPageIntegrityFailure(PAGE_INTEGRITY_FALLBACK_CODE)).toBe(true);
     expect(isPageIntegrityFailure("api_unreachable")).toBe(false);
     expect(isPageIntegrityFailure("enrollment_forbidden")).toBe(false);
     expect(isPageIntegrityFailure(null)).toBe(false);
     expect(isPageIntegrityFailure(undefined)).toBe(false);
+  });
+
+  /**
+   * The control is unlocked by the CURSOR, never by the code. The distinct refusal carries a
+   * position; the fallback does not. Gating on the code would put a button on screen that cannot
+   * aim at anything, which is the exact failure the aim-less control was refused for.
+   */
+  it("reads the recovery position only when the server actually supplied one", () => {
+    expect(recoveryCursorOf({ code: PAGE_INTEGRITY_CODE, recoveryCursor: "abc" })).toBe("abc");
+    expect(recoveryCursorOf({ code: PAGE_INTEGRITY_FALLBACK_CODE })).toBeNull();
+    expect(recoveryCursorOf({ recoveryCursor: "" })).toBeNull();
+    expect(recoveryCursorOf({ recoveryCursor: 42 })).toBeNull();
+    expect(recoveryCursorOf(null)).toBeNull();
+    expect(recoveryCursorOf(undefined)).toBeNull();
+    expect(recoveryCursorOf("not an error")).toBeNull();
   });
 
   /** The shared map says "the enrollment you asked for"; on a list that would be wrong. */
@@ -464,14 +486,21 @@ describe("a page refused because one row cannot be projected", () => {
   });
 
   it("gives the operator steps that are true today", () => {
-    expect(PAGE_INTEGRITY_STEPS.length).toBeGreaterThan(2);
-    const all = PAGE_INTEGRITY_STEPS.join(" ");
-    expect(all).toContain("preserved, not repaired");
-    expect(all).toContain("No row was silently dropped");
-    expect(all).toContain("different lifecycle filter");
-    // No step may promise a skip-past-the-bad-row control: the failing keyset position is not in
-    // the error body, so this interface could not aim one.
-    expect(all).not.toMatch(/skip past|continue past|advance past/i);
+    for (const cursor of [null, "opaque-cursor"]) {
+      const steps = pageIntegritySteps(cursor);
+      expect(steps.length, String(cursor)).toBeGreaterThan(2);
+      const all = steps.join(" ");
+      expect(all, String(cursor)).toContain("preserved, not repaired");
+      expect(all, String(cursor)).toContain("No row was silently dropped");
+      expect(all, String(cursor)).toContain("different lifecycle filter");
+    }
+    // The version WITHOUT a supplied position must promise no way past, because there is none.
+    // This is the half of the original assertion that still holds: an aim-less control was refused
+    // then and is still refused now. What changed is that the server can now supply the aim — a
+    // server-supplied cursor is not a client deciding which rows to skip.
+    expect(pageIntegritySteps(null).join(" ")).not.toMatch(
+      /skip past|continue past|advance past/i,
+    );
   });
 });
 
@@ -711,20 +740,41 @@ describe("a row that is listed but whose detail cannot be read", () => {
   });
 });
 
-describe("the page-integrity refusal admits it is a dead end", () => {
+describe("the page-integrity refusal says what is actually true of it", () => {
   /**
-   * The controller returns no position to resume from, so rows ordered after the failing one are
-   * unreachable through this list. An operator who is not told that will page into a wall and
-   * conclude the inventory is broken rather than that one record is.
+   * The honest next step genuinely differs by whether a position came back, so the copy does too.
+   * Telling an operator to continue when nothing can aim, or telling them it is a dead end when the
+   * controller handed over a position, are both wrong in the same way.
    */
-  it("says there is no way to page past the failing row", () => {
-    const all = PAGE_INTEGRITY_STEPS.join(" ");
-    expect(all).toContain("no way to page past it");
-    expect(all).toContain("carries no position to resume from");
-    expect(all).toContain("cannot be reached through this list");
+  it("admits a dead end only when no position was supplied", () => {
+    const stuck = pageIntegritySteps(null).join(" ");
+    expect(stuck).toContain("carried no position to resume from");
+    expect(stuck).toContain("cannot be reached through this list");
+    expect(stuck).not.toContain("still reachable");
   });
 
-  it("points at the read that still works", () => {
-    expect(PAGE_INTEGRITY_STEPS.join(" ")).toContain("still readable by id");
+  it("says the rest is reachable when a position was supplied", () => {
+    const recoverable = pageIntegritySteps("opaque-cursor").join(" ");
+    expect(recoverable).toContain("supplied a position past the failing row");
+    expect(recoverable).toContain("still reachable");
+    expect(recoverable).not.toContain("cannot be reached through this list");
+  });
+
+  /** Continuing must never read as fixing, hiding, or dismissing the broken record. */
+  it("never lets continuing read as a repair", () => {
+    const recoverable = pageIntegritySteps("opaque-cursor").join(" ");
+    expect(recoverable).toContain("does not hide or repair");
+    expect(recoverable).toContain("stays a gap in what you are looking at");
+    expect(SKIP_PAST_NOTICE).toContain("skipped by the controller, not by this browser");
+    expect(SKIP_PAST_NOTICE).toContain("stays broken until an administrator");
+  });
+
+  it("keeps the shared facts in both versions, and points at the read that still works", () => {
+    for (const cursor of [null, "opaque-cursor"]) {
+      const all = pageIntegritySteps(cursor).join(" ");
+      expect(all, String(cursor)).toContain("preserved, not repaired");
+      expect(all, String(cursor)).toContain("No row was silently dropped");
+      expect(all, String(cursor)).toContain("still readable by id");
+    }
   });
 });

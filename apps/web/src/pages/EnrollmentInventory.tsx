@@ -40,7 +40,6 @@ import {
   NO_INVITATION_IN_LIST_NOTICE,
   ORDERING_NOTICE,
   ORG_SCOPE_NOTICE,
-  PAGE_INTEGRITY_STEPS,
   PARTIAL_COUNT_NOTICE,
   RECOVERY_NOT_RESUMABLE_NOTICE,
   SCOPE_DESCRIPTIONS,
@@ -48,6 +47,8 @@ import {
   SELECTION_NOTICE,
   SITE_LABEL_NOTICE,
   SITE_UNAVAILABLE_TEXT,
+  SKIP_PAST_LABEL,
+  SKIP_PAST_NOTICE,
   STALENESS_NOTICE,
   SWEEP_NOTICE,
   appendPage,
@@ -60,6 +61,8 @@ import {
   isPageIntegrityFailure,
   isListedButUnreadable,
   canContinue,
+  pageIntegritySteps,
+  recoveryCursorOf,
   listGate,
   loadMoreGate,
   replaceRow,
@@ -99,8 +102,17 @@ export interface EnrollmentInventoryViewProps {
   /** True only for the very first load of a scope, so a refresh never blanks a populated table. */
   firstLoad: boolean;
   listError: ClosedCodeCopy | null;
+  /**
+   * The opaque position the controller supplied with a page-integrity refusal, or null when it
+   * supplied none. It is the ONLY thing that unlocks the continue-past control — a refusal without
+   * one is a genuine dead end for this list, and offering a button that cannot aim at anything
+   * would be worse than saying so.
+   */
+  recoveryCursor: string | null;
   onReload: () => void;
   onLoadMore: () => void;
+  /** Resume from the server-supplied position, immediately after the row it could not render. */
+  onContinuePastFailure: () => void;
 
   selectedId: string | null;
   onSelect: (enrollmentId: string) => void;
@@ -146,8 +158,10 @@ export function EnrollmentInventoryView({
   loading,
   firstLoad,
   listError,
+  recoveryCursor,
   onReload,
   onLoadMore,
+  onContinuePastFailure,
   selectedId,
   onSelect,
   onClearSelection,
@@ -309,11 +323,27 @@ export function EnrollmentInventoryView({
                       This page contains a record this controller cannot project
                     </strong>
                     <ul className="wenr-recovery__steps">
-                      {PAGE_INTEGRITY_STEPS.map((step) => (
+                      {pageIntegritySteps(recoveryCursor).map((step) => (
                         <li key={step}>{step}</li>
                       ))}
                     </ul>
                   </SafetyNotice>
+                  {/* Offered on the CURSOR, not on the code: the older fallback refusal carries
+                      no position, and a control that cannot aim is worse than its absence. */}
+                  {recoveryCursor !== null && (
+                    <>
+                      <p className="wenr-reason">{SKIP_PAST_NOTICE}</p>
+                      <div className="wenr-actions">
+                        <CyberButton
+                          variant="secondary"
+                          disabled={loading}
+                          onClick={onContinuePastFailure}
+                        >
+                          {loading ? "Loading…" : SKIP_PAST_LABEL}
+                        </CyberButton>
+                      </div>
+                    </>
+                  )}
                 </section>
               )}
             </>
@@ -541,6 +571,9 @@ export function EnrollmentInventory() {
    * no rows, no cursor, no announcement, and no error banner for a filter that is gone.
    */
   const listGeneration = useRef(0);
+  /** The position the last page-integrity refusal supplied, if any. Cleared whenever a request
+   *  succeeds or the filter changes, so a stale aim can never outlive the failure that produced it. */
+  const [recoveryCursor, setRecoveryCursor] = useState<string | null>(null);
   /** In-flight state for the CURRENT filter only, so a superseded request cannot keep the new
    *  filter's controls disabled while it drains. */
   const [listing, setListing] = useState(false);
@@ -591,11 +624,14 @@ export function EnrollmentInventory() {
         if (!current()) return; // superseded: this filter is no longer on screen
         const next = appendPage(from, response, forScope);
         setPage(next);
+        setRecoveryCursor(null); // a success clears any aim left by an earlier refusal
         announce(next, pageDelta(from, next, response));
       } catch (error) {
         // A superseded request's failure is not the operator's problem either — surfacing it would
         // put an error banner over a filter they have already moved on from.
         if (!current()) return;
+        // Read straight off the refusal and echoed back verbatim; never parsed, never constructed.
+        setRecoveryCursor(recoveryCursorOf(error));
         throw error;
       } finally {
         if (current()) setListing(false);
@@ -612,6 +648,7 @@ export function EnrollmentInventory() {
     listGeneration.current += 1;
     setListing(false);
     listAction.clearError();
+    setRecoveryCursor(null);
     setScope(next);
     setPage(EMPTY_PAGE);
     setSelectedId(null);
@@ -667,12 +704,19 @@ export function EnrollmentInventory() {
       loading={listing}
       firstLoad={page.pages === 0}
       listError={listAction.error}
+      recoveryCursor={recoveryCursor}
       onReload={() => load(EMPTY_PAGE, undefined, scope)}
       onLoadMore={() => {
         // Both guards restated at the call site: continue only a page built under THIS filter, and
         // only when the server offered a continuation for it.
         if (!canContinue(page, scope)) return;
         load(page, page.cursor as string, scope);
+      }}
+      onContinuePastFailure={() => {
+        if (recoveryCursor === null) return;
+        // Resumes onto whatever is already loaded, under the SAME filter — the recovery cursor is
+        // filter-bound exactly like an ordinary one, so it cannot cross a filter either.
+        load(page, recoveryCursor, scope);
       }}
       selectedId={selectedId}
       onSelect={setSelectedId}

@@ -80,6 +80,8 @@ function props(over: Partial<EnrollmentInventoryViewProps> = {}): EnrollmentInve
     loading: false,
     firstLoad: false,
     listError: null,
+    recoveryCursor: null,
+    onContinuePastFailure: () => {},
     onReload: () => {},
     onLoadMore: () => {},
     selectedId: null,
@@ -120,6 +122,14 @@ const STATES: ReadonlyArray<readonly [string, Partial<EnrollmentInventoryViewPro
   [
     "page refused for integrity",
     { listError: { code: "enrollment_state_corrupt", text: "" }, page: EMPTY_PAGE },
+  ],
+  [
+    "page refused for integrity, with a recovery position",
+    {
+      listError: { code: "enrollment_page_integrity", text: "" },
+      recoveryCursor: "opaque-recovery-cursor",
+      page: EMPTY_PAGE,
+    },
   ],
   [
     "cursor refused",

@@ -142,11 +142,27 @@ export class ApiClientError extends Error {
   code: string;
   details?: string[];
   status: number;
-  constructor(status: number, code: string, message: string, details?: string[]) {
+  /**
+   * An opaque keyset cursor the server supplies with a refusal that a caller CAN step past — today
+   * only `enrollment_page_integrity`, where a row that cannot be projected fails the whole page.
+   *
+   * It is the one code-owned field the redacted error handler serializes besides the code itself,
+   * and it is what turns "this page is unreadable" from a dead end into a recoverable position.
+   * Opaque: pass it straight back, never parse or construct one.
+   */
+  recoveryCursor?: string;
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    details?: string[],
+    recoveryCursor?: string,
+  ) {
     super(message);
     this.status = status;
     this.code = code;
     this.details = details;
+    this.recoveryCursor = recoveryCursor;
   }
 }
 
@@ -237,7 +253,14 @@ async function requestWithResponseMetadata<T>(
   // fresh interactive login. The failed request is NEVER auto-replayed; a 403 is left untouched.
   if (res.status === 401) notifyUnauthorized();
   const text = await res.text();
-  let payload: { error?: { code?: string; message?: string; details?: string[] } } | null = null;
+  let payload: {
+    error?: {
+      code?: string;
+      message?: string;
+      details?: string[];
+      recovery_cursor?: string;
+    };
+  } | null = null;
   try {
     payload = text ? JSON.parse(text) : null;
   } catch {
@@ -248,11 +271,19 @@ async function requestWithResponseMetadata<T>(
   }
   if (!res.ok) {
     const err = payload?.error ?? {};
+    // Only a non-empty string is carried forward: a malformed or absent cursor must leave the
+    // caller with no aim rather than an unusable one, because the UI decides whether to offer a
+    // "continue past" control on whether a cursor is PRESENT, not on which code came back.
+    const cursor =
+      typeof err.recovery_cursor === "string" && err.recovery_cursor !== ""
+        ? err.recovery_cursor
+        : undefined;
     throw new ApiClientError(
       res.status,
       err.code ?? "error",
       err.message ?? res.statusText,
       err.details,
+      cursor,
     );
   }
   return { data: payload as T, status: res.status };
