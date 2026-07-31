@@ -44,6 +44,7 @@ from secp_management.operator_token_revoke import (
     OUTCOME_NOT_REQUIRED,
     OUTCOME_REVOKED,
     OUTCOME_UNAVAILABLE,
+    OUTCOME_UNREADABLE,
     OUTCOME_UNSUPPORTED,
     RevocationOutcome,
 )
@@ -221,6 +222,25 @@ def _deps(client=None, store=None, locator=None, **overrides):
     return deps, waits, prompts
 
 
+def _assert_refusal(report, command, reason, *, remedy_expected=None):
+    """A refusal report carries the command, the reason, and AT MOST a code-owned remedy.
+
+    This preserves the strength of the original exact-dict assertions — nothing unexpected may
+    appear in a refusal — while allowing the one field deliberately added. `remedy_expected=True`
+    additionally requires the remedy to be present and to name an action.
+    """
+    assert report["command"] == command
+    assert report["reason_code"] == reason
+    assert set(report) <= {"command", "reason_code", "remedy"}, (
+        f"unexpected fields in a refusal report: "
+        f"{set(report) - {'command', 'reason_code', 'remedy'}}"
+    )
+    if remedy_expected:
+        assert report.get("remedy"), f"{reason} should tell the operator what to do"
+        # a remedy is code-owned prose, never a value from the environment or the provider
+        assert ORIGIN not in report["remedy"] and ISSUER not in report["remedy"]
+
+
 # --- exit-code alignment --------------------------------------------------------------------------
 
 
@@ -276,10 +296,9 @@ def test_login_runs_the_whole_grant_then_refuses_to_persist():
     assert store.store_attempts == 1, "the grant must actually reach the persist step"
     assert prompts, "the operator must have been shown the verification prompt"
     assert code == EXIT_AUTH_UNAVAILABLE
-    assert report == {
-        "command": "auth login",
-        "reason_code": "secpctl_credential_store_unavailable",
-    }
+    _assert_refusal(
+        report, "auth login", "secpctl_credential_store_unavailable", remedy_expected=True
+    )
 
 
 def test_the_refusal_report_carries_no_token_device_code_or_endpoint():
@@ -408,7 +427,7 @@ def test_login_still_refuses_with_exit_3_when_the_secret_service_is_unusable(mod
     code, report = auth_login(deps, gate=WRITE)
 
     assert code == EXIT_AUTH_UNAVAILABLE == 3
-    assert report == {"command": "auth login", "reason_code": reason}
+    _assert_refusal(report, "auth login", reason)
     # the grant really ran and really reached the persist step before refusing
     assert client.calls == ["authority", "discover", "device_authorization", "token", "jwks"]
     assert prompts
@@ -430,7 +449,7 @@ def test_a_locked_keyring_tells_the_operator_to_unlock_rather_than_nothing(monke
     ):
         code, report = result
         assert code == EXIT_AUTH_UNAVAILABLE
-        assert report == {"command": command, "reason_code": "secpctl_credential_store_locked"}
+        _assert_refusal(report, command, "secpctl_credential_store_locked", remedy_expected=True)
     # and `auth status` names the real backend rather than reporting a sealed one
     status = auth_status(deps)[1]
     assert status["credential_backend"] == "secret_service"
@@ -496,10 +515,7 @@ def test_an_operator_interrupt_is_a_bounded_refusal_not_a_traceback():
     store = _RecordingStore()
     deps, _waits, _prompts = _deps(client=_Interrupting(), store=store)
     code, report = auth_login(deps, gate=WRITE)
-    assert report == {
-        "command": "auth login",
-        "reason_code": "secpctl_device_authorization_cancelled",
-    }
+    _assert_refusal(report, "auth login", "secpctl_device_authorization_cancelled")
     assert code == EXIT_REFUSED
     assert store.store_attempts == 0
 
@@ -777,7 +793,7 @@ def test_refresh_refuses_when_there_is_nothing_to_renew():
     deps, _waits, _prompts = _deps(store=_working_store())
     code, report = auth_refresh(deps, gate=WRITE)
     assert code == EXIT_AUTH_UNAVAILABLE
-    assert report == {"command": "auth refresh", "reason_code": "secpctl_credential_absent"}
+    _assert_refusal(report, "auth refresh", "secpctl_credential_absent")
 
 
 def test_refresh_dry_run_reports_renewal_need_without_starting_a_grant():
@@ -822,10 +838,7 @@ def test_refresh_refuses_to_switch_the_stored_identity_to_a_different_operator()
     fresh, _w, _p = _deps(client=other, store=_working_store(keystore))
     code, report = auth_refresh(fresh, gate=WRITE)
     assert code == EXIT_REFUSED
-    assert report == {
-        "command": "auth refresh",
-        "reason_code": "secpctl_credential_subject_changed",
-    }
+    _assert_refusal(report, "auth refresh", "secpctl_credential_subject_changed")
     assert keystore.entries[("secp-secpctl-operator", ORIGIN)] == original
 
 
@@ -1052,3 +1065,120 @@ def test_a_rendered_report_still_carries_no_token_or_origin():
     rendered = _render_human(code, report)
     assert "eyJ" not in rendered
     assert ORIGIN not in rendered and ISSUER not in rendered
+
+
+# --- an UNREADABLE credential is not "nothing to revoke" ------------------------------------------
+#
+# `_revoke_stored_token` mapped every store refusal to `revocation_not_required()`, whose
+# `token_still_live` is False. That is right for absent/expired -- no live token exists -- and WRONG
+# for a corrupt record or a foreign-account entry, where a perfectly live token can be sitting in
+# the keystore, `delete()` removes it, and the report affirmatively states the token is not live.
+# A false negative on the one fact the revocation path exists to establish.
+
+
+class _UnreadableStore(SealedOperatorCredentialStore):
+    """A store whose credential cannot be READ, but which still deletes an entry."""
+
+    def __init__(self, reason):
+        self._reason = reason
+        self.deleted = 0
+
+    def for_account(self, account):
+        return self
+
+    def access_token(self):
+        raise ManagementError(self._reason)
+
+    def describe(self):
+        from secp_management.operator_credential_store import StoredCredentialStatus
+
+        return StoredCredentialStatus(backend="fake", available=True, has_credential=True)
+
+    def delete(self):
+        self.deleted += 1
+        return True
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "secpctl_credential_record_invalid",
+        "secpctl_credential_account_mismatch",
+        "secpctl_credential_store_locked",
+        "secpctl_credential_backend_failed",
+    ],
+)
+def test_an_unreadable_credential_is_never_reported_as_nothing_to_revoke(reason):
+    store = _UnreadableStore(reason)
+    deps, _w, _p = _deps(store=store)
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert report["revocation_outcome"] == OUTCOME_UNREADABLE
+    assert report["token_still_live"] is True, (
+        "a credential that could not be READ may still be live at the provider; reporting it as "
+        "'nothing to revoke' is a false negative"
+    )
+    assert report["revoked"] is False
+    assert code != EXIT_OK
+    # the entry is still removed locally
+    assert store.deleted == 1 and report["removed"] is True
+
+
+@pytest.mark.parametrize("reason", ["secpctl_credential_absent", "secpctl_credential_expired"])
+def test_absent_or_expired_really_is_nothing_to_revoke(reason):
+    """The other side of the split: these two genuinely mean no live token exists, so the logout is
+    complete and exits 0."""
+    store = _UnreadableStore(reason)
+    deps, _w, _p = _deps(store=store)
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert report["revocation_outcome"] == OUTCOME_NOT_REQUIRED
+    assert report["token_still_live"] is False
+    assert code == EXIT_OK
+
+
+# --- a refusal after interactive approval must name the remedy ------------------------------------
+#
+# `MAX_SECRET_BYTES` is a real Windows limit (CRED_MAX_CREDENTIAL_BLOB_SIZE) and is correct, but a
+# Keycloak token carrying realm/resource role claims can exceed it. The grant completes, the
+# operator approves interactively, and only THEN does the persist refuse -- so a bare reason code
+# strands them with no idea what to do. The size is not knowable before approval (the token does
+# not exist until the operator approves), so the remedy is the recoverable part.
+
+
+class _TooLargeStore(SealedOperatorCredentialStore):
+    def store(self, token, *, expires_at_epoch, subject_fingerprint=""):
+        raise ManagementError("secpctl_credential_too_large")
+
+
+def test_an_oversized_token_refusal_names_the_remedy():
+    deps, _w, prompts = _deps(store=_TooLargeStore())
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    assert report["reason_code"] == "secpctl_credential_too_large"
+    assert prompts, "this refusal is only reachable AFTER the operator approved interactively"
+    remedy = report.get("remedy", "")
+    assert remedy, "a post-approval refusal with no remedy strands the operator"
+    assert "roles" in remedy, "the remedy must name the actual fix (the roles client scope)"
+
+
+def test_a_remedy_is_code_owned_and_leaks_nothing():
+    """Remedies are fixed strings keyed by bounded reason code — never built from the environment,
+    the provider, or the failure itself."""
+    from secp_management.auth_cli import _REMEDY_BY_REASON
+
+    for reason, remedy in _REMEDY_BY_REASON.items():
+        assert reason.startswith("secpctl_")
+        assert ORIGIN not in remedy and ISSUER not in remedy
+        assert "eyJ" not in remedy
+
+
+def test_remedies_are_rendered_to_the_operator():
+    """A remedy in the report is useless if the human renderer drops it — the exact failure mode
+    that hid `token_still_live`."""
+    from secp_management.cli import _render_human
+
+    deps, _w, _p = _deps(store=_TooLargeStore())
+    code, report = auth_login(deps, gate=WRITE)
+    assert "remedy=" in _render_human(code, report)

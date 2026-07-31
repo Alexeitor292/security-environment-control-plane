@@ -172,3 +172,22 @@ def test_only_the_browser_client_enables_the_standard_flow():
     for client in _realm()["clients"]:
         if client.get("standardFlowEnabled") is True:
             assert client["clientId"] == "secp-web"
+
+
+def test_the_cli_client_drops_the_roles_scope_so_tokens_fit_an_os_keystore():
+    """A SIZE requirement, not a policy one, and easy to miss because everything works until it
+    does not. The `roles` client scope adds `realm_access`/`resource_access` claims; on a deployment
+    with many roles the issued token can exceed CRED_MAX_CREDENTIAL_BLOB_SIZE (2560 bytes, applied
+    on every platform), and `secpctl auth login` then refuses with `secpctl_credential_too_large`
+    AFTER the operator has already approved interactively.
+
+    secpctl needs no role claims: the database is the sole authority for organization, role and
+    permission, and a token claim never determines them.
+    """
+    client = _client(_realm(), "secp-cli")
+    scopes = client.get("defaultClientScopes")
+    assert scopes is not None, "secp-cli must pin its default client scopes explicitly"
+    assert "roles" not in scopes, (
+        "the `roles` scope inflates the access token past the credential-store record bound"
+    )
+    assert client.get("optionalClientScopes") == []

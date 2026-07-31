@@ -67,6 +67,7 @@ from secp_management.operator_device_auth import (
 from secp_management.operator_token_revoke import (
     OUTCOME_UNAVAILABLE,
     RevocationOutcome,
+    revocation_credential_unreadable,
     revocation_not_required,
 )
 from secp_management.operator_token_verify import jwks_by_kid, verify_operator_token
@@ -126,6 +127,7 @@ _EXIT_BY_REASON: dict[str, int] = {
     "secpctl_revocation_token_invalid": EXIT_MALFORMED,
     "secpctl_revocation_request_invalid": EXIT_MALFORMED,
     "secpctl_revocation_response_invalid": EXIT_MALFORMED,
+    "secpctl_revocation_credential_unreadable": EXIT_MALFORMED,
     # --- controller / provider reachability ---
     "secpctl_controller_locator_unavailable": EXIT_CONTROLLER_UNAVAILABLE,
     "secpctl_controller_locator_invalid": EXIT_CONTROLLER_UNAVAILABLE,
@@ -143,12 +145,65 @@ _EXIT_BY_REASON: dict[str, int] = {
 }
 
 
+#: Store refusals that mean there is genuinely NO LIVE credential — nothing was stored, or what was
+#: stored has already expired and is therefore already unusable. EVERY other store refusal means the
+#: credential could not be READ, which is a different fact: a live token may still be sitting there.
+#: Keeping this set explicit (rather than treating "any refusal" as "nothing to revoke") is what
+#: stops ``auth logout`` reporting ``token_still_live: false`` over a live, un-revoked credential.
+_NOTHING_LIVE_TO_REVOKE = frozenset(
+    {
+        "secpctl_credential_absent",
+        "secpctl_credential_expired",
+    }
+)
+
+#: Stable, secret-free remedies for the refusals an operator can actually DO something about. A
+#: bounded reason code says what failed; without this it never says what to do next — and these are
+#: reached after an interactive approval, where "exit 3" alone strands the operator.
+_REMEDY_BY_REASON: dict[str, str] = {
+    "secpctl_credential_too_large": (
+        "the issued token is larger than an OS keystore record can hold; disable the 'roles' "
+        "client scope on the secp-cli client (or trim realm/resource role claims) and retry"
+    ),
+    "secpctl_credential_store_unavailable": (
+        "no OS keystore is reachable; enable one (Windows Credential Manager, macOS Keychain, or a "
+        "freedesktop Secret Service) and retry — secpctl will not store a token anywhere else"
+    ),
+    "secpctl_credential_store_locked": ("the OS keyring is locked; unlock it and retry"),
+    "secpctl_revocation_endpoint_absent": (
+        "the identity provider advertises no RFC 7009 revocation endpoint; this token stays valid "
+        "until it expires and cannot be revoked from here"
+    ),
+    "secpctl_credential_record_invalid": (
+        "the stored credential could not be read and was removed; run 'secpctl auth login' again"
+    ),
+    "secpctl_credential_account_mismatch": (
+        "the keystore entry belongs to a different controller and was not used; run "
+        "'secpctl auth login' again for this controller"
+    ),
+}
+
+
 def exit_for(reason_code: str) -> int:
     return _EXIT_BY_REASON.get(reason_code, EXIT_REFUSED)
 
 
+def _with_remedy(report: dict, reason_code: str) -> dict:
+    """Attach the actionable remedy for ``reason_code``, when one exists.
+
+    The remedy is a fixed, code-owned string keyed by the bounded reason code — it never embeds a
+    value from the environment, the provider, or the failure itself, so it cannot leak.
+    """
+    remedy = _REMEDY_BY_REASON.get(reason_code)
+    if remedy:
+        report["remedy"] = remedy
+    return report
+
+
 def _refused(command: str, reason_code: str) -> tuple[int, dict]:
-    return exit_for(reason_code), {"command": command, "reason_code": reason_code}
+    return exit_for(reason_code), _with_remedy(
+        {"command": command, "reason_code": reason_code}, reason_code
+    )
 
 
 def present_device_prompt(prompt: dict) -> None:
@@ -490,11 +545,17 @@ def _revoke_stored_token(deps: AuthCliDeps, selection: _Selection) -> Revocation
     """
     try:
         token = selection.store.access_token()
-    except ManagementError:
-        # Absent, expired, or an unreadable store: nothing live to revoke, and no request to make.
-        # An unreadable store is the conservative case — but it also means there is no token to put
-        # in a revocation request, so there is genuinely nothing this step can do.
-        return revocation_not_required()
+    except ManagementError as exc:
+        if exc.reason_code in _NOTHING_LIVE_TO_REVOKE:
+            # Genuinely nothing to revoke: no credential was stored, or the stored one had already
+            # expired and is therefore already unusable.
+            return revocation_not_required()
+        # Everything else means the credential could not be READ, not that none exists — a corrupt
+        # record, an entry minted for a different controller, a locked or unreachable keystore. A
+        # perfectly live token may be sitting there, and `delete()` is about to remove it without it
+        # ever being revoked. Reporting "nothing to revoke" here would be a FALSE NEGATIVE on the
+        # one fact this path exists to establish.
+        return revocation_credential_unreadable(exc.reason_code)
     try:
         client, _authority, endpoints = _discover(deps, selection.locator)
         return client.revoke_token(endpoints, token.revocation_request_value())
@@ -555,7 +616,7 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
         # outcome, not a cosmetic one. The specific reason keeps its mapped exit category so a
         # script can tell "provider unreachable" from "provider refused".
         report["reason_code"] = outcome.reason_code or "secpctl_revocation_refused"
-        return exit_for(report["reason_code"]), report
+        return exit_for(report["reason_code"]), _with_remedy(report, report["reason_code"])
     except ManagementError as exc:
         return _refused(command, exc.reason_code)
 

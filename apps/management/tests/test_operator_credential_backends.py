@@ -541,12 +541,36 @@ _EXPECTED_BINDING = {
     "linux": (SecretServiceBinding, BACKEND_SECRET_SERVICE),
 }
 
-#: Backends whose own logic is driven against a documented substitute IN THIS FILE — macOS through
-#: `_FakeFrameworks` (the SecItem contract) and Linux through `_FakeSecretStorage` (the
-#: SecretStorage 3.x contract). Windows is deliberately absent: it has no stand-in because it is
-#: exercised LIVE on the developer host, and on any other host it honestly drops to structural-only
-#: rather than being given a substitute that would inflate its apparent assurance.
-_STAND_IN_BACKENDS = frozenset({BACKEND_MACOS_KEYCHAIN, BACKEND_SECRET_SERVICE})
+#: Each backend's substitute, named by the module-level objects that MUST exist for it to be
+#: exercised. Windows is deliberately absent: it has no stand-in because it is exercised LIVE on the
+#: developer host, and on any other host it honestly drops to structural-only rather than being
+#: given a substitute that would inflate its apparent assurance.
+#:
+#: The mapping is to NAMES, not to a hardcoded answer, because a hardcoded set decays silently: the
+#: substitute apparatus could be deleted wholesale and the ledger would go on reporting `stand_in`
+#: for a backend nothing exercised — recording it as covered when it had become structural-only.
+#: That is this ledger's own failure mode, one level up, so the answer is DERIVED from what is
+#: actually present rather than declared.
+_STAND_IN_APPARATUS = {
+    BACKEND_MACOS_KEYCHAIN: ("_FakeFrameworks", "_FakeSecurity", "_keychain"),
+    BACKEND_SECRET_SERVICE: ("_FakeSecretStorage", "_FakeCollection", "_FakeItem"),
+}
+
+
+def _stand_in_backends() -> frozenset[str]:
+    """Backends whose substitute apparatus is ACTUALLY PRESENT in this module.
+
+    Computed at call time from this module's own namespace. Delete the macOS stand-in classes and
+    macOS drops to ``structural_only`` — which is the truth — instead of the ledger continuing to
+    claim coverage that no longer exists.
+    """
+    present = globals()
+    return frozenset(
+        backend
+        for backend, required in _STAND_IN_APPARATUS.items()
+        if all(name in present for name in required)
+    )
+
 
 _ALL_BACKENDS = frozenset(
     backend_id for _platform, (_type, backend_id) in _EXPECTED_BINDING.items()
@@ -558,7 +582,7 @@ def _assurance_for(backend_id: str, live_backend: str) -> str:
     the Keychain binding is both, and the stronger claim is the true one."""
     if backend_id == live_backend:
         return ASSURANCE_LIVE
-    if backend_id in _STAND_IN_BACKENDS:
+    if backend_id in _stand_in_backends():
         return ASSURANCE_STAND_IN
     return ASSURANCE_STRUCTURAL_ONLY
 
@@ -658,11 +682,11 @@ def test_the_three_assurance_categories_stay_distinct():
 
     # macOS and Linux have substitutes; neither is ever promoted to `live` by owning one.
     for backend in (BACKEND_MACOS_KEYCHAIN, BACKEND_SECRET_SERVICE):
-        assert backend in _STAND_IN_BACKENDS
+        assert backend in _stand_in_backends()
         assert _assurance_for(backend, live_backend="none") == ASSURANCE_STAND_IN
 
     # Windows has NO substitute: live where the OS provides one, honestly structural-only elsewhere.
-    assert BACKEND_WINDOWS_CREDENTIAL_MANAGER not in _STAND_IN_BACKENDS
+    assert BACKEND_WINDOWS_CREDENTIAL_MANAGER not in _stand_in_backends()
     assert (
         _assurance_for(BACKEND_WINDOWS_CREDENTIAL_MANAGER, live_backend="none")
         == ASSURANCE_STRUCTURAL_ONLY
@@ -682,24 +706,52 @@ def test_the_three_assurance_categories_stay_distinct():
 
 
 def test_on_this_host_the_recorded_assurance_matches_what_actually_ran():
-    """Ties the ledger to observable reality rather than to its own bookkeeping."""
+    """Check each recorded category against the thing it claims to describe.
+
+    Being precise about what each arm establishes, because an earlier version of this docstring
+    claimed the whole test was grounded in observable reality when two of its three arms observed
+    nothing:
+
+    * **live** — grounded in the REAL resolver. `live` is recorded only when
+      ``resolve_secret_store_binding()`` actually returns a binding on this host, so this arm fails
+      if the binding breaks.
+    * **stand_in** — grounded in the substitute apparatus being PRESENT, via
+      ``_stand_in_backends()`` deriving from ``_STAND_IN_APPARATUS``. Before that derivation
+      existed this arm was a tautology against a hardcoded set and could not fail. It still does
+      not prove the stand-in tests PASS — pytest's own result does that — only that the apparatus
+      they need exists.
+    * **structural_only** — the residue, and therefore only as grounded as the two above.
+
+    None of these can prove the real framework behaves as documented. That needs a macOS host and is
+    recorded as an outstanding gap, not smoothed over here.
+    """
     assurance = _assurance_map()
     key = _platform_key()
+    binding = resolve_secret_store_binding()
 
-    # The two backends with substitutes are never live off their own platform...
-    if key != "darwin":
-        assert assurance[BACKEND_MACOS_KEYCHAIN] == ASSURANCE_STAND_IN
-    if key != "linux":
-        assert assurance[BACKEND_SECRET_SERVICE] == ASSURANCE_STAND_IN
-
-    # ...and Windows is live exactly when this IS a Windows host (where the round trip runs).
-    if key == "win32":
-        assert assurance[BACKEND_WINDOWS_CREDENTIAL_MANAGER] == ASSURANCE_LIVE
+    # LIVE: tied to the real resolver, not to bookkeeping.
+    if binding is None:
+        assert ASSURANCE_LIVE not in assurance.values(), (
+            "no binding resolved on this host, so nothing may be recorded as live"
+        )
     else:
+        live = [b for b, c in assurance.items() if c == ASSURANCE_LIVE]
+        assert live == [binding.backend_id], (
+            "the live entry must name the binding the resolver actually returned"
+        )
+
+    # STAND_IN: tied to the apparatus being present, so deleting it degrades the row.
+    for backend in (BACKEND_MACOS_KEYCHAIN, BACKEND_SECRET_SERVICE):
+        if assurance[backend] == ASSURANCE_STAND_IN:
+            assert backend in _stand_in_backends()
+            assert all(name in globals() for name in _STAND_IN_APPARATUS[backend])
+
+    # Windows is live exactly when this IS a Windows host (where the round trip runs) and the
+    # binding really resolved; anywhere else it is honestly structural-only.
+    if key == "win32" and binding is not None:
+        assert assurance[BACKEND_WINDOWS_CREDENTIAL_MANAGER] == ASSURANCE_LIVE
+    elif key != "win32":
         assert assurance[BACKEND_WINDOWS_CREDENTIAL_MANAGER] == ASSURANCE_STRUCTURAL_ONLY
-        # On CI (ubuntu) this is the whole point: no live OS keystore is exercised anywhere.
-        if key == "linux" and resolve_secret_store_binding() is None:
-            assert ASSURANCE_LIVE not in assurance.values()
 
 
 # --- the macOS Keychain binding, driven against a stand-in for the documented SecItem API ---------
@@ -1095,3 +1147,50 @@ def test_no_object_is_released_twice_when_the_framework_fails():
     with pytest.raises(ManagementError):
         binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"payload")
     assert [ref for ref, count in Counter(fw.released).items() if count > 1] == []
+
+
+def test_the_service_and_account_are_not_transposed_in_the_query():
+    """A CONSISTENT service/account swap still round-trips and still isolates accounts, so it
+    survives both the round-trip and isolation tests. Only a direct assertion on the query's own
+    fields catches it -- previously the sole thing doing so was an incidental tuple index inside
+    an unrelated race test."""
+    binding, fw = _keychain()
+    query, _owned = binding._query(SERVICE, ACCOUNT, [])
+    fields = fw.dict_contents(query)
+    c = fw.constants
+    assert fw.str_contents(fields[c["kSecAttrService"]]) == SERVICE
+    assert fw.str_contents(fields[c["kSecAttrAccount"]]) == ACCOUNT
+    assert fields[c["kSecClass"]] == c["kSecClassGenericPassword"]
+
+
+def test_a_read_releases_every_object_when_the_framework_fails():
+    """Only `set_secret`'s failure path asserted release. `get_secret` and `delete_secret` release
+    via `finally` in production, but nothing pinned it."""
+    from collections import Counter
+
+    binding, fw = _keychain()
+    fw.sec.SecItemCopyMatching = lambda query, result: -25291
+    with pytest.raises(ManagementError):
+        binding.get_secret(service=SERVICE, account=ACCOUNT)
+    assert fw.live_refs() == []
+    assert [ref for ref, n in Counter(fw.released).items() if n > 1] == []
+
+
+def test_a_delete_releases_every_object_when_the_framework_fails():
+    from collections import Counter
+
+    binding, fw = _keychain()
+    fw.sec.SecItemDelete = lambda query: -25291
+    with pytest.raises(ManagementError):
+        binding.delete_secret(service=SERVICE, account=ACCOUNT)
+    assert fw.live_refs() == []
+    assert [ref for ref, n in Counter(fw.released).items() if n > 1] == []
+
+
+def test_the_ledger_degrades_when_the_stand_in_apparatus_is_removed(monkeypatch):
+    """The decay this ledger could not previously see. With the substitute apparatus gone, macOS
+    must drop to `structural_only` -- not keep claiming `stand_in` for something nothing exercises.
+    A hardcoded set reported coverage that had been deleted."""
+    assert _assurance_for(BACKEND_MACOS_KEYCHAIN, live_backend="none") == ASSURANCE_STAND_IN
+    monkeypatch.delitem(globals(), "_FakeFrameworks")
+    assert _assurance_for(BACKEND_MACOS_KEYCHAIN, live_backend="none") == ASSURANCE_STRUCTURAL_ONLY

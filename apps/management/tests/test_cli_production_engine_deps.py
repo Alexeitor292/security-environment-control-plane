@@ -304,3 +304,51 @@ def test_a_controller_scoped_provider_over_a_sealed_store_refuses():
     with pytest.raises(ManagementError) as ei:
         provider.access_token()
     assert ei.value.reason_code == "secpctl_credential_store_unavailable"
+
+
+def test_sealed_because_unbootstrapped_is_distinguishable_from_sealed_because_the_wiring_threw():
+    """The `except Exception` in `_production_enrollment_deps` turns ANY composition error into
+    fully sealed deps -- invisibly. The `ca_bundle` tripwire above documents that trap; this asserts
+    the credential wiring does not walk into it.
+
+    Account derivation raises `secpctl_controller_locator_unavailable` on an unbootstrapped host. If
+    that ran at COMPOSITION time it would seal the entire enrollment surface. It must not: binding
+    is lazy, so composition succeeds and the refusal arrives per-command instead.
+    """
+    from secp_management import ManagementError
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    class _UnbootstrappedLocator:
+        def locate(self):
+            raise ManagementError("secpctl_controller_locator_unavailable")
+
+    class _Store:
+        def for_account(self, account):  # pragma: no cover - must never be reached
+            raise AssertionError("the account must not be derived before a token is needed")
+
+    # Composition with an unbootstrapped locator must SUCCEED (nothing resolved yet)...
+    provider = ControllerScopedCredentialProvider(_Store(), _UnbootstrappedLocator())
+
+    # ...and the refusal must arrive on use, bounded, naming the locator rather than the store.
+    with pytest.raises(ManagementError) as ei:
+        provider.access_token()
+    assert ei.value.reason_code == "secpctl_controller_locator_unavailable"
+
+
+def test_composing_the_credential_provider_resolves_no_locator(monkeypatch):
+    """The concrete form of the rule above, against the real composition: building the deps must not
+    call `locate()` even once. If it did, an unbootstrapped host would silently seal everything."""
+    calls: list[str] = []
+
+    import secp_management.controller_api_locator as locator_module
+
+    real = locator_module.FileControllerApiLocatorProvider
+
+    class _CountingLocator(real):  # type: ignore[misc, valid-type]
+        def locate(self):
+            calls.append("locate")
+            return super().locate()
+
+    monkeypatch.setattr(locator_module, "FileControllerApiLocatorProvider", _CountingLocator)
+    _enrollment_deps_with_stubbed_host(monkeypatch)
+    assert calls == [], "composition resolved the locator; an unbootstrapped host would seal"

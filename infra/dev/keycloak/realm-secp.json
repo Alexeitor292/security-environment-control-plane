@@ -1,7 +1,7 @@
 {
   "realm": "secp",
   "enabled": true,
-  "displayName": "SECP (development only — placeholder credentials, UNSAFE FOR PRODUCTION)",
+  "displayName": "SECP (development only \u2014 placeholder credentials, UNSAFE FOR PRODUCTION)",
   "sslRequired": "none",
   "registrationAllowed": false,
   "clients": [
@@ -14,8 +14,12 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": ["http://localhost:5173/auth/callback"],
-      "webOrigins": ["http://localhost:5173"],
+      "redirectUris": [
+        "http://localhost:5173/auth/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:5173"
+      ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:5173/login",
@@ -62,7 +66,13 @@
             "access.token.claim": "true"
           }
         }
-      ]
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email"
+      ],
+      "optionalClientScopes": []
     },
     {
       "clientId": "secp-api",
@@ -76,10 +86,22 @@
   ],
   "roles": {
     "realm": [
-      { "name": "platform-admin", "description": "DEV: all permissions" },
-      { "name": "operator", "description": "DEV: operate exercises" },
-      { "name": "approver", "description": "DEV: approve deployment plans" },
-      { "name": "auditor", "description": "DEV: read audit log" }
+      {
+        "name": "platform-admin",
+        "description": "DEV: all permissions"
+      },
+      {
+        "name": "operator",
+        "description": "DEV: operate exercises"
+      },
+      {
+        "name": "approver",
+        "description": "DEV: approve deployment plans"
+      },
+      {
+        "name": "auditor",
+        "description": "DEV: read audit log"
+      }
     ]
   },
   "users": [
@@ -98,7 +120,9 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["platform-admin"]
+      "realmRoles": [
+        "platform-admin"
+      ]
     }
   ]
 }

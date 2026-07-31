@@ -61,6 +61,11 @@ OUTCOME_REVOKED = "revoked"
 #: There was no live credential to revoke — none was stored, or the stored one had already expired.
 #: No request is made, and the token is NOT live, so this is a complete logout and not a shortfall.
 OUTCOME_NOT_REQUIRED = "not_required"
+#: The credential could not be READ, so it could not be revoked — a corrupt record, an entry minted
+#: for another controller, or a locked/unreachable keystore. Critically this is NOT
+#: :data:`OUTCOME_NOT_REQUIRED`: a perfectly live token may be sitting in that entry, and the logout
+#: is about to delete it locally without ever revoking it.
+OUTCOME_UNREADABLE = "credential_unreadable"
 #: The provider does not advertise a revocation endpoint at all (RFC 8414 makes it OPTIONAL).
 OUTCOME_UNSUPPORTED = "unsupported"
 #: RFC 7009 §2.2.1 — 503. The token MUST be assumed to still exist.
@@ -171,6 +176,19 @@ def revocation_unsupported() -> RevocationOutcome:
     return RevocationOutcome(OUTCOME_UNSUPPORTED, reason_code="secpctl_revocation_endpoint_absent")
 
 
+def revocation_credential_unreadable(reason_code: str) -> RevocationOutcome:
+    """The outcome when the stored credential could not be READ, so it could not be revoked.
+
+    This is deliberately NOT :func:`revocation_not_required`. "Absent" and "expired" mean no live
+    token exists; "the record is corrupt", "this entry belongs to another controller" and "the
+    keystore is locked" mean a live token may exist and simply cannot be reached. Collapsing the
+    second group into the first would make the logout affirmatively report ``token_still_live:
+    false`` while deleting a credential that is still valid at the provider — a false negative on
+    the one fact this module exists to report.
+    """
+    return RevocationOutcome(OUTCOME_UNREADABLE, reason_code=reason_code)
+
+
 def revocation_not_required() -> RevocationOutcome:
     """The outcome when there is no live credential to revoke.
 
@@ -187,11 +205,13 @@ __all__ = [
     "OUTCOME_REFUSED",
     "OUTCOME_REVOKED",
     "OUTCOME_UNAVAILABLE",
+    "OUTCOME_UNREADABLE",
     "OUTCOME_UNSUPPORTED",
     "TOKEN_TYPE_HINT_ACCESS_TOKEN",
     "OperatorTokenRevocationError",
     "RevocationOutcome",
     "interpret_revocation_response",
+    "revocation_credential_unreadable",
     "revocation_form",
     "revocation_not_required",
     "revocation_unsupported",
