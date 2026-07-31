@@ -488,10 +488,18 @@ list as a division of labour rather than as two covered cases and a gap:
 
 | shape | what reports it |
 |---|---|
-| bare, at module level | collection error — the test file imports `queue_check` at module scope, so pytest exits 2 and the whole run fails before any test executes |
+| bare, at module level | collection error — two test files (`test_operator_queue_isolation.py` and `test_operator_refusal_catalogue.py`) import `queue_check` at module scope, so pytest exits 2 and the whole run fails before any test executes |
 | bare, deferred into a function on the queue path | the exit-code assertion, via the CLI's bounded guard (exit 20) |
 | guarded `try: import temporalio / except Exception: pass` | the two static scans; it raises nothing, so the exit-code assertion passes |
 
 The guarded form is how an optional dependency is normally written, so it is the likeliest shape
-rather than a contrived one. The static scans remain the load-bearing half — they are the only
-reporter blind to none of the three, where the other two each cover exactly one.
+rather than a contrived one. The static scans are the load-bearing half **for the two shapes that
+reach them** — deferred-bare and guarded. The module-level shape stops the run before any test
+executes, so its collection error is the *sole* reporter, and that is sufficient on its own.
+
+Measured, not inferred, because the obvious phrasing here is wrong: run on its own,
+`test_deployment_boundary.py` does catch a module-level bare import, since it PARSES the package
+rather than importing it. But in the whole-directory run CI performs, collection is interrupted and
+that scan never executes — 2 collection errors, exit 2, zero tests run. So the scans are *capable*
+of all three shapes while *reporting* two, and writing "blind to none of the three" would take back
+what the table's first row says one paragraph earlier.
