@@ -514,6 +514,15 @@ def bootstrap(
         if not read_seals().safe:
             raise ManagementError("seals_unsafe")
         summary = _managed_plan_summary(role, vr, deps)
+        # Classify BEFORE any mutation, and refuse in the DRY RUN too. An operator must not be
+        # handed a plan for an operation that would then refuse — the same rule ``controller
+        # install`` follows. For the worker this is also where a managed upgrade is admitted.
+        worker_classification: str | None = None
+        if role is Role.WORKER:
+            wcls = _classify_worker_install(vr, deps)
+            if wcls.reason is not None:
+                raise ManagementError(wcls.reason)
+            worker_classification = wcls.classification
     except ManagementError as exc:
         return EXIT_REFUSED, _refused("bootstrap", role_value, exc.reason_code)
 
@@ -521,6 +530,7 @@ def bootstrap(
         "command": "bootstrap",
         "role": role.value,
         "release_aggregate_digest": vr.aggregate_digest,
+        "classification": worker_classification,
         "plan": summary,
         "code_seals": _seal_section(),
         "operator_started": False,
@@ -968,6 +978,20 @@ def _controller_end_state_reason(
 class _Classification:
     reason: str | None
     fresh: bool
+
+
+@dataclass(frozen=True)
+class _WorkerInstallClassification:
+    """The worker equivalent of :class:`_ControllerInstallClassification` (SECP WS-B).
+
+    ``classification`` is one of the closed ``CLASSIFY_*`` values and is meaningful only when
+    ``reason`` is None. The worker has no finalization, identity activation, generation CAS or
+    stack, so there is no generation to carry — which is exactly why it needs its own small type
+    rather than reusing the controller's.
+    """
+
+    reason: str | None
+    classification: str | None
 
 
 def _classify_preexisting(
@@ -1453,6 +1477,60 @@ def _classify_controller_install(
     return _ControllerInstallClassification(
         None, CLASSIFY_EXACT_SAME_RELEASE, ev.finalization.generation, ev
     )
+
+
+def _classify_worker_install(vr: VerifiedRelease, deps: EngineDeps) -> _WorkerInstallClassification:
+    """Classify a worker install before ANY host op: fresh, exact same-release, or managed upgrade.
+
+    ``_classify_preexisting`` refuses every changed-release state, which is correct as a DEFAULT —
+    an unconditional "install whatever bundle you were handed over whatever is already there" is
+    precisely the operation a managed plane must not offer. A managed UPGRADE is the narrow,
+    authenticated exception, and this function is where that exception is granted.
+
+    The worker's rule is the controller's linear-successor trust window, minus everything the worker
+    does not have. There is no finalization, no identity activation, no generation CAS and no stack,
+    so there is no generation to thread and no marker to bind — the eligibility question reduces to:
+    is the PRIOR install still fully authenticated and undrifted, and is the NEW release a signed
+    linear successor of it?
+    """
+    base = _classify_preexisting(Role.WORKER, vr, deps, mode=MODE_INSTALLED)
+    if base.fresh:
+        return _WorkerInstallClassification(None, CLASSIFY_FRESH)
+    if base.reason is None:
+        # the base classifier already fully revalidated an exact idempotent same-release install
+        return _WorkerInstallClassification(None, CLASSIFY_EXACT_SAME_RELEASE)
+    if base.reason != "preexisting_changed_release":
+        return _WorkerInstallClassification(base.reason, None)  # partial/foreign/drifted/mode-cross
+    return _classify_worker_upgrade_eligibility(vr, deps)
+
+
+def _classify_worker_upgrade_eligibility(
+    vr: VerifiedRelease, deps: EngineDeps
+) -> _WorkerInstallClassification:
+    """A changed worker release qualifies as a MANAGED_UPGRADE only when the PRIOR install is fully
+    re-authenticated (evidence + attestation + record binding + document integrity) AND the new
+    release is proven an authenticated LINEAR SUCCESSOR of it (``new.parent_sha ==
+    prior.source_sha`` — both signed). Every other changed-release state refuses.
+
+    The linear-successor rule is what makes the upgrade a *trust window* rather than a substitution:
+    an attacker holding a validly-signed but UNRELATED release cannot install it over a running
+    worker, because it does not descend from what is actually installed. Sideways moves and
+    downgrades are refused for the same reason.
+
+    The prior state is re-authenticated from the SIGNATURE-VERIFIED record and the release-bound
+    identity, never from the (re-authorable) evidence alone — the same rule every other worker
+    command follows.
+    """
+    ev, ident, record, reason = _revalidate_records(Role.WORKER, deps)
+    if reason is not None:  # prior unreadable / unauthenticated / mutually inconsistent
+        return _WorkerInstallClassification("worker_upgrade_prior_unauthenticated", None)
+    assert ev is not None and ident is not None and record is not None
+    if _verify_installed_documents(Role.WORKER, deps, ev, ident, record) is not None:
+        return _WorkerInstallClassification("worker_upgrade_prior_drifted", None)
+    prior_source = record.manifest.source_sha
+    if not vr.manifest.parent_sha or vr.manifest.parent_sha != prior_source:
+        return _WorkerInstallClassification("worker_upgrade_not_linear_successor", None)
+    return _WorkerInstallClassification(None, CLASSIFY_MANAGED_UPGRADE)
 
 
 def _classify_upgrade_eligibility(
@@ -2258,9 +2336,24 @@ def _write_transaction(
             if prior_ev.finalization.tls_mode != install.tls_mode:
                 raise ManagementError("controller_upgrade_tls_mode_change_unsupported")
     else:
-        classify = _classify_preexisting(role, vr, deps, mode=MODE_INSTALLED)
-        if classify.reason is not None:
-            raise ManagementError(classify.reason)
+        if role is Role.WORKER:
+            # The worker admits one narrow changed-release case — an authenticated linear successor
+            # (a managed upgrade). Re-classified HERE as well as in ``bootstrap`` so the write path
+            # is self-defending: a caller reaching the transaction directly cannot skip the check.
+            #
+            # ``classification`` is deliberately LEFT at CLASSIFY_FRESH. It is the CONTROLLER's
+            # notion — downstream it selects the controller candidate-stack upgrade and the
+            # generation/identity-reactivation compensation, none of which a worker has. A worker
+            # upgrade re-runs the ordinary worker ops and rebinds its documents; the _DocWriter
+            # already captures the prior documents and restores them if the new end state cannot be
+            # proven, which IS the worker's upgrade rollback.
+            wcls = _classify_worker_install(vr, deps)
+            if wcls.reason is not None:
+                raise ManagementError(wcls.reason)
+        else:
+            classify = _classify_preexisting(role, vr, deps, mode=MODE_INSTALLED)
+            if classify.reason is not None:
+                raise ManagementError(classify.reason)
 
     ident = _build_identity(role, vr, deps.now())
     identity_bytes = canonical_bytes(ident)
