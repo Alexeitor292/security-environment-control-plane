@@ -378,8 +378,9 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         from secp_management.worker_enroller import build_worker_enroller
 
         return EnrollmentCliDeps(controller_client=client, worker_enroller=build_worker_enroller())
-    # Same rule as `_production_auth_deps`: an environmental failure seals, a coding defect is loud.
-    except (NameError, AttributeError, ImportError):
+    # Same rule as `_production_auth_deps`: an environmental failure seals, a coding defect -- or a
+    # test tripwire installed on a seam inside this region -- is loud.
+    except (NameError, AttributeError, ImportError, AssertionError):
         raise
     except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
         return EnrollmentCliDeps()
@@ -415,10 +416,15 @@ def _production_auth_deps() -> AuthCliDeps:
     # A coding defect must be LOUD, never a silent total degradation. This `except` exists for
     # legitimate environmental failures (a non-POSIX host, an unprovisioned filesystem), but it
     # previously swallowed programming errors too: an `os` name that was out of scope here would
-    # have sealed the auth deps on every real host while every test passed, visible nowhere. These
-    # three classes are never a legitimate runtime condition in a first-party composition, so they
-    # propagate instead of being converted into a sealed default.
-    except (NameError, AttributeError, ImportError):
+    # have sealed the auth deps on every real host while every test passed, visible nowhere. None of
+    # these is ever a legitimate runtime condition in a first-party composition, so they propagate
+    # instead of being converted into a sealed default.
+    #
+    # `AssertionError` is in the list for a second reason: a TEST TRIPWIRE installed on a seam
+    # inside this region raises into this handler, so a broad `except` makes it inert — the guard
+    # looks green and proves nothing. Letting it through is what keeps such a tripwire able to
+    # reach its assertion.
+    except (NameError, AttributeError, ImportError, AssertionError):
         raise
     except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
         return AuthCliDeps()

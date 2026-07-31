@@ -356,7 +356,7 @@ def test_composing_the_credential_provider_resolves_no_locator(monkeypatch):
     assert calls == [], "composition resolved the locator; an unbootstrapped host would seal"
 
 
-@pytest.mark.parametrize("boom", [NameError, AttributeError, ImportError])
+@pytest.mark.parametrize("boom", [NameError, AttributeError, ImportError, AssertionError])
 def test_a_coding_defect_in_a_composition_is_loud_not_a_silent_seal(monkeypatch, boom):
     """The characteristic hazard of this file: a broad `except` around a composition converts ANY
     error inside it into a silent, total, host-only degradation. That is how an `os` name out of
@@ -392,3 +392,23 @@ def test_an_environmental_failure_still_seals_rather_than_propagating(monkeypatc
     # sealed, and honest about not knowing which provider is live
     assert auth.token_file_active() is None
     assert isinstance(cli._production_enrollment_deps(), EnrollmentCliDeps)
+
+
+def test_a_tripwire_on_a_seam_inside_the_guarded_region_can_actually_fire():
+    """A raising tripwire installed on a seam INSIDE a broad `except` is swallowed exactly as
+    readily as a real error, so the guard looks green and proves nothing. That is the hazard, and
+    it is why `AssertionError` propagates from these compositions.
+
+    Verified by execution rather than by reading the handler: before this, a tripwire of exactly
+    this shape was demonstrably inert.
+    """
+    import secp_commissioning.runtime as runtime
+
+    def _tripwire():
+        raise AssertionError("this seam must not be reached")
+
+    for composition in (cli._production_auth_deps, cli._production_enrollment_deps):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(runtime, "RealFilesystem", _tripwire)
+            with pytest.raises(AssertionError, match="this seam must not be reached"):
+                composition()
