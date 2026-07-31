@@ -4,7 +4,11 @@ The customer-visible controller surface over the durable PR5H-A enrollment found
 vertical slice covers the controller invitation lifecycle:
 
 * ``POST /api/v1/enrollment/invitations`` — create a single-use invitation and open its enrollment
-  at revision 0, returning the **non-secret** invitation the operator hands to the worker.
+  at revision 0, returning the **non-secret** invitation the operator hands to the worker. This is
+  the ONLY response that ever carries invitation material (see the one-shot decision in
+  ``secp_api.schemas_enrollment``).
+* ``GET  /api/v1/enrollment`` — the org-scoped, keyset-paged enrollment inventory: bounded status
+  projections only, filterable by a closed set of states, including revoked and terminal ones.
 * ``GET  /api/v1/enrollment/{enrollment_id}`` — the bounded, secret-free status projection.
 
 Authentication is required (``current_principal``); authorization is the organization boundary,
@@ -31,8 +35,9 @@ coordinates are derived server-side and never cross the public boundary.
 from __future__ import annotations
 
 import datetime as _dt
+from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from secp_commissioning.enrollment_attestation import DetachedAttestation
 from sqlalchemy.orm import Session
 
@@ -46,6 +51,7 @@ from secp_api.deps import (
 )
 from secp_api.enrollment_signer_client import EnrollmentOfferSignerClient
 from secp_api.enums import WorkerEnrollmentErrorCode as EC
+from secp_api.enums import WorkerEnrollmentStateName
 from secp_api.errors import WorkerEnrollmentError
 from secp_api.schemas_enrollment import (
     BindExchangeOut,
@@ -53,6 +59,7 @@ from secp_api.schemas_enrollment import (
     BindWorkerRequest,
     CreateEnrollmentInvitation,
     EnrollmentInvitationOut,
+    EnrollmentListOut,
     EnrollmentStatusOut,
     MarkHealthyRequest,
     RecordHandoffRequest,
@@ -63,6 +70,7 @@ from secp_api.schemas_enrollment import (
     VerifyReleaseRequest,
 )
 from secp_api.services import worker_enrollment as svc
+from secp_api.services.worker_enrollment import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from secp_api.worker_enrollment_contract import HandoffFacts
 
 router = APIRouter(prefix="/api/v1/enrollment", tags=["enrollment"])
@@ -119,6 +127,37 @@ def create_enrollment_invitation(
         expires_at=result.expires_at,
         state=result.state,
         revision=result.revision,
+    )
+
+
+@router.get("", response_model=EnrollmentListOut)
+def list_enrollments(
+    state: Annotated[list[WorkerEnrollmentStateName] | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)] = DEFAULT_LIST_LIMIT,
+    after: Annotated[str | None, Query(max_length=256)] = None,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentListOut:
+    """The org-scoped enrollment inventory: one bounded, keyset-paged page of status projections.
+
+    Declared BEFORE ``/{enrollment_id}`` so the collection path is matched as a collection.
+    ``state`` is repeatable and closed (anything else is a 422 from the enum, never a free-form
+    string reaching the query); ``limit`` is bounded here AND re-clamped server-side; ``after`` is
+    the opaque cursor from a previous page's ``next_cursor``.
+
+    Returns ONLY :class:`EnrollmentStatusOut` items — no invitation material is reachable from a
+    list, a status read, or a cursor (see the one-shot decision in ``schemas_enrollment``).
+    """
+    items, next_cursor = svc.list_public_views(
+        session,
+        principal,
+        states=tuple(entry.value for entry in state) if state else None,
+        limit=limit,
+        after=after,
+    )
+    return EnrollmentListOut(
+        items=[EnrollmentStatusOut.model_validate(item) for item in items],
+        next_cursor=next_cursor,
     )
 
 

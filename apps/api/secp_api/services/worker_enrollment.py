@@ -29,14 +29,17 @@ OpenTofu or operator activation lives here; PR5H-A stays an inert durable founda
 
 from __future__ import annotations
 
+import base64
+import datetime as _dt
 import hashlib
 import json
 import secrets
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Final
 
-from secp_commissioning.canonical import canonical_json, sha256_digest
+from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_digest
 from secp_commissioning.controller_enrollment_signer import AuthorizedControllerOfferContext
 from secp_commissioning.enrollment_attestation import (
     WORKER_RESULT_OUTCOME_HEALTHY,
@@ -64,6 +67,7 @@ from secp_api.errors import WorkerEnrollmentError
 from secp_api.models import _utcnow
 from secp_api.services import controller_identity
 from secp_api.worker_enrollment_contract import (
+    ALL_STATES,
     ENROLLMENT_CONTRACT_VERSION,
     INVITED,
     RECOVERY_REQUIRED,
@@ -322,6 +326,12 @@ def _serve_receipt(
         raise WorkerEnrollmentError(EC.state_corrupt)
     if loaded.state.revision < receipt.resulting_revision:  # head behind a recorded result
         raise WorkerEnrollmentError(EC.history_inconsistent)
+    # The history snapshot is CANONICAL material, so it cannot carry the non-canonical
+    # ``deployment_site_label``. Re-stamp it from the authoritative loaded row (the label is
+    # immutable for an enrollment and is cross-checked against the invitation on every load), so a
+    # delayed idempotent retry projects the same site as the original response. Done AFTER every
+    # digest/consistency compare above — and harmless to them, since the label is not canonical.
+    historical = replace(historical, deployment_site_label=loaded.deployment_site_label)
     return TransitionOutcome(
         state=historical, committed_revision=receipt.resulting_revision, deduplicated=True
     )
@@ -1593,6 +1603,127 @@ def load_public_view(
         raise WorkerEnrollmentError(EC.state_corrupt) from None
 
 
+# --------------------------------------------------------------- org-scoped inventory listing (R1)
+
+#: The default page size when the caller does not ask for one.
+DEFAULT_LIST_LIMIT: Final = 50
+
+#: The hard, code-owned server-side ceiling on one page. Re-applied HERE as well as in the router
+#: and the repository, so a direct service call can never exceed it either.
+MAX_LIST_LIMIT: Final = repo.MAX_LIST_PAGE
+
+#: The cursor is an opaque url-safe base64 blob over ``"<canonical utc>|<enrollment id>"``. Both
+#: halves are re-validated on decode, and a decoded cursor is only ever used as a keyset position
+#: WITHIN the caller's own organization-scoped query — so a forged or replayed cursor can at worst
+#: skip the caller past their own rows, never reach another organization's.
+_CURSOR_SEPARATOR: Final = "|"
+_MAX_CURSOR_LEN: Final = 256
+
+
+def _encode_cursor(expires_at: str, enrollment_id: str) -> str:
+    raw = f"{expires_at}{_CURSOR_SEPARATOR}{enrollment_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[_dt.datetime, str]:
+    """Decode an opaque cursor to its ``(expires_at_ts, enrollment_id)`` keyset position.
+
+    Every failure is the SAME bounded ``enrollment_cursor_invalid`` — the rejected value is never
+    echoed, and a malformed cursor is never allowed to degrade into an unfiltered scan.
+    """
+    if not isinstance(cursor, str) or not (1 <= len(cursor) <= _MAX_CURSOR_LEN):
+        raise WorkerEnrollmentError(EC.cursor_invalid)
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        raise WorkerEnrollmentError(EC.cursor_invalid) from None
+    head, separator, enrollment_id = raw.partition(_CURSOR_SEPARATOR)
+    if not separator:
+        raise WorkerEnrollmentError(EC.cursor_invalid)
+    expires_ts = repo.parse_canonical_utc(head)
+    if expires_ts is None or not is_sha256_digest(enrollment_id):
+        raise WorkerEnrollmentError(EC.cursor_invalid)
+    return expires_ts, enrollment_id
+
+
+def _validated_states(states: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """Reduce the requested filter to a closed-set tuple, or None for "every state".
+
+    An unknown state name is refused rather than ignored: silently dropping it would return a page
+    the operator did not ask for. Duplicates collapse; the caller's order is irrelevant because the
+    filter is a set membership test, not a sort key.
+    """
+    if states is None:
+        return None
+    unique = tuple(sorted({state for state in states}))
+    if not unique:
+        return None
+    if any(state not in ALL_STATES for state in unique):
+        raise WorkerEnrollmentError(EC.state_invalid)
+    return unique
+
+
+def list_public_views(
+    session: Session,
+    actor: Principal,
+    *,
+    states: tuple[str, ...] | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+    after: str | None = None,
+) -> tuple[list[dict[str, object]], str | None]:
+    """One org-scoped page of bounded, secret-free status projections + the next opaque cursor.
+
+    Authorization is the organization boundary and nothing else: the query is filtered in SQL by the
+    authenticated principal's own organization, and every loaded row is INDEPENDENTLY re-checked
+    with :meth:`Principal.require_org` — never a raw id comparison — so a repository change that
+    dropped the SQL filter would fail closed here rather than leaking another tenant's inventory.
+
+    ``enrollment:read`` is required, enforced HERE so a direct service call cannot bypass RBAC.
+    ``enrollment:manage`` does NOT imply it (pinned decision: strict read/manage separation).
+
+    NO invitation material is returned — only :meth:`EnrollmentState.public_view`. Unlike the expiry
+    sweep's candidate query, the page includes revoked, terminal and healthy enrollments.
+
+    ``next_cursor`` is non-null only when this page was FULL, i.e. there may be more behind it —
+    exactly the rule the recovery sweep uses for its own keyset continuation.
+    """
+    actor.require(Permission.enrollment_read)
+    _assert_schema_ready(session)
+    bounded_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    selected = _validated_states(states)
+    cursor = _decode_cursor(after) if after is not None else None
+
+    try:
+        page = repo.load_page(
+            session,
+            organization_id=actor.organization_id,
+            states=selected,
+            limit=bounded_limit,
+            after=cursor,
+        )
+    except RepositoryRefusal as exc:  # a corrupt row is preserved, never surfaced, never repaired
+        raise _surface(exc) from None
+
+    items: list[dict[str, object]] = []
+    for loaded in page:
+        # organization is the ONLY authorization boundary — re-proven per row against the
+        # authoritative binding, independently of the SQL filter that selected it
+        actor.require_org(loaded.organization_id)
+        try:
+            items.append(loaded.state.public_view())
+        except WorkerEnrollmentError:
+            raise
+        except Exception:  # noqa: BLE001 - a projection failure must not escape unbounded
+            raise WorkerEnrollmentError(EC.state_corrupt) from None
+
+    next_cursor = None
+    if len(page) == bounded_limit and page:
+        last = page[-1].state
+        next_cursor = _encode_cursor(last.expires_at, last.enrollment_id)
+    return items, next_cursor
+
+
 # --------------------------------------------------------------------------- invitation expiry
 
 
@@ -1608,6 +1739,8 @@ def _assert_invitation_unexpired(invitation: object, now: str) -> None:
 
 
 __all__ = [
+    "DEFAULT_LIST_LIMIT",
+    "MAX_LIST_LIMIT",
     "ClaimedScope",
     "ExchangeOutcome",
     "ExpectedRevision",
@@ -1617,6 +1750,7 @@ __all__ = [
     "bind_worker",
     "bind_worker_exchange",
     "create_invitation_and_open",
+    "list_public_views",
     "load_public_view",
     "mark_enrollment_healthy",
     "recover_enrollment",

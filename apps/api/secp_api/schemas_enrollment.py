@@ -11,6 +11,29 @@ The controller identity (installation id, key id, trust anchor, origin, running 
 NOT a caller input: the service sources it from the authoritative, persisted, independently verified
 ACTIVE controller bootstrap identity (F3). ``extra="forbid"`` makes any caller-supplied identity
 field a 422 rather than a silently ignored value.
+
+**DECISION — the invitation response is ONE-SHOT, and there is deliberately no re-fetch route.**
+
+:class:`EnrollmentInvitationOut` is returned exactly once, by the create call
+(``POST /api/v1/enrollment/invitations``) — or by an exact ``idempotency_key`` retry of that same
+create, which replays the ORIGINAL response.
+No other endpoint returns it: the status projection, the org-scoped list, and every progression
+response carry only :class:`EnrollmentStatusOut`. An operator who loses the invitation revokes and
+re-creates; that is the supported remedy, not a recovery gap.
+
+This is a security property, not an oversight. The invitation is **bearer-grade**:
+``bind_worker_exchange`` verifies that the presenter owns the key it presents, NOT that it is the
+intended recipient (``services/worker_enrollment.py``) — so the first valid binder wins. A re-fetch
+route would let a compromised ``enrollment:manage`` credential silently steal an *in-flight*
+enrollment: read the invitation, bind first, and the legitimate worker's later bind refuses as
+``enrollment_already_bound`` with nothing to distinguish theft from a race. Without such a route the
+same attacker must first REVOKE the enrollment — an ordinary, audited, operator-visible action that
+the legitimate worker observes as a refusal it can attribute. Keeping the material one-shot
+therefore converts a silent takeover into a loud one.
+
+The UI already tells the operator the invitation is shown once; this docstring is the written
+rationale that behaviour is meant to rest on. Adding a re-fetch endpoint would reverse a security
+decision and must not be done as a convenience change.
 """
 
 from __future__ import annotations
@@ -120,9 +143,30 @@ class EnrollmentStatusOut(BaseModel):
     release_fingerprint: str
     offer_fingerprint: str
     result_fingerprint: str
+    #: The opaque deployment-site grouping label, so an operator inventory can group workers without
+    #: a second round trip. Outside the canonical contract by construction — it can never affect
+    #: ``state_digest``, the CAS chain, or any durable invariant. Organization remains the ONLY
+    #: authorization boundary; this label is never interpreted as a tenant, address or endpoint.
+    deployment_site_label: str
     expires_at: str
     updated_at: str
     refusal_reason: str
+
+
+class EnrollmentListOut(BaseModel):
+    """One org-scoped page of the enrollment inventory.
+
+    NO invitation material appears here — a list carries only the bounded status projection. The
+    single-use invitation is returned exactly once, by the create call (see the one-shot decision in
+    this module's docstring); it is never re-derivable from a list, a status read, or a cursor.
+
+    ``next_cursor`` is an OPAQUE keyset continuation token over the ``(expires_at, enrollment_id)``
+    order. It is null when this page was the last one. Clients must treat it as a blob: pass it back
+    verbatim as ``after`` and never parse, construct, or persist its decoded form.
+    """
+
+    items: list[EnrollmentStatusOut]
+    next_cursor: str | None = None
 
 
 # --- SECP-PR5H-B1 Phase 3: the supported evidence-driven exchange -------------------------------

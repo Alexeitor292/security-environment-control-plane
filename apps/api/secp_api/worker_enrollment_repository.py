@@ -168,7 +168,12 @@ def _shadow_of(canonical_text: str) -> _dt.datetime:
 
 
 def _rehydrate_state(row: StateRow) -> EnrollmentState:
+    # ``deployment_site_label`` is NON-CANONICAL (it never enters the digest), so it is stamped from
+    # the persisted row rather than reconstructed from canonical material. ``_validate_rehydrated``
+    # still checks the row's label grammar and ``_cross_check_invitation`` still re-derives it from
+    # the AUTHORITATIVE invitation row, so a tampered state-row label refuses as corruption.
     return EnrollmentState(
+        deployment_site_label=row.deployment_site_label,
         contract_version=row.contract_version,
         enrollment_id=row.enrollment_id,
         state=row.state,
@@ -454,7 +459,11 @@ def create_invitation_and_open(
     Does NOT commit — the caller owns the transaction boundary.
     """
     invitation.validate()
-    state = open_enrollment(invitation, now=now)  # INVITED, revision 0; asserts freshness
+    # the non-canonical projection label is pre-stamped so the creation response and a later load
+    # project the same value; it cannot affect the digest, so the id relation below is unchanged
+    state = open_enrollment(  # INVITED, revision 0; asserts freshness
+        invitation, now=now, deployment_site_label=deployment_site_label
+    )
     if invitation.digest() != state.enrollment_id:
         raise _refuse("enrollment_internal_failure")
 
@@ -938,6 +947,89 @@ def select_due_active_candidates(
     return [(row[0], row[1]) for row in session.execute(stmt).all()]
 
 
+# ---------------------------------------------------------------------- org inventory listing (R1)
+
+#: A hard, code-owned ceiling on one list page — never a caller-controlled or deployment knob.
+MAX_LIST_PAGE: Final[int] = 200
+
+
+def select_org_enrollments_page(
+    session: Session,
+    *,
+    organization_id: uuid.UUID,
+    states: tuple[str, ...] | None = None,
+    limit: int,
+    after: tuple[_dt.datetime, str] | None = None,
+) -> list[StateRow]:
+    """One bounded, deterministically-ordered page of THIS organization's enrollment head rows.
+
+    A deliberate SIBLING of :func:`select_due_active_candidates`, not a widening of it. That
+    function is the expiry sweep's candidate query and its two exclusions — active states only, and
+    revoked invitations filtered out in SQL — are load-bearing for the sweep's FORWARD PROGRESS (see
+    its docstring). This one is the operator INVENTORY query and needs the opposite reach:
+
+    * it includes every state, terminals (``refused`` / ``recovery_required``) and ``healthy``
+      included, because the pending-enrollment queue and the worker inventory both need to show
+      finished and failed enrollments, not just in-flight ones;
+    * it includes REVOKED invitations, because a revoked enrollment is exactly what an operator
+      needs to see after revoking it;
+    * it applies no due-ness filter at all.
+
+    Widening the sweep query to serve both would silently reintroduce the starvation the exclusions
+    exist to prevent. They stay separate.
+
+    Read-only. ``organization_id`` is applied in SQL as a hard filter (organization is the ONLY
+    authorization boundary); ``states``, when given, must already be a closed-set tuple validated by
+    the caller. No caller-controlled SQL, table or sort key. ``limit`` is clamped to
+    :data:`MAX_LIST_PAGE`. ``after`` is a keyset cursor over the SAME ``(expires_at_ts,
+    enrollment_id)`` order the rows are returned in, so paging cannot skip or repeat a row under
+    concurrent writes the way an OFFSET scan would.
+    """
+    bounded = max(1, min(int(limit), MAX_LIST_PAGE))
+    stmt = select(StateRow).where(StateRow.organization_id == organization_id)
+    if states is not None:
+        stmt = stmt.where(StateRow.state.in_(states))
+    if after is not None:
+        after_ts, after_id = after
+        stmt = stmt.where(
+            tuple_(StateRow.expires_at_ts, StateRow.enrollment_id) > (after_ts, after_id)
+        )
+    stmt = stmt.order_by(StateRow.expires_at_ts, StateRow.enrollment_id).limit(bounded)
+    return list(session.execute(stmt).scalars().all())
+
+
+def load_page(
+    session: Session,
+    *,
+    organization_id: uuid.UUID,
+    states: tuple[str, ...] | None = None,
+    limit: int,
+    after: tuple[_dt.datetime, str] | None = None,
+) -> list[LoadedEnrollment]:
+    """Fully rehydrate + validate one page of this org's enrollments, in keyset order.
+
+    Every row goes through the SAME ``_build_loaded`` choke point as the single-enrollment read, so
+    a list can never surface a row that a status read would refuse: the recomputed canonical digest
+    must match the persisted CAS digest, the tenancy binding and enrollment identity are re-derived
+    from the authoritative invitation, and a same-key/corrupt row RAISES
+    ``enrollment_state_corrupt`` rather than being surfaced or repaired.
+
+    That means one poisoned row fails the whole page rather than being silently omitted. This is the
+    deliberate choice: silently dropping a row would tell an operator the enrollment does not exist,
+    which is untruthful, and the response envelope has no field in which to report a skip.
+    """
+    return [
+        _build_loaded(session, row)
+        for row in select_org_enrollments_page(
+            session,
+            organization_id=organization_id,
+            states=states,
+            limit=limit,
+            after=after,
+        )
+    ]
+
+
 def revision_row(session: Session, *, enrollment_id: str, revision: int) -> RevisionRow | None:
     """The append-only history row at ``revision``, or None."""
     return session.execute(
@@ -987,6 +1079,7 @@ def invitation_is_revoked(session: Session, *, enrollment_id: str) -> bool:
 
 
 __all__ = [
+    "MAX_LIST_PAGE",
     "LoadedEnrollment",
     "RepositoryRefusal",
     "commit_transition",
@@ -996,6 +1089,7 @@ __all__ = [
     "invitation_is_revoked",
     "load_for_update",
     "load_invitation_for_update",
+    "load_page",
     "load_read_only",
     "lock_and_load_sweep_candidate",
     "parse_canonical_utc",
@@ -1003,5 +1097,6 @@ __all__ = [
     "max_revision",
     "revision_row",
     "select_due_active_candidates",
+    "select_org_enrollments_page",
     "verify_history_consistent",
 ]

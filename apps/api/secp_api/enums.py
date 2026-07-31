@@ -2047,6 +2047,31 @@ class EnvironmentPublicationErrorCode(str, Enum):
     version_publish_audit_failure = "version_publish_audit_failure"
 
 
+class WorkerEnrollmentStateName(str, Enum):
+    """The closed set of enrollment state names, as a REQUEST-side filter vocabulary.
+
+    These are exactly the eight states of the pure transition contract
+    (``worker_enrollment_contract.ALL_STATES``): the five active ones, the terminal-success state,
+    and the two terminals. The enum exists so a query filter is a closed, self-documenting,
+    automatically-422-on-anything-else vocabulary rather than a free-form string reaching the
+    repository.
+
+    It is deliberately declared with literal values instead of imported from the contract: the
+    contract is the pure, boundary-mirrored authority and must not acquire an ``enums`` dependency.
+    ``apps/api/tests/test_enrollment_list_api.py`` pins this enum against ``ALL_STATES`` (values AND
+    order), so adding a state to one side without the other fails closed in CI.
+    """
+
+    invited = "invited"
+    worker_bound = "worker_bound"
+    offer_transported = "offer_transported"
+    result_transported = "result_transported"
+    verified = "verified"
+    healthy = "healthy"
+    refused = "refused"
+    recovery_required = "recovery_required"
+
+
 class WorkerEnrollmentErrorCode(str, Enum):
     """Closed catalog of durable worker-enrollment persistence/service codes (SECP-PR5H-A, ADR-027).
 
@@ -2107,6 +2132,10 @@ class WorkerEnrollmentErrorCode(str, Enum):
     pop_invalid = "enrollment_pop_invalid"
     # Phase 3: a concurrent/duplicate bind lost the write-once signed-offer insert
     signed_offer_conflict = "enrollment_signed_offer_conflict"
+    # R1: the opaque list cursor was absent-from-nowhere, malformed, over-long, or did not decode to
+    # a well-formed (canonical UTC timestamp, sha256 enrollment id) keyset position. Bounded and
+    # attacker-independent: the rejected cursor value is NEVER echoed.
+    cursor_invalid = "enrollment_cursor_invalid"
     # Phase 3: the root-gated controller-offer signer/broker is sealed, unreachable, or returned an
     # offer that failed the controller's independent re-verification (signer availability/integrity
     # — never a worker fault; the enrollment private key never enters the non-root API process)

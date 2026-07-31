@@ -352,6 +352,22 @@ class EnrollmentState:
     expires_at: str
     updated_at: str
     refusal_reason: str
+    #: The opaque deployment-site grouping label (ADR-027), carried for the STATUS PROJECTION only.
+    #:
+    #: Deliberately NON-CANONICAL: it is absent from :meth:`canonical`, so it can never enter
+    #: ``state_digest``, the predecessor chain, the CAS comparison, the append-only history
+    #: snapshot, or any existing invariant — the parity corpus pins that (see
+    #: ``tests/test_worker_enrollment_contract_parity.py``:
+    #: ``test_deployment_site_label_is_not_part_of_the_canonical_contract``). It is therefore also
+    #: NOT mirrored by the authoritative ``secp_management.enrollment`` contract, which owns only
+    #: canonical semantics.
+    #:
+    #: It defaults to empty so a state rehydrated from a canonical snapshot (which cannot carry a
+    #: non-canonical field) is still constructible; the AUTHORITATIVE value always comes from the
+    #: persisted row and is re-stamped by the repository/service on every load. Every transition
+    #: uses :func:`dataclasses.replace`, so the label rides along unchanged and cannot be mutated
+    #: by a transition.
+    deployment_site_label: str = ""
 
     def canonical(self) -> dict[str, object]:
         return {
@@ -380,7 +396,14 @@ class EnrollmentState:
 
     def public_view(self) -> dict[str, object]:
         """A bounded, non-secret projection for status/browser surfaces — identities are shown by
-        their short key-id/digest fingerprints only; no key material, path, or secret is exposed."""
+        their short key-id/digest fingerprints only; no key material, path, or secret is exposed.
+
+        ``deployment_site_label`` is included so an operator inventory can GROUP workers without a
+        second round trip. It is safe by construction: the grammar forbids '/', ':', '@' and
+        whitespace (so no URL, path or scheme can ride in), every IP-address literal is rejected,
+        and the ``scan_forbidden`` pass below runs over this projection's own output — so a
+        secret-shaped label could not reach a browser even if one were somehow persisted.
+        """
         view = {
             "enrollment_id": self.enrollment_id,
             "state": self.state,
@@ -392,6 +415,7 @@ class EnrollmentState:
             "release_fingerprint": _fingerprint(self.release_digest),
             "offer_fingerprint": _fingerprint(self.offer_digest),
             "result_fingerprint": _fingerprint(self.result_digest),
+            "deployment_site_label": self.deployment_site_label,
             "expires_at": self.expires_at,
             "updated_at": self.updated_at,
             "refusal_reason": self.refusal_reason,
@@ -409,11 +433,23 @@ def _fingerprint(value: str) -> str:
     return tail[:12] if _HEX64.fullmatch(tail) or len(tail) >= 12 else ""
 
 
-def open_enrollment(invitation: WorkerEnrollmentInvitation, *, now: str) -> EnrollmentState:
+def open_enrollment(
+    invitation: WorkerEnrollmentInvitation, *, now: str, deployment_site_label: str = ""
+) -> EnrollmentState:
+    """Open an enrollment at INVITED/revision 0.
+
+    ``deployment_site_label`` is the NON-CANONICAL projection label (see
+    :class:`EnrollmentState`). It is validated by the caller against
+    :func:`is_deployment_site_label` and stored on the row; passing it here only pre-stamps the
+    in-memory state so the creation response projects the same value a later load would. It cannot
+    reach ``canonical`` / ``digest``, so the invitation digest and the enrollment id are identical
+    with or without it — which is exactly why it defaults to empty and stays optional.
+    """
     invitation.validate()
     invitation.assert_fresh(now)
     _parse_ts(now, "enrollment_time_invalid")
     return EnrollmentState(
+        deployment_site_label=deployment_site_label,
         contract_version=ENROLLMENT_CONTRACT_VERSION,
         enrollment_id=invitation.digest(),
         state=INVITED,
