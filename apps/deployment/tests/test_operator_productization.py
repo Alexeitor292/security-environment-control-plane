@@ -4,9 +4,14 @@ These prove the three things a supported operator surface must be able to say, W
 approaching activation: which prerequisite blocks next and what class of change would close it,
 whether the two task queues are separated, and which implementation aggregate is installed.
 
-The load-bearing test here is :func:`test_ladder_first_blocking_rung_agrees_with_status` — the
-ladder and ``_resolve_status`` derive the reported status independently, and this asserts they
-agree across every failure mode. If someone reorders one without the other, it fails.
+``PREREQUISITE_LADDER`` and ``_resolve_status`` are independent derivations of the same reported
+status, and two tests keep them from diverging.
+:func:`test_ladder_first_blocking_rung_agrees_with_status` breaks exactly ONE prerequisite at a
+time through ``build_verification``, which pins that builder's wiring but cannot see a reorder —
+relative order only matters when two checks are unmet at once.
+:func:`test_ladder_order_matches_resolve_status_under_cumulative_faults` breaks a rung and every
+rung below it at the pure layer, which is what pins the ORDER. Both are needed; neither subsumes
+the other.
 
 Nothing in this module builds a composition aggregate, constructs a ``Worker``, calls
 ``run_plan_generation``, resolves a credential, or contacts any infrastructure.
@@ -27,6 +32,7 @@ from secp_operator_deployment.verify import (
     REMEDIATION_REVIEWED_DEPLOYMENT,
     STATUS_EXIT_CODES,
     _queue_section,
+    _resolve_status,
     build_prerequisite_ladder,
     build_provenance_report,
     build_verification,
@@ -121,6 +127,107 @@ def test_ladder_first_blocking_rung_agrees_with_status(overrides, expected_rung)
     assert _spec(expected_rung).status_when_unmet == report["status"]
     assert report["exit_code"] == STATUS_EXIT_CODES[report["status"]]
     assert pre["next_blocking_reason_code"], "a blocking rung must carry a bounded reason code"
+
+
+# --------------------------------------------------------------------------- ladder ORDER
+
+_LADDER_FLAGS = (
+    "seals_correct",
+    "profile_present",
+    "profile_schema_valid",
+    "expected_provided",
+    "identity_agrees",
+    "installed_trust_ok",
+    "host_attempted",
+    "host_coherent",
+    "host_prepared",
+    "host_ordinary",
+)
+
+#: flag -> (rung id, status ``_resolve_status`` must return when it is the first unmet rung)
+_CUMULATIVE = {
+    "seals_correct": ("seals_correct", "seals_unsafe"),
+    "profile_present": ("profile_installed", "sealed_but_unprovisioned"),
+    "profile_schema_valid": ("profile_schema_valid", "profile_invalid"),
+    "expected_provided": ("expected_identities_installed", "sealed_but_unprovisioned"),
+    "identity_agrees": ("identity_agreement", "identity_mismatch"),
+    "installed_trust_ok": ("installed_package_trusted", "install_untrusted"),
+    "host_attempted": ("host_observed", "sealed_but_unprovisioned"),
+    "host_coherent": ("host_observation_coherent", "host_unavailable"),
+    "host_prepared": ("operator_prepared_and_disabled", "host_not_ready"),
+    "host_ordinary": ("ordinary_worker_running", "host_not_ready"),
+}
+
+
+def _cumulative_sections(index: int) -> dict:
+    """Section dicts in which every flag BEFORE ``index`` is satisfied, and the flag at ``index``
+    and every flag after it is unmet."""
+    f = {name: (i < index) for i, name in enumerate(_LADDER_FLAGS)}
+    return {
+        "seals": {"seals_correct": f["seals_correct"]},
+        "profile": {
+            "present": f["profile_present"],
+            "schema_valid": f["profile_schema_valid"],
+            "reason_code": None,
+        },
+        "identity": {
+            "expected_provided": f["expected_provided"],
+            "agrees": f["identity_agrees"],
+            "reason_code": None,
+        },
+        "installed_trust_ok": f["installed_trust_ok"],
+        "host": {
+            "attempted": f["host_attempted"],
+            "inspected": f["host_coherent"],
+            "coherent": f["host_coherent"],
+            "operator_prepared_and_disabled": f["host_prepared"],
+            "ordinary_running_and_healthy": f["host_ordinary"],
+        },
+    }
+
+
+@pytest.mark.parametrize("index", range(len(_LADDER_FLAGS)))
+def test_ladder_order_matches_resolve_status_under_cumulative_faults(index):
+    """The single-fault matrix above cannot see an ordering change: relative order only matters
+    when two checks are unmet at once. Here rung ``index`` and everything below it are unmet, so
+    the first-unmet rung is unambiguous and its status pins the order. Measured: every one of the
+    9! = 362,880 orderings of ``_resolve_status``'s nine checks is detected by this matrix.
+
+    Driven at the PURE layer rather than through ``build_verification``, which cannot reach rung 1
+    at all: ``_read_seals()`` reads the real constants, so ``seals_correct`` cannot be driven false
+    from there.
+    """
+    s = _cumulative_sections(index)
+    rung_id, expected_status = _CUMULATIVE[_LADDER_FLAGS[index]]
+
+    ladder = build_prerequisite_ladder(
+        seals=s["seals"],
+        profile=s["profile"],
+        identity=s["identity"],
+        installed_trust_ok=s["installed_trust_ok"],
+        installed_trust_reason=None,
+        host=s["host"],
+        runtime_provisioned=False,
+        runtime_reason=None,
+        compositions_supplied=False,
+        compositions_verified=False,
+        compositions_reason=None,
+    )
+    status = _resolve_status(
+        seals=s["seals"],
+        installed_trust_ok=s["installed_trust_ok"],
+        profile_present=s["profile"]["present"],
+        profile_schema_valid=s["profile"]["schema_valid"],
+        expected_provided=s["identity"]["expected_provided"],
+        identity_agrees=s["identity"]["agrees"],
+        host=s["host"],
+    )
+
+    assert next_blocking_prerequisite(ladder)["id"] == rung_id
+    # The cross-check: the ladder's own declared status for that rung.
+    assert _spec(rung_id).status_when_unmet == status
+    # A third, INDEPENDENT pin — a coordinated edit must now defeat three places, not two.
+    assert status == expected_status
 
 
 def test_identity_mismatch_is_reached_when_profile_and_expected_disagree():

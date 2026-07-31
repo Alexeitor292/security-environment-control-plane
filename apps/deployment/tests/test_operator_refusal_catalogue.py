@@ -1,13 +1,22 @@
-"""The refusal catalogue is exhaustive, consistent, and cannot silently rot (WS-E).
+"""The refusal catalogue is exhaustive, consistent, and drift-guarded (WS-E).
 
 A catalogue that drifts from the code is worse than none — it would tell an operator a gap is
 closable when it is not. Two complementary guards keep it honest:
 
-* :func:`test_every_refusal_literal_in_verify_is_catalogued` SCANS this module's own refusal
-  literals, so adding a new reason code without cataloguing it fails here rather than surfacing
-  to an operator as an unexplained string.
+* :func:`test_every_refusal_literal_in_verify_is_catalogued` SCANS ``verify.py`` for refusal
+  literals, so adding a new reason code in one of the matched shapes without cataloguing it fails
+  here rather than surfacing to an operator as an unexplained string.
 * the behavioural guard in ``test_operator_productization`` drives an all-unmet ladder and
   requires every rung's reason code to classify.
+
+Scope, stated plainly rather than implied: the scan recognises five syntactic shapes and so covers
+26 of the 79 catalogued codes — the other 53, which include ``verify.py``'s OWN ladder fallback
+reasons (written as inline arguments to ``rung()``, not in a matched shape) alongside the codes
+raised in ``profile.py``, ``manifest.py``, ``compositions.py``, ``runtime_seams.py``, ``cli.py``
+and ``secp_worker``, are outside it. Widening the scan is deliberately not the fix: an uncatalogued
+code already degrades VISIBLY at the point of use, where ``build_prerequisite_ladder`` sets
+``reason_catalogued: False`` and the report carries that to the operator, so a wider scan would
+look far more thorough while remaining exactly as shape-fragile.
 
 It also pins the property that actually protects the seals: every gap that only a separately
 reviewed code change could close is classified as such, so the reported remediation can never
@@ -56,14 +65,51 @@ def _refusal_literals() -> set[str]:
 # --------------------------------------------------------------------------- exhaustiveness
 
 
-def test_the_scan_actually_matches_something():
+# The EXACT set the patterns above match today. Pinned as a SET, not a floor: a floor cannot see a
+# swap — six codes could vanish and six appear and ``>= 20`` would still pass.
+_SCANNED_LITERALS = frozenset(
+    {
+        "classification_invalid",
+        "composition_type_invalid",
+        "compositions_object_invalid",
+        "eligibility_gate_disabled",
+        "executor_factory_invalid",
+        "host_observation_type_invalid",
+        "manifest_unavailable",
+        "plan_execution_composition_invalid",
+        "plan_gate_disabled",
+        "process_digest_invalid",
+        "process_registration_invalid",
+        "profile_type_invalid",
+        "provenance_contract_version_invalid",
+        "provenance_expected_binding_invalid",
+        "provenance_implementation_id_invalid",
+        "provenance_manifest_digest_invalid",
+        "provenance_package_version_invalid",
+        "provenance_profile_binding_invalid",
+        "provenance_type_invalid",
+        "provenance_untrusted_install",
+        "provider_identity_invalid",
+        "provider_source_invalid",
+        "queue_separation_unavailable",
+        "readiness_gate_disabled",
+        "renderer_digest_invalid",
+        "renderer_registration_invalid",
+    }
+)
+
+
+def test_the_scan_matches_exactly_the_pinned_literal_set():
     """Guard the guard: a regex that silently stops matching would make this suite vacuous."""
-    literals = _refusal_literals()
-    assert len(literals) >= 20, f"the refusal scan found only {len(literals)} literals"
-    # spot-check that known codes from distinct code paths are being found
-    assert "compositions_object_invalid" in literals
-    assert "plan_gate_disabled" in literals
-    assert "host_observation_type_invalid" in literals
+    found = _refusal_literals()
+    assert not (found - _SCANNED_LITERALS), (
+        f"new refusal literal(s) in verify.py: {sorted(found - _SCANNED_LITERALS)} — "
+        "catalogue them, then add them to _SCANNED_LITERALS"
+    )
+    assert not (_SCANNED_LITERALS - found), (
+        f"the scan stopped matching known literal(s): {sorted(_SCANNED_LITERALS - found)} — "
+        "a pattern rotted, or the code path was removed"
+    )
 
 
 def test_every_refusal_literal_in_verify_is_catalogued():

@@ -96,8 +96,10 @@ Read `next_blocking` first. If it is `null`, nothing blocks the prepared result.
 | `runtime_provisioned` | D | **no** |
 | `compositions_verified` | E | **no** |
 
-The ladder and the status are derived independently and a test asserts they agree in every
-failure mode, so the first unmet blocking rung always explains the reported status.
+The ladder and the status are derived independently, and two test matrices assert they agree: one
+breaks a single prerequisite at a time, and one breaks each rung together with every rung below it
+— the latter is what pins the ORDER, because relative order can only matter when two rungs are
+unmet at once. So the first unmet blocking rung always explains the reported status.
 
 ### Remediation classes
 
