@@ -9,9 +9,15 @@ Only one binding can execute on any given host, so the tests are split:
   no-fallback rule holds on hosts with no keystore, no ``secretstorage``, or no Secret Service;
 * a real round trip against the platform's own keystore runs only where that keystore exists. On
   this repository's Windows development hosts that is a genuine end-to-end exercise of the ctypes
-  binding; the macOS and Linux bindings have no host here and are covered structurally — for Linux
-  that means the attribute set, which is the part a bug would make dangerous rather than merely
-  broken.
+  binding against the real Credential Manager;
+* the macOS and Linux bindings have no host here, so each is driven against a documented STAND-IN —
+  the ``SecItem`` contract and the SecretStorage 3.x contract respectively. That exercises the
+  binding's own logic (query composition, status handling, release ordering) but CANNOT prove the
+  real framework or library behaves as documented, so it is not verification.
+
+Those three levels of assurance are recorded per backend, not collapsed — see the "platform
+coverage" section below and ``test_the_three_assurance_categories_stay_distinct``, which exists
+because adding a stand-in is exactly when a binding's apparent assurance can be quietly inflated.
 """
 
 from __future__ import annotations
@@ -507,8 +513,25 @@ def test_windows_credential_manager_refuses_an_oversized_blob_before_calling_the
 #     genuine end-to-end exercise of the ctypes binding against the real Credential Manager;
 #   * CI runs exclusively on ubuntu (`.github/workflows`), where that test SKIPS and a headless
 #     runner has no session D-Bus and therefore no Secret Service — so NO live OS keystore is
-#     exercised on CI at all, and the Linux binding is covered structurally only.
+#     exercised on CI at all.
 # Neither fact is a defect, but a silently skipped backend must never read as a passing one.
+#
+# THREE assurance categories, deliberately kept distinct. Collapsing them is the failure mode this
+# ledger exists to prevent, and adding stand-in tests is exactly when that collapse would happen:
+#
+#   live            the REAL OS binding was exercised end to end against the actual keystore.
+#   stand_in        the binding's OWN logic ran against a documented substitute. This proves the
+#                   binding is self-consistent — query composition, status handling, release
+#                   ordering. It CANNOT prove that Apple's frameworks or the Secret Service library
+#                   behave as documented, so it is NOT verification and must never read as `live`.
+#   structural_only never executed at all; covered only by construction/refusal assertions.
+#
+# `test_the_three_assurance_categories_stay_distinct` is what stops a future edit from quietly
+# promoting a stand-in to live.
+
+ASSURANCE_LIVE = "live"
+ASSURANCE_STAND_IN = "stand_in"
+ASSURANCE_STRUCTURAL_ONLY = "structural_only"
 
 #: The binding each platform MUST resolve when its keystore is genuinely reachable.
 _EXPECTED_BINDING = {
@@ -516,6 +539,33 @@ _EXPECTED_BINDING = {
     "darwin": (MacOSKeychainBinding, BACKEND_MACOS_KEYCHAIN),
     "linux": (SecretServiceBinding, BACKEND_SECRET_SERVICE),
 }
+
+#: Backends whose own logic is driven against a documented substitute IN THIS FILE — macOS through
+#: `_FakeFrameworks` (the SecItem contract) and Linux through `_FakeSecretStorage` (the
+#: SecretStorage 3.x contract). Windows is deliberately absent: it has no stand-in because it is
+#: exercised LIVE on the developer host, and on any other host it honestly drops to structural-only
+#: rather than being given a substitute that would inflate its apparent assurance.
+_STAND_IN_BACKENDS = frozenset({BACKEND_MACOS_KEYCHAIN, BACKEND_SECRET_SERVICE})
+
+_ALL_BACKENDS = frozenset(
+    backend_id for _platform, (_type, backend_id) in _EXPECTED_BINDING.items()
+)
+
+
+def _assurance_for(backend_id: str, live_backend: str) -> str:
+    """This run's assurance category for one backend. `live` outranks `stand_in` — on a macOS host
+    the Keychain binding is both, and the stronger claim is the true one."""
+    if backend_id == live_backend:
+        return ASSURANCE_LIVE
+    if backend_id in _STAND_IN_BACKENDS:
+        return ASSURANCE_STAND_IN
+    return ASSURANCE_STRUCTURAL_ONLY
+
+
+def _assurance_map() -> dict[str, str]:
+    binding = resolve_secret_store_binding()
+    live = binding.backend_id if binding is not None else "none"
+    return {backend: _assurance_for(backend, live) for backend in sorted(_ALL_BACKENDS)}
 
 
 def _platform_key() -> str:
@@ -559,27 +609,89 @@ def test_the_live_backend_coverage_of_this_run_is_recorded(record_testsuite_prop
     into the uploaded artifact instead of quietly vanishing — which would have reproduced, in the
     reporting, exactly the "absence reads as coverage" problem this test exists to prevent.
 
+    Every backend is recorded with its OWN category, so "macOS has stand-in tests" can never be
+    read off the report as "macOS is verified". On CI the live entry is `none` and that is the
+    honest, load-bearing answer: an ubuntu runner exercises no real OS keystore at all.
+
     This test never fails on the ANSWER — a host without a keystore is a legitimate environment. It
     fails only if the answer cannot be determined, which would mean the ledger had gone stale.
     """
     binding = resolve_secret_store_binding()
     live = binding.backend_id if binding is not None else "none"
-    structural_only = sorted(
-        backend_id
-        for _platform, (_type, backend_id) in _EXPECTED_BINDING.items()
-        if backend_id != live
-    )
-    record_testsuite_property("live_os_keystore_backend", live)
-    record_testsuite_property("structural_only_backends", ",".join(structural_only))
+    assurance = _assurance_map()
 
-    assert live in {
-        BACKEND_WINDOWS_CREDENTIAL_MANAGER,
-        BACKEND_MACOS_KEYCHAIN,
-        BACKEND_SECRET_SERVICE,
-        "none",
-    }
-    # exactly one backend can be live, so the other two are always structural-only
-    assert len(structural_only) == (2 if live != "none" else 3)
+    record_testsuite_property("os_keystore_live_backend", live)
+    record_testsuite_property(
+        "os_keystore_assurance",
+        ",".join(f"{backend}={category}" for backend, category in assurance.items()),
+    )
+
+    assert live in _ALL_BACKENDS | {"none"}
+    # Every backend is categorised, and at most one can be live (only one binding runs per host).
+    assert set(assurance) == set(_ALL_BACKENDS)
+    assert sum(1 for c in assurance.values() if c == ASSURANCE_LIVE) <= 1
+    assert all(
+        category in (ASSURANCE_LIVE, ASSURANCE_STAND_IN, ASSURANCE_STRUCTURAL_ONLY)
+        for category in assurance.values()
+    )
+
+
+def test_the_three_assurance_categories_stay_distinct():
+    """The guard against this ledger's own worst failure: a stand-in reading as verification.
+
+    Adding stand-in tests for a binding is exactly when its apparent assurance can be inflated —
+    macOS gained a `SecItem` substitute and must NOT thereby become indistinguishable from a backend
+    that was genuinely round-tripped, nor collapse into the structural-only bucket it left. A
+    stand-in proves the binding is self-consistent; it cannot prove the real framework behaves as
+    documented, and only the three-way split records that difference.
+    """
+    assert ASSURANCE_LIVE != ASSURANCE_STAND_IN != ASSURANCE_STRUCTURAL_ONLY
+    assert len({ASSURANCE_LIVE, ASSURANCE_STAND_IN, ASSURANCE_STRUCTURAL_ONLY}) == 3
+
+    # macOS and Linux have substitutes; neither is ever promoted to `live` by owning one.
+    for backend in (BACKEND_MACOS_KEYCHAIN, BACKEND_SECRET_SERVICE):
+        assert backend in _STAND_IN_BACKENDS
+        assert _assurance_for(backend, live_backend="none") == ASSURANCE_STAND_IN
+
+    # Windows has NO substitute: live where the OS provides one, honestly structural-only elsewhere.
+    assert BACKEND_WINDOWS_CREDENTIAL_MANAGER not in _STAND_IN_BACKENDS
+    assert (
+        _assurance_for(BACKEND_WINDOWS_CREDENTIAL_MANAGER, live_backend="none")
+        == ASSURANCE_STRUCTURAL_ONLY
+    )
+    assert (
+        _assurance_for(
+            BACKEND_WINDOWS_CREDENTIAL_MANAGER, live_backend=BACKEND_WINDOWS_CREDENTIAL_MANAGER
+        )
+        == ASSURANCE_LIVE
+    )
+
+    # A real round trip outranks owning a substitute (a macOS host makes the Keychain binding both).
+    assert (
+        _assurance_for(BACKEND_MACOS_KEYCHAIN, live_backend=BACKEND_MACOS_KEYCHAIN)
+        is ASSURANCE_LIVE
+    )
+
+
+def test_on_this_host_the_recorded_assurance_matches_what_actually_ran():
+    """Ties the ledger to observable reality rather than to its own bookkeeping."""
+    assurance = _assurance_map()
+    key = _platform_key()
+
+    # The two backends with substitutes are never live off their own platform...
+    if key != "darwin":
+        assert assurance[BACKEND_MACOS_KEYCHAIN] == ASSURANCE_STAND_IN
+    if key != "linux":
+        assert assurance[BACKEND_SECRET_SERVICE] == ASSURANCE_STAND_IN
+
+    # ...and Windows is live exactly when this IS a Windows host (where the round trip runs).
+    if key == "win32":
+        assert assurance[BACKEND_WINDOWS_CREDENTIAL_MANAGER] == ASSURANCE_LIVE
+    else:
+        assert assurance[BACKEND_WINDOWS_CREDENTIAL_MANAGER] == ASSURANCE_STRUCTURAL_ONLY
+        # On CI (ubuntu) this is the whole point: no live OS keystore is exercised anywhere.
+        if key == "linux" and resolve_secret_store_binding() is None:
+            assert ASSURANCE_LIVE not in assurance.values()
 
 
 # --- the macOS Keychain binding, driven against a stand-in for the documented SecItem API ---------
