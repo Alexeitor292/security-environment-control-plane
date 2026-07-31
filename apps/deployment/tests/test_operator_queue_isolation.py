@@ -504,8 +504,19 @@ def test_the_queue_command_submits_nothing_and_starts_no_consumer(prepared_conte
 
     from secp_operator_deployment import compositions, host_process, runner
 
+    # The tripwires RECORD as well as raise, and the assertion below is made on the record.
+    #
+    # ``RealCommandRunner.run`` is the reason: it sits on a seam INSIDE ``load_verify_context``,
+    # every step of which is wrapped in ``except Exception``. That is correct fail-closed behaviour
+    # and it also swallows a raising tripwire whole — so this one could never have failed the test,
+    # whatever it caught. A decorative assertion inside a test named for a safety property is not
+    # neutral: a maintainer reads it as guarding the command-runner path. The other two seams are
+    # outside the loader and do propagate; recording costs them nothing.
+    reached: list[str] = []
+
     def _tripwire(name):  # noqa: ANN001, ANN202
         def _fail(*a, **k):  # noqa: ANN002, ANN003, ANN202
+            reached.append(name)
             raise AssertionError(f"the queue check reached {name}")
 
         return _fail
@@ -523,6 +534,8 @@ def test_the_queue_command_submits_nothing_and_starts_no_consumer(prepared_conte
     before = set(sys.modules)
     assert main(["queue", "--json"]) == 0
     new_modules = set(sys.modules) - before
+
+    assert reached == [], f"the queue check reached a tripwired seam: {reached}"
 
     # ``temporalio`` is the ONLY way to submit a workflow or run a worker. If the check had gone
     # anywhere near a submission it would be here.
