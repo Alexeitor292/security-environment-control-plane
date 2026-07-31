@@ -11,6 +11,10 @@ import {
   ATTENTION_STATES,
   COMPLETE_NOTICE,
   EMPTY_PAGE,
+  INVENTORY_ERROR_TEXT,
+  MORE_MAY_REMAIN_NOTICE,
+  PAGE_INTEGRITY_CODE,
+  PAGE_INTEGRITY_STEPS,
   INVENTORY_SCOPES,
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
@@ -30,10 +34,15 @@ import {
   listGate,
   loadMoreGate,
   replaceRow,
+  isPageIntegrityFailure,
   scopeStates,
   type InventoryPage,
 } from "./enrollment-inventory";
-import { ENROLLMENT_FORWARD_STATES, MISSING_READ_REASON } from "./worker-enrollment";
+import {
+  ENROLLMENT_ERROR_TEXT,
+  ENROLLMENT_FORWARD_STATES,
+  MISSING_READ_REASON,
+} from "./worker-enrollment";
 
 const NOW = Date.parse("2026-07-30T10:00:00+00:00");
 const LATER = "2026-07-30T11:00:00+00:00";
@@ -391,5 +400,90 @@ describe("gates", () => {
       expect(gate.ok).toBe(false);
       expect((gate.reason ?? "").length, JSON.stringify(gate)).toBeGreaterThan(10);
     }
+  });
+});
+
+// --------------------------------------------------------------------- page integrity
+
+describe("a page refused because one row cannot be projected", () => {
+  /**
+   * The controller fails the WHOLE page rather than dropping the row, deliberately: omitting it
+   * would tell an operator an enrollment does not exist. The consequence is that a single bad
+   * record makes a whole page unreadable, and the interface has to distinguish that from the two
+   * other ways a table ends up empty.
+   */
+  it("recognises the code the controller actually returns", () => {
+    // Read off the shipped service: a projection failure raises the same state_corrupt code a
+    // single-record read does. If that ever becomes a distinct code, this is the one place to change.
+    expect(PAGE_INTEGRITY_CODE).toBe("enrollment_state_corrupt");
+    expect(isPageIntegrityFailure(PAGE_INTEGRITY_CODE)).toBe(true);
+    expect(isPageIntegrityFailure("api_unreachable")).toBe(false);
+    expect(isPageIntegrityFailure("enrollment_forbidden")).toBe(false);
+    expect(isPageIntegrityFailure(null)).toBe(false);
+    expect(isPageIntegrityFailure(undefined)).toBe(false);
+  });
+
+  /** The shared map says "the enrollment you asked for"; on a list that would be wrong. */
+  it("says something different from the single-record copy for the same code", () => {
+    const shared = ENROLLMENT_ERROR_TEXT[PAGE_INTEGRITY_CODE];
+    const page = INVENTORY_ERROR_TEXT[PAGE_INTEGRITY_CODE];
+    expect(shared).toBeTruthy();
+    expect(page).toBeTruthy();
+    expect(page).not.toBe(shared);
+    expect(page).toContain("One enrollment on this page");
+    expect(page).toContain("refused the whole page");
+    // and it must not leave the operator thinking rows went missing
+    expect(page).toContain("Nothing is missing");
+  });
+
+  it("layers over the shared map rather than replacing it", () => {
+    for (const code of Object.keys(ENROLLMENT_ERROR_TEXT)) {
+      expect(INVENTORY_ERROR_TEXT, code).toHaveProperty(code);
+    }
+    // an unrelated code keeps its shared copy exactly
+    expect(INVENTORY_ERROR_TEXT.enrollment_forbidden).toBe(
+      ENROLLMENT_ERROR_TEXT.enrollment_forbidden,
+    );
+  });
+
+  it("carries the list-route codes the controller can actually return", () => {
+    for (const code of ["enrollment_cursor_invalid", "enrollment_state_invalid"]) {
+      expect(INVENTORY_ERROR_TEXT[code], code).toBeTruthy();
+      expect(INVENTORY_ERROR_TEXT[code].length, code).toBeGreaterThan(40);
+    }
+  });
+
+  it("gives the operator steps that are true today", () => {
+    expect(PAGE_INTEGRITY_STEPS.length).toBeGreaterThan(2);
+    const all = PAGE_INTEGRITY_STEPS.join(" ");
+    expect(all).toContain("preserved, not repaired");
+    expect(all).toContain("No row was silently dropped");
+    expect(all).toContain("different lifecycle filter");
+    // No step may promise a skip-past-the-bad-row control: the failing keyset position is not in
+    // the error body, so this interface could not aim one.
+    expect(all).not.toMatch(/skip past|continue past|advance past/i);
+  });
+});
+
+describe("cursor semantics as the controller actually implements them", () => {
+  /**
+   * `next_cursor` is non-null whenever a page came back FULL, which includes the case where the
+   * page after it is empty. "More pages remain" would therefore be a claim the response does not
+   * support, and the copy says the weaker true thing instead.
+   */
+  it("says there may be more, not that there certainly are", () => {
+    expect(MORE_MAY_REMAIN_NOTICE).toContain("came back full");
+    expect(MORE_MAY_REMAIN_NOTICE).toContain("does not guarantee");
+    expect(MORE_MAY_REMAIN_NOTICE).not.toMatch(/more pages remain/i);
+  });
+
+  /** The real end-of-list shape: a full page yields a cursor, and the next page returns nothing. */
+  it("completes cleanly when a full page is followed by an empty one", () => {
+    const full = page([status({ enrollment_id: id("a") })], "cursor-1");
+    expect(inventorySummary(full, NOW).complete).toBe(false);
+    const after = appendPage(full, { items: [], next_cursor: null });
+    expect(after.items).toHaveLength(1);
+    expect(after.pages).toBe(2);
+    expect(inventorySummary(after, NOW).complete).toBe(true);
   });
 });

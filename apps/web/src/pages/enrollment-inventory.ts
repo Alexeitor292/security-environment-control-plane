@@ -22,6 +22,7 @@
 
 import type { EnrollmentStatus } from "../api/types";
 import {
+  ENROLLMENT_ERROR_TEXT,
   ENROLLMENT_FORWARD_STATES,
   MISSING_READ_REASON,
   expiryView,
@@ -335,6 +336,11 @@ export const COMPLETE_NOTICE =
 export const ORDERING_NOTICE =
   "Ordered by expiry, soonest first, then by enrollment id. That order comes from the controller and is not re-sorted here: paging continues from the last row, so re-ordering the page would skip records.";
 
+/** The controller returns a continuation whenever a page came back full, so "more to load" means
+ *  "there may be more", not "there certainly are". The copy says the weaker, true thing. */
+export const MORE_MAY_REMAIN_NOTICE =
+  "Load more is offered whenever a page came back full, which does not guarantee another row is behind it. The last load can legitimately return nothing.";
+
 export const FILTER_NOTICE =
   "Filtering is done by the controller, not in this browser — so a filter searches every enrollment you can see, not just the rows already loaded. Changing it starts the list again from the first page.";
 
@@ -364,6 +370,47 @@ export const RECOVERY_NOT_RESUMABLE_NOTICE =
 
 export const NO_INVITATION_IN_LIST_NOTICE =
   "No invitation material appears on this page. The hand-off values exist only in the response that created them, and no route re-serves them — so an enrollment you have lost the invitation for must be revoked and created again.";
+
+// --------------------------------------------------------------------------- page integrity
+//
+// A row the controller cannot project fails the WHOLE page rather than being dropped from it. That
+// is the right call — omitting a row would tell an operator an enrollment does not exist — but it
+// means a single bad record makes a whole page unreadable, and the interface has to say which of
+// those two things happened. "The list is empty", "the API is unreachable" and "one row in this
+// page failed its integrity check" are three different situations with three different remedies,
+// and only the last of them is an administrator's problem.
+
+/**
+ * The code the controller returns when a row in the page could not be projected.
+ *
+ * It is `enrollment_state_corrupt` — the SAME code a single-record read returns for the record you
+ * asked for. On a list it means something materially different: not "the enrollment you opened is
+ * corrupt" but "one of the enrollments on this page is, and none of the page can be shown". That is
+ * why the inventory layers its own copy over the shared map instead of reusing it.
+ *
+ * A distinct code, and the failing keyset position, are requested but NOT yet shipped — so this
+ * interface deliberately offers no "skip past the bad row" control. It could not aim one.
+ */
+export const PAGE_INTEGRITY_CODE = "enrollment_state_corrupt";
+
+export function isPageIntegrityFailure(code: string | null | undefined): boolean {
+  return code === PAGE_INTEGRITY_CODE;
+}
+
+/** The inventory's closed-code copy: the shared map, with the page-scoped meaning layered over it. */
+export const INVENTORY_ERROR_TEXT: Record<string, string> = {
+  ...ENROLLMENT_ERROR_TEXT,
+  [PAGE_INTEGRITY_CODE]:
+    "One enrollment on this page failed its own integrity check, so the controller refused the whole page rather than quietly leaving that row out. Nothing is missing from your organization and nothing was written.",
+};
+
+/** Shown alongside that error, because the operator's next step is not obvious from the code. */
+export const PAGE_INTEGRITY_STEPS: readonly string[] = [
+  "The record is preserved, not repaired, and it is not deleted. This needs an administrator.",
+  "No row was silently dropped — that is why the whole page refused rather than returning a shorter one.",
+  "A different lifecycle filter asks for a different set of rows, and may not include the failing one.",
+  "Looking an enrollment up by id on the Worker Enrollment page still works for every other record.",
+];
 
 export const EMPTY_SCOPE_TITLE = "Nothing matches this filter";
 

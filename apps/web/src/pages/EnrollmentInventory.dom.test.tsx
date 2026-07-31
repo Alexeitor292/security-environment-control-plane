@@ -115,6 +115,14 @@ const STATES: ReadonlyArray<readonly [string, Partial<EnrollmentInventoryViewPro
   ["no enrollment permission", { permissions: { read: false, manage: false }, page: EMPTY_PAGE }],
   ["list refused", { listError: { code: "enrollment_forbidden", text: "" }, page: EMPTY_PAGE }],
   [
+    "page refused for integrity",
+    { listError: { code: "enrollment_state_corrupt", text: "" }, page: EMPTY_PAGE },
+  ],
+  [
+    "cursor refused",
+    { listError: { code: "enrollment_cursor_invalid", text: "" }, page: EMPTY_PAGE },
+  ],
+  [
     "revoke refused on a selected row",
     { selectedId: id("2"), revokeError: { code: "enrollment_revision_conflict", text: "" } },
   ],

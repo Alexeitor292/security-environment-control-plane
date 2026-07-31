@@ -85,3 +85,9 @@
   font-size: var(--text-lg);
   color: var(--ink-primary);
 }
+
+/* The page-integrity explanation sits under the closed-code error, so it needs separating from it
+   without becoming a second error banner. */
+.einv-integrity {
+  margin-top: 8px;
+}

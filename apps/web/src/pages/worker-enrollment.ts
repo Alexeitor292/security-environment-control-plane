@@ -87,6 +87,13 @@ export const ENROLLMENT_ERROR_TEXT: Record<string, string> = {
     "The controller's enrollment identity changed while this request was in flight. Try again — nothing was written.",
   enrollment_state_corrupt:
     "This enrollment's stored state failed its own integrity check and will not be shown. Report this to an administrator; the record is preserved, not repaired.",
+  // Both are list-route codes. They are in the shared map because the map is what any enrollment
+  // call resolves against; the inventory layers a page-specific message over the first of them,
+  // where "corrupt" means one row in a page rather than the record you asked for.
+  enrollment_cursor_invalid:
+    "The page position this request carried was not valid, so no page was returned. Load the list again from the first page.",
+  enrollment_state_invalid:
+    "That lifecycle filter was refused. Choose one of the filters offered above rather than editing the address bar.",
   enrollment_history_inconsistent:
     "This enrollment's history failed its own integrity check and will not be shown. Report this to an administrator; the record is preserved, not repaired.",
   configuration_invalid:

@@ -29,13 +29,16 @@ import {
   EMPTY_PAGE,
   EMPTY_SCOPE_TITLE,
   FILTER_NOTICE,
+  INVENTORY_ERROR_TEXT,
   INVENTORY_INTRO,
   INVENTORY_SCOPES,
   LIST_NEEDS_READ_NOTICE,
+  MORE_MAY_REMAIN_NOTICE,
   NO_DECISION_NOTICE,
   NO_INVITATION_IN_LIST_NOTICE,
   ORDERING_NOTICE,
   ORG_SCOPE_NOTICE,
+  PAGE_INTEGRITY_STEPS,
   PARTIAL_COUNT_NOTICE,
   RECOVERY_NOT_RESUMABLE_NOTICE,
   SCOPE_DESCRIPTIONS,
@@ -51,6 +54,7 @@ import {
   inventoryRevokeGate,
   inventoryRows,
   inventorySummary,
+  isPageIntegrityFailure,
   listGate,
   loadMoreGate,
   replaceRow,
@@ -74,6 +78,7 @@ const MORE_REASON = "einv-more-reason";
 const REVOKE_REASON = "einv-revoke-reason";
 const SELECTION_REGION = "einv-selection";
 const SELECTION_HEADING = "einv-selection-heading";
+const INTEGRITY_TITLE = "einv-integrity-title";
 const STATUS_LINE = "einv-status";
 
 export interface EnrollmentInventoryViewProps {
@@ -245,6 +250,7 @@ export function EnrollmentInventoryView({
             {summary.complete ? COMPLETE_NOTICE : PARTIAL_COUNT_NOTICE}
           </p>
           <p className="wenr-reason">{ORDERING_NOTICE}</p>
+          <p className="wenr-reason">{MORE_MAY_REMAIN_NOTICE}</p>
           <p className="wenr-reason">{STALENESS_NOTICE}</p>
 
           <div className="wenr-actions">
@@ -267,10 +273,33 @@ export function EnrollmentInventoryView({
           </div>
 
           {listError && (
-            <ClosedCodeError
-              error={{ code: listError.code, message: "" }}
-              codeText={ENROLLMENT_ERROR_TEXT}
-            />
+            <>
+              <ClosedCodeError
+                error={{ code: listError.code, message: "" }}
+                codeText={INVENTORY_ERROR_TEXT}
+              />
+              {/* A page refused because one row failed its integrity check is not the same event
+                  as an unreachable API, and it does not have the same remedy. The closed code
+                  alone does not carry that difference — the controller returns the same code a
+                  single-record read does — so the page-scoped consequences are spelled out. */}
+              {isPageIntegrityFailure(listError.code) && (
+                <section
+                  aria-labelledby={INTEGRITY_TITLE}
+                  className="einv-integrity"
+                >
+                  <SafetyNotice role="note" tone="warn">
+                    <strong id={INTEGRITY_TITLE}>
+                      This page contains a record this controller cannot project
+                    </strong>
+                    <ul className="wenr-recovery__steps">
+                      {PAGE_INTEGRITY_STEPS.map((step) => (
+                        <li key={step}>{step}</li>
+                      ))}
+                    </ul>
+                  </SafetyNotice>
+                </section>
+              )}
+            </>
           )}
 
           {firstLoad && loading ? (
@@ -470,9 +499,15 @@ export function EnrollmentInventory() {
   const rereadAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const revokeAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
 
-  /** What the load actually did, stated in rows rather than implied by the table changing size. */
+  /**
+   * What the load actually did, stated in rows rather than implied by the table changing size.
+   *
+   * "There may be more" rather than "more pages remain": the controller returns a cursor whenever a
+   * page came back FULL, which includes the case where the next page turns out to be empty. Saying
+   * more remain would be a claim the response does not support.
+   */
   const announce = (next: InventoryPage, added: number) => {
-    const more = next.cursor === null ? "No further pages." : "More pages remain.";
+    const more = next.cursor === null ? "No further pages." : "There may be more.";
     setLiveNotice(`Loaded ${added} more; ${next.items.length} shown. ${more}`);
   };
 

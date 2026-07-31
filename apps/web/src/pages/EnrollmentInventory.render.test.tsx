@@ -261,6 +261,55 @@ describe("EnrollmentInventoryView - loading and error states", () => {
     expect(out).toContain("enrollment_forbidden");
   });
 
+  /**
+   * The three ways this table ends up showing nothing are different events with different
+   * remedies, and only one of them is an administrator's problem. A single "something went wrong"
+   * would collapse them.
+   */
+  it("distinguishes a page-integrity refusal from an unreachable API", () => {
+    const integrity = html({
+      listError: { code: "enrollment_state_corrupt", text: "" },
+      page: EMPTY_PAGE,
+    });
+    expect(integrity).toContain("One enrollment on this page failed its own integrity check");
+    expect(integrity).toContain("refused the whole page");
+    expect(integrity).toContain("This page contains a record this controller cannot project");
+    expect(integrity).toContain("preserved, not repaired");
+    expect(integrity).toContain("No row was silently dropped");
+
+    const unreachable = html({
+      listError: { code: "api_unreachable", text: "" },
+      page: EMPTY_PAGE,
+    });
+    expect(unreachable).toContain("Cannot reach the control-plane API");
+    // the administrator-facing explanation belongs only to the integrity case
+    expect(unreachable).not.toContain("cannot project");
+    expect(unreachable).not.toContain("No row was silently dropped");
+  });
+
+  /** No affordance may be offered that this interface cannot actually aim. */
+  it("offers no skip-past-the-bad-row control, since the failing position is not returned", () => {
+    const out = html({
+      listError: { code: "enrollment_state_corrupt", text: "" },
+      page: EMPTY_PAGE,
+    });
+    expect(out).not.toMatch(/Skip (this|past)/i);
+    expect(out).not.toMatch(/Continue past/i);
+  });
+
+  it("explains the list-route refusals the controller can actually return", () => {
+    expect(html({ listError: { code: "enrollment_cursor_invalid", text: "" } })).toContain(
+      "Load the list again from the first page",
+    );
+    expect(html({ listError: { code: "enrollment_state_invalid", text: "" } })).toContain(
+      "That lifecycle filter was refused",
+    );
+  });
+
+  it("says load-more does not guarantee another row is behind it", () => {
+    expect(html()).toContain("does not guarantee another row is behind it");
+  });
+
   it("keeps a refused re-read separate from a refused revoke", () => {
     const out = html({
       selectedId: id("2"),
