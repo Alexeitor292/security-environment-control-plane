@@ -48,9 +48,13 @@ def _pem(body: str) -> str:
 
 
 CA_PEM = _pem("MIIBfakeControllerCA000000000==")
-# a root + intermediate chain at the size an ordinary enterprise PKI actually produces (~2.6 KB).
-# This is the `TLS_MODE_IMPORTED_ENTERPRISE` case the bound exists to serve: a 4096-byte cap would
-# have rejected it, which is why the whole-file cap is 16384 and the CA's own cap is 8192.
+# A synthetic chain sized like a real one, used here only to exercise the bound cheaply. The REAL
+# measurements are in `test_enrollment_ca_real_chain.py`, which generates actual certificates:
+# production controller CA 599B, ecdsa-p256 root+intermediate 1023B, RSA-4096 root+intermediate
+# 3480B (42% of the 8192 CA bound). An earlier version of this comment claimed a 4096-byte cap
+# "would have rejected" an enterprise chain — measurement shows it would not have. The 8192 CA
+# bound is right with >2x margin on the largest realistic shape; the whole-file cap is 16384 to stay
+# CONSISTENT with a CA field allowed to reach 8192, not because any measured chain needs it.
 ENTERPRISE_CHAIN = "".join(
     f"-----BEGIN CERTIFICATE-----\n{('MIIFake' + str(n)) * 160}\n-----END CERTIFICATE-----\n"
     for n in range(2)
