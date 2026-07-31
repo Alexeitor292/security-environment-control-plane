@@ -914,8 +914,8 @@ export interface TopologyDocumentDetail extends TopologyDocument {
 // --- Supported worker enrollment (SECP-PR5H-B1) ---
 //
 // Mirrors apps/api/secp_api/schemas_enrollment.py. Only the routes that take a browser principal
-// are modelled here: create invitation, read status, list, revoke. The worker exchange routes
-// (/exchange/bind, /exchange/result) are authenticated by the worker's Ed25519 proof-of-possession
+// are modelled here: create invitation, read status, list, revoke, recover. The worker exchange
+// routes (/exchange/bind, /exchange/result) are authenticated by the worker's Ed25519 proof-of-possession
 // and carry no principal, and the claim-only progression routes are sealed closed and hidden from
 // the schema — neither is a browser surface, so neither is typed or called from this client.
 //
@@ -925,8 +925,11 @@ export interface TopologyDocumentDetail extends TopologyDocument {
 // read off the shipped schema module.
 
 /** The closed, ordered enrollment lifecycle (worker_enrollment_contract.py). The five forward edges
- *  are driven by the worker's signed evidence; `refused` is the terminal an operator revoke reaches
- *  and `recovery_required` is produced only by the controller-side expiry sweep. */
+ *  are driven by the worker's signed evidence; `refused` is the terminal an operator revoke reaches.
+ *  `recovery_required` has TWO producers — the controller-side expiry sweep, and an operator with
+ *  enrollment:manage calling the recover route — so reaching it does not by itself mean the
+ *  enrollment expired. They are distinguishable only by the bounded `refusal_reason` the service
+ *  stamps, which differs per producer; no client may infer the cause from the state alone. */
 export type EnrollmentLifecycleState =
   | "invited"
   | "worker_bound"

@@ -220,8 +220,9 @@ export const AUDIT_TONE: Record<string, StatusTone> = {
 /** Worker-enrollment lifecycle (SECP-PR5H-B1). The four pre-terminal states are progress, not
  *  outcomes: `invited` is waiting on a worker that has not arrived, and the three transported
  *  states are an exchange in flight. Only `healthy` is a finished, working worker. `refused` is
- *  where an operator revoke lands and `recovery_required` is the expiry sweep's terminal — both
- *  mean no worker was enrolled. */
+ *  where an operator revoke lands; `recovery_required` is where both the expiry sweep and an
+ *  operator marking an enrollment stuck land — the tone is the same either way, because the tone
+ *  says "no worker was enrolled", which is the part that does not depend on which one acted. */
 export const ENROLLMENT_TONE: Record<EnrollmentLifecycleState, StatusTone> = {
   invited: "pending",
   worker_bound: "warn",

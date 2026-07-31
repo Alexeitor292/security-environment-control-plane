@@ -265,18 +265,82 @@ describe("WorkerEnrollmentView - the reveal disclosure in a real tree", () => {
 });
 
 describe("WorkerEnrollmentView - gated controls in a real tree", () => {
+  /**
+   * "Every disabled control" was narrower than it read: the walk rendered the default empty tracked
+   * table, so the one control that skipped this discipline — a tracked row's Refresh — was never in
+   * the set it measured. The second case below is the state that reaches it, and it needs nothing
+   * unusual: a principal with manage but not read can create an invitation, which puts a row in the
+   * table, and cannot then refresh it.
+   *
+   * `mustInclude` is the anti-vacuity half. Without it a case that renders no such control still
+   * passes, which is precisely how the gap survived.
+   */
+  const GATED_STATES: ReadonlyArray<
+    readonly [string, Partial<WorkerEnrollmentViewProps>, string | null]
+  > = [
+    ["no permissions at all", { permissions: { read: false, manage: false } }, null],
+    [
+      "manage without read, holding a tracked row",
+      {
+        permissions: { read: false, manage: true },
+        tracked: [trackedFromInvitation(INVITATION)],
+      },
+      "Refresh",
+    ],
+  ];
+
   it("keeps every disabled control out of the tab order with its reason present as text", () => {
-    const view = render({ permissions: { read: false, manage: false } });
+    for (const [name, over, mustInclude] of GATED_STATES) {
+      const view = render(over);
+      try {
+        const disabled = [...view.container.querySelectorAll<HTMLButtonElement>("button[disabled]")];
+        expect(disabled.length, name).toBeGreaterThan(0);
+        if (mustInclude !== null) {
+          // The control this case exists for must actually be in the set being walked.
+          const labels = disabled.map((b) => b.textContent ?? "");
+          expect(
+            labels.some((label) => label.includes(mustInclude)),
+            `${name}: no disabled "${mustInclude}" in [${labels.join(" | ")}]`,
+          ).toBe(true);
+        }
+        for (const button of disabled) {
+          expect(tabbable(view.container), name).not.toContain(button);
+          const described = button.getAttribute("aria-describedby");
+          expect(described, `${name}: ${button.textContent ?? ""}`).not.toBeNull();
+          const reason = document.getElementById(described as string);
+          expect(reason, `${name}: ${described}`).not.toBeNull();
+          expect((reason?.textContent ?? "").length, `${name}: ${described}`).toBeGreaterThan(10);
+        }
+      } finally {
+        view.unmount();
+      }
+    }
+  });
+
+  /**
+   * Two rows, both disabled for the same reason, must still carry two distinct reason elements —
+   * a shared id would be a duplicate id, and the row-scoped `busy` reason means the text genuinely
+   * differs per row. The id-uniqueness test below covers the general rule; this pins the case that
+   * introduced the risk.
+   */
+  it("gives each tracked row its own refresh reason rather than a shared id", () => {
+    const second = trackedFromInvitation({
+      ...INVITATION,
+      enrollment_id: "sha256:" + "9".repeat(64),
+    });
+    const view = render({
+      permissions: { read: false, manage: true },
+      tracked: [trackedFromInvitation(INVITATION), second],
+    });
     try {
-      const disabled = [...view.container.querySelectorAll<HTMLButtonElement>("button[disabled]")];
-      expect(disabled.length).toBeGreaterThan(0);
-      for (const button of disabled) {
-        expect(tabbable(view.container)).not.toContain(button);
-        const described = button.getAttribute("aria-describedby");
-        expect(described, button.textContent ?? "").not.toBeNull();
-        const reason = document.getElementById(described as string);
-        expect(reason, described as string).not.toBeNull();
-        expect((reason?.textContent ?? "").length).toBeGreaterThan(10);
+      const refreshes = [
+        ...view.container.querySelectorAll<HTMLButtonElement>("button[disabled]"),
+      ].filter((b) => (b.textContent ?? "").includes("Refresh"));
+      expect(refreshes).toHaveLength(2);
+      const ids = refreshes.map((b) => b.getAttribute("aria-describedby"));
+      expect(new Set(ids).size).toBe(2);
+      for (const id of ids) {
+        expect(document.getElementById(id as string)?.textContent).toContain("enrollment:read");
       }
     } finally {
       view.unmount();

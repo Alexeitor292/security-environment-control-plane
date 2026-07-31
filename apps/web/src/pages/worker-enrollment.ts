@@ -5,11 +5,17 @@
 // label grammar and the TTL bounds are all mirrored from the backend contract, and the service
 // stays authoritative for all of them.
 //
-// SCOPE. The controller exposes exactly four enrollment routes to a browser principal: create an
-// invitation, read the bounded status projection, list the organization's enrollments, and revoke.
-// There is deliberately no approve or reject here — the enrollment lifecycle has no approval edge.
-// Every forward transition is driven by the worker's signed cryptographic evidence, and revoke is
-// the only operator write in the entire lifecycle.
+// SCOPE. The controller exposes exactly five enrollment routes to a browser principal: create an
+// invitation, read the bounded status projection, list the organization's enrollments, revoke, and
+// mark for recovery. There is deliberately no approve or reject here — the enrollment lifecycle has
+// no approval edge. Every forward transition is driven by the worker's signed cryptographic
+// evidence, and the only operator writes are the two that END an enrollment: revoke and recover.
+//
+// TWO PRODUCERS. `recovery_required` is therefore not the expiry sweep's private terminal. The
+// controller's sweep reaches an enrollment whose time ran out; an operator holding
+// enrollment:manage reaches one they have decided is stuck, without waiting for the expiry. The
+// two are distinguishable only in the record — the service stamps a different bounded
+// `refusal_reason` for each — so copy in this module never asserts WHICH producer acted.
 
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
 import type { StepRailItem } from "../components/ui/StepRail";
@@ -43,9 +49,10 @@ export const INVITATION_CLEARED_NOTICE =
 export const NO_INVENTORY_NOTICE =
   "This looks up one enrollment at a time, by id. The Enrollment Inventory page lists every enrollment in your organization, including the ones waiting on a worker.";
 
-/** The truthful framing for the lifecycle rail: these states are not operator decisions. */
+/** The truthful framing for the lifecycle rail: no FORWARD state is an operator decision. The two
+ *  operator writes both end the enrollment, so neither is a step on this rail. */
 export const WORKER_DRIVEN_NOTICE =
-  "Enrollment advances only on evidence the worker signs. Nothing on this page approves or advances an enrollment — the one operator action is revoking it.";
+  "Enrollment advances only on evidence the worker signs. Nothing on this page approves or advances an enrollment — the two operator actions both end one: revoke it, or mark it for recovery.";
 
 export const REVOKE_CONFIRM_NOTICE =
   "Revoking is permanent for this enrollment. It cannot be undone, and a worker holding this invitation will no longer be able to enrol with it.";
@@ -263,9 +270,12 @@ export const ENROLLMENT_STEP_LABELS: Record<EnrollmentForwardState, string> = {
   healthy: "Worker healthy",
 };
 
+/** Why a forward step was never reached, per terminal. Neither names a cause: `recovery_required`
+ *  has two producers and this map cannot tell them apart, so it states only that the enrollment
+ *  ended first — which is the part that is true either way. */
 export const ENROLLMENT_TERMINAL_LABELS: Record<string, string> = {
   refused: "Refused — no worker enrolled",
-  recovery_required: "Recovery required — expired before completing",
+  recovery_required: "Recovery required — ended before completing",
 };
 
 export function isTerminalState(state: string): boolean {
@@ -523,7 +533,8 @@ export function lookupGate(
 }
 
 /**
- * Revoke is the only operator write in the lifecycle. It is offered only against a status that was
+ * Revoke is one of the two operator writes in the lifecycle; `recoverGate` below gates the other.
+ * It is offered only against a status that was
  * actually observed, because the request must carry that status's revision — never a typed value.
  * An already-terminal enrollment is refused here with an explanation; the backend would treat it
  * as an idempotent no-op, but presenting a live button for it would imply there is something left
@@ -575,6 +586,24 @@ export function recoverGate(
     );
   }
   if (busy) return denied("A request is already in flight.");
+  return allowed;
+}
+
+/**
+ * A tracked row's refresh. It is the same supported read as the look-up, so it needs
+ * enrollment:read — which enrollment:manage does not include.
+ *
+ * That makes a silent disabled control reachable in ONE action: a manage-only principal creates an
+ * invitation, the create response puts a row in the table, and the row's refresh is then disabled
+ * for a reason the operator has no way to see from the row. It is gated here, like every other
+ * write and read on this surface, so the reason is stated rather than left to be guessed.
+ *
+ * Busy is per row, not per page: `refreshingIds` tracks each id independently, so one row's request
+ * never explains another row's disabled control.
+ */
+export function refreshGate(p: EnrollmentPermissions, busy: boolean): Gate {
+  if (!p.read) return denied(MISSING_READ_REASON);
+  if (busy) return denied("This row is already being refreshed.");
   return allowed;
 }
 
@@ -761,7 +790,7 @@ export function recoveryView(state: string, expiry: ExpiryView): RecoveryView {
     return {
       needed: true,
       title: "Recovery required — no worker was enrolled",
-      body: "The controller's expiry sweep closed this enrollment before the exchange finished. Nothing was enrolled and nothing partial is left running.",
+      body: "This enrollment ended before the exchange finished. Two things reach this state — the controller's expiry sweep, when the enrollment ran out of time, and an operator marking it stuck without waiting for the expiry — and this page does not infer which one acted. The refusal reason recorded on the enrollment is what tells them apart. Nothing was enrolled and nothing partial is left running.",
       steps: [
         "No worker holds a controller-issued identity from this enrollment.",
         "This enrollment cannot be resumed or extended — the lifecycle has no edge out of recovery required, and no route accepts a new expiry.",
@@ -789,10 +818,10 @@ export function recoveryView(state: string, expiry: ExpiryView): RecoveryView {
       title: "Past its expiry — the worker did not finish in time",
       body: "This enrollment has not reached a terminal state, but its expiry has passed by this browser's clock. The controller decides what happens next, not this page.",
       steps: [
-        "Look the enrollment up again. The controller's expiry sweep — not this interface — moves an unfinished enrollment to recovery required.",
+        "Look the enrollment up again. The controller's expiry sweep runs on its own schedule, and it is what moves an unfinished enrollment to recovery required without anyone asking.",
         "An expiry cannot be extended. No route accepts a new one.",
         "Create a new invitation with a longer lifetime if the worker needs more time.",
-        "Revoke this one if you would rather close it now than wait for the sweep.",
+        "Close this one yourself rather than waiting for the sweep: revoke it, or mark it for recovery.",
       ],
     };
   }
@@ -889,6 +918,13 @@ export const ENROLLMENT_CONTROLS: readonly EnrollmentControl[] = [
     available: true,
     detail:
       "POST /api/v1/enrollment/{enrollment_id}/revoke — requires enrollment:manage. There is no separate cancel route: a revoke is the cancel, and it is permanent.",
+  },
+  {
+    id: "recover",
+    label: "Mark a stuck enrollment as needing recovery",
+    available: true,
+    detail:
+      "POST /api/v1/enrollment/{enrollment_id}/recover — requires enrollment:manage. The complement of the controller's expiry sweep: it reaches an enrollment an operator has decided will never finish, without waiting for the expiry to run out. Permanent, exactly as revoke is.",
   },
   {
     id: "list",
@@ -1094,4 +1130,4 @@ export const TRACKED_UNKNOWN_NOTICE =
   "A state this build does not recognise is counted separately and appears only under All tracked, so it is never filed as progress it might not be.";
 
 export const PAST_EXPIRY_NOTICE =
-  "Past its expiry by this browser's clock. The controller decides the record's real state — its expiry sweep is what moves an unfinished enrollment to recovery required.";
+  "Past its expiry by this browser's clock. The controller decides the record's real state — its expiry sweep is what moves an unfinished enrollment to recovery required on its own, though an operator can also mark one without waiting for it.";

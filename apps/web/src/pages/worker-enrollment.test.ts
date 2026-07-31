@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
+// Deliberately cross-page: `recovery_required` copy is only wrong when read as a whole, and the two
+// surfaces render the same claim about the same state. A per-file guard is what let five
+// contradictions ship together.
+import { NO_DECISION_NOTICE, SCOPE_DESCRIPTIONS, SWEEP_NOTICE } from "./enrollment-inventory";
 import {
   ENROLLMENT_CONTROLS,
   ENROLLMENT_FORWARD_STATES,
+  ENROLLMENT_TERMINAL_LABELS,
+  PAST_EXPIRY_NOTICE,
+  WORKER_DRIVEN_NOTICE,
   MISSING_MANAGE_REASON,
   MISSING_READ_REASON,
   RECOVER_CONFIRM_NOTICE,
@@ -661,9 +668,29 @@ describe("out-of-band verification context", () => {
 describe("control inventory", () => {
   const byId = Object.fromEntries(ENROLLMENT_CONTROLS.map((c) => [c.id, c]));
 
-  it("offers exactly the four routes a browser principal may call", () => {
+  // This list renders under "What this interface can and cannot do" and is framed as the
+  // controller's routes rather than a roadmap, so an operator reads it as exhaustive. It omitted
+  // `recover` while the page shipped the control and the client called the route — the boundary
+  // suite pinned five client methods at the same time, and the user-visible guard was the wrong one.
+  it("offers exactly the five routes a browser principal may call", () => {
     const available = ENROLLMENT_CONTROLS.filter((c) => c.available).map((c) => c.id);
-    expect(available.sort()).toEqual(["create", "list", "revoke", "status"]);
+    expect(available.sort()).toEqual(["create", "list", "recover", "revoke", "status"]);
+  });
+
+  /**
+   * The two operator writes are the ones that end an enrollment, and both must be declared here:
+   * an inventory that lists revoke but not recover reads as "revoking is all you can do", which is
+   * exactly the false claim the rest of this page used to make.
+   */
+  it("declares both operator writes, and says each is permanent", () => {
+    for (const id of ["revoke", "recover"]) {
+      expect(byId[id].available, id).toBe(true);
+      expect(byId[id].detail, id).toContain("enrollment:manage");
+      expect(byId[id].detail, id).toMatch(/permanent/i);
+    }
+    expect(byId.recover.detail).toContain("/recover");
+    // Named as the sweep's complement, not as a way to trigger the sweep or to extend an expiry.
+    expect(byId.recover.detail).toContain("without waiting for the expiry");
   });
 
   // Each available control names the route that backs it, so "available" can never drift into a
@@ -952,5 +979,120 @@ describe("operator-triggered recovery", () => {
     expect(RECOVER_VS_REVOKE_NOTICE).toContain("neither can be reversed");
     expect(RECOVER_CONFIRM_NOTICE).toContain("permanent");
     expect(RECOVER_CONFIRM_NOTICE).toContain("does not resume anything");
+  });
+});
+
+// ------------------------------------------------- recovery required has two producers, not one
+
+/**
+ * `recovery_required` is reached two ways: the controller's expiry sweep, when an enrollment ran
+ * out of time, and an operator holding enrollment:manage calling the recover route this interface
+ * ships. Nothing in the projection lets a browser infer which one acted — the service records that
+ * distinction as a bounded refusal reason, and the state alone does not carry it.
+ *
+ * Five constants asserted a single producer, and a rendered document showed all five at once
+ * directly above a live "Mark for recovery" button. The worst of them told the operator the
+ * controller's expiry sweep had closed the enrollment, immediately after their own action, on a
+ * record that had not expired.
+ *
+ * This pins the PROPERTY rather than the replacement wording: copy may be rewritten freely, but it
+ * may not go back to naming one producer.
+ */
+describe("operator-facing copy never asserts a single producer for recovery required", () => {
+  const live = expiryView("2026-07-30T11:00:00+00:00", NOW);
+  const gone = expiryView("2026-07-30T09:00:00+00:00", NOW);
+
+  const OPERATOR_FACING: ReadonlyArray<readonly [string, string]> = [
+    ["WORKER_DRIVEN_NOTICE", WORKER_DRIVEN_NOTICE],
+    ["PAST_EXPIRY_NOTICE", PAST_EXPIRY_NOTICE],
+    ["RECOVER_VS_REVOKE_NOTICE", RECOVER_VS_REVOKE_NOTICE],
+    ["RECOVER_CONFIRM_NOTICE", RECOVER_CONFIRM_NOTICE],
+    ["ENROLLMENT_TERMINAL_LABELS.recovery_required", ENROLLMENT_TERMINAL_LABELS.recovery_required],
+    ["NO_DECISION_NOTICE", NO_DECISION_NOTICE],
+    ["SWEEP_NOTICE", SWEEP_NOTICE],
+    // The inventory scope that COLLECTS the two terminals, so it enumerates how a record gets
+    // there and is the other place an omitted producer reads as an exhaustive list.
+    ["SCOPE_DESCRIPTIONS.attention", SCOPE_DESCRIPTIONS.attention],
+    ["recoveryView(recovery_required).body", recoveryView("recovery_required", live).body],
+    [
+      "recoveryView(recovery_required).steps",
+      recoveryView("recovery_required", live).steps.join(" "),
+    ],
+    ["recoveryView(past expiry).steps", recoveryView("worker_bound", gone).steps.join(" ")],
+  ];
+
+  /** Each pattern is an exclusivity claim that the shipped recover control falsifies. */
+  const SINGLE_PRODUCER = [
+    /only operator (write|action)/i,
+    /one operator action/i,
+    /produced only by/i,
+    /expiry sweep closed this/i,
+    /expired before completing/i,
+    /not by this page/i,
+    /sweep — not this interface/i,
+  ];
+
+  it("claims no single producer anywhere an operator can read it", () => {
+    for (const [name, text] of OPERATOR_FACING) {
+      expect(text.length, name).toBeGreaterThan(0);
+      for (const pattern of SINGLE_PRODUCER) {
+        expect(pattern.test(text), `${name} matched ${pattern}: ${text}`).toBe(false);
+      }
+    }
+  });
+
+  /**
+   * Anti-vacuity. A denylist that matches nothing passes against every string ever written, so each
+   * pattern is checked against the exact wording it was introduced to reject — the text that
+   * actually shipped. This is the half that proves the guard has teeth.
+   */
+  it("rejects the wording that shipped, so no pattern is inert", () => {
+    const SHIPPED: ReadonlyArray<readonly [string, RegExp]> = [
+      ["the one operator action is revoking it", /one operator action/i],
+      ["Revoking is the only operator write, and it is how you cancel", /only operator (write|action)/i],
+      [
+        "The controller's expiry sweep closed this enrollment before the exchange finished.",
+        /expiry sweep closed this/i,
+      ],
+      ["Recovery required — expired before completing", /expired before completing/i],
+      [
+        "moved to recovery required by the controller's own expiry sweep, not by this page",
+        /not by this page/i,
+      ],
+      [
+        "`recovery_required` is produced only by the controller-side expiry sweep",
+        /produced only by/i,
+      ],
+      [
+        "The controller's expiry sweep — not this interface — moves an unfinished enrollment",
+        /sweep — not this interface/i,
+      ],
+    ];
+    for (const [text, pattern] of SHIPPED) {
+      // the pattern this line exists for...
+      expect(pattern.test(text), `${pattern} no longer rejects: ${text}`).toBe(true);
+      // ...and the guard as a whole, so a pattern deleted from the list is caught here too
+      expect(
+        SINGLE_PRODUCER.some((p) => p.test(text)),
+        `no pattern rejects the shipped wording: ${text}`,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * The positive half. Refusing to name one producer is satisfiable by saying nothing at all, so
+   * the copy that DOES explain the state has to name both and point at what distinguishes them.
+   */
+  it("names both producers where it explains the state", () => {
+    const body = recoveryView("recovery_required", live).body;
+    expect(body).toContain("expiry sweep");
+    expect(body).toContain("operator");
+    expect(body).toContain("does not infer which one acted");
+    expect(body).toContain("refusal reason");
+    // The refusal reason is a real, rendered field, so that pointer is not a promise the page
+    // fails to keep: a terminal projection carrying one is displayed verbatim as the code it is.
+    const rows = statusDetailRows(status({ state: "recovery_required", refusal_reason: "expiry_recovery" }));
+    expect(rows.map((r) => r.key)).toContain("Refusal reason");
+    expect(rows.find((r) => r.key === "Refusal reason")?.value).toBe("expiry_recovery");
   });
 });

@@ -100,7 +100,11 @@ describe("EnrollmentInventoryView - framing", () => {
     const out = html();
     expect(out).toContain("There is no approve or reject here");
     expect(out).toContain("nothing is queued for your decision");
-    expect(out).toContain("Revoking is the only operator write");
+    // The page ships BOTH operator writes, so it must not describe revoke as the only one. The
+    // claim that matters is unchanged — neither write advances an enrollment — and it is the
+    // count, not the claim, that was wrong.
+    expect(out).toContain("The two operator writes both end an enrollment rather than advancing it");
+    expect(out).not.toContain("only operator write");
     // and it must never present one
     expect(out).not.toContain(">Approve<");
     expect(out).not.toContain(">Reject<");
@@ -129,10 +133,16 @@ describe("EnrollmentInventoryView - framing", () => {
     expect(out).toContain("grants nothing");
   });
 
-  it("says the expiry sweep, not this page, moves an unfinished enrollment", () => {
+  it("says the sweep runs on its own, without claiming it is the only way in", () => {
     // Apostrophes are HTML-escaped in static markup, so the assertion avoids them.
-    expect(html()).toContain("moved to recovery required by the controller");
-    expect(html()).toContain("own expiry sweep, not by this page");
+    const out = html();
+    expect(out).toContain("moved to recovery required by the controller");
+    expect(out).toContain("not by loading this page and not by looking at a row");
+    // `recovery_required` has two producers. Loading the list still moves nothing — that half was
+    // always true — but the page ships the operator write, so it must not present the sweep as the
+    // only route into the state.
+    expect(out).toContain("does not on its own mean the time ran out");
+    expect(out).not.toContain("not by this page");
   });
 
   it("says a settled record cannot be resumed, extended or un-revoked", () => {

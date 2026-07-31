@@ -108,6 +108,19 @@ const INVITATION: EnrollmentInvitation = {
   revision: 0,
 };
 
+/** A distinct second invitation. Every bearer field differs from the first, so an assertion that
+ *  this one's material is absent cannot be satisfied by the first one's still being on screen. */
+const SECOND_INVITATION: EnrollmentInvitation = {
+  ...INVITATION,
+  enrollment_id: B,
+  invitation_id: "sha256:" + "8".repeat(64),
+  controller_key_id: "sha256:" + "7".repeat(64),
+  controller_trust_anchor_hex: "6".repeat(64),
+  release_digest: "sha256:" + "5".repeat(64),
+  transaction_id: "txn-fedcba9876543210",
+  deployment_site_label: "site-two",
+};
+
 beforeEach(() => {
   statusCalls.length = 0;
   statusQueue.clear();
@@ -322,6 +335,64 @@ describe("WorkerEnrollment container - bearer material through a real create", (
       const reveal = clickAll(view.container, "Reveal invitation")[0];
       view.run(() => reveal.click());
       expect(view.container.textContent).toContain(INVITATION.transaction_id);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  /**
+   * A SECOND create while the first invitation is still open and revealed.
+   *
+   * The container closes the reveal on every create, so the new invitation's bearer material is not
+   * auto-disclosed by a disclosure the operator opened for a different invitation. That reset was
+   * the only clean-compiling mutation on the bearer path that the whole suite left alive: deleting
+   * `setRevealed(false)` from `onCreate` kept every other test green, and the shipped behaviour
+   * would have silently become "the second invitation's transaction_id and invitation_id appear
+   * with no operator opt-in". The consent is per invitation, not per session, which is why it is
+   * pinned here rather than assumed.
+   */
+  it("closes the reveal on a second create, so new material is never auto-disclosed", async () => {
+    const view = render();
+    try {
+      const site = view.container.querySelector<HTMLInputElement>("input:not(.mono)");
+      typeInto(site as HTMLInputElement, "site-one", view);
+      view.run(() => clickAll(view.container, "Create invitation")[0].click());
+      createQueue[0].resolve(INVITATION);
+      await settle(view);
+
+      // The operator opts in — for THIS invitation.
+      view.run(() => clickAll(view.container, "Reveal invitation")[0].click());
+      expect(view.container.textContent).toContain(INVITATION.transaction_id);
+
+      // A second create, without dismissing or hiding the first.
+      view.run(() => clickAll(view.container, "Create invitation")[0].click());
+      createQueue[1].resolve(SECOND_INVITATION);
+      await settle(view);
+
+      const text = view.container.textContent ?? "";
+      // The card now holds the second invitation, and none of its material is in the document:
+      // the operator has not opted in to it.
+      for (const secretish of [
+        SECOND_INVITATION.invitation_id,
+        SECOND_INVITATION.transaction_id,
+        SECOND_INVITATION.controller_trust_anchor_hex,
+        SECOND_INVITATION.release_digest,
+      ]) {
+        expect(text, secretish.slice(0, 20)).not.toContain(secretish);
+      }
+      // ...and the first one's is gone too, because the card no longer holds it.
+      expect(text).not.toContain(INVITATION.transaction_id);
+      // The toggle is genuinely closed, not merely emptied.
+      const toggle = buttons(view.container).find(
+        (b) => (b.getAttribute("aria-controls") ?? "") === "wenr-handoff-region",
+      );
+      expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+
+      // Anti-vacuity: opting in again must show the SECOND invitation's material, or "absent"
+      // above could just mean the card stopped rendering anything at all.
+      view.run(() => clickAll(view.container, "Reveal invitation")[0].click());
+      expect(view.container.textContent).toContain(SECOND_INVITATION.transaction_id);
+      expect(view.container.textContent).toContain(SECOND_INVITATION.invitation_id);
     } finally {
       view.unmount();
     }

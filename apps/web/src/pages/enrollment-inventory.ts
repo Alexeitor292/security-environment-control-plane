@@ -83,7 +83,7 @@ export const SCOPE_DESCRIPTIONS: Record<InventoryScope, string> = {
   queue:
     "Invitations that are open but not finished. Nothing here is waiting on you: an enrollment advances only when the worker presents the next piece of signed evidence.",
   attention:
-    "Enrollments that ended without a worker — revoked, refused, or closed by the controller's expiry sweep. They are kept for audit and cannot be resumed.",
+    "Enrollments that ended without a worker — revoked, refused, or marked as needing recovery, whether by the controller's expiry sweep or by an operator. They are kept for audit and cannot be resumed.",
   all: "Every enrollment in your organization, in expiry order, including revoked and terminal records and any state this interface does not recognise.",
 };
 
@@ -409,7 +409,7 @@ export const FILTER_NOTICE =
   "Filtering is done by the controller, not in this browser — so a filter searches every enrollment you can see, not just the rows already loaded. Changing it starts the list again from the first page.";
 
 export const NO_DECISION_NOTICE =
-  "There is no approve or reject here, and nothing is queued for your decision. The lifecycle has no approval edge: every forward step is driven by evidence the worker signs. Revoking is the only operator write, and it is how you cancel an enrollment.";
+  "There is no approve or reject here, and nothing is queued for your decision. The lifecycle has no approval edge: every forward step is driven by evidence the worker signs. The two operator writes both end an enrollment rather than advancing it — revoking, which is how you cancel one, and marking it for recovery.";
 
 export const SITE_LABEL_NOTICE =
   "The deployment site is an opaque grouping label chosen when the invitation was created. It is not a tenant, address, region, endpoint or provider, and it grants nothing.";
@@ -427,7 +427,7 @@ export const LIST_NEEDS_READ_NOTICE =
   "Listing enrollments requires enrollment:read. enrollment:manage does not include it — an operator who can create and revoke invitations may still be unable to see this list, which is deliberate rather than a fault. Ask an organization admin for enrollment:read.";
 
 export const SWEEP_NOTICE =
-  "An unfinished enrollment past its expiry is moved to recovery required by the controller's own expiry sweep, not by this page and not by looking at it. Until the sweep runs, a row can sit past its expiry in its last state.";
+  "An unfinished enrollment past its expiry is moved to recovery required by the controller's own expiry sweep, which runs on its own schedule — not by loading this page and not by looking at a row. Until it runs, a row can sit past its expiry in its last state. An operator marking an enrollment for recovery reaches the same state deliberately, so recovery required does not on its own mean the time ran out.";
 
 export const RECOVERY_NOT_RESUMABLE_NOTICE =
   "A record that ended without a worker cannot be resumed, extended or un-revoked. Create a new invitation for that site instead; the old record stays readable for audit.";

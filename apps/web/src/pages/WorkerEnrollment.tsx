@@ -58,6 +58,7 @@ import {
   newIdempotencyKey,
   parseEnrollmentId,
   parseTtlSeconds,
+  refreshGate,
   removeTracked,
   resolveEnrollmentPermissions,
   recoverGate,
@@ -79,6 +80,9 @@ const CREATE_REASON = "wenr-create-reason";
 const LOOKUP_REASON = "wenr-lookup-reason";
 const REVOKE_REASON = "wenr-revoke-reason";
 const RECOVER_REASON = "wenr-recover-reason";
+/** Suffixed with the row's enrollment id: one tracked row's refresh reason is not another's, and
+ *  every id in the document still has to be unique. */
+const REFRESH_REASON = "wenr-refresh-reason";
 const HANDOFF_REGION = "wenr-handoff-region";
 const TRACKED_TABS = "wenr-tracked";
 const DISMISS_NOTICE = "wenr-dismiss-notice";
@@ -527,6 +531,7 @@ export function WorkerEnrollmentView({
               {rows.map((entry) => {
                 const past = isPastExpiry(entry, nowMs);
                 const busy = refreshingIds.includes(entry.enrollmentId);
+                const refresh = refreshGate(permissions, busy);
                 return (
                   <tr key={entry.enrollmentId}>
                     <td>
@@ -562,32 +567,49 @@ export function WorkerEnrollmentView({
                       )}
                     </td>
                     <td>
-                      <div className="wenr-actions">
-                        <CyberButton
-                          size="sm"
-                          variant="secondary"
-                          disabled={!permissions.read || busy}
-                          onClick={() => onRefreshTracked(entry.enrollmentId)}
-                        >
-                          {busy ? "Refreshing…" : "Refresh"}
-                          <span className="ui-sr-only">
-                            {" "}
-                            enrollment {entry.enrollmentId}
-                          </span>
-                        </CyberButton>
-                        <CyberButton
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => onForgetTracked(entry.enrollmentId)}
-                        >
-                          Forget
-                          <span className="ui-sr-only">
-                            {" "}
-                            enrollment {entry.enrollmentId} — removes this row from this tab only
-                            and changes nothing on the control plane
-                          </span>
-                        </CyberButton>
-                      </div>
+                      {/* The row's refresh is gated like every other control on this surface, so a
+                          disabled one always states why. It is reachable without any unusual setup:
+                          a manage-only principal creates an invitation, that response puts this row
+                          here, and refreshing it needs enrollment:read — which manage does not
+                          include. The reason is per row because `busy` is per row.
+
+                          Forget rides inside the same group: it is this row's other action and
+                          shares its action bar, and it is deliberately never gated — forgetting a
+                          row is local to this tab and changes nothing on the control plane. */}
+                      <GatedAction
+                        gate={refresh}
+                        reasonId={`${REFRESH_REASON}-${entry.enrollmentId}`}
+                      >
+                        {(describedBy) => (
+                          <>
+                            <CyberButton
+                              size="sm"
+                              variant="secondary"
+                              disabled={!refresh.ok}
+                              aria-describedby={describedBy}
+                              onClick={() => onRefreshTracked(entry.enrollmentId)}
+                            >
+                              {busy ? "Refreshing…" : "Refresh"}
+                              <span className="ui-sr-only">
+                                {" "}
+                                enrollment {entry.enrollmentId}
+                              </span>
+                            </CyberButton>
+                            <CyberButton
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => onForgetTracked(entry.enrollmentId)}
+                            >
+                              Forget
+                              <span className="ui-sr-only">
+                                {" "}
+                                enrollment {entry.enrollmentId} — removes this row from this tab
+                                only and changes nothing on the control plane
+                              </span>
+                            </CyberButton>
+                          </>
+                        )}
+                      </GatedAction>
                     </td>
                   </tr>
                 );

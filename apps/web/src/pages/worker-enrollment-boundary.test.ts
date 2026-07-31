@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { ENROLLMENT_CONTROLS } from "./worker-enrollment";
 import CLIENT from "../api/client.ts?raw";
 import HARNESS from "../dev/A11yHarness.tsx?raw";
 import CONTRAST_PROBE from "../dev/contrast-probe.js?raw";
@@ -69,7 +70,11 @@ describe("enrollment UI import boundary", () => {
 });
 
 describe("enrollment client surface", () => {
-  it("calls exactly the three principal-authenticated enrollment routes", () => {
+  // Three of the five principal-authenticated routes, at their exact paths. The list route and the
+  // operator recovery route have their own cases below, because each carries a property this one
+  // does not check — org scope, and a revision-only body. Naming this "exactly the three routes"
+  // was wrong in a way that mattered: it read as an exhaustive count while asserting a subset.
+  it("calls the create, status and revoke routes at their exact paths", () => {
     expect(CLIENT_CODE).toContain('"/api/v1/enrollment/invitations"');
     expect(CLIENT_CODE).toContain("`/api/v1/enrollment/${enrollmentId}`");
     expect(CLIENT_CODE).toContain("`/api/v1/enrollment/${enrollmentId}/revoke`");
@@ -124,6 +129,63 @@ describe("enrollment client surface", () => {
       "  markEnrollmentRecoveryRequired:",
       "  revokeEnrollment:",
     ]);
+  });
+});
+
+/**
+ * The rendered control inventory and this file's client-method pin are two guards over one fact,
+ * and they disagreed: `ENROLLMENT_CONTROLS` listed four available controls with no `recover` entry
+ * while the client shipped `markEnrollmentRecoveryRequired` and the case above pinned five methods.
+ * The wrong one was the guard an operator can actually read, under a heading that frames the list
+ * as the controller's routes rather than a roadmap.
+ *
+ * Neither list is derived from the other — that is deliberate, because a derived list would agree
+ * with a mistake as readily as with the truth. They are cross-checked instead, in both directions,
+ * so a route added to one and not the other fails here rather than shipping as a false claim.
+ */
+describe("control inventory agrees with the client's enrollment surface", () => {
+  /** `{enrollment_id}` and `${enrollmentId}` are the same path segment written two ways. */
+  const canonical = (path: string) =>
+    path.replace(/\{enrollment_id\}|\$\{enrollmentId\}/g, ":id");
+
+  /** The route each AVAILABLE control names, keyed by control id. */
+  const declared = new Map(
+    ENROLLMENT_CONTROLS.filter((c) => c.available).map((c) => [
+      c.id,
+      canonical(c.detail.match(/\/api\/v1\/enrollment[^\s—]*/)?.[0] ?? ""),
+    ]),
+  );
+
+  /** Every enrollment route literal the client actually issues. */
+  const called = new Set(
+    (CLIENT_CODE.match(/\/api\/v1\/enrollment[^"`]*/g) ?? []).map(canonical),
+  );
+
+  it("names a real route on every available control", () => {
+    // Anti-vacuity: an extraction that silently matched nothing would make both directions below
+    // trivially true, so the sets are pinned non-empty and at their expected size first.
+    expect(declared.size).toBe(5);
+    expect(called.size).toBe(5);
+    for (const [id, path] of declared) {
+      expect(path, `${id} declares no /api/v1/enrollment route`).not.toBe("");
+    }
+  });
+
+  it("backs every available control with a route the client calls", () => {
+    for (const [id, path] of declared) {
+      expect([...called], `control "${id}" declares ${path}, which the client never calls`).toContain(
+        path,
+      );
+    }
+  });
+
+  it("declares a control for every enrollment route the client calls", () => {
+    const paths = [...declared.values()];
+    for (const path of called) {
+      expect(paths, `the client calls ${path} with no available control declaring it`).toContain(
+        path,
+      );
+    }
   });
 });
 
