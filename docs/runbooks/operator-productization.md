@@ -29,7 +29,37 @@ deliberate: an operator-supplied path would let a report describe a tree that is
 would actually run. `queue` additionally takes no queue **name**, which is its path-equivalent.
 
 There is no `install`, no `start`, and no command that opens the controlled-live path. That is
-not an oversight — see §5.
+not an oversight — see §1.1 for where installation actually happens, and §5 for why the
+controlled-live path stays closed.
+
+### 1.1 Where installation happens (it is not here, deliberately)
+
+This package **diagnoses** an installation; it does not **perform** one. The two are split on
+purpose: a package that can both install itself and attest to its own installation is its own
+witness, and its green tells you much less.
+
+Actuation lives in the commissioning tool, `python -m secp_commissioning`, whose full supervised
+sequence is [pr5d-operator-deployment.md](pr5d-operator-deployment.md) (steps 1–10):
+
+| Command | Does |
+| --- | --- |
+| `inspect` | observe host facts (read-only) |
+| `plan` | build the immutable commissioning plan |
+| `render` | render the staging bundle |
+| `verify` | validate descriptor + plan preconditions |
+| `install-prepared` | install the prepared, **disabled** state — **dry-run by default**; writes only with explicit `--write --confirm` |
+| `status` | independently re-verify the prepared state |
+| `rollback-prepared` | remove only the objects this install created |
+| `evidence` | print the prepared-state evidence record |
+
+So the division is: `secp_commissioning install-prepared` puts the host into the prepared state;
+`secp_operator_deployment verify` tells you, from the **other side**, whether it is actually there —
+and the prerequisite ladder (§2) tells you which rung is missing and whether closing it is yours to
+do. When `verify` reports `profile_installed` or `expected_identities_installed` unmet, the material
+is created out of band per step 4 of that sequence, not by any command in this package.
+
+Note that `install-prepared` installs the operator unit **disabled**, and that is the terminal
+state of the whole sequence. Nothing in either package starts it.
 
 ---
 
@@ -326,7 +356,7 @@ implements a second copy of something that already exists under a different name
 | Capability | Where it lives | Proven by |
 | --- | --- | --- |
 | Supported operator packaging | `manifest.py` (`COVERED_MODULES`, `compute_manifest`, `verify_installed_package_trust`); versions and identity in `__init__.py` | `test_deployment_wheel.py` builds the real wheel and proves wheel aggregate == source aggregate, exact inventory, and tamper detection; `test_deployment_manifest.py`, `test_deployment_root_manifest.py` |
-| Install + status diagnostics — *why* not ready, as distinct from the verdict | `PREREQUISITE_LADDER` + `build_prerequisite_ladder` (§2), `REFUSAL_CATALOGUE` + remediation classes (§2) | `test_operator_productization.py`, `test_operator_refusal_catalogue.py` |
+| Install + status diagnostics — *why* not ready, as distinct from the verdict | `PREREQUISITE_LADDER` + `build_prerequisite_ladder` (§2), `REFUSAL_CATALOGUE` + remediation classes (§2). Install **actuation** is `secp_commissioning` (§1.1), deliberately not this package | `test_operator_productization.py`, `test_operator_refusal_catalogue.py` |
 | Readiness validation — the verdict | `_resolve_status` + `STATUS_EXIT_CODES` (§2) | `test_operator_productization.py`, `test_deployment_verify.py` |
 | Release + provenance verification | `provenance` command, `build_provenance_report` + `_release_identity_section` (§4) — the installed aggregate **and** the release identity from the independent pins | `test_operator_productization.py`, `test_operator_cli_surface.py`, `test_operator_release_provenance.py` |
 | Queue configuration validation | the `queue` command, `queue_check.py` (§3); parse time `profile.py::_v_queue_separation`; report time `verify.py::_queue_section` | `test_operator_queue_isolation.py`, `test_deployment_profile.py::test_queue_equality_refused`, `test_operator_productization.py` |
