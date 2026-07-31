@@ -195,7 +195,10 @@ def test_no_url_ca_or_token_argument_on_worker_commands(tmp_path):
             )
 
 
-# --- the concrete adapter reaches the real (sealed-default) secp_worker driver -------------------
+# --- the concrete adapter composes the REAL secp_worker leaves ------------------------------------
+# (`1557aa4` replaced the sealed defaults with the real key seam, durable state store, health probes
+# and per-invitation transport. The header said "sealed-default" until the tests below contradicted
+# it — a stale header pointing at behaviour that no longer exists.)
 
 
 def test_concrete_worker_enroller_status_is_local_and_reads_the_durable_marker():

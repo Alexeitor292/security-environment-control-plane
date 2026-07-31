@@ -24,20 +24,30 @@ So this module closes that gap and nothing else:
 
 MEASURED SIZES (this module is where the bounds stop being estimates)
 ---------------------------------------------------------------------
-=====================================  =========  =======================
-material                               CA bytes   % of the 8192 CA bound
-=====================================  =========  =======================
-production controller CA (ecdsa-p256)        599                       7%
-root + intermediate (ecdsa-p256)            1023                      12%
-root + intermediate (RSA-4096)              3480                      42%
-=====================================  =========  =======================
+=====================================  ============  ====================
+material                                   CA bytes   % of 8192 CA bound
+=====================================  ============  ====================
+production controller CA (ecdsa-p256)           599                   7%
+root + intermediate (ecdsa-p256)          1023-1027                  12%
+root + intermediate (RSA-4096)            3468-3480                  42%
+=====================================  ============  ====================
+
+The ranges are not sloppiness: a DER-encoded ECDSA signature is 1-2 bytes shorter whenever ``r`` or
+``s`` has a leading zero byte, and the serial number varies likewise, so a freshly generated chain
+lands anywhere in the range. Every assertion below is therefore a RATIO or an inequality with
+headroom, never an equality against a byte count that would flake.
 
 The largest realistic shape leaves more than half the CA budget unused. The whole invitation file
-carrying the RSA-4096 chain is 4354 bytes, 26% of the 16384 cap. Note that 16384 is required for
-CONSISTENCY with a CA field permitted to reach 8192 — a CA at its own limit plus the remaining
-fields cannot fit in the old 8192 whole-file cap — and NOT because any measured chain needs it.
-The longest non-CA field an invitation can carry is ``controller_origin``, bounded at 269 by
-``ControllerApiLocator``, so the 1024 per-field bound is ~3.8x the largest permitted value.
+carrying the RSA-4096 chain is ~4110 bytes, 25% of the 16384 cap, measured with the exact
+``_invitation()`` fixture below. (An earlier note recorded 4354 here; that figure came from a
+scratch measurement that inflated ``controller_origin`` to near its 269-character cap rather than
+the 31-character origin this module actually uses — a 232-byte difference, not jitter.)
+
+Note that 16384 is required for CONSISTENCY with a CA field permitted to reach 8192 — a CA at its
+own limit plus the remaining fields cannot fit in the old 8192 whole-file cap — and NOT because any
+measured chain needs it. The longest non-CA field an invitation can carry is ``controller_origin``,
+bounded at 269 by ``ControllerApiLocator``, so the 1024 per-field bound is ~3.8x the largest
+permitted value.
 
 The production controller CA bundle is exactly ONE certificate: ``controller_tls._load_cert``
 refuses a CA PEM containing anything other than a single CERTIFICATE block, in BOTH TLS modes. The
@@ -198,10 +208,21 @@ def test_a_single_self_signed_root_loads(root_only):
 
 def test_supplying_cadata_does_not_silently_fall_back_to_the_system_trust_store(root_only):
     """If ``cadata`` were ignored the context would carry the host's whole trust store, and every
-    assertion above would pass for the wrong reason."""
+    assertion above would pass for the wrong reason.
+
+    The premise is established FIRST. Asserting only ``== 1`` is byte-identical to the assertion
+    above it, and on a host with an empty system trust store it would pass while proving nothing —
+    exactly the vacuity this module exists to avoid. Requiring the default context to be
+    substantially populated is what makes ``== 1`` below mean 'nothing was inherited'."""
+    system = ssl.create_default_context().get_ca_certs()
+    assert len(system) > 10, (
+        f"this host's default trust store holds only {len(system)} certs — the assertion below "
+        "cannot distinguish 'cadata was honoured' from 'there was nothing to inherit'"
+    )
+
     ctx = _real_context(root_only)
 
-    assert len(ctx.get_ca_certs()) == 1  # exactly ours, nothing inherited
+    assert len(ctx.get_ca_certs()) == 1  # exactly ours, none of the system's inherited
 
 
 # --- the grammar gate and ssl agree on what a chain is -------------------------------------------

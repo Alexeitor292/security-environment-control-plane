@@ -327,9 +327,13 @@ def test_invitation_mismatch_between_transport_and_invitation_refuses(patched):
     t = HttpxWorkerEnrollmentTransport(
         controller_origin=ORIGIN, ca_bundle_pem=CA_PEM, signer=signer
     )
+    # A SECOND legitimate controller, not an attacker. The origin is deliberately not named
+    # adversarially: this check cannot stop an attacker (both sides derive from the same
+    # invitation), and an "evil" fixture would quietly re-imply the security meaning the rename
+    # removed. What it catches is a transport reused across two honest enrollments.
     other = _invitation(signer)
     other = EnrollmentInvitationInputs(
-        **{**other.__dict__, "controller_origin": "https://evil.example.test"}
+        **{**other.__dict__, "controller_origin": "https://controller-two.example.test"}
     )
     with pytest.raises(EnrollmentTransportError) as ei:
         t.submit_binding(other)
