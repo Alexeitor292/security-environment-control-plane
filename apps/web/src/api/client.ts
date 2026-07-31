@@ -10,6 +10,11 @@ import type {
   BootstrapSession,
   BootstrapSessionCreate,
   DeploymentPlan,
+  EnrollmentInvitation,
+  EnrollmentInvitationCreate,
+  EnrollmentListPage,
+  EnrollmentListQuery,
+  EnrollmentStatus,
   EnvironmentPublicationClientResult,
   EnvironmentPublicationRequest,
   ExecutionTarget,
@@ -137,18 +142,49 @@ export class ApiClientError extends Error {
   code: string;
   details?: string[];
   status: number;
-  constructor(status: number, code: string, message: string, details?: string[]) {
+  /**
+   * An opaque keyset cursor the server supplies with a refusal that a caller CAN step past — today
+   * only `enrollment_page_integrity`, where a row that cannot be projected fails the whole page.
+   *
+   * It is the one code-owned field the redacted error handler serializes besides the code itself,
+   * and it is what turns "this page is unreadable" from a dead end into a recoverable position.
+   * Opaque: pass it straight back, never parse or construct one.
+   */
+  recoveryCursor?: string;
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    details?: string[],
+    recoveryCursor?: string,
+  ) {
     super(message);
     this.status = status;
     this.code = code;
     this.details = details;
+    this.recoveryCursor = recoveryCursor;
   }
 }
 
-export function buildUrl(path: string, params?: Record<string, string>): string {
+/**
+ * Query parameters for a request. An array value is a REPEATED parameter (`?state=a&state=b`),
+ * which is how the API models a repeatable filter — not a comma-joined string, which the server
+ * would receive as one value containing a comma.
+ */
+export type QueryParams = Record<string, string | readonly string[]>;
+
+export function buildUrl(path: string, params?: QueryParams): string {
   const url = new URL(path.replace(/^\//, ""), API_BASE.replace(/\/?$/, "/"));
   if (params) {
-    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    for (const [k, v] of Object.entries(params)) {
+      // `append` for the repeated form; `set` for the scalar one, so a single-valued parameter
+      // keeps its previous last-write-wins behaviour for every existing caller.
+      if (Array.isArray(v)) {
+        for (const item of v) url.searchParams.append(k, item);
+      } else {
+        url.searchParams.set(k, v as string);
+      }
+    }
   }
   return url.toString();
 }
@@ -184,7 +220,7 @@ async function requestWithResponseMetadata<T>(
   method: string,
   path: string,
   body?: unknown,
-  params?: Record<string, string>,
+  params?: QueryParams,
   opts?: RequestOptions,
 ): Promise<ResponseMetadata<T>> {
   // Resolve the API base BEFORE retrieving any bearer token. If production same-origin resolution
@@ -217,7 +253,14 @@ async function requestWithResponseMetadata<T>(
   // fresh interactive login. The failed request is NEVER auto-replayed; a 403 is left untouched.
   if (res.status === 401) notifyUnauthorized();
   const text = await res.text();
-  let payload: { error?: { code?: string; message?: string; details?: string[] } } | null = null;
+  let payload: {
+    error?: {
+      code?: string;
+      message?: string;
+      details?: string[];
+      recovery_cursor?: string;
+    };
+  } | null = null;
   try {
     payload = text ? JSON.parse(text) : null;
   } catch {
@@ -228,11 +271,19 @@ async function requestWithResponseMetadata<T>(
   }
   if (!res.ok) {
     const err = payload?.error ?? {};
+    // Only a non-empty string is carried forward: a malformed or absent cursor must leave the
+    // caller with no aim rather than an unusable one, because the UI decides whether to offer a
+    // "continue past" control on whether a cursor is PRESENT, not on which code came back.
+    const cursor =
+      typeof err.recovery_cursor === "string" && err.recovery_cursor !== ""
+        ? err.recovery_cursor
+        : undefined;
     throw new ApiClientError(
       res.status,
       err.code ?? "error",
       err.message ?? res.statusText,
       err.details,
+      cursor,
     );
   }
   return { data: payload as T, status: res.status };
@@ -242,7 +293,7 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  params?: Record<string, string>,
+  params?: QueryParams,
   opts?: RequestOptions,
 ): Promise<T> {
   const { data } = await requestWithResponseMetadata<T>(method, path, body, params, opts);
@@ -685,4 +736,51 @@ export const api = {
       `/api/v1/topology-authoring/documents/${documentId}/revisions/${revisionId}/reject`,
       { content_hash: contentHash, reason },
     ),
+
+  // SECP-PR5H-B1 — the supported worker-enrollment controller surface. These are the ONLY four
+  // enrollment routes that take a browser principal (routers/enrollment.py). The worker exchange
+  // routes are authenticated by the worker's own signed evidence and the claim-only progression
+  // routes are sealed closed in production; neither is callable from here, by design.
+  //
+  // `enrollment:manage` gates create/revoke and `enrollment:read` gates status AND list — and
+  // manage does NOT imply read, so a manage-only principal can create an invitation and still be
+  // refused both its status and the list. The service is authoritative for all of it.
+  createEnrollmentInvitation: (body: EnrollmentInvitationCreate) =>
+    request<EnrollmentInvitation>("POST", "/api/v1/enrollment/invitations", body),
+  // The org-scoped list. Never cross-org: the server scopes to the caller's organization and this
+  // client sends no organization parameter at all, so there is nothing here that could ask for
+  // another org's records.
+  //
+  // `state` is repeated rather than comma-joined, `limit` is capped client-side purely so an
+  // obviously-wrong request is not sent (the server re-applies its own hard maximum and is
+  // authoritative), and `after` is echoed back exactly as received — the cursor is opaque and is
+  // never decoded here.
+  listEnrollments: (query: EnrollmentListQuery = {}) => {
+    const params: QueryParams = {};
+    if (query.state && query.state.length > 0) params.state = [...query.state];
+    if (query.limit !== undefined) params.limit = String(query.limit);
+    if (query.after !== undefined && query.after !== "") params.after = query.after;
+    return request<EnrollmentListPage>("GET", "/api/v1/enrollment", undefined, params);
+  },
+  // `enrollmentId` is a `sha256:<64 hex>` content address. Callers validate it against that grammar
+  // before calling (see pages/worker-enrollment.ts), so no caller-controlled path segment is
+  // interpolated unchecked.
+  getEnrollmentStatus: (enrollmentId: string) =>
+    request<EnrollmentStatus>("GET", `/api/v1/enrollment/${enrollmentId}`),
+  // `expectedRevision` is always the revision from the last observed status projection — never a
+  // value a human typed. A stale revision on a live enrollment fails closed with a bounded
+  // enrollment_revision_conflict rather than revoking the wrong state.
+  revokeEnrollment: (enrollmentId: string, expectedRevision: number) =>
+    request<EnrollmentStatus>("POST", `/api/v1/enrollment/${enrollmentId}/revoke`, {
+      expected_revision: expectedRevision,
+    }),
+  // Operator-triggered recovery: the complement of the controller's scheduled expiry sweep. The
+  // sweep reaches enrollments that ran out of time; this reaches one an operator has decided is
+  // stuck, without waiting for the TTL. Same shape and same discipline as revoke — it requires
+  // enrollment:manage, and the body carries ONLY the last observed revision. The refusal reason is
+  // server-owned (a bounded code, never caller free-text), so there is nothing here to supply.
+  markEnrollmentRecoveryRequired: (enrollmentId: string, expectedRevision: number) =>
+    request<EnrollmentStatus>("POST", `/api/v1/enrollment/${enrollmentId}/recover`, {
+      expected_revision: expectedRevision,
+    }),
 };

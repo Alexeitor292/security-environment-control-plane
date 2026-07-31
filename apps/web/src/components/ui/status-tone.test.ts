@@ -3,6 +3,7 @@ import {
   AUTHORIZATION_TONE,
   BOOTSTRAP_TONE,
   ELIGIBILITY_TONE,
+  ENROLLMENT_TONE,
   PLAN_DECISION_TONE,
   TARGET_TONE,
   DISCOVERY_TONE,
@@ -36,6 +37,7 @@ const ALL_MAPS = {
   AUDIT_TONE,
   ELIGIBILITY_TONE,
   PLAN_DECISION_TONE,
+  ENROLLMENT_TONE,
 };
 
 describe("status tone maps", () => {
@@ -64,6 +66,7 @@ describe("status tone maps", () => {
       authorization: AUTHORIZATION_TONE,
       target: TARGET_TONE,
       audit: AUDIT_TONE,
+      enrollment: ENROLLMENT_TONE,
     } as const;
     for (const [domain, map] of Object.entries(domains)) {
       for (const state of Object.keys(map)) {
