@@ -30,6 +30,10 @@ from secp_worker.enrollment_http_transport import (
 
 NOW = "2026-07-26T00:00:00+00:00"
 FUTURE = "2999-01-01T00:00:00+00:00"
+# a grammar-valid controller CA chain; the driver's transport is a double, so no socket is opened
+CA_PEM = (
+    "-----BEGIN CERTIFICATE-----\nMIIBfakeCAforTESTS0000000000000==\n-----END CERTIFICATE-----\n"
+)
 
 
 def _invitation(controller_pub: str, **over) -> EnrollmentInvitationInputs:
@@ -42,6 +46,7 @@ def _invitation(controller_pub: str, **over) -> EnrollmentInvitationInputs:
         controller_transaction_id="txn-0001",
         release_digest="sha256:" + "a" * 64,
         expires_at=FUTURE,
+        controller_ca_bundle_pem=CA_PEM,
     )
     fields.update(over)
     return EnrollmentInvitationInputs(**fields)
@@ -207,7 +212,7 @@ def _driver(
     wpriv, _wpub = generate_keypair()
     return WorkerEnrollmentDriver(
         key_seam=_KeySeam(wpriv),
-        transport_factory=lambda signer: _FakeController(
+        transport_factory=lambda signer, _invitation: _FakeController(
             signer, controller_priv=controller_priv, controller_pub=controller_pub, **fake_kw
         ),
         state_store=state_store or InMemoryWorkerEnrollmentStateStore(),
@@ -215,6 +220,83 @@ def _driver(
         # all-true helper. Individual tests override it to exercise sealed / failed observations.
         health_observer=health_observer or _FakeObserver(),
     )
+
+
+# --- the per-invitation transport seam (CA travels in the invitation) ----------------------------
+
+
+def test_the_transport_is_built_from_the_invitation_being_enrolled():
+    """The factory takes the invitation because the origin and CA chain are per-invitation values.
+    A factory that ignored it could only ever have been built from stale construction-time input."""
+    cpriv, cpub = generate_keypair()
+    wpriv, _ = generate_keypair()
+    invitation = _invitation(cpub)
+    seen: list[EnrollmentInvitationInputs] = []
+
+    def factory(signer, built_for):
+        seen.append(built_for)
+        return _FakeController(signer, controller_priv=cpriv, controller_pub=cpub)
+
+    WorkerEnrollmentDriver(
+        key_seam=_KeySeam(wpriv),
+        transport_factory=factory,
+        state_store=InMemoryWorkerEnrollmentStateStore(),
+        health_observer=_FakeObserver(),
+    ).enroll(invitation, now=NOW)
+
+    assert seen == [invitation]
+    assert seen[0].controller_ca_bundle_pem == CA_PEM
+
+
+def test_two_enrollments_get_two_transports_and_never_share_one():
+    """The driver is long-lived and `enroll()` is per-invitation. If a transport were cached across
+    invitations, invitation A's binding could be posted to invitation B's controller."""
+    cpriv, cpub = generate_keypair()
+    wpriv, _ = generate_keypair()
+    built: list[tuple] = []
+
+    def factory(signer, built_for):
+        controller = _FakeController(signer, controller_priv=cpriv, controller_pub=cpub)
+        built.append((built_for, controller))
+        return controller
+
+    driver = WorkerEnrollmentDriver(
+        key_seam=_KeySeam(wpriv),
+        transport_factory=factory,
+        state_store=InMemoryWorkerEnrollmentStateStore(),
+        health_observer=_FakeObserver(),
+    )
+    first = _invitation(cpub)
+    second = _invitation(cpub, enrollment_id="sha256:" + "3" * 64)
+    driver.enroll(first, now=NOW)
+    driver.enroll(second, now=NOW)
+
+    assert [b[0] for b in built] == [first, second]
+    assert built[0][1] is not built[1][1]  # never reused across invitations
+
+
+def test_an_invitation_without_a_ca_chain_refuses_before_any_transport_is_built():
+    """The CA is the worker's ONLY server-TLS trust anchor, so an invitation without one cannot
+    produce a verifying transport. Checked in the driver, so a programmatic caller that bypasses the
+    CLI's file validation cannot skip it."""
+    cpriv, cpub = generate_keypair()
+    wpriv, _ = generate_keypair()
+    built = []
+
+    driver = WorkerEnrollmentDriver(
+        key_seam=_KeySeam(wpriv),
+        transport_factory=lambda s, i: (
+            built.append(i) or _FakeController(s, controller_priv=cpriv, controller_pub=cpub)
+        ),
+        state_store=InMemoryWorkerEnrollmentStateStore(),
+        health_observer=_FakeObserver(),
+    )
+
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        driver.enroll(_invitation(cpub, controller_ca_bundle_pem="   "), now=NOW)
+
+    assert ei.value.reason_code == "enrollment_invitation_ca_missing"
+    assert built == []  # refused before anything was constructed
 
 
 # --- happy path ----------------------------------------------------------------------------------

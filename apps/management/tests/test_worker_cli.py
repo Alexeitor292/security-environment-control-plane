@@ -20,6 +20,8 @@ from secp_management.enrollment_cli import (
     EnrollmentCliDeps,
 )
 
+CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBfakeControllerCA000000000==\n-----END CERTIFICATE-----\n"
+
 _INVITATION = {
     "enrollment_id": "sha256:" + "a" * 64,
     "invitation_id": "sha256:" + "b" * 64,
@@ -27,6 +29,7 @@ _INVITATION = {
     "controller_key_id": "sha256:" + "c" * 64,
     "controller_trust_anchor_hex": "11" * 32,
     "controller_origin": "https://controller.example.test",
+    "controller_ca_bundle_pem": CA_PEM,
     "transaction_id": "txn-0001",
     "release_digest": "sha256:" + "d" * 64,
     "deployment_site_label": "rack-01.eu_a",

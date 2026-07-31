@@ -61,6 +61,10 @@ OFFER_DIGEST = "sha256:" + "c" * 64
 NOW = "2026-07-30T00:00:00+00:00"
 FUTURE = "2999-01-01T00:00:00+00:00"
 BOOTSTRAP_DIR = "/var/lib/secp/bootstrap"
+# a grammar-valid controller CA chain; these tests never open a socket, so no real key is needed
+CA_PEM = (
+    "-----BEGIN CERTIFICATE-----\nMIIBfakeCAforTESTS0000000000000==\n-----END CERTIFICATE-----\n"
+)
 
 # The two seeded documents are built from the management plane's OWN strict models and serialized
 # through their own ``canonical()`` — never hand-rolled here. ``read_installed_worker_record``
@@ -125,6 +129,7 @@ def _invitation(**over) -> EnrollmentInvitationInputs:
         controller_transaction_id=TRANSACTION,
         release_digest=RELEASE,
         expires_at=FUTURE,
+        controller_ca_bundle_pem=CA_PEM,
     )
     fields.update(over)
     return EnrollmentInvitationInputs(**fields)
@@ -644,7 +649,11 @@ def _drive(fs: InMemoryFilesystem) -> tuple[dict, dict]:
     store = DurableWorkerEnrollmentStateStore(fs)
     controllers: list[_FakeController] = []
 
-    def transport_factory(signer: WorkerEnrollmentSigner) -> _FakeController:
+    def transport_factory(
+        signer: WorkerEnrollmentSigner, built_for: EnrollmentInvitationInputs
+    ) -> _FakeController:
+        # the factory is per-invitation: the origin and CA chain are the invitation's own
+        assert built_for is invitation
         controller = _FakeController(signer, priv=priv)
         controllers.append(controller)
         return controller

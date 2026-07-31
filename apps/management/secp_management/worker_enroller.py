@@ -49,6 +49,10 @@ class DriverWorkerEnroller:
     def _inputs(invitation: dict):
         from secp_worker.enrollment_http_transport import EnrollmentInvitationInputs
 
+        # NOTE the one deliberate rename: the API/invitation-file name is `transaction_id`, the
+        # worker-side name is `controller_transaction_id`. This adapter is the ONLY correct place
+        # for that translation — the invitation file must keep the API's own field name, and the
+        # worker type must keep the name that says WHOSE transaction it is.
         return EnrollmentInvitationInputs(
             enrollment_id=invitation["enrollment_id"],
             invitation_id=invitation["invitation_id"],
@@ -58,6 +62,7 @@ class DriverWorkerEnroller:
             controller_transaction_id=invitation["transaction_id"],
             release_digest=invitation["release_digest"],
             expires_at=invitation["expires_at"],
+            controller_ca_bundle_pem=invitation["controller_ca_bundle_pem"],
         )
 
 

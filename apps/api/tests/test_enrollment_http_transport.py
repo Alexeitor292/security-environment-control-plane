@@ -1,11 +1,12 @@
 """Worker-initiated hardened EnrollmentTransport (SECP-PR5H-B1, T2).
 
 Proves the transport posture offline (no real network / TLS): the outbound origin is strictly
-validated; the request goes out CA-pinned (``verify`` is an ``ssl.SSLContext``, never True/False),
-with ``trust_env=False`` and ``follow_redirects=False``; the worker proof-of-possession attestation
-in the body verifies under the worker's own key over the exact binding claim; redirects and big
+validated; the request goes out pinned to the CA chain CARRIED IN THE INVITATION (``verify`` is an
+``ssl.SSLContext`` built with ``cadata``, never True/False and never a file), with
+``trust_env=False`` and ``follow_redirects=False``; the worker proof-of-possession attestation in
+the body verifies under the worker's own key over the exact binding claim; redirects and big
 responses fail closed; the shipped default is sealed; and the signer/transport never serialize or
-leak the private key / origin / CA path.
+leak the private key / origin / CA chain.
 """
 
 from __future__ import annotations
@@ -28,6 +29,16 @@ from secp_worker.enrollment_http_transport import (
 ORIGIN = "https://controller.example.test"
 
 
+def _pem(body: str) -> str:
+    """A grammar-valid CERTIFICATE chain. ``ssl.create_default_context`` is patched in these tests,
+    so the base64 body never has to decode to a real certificate."""
+    return f"-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----\n"
+
+
+CA_PEM = _pem("MIIBfakeCAforTESTS0000000000000==")
+SECRET_CA_PEM = _pem("MIIBsecretCAvalue0000000000000==")
+
+
 def _signer() -> WorkerEnrollmentSigner:
     priv, _pub = generate_keypair()
     return WorkerEnrollmentSigner(priv)
@@ -43,6 +54,7 @@ def _invitation(signer: WorkerEnrollmentSigner) -> EnrollmentInvitationInputs:
         controller_transaction_id="txn-0001",
         release_digest="sha256:" + "d" * 64,
         expires_at="2026-07-21T01:00:00+00:00",
+        controller_ca_bundle_pem=CA_PEM,
     )
 
 
@@ -72,6 +84,7 @@ class _FakeResp:
 
 class _FakeClient:
     captured: dict = {}
+    cadata: str | None = None
     resp = _FakeResp()
 
     def __init__(self, **kw):
@@ -92,9 +105,15 @@ class _FakeClient:
 
 @pytest.fixture
 def patched(monkeypatch):
-    monkeypatch.setattr(
-        ssl, "create_default_context", lambda *, cafile: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    )
+    # keyword-only `cadata`, not `cafile`: the CA now arrives as PEM TEXT in the invitation, so the
+    # transport builds its context with `cadata=` and never writes the chain to a file. Capturing it
+    # lets the tests below assert the EXACT chain reached ssl.
+    # kept off `captured`, which `_FakeClient.__init__` rebuilds after the context is created
+    def _context(*, cadata):
+        _FakeClient.cadata = cadata
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    monkeypatch.setattr(ssl, "create_default_context", _context)
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     _FakeClient.resp = _FakeResp()
     return _FakeClient
@@ -115,13 +134,62 @@ def patched(monkeypatch):
 )
 def test_transport_rejects_non_strict_origins(origin):
     with pytest.raises(EnrollmentTransportError):
-        HttpxWorkerEnrollmentTransport(controller_origin=origin, ca_path="ca", signer=_signer())
+        HttpxWorkerEnrollmentTransport(
+            controller_origin=origin, ca_bundle_pem=CA_PEM, signer=_signer()
+        )
+
+
+def test_the_exact_invitation_ca_chain_reaches_ssl_as_cadata(patched):
+    """`cadata`, not `cafile`: the chain arrives as PEM TEXT in the invitation, so there is no file
+    to create, no fixed path to reserve, and nothing to clean up. `verify` stays provably an
+    SSLContext over exactly this chain — never system trust, never True/False."""
+    signer = _signer()
+    t = HttpxWorkerEnrollmentTransport(
+        controller_origin=ORIGIN, ca_bundle_pem=SECRET_CA_PEM, signer=signer
+    )
+
+    t.submit_binding(_invitation(signer))
+
+    assert patched.cadata == SECRET_CA_PEM
+    assert isinstance(patched.captured["verify"], ssl.SSLContext)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "   ",
+        "not a pem",
+        "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",  # never a private key
+        "-----BEGIN CERTIFICATE-----\nAAAA\n",  # unterminated
+    ],
+)
+def test_a_missing_or_malformed_ca_chain_refuses_at_construction(bad):
+    """Refused HERE with a bounded reason code, not as an opaque ssl error at connect time."""
+    with pytest.raises(EnrollmentTransportError) as ei:
+        HttpxWorkerEnrollmentTransport(
+            controller_origin=ORIGIN, ca_bundle_pem=bad, signer=_signer()
+        )
+
+    assert ei.value.reason_code in ("enrollment_ca_required", "enrollment_ca_invalid")
+
+
+def test_the_production_factory_pins_the_transport_to_its_own_invitation(patched):
+    from secp_worker.enrollment_http_transport import build_invitation_transport
+
+    signer = _signer()
+    invitation = _invitation(signer)
+
+    build_invitation_transport(signer, invitation).submit_binding(invitation)
+
+    assert patched.cadata == invitation.controller_ca_bundle_pem
+    assert patched.captured["url"].startswith(invitation.controller_origin)
 
 
 def test_binding_submit_is_ca_pinned_no_proxy_no_redirects(patched):
     signer = _signer()
     t = HttpxWorkerEnrollmentTransport(
-        controller_origin=ORIGIN, ca_path="/dev/ca.pem", signer=signer
+        controller_origin=ORIGIN, ca_bundle_pem=CA_PEM, signer=signer
     )
     status, body = t.submit_binding(_invitation(signer))
     assert status == 200 and body == {"state": "worker_bound"}
@@ -139,7 +207,9 @@ def test_submitted_pop_attestation_verifies_over_the_binding_claim(patched):
     import json
 
     signer = _signer()
-    t = HttpxWorkerEnrollmentTransport(controller_origin=ORIGIN, ca_path="ca", signer=signer)
+    t = HttpxWorkerEnrollmentTransport(
+        controller_origin=ORIGIN, ca_bundle_pem=CA_PEM, signer=signer
+    )
     t.submit_binding(_invitation(signer))
     sent = json.loads(patched.captured["content"])
     claim, att = sent["binding"], sent["attestation"]
@@ -167,7 +237,9 @@ def test_result_submit_signs_a_worker_result(patched):
     import json
 
     signer = _signer()
-    t = HttpxWorkerEnrollmentTransport(controller_origin=ORIGIN, ca_path="ca", signer=signer)
+    t = HttpxWorkerEnrollmentTransport(
+        controller_origin=ORIGIN, ca_bundle_pem=CA_PEM, signer=signer
+    )
     health_evidence = {"schema": "secp.worker-enrollment.health/v1", "all_checks_passed": True}
     t.submit_result(
         _invitation(signer),
@@ -195,7 +267,9 @@ def test_result_submit_signs_a_worker_result(patched):
 def test_redirect_response_fails_closed(patched):
     patched.resp = _FakeResp(is_redirect=True)
     signer = _signer()
-    t = HttpxWorkerEnrollmentTransport(controller_origin=ORIGIN, ca_path="ca", signer=signer)
+    t = HttpxWorkerEnrollmentTransport(
+        controller_origin=ORIGIN, ca_bundle_pem=CA_PEM, signer=signer
+    )
     with pytest.raises(EnrollmentTransportError) as ei:
         t.submit_binding(_invitation(signer))
     assert ei.value.reason_code == "enrollment_redirect_forbidden"
@@ -204,7 +278,9 @@ def test_redirect_response_fails_closed(patched):
 def test_non_identity_content_encoding_fails_closed(patched):
     patched.resp = _FakeResp(encoding="gzip")
     signer = _signer()
-    t = HttpxWorkerEnrollmentTransport(controller_origin=ORIGIN, ca_path="ca", signer=signer)
+    t = HttpxWorkerEnrollmentTransport(
+        controller_origin=ORIGIN, ca_bundle_pem=CA_PEM, signer=signer
+    )
     with pytest.raises(EnrollmentTransportError) as ei:
         t.submit_binding(_invitation(signer))
     assert ei.value.reason_code == "enrollment_response_invalid"
@@ -213,7 +289,9 @@ def test_non_identity_content_encoding_fails_closed(patched):
 def test_oversized_response_fails_closed(patched):
     patched.resp = _FakeResp(body=b"x" * (64 * 1024 + 1))
     signer = _signer()
-    t = HttpxWorkerEnrollmentTransport(controller_origin=ORIGIN, ca_path="ca", signer=signer)
+    t = HttpxWorkerEnrollmentTransport(
+        controller_origin=ORIGIN, ca_bundle_pem=CA_PEM, signer=signer
+    )
     with pytest.raises(EnrollmentTransportError) as ei:
         t.submit_binding(_invitation(signer))
     assert ei.value.reason_code == "enrollment_response_too_large"
@@ -233,21 +311,26 @@ def test_signer_and_transport_never_leak_or_serialize():
     assert signer.worker_key_id == ea.key_id_for(pub)
     assert priv not in repr(signer)  # the private key is never represented
     t = HttpxWorkerEnrollmentTransport(
-        controller_origin=ORIGIN, ca_path="/secret/ca.pem", signer=signer
+        controller_origin=ORIGIN, ca_bundle_pem=SECRET_CA_PEM, signer=signer
     )
-    assert "controller.example.test" not in repr(t) and "/secret/ca.pem" not in repr(t)
+    assert "controller.example.test" not in repr(t) and SECRET_CA_PEM not in repr(t)
     for obj in (signer, t):
         with pytest.raises(EnrollmentTransportError):
             pickle.dumps(obj)
 
 
-def test_origin_mismatch_between_transport_and_invitation_refuses(patched):
+def test_invitation_mismatch_between_transport_and_invitation_refuses(patched):
+    """INTERNAL CONSISTENCY, not origin validation. The driver builds the transport from the
+    same invitation it then submits, so this can never authenticate an origin against anything
+    independent. It exists to catch a transport cached or reused ACROSS invitations."""
     signer = _signer()
-    t = HttpxWorkerEnrollmentTransport(controller_origin=ORIGIN, ca_path="ca", signer=signer)
+    t = HttpxWorkerEnrollmentTransport(
+        controller_origin=ORIGIN, ca_bundle_pem=CA_PEM, signer=signer
+    )
     other = _invitation(signer)
     other = EnrollmentInvitationInputs(
         **{**other.__dict__, "controller_origin": "https://evil.example.test"}
     )
     with pytest.raises(EnrollmentTransportError) as ei:
         t.submit_binding(other)
-    assert ei.value.reason_code == "enrollment_origin_mismatch"
+    assert ei.value.reason_code == "enrollment_transport_invitation_mismatch"
