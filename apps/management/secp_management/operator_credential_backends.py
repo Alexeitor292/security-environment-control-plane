@@ -65,6 +65,16 @@ small, well-scoped change.
 reaching the operator's own session bus. No code HERE reads, writes, or branches on an environment
 variable, and no binding resolves an executable through ``PATH``.
 
+One further asymmetry is STATIC rather than behavioural, and it is why this module carries a typed
+seam. Windows is the only platform whose API surface a type checker cannot see from anywhere else:
+typeshed declares ``ctypes.WinDLL`` and ``ctypes.get_last_error`` only under ``sys.platform ==
+'win32'``, and ``CREDENTIALW`` cannot even be built off Windows. CI checks types on Linux, so that
+half of the module was invisible there. The ``TYPE_CHECKING`` block below the Windows section header
+declares it — the two ctypes members, the four ``advapi32`` entry points, the structure's field
+types — so the binding is checked on every platform against a named description instead of being
+excluded or blanketed in suppressions. macOS and Linux need no equivalent: ``CDLL`` and
+``secretstorage`` are visible everywhere.
+
 Every failure is one bounded reason code. A binding never returns, logs, or embeds the secret, the
 account, the target name, an OS error string, or an upstream exception.
 """
@@ -72,7 +82,7 @@ account, the target name, an OS error string, or an upstream exception.
 from __future__ import annotations
 
 import sys
-from typing import Any, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast, runtime_checkable
 
 from secp_management import ManagementError
 
@@ -173,7 +183,112 @@ _CRED_PERSIST_LOCAL_MACHINE = 2
 _ERROR_NOT_FOUND = 1168
 
 
-def _windows_structures() -> tuple[Any, Any]:
+if TYPE_CHECKING:
+    # THE WINDOWS TYPE BOUNDARY, and the whole of it. Everything below this block is checked
+    # normally, on every platform, against these declarations — which is the point: the alternative
+    # was excluding the module or blanketing it in suppressions, and both of those stop checking the
+    # POLICY code (the size bound, the reason codes, the fail-closed returns) as well as the FFI.
+    #
+    # What is declared is exactly what a non-Windows type surface lacks and nothing else: the two
+    # `ctypes` members typeshed guards behind `sys.platform == "win32"`, the four `advapi32` entry
+    # points, and the field types of `CREDENTIALW` (which cannot be built off Windows at all,
+    # because `ctypes.wintypes` does not import there).
+    #
+    # The one property this deliberately does NOT mirror is the field ORDER in
+    # `_windows_structures` — the part that is load-bearing for the OS, since a transposed field
+    # hands it a pointer where it expects a length. Annotations carry no layout, so ordering stays a
+    # property of the runtime class, verified where it is actually executed: on a Windows host, by
+    # `test_windows_credential_manager_round_trip`.
+    import ctypes
+    from ctypes import wintypes
+
+    class _CredentialW(ctypes.Structure):
+        """The static field TYPES of wincred.h ``CREDENTIALW``.
+
+        A complete mirror rather than only the fields in use, so that a name absent here reads as
+        absent from the struct rather than merely untouched by this binding.
+        """
+
+        Flags: int
+        Type: int
+        TargetName: str | None
+        Comment: str | None
+        LastWritten: wintypes.FILETIME
+        CredentialBlobSize: int
+        CredentialBlob: ctypes._Pointer[ctypes.c_byte]
+        Persist: int
+        AttributeCount: int
+        Attributes: int | None
+        TargetAlias: str | None
+        UserName: str | None
+
+    class _WinEntryPoint(Protocol):
+        """The ctypes knobs every resolved entry point carries.
+
+        Both are WRITTEN and never read: pinning them is what stops ctypes defaulting a 64-bit
+        pointer to ``int`` and handing the OS a truncated address, so they belong in the declared
+        surface even though no code here reads them back.
+        """
+
+        argtypes: tuple[type[Any], ...]
+        restype: type[Any] | None
+
+    class _CredWriteW(_WinEntryPoint, Protocol):
+        def __call__(self, credential: Any, flags: int, /) -> int: ...
+
+    class _CredReadW(_WinEntryPoint, Protocol):
+        def __call__(self, target: str, type: int, flags: int, out: Any, /) -> int: ...
+
+    class _CredDeleteW(_WinEntryPoint, Protocol):
+        def __call__(self, target: str, type: int, flags: int, /) -> int: ...
+
+    class _CredFree(_WinEntryPoint, Protocol):
+        def __call__(self, buffer: Any, /) -> None: ...
+
+    class _Advapi32(Protocol):
+        """The FOUR ``advapi32`` entry points this binding resolves, and no others.
+
+        Naming them one by one rather than typing the handle ``Any`` is what makes a call with the
+        wrong arity or a call to a fifth, unresolved entry point a type error here.
+        """
+
+        CredWriteW: _CredWriteW
+        CredReadW: _CredReadW
+        CredDeleteW: _CredDeleteW
+        CredFree: _CredFree
+
+    class _WindowsCtypes(Protocol):
+        """:mod:`ctypes` narrowed to the two members it has ONLY on a Windows interpreter.
+
+        ``WinDLL`` is declared as returning the ``advapi32`` surface above because ``advapi32`` is
+        the only library this module ever loads. Narrowing it once, here, is what keeps the loader
+        typed at its call site instead of returning ``Any`` into the rest of the binding.
+        """
+
+        def WinDLL(self, name: str, *, use_last_error: bool = ...) -> _Advapi32: ...
+
+        def get_last_error(self) -> int: ...
+
+
+def _windows_ctypes() -> _WindowsCtypes:
+    """:mod:`ctypes` seen through its Windows-only surface.
+
+    A ``cast`` rather than a ``type: ignore``: both members genuinely exist on a Windows
+    interpreter, so what is being stated is WHICH surface this is, not that an error should be
+    suppressed — and unlike a suppression it keeps the two results typed for every caller. Every
+    caller is already past a ``sys.platform`` gate, so this can only be reached where the surface
+    is real.
+
+    This is one of the module's TWO unchecked steps, and they are the whole of it: this one, and
+    the structure cast at the end of :func:`_windows_structures`. Both exist because a runtime
+    ctypes object cannot carry the declared shape; neither suppresses a diagnostic.
+    """
+    import ctypes
+
+    return cast("_WindowsCtypes", ctypes)
+
+
+def _windows_structures() -> tuple[_Advapi32, type[_CredentialW]]:
     """The ``advapi32`` handle and the ``CREDENTIALW`` structure, built on first use.
 
     ``ctypes.wintypes`` does not import off Windows, so the whole binding is constructed lazily and
@@ -201,7 +316,7 @@ def _windows_structures() -> tuple[Any, Any]:
         )
 
     try:
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32 = _windows_ctypes().WinDLL("advapi32", use_last_error=True)
         advapi32.CredWriteW.argtypes = (ctypes.POINTER(_CREDENTIALW), wintypes.DWORD)
         advapi32.CredWriteW.restype = wintypes.BOOL
         advapi32.CredReadW.argtypes = (
@@ -217,7 +332,10 @@ def _windows_structures() -> tuple[Any, Any]:
         advapi32.CredFree.restype = None
     except Exception:  # noqa: BLE001 - an unusable API surface is a bounded refusal
         _reject("secpctl_credential_store_unavailable")
-    return advapi32, _CREDENTIALW
+    # The runtime class is assembled from `wintypes` field descriptors that exist only on Windows,
+    # so it cannot BE the declared shape; `_CredentialW` is that shape's static mirror and this is
+    # where the two are tied together. Field types are mirrored above; field ORDER lives here.
+    return advapi32, cast("type[_CredentialW]", _CREDENTIALW)
 
 
 class WindowsCredentialManagerBinding:
@@ -228,6 +346,14 @@ class WindowsCredentialManagerBinding:
     """
 
     __slots__ = ("_advapi32", "_credential_type")
+    # Annotations only (no assignment), so the slots are typed without creating class attributes
+    # that would collide with ``__slots__`` — the same shape as ``MacOSKeychainBinding._fw``. Here
+    # they are also load-bearing for a second reason: on a non-Windows type surface the platform
+    # gate in ``__init__`` is statically always-true, which makes the assignment after it
+    # unreachable, so a checker there would infer NOTHING for either attribute and every method
+    # below would silently stop being checked.
+    _advapi32: _Advapi32
+    _credential_type: type[_CredentialW]
 
     def __init__(self) -> None:
         if sys.platform != "win32":
@@ -267,7 +393,7 @@ class WindowsCredentialManagerBinding:
         target = target_name(service, account)
         pointer = ctypes.POINTER(self._credential_type)()
         if not self._advapi32.CredReadW(target, _CRED_TYPE_GENERIC, 0, ctypes.byref(pointer)):
-            if ctypes.get_last_error() == _ERROR_NOT_FOUND:
+            if _windows_ctypes().get_last_error() == _ERROR_NOT_FOUND:
                 return None
             _reject("secpctl_credential_backend_failed")
         try:
@@ -281,12 +407,10 @@ class WindowsCredentialManagerBinding:
             self._advapi32.CredFree(pointer)
 
     def delete_secret(self, *, service: str, account: str) -> bool:
-        import ctypes
-
         target = target_name(service, account)
         if self._advapi32.CredDeleteW(target, _CRED_TYPE_GENERIC, 0):
             return True
-        if ctypes.get_last_error() == _ERROR_NOT_FOUND:
+        if _windows_ctypes().get_last_error() == _ERROR_NOT_FOUND:
             return False
         _reject("secpctl_credential_backend_failed")
 
