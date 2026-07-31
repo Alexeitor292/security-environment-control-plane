@@ -738,3 +738,43 @@ def test_auth_surface_never_requests_or_stores_a_long_lived_renewal_credential()
         "expires_at_epoch",
         "subject_fingerprint",
     }
+
+
+def test_every_exit_map_entry_is_a_reason_code_the_package_can_actually_produce():
+    """A mapped reason code that nothing emits is worse than an absent one: it reads as though a
+    dedicated code exists for some path, and a later reader can map or match on it and never learn
+    why it never fires. One such entry existed (`secpctl_revocation_credential_unreadable`) because
+    `revocation_credential_unreadable()` passes the STORE's reason code through unchanged.
+
+    Every key must appear as a string literal somewhere in the management package that is NOT this
+    table -- i.e. somewhere that could raise or return it.
+    """
+    import ast
+    import pathlib
+
+    from secp_management.auth_cli import _EXIT_BY_REASON
+
+    pkg = pathlib.Path(auth_cli_module.__file__).parent
+    emitted: set[str] = set()
+    for path in pkg.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # Constants that live INSIDE the exit table are not emissions -- being listed there is
+        # exactly what we are testing. Exclude by node identity, not by set subtraction: several
+        # codes appear both in the table AND as a genuine `_refused(...)` / `raise` argument in the
+        # same file, and subtracting afterwards would wrongly erase the real emission too.
+        inside_table: set[int] = set()
+        for node in ast.walk(tree):
+            targets = getattr(node, "targets", []) or [getattr(node, "target", None)]
+            if any(getattr(t, "id", "") == "_EXIT_BY_REASON" for t in targets if t is not None):
+                for inner in ast.walk(node):
+                    inside_table.add(id(inner))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in inside_table
+            ):
+                emitted.add(node.value)
+
+    dead = sorted(k for k in _EXIT_BY_REASON if k not in emitted)
+    assert dead == [], f"exit-map entries no code path can produce: {dead}"

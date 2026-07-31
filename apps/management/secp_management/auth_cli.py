@@ -127,7 +127,12 @@ _EXIT_BY_REASON: dict[str, int] = {
     "secpctl_revocation_token_invalid": EXIT_MALFORMED,
     "secpctl_revocation_request_invalid": EXIT_MALFORMED,
     "secpctl_revocation_response_invalid": EXIT_MALFORMED,
-    "secpctl_revocation_credential_unreadable": EXIT_MALFORMED,
+    # NOTE: there is deliberately NO `secpctl_revocation_credential_unreadable` entry.
+    # `revocation_credential_unreadable()` carries the STORE's own reason code through unchanged
+    # (`secpctl_credential_record_invalid`, `..._account_mismatch`, `..._store_locked`,
+    # `..._backend_failed`), each of which is already mapped above and is strictly more informative
+    # than a generic one would be. A dedicated code here would never fire, and a code that never
+    # fires is worse than absent: a later reader could map or match on it and never know why.
     # --- controller / provider reachability ---
     "secpctl_controller_locator_unavailable": EXIT_CONTROLLER_UNAVAILABLE,
     "secpctl_controller_locator_invalid": EXIT_CONTROLLER_UNAVAILABLE,
