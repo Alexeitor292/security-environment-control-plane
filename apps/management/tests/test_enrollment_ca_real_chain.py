@@ -206,23 +206,55 @@ def test_a_single_self_signed_root_loads(root_only):
     assert len(_real_context(root_only).get_ca_certs()) == 1
 
 
-def test_supplying_cadata_does_not_silently_fall_back_to_the_system_trust_store(root_only):
-    """If ``cadata`` were ignored the context would carry the host's whole trust store, and every
-    assertion above would pass for the wrong reason.
+def test_supplying_cadata_does_not_silently_fall_back_to_the_system_trust_store(
+    root_only, tmp_path, monkeypatch
+):
+    """If ``cadata`` were ignored the context would carry whatever the default trust source holds,
+    and every assertion above would pass for the wrong reason.
 
-    The premise is established FIRST. Asserting only ``== 1`` is byte-identical to the assertion
-    above it, and on a host with an empty system trust store it would pass while proving nothing —
-    exactly the vacuity this module exists to avoid. Requiring the default context to be
-    substantially populated is what makes ``== 1`` below mean 'nothing was inherited'."""
-    system = ssl.create_default_context().get_ca_certs()
-    assert len(system) > 10, (
-        f"this host's default trust store holds only {len(system)} certs — the assertion below "
-        "cannot distinguish 'cadata was honoured' from 'there was nothing to inherit'"
+    The premise is established FIRST, and from a trust source THIS TEST OWNS. Asserting only
+    ``== 1`` is byte-identical to the assertion above it; it earns its distinct meaning —
+    'nothing was inherited' — only once something demonstrably WAS available to inherit.
+
+    Sourcing that premise from the HOST's CA population is what made it non-portable. The
+    uv-managed CI interpreter is a python-build-standalone whose OpenSSL resolves its default
+    cafile to ``/etc/ssl/cert.pem``, a path Debian/Ubuntu do not populate (they ship
+    ``/etc/ssl/certs/ca-certificates.crt``), and its default capath is a hash directory that
+    OpenSSL consults LAZILY and therefore never enumerates. A default context on a perfectly
+    healthy CI runner consequently reports ZERO certificates, so a premise phrased as 'the host
+    holds more than ten' fails for a reason that has nothing to do with the property under test.
+
+    So the premise is CONSTRUCTED here instead: a second, unrelated CA, generated in-process, and
+    installed as OpenSSL's default verify file for the duration of this test. That makes the
+    default trust source non-empty by construction on every host, and — unlike a real CA store —
+    IDENTIFIABLE: inheritance would not merely change a count, it would show up BY NAME. The
+    assertions below therefore pin identity, not just arity, so this cannot pass with the wrong
+    single certificate.
+
+    ``ssl`` itself is still never patched; only the environment OpenSSL reads is, and only within
+    this test (``monkeypatch`` restores it). No production path is affected either way: every
+    transport in this branch constructs httpx with ``trust_env=False`` precisely so ambient
+    ``SSL_CERT_*`` cannot reach it."""
+    unrelated, _key = _issue("secp-unrelated-authority")
+    default_store = tmp_path / "unrelated-default-store.pem"
+    default_store.write_text(_pem(unrelated), encoding="utf-8")
+    monkeypatch.setenv("SSL_CERT_FILE", str(default_store))
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    # the premise, proven not assumed: the SAME constructor, given no cadata, really does pick this
+    # up — so there IS something for the context below to inherit, and we know its name.
+    inheritable = ssl.create_default_context().get_ca_certs()
+    assert any("secp-unrelated-authority" in str(cert) for cert in inheritable), (
+        f"the controlled default trust source did not load ({len(inheritable)} certs), so the "
+        "assertions below cannot distinguish 'cadata was honoured' from 'nothing to inherit'"
     )
 
     ctx = _real_context(root_only)
 
-    assert len(ctx.get_ca_certs()) == 1  # exactly ours, none of the system's inherited
+    loaded = ctx.get_ca_certs()
+    assert len(loaded) == 1  # exactly ours, nothing of the default source inherited
+    assert "secp-test-root" in str(loaded[0])  # and it is OUR root, not some other single cert
+    assert not any("secp-unrelated-authority" in str(cert) for cert in loaded)
 
 
 # --- the grammar gate and ssl agree on what a chain is -------------------------------------------
