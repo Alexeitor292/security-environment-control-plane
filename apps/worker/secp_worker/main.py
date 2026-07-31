@@ -124,9 +124,12 @@ async def _ensure_enrollment_recovery_schedule(client, task_queue: str) -> None:
     activities registered above serve the product's primary paths. Killing the worker over a
     scheduling hiccup would trade a small delay for a full outage, so this logs and continues.
     """
-    from temporalio.client import WorkflowAlreadyStartedError
-
+    # ``WorkflowAlreadyStartedError`` lives in temporalio.exceptions, NOT temporalio.client. The
+    # import is inside the try so a future relocation degrades to the generic handler below (a
+    # logged scheduling failure) instead of raising out of worker startup and killing the process.
     try:
+        from temporalio.exceptions import WorkflowAlreadyStartedError
+
         await client.start_workflow(
             EnrollmentRecoverySweepWorkflow.run,
             {},

@@ -17,9 +17,42 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _APPS = Path(__file__).resolve().parents[2]
 WORKER_PKG = _APPS / "worker" / "secp_worker"
 API_PKG = _APPS / "api" / "secp_api"
+
+
+def test_the_scheduler_uses_temporal_symbols_that_actually_exist():
+    """The scheduling helper's Temporal imports and kwargs must resolve against the real library.
+
+    Caught a genuine defect: ``WorkflowAlreadyStartedError`` was imported from ``temporalio.client``
+    (where it does not live) instead of ``temporalio.exceptions``. Because the scheduler runs only
+    against a live Temporal server, nothing else in the suite would have exercised that line — it
+    would have surfaced as a worker that dies on startup.
+    """
+    pytest.importorskip("temporalio")
+    import inspect
+
+    from temporalio.client import Client
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    assert WorkflowAlreadyStartedError is not None
+    parameters = inspect.signature(Client.start_workflow).parameters
+    for required in ("id", "task_queue", "cron_schedule"):
+        assert required in parameters, required
+
+
+def test_the_sweep_is_scheduled_under_a_stable_id_on_a_cron():
+    """A stable id means a restart re-attaches to the ONE schedule instead of creating another."""
+    from secp_worker.main import (
+        ENROLLMENT_RECOVERY_SWEEP_CRON,
+        ENROLLMENT_RECOVERY_SWEEP_WORKFLOW_ID,
+    )
+
+    assert ENROLLMENT_RECOVERY_SWEEP_WORKFLOW_ID == "secp-enrollment-recovery-sweep"
+    assert len(ENROLLMENT_RECOVERY_SWEEP_CRON.split()) == 5, "a 5-field cron expression"
 
 
 def test_the_sweep_is_registered_on_the_shipped_ordinary_worker():
