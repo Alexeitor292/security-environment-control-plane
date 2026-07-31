@@ -74,14 +74,39 @@ def test_seals_reported_and_correct():
 
 
 def test_effects_are_scoped_and_pure():
+    """The effects section separates what was MEASURED this invocation from what holds
+    structurally (WS-E).
+
+    ``external_contact_performed`` used to be a flat, unconditional ``False`` here. That was wrong
+    on the host that matters: resolving the production context runs ``systemctl show``,
+    ``docker inspect`` and a ``docker exec`` health probe. Contact is now derived from a count
+    taken while those commands run, so this report — built from INJECTED inputs, which resolve no
+    context — truthfully reports zero rather than conveniently asserting it.
+    """
     report = _prepared()
     assert report["effects_of_this_verification"] == {
-        "worker_constructed": False,
-        "workflow_submitted": False,
-        "run_plan_generation_called": False,
-        "secret_resolver_constructed": False,
-        "external_contact_performed": False,
+        "measured_this_invocation": {
+            "host_commands_executed": 0,
+            "local_host_contact_performed": False,
+        },
+        "structural_invariants": {
+            "worker_constructed": False,
+            "workflow_submitted": False,
+            "run_plan_generation_called": False,
+            "secret_resolver_constructed": False,
+        },
     }
+
+
+def test_the_verification_contact_statement_tracks_the_measured_count():
+    """A non-zero count must surface as contact — otherwise the split is decorative."""
+    from secp_operator_deployment.verify import build_verification
+
+    measured = build_verification(host_commands_executed=3)["effects_of_this_verification"][
+        "measured_this_invocation"
+    ]
+    assert measured["host_commands_executed"] == 3
+    assert measured["local_host_contact_performed"] is True
 
 
 # --------------------------------------------------------------------------- fail-closed statuses

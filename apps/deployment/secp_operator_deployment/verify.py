@@ -144,8 +144,16 @@ PREREQUISITE_LADDER: tuple[Prerequisite, ...] = (
 # THE REFUSAL CATALOGUE — every bounded reason code an operator can meet, classified.
 #
 # Each entry maps a BOUNDED reason code to the dimension it belongs to and what would close it.
-# An exhaustiveness test scans this module's own refusal literals and fails when a new code is
-# introduced without being catalogued, so the catalogue cannot silently rot.
+#
+# A scan in ``test_operator_refusal_catalogue.py`` fails when a code appears in one of five
+# recognised syntactic shapes without being catalogued. State its reach accurately, because
+# over-trusting it is how a code reaches an operator unexplained: it MATCHES ONLY THOSE SHAPES —
+# measured at 27 of the 84 codes here. A bare positional literal passed to ``rung()``, a code
+# reached through a variable, and a conditional dict-literal value are NOT seen, and 22 codes in
+# this module sit in exactly those shapes. The scan is a partial net, not a guarantee; the
+# behavioural guard (an all-unmet ladder whose every reason code must classify) and the visible
+# ``reason_catalogued: False`` at the point of use are what cover the rest. That test's docstring
+# carries the full measured breakdown, re-measured on every run.
 # =================================================================================================
 _C = REMEDIATION_REVIEWED_CODE
 _D = REMEDIATION_REVIEWED_DEPLOYMENT
@@ -179,6 +187,13 @@ REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
     "manifest_package_path_not_absolute": {"dimension": "A", "remediation": _O},
     "manifest_package_path_not_normalized": {"dimension": "A", "remediation": _O},
     "manifest_trust_non_posix": {"dimension": "A", "remediation": _O},
+    # The hardened filesystem / command backends are POSIX + root only, and the CLI's bounded
+    # top-level guard turns any refusal that escapes a per-dimension handler into one of these
+    # rather than a traceback.
+    "filesystem_backend_non_posix": {"dimension": "A", "remediation": _O},
+    "production_filesystem_unavailable": {"dimension": "A", "remediation": _O},
+    "command_backend_non_posix": {"dimension": "A", "remediation": _O},
+    "unhandled_command_failure": {"dimension": "A", "remediation": _O},
     "manifest_installed_aggregate_mismatch": {"dimension": "A", "remediation": _O},
     # --- (B) profile + independent expected identities -------------------------------------------
     "profile_not_installed": {"dimension": "B", "remediation": _D},
@@ -569,6 +584,7 @@ def build_verification(
     attestation: object | None = None,
     compositions: object | None = None,
     host_observation: object | None = None,
+    host_commands_executed: int = 0,
 ) -> dict:
     """Build the deterministic, sectioned verification report + resolve the honest status. PURE +
     exact-typed: every input is a pre-resolved exact type (or ``None``); a foreign object is refused
@@ -716,12 +732,20 @@ def build_verification(
             "runtime_provisioned": runtime_provisioned,
             "compositions_verified": compositions_verified,
         },
+        # Same split, and for the same reason, as the queue report: ``verify`` resolves the SAME
+        # context and therefore runs the SAME host commands, so an unconditional
+        # ``external_contact_performed: False`` was wrong here too — not just in queue_check.
         "effects_of_this_verification": {
-            "worker_constructed": False,
-            "workflow_submitted": False,
-            "run_plan_generation_called": False,
-            "secret_resolver_constructed": False,
-            "external_contact_performed": False,
+            "measured_this_invocation": {
+                "host_commands_executed": int(host_commands_executed),
+                "local_host_contact_performed": int(host_commands_executed) > 0,
+            },
+            "structural_invariants": {
+                "worker_constructed": False,
+                "workflow_submitted": False,
+                "run_plan_generation_called": False,
+                "secret_resolver_constructed": False,
+            },
         },
     }
 

@@ -31,7 +31,7 @@ import json
 
 import pytest
 from _deploy_support import OPERATOR_QUEUE, ORDINARY_QUEUE, host_evidence, valid_profile
-from secp_operator_deployment.cli import build_parser, main
+from secp_operator_deployment.cli import build_parser, main, run
 from secp_operator_deployment.queue_check import (
     QUEUE_EXIT_CODES,
     QUEUE_LADDER,
@@ -55,6 +55,22 @@ def _report(**over):  # noqa: ANN003, ANN201
     kwargs = dict(profile=valid_profile(), host_observation=host_evidence())
     kwargs.update(over)
     return build_queue_report(**kwargs)
+
+
+def _prepared_context(**over):  # noqa: ANN003, ANN201
+    from secp_operator_deployment.production_context import VerifyContext
+
+    kwargs = dict(
+        profile=valid_profile(),
+        profile_load_reason=None,
+        expected=None,
+        installed_trust_ok=True,
+        installed_trust_reason=None,
+        attestation=None,
+        host_observation=host_evidence(),
+    )
+    kwargs.update(over)
+    return VerifyContext(**kwargs)
 
 
 # --------------------------------------------------------------------------- the ordering proof
@@ -527,19 +543,90 @@ def test_the_queue_command_reads_the_same_context_verify_does_exactly_once(monke
     assert len(calls) == 1
 
 
-def test_the_declared_effects_are_all_false_and_none_were_reached():
-    """The section must not grow a truthy field: a ``True`` here would be an admission."""
+def test_the_structural_invariants_are_all_false_and_none_were_reached():
+    """These must not grow a truthy field: a ``True`` here would be an admission."""
     effects = _report()["effects_of_this_queue_check"]
-    assert set(effects) == {
+    assert set(effects) == {"measured_this_invocation", "structural_invariants"}
+    assert set(effects["structural_invariants"]) == {
         "worker_constructed",
         "workflow_submitted",
         "run_plan_generation_called",
         "secret_resolver_constructed",
         "composition_aggregate_built",
-        "external_contact_performed",
         "host_mutated",
     }
-    assert all(v is False for v in effects.values())
+    assert all(v is False for v in effects["structural_invariants"].values())
+
+
+# --- the contact statement is MEASURED, not declared ---------------------------------------------
+#
+# The bug this replaces: `external_contact_performed` was hardcoded False. On a provisioned POSIX
+# host the queue command runs `systemctl show`, `docker inspect` and `docker exec <container>
+# <health argv>` while resolving its inputs — so the report asserted "no external contact" on
+# exactly the host where contact happens. It is now derived from a count taken as the commands run.
+
+
+@pytest.mark.parametrize("executed", [0, 1, 3, 17])
+def test_the_contact_statement_tracks_the_measured_command_count(executed):
+    measured = _report(host_commands_executed=executed)["effects_of_this_queue_check"][
+        "measured_this_invocation"
+    ]
+    assert measured["host_commands_executed"] == executed
+    assert measured["local_host_contact_performed"] is (executed > 0)
+
+
+def test_a_report_over_injected_inputs_truthfully_claims_no_contact():
+    """Injected inputs resolve no context, so zero is the honest answer — not a convenient one."""
+    measured = _report()["effects_of_this_queue_check"]["measured_this_invocation"]
+    assert measured["host_commands_executed"] == 0
+    assert measured["local_host_contact_performed"] is False
+
+
+def test_the_counting_runner_counts_every_invocation_including_a_failing_one():
+    """A command that started and then failed still made contact. Counting only successes would
+    understate exactly the case an operator most needs to know about."""
+    from secp_operator_deployment.production_context import _CountingCommandRunner
+
+    class _Boom:
+        def run(self, pin, argv_tail, *, timeout_seconds, max_output_bytes):  # noqa: ANN001, ANN201
+            raise RuntimeError("host command failed")
+
+    counter = _CountingCommandRunner(_Boom())
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            counter.run(object(), [], timeout_seconds=1, max_output_bytes=1)
+    assert counter.calls == 3
+
+
+def test_the_counting_runner_delegates_unchanged_and_returns_the_inner_result():
+    """A wrapper that altered the call would corrupt the observation it exists to measure."""
+    from secp_operator_deployment.production_context import _CountingCommandRunner
+
+    seen = []
+
+    class _Recorder:
+        def run(self, pin, argv_tail, *, timeout_seconds, max_output_bytes):  # noqa: ANN001, ANN201
+            seen.append((pin, tuple(argv_tail), timeout_seconds, max_output_bytes))
+            return "inner-result"
+
+    counter = _CountingCommandRunner(_Recorder())
+    pin = object()
+    assert counter.run(pin, ["show", "x"], timeout_seconds=5, max_output_bytes=99) == "inner-result"
+    assert seen == [(pin, ("show", "x"), 5, 99)]
+    assert counter.calls == 1
+
+
+def test_the_cli_carries_the_measured_count_from_the_resolved_context(monkeypatch):
+    """End to end: a context reporting executed commands must surface as contact in the report."""
+    from secp_operator_deployment import production_context
+
+    ctx = _prepared_context(host_commands_executed=4)
+    monkeypatch.setattr(production_context, "load_verify_context", lambda: ctx)
+
+    _code, payload = run(["queue", "--json"], None)
+    measured = payload["effects_of_this_queue_check"]["measured_this_invocation"]
+    assert measured["host_commands_executed"] == 4
+    assert measured["local_host_contact_performed"] is True
 
 
 def test_the_queue_check_module_calls_and_imports_no_submission_symbol():

@@ -35,9 +35,23 @@ answers differ on exactly one host state — unit absent — and they differ cor
 
 PURE, like :mod:`~secp_operator_deployment.verify`: the builders take already-resolved, exact-typed
 inputs and do no filesystem I/O. The CLI resolves those inputs from the SAME fixed root-controlled
-context ``verify`` uses, so this command adds no contact surface of its own. There is no queue
-argument and no queue name in the output: queue names are profile values, and this module — the one
-most tempted to print them — never does.
+context ``verify`` uses, so this command adds no contact surface BEYOND ``verify``'s. There is no
+queue argument and no queue name in the output: queue names are profile values, and this module —
+the one most tempted to print them — never does.
+
+WHAT "NO CONTACT SURFACE OF ITS OWN" DOES NOT MEAN. Resolving that context on a provisioned POSIX
+host is not inert: it runs ``systemctl show`` and ``docker inspect``, and the health probe runs
+``docker exec <ordinary-container> <health argv>``. Those are read-only and cannot submit, but they
+ARE contact, and an earlier version of this report declared ``external_contact_performed: False``
+unconditionally — false on precisely the host that matters. The report now DERIVES its contact
+statement from a count taken while the commands run
+(:class:`~secp_operator_deployment.production_context._CountingCommandRunner`), and the effects
+section separates what was measured this invocation from what holds structurally.
+
+One limit worth stating rather than leaving to be discovered: the health probe executes the
+PROFILE-CONFIGURED health command inside the ordinary container. What that command does is outside
+this package's control, so no claim here — measured or structural — extends to its side effects.
+This report accounts for the commands THIS package runs, not for what they run in turn.
 """
 
 from __future__ import annotations
@@ -234,6 +248,7 @@ def build_queue_report(
     profile: object | None = None,
     host_observation: object | None = None,
     stops: list[dict] | None = None,
+    host_commands_executed: int = 0,
 ) -> dict:
     """Build the deterministic, secret-free CONTROLLED-LIVE QUEUE report.
 
@@ -308,14 +323,25 @@ def build_queue_report(
             else None,
             "basis": "observed_reviewed_code_constants",
         },
+        # Split because the two halves have DIFFERENT epistemic status, and merging them is how a
+        # measured fact lends its credibility to an assumed one.
         "effects_of_this_queue_check": {
-            "worker_constructed": False,
-            "workflow_submitted": False,
-            "run_plan_generation_called": False,
-            "secret_resolver_constructed": False,
-            "composition_aggregate_built": False,
-            "external_contact_performed": False,
-            "host_mutated": False,
+            # COUNTED during this invocation — see production_context._CountingCommandRunner.
+            "measured_this_invocation": {
+                "host_commands_executed": int(host_commands_executed),
+                "local_host_contact_performed": int(host_commands_executed) > 0,
+            },
+            # Structural: no code path in this command constructs, submits or mutates. Backed by
+            # the tripwire suite (no `temporalio` import across a real main() run; the run hook,
+            # composition builder and real command runner each replaced by a raising tripwire).
+            "structural_invariants": {
+                "worker_constructed": False,
+                "workflow_submitted": False,
+                "run_plan_generation_called": False,
+                "secret_resolver_constructed": False,
+                "composition_aggregate_built": False,
+                "host_mutated": False,
+            },
         },
     }
 

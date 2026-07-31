@@ -108,10 +108,19 @@ def test_verify_effects_are_structurally_true():
     )
     _code, payload = run(["verify", "--json"], deps)
     assert payload["status"] == "sealed_prepared"
+    # WS-E: the effects section separates MEASURED-this-invocation from structural. The old flat
+    # `external_contact_performed: False` was false on a provisioned POSIX host, where resolving
+    # the context runs systemctl/docker commands; contact is now counted as those commands run.
+    # These deps are injected, so no context is resolved and zero is the honest count.
     assert payload["effects_of_this_verification"] == {
-        "worker_constructed": False,
-        "workflow_submitted": False,
-        "run_plan_generation_called": False,
-        "secret_resolver_constructed": False,
-        "external_contact_performed": False,
+        "measured_this_invocation": {
+            "host_commands_executed": 0,
+            "local_host_contact_performed": False,
+        },
+        "structural_invariants": {
+            "worker_constructed": False,
+            "workflow_submitted": False,
+            "run_plan_generation_called": False,
+            "secret_resolver_constructed": False,
+        },
     }

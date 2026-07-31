@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 
@@ -71,6 +72,8 @@ def _kwargs_from_context(ctx: object) -> dict:
         installed_trust_reason=ctx.installed_trust_reason,  # type: ignore[attr-defined]
         attestation=ctx.attestation,  # type: ignore[attr-defined]
         host_observation=ctx.host_observation,  # type: ignore[attr-defined]
+        # Carried so the report states contact from a MEASUREMENT, not a declaration.
+        host_commands_executed=ctx.host_commands_executed,  # type: ignore[attr-defined]
     )
 
 
@@ -188,16 +191,35 @@ def cmd_provenance(args: argparse.Namespace, deps: VerifyDeps | None) -> tuple[i
 def _queue_kwargs(deps: VerifyDeps | None) -> dict:
     """Resolve the queue-check inputs from the SAME fixed root-controlled context ``verify`` uses.
 
-    Deliberately routed through :func:`_verify_kwargs` rather than resolved separately: the queue
-    command must add NO contact surface of its own, and reusing the one loader is what makes that
-    checkable rather than claimed. There is no ``--queue`` argument — the queues inspected are the
-    ones in the installed profile, never ones an operator names, for the same reason there is no
-    profile-path flag.
+    The loader is called EXACTLY ONCE per invocation, which is what makes "adds no contact surface
+    beyond ``verify``'s" checkable rather than claimed — a test counts the calls. There is no
+    ``--queue`` argument: the queues inspected are the ones in the installed profile, never ones an
+    operator names, for the same reason there is no profile-path flag.
+
+    It also carries out the EXECUTED host-command count, so the report can state contact from a
+    measurement instead of asserting it. Explicitly-injected test inputs never resolve a context
+    and therefore truthfully report a count of zero.
     """
-    kwargs = _verify_kwargs(deps)
+    from secp_operator_deployment.production_context import VerifyContext, load_verify_context
+
+    ctx: object | None = None
+    if deps is None:
+        ctx = load_verify_context()  # PRODUCTION path — the one call
+    elif deps.context is not None and type(deps.context) is VerifyContext:
+        ctx = deps.context
+
+    if ctx is not None:
+        return {
+            "profile": ctx.profile,  # type: ignore[attr-defined]
+            "host_observation": ctx.host_observation,  # type: ignore[attr-defined]
+            "host_commands_executed": ctx.host_commands_executed,  # type: ignore[attr-defined]
+        }
+    # Explicit inputs, or a foreign context refused by exact type: no context resolution ran, so no
+    # host command could have been executed through it.
     return {
-        "profile": kwargs.get("profile"),
-        "host_observation": kwargs.get("host_observation"),
+        "profile": None if deps is None else deps.profile,
+        "host_observation": None if deps is None else deps.host_observation,
+        "host_commands_executed": 0,
     }
 
 
@@ -244,10 +266,44 @@ def run(argv: list[str], deps: VerifyDeps | None = None) -> tuple[int, dict]:
     return _HANDLERS[args.command](args, deps)
 
 
+# A bounded reason token: lowercase snake_case only. Anything else is replaced, so an exception
+# message — which can carry absolute paths — can never reach an operator's terminal through here.
+_BOUNDED_REASON = re.compile(r"^[a-z][a-z0-9_]{3,63}$")
+
+# Exit code for a refusal that escaped the per-dimension handlers. Shares 20 with the other
+# "stop and escalate" classes (``seals_unsafe``, ``queue_stops_open``, ``provenance_unavailable``)
+# rather than inventing a code outside every published table.
+UNAVAILABLE_EXIT_CODE = 20
+
+
+def _bounded_reason(exc: BaseException) -> str:
+    reason = getattr(exc, "reason_code", None)
+    if isinstance(reason, str) and _BOUNDED_REASON.match(reason):
+        return reason
+    return "unhandled_command_failure"
+
+
 def main(argv: list[str] | None = None) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
     # deps=None → the production context loader resolves the fixed root-controlled inputs.
-    exit_code, payload = run(args_list, deps=None)
+    #
+    # A package whose entire value is BOUNDED REFUSAL must not have an unbounded traceback as a
+    # reachable exit. The hardened filesystem is POSIX+root only and refuses to construct
+    # elsewhere; before this guard that refusal escaped every per-dimension handler and printed a
+    # stack containing absolute deployment paths, exiting 1 — a code in none of the published
+    # tables. Now every escaping refusal becomes a bounded report. SystemExit (argparse) and
+    # KeyboardInterrupt deliberately still propagate: those are the caller's, not a refusal.
+    try:
+        exit_code, payload = run(args_list, deps=None)
+    except Exception as exc:
+        exit_code = UNAVAILABLE_EXIT_CODE
+        payload = {
+            "phase": args_list[0] if args_list and not args_list[0].startswith("-") else "?",
+            "status": "command_unavailable",
+            "exit_code": UNAVAILABLE_EXIT_CODE,
+            # The bounded reason code ONLY. The exception message is never rendered.
+            "reason_code": _bounded_reason(exc),
+        }
     if "--json" in args_list:
         sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
     else:

@@ -8,6 +8,22 @@ cannot do.
 a credential, or contacts Proxmox, OpenBao, Temporal, remote state, or PostgreSQL.** Every
 command below is an observation.
 
+> **"Observation" is not "inert."** On a provisioned POSIX host, `verify` and `queue` resolve their
+> inputs by running read-only host commands — `systemctl show`, `docker inspect`, and a
+> `docker exec <ordinary-container> <health argv>` health probe. These are read-only and cannot
+> submit anything, but they *are* contact, and both reports now say so from a **count taken while
+> the commands run**, in `effects_of_this_*.measured_this_invocation`. Note the health probe runs
+> the profile-configured health command inside the container; what *that* command does is outside
+> this package's control and outside these reports' claims.
+
+> **All three commands are POSIX + root.** The hardened filesystem and command backends refuse to
+> construct elsewhere. On a non-POSIX host each command still produces a **bounded report with a
+> published exit code** — never a traceback — carrying `filesystem_backend_non_posix` or
+> `manifest_trust_non_posix`. Observed on Windows: `verify` → exit 10, `queue` → exit 10,
+> `provenance` → exit 15. A refusal that escapes the per-dimension handlers is caught at the top
+> level and rendered as `command_unavailable` with exit 20; the exception message is never printed,
+> only a bounded reason code, because messages are where absolute paths live.
+
 Companion documents: [ADR-024](../adr/ADR-024-operator-deployment-package.md) (the package
 contract) and [pr5d-operator-deployment.md](pr5d-operator-deployment.md) (how the package is
 prepared and installed).
@@ -92,6 +108,13 @@ separately and never gate the prepared result.
 | `host_not_ready` | 14 | Observed, but the operator unit or the ordinary worker is not in the prepared state. |
 | `install_untrusted` | 15 | The installed package failed the trusted directory-fd verification. |
 | `seals_unsafe` | 20 | **A reviewed safety seal has drifted. Stop and escalate.** |
+
+> **POSIX + root.** On a non-POSIX host the profile cannot be read at all, so `verify` reports
+> `sealed_but_unprovisioned` (exit 10) with `filesystem_backend_non_posix` on the
+> `profile_installed` rung. Like `queue`, that 10 means *not established*, not *fine*.
+>
+> `verify` also runs the read-only host commands described at the top of this runbook, and reports
+> the count in `effects_of_this_verification.measured_this_invocation`.
 
 ### The prerequisite ladder
 
@@ -180,6 +203,16 @@ safe" boolean:
 `queue_unverified` is a refusal, not a pass. The dangerous failure mode for this command would be
 reporting isolation it never observed, so an absent profile or an incoherent host reads as
 *unverified* rather than as *fine*.
+
+> **POSIX + root, like the other two.** On a non-POSIX host `queue` cannot observe isolation or
+> dormancy at all and reports `queue_unverified` (exit 10) with `filesystem_backend_non_posix` —
+> a bounded refusal, never a traceback. Do not read that 10 as "the queue is fine"; it means
+> nothing was established.
+>
+> **This command is not inert on a real host.** Resolving its inputs runs `systemctl show`,
+> `docker inspect` and the `docker exec` health probe. `effects_of_this_queue_check.
+> measured_this_invocation.host_commands_executed` reports how many actually ran, counted as they
+> ran, and `local_host_contact_performed` is derived from that count — not declared.
 
 ### `isolation` (dimension B)
 
