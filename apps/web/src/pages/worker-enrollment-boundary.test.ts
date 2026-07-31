@@ -417,6 +417,30 @@ describe("dev harness stays out of the product", () => {
     expect(CLIENT_CODE).not.toContain("testing/");
   });
 
+  /**
+   * A harness fixture that drifts from the product is worse than no harness: a browser
+   * accessibility pass reads live-region text off it, so the one string being verified by eye
+   * becomes copy the product does not emit. That already happened once — the fixture kept "more
+   * pages remain" after the product was corrected to "there may be more", because a cursor means
+   * the page came back full, not that another row exists.
+   *
+   * Pinned as an exclusion rather than an equality: the fixture is allowed to say something the
+   * product could say, and must never say something the product cannot.
+   */
+  it("uses live-region copy the product can actually emit", () => {
+    // Comments legitimately explain the phrasing that was corrected away, so scan CODE only —
+    // the same rule this file applies to forbidden routes and tokens.
+    const harness = code(HARNESS);
+    expect(harness).toContain("There may be more.");
+    expect(harness).not.toMatch(/more pages remain/i);
+    // Anti-vacuity, and the real assertion: every fixture notice ends the way the product ends.
+    const notices = harness.match(/liveNotice: "[^"]*"/g) ?? [];
+    expect(notices.length, "no liveNotice fixture found - re-anchor this scan").toBeGreaterThan(0);
+    for (const notice of notices) {
+      expect(notice, notice).toMatch(/(There may be more\.|No further pages\.)"$/);
+    }
+  });
+
   // The harness renders the shipped component; the moment it stops doing that it is a second
   // implementation whose findings say nothing about the product.
   it("renders the real component and models no controller behaviour", () => {

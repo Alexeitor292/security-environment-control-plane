@@ -274,7 +274,12 @@ function InventoryHarness() {
     onRecover: () => {},
     recovering: false,
     recoverError: null,
-    liveNotice: "Loaded 4 more; 4 shown. More pages remain.",
+    // The product's real phrasing, verbatim. A cursor means the page came back FULL, not that
+    // another row exists behind it — so "more pages remain" is a claim the response does not
+    // support, and the product was corrected away from it. A browser accessibility pass reads
+    // live-region text off THIS fixture, so a fixture that drifts is a pass verifying copy the
+    // product does not emit.
+    liveNotice: "Loaded 4 more; 4 shown. There may be more.",
     nowMs: NOW,
   };
 
