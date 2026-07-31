@@ -1060,6 +1060,24 @@ describe("operator-facing copy never asserts a single producer for recovery requ
   });
 
   /**
+   * Both lists are otherwise guarded only RELATIONALLY — every pattern has an example, every
+   * example is rejected — and a relation stays true over a smaller pair. Deleting a pattern alone
+   * reddens; deleting a pattern AND its example together satisfies both invariants and leaves the
+   * suite fully green, which is a silent path back to the exact defect this file exists to catch:
+   * drop `/one operator action/i` with its example, restore the inline JSX at
+   * EnrollmentInventory.tsx:482, and nothing goes red.
+   *
+   * So the sizes are pinned absolutely rather than to each other. Exact counts, not floors — the
+   * same instrument as the liveNotice fixture scan, for the same reason: a floor absorbs the next
+   * removal silently, and removal is the operation that costs coverage. Growing a list is also
+   * worth a look, which is why this fails in both directions.
+   */
+  it("pins the size of both lists, so a matched pair cannot be trimmed silently", () => {
+    expect(SINGLE_PRODUCER_CLAIMS).toHaveLength(7);
+    expect(SHIPPED_SINGLE_PRODUCER_COPY).toHaveLength(7);
+  });
+
+  /**
    * These patterns run against `renderToStaticMarkup` output too, where React escapes `'` to
    * `&#x27;`. A pattern carrying a literal apostrophe would silently stop matching there while
    * still looking like a guard — a failure with no symptom, which is the kind this whole exercise

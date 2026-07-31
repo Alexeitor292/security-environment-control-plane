@@ -711,6 +711,14 @@ describe("WorkerEnrollmentView — renders no single-producer claim about recove
    * that trims this matrix should go red rather than quietly narrowing what is checked — which is
    * the exact shape of the defect this whole surface keeps meeting: a guard walking a set the
    * offending case is not in.
+   *
+   * DELIBERATELY WEAKER THAN THE INVENTORY'S PIN, which also asserts its default case carries no
+   * selection and actually renders the empty state. Do not read the two as equivalent. That page
+   * needs the extra clauses because the site it guards renders ONLY when nothing is selected, so
+   * giving that case a `selectedId` silently removes it from the scan. No case here is suppressed
+   * by GAINING props — each is protected by its own `mustContain` marker, which fails loudly if the
+   * state stops rendering the copy. If a state is ever added here whose copy disappears when a prop
+   * is set, this pin needs the inventory's clauses 2 and 3 as well.
    */
   it("scans the states that actually render the recovery copy", () => {
     const names = CASES.map(([name]) => name);
