@@ -566,8 +566,8 @@ def _mutated() -> dict:
 
 
 @contextlib.contextmanager
-def refuses(mutated: object, pristine: object) -> Iterator[None]:
-    """Assert the mutation ACTUALLY LANDED, then that the contract refuses it.
+def refuses(mutated: object, pristine: object, match: str) -> Iterator[None]:
+    """Assert the mutation ACTUALLY LANDED, then that the INTENDED guard refuses it.
 
     A mutation that silently fails to apply is indistinguishable from one the guard caught: both
     are a green test. Every regression below would still pass if its edit quietly became a no-op --
@@ -575,12 +575,20 @@ def refuses(mutated: object, pristine: object) -> Iterator[None]:
     differently -- and the suite would report that the property is defended when nothing checked it.
 
     So the edit is proven to have changed the subject BEFORE the guard is asked about it. This is a
-    guard on the guards, and it is the reason these regressions can be cited as evidence at all."""
+    guard on the guards, and it is the reason these regressions can be cited as evidence at all.
+
+    ``match`` is REQUIRED, not optional, and that is the point. "The tests went red" is the signal
+    everyone treats as conclusive, and a failure for an UNRELATED reason reads exactly like the
+    intended guard catching the mutation: a malformed edit that breaks parsing, or a mutation that
+    happens to trip a different assertion first, both produce a green regression while the property
+    under test goes unchecked. Binding the refusal to its message is what distinguishes "something
+    refused" from "THIS refused". Making it a required parameter means a new regression cannot be
+    added without deciding which guard it is exercising."""
     assert mutated != pristine, (
         "the mutation did not change anything, so this test would pass even if the guard did "
         "nothing at all -- fix the mutation, not the guard"
     )
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match=match):
         yield
 
 
@@ -590,7 +598,7 @@ def test_the_mutation_harness_itself_fails_on_a_no_op_edit() -> None:
     Without this, `refuses` is itself an unproven claim -- exactly the shape this suite refuses."""
     workflow = _mutated()  # deep copy, but nothing changed
     with pytest.raises(AssertionError, match="did not change anything"):
-        with refuses(workflow, _workflow()):
+        with refuses(workflow, _workflow(), match="unreachable"):
             pass  # never reached
 
 
@@ -599,8 +607,22 @@ def test_the_mutation_harness_requires_the_guard_to_actually_refuse() -> None:
     workflow = _mutated()
     workflow["jobs"]["backend-realfs-root"]["name"] = "renamed, but no guard cares"
     with pytest.raises(pytest.fail.Exception):
-        with refuses(workflow, _workflow()):
+        with refuses(workflow, _workflow(), match="anything at all"):
             pass  # the guard raised nothing, so `pytest.raises` must fail
+
+
+def test_the_mutation_harness_rejects_a_refusal_from_the_WRONG_guard() -> None:
+    """Clause 5, and the reason `match` is required rather than optional.
+
+    A landed mutation whose refusal comes from an unrelated guard is indistinguishable, at the
+    "the tests went red" level, from the intended guard catching it. Here the environment is
+    removed -- a real break that `assert_controlled_environment` genuinely refuses -- but the
+    refusal is bound to the repair scan's message, which is not what fired. That must FAIL."""
+    workflow = _mutated()
+    del workflow["jobs"]["backend-deployment-root"]["container"]
+    with pytest.raises(AssertionError, match="repairs a fixed system parent"):
+        with refuses(workflow, _workflow(), match="repairs a fixed system parent"):
+            assert_controlled_environment(workflow, _manifest())
 
 
 def test_the_proof_fails_when_the_last_root_job_loses_its_gate() -> None:
@@ -608,7 +630,7 @@ def test_the_proof_fails_when_the_last_root_job_loses_its_gate() -> None:
     job = "backend-management-controller-real-adapters-root"
     steps = workflow["jobs"][job]["steps"]
     workflow["jobs"][job]["steps"] = [s for s in steps if not _is_gate(s)]
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="no attestation step in THIS job"):
         assert_job_local_gate_order(workflow)
 
 
@@ -619,7 +641,7 @@ def test_the_proof_fails_when_a_gate_moves_after_its_product_test_step() -> None
     gate_index = _gate_indices(steps)[0]
     moved = steps.pop(gate_index)
     steps.append(moved)  # now strictly after the product-test step
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="every attestation runs at or after"):
         assert_job_local_gate_order(workflow)
 
 
@@ -630,7 +652,7 @@ def test_the_proof_fails_when_only_an_earlier_job_has_a_gate() -> None:
     workflow["jobs"][job]["steps"] = [s for s in workflow["jobs"][job]["steps"] if not _is_gate(s)]
     # an EARLIER job keeps its gate, which used to be enough to satisfy the old test
     assert _gate_indices(_steps(workflow, "backend-deployment-root"))
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="no attestation step in THIS job"):
         assert_job_local_gate_order(workflow)
 
 
@@ -639,7 +661,7 @@ def test_the_proof_fails_when_a_gate_is_allowed_to_continue_on_error() -> None:
     job = "backend-management-root"
     steps = workflow["jobs"][job]["steps"]
     steps[_gate_indices(steps)[0]]["continue-on-error"] = True
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="gate continue-on-error"):
         assert_job_local_gate_order(workflow)
 
 
@@ -648,7 +670,7 @@ def test_the_proof_fails_when_a_gate_becomes_conditional() -> None:
     job = "backend-management-root"
     steps = workflow["jobs"][job]["steps"]
     steps[_gate_indices(steps)[0]]["if"] = "always()"
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="gate is conditional"):
         assert_job_local_gate_order(workflow)
 
 
@@ -658,7 +680,7 @@ def test_the_proof_fails_when_a_gate_swallows_the_exit_code() -> None:
     steps = workflow["jobs"][job]["steps"]
     index = _gate_indices(steps)[0]
     steps[index]["run"] = str(steps[index]["run"]).rstrip() + " || true\n"
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="gate exit code is swallowed"):
         assert_job_local_gate_order(workflow)
 
 
@@ -672,7 +694,7 @@ def test_the_proof_fails_when_the_pr5f_etc_attestation_moves_after_its_preparati
     assert covering
     moved = steps.pop(covering[-1])
     steps.insert(prep, moved)  # now at/after the preparation step
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="attestation precedes"):
         assert_job_local_gate_order(workflow)
 
 
@@ -966,9 +988,15 @@ def assert_controlled_environment(workflow: dict, manifest: dict) -> None:
 
         _assert_the_prelude_matches_the_manifest(job, steps, manifest)
 
-    # the manifest is the single source of truth for the pin; neither side may drift from the other
-    assert sorted(manifest["controlled_jobs"]) == controlled_jobs()
-    assert sorted(manifest["not_yet_controlled"]) == sorted(NOT_YET_CONTROLLED)
+    # The manifest is the single source of truth for the pin; neither side may drift from the other.
+    # Carrying messages so a refusal can be ATTRIBUTED to this check rather than merely observed --
+    # a bare `assert a == b` fails with a diff that no `match=` can bind to.
+    assert sorted(manifest["controlled_jobs"]) == controlled_jobs(), (
+        "the manifest's controlled_jobs disagrees with the suite's derived controlled set"
+    )
+    assert sorted(manifest["not_yet_controlled"]) == sorted(NOT_YET_CONTROLLED), (
+        "the manifest's not_yet_controlled disagrees with the held set"
+    )
 
 
 def test_every_controlled_root_fence_runs_in_the_pinned_environment() -> None:
@@ -1124,7 +1152,7 @@ def test_no_root_fence_repairs_a_fixed_system_parent() -> None:
 def test_the_controlled_proof_fails_when_a_fence_loses_its_environment() -> None:
     workflow = _mutated()
     del workflow["jobs"]["backend-deployment-root"]["container"]
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="no controlled environment"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1133,7 +1161,7 @@ def test_the_controlled_proof_fails_when_a_pin_drifts_from_the_manifest() -> Non
     workflow["jobs"]["backend-management-root"]["container"]["image"] = (
         "ubuntu:24.04@sha256:" + "0" * 64
     )
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="pin drifted from the manifest"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1141,7 +1169,7 @@ def test_the_controlled_proof_fails_when_an_environment_is_only_tag_pinned() -> 
     """A tag reintroduces exactly the silent-rollover variable this work removes."""
     workflow = _mutated()
     workflow["jobs"]["backend-realfs-root"]["container"]["image"] = "ubuntu:24.04"
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="is not digest-pinned"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1152,7 +1180,7 @@ def test_the_controlled_proof_fails_when_the_gate_is_redirected_out_of_the_envir
     steps = workflow["jobs"]["backend-management-root"]["steps"]
     index = _gate_indices(steps)[0]
     steps[index]["run"] = "sudo docker exec other-host " + str(steps[index]["run"]).lstrip()
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="redirected out of the controlled environment"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1163,7 +1191,7 @@ def test_the_controlled_proof_fails_when_the_canary_moves_after_a_third_party_ac
     moved = steps.pop(canary)
     first_action = next(i for i, step in enumerate(steps) if "uses" in step)
     steps.insert(first_action + 1, moved)
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="the canary is step"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1178,7 +1206,7 @@ def test_the_controlled_proof_fails_when_the_product_tests_are_redirected_out() 
     steps = workflow["jobs"][job]["steps"]
     index = _index_of_step(steps, REQUIRED_GATED_JOBS[job])
     steps[index]["run"] = "sudo docker exec other-host " + str(steps[index]["run"]).lstrip()
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="redirected out of the controlled environment"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1187,7 +1215,7 @@ def test_the_controlled_proof_fails_when_a_fence_is_made_non_blocking_at_job_lev
     and the fence still stops nothing."""
     workflow = _mutated()
     workflow["jobs"]["backend-deployment-root"]["continue-on-error"] = True
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="job-level continue-on-error"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1195,7 +1223,7 @@ def test_the_controlled_proof_fails_when_a_fence_is_switched_off_at_job_level() 
     """A job-level `if` can disable the whole fence without touching a single step."""
     workflow = _mutated()
     workflow["jobs"]["backend-deployment-root"]["if"] = "false"
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="job-level .if. can switch the fence off"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1208,7 +1236,7 @@ def test_the_controlled_proof_fails_when_the_host_etc_is_mounted_over_the_pinned
     for this mutation before the volumes check existed."""
     workflow = _mutated()
     workflow["jobs"]["backend-management-root"]["container"]["volumes"] = ["/etc:/etc"]
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="container.volumes"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1233,7 +1261,7 @@ def test_the_controlled_proof_fails_when_a_fence_option_drifts_from_the_manifest
     manifest exists to prevent -- the image alone is not the whole environment."""
     workflow = _mutated()
     workflow["jobs"]["backend-realfs-root"]["container"]["options"] = "--init --cpus 2"
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="the manifest declares"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1258,7 +1286,7 @@ def test_the_controlled_proof_fails_when_a_step_is_inserted_above_the_canary() -
     workflow = _mutated()
     steps = workflow["jobs"]["backend-realfs-root"]["steps"]
     steps.insert(0, {"name": "Something that runs first", "run": "echo anything\n"})
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="not the first step"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1269,7 +1297,7 @@ def test_the_controlled_proof_fails_when_the_canary_stops_observing_the_ancestry
     steps = workflow["jobs"]["backend-realfs-root"]["steps"]
     index = next(i for i, step in enumerate(steps) if "stat -c" in str(step.get("run", "")))
     steps[index]["run"] = "stat -c '%u %g %n' /tmp\n"
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="does not cover"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1278,7 +1306,7 @@ def test_the_controlled_proof_fails_when_the_prelude_drifts_from_the_manifest() 
     steps = workflow["jobs"]["backend-management-root"]["steps"]
     index = next(i for i, step in enumerate(steps) if "apt-get install" in str(step.get("run", "")))
     steps[index]["run"] = str(steps[index]["run"]).replace(" git ", " git openssh-client ")
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="the prelude installs"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1290,7 +1318,7 @@ def test_the_controlled_proof_fails_when_the_prelude_is_removed_entirely() -> No
         for step in workflow["jobs"][job]["steps"]
         if "apt-get install" not in str(step.get("run", ""))
     ]
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="expected exactly one prerequisite prelude"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1298,7 +1326,7 @@ def test_the_controlled_proof_fails_when_the_manifest_contradicts_itself() -> No
     """`base` + `digest` are what a human reads; `image` is what the workflow is checked against."""
     manifest = dict(_manifest())
     manifest["digest"] = "sha256:" + "b" * 64
-    with refuses(manifest, _manifest()):
+    with refuses(manifest, _manifest(), match="the manifest's own fields disagree"):
         assert_controlled_environment(_workflow(), manifest)
 
 
@@ -1311,7 +1339,7 @@ def test_the_redirect_scan_catches_the_spellings_that_used_to_evade_it(escape: s
     steps = workflow["jobs"][job]["steps"]
     index = _index_of_step(steps, REQUIRED_GATED_JOBS[job])
     steps[index]["run"] = escape + str(steps[index]["run"]).lstrip()
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="redirected out of the controlled environment"):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1324,7 +1352,7 @@ def test_the_accounting_proof_fails_when_a_new_root_fence_is_added_to_the_workfl
         "runs-on": "ubuntu-24.04",
         "steps": [{"name": "Run new root tests", "run": "sudo .venv/bin/python -m pytest x\n"}],
     }
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="declared set disagree"):
         assert_every_root_fence_is_accounted_for(workflow)
 
 
@@ -1336,7 +1364,7 @@ def test_the_accounting_proof_fails_for_a_root_fence_that_avoids_the_naming_conv
         "runs-on": "ubuntu-24.04",
         "steps": [{"name": "Elevate", "run": "sudo install -d -m 0755 /var/lib/secp\n"}],
     }
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="declared set disagree"):
         assert_every_root_fence_is_accounted_for(workflow)
 
 
@@ -1358,7 +1386,9 @@ def test_the_accounting_proof_fails_when_a_fence_is_parked_in_the_held_set(
     )
     # the same guard `refuses` applies: prove the patch LANDED before trusting the refusal, or a
     # monkeypatch that silently targeted the wrong module would read as the property being defended
-    with refuses(NOT_YET_CONTROLLED, original):
+    with refuses(
+        NOT_YET_CONTROLLED, original, match="not_yet_controlled disagrees with the held set"
+    ):
         assert_controlled_environment(_workflow(), _manifest())
 
 
@@ -1381,7 +1411,7 @@ def test_the_repair_proof_fails_when_a_fence_chowns_a_fixed_system_parent(repair
     steps = workflow["jobs"]["backend-deployment-root"]["steps"]
     index = next(i for i, step in enumerate(steps) if "apt-get" in str(step.get("run", "")))
     steps[index]["run"] = str(steps[index]["run"]) + repair + "\n"
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="repairs a fixed system parent"):
         assert_no_root_fence_repairs_a_fixed_system_parent(workflow)
 
 
@@ -1444,7 +1474,7 @@ def test_the_repair_proof_reads_only_executed_lines_not_comments() -> None:
     assert_no_root_fence_repairs_a_fixed_system_parent(workflow)  # a comment is not an act
 
     steps[0]["run"] = "chmod 0755 /etc\n" + str(steps[0]["run"])
-    with refuses(workflow, _workflow()):
+    with refuses(workflow, _workflow(), match="repairs a fixed system parent"):
         assert_no_root_fence_repairs_a_fixed_system_parent(workflow)
 
 

@@ -760,3 +760,51 @@ def test_the_worker_extra_is_not_quietly_added_everywhere(wf):
         f"the worker extra is installed in {sorted(with_extra)}; if that is intended, update this "
         "test deliberately"
     )
+
+
+# --- shard skip accounting: absence must not read as coverage ---------------------------------
+#
+# The shard jobs were the ONLY pytest jobs with no skip accounting. Every dedicated fence refuses a
+# skip outright, but the shards cannot -- ~80 tests are legitimately gated on POSIX/root/docker/
+# systemd a normal runner lacks -- so a genuinely missing dependency (`temporalio`) sat in the
+# corpus reading as coverage. The enforcement keys on the skip REASON, never on test identity.
+
+
+def _shard_enforcement(wf):
+    steps = [
+        s
+        for s in _steps(_jobs(wf)["backend-pytest"])
+        if "platform-gated" in str(s.get("name", "")) or "PLATFORM_GATED" in str(s.get("run", ""))
+    ]
+    assert len(steps) == 1, f"expected exactly one shard skip-accounting step, found {len(steps)}"
+    return steps[0]
+
+
+def test_the_shard_job_accounts_for_every_skip(wf):
+    step = _shard_enforcement(wf)
+    run = str(step["run"])
+    assert "sys.exit(1)" in run, "the skip accounting must fail the job, not merely report"
+    assert step.get("continue-on-error") in (None, False)
+    assert "if" not in step, "a conditional skip gate stops nothing"
+
+
+def test_the_shard_skip_accounting_keys_on_reason_not_on_test_names(wf):
+    """An enumerated allowlist of test names decays silently the moment a test is renamed. A
+    capability shape does not, and a newly added root-gated test needs no maintenance."""
+    run = str(_shard_enforcement(wf)["run"])
+    for capability in ("posix", "root", "docker", "systemctl", "systemd", "postgres"):
+        assert capability in run, f"the reason matcher must recognise {capability}"
+    # it must classify the message, not the identity
+    assert "message" in run and "classname" not in run.split("unexplained")[0]
+
+
+def test_the_shard_skip_accounting_is_not_vacuous(wf):
+    """A matcher broadened to accept everything would pass while checking nothing, so the step
+    proves in-process that it still discriminates: a known missing-dependency reason must be
+    refused and a known platform-gated reason accepted, or the step fails."""
+    run = str(_shard_enforcement(wf)["run"])
+    assert "MUST_REFUSE" in run and "MUST_ACCEPT" in run
+    assert "temporalio" in run, "the anti-vacuity sample must be the real defect it exists to catch"
+    assert "PLATFORM_GATED is empty" in run, "an empty pattern set must fail, not accept everything"
+    assert "no testcases at all" in run, "an empty corpus must fail rather than pass vacuously"
+    assert "missing" in run, "a missing report must fail rather than pass vacuously"

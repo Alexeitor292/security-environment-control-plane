@@ -171,6 +171,95 @@ jobs:
           uv run python scripts/ci/pytest_shards.py run --shard ${{ matrix.shard }}
           -- -q -p no:cacheprovider --durations=15
           --junitxml=junit-shard-${{ matrix.shard }}.xml
+      - name: Enforce that every shard skip is platform-gated, not a missing dependency
+        # The shard jobs were the ONLY pytest jobs with no skip accounting, so any test that
+        # stopped running in the shared corpus was invisible: `temporalio` was absent for months
+        # and seven tests read as passing while never executing. Every dedicated fence already
+        # refuses a skip outright; the shards cannot, because ~80 tests are legitimately gated on
+        # POSIX/root/docker/systemd that a normal runner does not have.
+        #
+        # So this keys on the skip REASON, not on test identity. An enumerated allowlist of test
+        # names decays silently the moment a test is renamed; a reason shape does not, and a newly
+        # added root-gated test passes with no maintenance while `could not import 'x'` fails.
+        #
+        # Fail-closed in every direction: a missing or unparseable report, an empty corpus, an
+        # empty pattern set, or a skip whose reason matches nothing all exit 1.
+        run: |
+          uv run python - <<'PY'
+          import re, sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          # Platform capabilities a hosted runner legitimately lacks. NOT test names.
+          PLATFORM_GATED = (
+              r"\bposix\b",
+              r"\broot\b",
+              r"\bdocker\b",
+              r"\bsystemctl\b",
+              r"\bsystemd\b",
+              r"\bpostgres",
+              r"SECP_TEST_POSTGRES_URL",
+          )
+          # A reason that must ALWAYS be refused, used below to prove the matcher still discriminates.
+          MUST_REFUSE = "could not import 'temporalio': No module named 'temporalio'"
+          MUST_ACCEPT = "requires dedicated Linux-root fixed-layout PR5F CI gate"
+
+          def platform_gated(reason: str) -> bool:
+              return any(re.search(p, reason, re.IGNORECASE) for p in PLATFORM_GATED)
+
+          problems = []
+
+          # --- anti-vacuity: the matcher must still discriminate ---------------------------------
+          # Without this, widening a pattern to `.*` (or emptying the tuple) would make every skip
+          # "platform-gated" and the whole step would pass while checking nothing.
+          if not PLATFORM_GATED:
+              problems.append("PLATFORM_GATED is empty: every skip would be accepted unchecked")
+          if platform_gated(MUST_REFUSE):
+              problems.append(
+                  "the reason matcher accepts a missing-dependency skip, so it no longer discriminates"
+              )
+          if not platform_gated(MUST_ACCEPT):
+              problems.append(
+                  "the reason matcher rejects a known platform-gated skip, so it would fail valid runs"
+              )
+
+          report = Path("junit-shard-${{ matrix.shard }}.xml")
+          if not report.exists():
+              print(f"::error::{report} missing - the shard produced no results")
+              sys.exit(1)
+          root = ET.parse(report).getroot()
+
+          cases = list(root.iter("testcase"))
+          if not cases:
+              problems.append("the shard report contains no testcases at all")
+
+          unexplained = {}
+          skipped = 0
+          for case in cases:
+              marker = case.find("skipped")
+              if marker is None:
+                  continue
+              skipped += 1
+              reason = (marker.get("message") or "").strip()
+              if not reason or not platform_gated(reason):
+                  key = reason or "<no reason recorded>"
+                  unexplained.setdefault(key, []).append(
+                      f"{case.get('classname', '')}::{case.get('name', '')}"
+                  )
+
+          print(f"shard ${{ matrix.shard }}: {len(cases)} tests, {skipped} skipped, "
+                f"{len(unexplained)} unexplained skip reason(s)")
+          for reason, tests in sorted(unexplained.items()):
+              problems.append(
+                  f"{len(tests)} test(s) skipped for a reason that is not a platform gate: "
+                  f"{reason!r} (e.g. {tests[0]})"
+              )
+
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+          print("Every shard skip is attributable to a platform capability this runner lacks.")
+          PY
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
