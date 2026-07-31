@@ -5,11 +5,12 @@ layer an operator actually touches. ``run`` was exercised by several modules; :f
 ``python -m secp_operator_deployment`` entrypoint that ``__main__`` calls — was exercised by none,
 so the stdout rendering, the ``--json`` branch and the exit-code return were unpinned.
 
-The load-bearing test here is :func:`test_neither_command_accepts_a_path_argument`. A path argument
-is what would let a report describe, entirely truthfully, a tree that is NOT the one that would
-run — and such a report is indistinguishable from one about the tree that would. The existing suite
-pinned the absence of ``verify --profile`` but never the absence of a path on ``provenance``, so
-that property was documented in two docstrings and enforced nowhere.
+The load-bearing test here is :func:`test_no_command_accepts_a_path_or_queue_argument`. A path
+argument is what would let a report describe, entirely truthfully, a tree that is NOT the one that
+would run — and such a report is indistinguishable from one about the tree that would. The existing
+suite pinned the absence of ``verify --profile`` but never the absence of a path on ``provenance``,
+so that property was documented in two docstrings and enforced nowhere. The ``queue`` command
+(WS-E) extends the same property to a queue NAME, which is its path-equivalent.
 
 Nothing in this module builds a composition aggregate, constructs a ``Worker``, calls
 ``run_plan_generation``, resolves a credential, or contacts any infrastructure. The provenance
@@ -73,10 +74,16 @@ def prepared_context(monkeypatch):
         ["verify", "--package-dir", "/tmp/x"],
         ["verify", "--expected", "/tmp/x.json"],
         ["verify", "/tmp/x"],
+        # queue (WS-E): a queue NAME is the path-equivalent here — naming one would let the report
+        # describe a queue that is not the one the deployment would actually use.
+        ["queue", "--queue", "some-queue"],
+        ["queue", "--task-queue", "some-queue"],
+        ["queue", "--profile", "/tmp/x.json"],
+        ["queue", "/tmp/x"],
     ],
     ids=lambda a: " ".join(a),
 )
-def test_neither_command_accepts_a_path_argument(argv, capsys):
+def test_no_command_accepts_a_path_or_queue_argument(argv, capsys):
     """A truthful report about the WRONG tree carries the same authority as one about the right
     tree. The only defence is that no path can be named."""
     with pytest.raises(SystemExit):
@@ -84,7 +91,7 @@ def test_neither_command_accepts_a_path_argument(argv, capsys):
     capsys.readouterr()  # argparse writes usage to stderr; keep the run quiet
 
 
-@pytest.mark.parametrize("command", ["verify", "provenance"])
+@pytest.mark.parametrize("command", ["verify", "provenance", "queue"])
 def test_each_command_exposes_exactly_one_optional_flag(command):
     """``--json`` and nothing else — no path, no host, no override, no gate."""
     parsed = vars(build_parser().parse_args([command]))

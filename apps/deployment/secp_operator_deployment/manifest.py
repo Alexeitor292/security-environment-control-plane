@@ -54,6 +54,7 @@ COVERED_MODULES: tuple[str, ...] = (
     "pinned_exec.py",
     "production_context.py",
     "profile.py",
+    "queue_check.py",
     "runner.py",
     "runtime_seams.py",
     "verify.py",

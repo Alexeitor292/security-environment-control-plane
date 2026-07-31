@@ -522,7 +522,14 @@ def test_cli_verify_still_reports_the_ladder():
     assert payload["prerequisites"]["next_blocking"] is None
 
 
-def test_cli_still_exposes_exactly_two_read_only_commands():
+def test_cli_still_exposes_exactly_three_read_only_commands():
+    """Pinned as a SET, so adding a command is a DELIBERATE edit here and never an accident.
+
+    ``queue`` (WS-E) is the third. Like the other two it is an observation: it reports queue
+    isolation, consumer dormancy and the reviewed stops that would refuse a controlled-live start,
+    and it derives the last of those by READING the stop constants rather than by attempting
+    anything. See ``test_operator_queue_isolation.py``.
+    """
     from secp_operator_deployment.cli import _HANDLERS
 
-    assert set(_HANDLERS) == {"verify", "provenance"}
+    assert set(_HANDLERS) == {"verify", "provenance", "queue"}

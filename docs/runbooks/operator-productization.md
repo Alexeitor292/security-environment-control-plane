@@ -1,6 +1,6 @@
 # Runbook — controlled-live operator productization (read-only)
 
-This runbook covers the two **read-only** commands the controlled-live operator deployment
+This runbook covers the three **read-only** commands the controlled-live operator deployment
 package exposes, how to read their output, and — equally important — what they deliberately
 cannot do.
 
@@ -14,17 +14,19 @@ prepared and installed).
 
 ---
 
-## 1. The two commands
+## 1. The three commands
 
 ```
 python -m secp_operator_deployment verify --json
 python -m secp_operator_deployment provenance --json
+python -m secp_operator_deployment queue --json
 ```
 
-Neither takes a path argument. `verify` resolves the fixed root-controlled deployment profile and
+None takes a path argument. `verify` resolves the fixed root-controlled deployment profile and
 the **separate** independent expected-identities file; `provenance` inspects the installed
-module's own directory, resolved in code. This is deliberate: an operator-supplied path would let
-a report describe a tree that is not the one that would actually run.
+module's own directory, resolved in code; `queue` reuses `verify`'s context loader. This is
+deliberate: an operator-supplied path would let a report describe a tree that is not the one that
+would actually run. `queue` additionally takes no queue **name**, which is its path-equivalent.
 
 There is no `install`, no `start`, and no command that opens the controlled-live path. That is
 not an oversight — see §5.
@@ -115,28 +117,100 @@ If you see `reviewed_code_change`, stop looking for a setting. There isn't one, 
 
 ---
 
-## 3. Queue separation
+## 3. `queue` — is the controlled-live queue isolated, and is anything consuming it?
 
-The `queue_separation` section reports booleans only — never the queue names, which are profile
-values:
+The program constraint is that the **controlled-live operator queue must be disabled and isolated
+from the ordinary Temporal queue**. `verify` reports queue separation as one section among many;
+`queue` is the command for answering that constraint on its own, and it is what you run before a
+controlled-live milestone.
+
+```
+python -m secp_operator_deployment queue --json
+```
+
+It reports **three independent facts and never merges them** into a single "the operator side is
+safe" boolean:
+
+| Section | Dim | Question |
+| --- | --- | --- |
+| `isolation` | B | Are both queues configured, and **distinct**? |
+| `operator_consumer` | C | Is anything actually **polling** the operator queue? |
+| `submission_stops` | D/E/F | What would **refuse** an attempted controlled-live start? |
+
+### Exit codes
+
+| Status | Exit | Meaning |
+| --- | --- | --- |
+| `queue_isolated_and_dormant` | 0 | Queues distinct, nothing consuming, every stop closed. |
+| `queue_unverified` | 10 | No parsed profile, or the host could not be observed coherently. Isolation or dormancy was **not** established. |
+| `queue_not_isolated` | 12 | The queues are missing or shared. The configuration itself is unsafe. |
+| `queue_operator_consuming` | 14 | The operator unit is enabled or running — something may be polling the controlled-live queue. |
+| `queue_stops_open` | 20 | **A reviewed submission stop is open or unreadable. Stop and escalate.** |
+
+`queue_unverified` is a refusal, not a pass. The dangerous failure mode for this command would be
+reporting isolation it never observed, so an absent profile or an incoherent host reads as
+*unverified* rather than as *fine*.
+
+### `isolation` (dimension B)
+
+Booleans only — never the queue names, which are profile values:
 
 ```json
-"queue_separation": {
+"isolation": {
   "ok": true, "ordinary_configured": true,
   "operator_configured": true, "distinct": true, "reason_code": null
 }
 ```
 
-The two queues must be distinct. A shared queue would let the shipped sealed worker pick up
-controlled-live work, so the profile validator refuses it at parse time
-(`profile.py::_v_queue_separation`) and this section is the defence-in-depth report of the same
-fact.
+A shared queue would let the shipped sealed ordinary worker pick up controlled-live work, so the
+profile validator refuses it at parse time (`profile.py::_v_queue_separation`) and this section is
+the defence-in-depth report of the same fact. It is built by the **same** builder `verify` uses, so
+the two commands can never disagree about it.
 
-Note which fact this section does **not** carry. Queue *isolation* — both queues configured, and
-distinct — is dimension **B**, above. Whether the operator **unit** is installed but disabled and
-not running is dimension **C**, reported in `host_observation` and gated by the
-`operator_prepared_and_disabled` rung. They are separate facts about separate things and are
-deliberately never merged into one "the operator side is safe" boolean.
+### `operator_consumer` (dimension C)
+
+Observed from the host, not from configuration. Note this is deliberately **not** `verify`'s
+`operator_prepared_and_disabled` rung. That rung requires the unit to be *present* — a prepared
+host has it installed but disabled. This section asks only whether anything **consumes** the
+queue, and an absent unit consumes nothing. The two answers differ on exactly one host state, and
+they differ correctly; merging them would make one of them wrong.
+
+When the host was not observed coherently, the three unit fields are `null` rather than a guess.
+
+### `submission_stops` and `submission_preview` — the dry run
+
+A controlled-live submission cannot be "tried" — trying it is the thing that must never happen. So
+the preview is derived by **reading the reviewed code constants that would refuse**, in the order
+they would be encountered along an attempted start:
+
+| Stop | Stops |
+| --- | --- |
+| `shipped_runtime_sealed` | the no-argument controlled-live composition build |
+| `reviewed_runtime_provider_set_empty` | any runtime-provisioning attestation validating |
+| `operator_activation_seal` | the operator worker being constructed, so nothing polls the queue |
+| `plan_execution_gate_default_disabled` | the shipped plan-execution composition, before any external contact |
+
+```json
+"submission_preview": {
+  "submission_performed": false,
+  "would_be_refused": true,
+  "first_refusing_stop": "shipped_runtime_sealed",
+  "refusal_reason_code": "controlled_live_runtime_not_provisioned",
+  "basis": "observed_reviewed_code_constants"
+}
+```
+
+Every `closed` boolean carries the value that was **read** next to it in `observed`, so you can
+check the verdict rather than take it. `refusal_reason_code` is the bounded code the *real* path
+refuses with, so the preview and an actual refusal name the same thing.
+
+Two properties worth knowing:
+
+- **A stop that cannot be read is reported open**, with `submission_stop_unobservable`. An
+  unobservable stop is not a stop, and this resolves to exit 20.
+- **All four stops are `reviewed_code_change`.** None is operator-closable. See §5.
+
+> This command is the reason there is no `--dry-run` flag anywhere else in the package (§7).
 
 ---
 
@@ -182,6 +256,10 @@ none reachable from configuration:
    runtime-provider set is **empty**, so no provisioning attestation can ever validate;
 3. the operator-activation seal — the run hook refuses before any Temporal worker is constructed.
 
+`queue` (§3) reports these as **four** rows rather than three: it observes the runtime seam's two
+halves separately, because the shipped runtime being sealed and the reviewed provider set being
+empty are independent readings and either could change without the other.
+
 Independently, both generic subprocess seals remain closed, and the plan-only command grammar
 admits only `init`, a non-destroy `plan`, and `show -json`. **Apply and destroy are not
 available, and no command in this package can make them available.**
@@ -221,16 +299,25 @@ implements a second copy of something that already exists under a different name
 | Install + status diagnostics — *why* not ready, as distinct from the verdict | `PREREQUISITE_LADDER` + `build_prerequisite_ladder` (§2), `REFUSAL_CATALOGUE` + remediation classes (§2) | `test_operator_productization.py`, `test_operator_refusal_catalogue.py` |
 | Readiness validation — the verdict | `_resolve_status` + `STATUS_EXIT_CODES` (§2) | `test_operator_productization.py`, `test_deployment_verify.py` |
 | Release + provenance verification | `provenance` command, `build_provenance_report` (§4) | `test_operator_productization.py`, `test_operator_cli_surface.py` |
-| Queue configuration validation | parse time `profile.py::_v_queue_separation`; report time `verify.py::_queue_section` (§3) | `test_deployment_profile.py::test_queue_equality_refused`, `test_operator_productization.py` |
-| Evidence observation | `host_adapters.py` → `HostObservationEvidence`, reported by `verify.py::_host_section` | `test_deployment_adapters.py` — generation/ABA refusal, fail-closed on malformed or ambiguous readings, no mutation subcommand, exact argv |
-| Refusal paths | `REFUSAL_CATALOGUE` + every rung's bounded `reason_code` (§2) | `test_operator_refusal_catalogue.py` |
-| Read-only guarantee (the "dry-run" half) | **No flag.** Both commands are observations; the `effects_of_this_*` sections declare it | `test_operator_cli_surface.py` — output byte-identical across runs, and the installed package byte-identical after both commands; `test_deployment_boundary.py` |
+| Queue configuration validation | the `queue` command, `queue_check.py` (§3); parse time `profile.py::_v_queue_separation`; report time `verify.py::_queue_section` | `test_operator_queue_isolation.py`, `test_deployment_profile.py::test_queue_equality_refused`, `test_operator_productization.py` |
+| Evidence observation | `host_adapters.py` → `HostObservationEvidence`, reported by `verify.py::_host_section` and by `queue_check.py` as consumer dormancy (§3) | `test_deployment_adapters.py` — generation/ABA refusal, fail-closed on malformed or ambiguous readings, no mutation subcommand, exact argv; `test_operator_queue_isolation.py` |
+| Refusal paths | `REFUSAL_CATALOGUE` + every rung's bounded `reason_code` (§2); the queue ladder + submission stops (§3) | `test_operator_refusal_catalogue.py`, `test_operator_queue_isolation.py` |
+| Dry run | `queue`'s `submission_preview` (§3) — what *would* refuse a controlled-live start, derived by reading the reviewed stop constants | `test_operator_queue_isolation.py` — the stops are checked against the constants themselves, and the no-submission claim against a `sys.modules` delta + tripwires |
+| Read-only guarantee | **No flag.** All three commands are observations; the `effects_of_this_*` sections declare it and the tests observe it | `test_operator_cli_surface.py` — output byte-identical across runs, installed package byte-identical afterwards; `test_operator_queue_isolation.py`; `test_deployment_boundary.py` |
 
-### Why there is no `--dry-run`
+### Why there is no `--dry-run` flag
 
-Neither command has a mutating counterpart, so a `--dry-run` flag would have nothing to stand in
+No command has a mutating counterpart, so a `--dry-run` **flag** would have nothing to stand in
 for — and it would advertise that a non-dry-run mode exists somewhere. On a package whose whole
-value is that it cannot activate, that is exactly the flag an operator would go looking for. The
-guarantee is delivered instead by making the no-effect claim checkable: the report is byte-identical
-across runs and the installed package is unchanged after both commands run, so a command that wrote
-anything fails regardless of what its `effects_of_this_*` section claims.
+value is that it cannot activate, that is exactly the flag an operator would go looking for.
+
+What an operator actually wants from a dry run is delivered as a command instead: `queue`'s
+`submission_preview` (§3) answers *"if a controlled-live workflow were submitted right now, what
+would stop it?"* by reading the stop constants rather than by attempting anything.
+
+The read-only guarantee itself is delivered by making the no-effect claim checkable rather than
+declarable. `effects_of_this_*` is a claim; the observations are: reports byte-identical across
+runs, the installed package unchanged afterwards, no `temporalio` module imported during a real
+`main()` run, and tripwires on the operator run hook, the composition builder and the real command
+runner. A command that submitted, started a consumer or wrote anything fails those regardless of
+what its `effects_of_this_*` section says.

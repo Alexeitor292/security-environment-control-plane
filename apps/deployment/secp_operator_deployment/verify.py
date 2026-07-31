@@ -154,6 +154,12 @@ _O = REMEDIATION_OPERATOR
 REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
     # --- (F) seals ------------------------------------------------------------------------------
     "seal_drift_detected": {"dimension": "F", "remediation": _C},
+    # The operator-activation seal: the bounded code the run hook refuses with, and the codes the
+    # queue check reports when a reviewed submission stop is open or cannot be read at all. None is
+    # operator-closable — there is no flag that opens or repairs a reviewed constant.
+    "operator_activation_sealed": {"dimension": "F", "remediation": _C},
+    "submission_stop_open": {"dimension": "F", "remediation": _C},
+    "submission_stop_unobservable": {"dimension": "F", "remediation": _C},
     # --- (A) installed-package trust (the trusted directory-fd walk) -----------------------------
     "install_untrusted": {"dimension": "A", "remediation": _O},
     "install_trust_not_evaluated": {"dimension": "A", "remediation": _O},
@@ -192,6 +198,9 @@ REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
     "verify_context_type_invalid": {"dimension": "B", "remediation": _D},
     "queue_not_distinct": {"dimension": "B", "remediation": _D},
     "queue_separation_unavailable": {"dimension": "B", "remediation": _D},
+    # --- (C) the controlled-live queue CONSUMER (queue_check) -------------------------------------
+    "operator_consumer_unobservable": {"dimension": "C", "remediation": _O},
+    "operator_consumer_active": {"dimension": "C", "remediation": _O},
     # --- (C) prepared host ------------------------------------------------------------------------
     "host_observation_type_invalid": {"dimension": "C", "remediation": _O},
     "host_not_observed": {"dimension": "C", "remediation": _O},

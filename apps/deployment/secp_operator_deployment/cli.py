@@ -16,8 +16,17 @@ recomputes the implementation manifest over the INSTALLED package through the tr
 directory-fd walk and reports the aggregate, so an operator can compare it against the aggregate
 bound into a signed release BEFORE trusting the deployment. Like ``verify`` it takes no path
 argument — the directory inspected is the installed module's own, resolved in code — and it
-mutates nothing. Both commands perform their filesystem reads HERE and hand already-resolved
-values to the PURE builders in :mod:`secp_operator_deployment.verify`.
+mutates nothing.
+
+``python -m secp_operator_deployment queue --json`` is the third: the controlled-live QUEUE
+isolation check (:mod:`secp_operator_deployment.queue_check`) — are the two queues distinct, is
+anything consuming the operator queue, and what would refuse an attempted controlled-live start.
+It resolves its inputs through the SAME context loader ``verify`` uses, so it adds no contact
+surface, and it takes no queue argument for the same reason the others take no path argument.
+
+All three commands perform their filesystem reads HERE and hand already-resolved values to the
+PURE builders in :mod:`secp_operator_deployment.verify` /
+:mod:`secp_operator_deployment.queue_check`.
 """
 
 from __future__ import annotations
@@ -158,7 +167,31 @@ def cmd_provenance(args: argparse.Namespace, deps: VerifyDeps | None) -> tuple[i
     return code, report
 
 
-_HANDLERS = {"verify": cmd_verify, "provenance": cmd_provenance}
+def _queue_kwargs(deps: VerifyDeps | None) -> dict:
+    """Resolve the queue-check inputs from the SAME fixed root-controlled context ``verify`` uses.
+
+    Deliberately routed through :func:`_verify_kwargs` rather than resolved separately: the queue
+    command must add NO contact surface of its own, and reusing the one loader is what makes that
+    checkable rather than claimed. There is no ``--queue`` argument — the queues inspected are the
+    ones in the installed profile, never ones an operator names, for the same reason there is no
+    profile-path flag.
+    """
+    kwargs = _verify_kwargs(deps)
+    return {
+        "profile": kwargs.get("profile"),
+        "host_observation": kwargs.get("host_observation"),
+    }
+
+
+def cmd_queue(args: argparse.Namespace, deps: VerifyDeps | None) -> tuple[int, dict]:
+    from secp_operator_deployment.queue_check import QUEUE_EXIT_CODES, build_queue_report
+
+    report = build_queue_report(**_queue_kwargs(deps))
+    code = QUEUE_EXIT_CODES.get(report.get("status", ""), 20)
+    return code, report
+
+
+_HANDLERS = {"verify": cmd_verify, "provenance": cmd_provenance, "queue": cmd_queue}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -180,6 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="read-only installed-package provenance (implementation aggregate + trust)",
     )
     prov.add_argument("--json", action="store_true", help="deterministic machine-readable output")
+    queue = sub.add_parser(
+        "queue",
+        help="read-only controlled-live queue isolation, consumer dormancy, and submission stops",
+    )
+    queue.add_argument("--json", action="store_true", help="deterministic machine-readable output")
     return parser
 
 

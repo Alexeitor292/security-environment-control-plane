@@ -3,20 +3,40 @@
 A catalogue that drifts from the code is worse than none — it would tell an operator a gap is
 closable when it is not. Two complementary guards keep it honest:
 
-* :func:`test_every_refusal_literal_in_verify_is_catalogued` SCANS ``verify.py`` for refusal
-  literals, so adding a new reason code in one of the matched shapes without cataloguing it fails
-  here rather than surfacing to an operator as an unexplained string.
+* :func:`test_every_refusal_literal_is_catalogued` SCANS ``verify.py`` AND ``queue_check.py`` for
+  refusal literals, so adding a new reason code in one of the matched shapes without cataloguing it
+  fails here rather than surfacing to an operator as an unexplained string.
 * the behavioural guard in ``test_operator_productization`` drives an all-unmet ladder and
   requires every rung's reason code to classify.
 
-Scope, stated plainly rather than implied. The scan recognises five syntactic shapes and so covers
-26 of the 79 catalogued codes. Thirteen of the other 53 are raised by ``verify.py`` ITSELF in
-shapes no pattern matches — eleven as inline positional arguments to ``rung()`` (bare, or as the
-``x or "literal"`` fallback), ``compositions_not_supplied`` inside a parenthesised conditional, and
-``queue_not_distinct`` as a conditional dict-literal value in ``_queue_section``; two more
-(``identity_mismatch``, ``install_untrusted``) are filtered out DELIBERATELY because they double as
-status names. The remaining 40 are raised in ``profile.py``, ``manifest.py``, ``compositions.py``,
-``runtime_seams.py``, ``cli.py`` and ``secp_worker``.
+Scope, stated plainly rather than implied, and MEASURED rather than estimated — the numbers below
+are asserted by :func:`test_the_scan_coverage_is_exactly_what_this_docstring_claims`, so they
+cannot rot into decoration. The scan recognises five syntactic shapes across the two source files
+and covers **27 of the 84** catalogued codes: 26 in ``verify.py``, and exactly one —
+``operator_consumer_active`` — in ``queue_check.py``.
+
+Of the other 57, measured by asking whether the literal appears in each module outside the
+catalogue block itself:
+
+* **22 appear in ``verify.py``** in shapes no pattern matches: inline positional arguments to
+  ``rung()`` (bare, or as the ``x or "literal"`` fallback), ``compositions_not_supplied`` inside a
+  parenthesised conditional, and ``queue_not_distinct`` as a conditional dict-literal value in
+  ``_queue_section``. Two of the 22 (``identity_mismatch``, ``install_untrusted``) are filtered out
+  DELIBERATELY because they double as status names. This measure OVER-COUNTS slightly and is left
+  that way rather than tuned: ``operator_activation_sealed`` is matched because it is a report
+  FIELD name in ``_read_seals``, not because ``verify.py`` refuses with it.
+* **5 appear only in ``queue_check.py``** — ``attestation_provider_not_reviewed`` and
+  ``controlled_live_runtime_not_provisioned``, passed positionally to ``SubmissionStop`` (the other
+  two stop codes also occur in ``verify.py`` and are counted above);
+  ``operator_consumer_unobservable`` as an ``x or "literal"`` fallback; ``submission_stop_open`` as
+  a conditional dict-literal value; and ``submission_stop_unobservable`` reached through the
+  ``STOP_UNOBSERVABLE`` module constant.
+* **30 are raised elsewhere** — ``profile.py``, ``manifest.py``, ``compositions.py``,
+  ``runtime_seams.py``, ``cli.py``, ``runner.py`` and ``secp_worker``.
+
+This 22/5/30 split is re-measured on every run by
+:func:`test_the_blind_spot_breakdown_is_re_measured_not_remembered`, so the prose above cannot
+quietly stop describing the code.
 
 The scan also proves only one direction — every scanned literal is catalogued, never that every
 catalogued entry is still reachable — so a STALE entry is unpoliced here.
@@ -36,6 +56,7 @@ from __future__ import annotations
 import pathlib
 import re
 
+from secp_operator_deployment.queue_check import QUEUE_EXIT_CODES
 from secp_operator_deployment.verify import (
     CATALOGUE_PREFIXES,
     DIMENSIONS,
@@ -47,9 +68,16 @@ from secp_operator_deployment.verify import (
     classify_reason_code,
 )
 
-_VERIFY_SRC = pathlib.Path(__file__).resolve().parents[1] / "secp_operator_deployment" / "verify.py"
+_PKG = pathlib.Path(__file__).resolve().parents[1] / "secp_operator_deployment"
+# Both modules that PRODUCE operator-visible reason codes from already-resolved inputs.
+_SCANNED_SOURCES = (_PKG / "verify.py", _PKG / "queue_check.py")
 
-# The exact shapes a bounded reason code is produced in inside verify.py.
+# The measured coverage the module docstring states. Asserted below so the prose cannot drift.
+_EXPECTED_COVERAGE = (27, 84)
+# The measured blind-spot split: (in verify.py, in queue_check.py only, elsewhere).
+_EXPECTED_BLIND_SPOTS = (22, 5, 30)
+
+# The exact shapes a bounded reason code is produced in inside the scanned sources.
 _REFUSAL_PATTERNS = (
     re.compile(r'return False, "([a-z0-9_]+)"'),
     re.compile(r'^\s*return "([a-z0-9_]+)"', re.MULTILINE),
@@ -58,15 +86,16 @@ _REFUSAL_PATTERNS = (
     re.compile(r'profile_load_reason = "([a-z0-9_]+)"'),
 )
 
-# Status names are NOT reason codes; they are returned by _resolve_status / the report builders.
-_STATUS_NAMES = set(STATUS_EXIT_CODES) | set(PROVENANCE_EXIT_CODES)
+# Status names are NOT reason codes; they are returned by the status resolvers / report builders.
+_STATUS_NAMES = set(STATUS_EXIT_CODES) | set(PROVENANCE_EXIT_CODES) | set(QUEUE_EXIT_CODES)
 
 
 def _refusal_literals() -> set[str]:
-    text = _VERIFY_SRC.read_text(encoding="utf-8")
     found: set[str] = set()
-    for pattern in _REFUSAL_PATTERNS:
-        found.update(pattern.findall(text))
+    for source in _SCANNED_SOURCES:
+        text = source.read_text(encoding="utf-8")
+        for pattern in _REFUSAL_PATTERNS:
+            found.update(pattern.findall(text))
     return found - _STATUS_NAMES
 
 
@@ -84,6 +113,7 @@ _SCANNED_LITERALS = frozenset(
         "executor_factory_invalid",
         "host_observation_type_invalid",
         "manifest_unavailable",
+        "operator_consumer_active",  # queue_check.py — the only literal matched outside verify.py
         "plan_execution_composition_invalid",
         "plan_gate_disabled",
         "process_digest_invalid",
@@ -120,9 +150,40 @@ def test_the_scan_matches_exactly_the_pinned_literal_set():
     )
 
 
-def test_every_refusal_literal_in_verify_is_catalogued():
+def test_every_refusal_literal_is_catalogued():
     uncatalogued = sorted(c for c in _refusal_literals() if classify_reason_code(c) is None)
-    assert not uncatalogued, f"uncatalogued reason codes in verify.py: {uncatalogued}"
+    assert not uncatalogued, f"uncatalogued reason codes in the scanned sources: {uncatalogued}"
+
+
+def test_the_scan_coverage_is_exactly_what_this_docstring_claims():
+    """The module docstring states how little this scan covers. Numbers that are only prose drift
+    into decoration, so the two that matter are asserted."""
+    assert (len(_refusal_literals()), len(REFUSAL_CATALOGUE)) == _EXPECTED_COVERAGE, (
+        "scan coverage moved — re-measure and update BOTH the docstring and _EXPECTED_COVERAGE"
+    )
+
+
+def _blind_spot_split() -> tuple[int, int, int]:
+    """Re-run the measurement the docstring reports: for every catalogued code the scan MISSES,
+    does its literal appear in ``verify.py`` (outside the catalogue block, which would otherwise
+    match everything), in ``queue_check.py`` only, or in neither?"""
+    verify_src, queue_src = (s.read_text(encoding="utf-8") for s in _SCANNED_SOURCES)
+    start = verify_src.index("REFUSAL_CATALOGUE: dict")
+    verify_body = verify_src[:start] + verify_src[verify_src.index("\n}\n", start) :]
+
+    missed = [c for c in REFUSAL_CATALOGUE if c not in _refusal_literals()]
+    in_verify = [c for c in missed if f'"{c}"' in verify_body]
+    in_queue = [c for c in missed if c not in in_verify and f'"{c}"' in queue_src]
+    return len(in_verify), len(in_queue), len(missed) - len(in_verify) - len(in_queue)
+
+
+def test_the_blind_spot_breakdown_is_re_measured_not_remembered():
+    """A stated blind spot is only worth stating if it is still true. This recomputes the split
+    rather than trusting the number written down when it was first measured."""
+    assert _blind_spot_split() == _EXPECTED_BLIND_SPOTS, (
+        "the blind-spot split moved — re-measure and update BOTH the docstring and "
+        "_EXPECTED_BLIND_SPOTS"
+    )
 
 
 # --------------------------------------------------------------------------- internal consistency
