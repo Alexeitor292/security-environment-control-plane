@@ -9,14 +9,22 @@ closable when it is not. Two complementary guards keep it honest:
 * the behavioural guard in ``test_operator_productization`` drives an all-unmet ladder and
   requires every rung's reason code to classify.
 
-Scope, stated plainly rather than implied: the scan recognises five syntactic shapes and so covers
-26 of the 79 catalogued codes — the other 53, which include ``verify.py``'s OWN ladder fallback
-reasons (written as inline arguments to ``rung()``, not in a matched shape) alongside the codes
-raised in ``profile.py``, ``manifest.py``, ``compositions.py``, ``runtime_seams.py``, ``cli.py``
-and ``secp_worker``, are outside it. Widening the scan is deliberately not the fix: an uncatalogued
-code already degrades VISIBLY at the point of use, where ``build_prerequisite_ladder`` sets
-``reason_catalogued: False`` and the report carries that to the operator, so a wider scan would
-look far more thorough while remaining exactly as shape-fragile.
+Scope, stated plainly rather than implied. The scan recognises five syntactic shapes and so covers
+26 of the 79 catalogued codes. Thirteen of the other 53 are raised by ``verify.py`` ITSELF in
+shapes no pattern matches — eleven as inline positional arguments to ``rung()`` (bare, or as the
+``x or "literal"`` fallback), ``compositions_not_supplied`` inside a parenthesised conditional, and
+``queue_not_distinct`` as a conditional dict-literal value in ``_queue_section``; two more
+(``identity_mismatch``, ``install_untrusted``) are filtered out DELIBERATELY because they double as
+status names. The remaining 40 are raised in ``profile.py``, ``manifest.py``, ``compositions.py``,
+``runtime_seams.py``, ``cli.py`` and ``secp_worker``.
+
+The scan also proves only one direction — every scanned literal is catalogued, never that every
+catalogued entry is still reachable — so a STALE entry is unpoliced here.
+
+Widening the scan is deliberately not the fix for either gap: an uncatalogued code already degrades
+VISIBLY at the point of use, where ``build_prerequisite_ladder`` sets ``reason_catalogued: False``
+and the report carries that to the operator, so a wider scan would look far more thorough while
+remaining exactly as shape-fragile.
 
 It also pins the property that actually protects the seals: every gap that only a separately
 reviewed code change could close is classified as such, so the reported remediation can never
