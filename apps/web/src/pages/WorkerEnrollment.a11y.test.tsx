@@ -303,6 +303,26 @@ describe("worker-enrollment accessibility — names, roles and relationships", (
     expect(after).toContain('role="status"');
   });
 
+  /**
+   * The notice is also the FOCUS target after a dismissal, because a browser drops focus to
+   * <body> when the focused control's card unmounts — measured in Chromium, not assumed. Only the
+   * preconditions are assertable here (there is no DOM in this environment): the element must be
+   * addressable and programmatically focusable, and it must already exist BEFORE the dismissal,
+   * or the container would have nothing to move focus to at the moment the card disappears. That
+   * focus actually lands there is browser-verified, not claimed by this file.
+   */
+  it("keeps a focusable, already-mounted landing target for the dismissal", () => {
+    const before = html({ invitation: INVITATION, revealed: true });
+    const after = html({ invitation: null, dismissNotice: INVITATION_CLEARED_NOTICE });
+    for (const [name, out] of [
+      ["before", before],
+      ["after", after],
+    ] as const) {
+      expect(out, name).toContain('id="wenr-dismiss-notice"');
+      expect(out, name).toMatch(/id="wenr-dismiss-notice"[^>]*tabindex="-1"/);
+    }
+  });
+
   it("marks every decorative icon aria-hidden", () => {
     for (const [name, over] of RENDERS) {
       const svgs = elements(html(over), "svg");

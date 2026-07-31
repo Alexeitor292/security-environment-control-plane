@@ -140,9 +140,26 @@ describe("enrollment page I/O boundary", () => {
       expect(src).not.toContain("requestAnimationFrame");
       expect(src).not.toContain("requestIdleCallback");
     }
-    // No effect at all, so there is no place for a fetch-on-mount to appear later either. The
-    // page's only I/O is in click handlers.
-    expect(PAGE_CODE).not.toContain("useEffect");
+    // There IS one effect now — it moves focus after a dismissal, because a browser drops focus
+    // to <body> when the focused control's card unmounts. So the blanket "no useEffect" ban was
+    // replaced rather than deleted: what must never appear in an effect is I/O, since a
+    // fetch-on-mount would make this page issue requests the operator never asked for.
+    //
+    // Same hardened-slice discipline as environment-publication-boundary: prove the anchor,
+    // bound the slice, prove the slice has real content, and only then assert about it — a scan
+    // that stops matching must fail loudly instead of scanning an empty string and passing.
+    const effects = PAGE_CODE.split("useEffect(").slice(1);
+    expect(effects, "no effect found — re-anchor this scan").toHaveLength(1);
+    for (const body of effects) {
+      const end = body.indexOf("}, [");
+      expect(end, "unterminated effect — the slice would run to end of file").toBeGreaterThan(-1);
+      const block = body.slice(0, end);
+      expect(block, "the effect slice is empty — the scan is not reading the body").toContain(
+        "focus",
+      );
+      expect(block).not.toMatch(/api\./);
+      expect(block).not.toMatch(/setInterval|setTimeout|fetch\(/);
+    }
     expect(PAGE_CODE).not.toContain("useLayoutEffect");
   });
 

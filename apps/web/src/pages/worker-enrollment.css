@@ -107,6 +107,23 @@
   margin-top: 12px;
 }
 
+/* Focus lands here when the invitation card unmounts, so the landing point has to be visible
+   even though the element is not otherwise interactive. */
+.wenr-dismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* CyberTable's scroll region is keyboard-focusable but is not in ui.css's shared focus-ring
+   list, so it alone falls back to the UA default outline while every other control on this page
+   shows the app ring — measured in a browser, not inferred. Scoped to this page rather than
+   fixed in ui.css, which is shared with every other surface in the app. */
+.wenr .ui-table-wrap:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .wenr-subhead {
   margin: 14px 0 6px;
   font-size: var(--text-base);

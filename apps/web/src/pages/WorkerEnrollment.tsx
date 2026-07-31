@@ -1,6 +1,6 @@
 import "./worker-enrollment.css";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { api } from "../api/client";
 import type { EnrollmentInvitation, EnrollmentStatus } from "../api/types";
@@ -87,6 +87,7 @@ const LOOKUP_REASON = "wenr-lookup-reason";
 const REVOKE_REASON = "wenr-revoke-reason";
 const HANDOFF_REGION = "wenr-handoff-region";
 const TRACKED_TABS = "wenr-tracked";
+const DISMISS_NOTICE = "wenr-dismiss-notice";
 
 /**
  * A control plus the fixed reason it is unavailable. The reason is always rendered, so a disabled
@@ -185,8 +186,12 @@ export interface WorkerEnrollmentViewProps {
 }
 
 /**
- * Presentational worker-enrollment surface. Props only — no hooks, no data fetching, no clock and
- * no randomness — so it renders under `renderToStaticMarkup` in the node test environment.
+ * Presentational worker-enrollment surface. Props only — no data fetching, no clock and no
+ * randomness — so it renders under `renderToStaticMarkup` in the node test environment.
+ *
+ * It holds exactly one hook, an effect that moves focus after a dismissal (see below). Effects do
+ * not run under `renderToStaticMarkup`, so the rendered markup remains a pure function of the
+ * props and every assertion in the node suite stays deterministic.
  */
 export function WorkerEnrollmentView({
   permissions,
@@ -228,6 +233,29 @@ export function WorkerEnrollmentView({
   const lookup = lookupGate(permissions, id, lookingUp);
   const revoke = revokeGate(permissions, status, revoking);
 
+  /**
+   * Move focus to the dismissal notice when it appears.
+   *
+   * Dismissing removes the card that contains the focused control, and the browser responds by
+   * dropping focus to <body> — measured in Chromium, not assumed — which returns a keyboard user
+   * to the top of the document with their place lost. The notice is mounted from the start, so it
+   * is always a valid target, and an effect runs after commit so its text is already present when
+   * focus and the live-region announcement land on it.
+   *
+   * This is the view's ONLY hook and it is deliberately here rather than in the container: the
+   * DOM being managed is this component's own, and a container-side effect would not fire for any
+   * other consumer of the view. It does not compromise the node test environment —
+   * `renderToStaticMarkup` never runs effects, so the rendered markup stays a pure function of
+   * the props.
+   *
+   * Addressed by id rather than by ref because the view is otherwise prop-only; the ids are
+   * static and are asserted by the accessibility suite.
+   */
+  useEffect(() => {
+    if (dismissNotice === null) return;
+    document.getElementById(DISMISS_NOTICE)?.focus();
+  }, [dismissNotice]);
+
   const summary = trackedSummary(tracked, nowMs);
   const rows = filterTracked(tracked, trackedFilter);
   const recovery = status
@@ -252,10 +280,17 @@ export function WorkerEnrollmentView({
       )}
 
       {/* Dismissing the invitation unmounts the card the operator was working in, which takes the
-          focused control with it and leaves a screen reader with nothing announced. This region
-          lives OUTSIDE that card and is mounted from the start, so the outcome is spoken rather
-          than being a silent disappearance — and it says plainly that the material is gone. */}
-      <p className="wenr-reason" role="status">
+          focused control with it. Verified in a browser, not inferred: the browser then drops
+          focus to <body>, so a keyboard user is returned to the top of the document with no
+          announcement. This region lives OUTSIDE that card and is mounted from the start, so it
+          is both a valid focus target at the moment the card disappears and a live region that
+          has existed long enough to announce. The container moves focus here; see the effect. */}
+      <p
+        className="wenr-reason wenr-dismiss"
+        id={DISMISS_NOTICE}
+        role="status"
+        tabIndex={-1}
+      >
         {dismissNotice}
       </p>
 
