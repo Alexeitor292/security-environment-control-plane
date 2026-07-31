@@ -457,9 +457,30 @@ describe("EnrollmentInventoryView - renders no single-producer claim about recov
     status({ enrollment_id: id("4"), state: "invited", expires_at: "2026-07-30T09:00:00+00:00" }),
   ]);
 
-  const CASES: ReadonlyArray<readonly [string, Partial<EnrollmentInventoryViewProps>, string]> = [
+  type Case = readonly [string, Partial<EnrollmentInventoryViewProps>, string];
+
+  /**
+   * Held as a BOUND CONSTANT, not looked up by name, and spread into `CASES` by reference.
+   *
+   * The pin below asserts three things about this case, and a name lookup made all three
+   * defeasible at once: `CASES.find(...)` returns `undefined` when the name changes, and then
+   * `undefined?.[1].selectedId ?? null` is `null` (passes), while `html(undefined)` falls back to
+   * `html`'s own default props — which are themselves unselected, so even the render clause finds
+   * the empty state and passes. The clause chosen to be immune to the list's shape instead
+   * depended on the default fixture happening to be unselected: the same accident one layer down.
+   *
+   * Binding removes the `undefined` entirely, so no assertion below has a vacuous reading and the
+   * pin's soundness no longer depends on the order of the statements guarding it.
+   */
+  const UNSELECTED_DEFAULT: Case = [
+    "default page",
+    {},
+    "The two operator writes both end an enrollment rather than advancing it",
+  ];
+
+  const CASES: ReadonlyArray<Case> = [
     // NO_DECISION_NOTICE and SWEEP_NOTICE are on every render of this page.
-    ["default page", {}, "The two operator writes both end an enrollment rather than advancing it"],
+    UNSELECTED_DEFAULT,
     ["sweep notice", {}, "does not on its own mean the time ran out"],
     [
       // The scope that COLLECTS the two terminals, so it enumerates how a record reaches them.
@@ -500,25 +521,26 @@ describe("EnrollmentInventoryView - renders no single-producer claim about recov
    * that string live, which is the failure this surface keeps meeting in new costumes: a guard
    * walking a set the defect is not in.
    *
-   * So the unselected default is pinned three ways: present by name, genuinely carrying no
-   * selection, and actually producing the empty state. Name alone would survive someone adding a
-   * `selectedId` to that case's overrides.
+   * So the unselected default is pinned three ways: actually scanned, genuinely carrying no
+   * selection, and actually producing the empty state. Each clause is asserted against the BOUND
+   * case (see `UNSELECTED_DEFAULT`), never a name lookup — a lookup can miss, and every clause here
+   * has a passing reading on `undefined`.
    */
   it("scans the unselected default, where the selection region's empty state lives", () => {
-    const names = CASES.map(([name]) => name);
-    expect(names, "the unselected default dropped out of the scanned states").toContain(
-      "default page",
+    // Identity, not name: this is the very object the scan above iterates, so it cannot be
+    // satisfied by a different case that happens to share a label.
+    expect(CASES, "the unselected default is no longer one of the scanned cases").toContain(
+      UNSELECTED_DEFAULT,
     );
 
-    const unselected = CASES.find(([name]) => name === "default page");
-    expect(unselected, "default page case missing").toBeDefined();
+    const [, overrides] = UNSELECTED_DEFAULT;
     expect(
-      unselected?.[1].selectedId ?? null,
+      overrides.selectedId ?? null,
       "the default case now selects a row, so the empty state is no longer scanned",
     ).toBeNull();
 
     // The state is genuinely reached: this sentence exists in no other branch.
-    expect(html(unselected?.[1])).toContain("Select an enrollment above to see its evidence");
+    expect(html(overrides)).toContain("Select an enrollment above to see its evidence");
   });
 
   /** Shared-list integrity, asserted from THIS consumer: a pattern deleted from the module is
