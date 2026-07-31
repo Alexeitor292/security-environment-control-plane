@@ -20,6 +20,7 @@ functions, so they are not gated on POSIX or root.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import errno
 import json
@@ -27,6 +28,7 @@ import os
 import re
 import stat
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -554,12 +556,50 @@ def _mutated() -> dict:
     return copy.deepcopy(_workflow())
 
 
+@contextlib.contextmanager
+def refuses(mutated: object, pristine: object) -> Iterator[None]:
+    """Assert the mutation ACTUALLY LANDED, then that the contract refuses it.
+
+    A mutation that silently fails to apply is indistinguishable from one the guard caught: both
+    are a green test. Every regression below would still pass if its edit quietly became a no-op --
+    a `.replace()` whose needle moved, a step name that was renamed, a key that is now spelled
+    differently -- and the suite would report that the property is defended when nothing checked it.
+
+    So the edit is proven to have changed the subject BEFORE the guard is asked about it. This is a
+    guard on the guards, and it is the reason these regressions can be cited as evidence at all."""
+    assert mutated != pristine, (
+        "the mutation did not change anything, so this test would pass even if the guard did "
+        "nothing at all -- fix the mutation, not the guard"
+    )
+    with pytest.raises(AssertionError):
+        yield
+
+
+def test_the_mutation_harness_itself_fails_on_a_no_op_edit() -> None:
+    """The control for `refuses`: a mutation that changes nothing must be reported, not tolerated.
+
+    Without this, `refuses` is itself an unproven claim -- exactly the shape this suite refuses."""
+    workflow = _mutated()  # deep copy, but nothing changed
+    with pytest.raises(AssertionError, match="did not change anything"):
+        with refuses(workflow, _workflow()):
+            pass  # never reached
+
+
+def test_the_mutation_harness_requires_the_guard_to_actually_refuse() -> None:
+    """The other half: a landed mutation that the guard does NOT refuse must fail the test."""
+    workflow = _mutated()
+    workflow["jobs"]["backend-realfs-root"]["name"] = "renamed, but no guard cares"
+    with pytest.raises(pytest.fail.Exception):
+        with refuses(workflow, _workflow()):
+            pass  # the guard raised nothing, so `pytest.raises` must fail
+
+
 def test_the_proof_fails_when_the_last_root_job_loses_its_gate() -> None:
     workflow = _mutated()
     job = "backend-management-controller-real-adapters-root"
     steps = workflow["jobs"][job]["steps"]
     workflow["jobs"][job]["steps"] = [s for s in steps if not _is_gate(s)]
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_job_local_gate_order(workflow)
 
 
@@ -570,7 +610,7 @@ def test_the_proof_fails_when_a_gate_moves_after_its_product_test_step() -> None
     gate_index = _gate_indices(steps)[0]
     moved = steps.pop(gate_index)
     steps.append(moved)  # now strictly after the product-test step
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_job_local_gate_order(workflow)
 
 
@@ -581,7 +621,7 @@ def test_the_proof_fails_when_only_an_earlier_job_has_a_gate() -> None:
     workflow["jobs"][job]["steps"] = [s for s in workflow["jobs"][job]["steps"] if not _is_gate(s)]
     # an EARLIER job keeps its gate, which used to be enough to satisfy the old test
     assert _gate_indices(_steps(workflow, "backend-deployment-root"))
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_job_local_gate_order(workflow)
 
 
@@ -590,7 +630,7 @@ def test_the_proof_fails_when_a_gate_is_allowed_to_continue_on_error() -> None:
     job = "backend-management-root"
     steps = workflow["jobs"][job]["steps"]
     steps[_gate_indices(steps)[0]]["continue-on-error"] = True
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_job_local_gate_order(workflow)
 
 
@@ -599,7 +639,7 @@ def test_the_proof_fails_when_a_gate_becomes_conditional() -> None:
     job = "backend-management-root"
     steps = workflow["jobs"][job]["steps"]
     steps[_gate_indices(steps)[0]]["if"] = "always()"
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_job_local_gate_order(workflow)
 
 
@@ -609,7 +649,7 @@ def test_the_proof_fails_when_a_gate_swallows_the_exit_code() -> None:
     steps = workflow["jobs"][job]["steps"]
     index = _gate_indices(steps)[0]
     steps[index]["run"] = str(steps[index]["run"]).rstrip() + " || true\n"
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_job_local_gate_order(workflow)
 
 
@@ -623,7 +663,7 @@ def test_the_proof_fails_when_the_pr5f_etc_attestation_moves_after_its_preparati
     assert covering
     moved = steps.pop(covering[-1])
     steps.insert(prep, moved)  # now at/after the preparation step
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_job_local_gate_order(workflow)
 
 
@@ -1042,7 +1082,7 @@ def test_no_root_fence_repairs_a_fixed_system_parent() -> None:
 def test_the_controlled_proof_fails_when_a_fence_loses_its_environment() -> None:
     workflow = _mutated()
     del workflow["jobs"]["backend-deployment-root"]["container"]
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1051,7 +1091,7 @@ def test_the_controlled_proof_fails_when_a_pin_drifts_from_the_manifest() -> Non
     workflow["jobs"]["backend-management-root"]["container"]["image"] = (
         "ubuntu:24.04@sha256:" + "0" * 64
     )
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1059,7 +1099,7 @@ def test_the_controlled_proof_fails_when_an_environment_is_only_tag_pinned() -> 
     """A tag reintroduces exactly the silent-rollover variable this work removes."""
     workflow = _mutated()
     workflow["jobs"]["backend-realfs-root"]["container"]["image"] = "ubuntu:24.04"
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1070,7 +1110,7 @@ def test_the_controlled_proof_fails_when_the_gate_is_redirected_out_of_the_envir
     steps = workflow["jobs"]["backend-management-root"]["steps"]
     index = _gate_indices(steps)[0]
     steps[index]["run"] = "sudo docker exec other-host " + str(steps[index]["run"]).lstrip()
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1081,7 +1121,7 @@ def test_the_controlled_proof_fails_when_the_canary_moves_after_a_third_party_ac
     moved = steps.pop(canary)
     first_action = next(i for i, step in enumerate(steps) if "uses" in step)
     steps.insert(first_action + 1, moved)
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1096,7 +1136,7 @@ def test_the_controlled_proof_fails_when_the_product_tests_are_redirected_out() 
     steps = workflow["jobs"][job]["steps"]
     index = _index_of_step(steps, REQUIRED_GATED_JOBS[job])
     steps[index]["run"] = "sudo docker exec other-host " + str(steps[index]["run"]).lstrip()
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1105,7 +1145,7 @@ def test_the_controlled_proof_fails_when_a_fence_is_made_non_blocking_at_job_lev
     and the fence still stops nothing."""
     workflow = _mutated()
     workflow["jobs"]["backend-deployment-root"]["continue-on-error"] = True
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1113,7 +1153,7 @@ def test_the_controlled_proof_fails_when_a_fence_is_switched_off_at_job_level() 
     """A job-level `if` can disable the whole fence without touching a single step."""
     workflow = _mutated()
     workflow["jobs"]["backend-deployment-root"]["if"] = "false"
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1126,7 +1166,7 @@ def test_the_controlled_proof_fails_when_the_host_etc_is_mounted_over_the_pinned
     for this mutation before the volumes check existed."""
     workflow = _mutated()
     workflow["jobs"]["backend-management-root"]["container"]["volumes"] = ["/etc:/etc"]
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1151,7 +1191,7 @@ def test_the_controlled_proof_fails_when_a_fence_option_drifts_from_the_manifest
     manifest exists to prevent -- the image alone is not the whole environment."""
     workflow = _mutated()
     workflow["jobs"]["backend-realfs-root"]["container"]["options"] = "--init --cpus 2"
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1176,7 +1216,7 @@ def test_the_controlled_proof_fails_when_a_step_is_inserted_above_the_canary() -
     workflow = _mutated()
     steps = workflow["jobs"]["backend-realfs-root"]["steps"]
     steps.insert(0, {"name": "Something that runs first", "run": "echo anything\n"})
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1187,7 +1227,7 @@ def test_the_controlled_proof_fails_when_the_canary_stops_observing_the_ancestry
     steps = workflow["jobs"]["backend-realfs-root"]["steps"]
     index = next(i for i, step in enumerate(steps) if "stat -c" in str(step.get("run", "")))
     steps[index]["run"] = "stat -c '%u %g %n' /tmp\n"
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1196,7 +1236,7 @@ def test_the_controlled_proof_fails_when_the_prelude_drifts_from_the_manifest() 
     steps = workflow["jobs"]["backend-management-root"]["steps"]
     index = next(i for i, step in enumerate(steps) if "apt-get install" in str(step.get("run", "")))
     steps[index]["run"] = str(steps[index]["run"]).replace(" git ", " git openssh-client ")
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1208,7 +1248,7 @@ def test_the_controlled_proof_fails_when_the_prelude_is_removed_entirely() -> No
         for step in workflow["jobs"][job]["steps"]
         if "apt-get install" not in str(step.get("run", ""))
     ]
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1216,7 +1256,7 @@ def test_the_controlled_proof_fails_when_the_manifest_contradicts_itself() -> No
     """`base` + `digest` are what a human reads; `image` is what the workflow is checked against."""
     manifest = dict(_manifest())
     manifest["digest"] = "sha256:" + "b" * 64
-    with pytest.raises(AssertionError):
+    with refuses(manifest, _manifest()):
         assert_controlled_environment(_workflow(), manifest)
 
 
@@ -1229,7 +1269,7 @@ def test_the_redirect_scan_catches_the_spellings_that_used_to_evade_it(escape: s
     steps = workflow["jobs"][job]["steps"]
     index = _index_of_step(steps, REQUIRED_GATED_JOBS[job])
     steps[index]["run"] = escape + str(steps[index]["run"]).lstrip()
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_controlled_environment(workflow, _manifest())
 
 
@@ -1242,7 +1282,7 @@ def test_the_accounting_proof_fails_when_a_new_root_fence_is_added_to_the_workfl
         "runs-on": "ubuntu-24.04",
         "steps": [{"name": "Run new root tests", "run": "sudo .venv/bin/python -m pytest x\n"}],
     }
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_every_root_fence_is_accounted_for(workflow)
 
 
@@ -1254,7 +1294,7 @@ def test_the_accounting_proof_fails_for_a_root_fence_that_avoids_the_naming_conv
         "runs-on": "ubuntu-24.04",
         "steps": [{"name": "Elevate", "run": "sudo install -d -m 0755 /var/lib/secp\n"}],
     }
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_every_root_fence_is_accounted_for(workflow)
 
 
@@ -1268,12 +1308,15 @@ def test_the_accounting_proof_fails_when_a_fence_is_parked_in_the_held_set(
     in: the manifest cross-check in `assert_controlled_environment` compares the held set against
     `infra/ci/controlled-root-env.json`, so parking a fence there cannot be done without editing
     the reviewed manifest too. Driven for real by patching the module constant."""
+    original = NOT_YET_CONTROLLED
     monkeypatch.setattr(
         sys.modules[__name__],
         "NOT_YET_CONTROLLED",
-        NOT_YET_CONTROLLED | {"backend-newfence-root"},
+        original | {"backend-newfence-root"},
     )
-    with pytest.raises(AssertionError):
+    # the same guard `refuses` applies: prove the patch LANDED before trusting the refusal, or a
+    # monkeypatch that silently targeted the wrong module would read as the property being defended
+    with refuses(NOT_YET_CONTROLLED, original):
         assert_controlled_environment(_workflow(), _manifest())
 
 
@@ -1283,7 +1326,7 @@ def test_the_repair_proof_fails_when_a_fence_chowns_a_fixed_system_parent() -> N
     steps = workflow["jobs"]["backend-deployment-root"]["steps"]
     index = next(i for i, step in enumerate(steps) if "apt-get" in str(step.get("run", "")))
     steps[index]["run"] = str(steps[index]["run"]) + "chown root:root /etc\n"
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_no_root_fence_repairs_a_fixed_system_parent(workflow)
 
 
@@ -1299,7 +1342,7 @@ def test_the_repair_proof_reads_only_executed_lines_not_comments() -> None:
     assert_no_root_fence_repairs_a_fixed_system_parent(workflow)  # a comment is not an act
 
     steps[0]["run"] = "chmod 0755 /etc\n" + str(steps[0]["run"])
-    with pytest.raises(AssertionError):
+    with refuses(workflow, _workflow()):
         assert_no_root_fence_repairs_a_fixed_system_parent(workflow)
 
 
