@@ -457,6 +457,33 @@ describe("EnrollmentInventory container - continuing past an unreadable row", ()
     }
   });
 
+  /**
+   * The recovery cursor NECESSARILY encodes the failing row's enrollment id — there is no way to
+   * step past a row in a keyset order without naming its position. That is ratified and fine for
+   * this caller, who is organization-scoped with `enrollment:read` and receives every id on a
+   * successful page anyway.
+   *
+   * It still must not be RENDERED. An opaque token is opaque to the operator too: printing it puts
+   * an identifier on screen in a form nobody can act on, in a context that invites copying it
+   * somewhere it does not belong. It is a value to hand back, not one to show.
+   */
+  it("never renders the recovery cursor, which carries an enrollment id", async () => {
+    const view = render();
+    try {
+      click(view.container, "Load enrollments", view);
+      listQueue[0].reject(pageIntegrity("cursor-encoding-" + id("f")));
+      await settle(view);
+
+      // the control is offered...
+      expect(view.container.textContent).toContain("Continue past the unreadable row");
+      // ...and the token behind it appears nowhere in the document, nor in any attribute
+      expect(view.container.textContent ?? "").not.toContain("cursor-encoding-");
+      expect(view.container.innerHTML).not.toContain("cursor-encoding-");
+    } finally {
+      view.unmount();
+    }
+  });
+
   /** Changing the filter must retire it too: the position is bound to the filter it came from. */
   it("withdraws the continue control when the filter changes", async () => {
     const view = render();
