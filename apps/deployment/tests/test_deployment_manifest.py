@@ -183,6 +183,53 @@ def test_a_symlinked_subdirectory_is_refused_not_skipped(tmp_path):
     assert excinfo.value.reason_code == "manifest_symlinked_directory"
 
 
+def test_an_unstatable_directory_entry_refuses_rather_than_reading_as_not_a_symlink(
+    tmp_path, monkeypatch
+):
+    """The source-walk stat is a BEHAVIOUR change, not a refactor, so it is pinned like one.
+
+    Reaching the shared refusal on a mode meant moving from ``os.path.islink`` to ``os.lstat``, and
+    those two disagree on failure: ``islink`` SWALLOWS ``OSError`` and returns False, so a
+    directory entry that could not be stat'd read as "not a symlink" and the walk carried on past
+    it. That is the not-readable-looks-like-clean failure ``_walk_error`` exists to prevent,
+    reappearing one level in — the entry contributes nothing to the aggregate and nothing says so.
+    ``os.lstat`` raises, and the refusal is bounded and catalogued.
+
+    The syscall is SUBSTITUTED, not simulated, and the distinction is the reason this test looks
+    the way it does. The real occurrence is an entry present at enumeration and gone by the stat,
+    which cannot be scheduled; the permission-based variant does not reproduce as root, which is
+    where the trusted walk runs. Replacing the one call under test is the only form of this that
+    fails for the reason it names rather than for a staged approximation of it.
+    """
+    import pytest
+    from secp_operator_deployment import manifest
+    from secp_operator_deployment.manifest import ManifestError, RealManifestReader
+
+    pkg = tmp_path / "secp_operator_deployment"
+    (pkg / "adapters").mkdir(parents=True)
+    (pkg / "verify.py").write_text("", encoding="utf-8")
+
+    real_lstat = manifest.os.lstat
+    target = str(pkg / "adapters")
+
+    def _unstatable(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if str(path) == target:
+            raise OSError(2, "vanished between enumeration and stat")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(manifest.os, "lstat", _unstatable)
+
+    with pytest.raises(ManifestError) as excinfo:
+        RealManifestReader(str(pkg)).list_modules()
+    assert excinfo.value.reason_code == "manifest_dir_unreadable"
+
+    # And the refusal is SPECIFIC to the failed stat, not to the tree: restored, the same directory
+    # enumerates. Without this the test would also pass against a walk that refused everything —
+    # the same control the empty-subdirectory case provides for the trusted descent.
+    monkeypatch.setattr(manifest.os, "lstat", real_lstat)
+    assert set(RealManifestReader(str(pkg)).list_modules()) == {"verify.py"}
+
+
 def test_the_symlinked_directory_refusal_is_expressed_once_and_reused_at_every_site():
     """One rule, one expression — the property, not "site 3 now also refuses".
 
