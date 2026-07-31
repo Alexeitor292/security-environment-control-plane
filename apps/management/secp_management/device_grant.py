@@ -69,6 +69,18 @@ _DEVICE_CODE_GRAMMAR = re.compile(r"[\x21-\x7e]{8,2048}")
 # grammar stays permissive-but-safe rather than guessing the provider's alphabet.
 _USER_CODE_GRAMMAR = re.compile(r"[\x20-\x7e]{4,64}")
 
+# --- scope policy (RFC 6749 §3.3 / §5.1) ----------------------------------------------------------
+
+#: Scopes the grant MUST carry for the issued token to be usable as an operator credential.
+REQUIRED_SCOPES: frozenset[str] = frozenset({"openid"})
+
+#: Scopes secpctl must NEVER hold, even if the provider grants them without being asked.
+#: ``offline_access`` is the one that matters: it is what mints a long-lived refresh credential, and
+#: the CLI's whole posture (ADR-018, mirrored by ``routers/auth_config.py``) is that no such
+#: credential ever exists on an operator workstation. A provider that upgrades the grant to include
+#: it is refused rather than quietly obeyed.
+REFUSED_SCOPES: frozenset[str] = frozenset({"offline_access"})
+
 # --- poll decisions -------------------------------------------------------------------------------
 
 ACTION_POLL = "poll"
@@ -100,7 +112,10 @@ class DeviceCode(_NonSerializable):
 
     __slots__ = ("_value",)
 
-    def __init__(self, value: str) -> None:
+    def __init__(self, value: object) -> None:
+        """``value`` is typed ``object`` because this constructor is handed RAW provider JSON: it
+        validates rather than trusts, so declaring ``str`` would push the untrusted-input check out
+        to callers that have nothing to check with. The same posture as :func:`_bounded_int`."""
         if not isinstance(value, str) or not _DEVICE_CODE_GRAMMAR.fullmatch(value):
             _reject("secpctl_device_authorization_invalid")
         self._value = value
@@ -213,6 +228,44 @@ def parse_device_authorization(payload: object, *, require_https: bool) -> Devic
         interval=interval,
         verification_uri_complete=verification_uri_complete,
     )
+
+
+def parse_scope(value: object) -> frozenset[str]:
+    """Parse an OAuth scope string into its set of values.
+
+    RFC 6749 §3.3 defines ``scope`` as a space-delimited list of case-sensitive strings. Splitting
+    on arbitrary whitespace (rather than a single space) is deliberate: a provider that separates
+    with a tab must not read as one long scope value that then fails a membership check silently.
+    """
+    if not isinstance(value, str) or len(value) > 4096:
+        _reject("secpctl_device_scope_invalid")
+    return frozenset(part for part in value.split() if part)
+
+
+def validate_granted_scope(value: object) -> frozenset[str]:
+    """Validate the scope actually GRANTED, from a token response or a token's ``scope`` claim.
+
+    RFC 6749 §5.1 makes ``scope`` OPTIONAL in the token response when it is identical to what was
+    requested and REQUIRED when it differs, so ``None`` means "exactly what we asked for" and is
+    accepted as such. A present value must carry every :data:`REQUIRED_SCOPES` entry and none of
+    :data:`REFUSED_SCOPES`.
+
+    A granted scope NARROWER than requested (beyond the required floor) is accepted — RFC 6749 §3.3
+    explicitly permits the server to issue a narrower scope, and secpctl needs only ``openid`` to
+    identify the operator. A granted scope WIDER than requested is likewise not refused on width
+    alone: identity providers routinely attach their own default client scopes (Keycloak's ``roles``
+    and ``basic`` among them), so refusing on width would break real logins for a reason that is not
+    a security property. The security property is the REFUSED set, and that is enforced absolutely,
+    whether the extra scope was requested or volunteered.
+    """
+    if value is None:
+        return REQUIRED_SCOPES
+    granted = parse_scope(value)
+    if not REQUIRED_SCOPES.issubset(granted):
+        _reject("secpctl_device_scope_insufficient")
+    if granted & REFUSED_SCOPES:
+        _reject("secpctl_device_scope_refused")
+    return granted
 
 
 @dataclass(frozen=True)
@@ -328,6 +381,8 @@ __all__ = [
     "ERROR_AUTHORIZATION_PENDING",
     "ERROR_EXPIRED_TOKEN",
     "ERROR_SLOW_DOWN",
+    "REFUSED_SCOPES",
+    "REQUIRED_SCOPES",
     "SLOW_DOWN_INCREMENT_SECONDS",
     "DeviceAuthorization",
     "DeviceCode",
@@ -335,4 +390,6 @@ __all__ = [
     "DevicePollScheduler",
     "PollDecision",
     "parse_device_authorization",
+    "parse_scope",
+    "validate_granted_scope",
 ]

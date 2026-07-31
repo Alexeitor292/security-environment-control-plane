@@ -370,10 +370,12 @@ def _production_auth_deps() -> AuthCliDeps:
     """Compose the operator-auth deps: the real bootstrap-recorded controller locator plus the
     credential store from :func:`build_operator_credential_store`.
 
-    That builder resolves NO backend in this slice, so the store is the SEALED default and
-    ``auth login`` completes the grant but refuses to persist. Any construction failure falls back
-    to the fully sealed defaults, so an unconfigured or non-POSIX host fails closed with a code
-    rather than crashing. No identity, endpoint or trust input is read from a flag or an env var."""
+    That builder resolves the platform's OS keystore (Windows Credential Manager, macOS Keychain, or
+    the freedesktop Secret Service) or, when none is reachable, the SEALED store — in which case
+    ``auth login`` completes the grant and then refuses to persist, with no plaintext fallback. Any
+    construction failure falls back to the fully sealed defaults, so an unconfigured or non-POSIX
+    host fails closed with a code rather than crashing. No identity, endpoint or trust input is read
+    from a flag or an env var."""
     try:
         from secp_commissioning.runtime import RealFilesystem
 

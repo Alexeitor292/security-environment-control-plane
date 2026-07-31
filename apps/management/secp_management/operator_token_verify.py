@@ -22,6 +22,21 @@ Trust rules mirrored from ADR-017 (``secp_api/oidc.py``):
 * an ``iat`` beyond now + the permitted skew is refused explicitly, including a ``bool``/non-numeric
   ``iat`` that an int coercion elsewhere could otherwise mask.
 
+Two further checks close the CLIENT and SCOPE halves of the brief, which signature/issuer/audience
+verification alone does not cover:
+
+* **client** — when the token carries ``azp`` (authorized party), it MUST equal the client id
+  secpctl presented. OpenID Connect Core §3.1.3.7 step 5 states that a client SHOULD verify its own
+  client id is the ``azp`` value when the claim is present, and Keycloak sets ``azp`` on every
+  access token to the client that obtained it. This is what stops a token minted for a DIFFERENT
+  client — but the same issuer and audience — from being accepted and stored as secpctl's operator
+  credential. The claim is optional in the spec, so an absent ``azp`` is not a refusal; a present,
+  mismatched one is.
+* **scope** — the granted scope must carry the required floor and none of the refused set, so a
+  provider that silently upgraded the grant to ``offline_access`` is refused rather than obeyed. The
+  policy is stated once, in :mod:`secp_management.device_grant`, and applied both to the token
+  response and to this claim.
+
 Every failure is one bounded reason code. The token, its claims, the JWK material and any upstream
 exception never enter a refusal, repr, log or report.
 """
@@ -34,6 +49,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from secp_management import ManagementError
+from secp_management.device_grant import validate_granted_scope
 
 #: The ONLY accepted signing algorithm (ADR-017). A fixed allowlist, never derived from input.
 ALLOWED_ALGORITHMS: tuple[str, ...] = ("RS256",)
@@ -57,14 +73,16 @@ class VerifiedOperatorToken:
     """The bounded, non-secret facts a verified operator token yields.
 
     It deliberately carries NO raw claims mapping and NOT the token itself — only the exact subject
-    (needed to detect an unprovisioned operator) and the expiry (needed for credential-store
-    lifecycle). ``auth status`` still resolves the authoritative principal from ``/api/v1/me``;
-    a token claim never determines organization, role or permission.
+    (needed to detect an unprovisioned operator), the expiry (needed for credential-store
+    lifecycle), and the granted scope (a non-secret, already-validated set kept so a report can say
+    what was actually granted). ``auth status`` still resolves the authoritative principal from
+    ``/api/v1/me``; a token claim never determines organization, role or permission.
     """
 
     subject: str
     expires_at_epoch: int
     issued_at_epoch: int
+    granted_scope: frozenset[str] = frozenset()
 
 
 def _signing_key(jwks: Mapping[str, Any], kid: str) -> Any:
@@ -95,13 +113,15 @@ def verify_operator_token(
     issuer: str,
     audience: str,
     now_epoch: float,
+    client_id: str = "",
     clock_skew_seconds: int = _DEFAULT_CLOCK_SKEW_SECONDS,
 ) -> VerifiedOperatorToken:
     """Verify a device-grant access token against the reviewed issuer's JWKS.
 
-    ``jwks`` maps ``kid`` -> JWK dict (already retrieved and bounded by the caller). Returns the
-    bounded :class:`VerifiedOperatorToken`, or raises :class:`OperatorTokenVerificationError` with a
-    single bounded reason code.
+    ``jwks`` maps ``kid`` -> JWK dict (already retrieved and bounded by the caller). ``client_id``,
+    when supplied, is the client secpctl presented, and a present ``azp`` claim must equal it.
+    Returns the bounded :class:`VerifiedOperatorToken`, or raises
+    :class:`OperatorTokenVerificationError` with a single bounded reason code.
     """
     import jwt
 
@@ -176,10 +196,24 @@ def verify_operator_token(
     if not isinstance(expires_at, (int, float)) or isinstance(expires_at, bool):
         _reject("secpctl_operator_token_claims_invalid")
 
+    # CLIENT: a present `azp` must name the client secpctl actually presented (OIDC Core §3.1.3.7).
+    # The claim is optional, so its ABSENCE is not a refusal — but a token minted for a different
+    # client at the same issuer and audience is, which is the substitution this check exists for.
+    authorized_party = claims.get("azp")
+    if client_id and authorized_party is not None:
+        if not isinstance(authorized_party, str) or authorized_party != client_id:
+            _reject("secpctl_operator_token_client_invalid")
+
+    # SCOPE: the same policy the token response was held to, applied to the claim. `scope` is absent
+    # on providers that do not mirror it into the access token, which `validate_granted_scope`
+    # reads as "exactly what was requested" rather than as a violation.
+    granted_scope = validate_granted_scope(claims.get("scope"))
+
     return VerifiedOperatorToken(
         subject=subject,
         expires_at_epoch=int(expires_at),
         issued_at_epoch=int(issued_at),
+        granted_scope=granted_scope,
     )
 
 

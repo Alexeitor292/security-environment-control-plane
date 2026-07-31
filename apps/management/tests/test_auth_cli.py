@@ -40,6 +40,13 @@ from secp_management.operator_credential_store import (
     subject_fingerprint,
 )
 from secp_management.operator_device_auth import DeviceEndpoints, ReviewedAuthority
+from secp_management.operator_token_revoke import (
+    OUTCOME_NOT_REQUIRED,
+    OUTCOME_REVOKED,
+    OUTCOME_UNAVAILABLE,
+    OUTCOME_UNSUPPORTED,
+    RevocationOutcome,
+)
 from secp_management.transaction import EXIT_OK, EXIT_REFUSED, WriteGate
 
 ISSUER = "https://idp.invalid/realms/secp"
@@ -64,6 +71,7 @@ ENDPOINTS = DeviceEndpoints(
     device_authorization_endpoint=f"{ISSUER}/auth/device",
     token_endpoint=f"{ISSUER}/token",
     jwks_uri=f"{ISSUER}/certs",
+    revocation_endpoint=f"{ISSUER}/revoke",
 )
 AUTHORIZATION = parse_device_authorization(
     {
@@ -105,12 +113,24 @@ class _FakeLocatorProvider:
 class _FakeDeviceClient:
     """Records the grant steps so a test can prove which half of the flow actually ran."""
 
-    def __init__(self, *, token=None, errors=(), authority_error=None, discover_error=None):
+    def __init__(
+        self,
+        *,
+        token=None,
+        errors=(),
+        authority_error=None,
+        discover_error=None,
+        revocation=None,
+    ):
         self.calls: list[str] = []
+        self.revoked: list[str] = []
         self._token = token
         self._errors = list(errors)
         self._authority_error = authority_error
         self._discover_error = discover_error
+        self._revocation = (
+            revocation if revocation is not None else RevocationOutcome(OUTCOME_REVOKED)
+        )
 
     def reviewed_authority(self):
         self.calls.append("authority")
@@ -137,6 +157,13 @@ class _FakeDeviceClient:
     def fetch_jwks(self, _endpoints):
         self.calls.append("jwks")
         return JWKS
+
+    def revoke_token(self, _endpoints, token):
+        self.calls.append("revoke")
+        # Recorded so a test can prove the RAW token — not a header, not a fingerprint — is what
+        # reaches the revocation request, which is what RFC 7009 §2.1 requires.
+        self.revoked.append(token)
+        return self._revocation
 
 
 class _RecordingStore(SealedOperatorCredentialStore):
@@ -547,6 +574,143 @@ def test_a_logged_out_credential_cannot_be_replayed():
         _working_store(keystore).for_account(ORIGIN).access_token()
     assert ei.value.reason_code == "secpctl_credential_absent"
     assert auth_status(deps)[1]["has_credential"] is False
+
+
+# --- logout: RFC 7009 revocation ------------------------------------------------------------------
+
+
+def test_logout_revokes_the_token_at_the_provider_before_deleting_it_locally():
+    """Deleting the local copy is not a logout on its own: the token stays valid at the provider
+    until it expires. RFC 7009 is what actually ends the session, and the ORDER matters — revocation
+    needs the token, so deleting first would throw away the only thing that can end it."""
+    keystore = _FakeKeystore()
+    client = _FakeDeviceClient()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+    stored = json.loads(keystore.entries[("secp-secpctl-operator", ORIGIN)])["t"]
+
+    out, _w2, _p2 = _deps(client=client, store=_working_store(keystore))
+    code, report = auth_logout(out, gate=WRITE)
+
+    assert code == EXIT_OK
+    assert report["revoked"] is True
+    assert report["revocation_outcome"] == OUTCOME_REVOKED
+    assert report["token_still_live"] is False
+    assert report["removed"] is True
+    # The RAW token reached the revocation request — not a header, not a fingerprint.
+    assert client.revoked == [stored]
+    assert not client.revoked[0].startswith("Bearer ")
+    # ORDERING: the revocation carried the stored token, which is only readable while the credential
+    # still exists. Had the delete run first, `access_token()` would have refused and the outcome
+    # would have been `not_required` with no request made at all.
+    assert "revoke" in client.calls
+    assert report["revocation_outcome"] != OUTCOME_NOT_REQUIRED
+    # ...and the credential is gone once the command returns.
+    assert keystore.entries == {}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "still_live"),
+    [
+        (RevocationOutcome(OUTCOME_UNAVAILABLE, reason_code="x"), True),
+        (RevocationOutcome(OUTCOME_UNSUPPORTED, reason_code="x"), True),
+        (RevocationOutcome("refused", reason_code="x"), True),
+        (RevocationOutcome(OUTCOME_REVOKED), False),
+    ],
+)
+def test_the_local_credential_is_deleted_whatever_the_provider_answers(outcome, still_live):
+    """A revocation failure must never strand the credential in the keystore — that would be
+    strictly worse than the state the operator asked for. The report stays honest about whether the
+    token is still usable at the provider."""
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+
+    out, _w2, _p2 = _deps(
+        client=_FakeDeviceClient(revocation=outcome), store=_working_store(keystore)
+    )
+    code, report = auth_logout(out, gate=WRITE)
+
+    assert code == EXIT_OK
+    assert report["removed"] is True
+    assert keystore.entries == {}
+    assert report["token_still_live"] is still_live
+    assert report["revoked"] is (not still_live)
+
+
+def test_logout_deletes_locally_even_when_the_provider_cannot_be_discovered():
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+
+    broken = _FakeDeviceClient(discover_error="secpctl_device_discovery_invalid")
+    out, _w2, _p2 = _deps(client=broken, store=_working_store(keystore))
+    code, report = auth_logout(out, gate=WRITE)
+
+    assert code == EXIT_OK
+    assert keystore.entries == {}
+    assert report["revoked"] is False
+    assert report["token_still_live"] is True
+    assert broken.revoked == []
+
+
+def test_logout_with_nothing_stored_makes_no_revocation_request():
+    client = _FakeDeviceClient()
+    deps, _w, _p = _deps(client=client, store=_working_store())
+    code, report = auth_logout(deps, gate=WRITE)
+    assert code == EXIT_OK
+    assert report["revocation_outcome"] == OUTCOME_NOT_REQUIRED
+    assert report["revoked"] is False
+    assert report["token_still_live"] is False
+    assert report["removed"] is False
+    assert client.calls == []
+
+
+def test_logout_of_an_expired_credential_needs_no_revocation_request():
+    """An expired token is already unusable; RFC 7009 §2.2 would have the provider answer 200 for it
+    anyway. Skipping the round trip is not a shortfall, so `token_still_live` stays false."""
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+
+    later = time.time() + 10_000
+    client = _FakeDeviceClient()
+    aged, _w2, _p2 = _deps(client=client, store=_working_store(keystore, now=lambda: later))
+    code, report = auth_logout(aged, gate=WRITE)
+
+    assert code == EXIT_OK
+    assert report["revocation_outcome"] == OUTCOME_NOT_REQUIRED
+    assert report["token_still_live"] is False
+    assert report["removed"] is True and keystore.entries == {}
+    assert client.calls == []
+
+
+def test_logout_dry_run_opens_no_socket_and_revokes_nothing():
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+    before = dict(keystore.entries)
+
+    client = _FakeDeviceClient()
+    out, waits, prompts = _deps(client=client, store=_working_store(keystore))
+    code, report = auth_logout(out, gate=DRY)
+
+    assert code == EXIT_OK
+    assert report["mode"] == "dry_run"
+    assert report["revocation_planned"] is True
+    assert client.calls == [] and waits == [] and prompts == []
+    assert keystore.entries == before
+
+
+def test_a_logout_report_never_carries_the_token_or_the_origin():
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+    out, _w2, _p2 = _deps(store=_working_store(keystore))
+    rendered = json.dumps(auth_logout(out, gate=WRITE)[1])
+    assert "eyJ" not in rendered
+    assert ORIGIN not in rendered and "controller.invalid" not in rendered
+    assert ISSUER not in rendered
 
 
 def test_an_expired_stored_credential_is_reported_expired_and_never_replayed():

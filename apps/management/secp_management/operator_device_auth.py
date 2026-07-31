@@ -1,8 +1,9 @@
 """Hardened OAuth 2.0 Device Authorization Grant client — SECP-PR5H-B2, Workstream C.
 
 The ONLY module in the ``secpctl auth`` surface that performs network I/O. The protocol decisions
-live in :mod:`secp_management.device_grant` (pure) and token verification in
-:mod:`secp_management.operator_token_verify` (pure); this module only retrieves bytes and hands them
+live in :mod:`secp_management.device_grant` (pure), token verification in
+:mod:`secp_management.operator_token_verify` (pure), and RFC 7009 revocation semantics in
+:mod:`secp_management.operator_token_revoke` (pure); this module only retrieves bytes and hands them
 over, so the security-relevant logic stays testable without a socket.
 
 Two DIFFERENT transport postures, each matching its counterpart — the distinction is deliberate:
@@ -44,6 +45,15 @@ from secp_management.device_grant import (
     DeviceAuthorization,
     DeviceCode,
     parse_device_authorization,
+    validate_granted_scope,
+)
+from secp_management.operator_token_revoke import (
+    OUTCOME_REFUSED,
+    OUTCOME_UNAVAILABLE,
+    RevocationOutcome,
+    interpret_revocation_response,
+    revocation_form,
+    revocation_unsupported,
 )
 
 #: The code-owned PUBLIC client id secpctl presents to the reviewed issuer. It is not a secret (a
@@ -134,11 +144,18 @@ class ReviewedAuthority:
 
 @dataclass(frozen=True)
 class DeviceEndpoints:
-    """The discovered, safety-checked issuer endpoints. Redacted repr."""
+    """The discovered, safety-checked issuer endpoints. Redacted repr.
+
+    ``revocation_endpoint`` is ``None`` when the issuer does not advertise one: RFC 8414 §2 makes it
+    OPTIONAL, so a conforming provider may simply not offer revocation. It is the only endpoint here
+    that is allowed to be absent, and ``auth logout`` reports that absence rather than treating it
+    as a successful revocation.
+    """
 
     device_authorization_endpoint: str
     token_endpoint: str
     jwks_uri: str
+    revocation_endpoint: str | None = None
 
     def __repr__(self) -> str:
         return "DeviceEndpoints(<redacted>)"
@@ -281,6 +298,22 @@ class DeviceAuthorizationClient:
         if isinstance(grant_types, list) and DEVICE_CODE_GRANT_TYPE not in grant_types:
             _reject("secpctl_device_grant_unsupported")
 
+        # RFC 8414 §2 — `revocation_endpoint` is OPTIONAL. An ABSENT member is a provider that does
+        # not offer revocation and is reported as such; a PRESENT but malformed one is a refusal,
+        # never a silent downgrade to "no revocation", because that would turn a broken discovery
+        # document into a logout that quietly leaves the token live.
+        revocation_raw = document.get("revocation_endpoint")
+        revocation_endpoint: str | None = None
+        if revocation_raw is not None:
+            revocation_endpoint = _require_safe_url(
+                revocation_raw,
+                # RFC 7009 §2: "URLs for token revocation endpoints MUST be HTTPS URLs." The
+                # `require_https` seam still applies so the test transport can drive plain HTTP,
+                # exactly as it does for every other endpoint here.
+                require_https=self._require_https,
+                reason="secpctl_device_discovery_invalid",
+            )
+
         return DeviceEndpoints(
             device_authorization_endpoint=_require_safe_url(
                 endpoint,
@@ -297,6 +330,7 @@ class DeviceAuthorizationClient:
                 require_https=self._require_https,
                 reason="secpctl_device_discovery_invalid",
             ),
+            revocation_endpoint=revocation_endpoint,
         )
 
     def fetch_jwks(self, endpoints: DeviceEndpoints) -> dict[str, Any]:
@@ -368,11 +402,73 @@ class DeviceAuthorizationClient:
             token_type = body.get("token_type")
             if not isinstance(token_type, str) or token_type.lower() != "bearer":
                 _reject("secpctl_device_token_refused")
+            # RFC 6749 §5.1 — `scope` is OPTIONAL when identical to the request and REQUIRED when it
+            # differs, so an absent member means "what we asked for". A present one is checked
+            # against the scope policy BEFORE the token is handed back, so a grant the provider
+            # widened to `offline_access` is refused at the point of issue rather than discovered
+            # later in a claim.
+            validate_granted_scope(body.get("scope"))
+            # A public client is issued no refresh token, and one arriving unasked means the grant
+            # is not the posture this CLI is built on. Refuse rather than hold a credential whose
+            # lifetime nothing here manages.
+            if body.get("refresh_token") is not None:
+                _reject("secpctl_device_refresh_token_unexpected")
             return access_token, ""
         error = body.get("error")
         if not isinstance(error, str) or not error or len(error) > 64:
             _reject("secpctl_device_token_refused")
         return "", error
+
+    def revoke_token(self, endpoints: DeviceEndpoints, token: str) -> RevocationOutcome:
+        """RFC 7009 §2.1 — ask the issuer to revoke this access token.
+
+        Returns a bounded :class:`~secp_management.operator_token_revoke.RevocationOutcome` and
+        NEVER raises on a provider answer or a transport failure. That is deliberate and is the
+        whole contract of this method: ``auth logout`` must reach its LOCAL deletion whatever the
+        provider does, so an unreachable issuer can never strand a credential on the workstation.
+        The outcome still records that the token must be assumed live, so nothing is hidden.
+
+        The token travels in the request BODY, never in a query string or a header — a revocation
+        endpoint's access log is exactly where a bearer credential must not land.
+        """
+        if not endpoints.revocation_endpoint:
+            return revocation_unsupported()
+
+        form = revocation_form(token=token, client_id=OPERATOR_CLI_CLIENT_ID)
+        try:
+            with self._issuer_client() as client:
+                response = client.post(
+                    endpoints.revocation_endpoint,
+                    data=form,
+                    headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+                )
+                if response.is_redirect:
+                    # A redirect would forward the token to an unreviewed host. Never follow it, and
+                    # never treat it as a revocation.
+                    return RevocationOutcome(
+                        OUTCOME_REFUSED, reason_code="secpctl_revocation_refused"
+                    )
+                raw = response.content
+                status = response.status_code
+        except ManagementError:
+            raise
+        except Exception:  # noqa: BLE001 - transport failure never leaks endpoint / token / chain
+            return RevocationOutcome(
+                OUTCOME_UNAVAILABLE, reason_code="secpctl_revocation_provider_unavailable"
+            )
+
+        # A 200 is authoritative on its own (RFC 7009 §2.2 defines no success body), so a provider
+        # that answers 200 with an empty or non-JSON body is still a successful revocation. Only an
+        # ERROR body needs parsing, and a body that will not parse simply yields no error code.
+        error: object = None
+        if raw and status // 100 != 2 and len(raw) <= _MAX_TOKEN_RESPONSE_BYTES:
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+            except Exception:  # noqa: BLE001 - an unparseable error body is simply no error code
+                parsed = None
+            if isinstance(parsed, dict):
+                error = parsed.get("error")
+        return interpret_revocation_response(status, error=error)
 
 
 __all__ = [

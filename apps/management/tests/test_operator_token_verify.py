@@ -260,3 +260,84 @@ def test_verification_performs_no_network_or_filesystem_access():
             )
             for name in names:
                 assert name.split(".")[0] not in {"httpx", "socket", "os", "pathlib", "requests"}
+
+
+# --- CLIENT: the `azp` (authorized party) claim ---------------------------------------------------
+#
+# Signature, issuer and audience verification alone does not establish WHICH CLIENT the token was
+# minted for. At an issuer where several clients share one audience, a token obtained by any of them
+# would otherwise verify and be stored as secpctl's operator credential. OpenID Connect Core
+# §3.1.3.7 step 5 has the client verify its own client id is the `azp` value when the claim is
+# present, and Keycloak sets `azp` on every access token to the client that obtained it.
+
+CLIENT_ID = "secp-cli"
+
+
+def test_a_token_minted_for_a_different_client_is_refused(keypair, jwks):
+    token = _token(keypair, azp="some-other-client")
+    with pytest.raises(ManagementError) as ei:
+        _verify(token, jwks, client_id=CLIENT_ID)
+    assert _reason(ei) == "secpctl_operator_token_client_invalid"
+
+
+def test_a_matching_azp_is_accepted(keypair, jwks):
+    verified = _verify(_token(keypair, azp=CLIENT_ID), jwks, client_id=CLIENT_ID)
+    assert verified.subject == SUBJECT
+
+
+def test_an_absent_azp_is_not_a_refusal(keypair, jwks):
+    """OIDC Core §2 states azp 'only occurs when extensions ... are used' and encourages ignoring it
+    when absent, so requiring it would refuse conforming providers that simply do not emit it."""
+    assert _verify(_token(keypair), jwks, client_id=CLIENT_ID).subject == SUBJECT
+
+
+@pytest.mark.parametrize("azp", [123, ["secp-cli"], {"azp": "secp-cli"}, ""])
+def test_a_non_string_or_empty_azp_is_refused_rather_than_coerced(keypair, jwks, azp):
+    with pytest.raises(ManagementError) as ei:
+        _verify(_token(keypair, azp=azp), jwks, client_id=CLIENT_ID)
+    assert _reason(ei) == "secpctl_operator_token_client_invalid"
+
+
+def test_azp_is_only_checked_when_a_client_id_is_supplied(keypair, jwks):
+    """The parameter defaults to empty so the verifier stays usable without one; the shipped
+    composition in `auth_cli` always supplies it, which `test_auth_cli` covers."""
+    assert _verify(_token(keypair, azp="anyone"), jwks).subject == SUBJECT
+
+
+# --- SCOPE ----------------------------------------------------------------------------------------
+
+
+def test_a_token_carrying_offline_access_is_refused(keypair, jwks):
+    """`offline_access` is what mints a long-lived refresh credential. The CLI never requests it,
+    and a token that carries it anyway is refused rather than stored."""
+    with pytest.raises(ManagementError) as ei:
+        _verify(_token(keypair, scope="openid profile offline_access"), jwks)
+    assert _reason(ei) == "secpctl_device_scope_refused"
+
+
+def test_a_token_without_the_required_scope_is_refused(keypair, jwks):
+    with pytest.raises(ManagementError) as ei:
+        _verify(_token(keypair, scope="profile email"), jwks)
+    assert _reason(ei) == "secpctl_device_scope_insufficient"
+
+
+def test_an_absent_scope_claim_is_accepted(keypair, jwks):
+    """Not every provider mirrors `scope` into the access token; its absence is not a violation."""
+    assert _verify(_token(keypair), jwks).granted_scope == frozenset({"openid"})
+
+
+def test_the_granted_scope_is_reported_on_the_verified_token(keypair, jwks):
+    verified = _verify(_token(keypair, scope="openid profile email"), jwks)
+    assert verified.granted_scope == frozenset({"openid", "profile", "email"})
+
+
+def test_a_verified_token_still_carries_no_raw_claims_or_token(keypair, jwks):
+    """The granted scope is a non-secret, already-validated set; adding it must not have widened
+    the projection into a general claims bag."""
+    verified = _verify(_token(keypair, scope="openid"), jwks)
+    assert set(vars(verified)) == {
+        "subject",
+        "expires_at_epoch",
+        "issued_at_epoch",
+        "granted_scope",
+    }

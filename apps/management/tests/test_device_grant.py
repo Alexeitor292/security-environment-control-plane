@@ -17,10 +17,14 @@ from secp_management.device_grant import (
     ACTION_STOP,
     DEFAULT_INTERVAL_SECONDS,
     DEVICE_CODE_GRANT_TYPE,
+    REFUSED_SCOPES,
+    REQUIRED_SCOPES,
     SLOW_DOWN_INCREMENT_SECONDS,
     DeviceCode,
     DevicePollScheduler,
     parse_device_authorization,
+    parse_scope,
+    validate_granted_scope,
 )
 
 VALID = {
@@ -319,3 +323,84 @@ def test_scheduler_performs_no_io():
             target = node.func
             called = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
             assert called not in {"sleep", "monotonic", "time", "perf_counter"}
+
+
+# --- scope policy (RFC 6749 §3.3 / §5.1) ----------------------------------------------------------
+#
+# Stated once here and applied BOTH to the token response and to the token's `scope` claim, so the
+# two cannot drift into disagreeing about what secpctl is willing to hold.
+
+
+def test_the_required_and_refused_scope_sets_are_what_the_posture_says():
+    assert REQUIRED_SCOPES == frozenset({"openid"})
+    assert REFUSED_SCOPES == frozenset({"offline_access"})
+    assert not (REQUIRED_SCOPES & REFUSED_SCOPES)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("openid", {"openid"}),
+        ("openid profile email", {"openid", "profile", "email"}),
+        ("  openid   profile  ", {"openid", "profile"}),
+        ("openid\tprofile\nemail", {"openid", "profile", "email"}),
+        ("", set()),
+    ],
+)
+def test_scope_parses_as_a_whitespace_delimited_set(raw, expected):
+    """RFC 6749 §3.3 defines scope as a space-delimited list. Splitting on arbitrary whitespace is
+    deliberate: a provider separating with a tab must not read as one long scope value that then
+    fails a membership check silently."""
+    assert parse_scope(raw) == frozenset(expected)
+
+
+def test_scope_values_are_case_sensitive():
+    """§3.3: 'The value of the scope parameter is expressed as a list of space-delimited,
+    case-sensitive strings.' `OpenID` is not `openid`."""
+    with pytest.raises(ManagementError) as ei:
+        validate_granted_scope("OpenID profile")
+    assert ei.value.reason_code == "secpctl_device_scope_insufficient"
+
+
+@pytest.mark.parametrize("value", [None, 0, [], {"scope": "openid"}, "x" * 4097])
+def test_a_non_string_or_oversized_scope_is_refused(value):
+    with pytest.raises(ManagementError) as ei:
+        parse_scope(value)
+    assert ei.value.reason_code == "secpctl_device_scope_invalid"
+
+
+def test_an_absent_granted_scope_means_exactly_what_was_requested():
+    """RFC 6749 §5.1 — `scope` is OPTIONAL in the token response when identical to the request and
+    REQUIRED when it differs, so `None` is 'unchanged', not 'nothing granted'."""
+    assert validate_granted_scope(None) == REQUIRED_SCOPES
+
+
+def test_a_grant_widened_to_offline_access_is_refused():
+    """The one check that matters: `offline_access` mints a long-lived refresh credential, and no
+    such credential may exist on an operator workstation (ADR-018)."""
+    with pytest.raises(ManagementError) as ei:
+        validate_granted_scope("openid profile offline_access")
+    assert ei.value.reason_code == "secpctl_device_scope_refused"
+
+
+def test_a_grant_missing_the_required_floor_is_refused():
+    with pytest.raises(ManagementError) as ei:
+        validate_granted_scope("profile email")
+    assert ei.value.reason_code == "secpctl_device_scope_insufficient"
+
+
+def test_a_narrower_grant_above_the_floor_is_accepted():
+    """§3.3 explicitly permits the server to issue a narrower scope than requested, and secpctl
+    needs only `openid` to identify the operator."""
+    assert validate_granted_scope("openid") == frozenset({"openid"})
+
+
+def test_a_wider_grant_is_accepted_on_width_alone_but_never_past_the_refused_set():
+    """Identity providers routinely attach their own default client scopes (Keycloak's `roles` and
+    `basic` among them), so refusing on width would break real logins for a reason that is not a
+    security property. The REFUSED set is the security property and is absolute."""
+    assert validate_granted_scope("openid profile email roles basic") == frozenset(
+        {"openid", "profile", "email", "roles", "basic"}
+    )
+    with pytest.raises(ManagementError):
+        validate_granted_scope("openid roles offline_access")

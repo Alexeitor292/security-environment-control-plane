@@ -31,6 +31,7 @@ SECPCTL_ENROLLMENT_MODULES = (
     MGMT_PKG / "device_grant.py",
     MGMT_PKG / "operator_device_auth.py",
     MGMT_PKG / "operator_token_verify.py",
+    MGMT_PKG / "operator_token_revoke.py",
     MGMT_PKG / "operator_credential_store.py",
     MGMT_PKG / "operator_credential_backends.py",
 )

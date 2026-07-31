@@ -20,6 +20,7 @@ import pytest
 import secp_management.auth_cli as auth_cli_module
 import secp_management.operator_credential_backends as backends_module
 import secp_management.operator_credential_store as store_module
+import secp_management.operator_token_revoke as revoke_module
 from secp_management import ManagementError
 from secp_management.controller_api_locator import ControllerApiLocator
 from secp_management.operator_auth import OperatorAccessToken, OperatorAccessTokenProvider
@@ -66,6 +67,9 @@ def _code(module) -> str:
 STORE_CODE = _code(store_module)
 AUTH_CLI_CODE = _code(auth_cli_module)
 BACKENDS_CODE = _code(backends_module)
+#: The RFC 7009 revocation core also holds the token in memory (as a request form value), so it is
+#: held to the same no-plaintext-fallback floor as the three modules above.
+REVOKE_CODE = _code(revoke_module)
 
 
 class FakeBinding:
@@ -489,6 +493,7 @@ SCANNED_MODULES = (
     (lambda: STORE_CODE, "SealedOperatorCredentialStore"),
     (lambda: BACKENDS_CODE, "resolve_secret_store_binding"),
     (lambda: AUTH_CLI_CODE, "auth_login"),
+    (lambda: REVOKE_CODE, "interpret_revocation_response"),
 )
 
 
@@ -503,16 +508,17 @@ def test_each_scanned_blob_is_really_the_module_it_claims_to_be(blob, sentinel):
 
 @pytest.mark.parametrize("forbidden", PLAINTEXT_CAPABLE_BACKENDS)
 def test_no_module_in_the_credential_surface_references_a_plaintext_capable_backend(forbidden):
-    for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE):
+    for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE, REVOKE_CODE):
         assert forbidden not in code
 
 
 @pytest.mark.parametrize("forbidden", FILE_WRITE_SHAPES)
 def test_no_module_in_the_credential_surface_writes_a_file_as_a_fallback(forbidden):
-    """An unavailable backend must be a refusal, not a degradation to disk. All three modules are
-    scanned: the store holds the policy, the backends module holds the only OS calls, and
-    ``auth_cli`` holds the one place a token exists in memory."""
-    for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE):
+    """An unavailable backend must be a refusal, not a degradation to disk. Every module in the
+    credential surface is scanned: the store holds the policy, the backends module holds the only OS
+    calls, ``auth_cli`` holds the place a token exists in memory, and the revocation core is the one
+    other module that takes the raw token as a value."""
+    for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE, REVOKE_CODE):
         assert forbidden not in code
 
 
@@ -537,10 +543,10 @@ def test_no_module_in_the_credential_surface_reads_an_environment_variable():
     ``secretstorage``/jeepney read the session D-Bus address from the environment inside the
     library — that is inherent to reaching the operator's own session bus, and it happens in-process
     with no subprocess anywhere (avoiding one is the whole reason ``secretstorage`` was chosen over
-    ``secret-tool``; the test below pins that). No code in these three modules reads, writes or
+    ``secret-tool``; the test below pins that). No code in these modules reads, writes or
     branches on a variable."""
     for forbidden in ("os.environ", "os.getenv", "getenv", "environb"):
-        for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE):
+        for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE, REVOKE_CODE):
             assert forbidden not in code
 
 
@@ -560,7 +566,7 @@ def test_the_credential_surface_spawns_no_process_and_resolves_no_executable():
         "find_library",
         "shutil",
     ):
-        for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE):
+        for code in (STORE_CODE, BACKENDS_CODE, AUTH_CLI_CODE, REVOKE_CODE):
             assert forbidden not in code
 
 
@@ -704,9 +710,31 @@ def test_the_only_grant_type_in_the_auth_surface_is_the_device_grant():
 def test_auth_surface_never_requests_or_stores_a_long_lived_renewal_credential():
     """`secpctl auth refresh` re-runs the device grant; it does not redeem an OAuth refresh token.
     The CLI must not ask for `offline_access` and must not store one, mirroring the browser posture
-    ADR-018 established (and the dev client pins `use.refresh.tokens=false`)."""
+    ADR-018 established (and the dev client pins `use.refresh.tokens=false`).
+
+    `offline_access` stays a plain ABSENCE rule: no module in this surface has any business naming
+    it. `refresh_token` cannot be, because the transport now REFUSES an unrequested refresh token
+    and `auth_cli` categorises that refusal's reason code — mentions that ENFORCE the posture rather
+    than break it. A bare substring scan would have to forbid those too, which is precisely the trap
+    `FILE_WRITE_SHAPES` documents above. So the rule is stated exactly instead: the refresh-token
+    grant is never redeemed, no form or record field carries one, and the stored record's shape is
+    pinned structurally so a renewal credential cannot be persisted at all.
+    """
     import secp_management.operator_device_auth as device_auth_module
 
-    for code in (AUTH_CLI_CODE, _code(device_auth_module), STORE_CODE, BACKENDS_CODE):
+    for code in (AUTH_CLI_CODE, _code(device_auth_module), STORE_CODE, BACKENDS_CODE, REVOKE_CODE):
         assert "offline_access" not in code
-        assert "refresh_token" not in code
+        # Redeeming a refresh token looks like exactly one thing (RFC 6749 §6) — this grant type.
+        assert "grant-type:refresh_token" not in code
+        assert "'grant_type': 'refresh_token'" not in code
+        # ...and no module builds a form or record field that CARRIES one.
+        assert "'refresh_token':" not in code and '"refresh_token":' not in code
+
+    # Structural, not textual: the stored record's fields are fixed, so there is nowhere for a
+    # renewal credential to live even if some future caller obtained one.
+    assert set(CredentialRecord.__dataclass_fields__) == {
+        "account",
+        "token",
+        "expires_at_epoch",
+        "subject_fingerprint",
+    }

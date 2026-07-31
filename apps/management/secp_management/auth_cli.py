@@ -26,6 +26,11 @@ Three properties are worth stating because they are easy to lose in a later edit
 * **Persistence is the last step and has no alternative.** The token is verified before it is
   offered to the store, and a store that refuses ends the command. There is deliberately no
   ``except`` around the persist call that writes the token somewhere else instead.
+* **Logout revokes before it deletes.** Deleting the local copy does not end the session — the token
+  stays valid at the provider until it expires — so ``auth logout`` first asks the issuer to revoke
+  it (RFC 7009) and only then removes it from the keystore. Local deletion is unconditional, so a
+  provider outage cannot leave the credential on the workstation, and the report says plainly
+  whether the token must still be assumed live.
 """
 
 from __future__ import annotations
@@ -55,7 +60,15 @@ from secp_management.operator_credential_store import (
     account_for_controller,
     subject_fingerprint,
 )
-from secp_management.operator_device_auth import DeviceAuthorizationClient
+from secp_management.operator_device_auth import (
+    OPERATOR_CLI_CLIENT_ID,
+    DeviceAuthorizationClient,
+)
+from secp_management.operator_token_revoke import (
+    OUTCOME_UNAVAILABLE,
+    RevocationOutcome,
+    revocation_not_required,
+)
 from secp_management.operator_token_verify import jwks_by_kid, verify_operator_token
 from secp_management.transaction import EXIT_OK, EXIT_REFUSED, WriteGate
 
@@ -90,14 +103,29 @@ _EXIT_BY_REASON: dict[str, int] = {
     "secpctl_device_grant_unsupported": EXIT_AUTH_UNAVAILABLE,
     "secpctl_device_authorization_refused": EXIT_AUTH_UNAVAILABLE,
     "secpctl_device_authority_not_oidc": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_device_refresh_token_unexpected": EXIT_REFUSED,
+    # --- granted scope (a provider that widened or narrowed the grant) ---
+    "secpctl_device_scope_refused": EXIT_REFUSED,
+    "secpctl_device_scope_insufficient": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_device_scope_invalid": EXIT_MALFORMED,
     # --- token verification ---
     "secpctl_operator_token_expired": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_invalid": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_signature_invalid": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_algorithm_refused": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_claims_invalid": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_operator_token_client_invalid": EXIT_REFUSED,
     "secpctl_operator_token_key_unknown": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_jwks_invalid": EXIT_MALFORMED,
+    # --- revocation (RFC 7009). These never fail the command — logout deletes locally regardless —
+    # but they are categorised so a reason code that DOES surface has a stable exit.
+    "secpctl_revocation_provider_unavailable": EXIT_CONTROLLER_UNAVAILABLE,
+    "secpctl_revocation_unsupported_token_type": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_revocation_endpoint_absent": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_revocation_refused": EXIT_REFUSED,
+    "secpctl_revocation_token_invalid": EXIT_MALFORMED,
+    "secpctl_revocation_request_invalid": EXIT_MALFORMED,
+    "secpctl_revocation_response_invalid": EXIT_MALFORMED,
     # --- controller / provider reachability ---
     "secpctl_controller_locator_unavailable": EXIT_CONTROLLER_UNAVAILABLE,
     "secpctl_controller_locator_invalid": EXIT_CONTROLLER_UNAVAILABLE,
@@ -401,6 +429,10 @@ def _verify(
         issuer=authority.issuer,
         audience=authority.audience,
         now_epoch=deps.now_epoch(),
+        # CLIENT validation: a present `azp` must name the client secpctl actually presented, so a
+        # token minted for a different client at the same issuer and audience is refused here rather
+        # than stored and rejected later by the controller.
+        client_id=OPERATOR_CLI_CLIENT_ID,
     )
 
 
@@ -444,26 +476,73 @@ def _describe_unbound(deps: AuthCliDeps) -> StoredCredentialStatus:
         return StoredCredentialStatus(backend="sealed", available=False)
 
 
+def _revoke_stored_token(deps: AuthCliDeps, selection: _Selection) -> RevocationOutcome:
+    """Best-effort RFC 7009 revocation of the stored token, BEFORE it is deleted locally.
+
+    This function NEVER raises. That is the whole point of it: local deletion is what makes a logout
+    mean something on the operator's own machine, and it must be reached whether the provider
+    revoked the token, refused, or could not be contacted at all. A revocation failure that aborted
+    the command would leave the credential sitting in the keystore — strictly worse than the state
+    the operator asked for.
+
+    Nothing is hidden by that: the returned outcome records whether the token must be assumed still
+    live at the provider, and ``auth logout`` reports it.
+    """
+    try:
+        token = selection.store.access_token()
+    except ManagementError:
+        # Absent, expired, or an unreadable store: nothing live to revoke, and no request to make.
+        # An unreadable store is the conservative case — but it also means there is no token to put
+        # in a revocation request, so there is genuinely nothing this step can do.
+        return revocation_not_required()
+    try:
+        client, _authority, endpoints = _discover(deps, selection.locator)
+        return client.revoke_token(endpoints, token.revocation_request_value())
+    except ManagementError as exc:
+        # Discovery failed (unreachable controller or issuer, malformed document). The token stays
+        # live, and the outcome says so.
+        return RevocationOutcome(OUTCOME_UNAVAILABLE, reason_code=exc.reason_code)
+
+
 def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
-    """``secpctl auth logout`` — delete ONLY the credential material this store owns for THIS
-    controller's account. Dry-run unless ``--write --confirm``. It never touches an unrelated OS
-    keyring entry, never touches another controller's account, and never revokes anything
-    server-side (revocation is the identity provider's surface, not secpctl's)."""
+    """``secpctl auth logout`` — revoke this controller's operator token at the identity provider
+    (RFC 7009), then delete ONLY the credential material this store owns for THIS controller's
+    account. Dry-run unless ``--write --confirm``.
+
+    The ORDER is deliberate: revoke first, delete second. Revocation needs the token, so deleting
+    first would throw away the only thing that can end the session at the provider. Deletion then
+    happens UNCONDITIONALLY — see :func:`_revoke_stored_token` — so a provider outage can never
+    leave the credential on the workstation.
+
+    Local deletion alone was never a real logout. Until the token is revoked it remains valid at the
+    provider until its own expiry, so anyone who captured it still holds a working credential; that
+    is precisely the window RFC 7009 exists to close. When the provider advertises no
+    ``revocation_endpoint`` (RFC 8414 §2 makes it OPTIONAL) the command still succeeds, and reports
+    ``token_still_live`` so the operator knows the credential dies only when it expires.
+
+    It never touches an unrelated OS keyring entry and never touches another controller's account.
+    """
     command = "auth logout"
     try:
         selection = _select(deps)
         if not gate.is_write:
+            status = selection.store.describe()
             return EXIT_OK, {
                 "command": command,
                 "mode": "dry_run",
-                **_credential_report(selection.account, selection.store.describe()),
+                # Stated WITHOUT a network call: a dry run opens no socket, so it reports what the
+                # write path would attempt rather than what the provider would answer.
+                "revocation_planned": bool(status.has_credential and not status.expired),
+                **_credential_report(selection.account, status),
             }
+        outcome = _revoke_stored_token(deps, selection)
         removed = selection.store.delete()
         return EXIT_OK, {
             "command": command,
             "mode": "written",
             "removed": bool(removed),
             "account": account_fingerprint(selection.account),
+            **outcome.to_report(),
         }
     except ManagementError as exc:
         return _refused(command, exc.reason_code)
