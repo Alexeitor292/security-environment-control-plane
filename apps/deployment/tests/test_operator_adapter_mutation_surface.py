@@ -24,12 +24,29 @@ rather than assumed to:
   genuinely strong; what the mutation exploited is that a CONCRETE adapter may carry extra methods
   and call them itself. Pinned as an exact set.
 
-Stated limit: a private method (``_enable``) called from an existing public one would evade the
-third check, and a verb assembled at runtime from data would evade the first two. The first check is
-the backstop for that case — it refuses any non-literal in the verb position, so a runtime-assembled
-verb cannot reach ``runner.run`` through this module at all. What none of them cover is a verb
-reaching the runner from OUTSIDE this module; the runner is only ever constructed with pinned
-executables, which is a separate property tested elsewhere.
+STATED LIMITS, and the first one is a correction. This docstring previously claimed the literal
+check meant "a runtime-assembled verb cannot reach ``runner.run`` through this module at all".
+**That was false**, and it was an overstated guarantee in the module written to replace an
+overstated guarantee. The finder matched only ``<x>.runner.run`` and silently skipped everything
+else, so ``r = self.runner`` followed by ``r.run(verb, ...)`` was invisible to it — with a private
+``_enable`` and a constructed verb stacked alongside, all three checks could be evaded at once
+while the suite stayed green. The finder now REFUSES an unrecognised ``.run(`` receiver instead of
+skipping it, which closes the alias.
+
+What remains outside these three, stated without an absolute this time:
+
+* indirection that produces no ``ast.Attribute`` func node at all — ``getattr(obj, "run")(...)``
+  — is not matched by the finder. There is none in the module today (checked), and the
+  behavioural tests are what cover it: a private method wired into a public one fails them hard,
+  including the count-equality test, because the commands actually run.
+* a private method that is never called is invisible to every check here, and harmless for the
+  same reason.
+* a verb reaching the runner from OUTSIDE this module. The runner is only ever constructed with
+  pinned executables, which is a separate property tested elsewhere.
+
+The general point, since it is what this file keeps demonstrating: a static check should refuse
+what it cannot analyse rather than pass over it, because silence and success are indistinguishable
+to whoever reads the green.
 
 Nothing here executes an adapter method or runs a command; the module is parsed and its classes
 introspected.
@@ -81,9 +98,20 @@ def _module_ast(source: str | None = None) -> ast.Module:
     return ast.parse(source if source is not None else _ADAPTERS.read_text(encoding="utf-8"))
 
 
-def _runner_call_argvs(tree: ast.Module) -> list[ast.expr]:
-    """The second positional argument of every ``<x>.runner.run(...)`` call."""
-    found: list[ast.expr] = []
+def _run_calls(tree: ast.Module) -> tuple[list[ast.expr], list[str]]:
+    """Partition every ``.run(...)`` call into recognised and UNRECOGNISED receivers.
+
+    Returns ``(argvs of <x>.runner.run calls, descriptions of everything else)``.
+
+    The second half is the point. An earlier version matched only ``<x>.runner.run`` and
+    **silently skipped** anything else, so a one-line local alias — ``r = self.runner`` then
+    ``r.run(verb, ...)`` — made the receiver an ``ast.Name``, the call invisible to the finder, and
+    ``len(argvs) == 4`` still held because the original four were untouched. A check evadable by an
+    alias is weak; refusing what it does not recognise is free, because every ``.run(`` receiver in
+    this module is already ``<x>.runner``.
+    """
+    recognised: list[ast.expr] = []
+    unrecognised: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
@@ -92,8 +120,10 @@ def _runner_call_argvs(tree: ast.Module) -> list[ast.expr]:
         target = node.func.value
         if isinstance(target, ast.Attribute) and target.attr == "runner":
             assert len(node.args) >= 2, "runner.run called without an argv argument"
-            found.append(node.args[1])
-    return found
+            recognised.append(node.args[1])
+        else:
+            unrecognised.append(f"line {node.lineno}: {ast.unparse(node.func)}")
+    return recognised, unrecognised
 
 
 def _verb_of(argv: ast.expr) -> tuple[bool, str | None]:
@@ -110,7 +140,15 @@ def _verb_of(argv: ast.expr) -> tuple[bool, str | None]:
 
 
 def test_every_runner_call_passes_a_literal_read_only_verb():
-    argvs = _runner_call_argvs(_module_ast())
+    argvs, unrecognised = _run_calls(_module_ast())
+
+    # Refuse what the finder does not recognise, rather than skipping it. Without this, a local
+    # alias (``r = self.runner``) hides a call from the check entirely while the count below still
+    # passes.
+    assert not unrecognised, (
+        f"`.run(` call(s) on an unrecognised receiver: {unrecognised} — the verb check cannot see "
+        "them, so they are refused rather than skipped"
+    )
     assert len(argvs) == 4, f"expected 4 runner.run sites, found {len(argvs)}"
 
     for argv in argvs:
@@ -178,18 +216,44 @@ class LocalServiceStateAdapter:
 """
 
 
+_ALIASED_RUNNER = """
+class LocalServiceStateAdapter:
+    def _enable(self):
+        r = self.runner
+        verb = "en" + "able"
+        return r.run(
+            self.service_inspector, [verb, self.operator_service],
+            timeout_seconds=1, max_output_bytes=1,
+        )
+"""
+
+
 def test_the_literal_verb_check_catches_a_constructed_verb():
     """The exact mutation a substring scan cannot see."""
-    argvs = _runner_call_argvs(_module_ast(_CONSTRUCTED_VERB))
+    argvs, _ = _run_calls(_module_ast(_CONSTRUCTED_VERB))
     assert len(argvs) == 1
     is_literal, _ = _verb_of(argvs[0])
     assert is_literal is False, "a constructed verb was accepted as a literal"
 
 
 def test_the_literal_verb_check_also_catches_the_natural_shape():
-    argvs = _runner_call_argvs(_module_ast(_LITERAL_VERB))
+    argvs, _ = _run_calls(_module_ast(_LITERAL_VERB))
     is_literal, verb = _verb_of(argvs[0])
     assert is_literal and verb == "enable" and verb in MUTATION_VERBS
+
+
+def test_an_aliased_runner_is_refused_rather_than_skipped():
+    """The evasion that defeated the previous finder, and the reason the fix is refusal rather
+    than a wider match: the alias is not recognised, so it must be REPORTED, not passed over.
+
+    All three evasions are stacked here — private method, aliased receiver, constructed verb —
+    which together produced a fully green suite before this change.
+    """
+    argvs, unrecognised = _run_calls(_module_ast(_ALIASED_RUNNER))
+
+    assert argvs == [], "the aliased call must not be mistaken for a recognised runner.run"
+    assert len(unrecognised) == 1, unrecognised
+    assert "r.run" in unrecognised[0]
 
 
 def test_the_literal_scan_catches_a_mutation_verb_the_substring_form_would_miss():
@@ -206,15 +270,27 @@ def test_the_literal_scan_catches_a_mutation_verb_the_substring_form_would_miss(
 
 def test_the_runner_call_finder_is_not_vacuous():
     """If the finder stopped matching, every check above would pass over an empty list."""
-    assert _runner_call_argvs(_module_ast()), "no runner.run calls found — the checks are vacuous"
-    assert not _runner_call_argvs(_module_ast("x = 1\n"))
+    recognised, _ = _run_calls(_module_ast())
+    assert recognised, "no runner.run calls found — the checks are vacuous"
+    assert _run_calls(_module_ast("x = 1\n")) == ([], [])
 
 
 @pytest.mark.parametrize("extra", ["enable_operator_unit", "start"])
 def test_the_public_surface_check_catches_an_added_method(extra):
+    """Re-runs the REAL assertion against a mutated class, rather than re-implementing the
+    technique beside it. The weaker form verified that ``vars()`` sees an added method — true of
+    Python, not of this check — and would have kept passing if the real assertion changed."""
+
     class _Mutated(LocalServiceStateAdapter):  # type: ignore[misc]
         pass
 
     setattr(_Mutated, extra, lambda self: None)
-    public = {n for n, v in vars(_Mutated).items() if not n.startswith("_") and callable(v)}
-    assert extra in public
+
+    allowed = {"snapshot", "observe", "observe_generation"}
+    public = {
+        name
+        for name, value in vars(_Mutated).items()
+        if not name.startswith("_") and callable(value)
+    }
+    assert public != allowed, f"the public-surface check would not have caught {extra}"
+    assert extra in public - allowed
