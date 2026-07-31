@@ -998,6 +998,21 @@ def select_org_enrollments_page(
     return list(session.execute(stmt).scalars().all())
 
 
+class PageIntegrityRefusal(RepositoryRefusal):
+    """A row inside a page could not be projected, plus WHICH row and WHERE it sits.
+
+    The keyset position is what makes the refusal actionable: without it, a caller cannot advance
+    ``after`` past an unrenderable row, and every enrollment ordered after it becomes permanently
+    unreachable from the list. ``enrollment_id`` is carried for the server-side audit entry only —
+    the transport layer decides what, if anything, crosses the boundary.
+    """
+
+    def __init__(self, reason_code: str, *, enrollment_id: str, expires_at: str) -> None:
+        super().__init__(reason_code)
+        self.enrollment_id = enrollment_id
+        self.expires_at = expires_at
+
+
 def load_page(
     session: Session,
     *,
@@ -1008,26 +1023,39 @@ def load_page(
 ) -> list[LoadedEnrollment]:
     """Fully rehydrate + validate one page of this org's enrollments, in keyset order.
 
-    Every row goes through the SAME ``_build_loaded`` choke point as the single-enrollment read, so
-    a list can never surface a row that a status read would refuse: the recomputed canonical digest
-    must match the persisted CAS digest, the tenancy binding and enrollment identity are re-derived
-    from the authoritative invitation, and a same-key/corrupt row RAISES
-    ``enrollment_state_corrupt`` rather than being surfaced or repaired.
+    Every row goes through the SAME checks as the single-enrollment read — ``_build_loaded`` (the
+    recomputed canonical digest must match the persisted CAS digest, and the tenancy binding and
+    enrollment identity are re-derived from the authoritative invitation) AND
+    :func:`verify_history_consistent` (the append-only history must agree with the head). Both are
+    required for the claim to hold: ``load_public_view`` runs the history check too, so omitting it
+    here would let the list surface a row whose own detail view refuses — a UI could show an
+    enrollment it cannot then open. A corrupt row RAISES rather than being surfaced or repaired.
 
-    That means one poisoned row fails the whole page rather than being silently omitted. This is the
+    One poisoned row therefore fails the whole page rather than being silently omitted. That is the
     deliberate choice: silently dropping a row would tell an operator the enrollment does not exist,
-    which is untruthful, and the response envelope has no field in which to report a skip.
+    which is untruthful. The refusal carries the failing row's keyset position so the caller can
+    still page PAST it and reach the rest of the inventory.
     """
-    return [
-        _build_loaded(session, row)
-        for row in select_org_enrollments_page(
-            session,
-            organization_id=organization_id,
-            states=states,
-            limit=limit,
-            after=after,
-        )
-    ]
+    loaded: list[LoadedEnrollment] = []
+    for row in select_org_enrollments_page(
+        session,
+        organization_id=organization_id,
+        states=states,
+        limit=limit,
+        after=after,
+    ):
+        try:
+            entry = _build_loaded(session, row)
+            verify_history_consistent(session, row.enrollment_id, entry.state)
+        except RepositoryRefusal as exc:
+            # re-raise WITH the keyset position, so the caller can step past this exact row
+            raise PageIntegrityRefusal(
+                exc.reason_code,
+                enrollment_id=row.enrollment_id,
+                expires_at=row.expires_at,
+            ) from None
+        loaded.append(entry)
+    return loaded
 
 
 def revision_row(session: Session, *, enrollment_id: str, revision: int) -> RevisionRow | None:
@@ -1081,6 +1109,7 @@ def invitation_is_revoked(session: Session, *, enrollment_id: str) -> bool:
 __all__ = [
     "MAX_LIST_PAGE",
     "LoadedEnrollment",
+    "PageIntegrityRefusal",
     "RepositoryRefusal",
     "commit_transition",
     "consume_invitation",

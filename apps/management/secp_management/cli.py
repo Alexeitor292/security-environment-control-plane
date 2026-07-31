@@ -297,26 +297,13 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
             if token_path
             else SealedOperatorAccessTokenProvider()
         )
-        # ONE locator instance, shared by the client and the CA provider on purpose: the client
-        # pins its TLS to the recorded CA path and the invitation carries that same CA to the
-        # worker. Two instances could resolve two different locators and hand the worker a chain
-        # the operator's own client never trusted.
-        locator_provider = FileControllerApiLocatorProvider(fs)
         client = HttpsEnrollmentControllerClient(
-            locator_provider=locator_provider,
+            locator_provider=FileControllerApiLocatorProvider(fs),
             token_provider=token_provider,
         )
-        from secp_management.enrollment_cli import LocatorControllerCaBundleProvider
         from secp_management.worker_enroller import build_worker_enroller
 
-        return EnrollmentCliDeps(
-            controller_client=client,
-            worker_enroller=build_worker_enroller(),
-            # Without this the field falls to SealedControllerCaBundleProvider and EVERY
-            # `enrollment invite create` refuses `secpctl_controller_ca_unavailable` — the CA
-            # feature shipped inert. Same failure class as the sealed worker-enroller composition.
-            ca_bundle=LocatorControllerCaBundleProvider(fs, locator_provider),
-        )
+        return EnrollmentCliDeps(controller_client=client, worker_enroller=build_worker_enroller())
     except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
         return EnrollmentCliDeps()
 

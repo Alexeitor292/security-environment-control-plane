@@ -290,6 +290,35 @@ flaky install.
 | `enrollment_signer_unavailable` | The controller's root-gated offer signer is unavailable |
 | `enrollment_revision_conflict` | Concurrent change — re-read status and retry |
 | `enrollment_forbidden` | Cross-organization access |
+| `enrollment_state_corrupt` | **One** enrollment failed its integrity checks — investigate |
+| `enrollment_page_integrity` | An inventory **page** contains a row that cannot be rendered |
+| `enrollment_cursor_invalid` | A list cursor was malformed, or reused under a different filter |
+
+### Inventory listing
+
+`GET /api/v1/enrollment` is keyset-paged. Two behaviours are worth knowing:
+
+**`next_cursor` is a weak signal.** It is non-null whenever the page came back full, which includes
+the case where the next page turns out to be empty. It means "there may be more", never "there
+certainly is". Page until it comes back null.
+
+**Cursors are bound to the state filter that minted them.** Passing a cursor from one `?state=`
+filter to a different one refuses `enrollment_cursor_invalid` rather than silently returning a short
+page that omits matching rows. Reordering or repeating `?state=` values is fine — the filter is
+treated as a set.
+
+**`enrollment_page_integrity` means one row in that page could not be projected.** The row is
+preserved, never repaired, and never silently dropped — silently omitting it would tell you the
+enrollment does not exist. The error body carries a `recovery_cursor`; pass it as `after` to page
+past the unrenderable row and reach the rest of the inventory:
+
+```
+GET /api/v1/enrollment?after=<recovery_cursor from the 409 body>
+```
+
+The failing enrollment id is **not** in the error body. It is recorded in the audit log under
+`enrollment.page_integrity_failed`, scoped to your organization — look there to identify the row,
+then read it directly with `GET /api/v1/enrollment/{enrollment_id}`.
 
 ---
 

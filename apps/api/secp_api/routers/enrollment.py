@@ -151,13 +151,21 @@ def list_enrollments(
     Returns ONLY :class:`EnrollmentStatusOut` items — no invitation material is reachable from a
     list, a status read, or a cursor (see the one-shot decision in ``schemas_enrollment``).
     """
-    items, next_cursor = svc.list_public_views(
-        session,
-        principal,
-        states=tuple(entry.value for entry in state) if state else None,
-        limit=limit,
-        after=after,
-    )
+    try:
+        items, next_cursor = svc.list_public_views(
+            session,
+            principal,
+            states=tuple(entry.value for entry in state) if state else None,
+            limit=limit,
+            after=after,
+        )
+    except WorkerEnrollmentError as exc:
+        # A page-integrity refusal also materializes the audit row naming the failing enrollment —
+        # the only place that id is recorded. Commit it here so it survives the request (db_session
+        # would roll it back), then re-raise so the caller still gets the redacted 409 + cursor.
+        if exc.durable_transition:
+            session.commit()
+        raise
     return EnrollmentListOut(
         items=[EnrollmentStatusOut.model_validate(item) for item in items],
         next_cursor=next_cursor,

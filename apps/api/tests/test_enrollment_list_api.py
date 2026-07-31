@@ -404,7 +404,7 @@ def test_cursor_from_another_page_cannot_reach_another_organization(
     session.commit()
 
     # forge a cursor positioned just before the foreign row and present it as our own
-    forged = svc._encode_cursor("2026-07-21T00:00:00+00:00", "sha256:" + "0" * 64)
+    forged = svc._encode_cursor("2026-07-21T00:00:00+00:00", "sha256:" + "0" * 64, None)
     ids = [item["enrollment_id"] for item in _list(client, after=forged).json()["items"]]
     assert foreign.state.enrollment_id not in ids
 
@@ -530,3 +530,174 @@ def test_the_lifecycle_service_now_requires_an_explicit_permission(client, sessi
             reason="operator_recovery_required",
             expected=expected,
         )
+
+
+# --- page integrity: distinct code + recourse past the unrenderable row --------------------------
+
+
+def _corrupt_head_row(session, enrollment_id: str) -> None:
+    """Break a head row's canonical digest so it can no longer be projected."""
+    from secp_api.worker_enrollment_models import WorkerEnrollmentState as StateRow
+
+    row = session.get(StateRow, enrollment_id)
+    row.state_digest = "sha256:" + "0" * 64
+    session.commit()
+
+
+def _break_history(session, enrollment_id: str) -> None:
+    """Delete a revision-history row: the head/history disagree, which a status read refuses."""
+    from secp_api.worker_enrollment_models import WorkerEnrollmentRevision as RevisionRow
+
+    session.query(RevisionRow).filter(RevisionRow.enrollment_id == enrollment_id).delete()
+    session.commit()
+
+
+def test_a_page_integrity_failure_uses_a_code_distinct_from_state_corrupt(client, session):
+    """A UI must tell 'this page has an unrenderable row' from 'this one enrollment is corrupt'."""
+    created = _create(client)
+    _corrupt_head_row(session, created["enrollment_id"])
+
+    r = _list(client)
+
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "enrollment_page_integrity"
+    assert r.json()["error"]["code"] != "enrollment_state_corrupt"
+
+
+def test_the_page_integrity_error_carries_a_cursor_that_pages_past_the_bad_row(client, session):
+    """The recourse: without it, every enrollment ordered after a poison row is unreachable."""
+    ids = [_create(client, ttl_seconds=60 + i)["enrollment_id"] for i in range(5)]
+    order = [i["enrollment_id"] for i in _list(client).json()["items"]]
+    victim = order[2]
+    _corrupt_head_row(session, victim)
+
+    failed = _list(client)
+    assert failed.status_code == 409
+    recovery = failed.json()["error"]["recovery_cursor"]
+    assert isinstance(recovery, str) and recovery
+
+    # paging past the bad row reaches the rest of the inventory
+    rest = _list(client, after=recovery)
+    assert rest.status_code == 200, rest.text
+    reachable = [item["enrollment_id"] for item in rest.json()["items"]]
+    assert victim not in reachable
+    assert set(order[3:]) <= set(reachable), "rows after the poison row must become reachable"
+    assert set(ids) - {victim} >= set(reachable)
+
+
+def test_the_page_integrity_error_body_carries_no_id_label_or_reason(client, session):
+    created = _create(client, deployment_site_label=OTHER_SITE)
+    _corrupt_head_row(session, created["enrollment_id"])
+
+    body = _list(client).json()
+
+    assert set(body["error"]) == {"code", "recovery_cursor"}
+    assert created["enrollment_id"] not in body["error"]["code"]
+    assert OTHER_SITE not in str(body)
+    assert "corrupt" not in body["error"]["code"]
+
+
+def test_a_page_integrity_failure_is_audited_with_the_failing_enrollment_id(client, session):
+    """The id appears server-side ONLY — that is what makes the condition diagnosable at all."""
+    from secp_api.models import AuditEvent
+
+    created = _create(client)
+    _corrupt_head_row(session, created["enrollment_id"])
+
+    assert _list(client).status_code == 409
+
+    session.expire_all()
+    rows = (
+        session.query(AuditEvent).filter(AuditEvent.resource_id == created["enrollment_id"]).all()
+    )
+    actions = {getattr(r.action, "value", r.action) for r in rows}
+    assert "enrollment.page_integrity_failed" in actions, actions
+
+
+def test_a_history_inconsistent_row_fails_the_list_exactly_as_it_fails_the_detail(client, session):
+    """The documented invariant: a list must not surface a row whose own detail view refuses."""
+    created = _create(client)
+    _break_history(session, created["enrollment_id"])
+
+    detail = client.get(f"/api/v1/enrollment/{created['enrollment_id']}")
+    listing = _list(client)
+
+    assert detail.status_code == 409
+    assert detail.json()["error"]["code"] == "enrollment_history_inconsistent"
+    # the list must NOT return 200 with the row a detail read refuses
+    assert listing.status_code == 409
+    assert listing.json()["error"]["code"] == "enrollment_page_integrity"
+
+
+# --- the cursor binds the state filter it was minted under ---------------------------------------
+
+
+def test_a_cursor_minted_under_one_filter_is_refused_under_another(client):
+    """Replaying a cursor across filters would silently omit matching rows — refuse instead."""
+    for index in range(3):
+        _create(client, ttl_seconds=60 + index)
+
+    page = _list(client, state="invited", limit=1).json()
+    cursor = page["next_cursor"]
+    assert cursor
+
+    same = client.get("/api/v1/enrollment", params={"state": "invited", "after": cursor})
+    assert same.status_code == 200, "the cursor still works under the filter that minted it"
+
+    other = client.get("/api/v1/enrollment", params={"state": "refused", "after": cursor})
+    assert other.status_code == 422
+    assert other.json()["error"]["code"] == "enrollment_cursor_invalid"
+
+    unfiltered = client.get("/api/v1/enrollment", params={"after": cursor})
+    assert unfiltered.status_code == 422, "no filter is a DIFFERENT filter, not a superset"
+
+
+def test_the_filter_binding_is_order_and_duplicate_insensitive(client):
+    """The filter is a set; reordering or repeating ?state= must not invalidate a live cursor."""
+    for index in range(3):
+        _create(client, ttl_seconds=60 + index)
+
+    minted = client.get(
+        "/api/v1/enrollment",
+        params=[("state", "invited"), ("state", "refused"), ("limit", 1)],
+    ).json()["next_cursor"]
+    assert minted
+
+    reordered = client.get(
+        "/api/v1/enrollment",
+        params=[
+            ("state", "refused"),
+            ("state", "invited"),
+            ("state", "invited"),
+            ("after", minted),
+        ],
+    )
+    assert reordered.status_code == 200, reordered.text
+
+
+def test_an_unfiltered_cursor_round_trips_unfiltered(client):
+    for index in range(3):
+        _create(client, ttl_seconds=60 + index)
+
+    cursor = _list(client, limit=1).json()["next_cursor"]
+    assert cursor
+    assert _list(client, after=cursor).status_code == 200
+
+
+def test_the_recovery_cursor_carries_the_same_filter_binding(client, session):
+    """Otherwise the recourse hands back a cursor that 422s under the filter already in use."""
+    for index in range(4):
+        _create(client, ttl_seconds=60 + index)
+    order = [i["enrollment_id"] for i in _list(client, state="invited").json()["items"]]
+    _corrupt_head_row(session, order[1])
+
+    failed = client.get("/api/v1/enrollment", params={"state": "invited"})
+    assert failed.status_code == 409
+    recovery = failed.json()["error"]["recovery_cursor"]
+
+    # usable with the SAME filter that produced it...
+    resumed = client.get("/api/v1/enrollment", params={"state": "invited", "after": recovery})
+    assert resumed.status_code == 200, resumed.text
+    # ...and still refused under a different one
+    crossed = client.get("/api/v1/enrollment", params={"state": "healthy", "after": recovery})
+    assert crossed.status_code == 422

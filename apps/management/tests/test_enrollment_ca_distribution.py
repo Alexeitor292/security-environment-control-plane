@@ -386,3 +386,72 @@ def test_the_dry_run_shows_the_fingerprint_before_the_worker_commits(tmp_path):
     assert report["controller_key_fingerprint"] == controller_key_fingerprint(
         _INVITATION["controller_key_id"]
     )
+
+
+# --- TRIPWIRE: the production CLI wiring this feature needs is NOT on this branch -----------------
+# `_production_enrollment_deps` lives in `apps/management/secp_management/cli.py`, which Stream C
+# owns. WS-B must not edit it, so the CA provider is composed there by Stream C, not here.
+#
+# Until that lands, `EnrollmentCliDeps.ca_bundle` falls to `SealedControllerCaBundleProvider` in
+# production, and EVERY `secpctl enrollment invite create` then refuses
+# `secpctl_controller_ca_unavailable`
+# — the CA distribution feature ships INERT.
+#
+# These tests make that loud. The xfail FLIPS TO A FAILURE the moment the wiring lands (strict), so
+# nobody has to remember to come back and delete it; the companion test states the exact required
+# shape so the requirement is readable in the codebase, not only in a hand-off message.
+
+
+def test_the_production_cli_does_not_yet_compose_the_ca_provider():
+    """States the gap explicitly: today production gets the SEALED provider.
+
+    This is the honest status of the feature on this branch, not an assertion that it is correct.
+    """
+    from secp_management.enrollment_cli import (
+        EnrollmentCliDeps,
+        SealedControllerCaBundleProvider,
+    )
+
+    assert isinstance(EnrollmentCliDeps().ca_bundle, SealedControllerCaBundleProvider)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PENDING Stream C: cli.py:_production_enrollment_deps must pass "
+        "ca_bundle=LocatorControllerCaBundleProvider(fs, locator_provider), sharing ONE "
+        "FileControllerApiLocatorProvider with HttpsEnrollmentControllerClient. Strict xfail, so "
+        "this FAILS (and must be deleted) the moment the wiring lands."
+    ),
+)
+def test_production_enrollment_deps_composes_the_real_ca_provider(monkeypatch, tmp_path):
+    from secp_management import cli
+    from secp_management.enrollment_cli import LocatorControllerCaBundleProvider
+
+    deps = cli._production_enrollment_deps()
+    assert isinstance(deps.ca_bundle, LocatorControllerCaBundleProvider)
+
+
+def test_the_ca_provider_resolves_through_the_locator_it_was_given():
+    """The security constraint behind the requirement, provable without touching cli.py.
+
+    The provider reads the CA path from the locator instance it is handed. That is why the wiring
+    must share ONE ``FileControllerApiLocatorProvider`` with the controller client: two instances
+    could resolve two DIFFERENT locators, handing the worker a CA chain the operator's own client
+    never pinned its TLS to.
+    """
+    counting = _CountingLocatorProvider()
+    provider = LocatorControllerCaBundleProvider(_FakeFs(content=CA_PEM.encode("utf-8")), counting)
+
+    assert provider.read_pem() == CA_PEM
+    assert counting.calls == 1, "the provider must resolve through the locator it was given"
+
+
+class _CountingLocatorProvider(_FakeLocatorProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def locate(self):
+        self.calls += 1
+        return super().locate()

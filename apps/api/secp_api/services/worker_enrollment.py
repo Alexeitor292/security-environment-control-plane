@@ -1675,24 +1675,49 @@ DEFAULT_LIST_LIMIT: Final = 50
 #: and the repository, so a direct service call can never exceed it either.
 MAX_LIST_LIMIT: Final = repo.MAX_LIST_PAGE
 
-#: The cursor is an opaque url-safe base64 blob over ``"<canonical utc>|<enrollment id>"``. Both
-#: halves are re-validated on decode, and a decoded cursor is only ever used as a keyset position
-#: WITHIN the caller's own organization-scoped query — so a forged or replayed cursor can at worst
-#: skip the caller past their own rows, never reach another organization's.
+#: The cursor is an opaque url-safe base64 blob over
+#: ``"<canonical utc>|<enrollment id>|<filter digest>"``. Every part is re-validated on decode, and
+#: a decoded cursor is only ever used as a keyset position WITHIN the caller's own
+#: organization-scoped query — so a forged or replayed cursor can at worst skip the caller past
+#: their own rows, never reach another organization's.
 _CURSOR_SEPARATOR: Final = "|"
 _MAX_CURSOR_LEN: Final = 256
 
-
-def _encode_cursor(expires_at: str, enrollment_id: str) -> str:
-    raw = f"{expires_at}{_CURSOR_SEPARATOR}{enrollment_id}".encode()
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+#: The sentinel filter digest for "no state filter" — distinct from any real digest.
+_NO_FILTER: Final = "all"
 
 
-def _decode_cursor(cursor: str) -> tuple[_dt.datetime, str]:
+def _filter_digest(states: tuple[str, ...] | None) -> str:
+    """A short, stable digest of the CANONICALISED state filter a cursor was minted under.
+
+    A keyset cursor is only meaningful within the filtered order that produced it. Replaying a
+    cursor from one filter against another silently skips every row the new filter matches that
+    sorts before the old cursor's position — a short page that looks exactly like a genuinely short
+    page. Binding the filter in turns that silent wrong answer into a bounded refusal.
+
+    Canonicalised (sorted, de-duplicated) so a caller reordering ``?state=`` parameters, or
+    repeating one, still gets a cursor that matches — the filter is a set, and its digest must
+    behave like one.
+    """
+    if not states:
+        return _NO_FILTER
+    joined = ",".join(sorted(set(states)))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _encode_cursor(expires_at: str, enrollment_id: str, states: tuple[str, ...] | None) -> str:
+    raw = _CURSOR_SEPARATOR.join((expires_at, enrollment_id, _filter_digest(states)))
+    return base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str, states: tuple[str, ...] | None) -> tuple[_dt.datetime, str]:
     """Decode an opaque cursor to its ``(expires_at_ts, enrollment_id)`` keyset position.
 
-    Every failure is the SAME bounded ``enrollment_cursor_invalid`` — the rejected value is never
-    echoed, and a malformed cursor is never allowed to degrade into an unfiltered scan.
+    Refuses when the cursor was minted under a DIFFERENT state filter than the request presenting
+    it. Every failure — malformed, over-long, non-decoding, or filter-mismatched — is the SAME
+    bounded ``enrollment_cursor_invalid``: the rejected value is never echoed, the filter it was
+    minted under is never echoed, and a bad cursor is never allowed to degrade into a silently
+    incomplete page or an unfiltered scan.
     """
     if not isinstance(cursor, str) or not (1 <= len(cursor) <= _MAX_CURSOR_LEN):
         raise WorkerEnrollmentError(EC.cursor_invalid)
@@ -1701,11 +1726,15 @@ def _decode_cursor(cursor: str) -> tuple[_dt.datetime, str]:
         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         raise WorkerEnrollmentError(EC.cursor_invalid) from None
-    head, separator, enrollment_id = raw.partition(_CURSOR_SEPARATOR)
-    if not separator:
+    parts = raw.split(_CURSOR_SEPARATOR)
+    if len(parts) != 3:
         raise WorkerEnrollmentError(EC.cursor_invalid)
+    head, enrollment_id, bound_filter = parts
     expires_ts = repo.parse_canonical_utc(head)
     if expires_ts is None or not is_sha256_digest(enrollment_id):
+        raise WorkerEnrollmentError(EC.cursor_invalid)
+    if bound_filter != _filter_digest(states):
+        # a position carried across filters would silently omit matching rows — refuse, never serve
         raise WorkerEnrollmentError(EC.cursor_invalid)
     return expires_ts, enrollment_id
 
@@ -1748,14 +1777,21 @@ def list_public_views(
     NO invitation material is returned — only :meth:`EnrollmentState.public_view`. Unlike the expiry
     sweep's candidate query, the page includes revoked, terminal and healthy enrollments.
 
-    ``next_cursor`` is non-null only when this page was FULL, i.e. there may be more behind it —
-    exactly the rule the recovery sweep uses for its own keyset continuation.
+    ``next_cursor`` is a WEAK signal, deliberately: it is non-null whenever this page came back
+    FULL, which includes the case where the page behind it turns out to be empty. It means "there
+    MAY be more", never "there certainly is". A caller must page until it comes back null rather
+    than treating a non-null value as proof of a further page. (Same rule the recovery sweep uses
+    for its own keyset continuation.)
+
+    A row that cannot be projected raises the DISTINCT ``enrollment_page_integrity`` — "this page
+    contains a row I cannot render", not "this one enrollment is corrupt" — carrying an opaque
+    ``recovery_cursor`` so the caller can page PAST it and still reach the rest of the inventory.
     """
     actor.require(Permission.enrollment_read)
     _assert_schema_ready(session)
     bounded_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
     selected = _validated_states(states)
-    cursor = _decode_cursor(after) if after is not None else None
+    cursor = _decode_cursor(after, selected) if after is not None else None
 
     try:
         page = repo.load_page(
@@ -1765,6 +1801,21 @@ def list_public_views(
             limit=bounded_limit,
             after=cursor,
         )
+    except repo.PageIntegrityRefusal as exc:
+        # The row is preserved, never repaired, and never silently dropped. Two things happen:
+        # (1) the failing enrollment id is recorded SERVER-SIDE so the condition is diagnosable at
+        #     all — it is org-scoped and audited, never returned as free text or logged bare;
+        # (2) the caller gets an opaque cursor positioned AT the failing row, bound to the SAME
+        #     state filter, so `after=<recovery_cursor>` steps past it. Without this, every
+        #     enrollment ordered after a poison row is permanently unreachable from the list.
+        _audit_page_integrity(session, actor, exc)
+        raise WorkerEnrollmentError(
+            EC.page_integrity,
+            # the audit row above must SURVIVE this failed request — ``db_session`` would otherwise
+            # roll it back, and an audit entry that only exists on the happy path is no audit at all
+            durable_transition=True,
+            recovery_cursor=_encode_cursor(exc.expires_at, exc.enrollment_id, selected),
+        ) from None
     except RepositoryRefusal as exc:  # a corrupt row is preserved, never surfaced, never repaired
         raise _surface(exc) from None
 
@@ -1783,8 +1834,33 @@ def list_public_views(
     next_cursor = None
     if len(page) == bounded_limit and page:
         last = page[-1].state
-        next_cursor = _encode_cursor(last.expires_at, last.enrollment_id)
+        next_cursor = _encode_cursor(last.expires_at, last.enrollment_id, selected)
     return items, next_cursor
+
+
+def _audit_page_integrity(
+    session: Session, actor: Principal, exc: repo.PageIntegrityRefusal
+) -> None:
+    """Record WHICH row could not be projected, server-side, so the condition is diagnosable.
+
+    The enrollment id appears here and nowhere else on this path: the audit row is organization-
+    scoped and durable, whereas a bare log line is neither. ``reason`` is the bounded repository
+    code, never free text. Auditing must never convert a bounded refusal into an unbounded one, so
+    a failure to record is swallowed — the caller still gets the page-integrity refusal.
+    """
+    try:
+        audit.record(
+            session,
+            action=AuditAction.enrollment_page_integrity_failed,
+            resource_type="worker_enrollment",
+            resource_id=exc.enrollment_id,
+            actor=str(actor.user_id),
+            organization_id=actor.organization_id,
+            outcome="failure",
+            data={"reason": exc.reason_code},
+        )
+    except Exception:  # noqa: BLE001 - never let auditing mask or replace the bounded refusal
+        pass
 
 
 # --------------------------------------------------------------------------- invitation expiry

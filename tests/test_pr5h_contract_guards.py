@@ -165,10 +165,43 @@ def test_canonical_field_order_and_state_shape_invariants_are_pinned() -> None:
     from secp_api.worker_enrollment_contract import EnrollmentState
     from secp_api.worker_enrollment_repository import _PIPELINE_SHAPE
 
-    # 17 contract fields + the schema marker, in declaration order, identical on both planes
+    # The 17 CANONICAL contract fields, in declaration order, identical on both planes — plus,
+    # on the API side ONLY, the documented non-canonical projection field appended last.
+    #
+    # WS-B R2 added ``deployment_site_label`` for the status projection. It is absent from
+    # ``canonical()``, so it cannot reach a digest, the predecessor chain, the CAS predicate or a
+    # history snapshot (pinned independently by the parity corpus), and the authoritative
+    # management contract deliberately does not model a projection-only field.
+    #
+    # The allowance is exhaustive and ORDER-SENSITIVE: the canonical 17 must still match the
+    # management plane exactly and in sequence, and only these names may follow. A canonical field
+    # added to one plane, reordered, or renamed still fails closed — as does an undocumented extra.
+    api_only = ["deployment_site_label"]
     fields = [f for f in EnrollmentState.__dataclass_fields__]
-    assert len(fields) == 17
-    assert fields == [f for f in mgmt.EnrollmentState.__dataclass_fields__]
+    canonical_fields = [f for f in mgmt.EnrollmentState.__dataclass_fields__]
+    assert len(canonical_fields) == 17
+    assert fields == canonical_fields + api_only
+    # ...and every API-only field really is outside the canonical serialization
+    sample = EnrollmentState(
+        contract_version="v",
+        enrollment_id="e",
+        state="invited",
+        revision=0,
+        sequence=0,
+        predecessor_digest="",
+        controller_installation_id="c",
+        controller_key_id="k",
+        worker_installation_id="",
+        worker_key_id="",
+        release_digest="r",
+        transaction_id="t",
+        offer_digest="",
+        result_digest="",
+        expires_at="x",
+        updated_at="u",
+        refusal_reason="",
+    )
+    assert not (set(api_only) & set(sample.canonical())), "an API-only field entered canonical()"
     # the repository's per-state presence map covers every non-terminal state plus healthy
     assert set(_PIPELINE_SHAPE) == {
         "invited",

@@ -385,8 +385,10 @@ class WorkerEnrollmentError(DomainError):
         # an authenticated worker result did not attest a successful outcome + every required health
         # check, so the enrollment cannot advance to healthy (bad input evidence)
         "enrollment_health_incomplete": 422,
-        # a malformed / over-long / non-decoding opaque list cursor is bad caller input
+        # a malformed / over-long / non-decoding / filter-mismatched opaque cursor is bad input
         "enrollment_cursor_invalid": 422,
+        # a page carrying a row that cannot be projected — a state conflict, like its siblings
+        "enrollment_page_integrity": 409,
         "enrollment_internal_failure": 500,
         # surfaced pure transition-contract codes: an invalid input is 422, a state/lifecycle
         # conflict is 409 (the default for anything not explicitly listed)
@@ -396,11 +398,25 @@ class WorkerEnrollmentError(DomainError):
         "enrollment_time_invalid": 422,
         "enrollment_handoff_invalid": 422,
         "enrollment_reason_code_invalid": 422,
+        # a caller naming a state outside the closed set is bad INPUT, not a lifecycle conflict.
+        # The router's enum normally 422s first; this makes a direct service caller agree with it
+        # instead of falling through to the 409 default.
+        "enrollment_state_invalid": 422,
     }
 
-    def __init__(self, code: object, *, durable_transition: bool = False) -> None:
+    def __init__(
+        self,
+        code: object,
+        *,
+        durable_transition: bool = False,
+        recovery_cursor: str | None = None,
+    ) -> None:
         code_value = getattr(code, "value", str(code))
         super().__init__(code_value)
         self.code = code_value
         self.http_status = self._STATUS.get(code_value, 409)
         self.durable_transition = durable_transition
+        # The ONLY additional field the redacted handler may serialize, and it is code-owned: an
+        # opaque keyset cursor the caller passes back as ``after`` to page PAST an unrenderable row.
+        # Never caller text, never a reason, never a label. Set only by the list path.
+        self.recovery_cursor = recovery_cursor

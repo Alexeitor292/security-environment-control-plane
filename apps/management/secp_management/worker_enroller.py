@@ -21,11 +21,31 @@ which is precisely the property the probes exist to deny. So this adapter compos
 per ``enroll()``. Only the durable restart-state store is long-lived, because ``status()`` must read
 it without driving anything.
 
-The ``secp_worker`` import stays lazy so the management CLI need not load the worker package unless
-a worker command actually runs.
+The ``secp_worker`` RUNTIME import stays lazy so the management CLI need not load the worker package
+unless a worker command actually runs. The TYPE-ONLY imports below are guarded by ``TYPE_CHECKING``,
+so they cost nothing at runtime while still giving the composition real types: passing the wrong
+backend into the protected key seam, or the wrong object as the state store, is now a type error
+rather than something ``object`` would wave through.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:  # type-only: never imported at runtime, so the lazy-import property is preserved
+    from secp_commissioning.runtime import FilesystemBackend
+    from secp_worker.enrollment_driver import (
+        WorkerEnrollmentDriver,
+        WorkerEnrollmentStateStore,
+    )
+    from secp_worker.enrollment_http_transport import EnrollmentInvitationInputs
+
+
+class _DriverFactory(Protocol):
+    """Builds a driver for ONE invitation. Production uses the real per-invitation composition;
+    tests inject a double. Named so the injected callable is checked rather than untyped."""
+
+    def __call__(self, inputs: EnrollmentInvitationInputs) -> WorkerEnrollmentDriver: ...
 
 
 class DriverWorkerEnroller:
@@ -36,7 +56,13 @@ class DriverWorkerEnroller:
 
     __slots__ = ("_fs", "_state_store", "_driver_factory")
 
-    def __init__(self, *, fs: object, state_store: object, driver_factory=None) -> None:
+    def __init__(
+        self,
+        *,
+        fs: FilesystemBackend,
+        state_store: WorkerEnrollmentStateStore,
+        driver_factory: _DriverFactory | None = None,
+    ) -> None:
         self._fs = fs
         self._state_store = state_store
         # injectable purely so tests can compose a driver over doubles; production passes None and
@@ -58,12 +84,14 @@ class DriverWorkerEnroller:
         return self.enroll(invitation, now=now)
 
     def status(self, invitation: dict) -> dict:
-        # read-only: report the local restart-state marker; never drive or contact the controller
+        # read-only: report the local restart-state marker; never drive or contact the controller.
+        # ``load`` is part of the WorkerEnrollmentStateStore protocol, so this no longer needs an
+        # attr-defined ignore — the protocol expresses the invariant the ignore used to hide.
         enrollment_id = invitation["enrollment_id"]
-        step = self._state_store.load(enrollment_id)  # type: ignore[attr-defined]
+        step = self._state_store.load(enrollment_id)
         return {"enrollment_id": enrollment_id, "state": step or "unknown"}
 
-    def _build_driver(self, inputs):
+    def _build_driver(self, inputs: EnrollmentInvitationInputs) -> WorkerEnrollmentDriver:
         """Compose the production driver over the real host-local leaves, pinned to THIS invitation.
 
         Reaching here already means the operator passed ``--write --confirm`` (``worker_enroll``
@@ -72,13 +100,15 @@ class DriverWorkerEnroller:
         read."""
         from secp_worker.enrollment_driver import (
             LocalWorkerHealthObserver,
-            WorkerEnrollmentDriver,
+        )
+        from secp_worker.enrollment_driver import (
+            WorkerEnrollmentDriver as _Driver,
         )
         from secp_worker.enrollment_health_probes import LocalWorkerHealthProbes
         from secp_worker.enrollment_http_transport import build_invitation_transport
         from secp_worker.enrollment_key import LocalWorkerEnrollmentKeySeam
 
-        return WorkerEnrollmentDriver(
+        return _Driver(
             key_seam=LocalWorkerEnrollmentKeySeam(self._fs, write=True, confirm=True),
             # per-invitation: the origin + CA chain are the validated invitation's own
             transport_factory=build_invitation_transport,
@@ -91,14 +121,16 @@ class DriverWorkerEnroller:
         )
 
     @staticmethod
-    def _inputs(invitation: dict):
-        from secp_worker.enrollment_http_transport import EnrollmentInvitationInputs
+    def _inputs(invitation: dict) -> EnrollmentInvitationInputs:
+        from secp_worker.enrollment_http_transport import (
+            EnrollmentInvitationInputs as _Inputs,
+        )
 
         # NOTE the one deliberate rename: the API/invitation-file name is `transaction_id`, the
         # worker-side name is `controller_transaction_id`. This adapter is the ONLY correct place
         # for that translation — the invitation file must keep the API's own field name, and the
         # worker type must keep the name that says WHOSE transaction it is.
-        return EnrollmentInvitationInputs(
+        return _Inputs(
             enrollment_id=invitation["enrollment_id"],
             invitation_id=invitation["invitation_id"],
             controller_installation_id=invitation["controller_installation_id"],
@@ -111,7 +143,7 @@ class DriverWorkerEnroller:
         )
 
 
-def build_worker_enroller(fs: object | None = None) -> DriverWorkerEnroller:
+def build_worker_enroller(fs: FilesystemBackend | None = None) -> DriverWorkerEnroller:
     """Compose the concrete worker enroller over the REAL host-local leaves.
 
     The three leaves delivered by WS-B (the fixed-path protected key seam, the durable restart-state
@@ -128,7 +160,7 @@ def build_worker_enroller(fs: object | None = None) -> DriverWorkerEnroller:
     from secp_commissioning.runtime import RealFilesystem
     from secp_worker.enrollment_state_store import DurableWorkerEnrollmentStateStore
 
-    backend = fs if fs is not None else RealFilesystem()
+    backend: FilesystemBackend = fs if fs is not None else RealFilesystem()
     return DriverWorkerEnroller(fs=backend, state_store=DurableWorkerEnrollmentStateStore(backend))
 
 

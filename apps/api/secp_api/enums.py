@@ -862,6 +862,10 @@ class AuditAction(str, Enum):
     # platform work reported as aggregate counts, and a per-row audit would be an unbounded write
     # amplification with no actor to attribute it to.
     enrollment_recovery_required = "enrollment.recovery_required"
+    # R1: a row inside an inventory page could not be projected. Audited (not merely logged) because
+    # this is the ONLY place the failing enrollment id is recorded — the HTTP refusal deliberately
+    # carries no id — and an org-scoped durable row is where an operator can actually find it.
+    enrollment_page_integrity_failed = "enrollment.page_integrity_failed"
     enrollment_worker_bound = "enrollment.worker_bound"
     enrollment_offer_recorded = "enrollment.offer_recorded"
     enrollment_result_recorded = "enrollment.result_recorded"
@@ -2138,10 +2142,17 @@ class WorkerEnrollmentErrorCode(str, Enum):
     pop_invalid = "enrollment_pop_invalid"
     # Phase 3: a concurrent/duplicate bind lost the write-once signed-offer insert
     signed_offer_conflict = "enrollment_signed_offer_conflict"
-    # R1: the opaque list cursor was absent-from-nowhere, malformed, over-long, or did not decode to
-    # a well-formed (canonical UTC timestamp, sha256 enrollment id) keyset position. Bounded and
-    # attacker-independent: the rejected cursor value is NEVER echoed.
+    # R1: the opaque list cursor was malformed, over-long, did not decode to a well-formed
+    # (canonical UTC timestamp, sha256 enrollment id) keyset position, or was minted under a
+    # DIFFERENT state filter than the request presenting it. Bounded and attacker-independent: the
+    # rejected cursor value, and the filter it was minted under, are NEVER echoed.
     cursor_invalid = "enrollment_cursor_invalid"
+    # R1: a row inside a LIST page could not be projected — it failed the same rehydration or
+    # history-consistency checks a single status read applies. Deliberately DISTINCT from
+    # ``enrollment_state_corrupt`` (which means "this one enrollment is corrupt"): this means "this
+    # PAGE contains a row I cannot render", which is a different thing for a UI to say. The row is
+    # preserved, never repaired, and never silently dropped from the page.
+    page_integrity = "enrollment_page_integrity"
     # Phase 3: the root-gated controller-offer signer/broker is sealed, unreachable, or returned an
     # offer that failed the controller's independent re-verification (signer availability/integrity
     # — never a worker fault; the enrollment private key never enters the non-root API process)
