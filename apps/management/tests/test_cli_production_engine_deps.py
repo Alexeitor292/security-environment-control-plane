@@ -13,6 +13,8 @@ import dataclasses
 
 import pytest
 from secp_management import ManagementError, cli
+from secp_management.auth_cli import AuthCliDeps
+from secp_management.enrollment_cli import EnrollmentCliDeps
 
 # --- Stream B integration tripwire ----------------------------------------------------------------
 
@@ -352,3 +354,41 @@ def test_composing_the_credential_provider_resolves_no_locator(monkeypatch):
     monkeypatch.setattr(locator_module, "FileControllerApiLocatorProvider", _CountingLocator)
     _enrollment_deps_with_stubbed_host(monkeypatch)
     assert calls == [], "composition resolved the locator; an unbootstrapped host would seal"
+
+
+@pytest.mark.parametrize("boom", [NameError, AttributeError, ImportError])
+def test_a_coding_defect_in_a_composition_is_loud_not_a_silent_seal(monkeypatch, boom):
+    """The characteristic hazard of this file: a broad `except` around a composition converts ANY
+    error inside it into a silent, total, host-only degradation. That is how an `os` name out of
+    scope in `_production_auth_deps` would have sealed the auth deps on every real host while every
+    test passed -- invisible on a dev box where the composition already seals for another reason.
+
+    Environmental failures must still seal (that is the point of the handler). Programming errors
+    must propagate.
+    """
+    import secp_commissioning.runtime as runtime
+
+    def _explode():
+        raise boom("a coding defect, not an environment")
+
+    monkeypatch.setattr(runtime, "RealFilesystem", _explode)
+    with pytest.raises(boom):
+        cli._production_auth_deps()
+    with pytest.raises(boom):
+        cli._production_enrollment_deps()
+
+
+def test_an_environmental_failure_still_seals_rather_than_propagating(monkeypatch):
+    """The other half: a non-POSIX host or an unprovisioned filesystem must still fail closed."""
+    import secp_commissioning.runtime as runtime
+    from secp_commissioning.runtime import FilesystemError
+
+    def _unsupported():
+        raise FilesystemError("filesystem_backend_non_posix")
+
+    monkeypatch.setattr(runtime, "RealFilesystem", _unsupported)
+    auth = cli._production_auth_deps()
+    assert isinstance(auth, AuthCliDeps)
+    # sealed, and honest about not knowing which provider is live
+    assert auth.token_file_active() is None
+    assert isinstance(cli._production_enrollment_deps(), EnrollmentCliDeps)

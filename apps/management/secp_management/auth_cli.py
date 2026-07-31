@@ -254,9 +254,15 @@ def _never_cancelled() -> bool:
     return False
 
 
-def _token_file_inactive() -> bool:
-    """The default: no protected token FILE is selected, so the OS keystore is the live provider."""
-    return False
+def _token_file_unknown() -> bool | None:
+    """The shipped default: it is NOT KNOWN which provider authenticated commands will use.
+
+    Deliberately not ``False``. ``False`` is the reassuring answer — "the keystore is live" — and
+    the sealed default is reached exactly when deps composition FAILED, which is when that claim is
+    least justified. Reporting the comfortable value for an unknown is the same defect as reporting
+    "nothing to revoke" for a credential that merely could not be read.
+    """
+    return None
 
 
 @dataclass
@@ -280,7 +286,7 @@ class AuthCliDeps:
     #: Injected rather than read here: this module must never touch the environment (the credential
     #: surface is scanned for that), and the env read already lives in ``cli.py`` where the token
     #: provider is composed. See :func:`auth_status` for why it is reported.
-    token_file_active: Callable[[], bool] = _token_file_inactive
+    token_file_active: Callable[[], bool | None] = _token_file_unknown
 
 
 @dataclass(frozen=True)
@@ -323,6 +329,8 @@ def _prompt_payload(authorization: DeviceAuthorization) -> dict:
 #: The provider an AUTHENTICATED command will use, as reported by ``auth status``.
 PROVIDER_OS_KEYSTORE = "os_keystore"
 PROVIDER_TOKEN_FILE = "token_file"
+#: The probe did not run, or the deps did not compose — so which provider is live is NOT KNOWN.
+PROVIDER_UNKNOWN = "unknown"
 
 
 def _active_provider_report(deps: AuthCliDeps) -> dict:
@@ -331,14 +339,21 @@ def _active_provider_report(deps: AuthCliDeps) -> dict:
     ``token_file_override_active`` is the operator-facing warning: when it is true, ``auth login``
     can succeed and store a perfectly good credential that NOTHING will use, because the explicitly
     selected token file wins. Without this the two facts never appear together.
+
+    THREE values, not two. A failed probe and a sealed composition both mean the answer is UNKNOWN,
+    and they must not report ``os_keystore``/``false`` — the reassuring pair — because that is a
+    positive claim made precisely when nothing was established. ``token_file_override_active`` is
+    OMITTED rather than set false when unknown, so no boolean can be read as a settled answer.
     """
     try:
-        file_active = bool(deps.token_file_active())
+        file_active = deps.token_file_active()
     except Exception:  # noqa: BLE001 - a broken probe must not break a read-only status
-        file_active = False
+        file_active = None
+    if file_active is None:
+        return {"active_token_provider": PROVIDER_UNKNOWN}
     return {
         "active_token_provider": PROVIDER_TOKEN_FILE if file_active else PROVIDER_OS_KEYSTORE,
-        "token_file_override_active": file_active,
+        "token_file_override_active": bool(file_active),
     }
 
 

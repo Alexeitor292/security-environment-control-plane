@@ -378,6 +378,9 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         from secp_management.worker_enroller import build_worker_enroller
 
         return EnrollmentCliDeps(controller_client=client, worker_enroller=build_worker_enroller())
+    # Same rule as `_production_auth_deps`: an environmental failure seals, a coding defect is loud.
+    except (NameError, AttributeError, ImportError):
+        raise
     except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
         return EnrollmentCliDeps()
 
@@ -409,6 +412,14 @@ def _production_auth_deps() -> AuthCliDeps:
             # token file is overriding the keystore they just logged in to.
             token_file_active=lambda: bool(os.environ.get(OPERATOR_TOKEN_FILE_ENV, "")),
         )
+    # A coding defect must be LOUD, never a silent total degradation. This `except` exists for
+    # legitimate environmental failures (a non-POSIX host, an unprovisioned filesystem), but it
+    # previously swallowed programming errors too: an `os` name that was out of scope here would
+    # have sealed the auth deps on every real host while every test passed, visible nowhere. These
+    # three classes are never a legitimate runtime condition in a first-party composition, so they
+    # propagate instead of being converted into a sealed default.
+    except (NameError, AttributeError, ImportError):
+        raise
     except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
         return AuthCliDeps()
 
@@ -483,15 +494,27 @@ _HUMAN_LEADING_KEYS = ("role", "mode", "status", "ok", "trusted", "reason_code")
 
 #: Report fields that carry a WARNING an operator must not miss, and the text for each. A report
 #: field alone is not a warning: it prints among a dozen others and reads as noise.
-_HUMAN_WARNINGS = {
-    "token_file_override_active": (
-        "NOTE: SECP_OPERATOR_TOKEN_FILE is set, so authenticated commands use that FILE and\n"
-        "  not the OS keystore. A successful 'auth login' will not change which token they send."
-    ),
-    "token_still_live": (
-        "WARNING: the local credential was deleted, but the token is STILL VALID at the\n"
-        "  identity provider and remains usable until it expires. The session was NOT ended."
-    ),
+_HUMAN_WARNINGS: dict[str, dict[object, str]] = {
+    "token_file_override_active": {
+        True: (
+            "NOTE: SECP_OPERATOR_TOKEN_FILE is set, so authenticated commands use that FILE\n"
+            "  and not the OS keystore. A successful 'auth login' will not change which token\n"
+            "  they send."
+        )
+    },
+    "active_token_provider": {
+        "unknown": (
+            "NOTE: which token provider authenticated commands will use could not be\n"
+            "  determined (deps did not compose, or the probe failed). This is NOT a statement\n"
+            "  that the OS keystore is live."
+        )
+    },
+    "token_still_live": {
+        True: (
+            "WARNING: the local credential was deleted, but the token is STILL VALID at the\n"
+            "  identity provider and remains usable until it expires. The session was NOT ended."
+        )
+    },
 }
 
 
@@ -538,7 +561,12 @@ def _render_human(exit_code: int, payload: dict) -> str:
             parts.append(f"{key}={value}")
 
     line = " ".join(str(p) for p in parts)
-    warnings = [text for key, text in _HUMAN_WARNINGS.items() if payload.get(key) is True]
+    warnings = [
+        text
+        for key, by_value in _HUMAN_WARNINGS.items()
+        for trigger, text in by_value.items()
+        if key in payload and payload[key] == trigger and type(payload[key]) is type(trigger)
+    ]
     for text in warnings:
         line += f"\n  {text}"
     return line + "\n"

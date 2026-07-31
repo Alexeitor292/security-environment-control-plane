@@ -1271,11 +1271,27 @@ def test_the_provider_never_reveals_the_token_in_a_repr():
 # --- N2: which provider is actually live ----------------------------------------------------------
 
 
-def test_auth_status_names_the_os_keystore_when_no_token_file_is_set():
-    code, report = auth_status(_deps(store=_working_store())[0])
+def test_auth_status_names_the_os_keystore_when_the_probe_says_so():
+    deps, _w, _p = _deps(store=_working_store(), token_file_active=lambda: False)
+    code, report = auth_status(deps)
     assert code == EXIT_OK
     assert report["active_token_provider"] == "os_keystore"
     assert report["token_file_override_active"] is False
+
+
+def test_auth_status_says_unknown_rather_than_the_reassuring_answer():
+    """The shipped default is reached exactly when deps composition FAILED — which is when
+    "the keystore is live" is least justified. Reporting the comfortable value for an unknown is
+    the same defect as reporting "nothing to revoke" for a credential that could not be read."""
+    from secp_management.cli import _render_human
+
+    code, report = auth_status(AuthCliDeps(credential_store=_working_store()))
+    assert code == EXIT_OK
+    assert report["active_token_provider"] == "unknown"
+    # no boolean may be present, because a boolean would read as a settled answer
+    assert "token_file_override_active" not in report
+    assert "could not be" in _render_human(code, report)
+    assert "NOT a statement" in _render_human(code, report)
 
 
 def test_auth_status_warns_when_a_token_file_silently_overrides_the_keystore():
@@ -1294,14 +1310,16 @@ def test_auth_status_warns_when_a_token_file_silently_overrides_the_keystore():
     assert "not the OS keystore" in rendered or "not\n  the OS keystore" in rendered
 
 
-def test_a_broken_override_probe_never_breaks_a_read_only_status():
+def test_a_broken_override_probe_reports_unknown_and_never_breaks_a_read_only_status():
     def _explode():
         raise RuntimeError("probe failed")
 
     deps, _w, _p = _deps(store=_working_store(), token_file_active=_explode)
     code, report = auth_status(deps)
     assert code == EXIT_OK
-    assert report["active_token_provider"] == "os_keystore"
+    # the status still succeeds -- but it does NOT claim the keystore is live
+    assert report["active_token_provider"] == "unknown"
+    assert "token_file_override_active" not in report
 
 
 # --- N1: the terminal-disclosure property now covers EVERY command group -------------------------
@@ -1343,8 +1361,10 @@ _EVERY_GROUP_INVOCATION = (
         "--tls-mode",
         "reverse_proxy",
     ],
-    ["enrollment", "invite", "create", "--site", "s", "--label", "l"],
-    ["worker", "status"],
+    ["enrollment", "invite", "create", "--site", "s"],
+    ["enrollment", "status", "--enrollment-id", "e"],
+    ["worker", "enroll", "--invitation", "/nonexistent"],
+    ["worker", "enrollment", "status", "--invitation", "/nonexistent"],
     ["auth", "status"],
     ["auth", "login"],
     ["auth", "logout"],
@@ -1362,8 +1382,11 @@ def test_no_command_groups_terminal_output_can_carry_a_secret(argv):
 
     try:
         code, report = run(list(argv))
-    except SystemExit:
-        pytest.skip(f"argv not accepted by the parser: {argv}")
+    except SystemExit as exc:  # pragma: no cover - a parser-invalid entry is a defect, not a skip
+        raise AssertionError(
+            f"{argv} is not accepted by build_parser(); a permanently-skipping entry in this "
+            "table asserts nothing on any host, forever"
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"group produces no report on this host: {type(exc).__name__}")
     rendered = _render_human(code, report)
@@ -1389,12 +1412,11 @@ _FORBIDDEN_EXACT_FIELD_NAMES = frozenset({"authorization", "bearer", "token", "a
 _REVIEWED_FIELD_EXCEPTIONS = frozenset({"has_secret_store"})
 
 
-def _report_key_literals(module) -> set[str]:
-    """Every string literal used as a dict key in a module — a superset of its report fields."""
+def _report_key_literals(path) -> set[str]:
+    """Every string literal used as a dict key in a file — a superset of its report fields."""
     import ast
-    import pathlib as _pathlib
 
-    tree = ast.parse(_pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     keys: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
@@ -1404,22 +1426,49 @@ def _report_key_literals(module) -> set[str]:
     return keys
 
 
+def _report_producing_modules() -> list:
+    """DISCOVER the modules that build reports, rather than listing them.
+
+    A hardcoded tuple is the defect this program has now hit three times: an enumeration that
+    silently stops covering what it was written to cover. A new ``*_cli.py`` — or whatever another
+    stream lands — would simply not be scanned, and a secret-shaped field name in it would reach
+    the terminal with this guard still green.
+
+    The seed is the report marker itself: every report this CLI renders carries a ``"command"``
+    key, so any module in the package that builds a dict with that key is report-producing and must
+    be scanned. That derives coverage from the code rather than from someone remembering.
+    """
+    import pathlib as _pathlib
+
+    import secp_management
+
+    pkg = _pathlib.Path(secp_management.__file__).parent
+    return sorted(path for path in pkg.glob("*.py") if "command" in _report_key_literals(path))
+
+
+def test_the_report_module_discovery_finds_the_known_producers():
+    """Anti-vacuity for the discovery itself: if the seed stopped matching, the guard below would
+    scan nothing and pass. These three are known to build reports today."""
+    found = {path.name for path in _report_producing_modules()}
+    for expected in ("engine.py", "enrollment_cli.py", "auth_cli.py"):
+        assert expected in found, f"{expected} builds reports but discovery missed it"
+    assert len(found) >= 3
+
+
 def test_no_report_producing_module_emits_a_secret_shaped_field_name():
     """Host-independent, and the control that actually holds the line: the renderer prints every
     scalar, so a field named like a secret would reach the terminal by default. This fails in the
     file another stream would have to edit, rather than only on a host that can run that group."""
-    from secp_management import auth_cli, engine, enrollment_cli
-
     offenders = []
-    for module in (engine, enrollment_cli, auth_cli):
-        for key in _report_key_literals(module):
+    for path in _report_producing_modules():
+        for key in _report_key_literals(path):
             if key in _REVIEWED_FIELD_EXCEPTIONS:
                 continue
             lowered = key.lower()
             if lowered in _FORBIDDEN_EXACT_FIELD_NAMES or any(
                 shape in lowered for shape in _FORBIDDEN_REPORT_FIELD_SHAPES
             ):
-                offenders.append(f"{module.__name__}:{key}")
+                offenders.append(f"{path.name}:{key}")
     assert offenders == [], (
         f"secret-shaped report field names would print to the terminal by default: {offenders}"
     )
