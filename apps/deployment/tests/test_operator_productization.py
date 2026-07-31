@@ -13,6 +13,13 @@ relative order only matters when two checks are unmet at once.
 rung below it at the pure layer, which is what pins the ORDER. Both are needed; neither subsumes
 the other.
 
+That the second one pins the order is itself proved rather than asserted:
+:func:`test_every_reordering_of_resolve_status_is_detected` re-derives, on every run, that only the
+identity ordering of the nine guards reproduces the pinned status vector. It runs against a
+transcribed model, so the model is bound to the real function twice — agreement over all 1024 flag
+combinations, and a guard count taken from the AST — because an unbound model would prove a
+property of the transcription rather than of the code.
+
 Nothing in this module builds a composition aggregate, constructs a ``Worker``, calls
 ``run_plan_generation``, resolves a credential, or contacts any infrastructure.
 """
@@ -159,10 +166,10 @@ _CUMULATIVE = {
 }
 
 
-def _cumulative_sections(index: int) -> dict:
-    """Section dicts in which every flag BEFORE ``index`` is satisfied, and the flag at ``index``
-    and every flag after it is unmet."""
-    f = {name: (i < index) for i, name in enumerate(_LADDER_FLAGS)}
+def _sections_from_flags(f: dict) -> dict:
+    """The section dicts ``build_prerequisite_ladder`` and ``_resolve_status`` consume, built from
+    a flat flag map. NOTE both host-observation sub-flags are tied to one flag, ``host_coherent``:
+    ``_resolve_status`` only ever reads them as a conjunction."""
     return {
         "seals": {"seals_correct": f["seals_correct"]},
         "profile": {
@@ -186,12 +193,35 @@ def _cumulative_sections(index: int) -> dict:
     }
 
 
+def _cumulative_sections(index: int) -> dict:
+    """Sections in which every flag BEFORE ``index`` is satisfied, and the flag at ``index`` and
+    every flag after it is unmet."""
+    return _sections_from_flags({name: (i < index) for i, name in enumerate(_LADDER_FLAGS)})
+
+
+def _resolve_kwargs(s: dict) -> dict:
+    """The exact keyword arguments ``_resolve_status`` takes, from a section dict."""
+    return {
+        "seals": s["seals"],
+        "installed_trust_ok": s["installed_trust_ok"],
+        "profile_present": s["profile"]["present"],
+        "profile_schema_valid": s["profile"]["schema_valid"],
+        "expected_provided": s["identity"]["expected_provided"],
+        "identity_agrees": s["identity"]["agrees"],
+        "host": s["host"],
+    }
+
+
 @pytest.mark.parametrize("index", range(len(_LADDER_FLAGS)))
 def test_ladder_order_matches_resolve_status_under_cumulative_faults(index):
     """The single-fault matrix above cannot see an ordering change: relative order only matters
     when two checks are unmet at once. Here rung ``index`` and everything below it are unmet, so
-    the first-unmet rung is unambiguous and its status pins the order. Measured: every one of the
-    9! = 362,880 orderings of ``_resolve_status``'s nine checks is detected by this matrix.
+    the first-unmet rung is unambiguous and its status pins the order. Every one of the
+    9! = 362,880 orderings of ``_resolve_status``'s nine GUARDS is detected by this matrix — nine
+    guards over ten flags, because the host-observation and host-readiness guards are each a
+    conjunction of two. That result is not a comment: it is re-derived on every run by
+    :func:`test_every_reordering_of_resolve_status_is_detected`, so it cannot lapse silently if a
+    tenth guard is added or a status string is reused.
 
     Driven at the PURE layer rather than through ``build_verification``, which cannot reach rung 1
     at all: ``_read_seals()`` reads the real constants, so ``seals_correct`` cannot be driven false
@@ -213,21 +243,98 @@ def test_ladder_order_matches_resolve_status_under_cumulative_faults(index):
         compositions_verified=False,
         compositions_reason=None,
     )
-    status = _resolve_status(
-        seals=s["seals"],
-        installed_trust_ok=s["installed_trust_ok"],
-        profile_present=s["profile"]["present"],
-        profile_schema_valid=s["profile"]["schema_valid"],
-        expected_provided=s["identity"]["expected_provided"],
-        identity_agrees=s["identity"]["agrees"],
-        host=s["host"],
-    )
+    status = _resolve_status(**_resolve_kwargs(s))
 
     assert next_blocking_prerequisite(ladder)["id"] == rung_id
     # The cross-check: the ladder's own declared status for that rung.
     assert _spec(rung_id).status_when_unmet == status
     # A third, INDEPENDENT pin — a coordinated edit must now defeat three places, not two.
     assert status == expected_status
+
+
+# --------------------------------------------------------------------------- the ordering proof,
+# re-derived on every run rather than asserted in prose
+
+#: ``_resolve_status`` transcribed as (name, satisfied-predicate, status when NOT satisfied). This
+#: is a MODEL, so it is bound to the real function two ways below — by agreement over every flag
+#: combination, and by guard count. Without those binds the permutation result would be a property
+#: of this transcription rather than of the code.
+_GUARDS = (
+    ("seals_correct", lambda k: k["seals"]["seals_correct"], "seals_unsafe"),
+    ("profile_present", lambda k: k["profile_present"], "sealed_but_unprovisioned"),
+    ("profile_schema_valid", lambda k: k["profile_schema_valid"], "profile_invalid"),
+    ("expected_provided", lambda k: k["expected_provided"], "sealed_but_unprovisioned"),
+    ("identity_agrees", lambda k: k["identity_agrees"], "identity_mismatch"),
+    ("installed_trust_ok", lambda k: k["installed_trust_ok"], "install_untrusted"),
+    ("host_attempted", lambda k: k["host"]["attempted"], "sealed_but_unprovisioned"),
+    (
+        "host_observation",
+        lambda k: k["host"]["inspected"] and k["host"]["coherent"],
+        "host_unavailable",
+    ),
+    (
+        "host_readiness",
+        lambda k: (
+            k["host"]["operator_prepared_and_disabled"]
+            and k["host"]["ordinary_running_and_healthy"]
+        ),
+        "host_not_ready",
+    ),
+)
+
+
+def _model_resolve(order, kwargs: dict) -> str:
+    for _name, satisfied, status in order:
+        if not satisfied(kwargs):
+            return status
+    return "sealed_prepared"
+
+
+def test_the_model_agrees_with_the_real_resolve_status_on_every_flag_combination():
+    """First bind: over all 2**10 = 1024 flag combinations, not just the cumulative ten.
+
+    If ``_resolve_status`` gains a guard, drops one, or changes a returned status, the model stops
+    agreeing here — so the permutation proof below can never be measuring a stale transcription.
+    """
+    for bits in range(2 ** len(_LADDER_FLAGS)):
+        flags = {name: bool(bits >> i & 1) for i, name in enumerate(_LADDER_FLAGS)}
+        kwargs = _resolve_kwargs(_sections_from_flags(flags))
+        assert _model_resolve(_GUARDS, kwargs) == _resolve_status(**kwargs), flags
+
+
+def test_the_model_has_exactly_one_guard_per_branch_in_resolve_status():
+    """Second bind: a tenth guard must not slip past the permutation proof unnoticed."""
+    import ast
+    import inspect
+
+    from secp_operator_deployment import verify
+
+    fn = ast.parse(inspect.getsource(verify._resolve_status)).body[0]
+    branches = [node for node in fn.body if isinstance(node, ast.If)]
+    assert len(branches) == len(_GUARDS) == 9
+
+
+def test_every_reordering_of_resolve_status_is_detected():
+    """The measured claim, re-derived: of the 9! orderings of the nine guards, ONLY the identity
+    reproduces the status vector the cumulative matrix pins. Every other ordering changes at least
+    one of the ten reported statuses and is therefore caught."""
+    from itertools import permutations
+
+    states = [_resolve_kwargs(_cumulative_sections(i)) for i in range(len(_LADDER_FLAGS))]
+    canonical = [_model_resolve(_GUARDS, s) for s in states]
+
+    # The vector is the one the parametrised matrix above already pins, independently.
+    assert canonical == [_CUMULATIVE[flag][1] for flag in _LADDER_FLAGS]
+
+    undetected = [
+        tuple(g[0] for g in perm)
+        for perm in permutations(_GUARDS)
+        if [_model_resolve(perm, s) for s in states] == canonical
+    ]
+    assert undetected == [tuple(g[0] for g in _GUARDS)], (
+        f"{len(undetected) - 1} non-identity ordering(s) reproduce the pinned status vector; "
+        "the cumulative matrix no longer pins the order"
+    )
 
 
 def test_identity_mismatch_is_reached_when_profile_and_expected_disagree():
