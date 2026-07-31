@@ -287,9 +287,15 @@ function appearsIn(serialised: string, value: string): boolean {
   return serialised.includes(value) || serialised.includes(jsonEncoded(value));
 }
 
-/** A PEM is the shape of value that broke the old format: inherently multi-line. Stream B is
- *  adding `controller_ca_bundle_pem`; this proves the FORMAT is already safe for one, using a
- *  field that exists today, so the format is not what has to change when the field lands. */
+/**
+ * A multi-line fixture, in the shape of the value most likely to be one in practice.
+ *
+ * No field on `EnrollmentInvitation` is multi-line today, and none is planned — the controller CA
+ * reaches the worker through the CLI's own invitation file, not the API response. This fixture is
+ * NOT anticipating a field. It exists because every hand-off field is typed as an unconstrained
+ * server-chosen string: nothing in this contract forbids a newline, so the serialisation and every
+ * assertion about it must be correct for one. The old line-delimited format was not.
+ */
 const PEM = "-----BEGIN CERTIFICATE-----\nAAAA\nBBBB\n-----END CERTIFICATE-----\n";
 
 const HANDOFF_KEYS = [

@@ -412,12 +412,16 @@ export function handoffPayload(invitation: EnrollmentInvitation): Record<string,
  *
  * JSON rather than newline-delimited `key: value`, for two reasons that are not stylistic:
  *
- *  1. It is the format the shipped CLI already reads. `load_invitation_file` does a bounded read
- *     and `json.loads`, then requires exactly these eight API-named string keys. A newline-
- *     delimited block had no machine-readable path out of this interface at all: an operator could
- *     not save it and run `secpctl worker enroll --invitation <file>`. Now they can, byte for byte.
- *  2. A newline-delimited format cannot carry a multi-line value. A PEM certificate is inherently
- *     multi-line, so the previous format structurally could not represent one.
+ *  1. It is the format the shipped CLI already reads, and this is the load-bearing reason.
+ *     `load_invitation_file` does a bounded read and `json.loads`, then requires exactly these
+ *     eight API-named string keys. A newline-delimited block had no machine-readable path out of
+ *     this interface at all: an operator could not save it and run
+ *     `secpctl worker enroll --invitation <file>`. Now they can, byte for byte.
+ *  2. `key: value` lines cannot represent every value the contract permits. Each of these fields is
+ *     typed as an unconstrained string the server chooses; nothing in the browser stops one from
+ *     containing a newline, and a line-delimited block would silently split it into two records.
+ *     No field is multi-line today — this is about the format being closed under what the contract
+ *     already allows, not about any particular field arriving later.
  */
 export function handoffText(invitation: EnrollmentInvitation): string {
   return JSON.stringify(handoffPayload(invitation), null, 2);

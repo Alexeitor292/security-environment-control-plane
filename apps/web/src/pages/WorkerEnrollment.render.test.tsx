@@ -106,7 +106,8 @@ function html(over: Partial<WorkerEnrollmentViewProps> = {}): string {
  * fail, green forever while testing nothing:
  *
  *   * the hand-off block is now `JSON.stringify` output, so a real newline is emitted as the two
- *     characters `\` and `n`. A PEM is exactly this case, and Stream B is adding one.
+ *     characters `\` and `n`. Every hand-off field is an unconstrained server-chosen string, so a
+ *     value containing one is permitted by the contract whether or not any field is expected to.
  *   * `renderToStaticMarkup` escapes `&`, `<`, `>`, `"` and `'` in text nodes.
  *
  * All four combinations are checked so the NEGATIVE direction stays honest, and every block of

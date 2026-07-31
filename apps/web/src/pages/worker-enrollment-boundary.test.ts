@@ -174,8 +174,9 @@ describe("enrollment page I/O boundary", () => {
   });
 
   // The hand-off block is now a machine-readable artefact the operator saves to a file. Serialising
-  // it here rather than hand-assembling text is what keeps a multi-line value (a PEM) representable
-  // and keeps the document parseable by `load_invitation_file`.
+  // it here rather than hand-assembling text is what keeps the document parseable by
+  // `load_invitation_file`, and what keeps it correct for any string the contract permits —
+  // including one containing a newline, which a line-delimited block would split in two.
   it("serialises the hand-off block rather than concatenating it", () => {
     expect(MODULE_CODE).toContain("JSON.stringify(handoffPayload(invitation), null, 2)");
   });
