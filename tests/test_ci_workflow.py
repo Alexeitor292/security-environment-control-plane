@@ -708,3 +708,55 @@ def test_python_image_smoke_is_fail_closed_on_skip_or_failure(wf):
     assert "tests < 5" in run
     assert "skipped != 0" in run
     assert "failures != 0" in run
+
+
+# --- the optional `worker` extra must be installed where the shared corpus EXECUTES -------------
+#
+# `temporalio` is declared only in the `worker` extra (pyproject.toml). Every install site in the
+# workflow used `.[dev]`, so eight tests reached `pytest.importorskip("temporalio")` and SKIPPED in
+# CI while passing on any developer machine -- among them a fail-closed worker guard and the
+# regression for a startup-fatal import bug. The shard jobs have no no-skip enforcement, so nothing
+# surfaced it. These proofs stop the extra being dropped again in silence.
+
+WORKER_EXTRA_TESTS = (
+    "apps/api/tests/test_temporal_sandbox_validation.py",
+    "apps/api/tests/test_worker_fail_closed.py",
+    "apps/api/tests/test_worker_readiness_timing.py",
+)
+
+
+def test_the_shard_job_installs_the_worker_extra(wf):
+    """The job that executes the shared corpus must have `temporalio` available."""
+    run = _run_text(_jobs(wf)["backend-pytest"])
+    assert '".[dev,worker]"' in run, (
+        "backend-pytest executes the shared corpus, so it must install the worker extra or the "
+        "temporalio-gated tests silently skip"
+    )
+
+
+def test_the_shard_job_proves_the_worker_extra_is_present(wf):
+    """Installing it is not enough: a revert to `.[dev]` must FAIL the job rather than restore the
+    skip. The import step is what makes that true."""
+    run = _run_text(_jobs(wf)["backend-pytest"])
+    assert "import temporalio" in run, (
+        "backend-pytest must prove temporalio is importable, otherwise dropping the extra silently "
+        "re-skips eight tests"
+    )
+
+
+def test_the_temporalio_gated_modules_are_in_the_authoritative_corpus(suite):
+    """The extra only helps if these modules are actually collected by the sharded corpus."""
+    assert "apps/api/tests" in suite["roots"]
+
+
+def test_the_worker_extra_is_not_quietly_added_everywhere(wf):
+    """The narrowest placement is deliberate: only the job that EXECUTES the corpus needs it.
+
+    Recorded as a test so the choice is visible if someone later widens it -- widening is not
+    forbidden, but it should be a decision rather than a drift."""
+    jobs = _jobs(wf)
+    with_extra = {name for name, job in jobs.items() if '".[dev,worker]"' in _run_text(job)}
+    assert with_extra == {"backend-pytest"}, (
+        f"the worker extra is installed in {sorted(with_extra)}; if that is intended, update this "
+        "test deliberately"
+    )

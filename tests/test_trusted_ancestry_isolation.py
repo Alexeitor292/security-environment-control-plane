@@ -25,6 +25,7 @@ import copy
 import errno
 import json
 import os
+import posixpath
 import re
 import stat
 import sys
@@ -189,9 +190,17 @@ def test_no_source_or_test_chowns_or_chmods_a_fixed_system_parent() -> None:
 
     The intermittent failures were consistent with an earlier test mutating a shared parent, and
     that hypothesis could not be ruled out by inspection alone. This asserts it structurally: no
-    source or test file may ``chown``/``chmod`` a fixed system parent, whatever the ordering."""
+    source or test file may ``chown``/``chmod`` a fixed system parent, whatever the ordering.
+
+    Matched on CANONICAL paths, not on quoted literals. The literal form this used to use
+    shared the review finding that hit the workflow scan: a mode change whose argument is written
+    with a trailing slash, a doubled leading slash, or a trailing dot names the same target and
+    every one of those spellings evaded it. See `_canonical_path`.
+
+    (Spelled without a quoted fixed-parent literal beside a mode-change call, because this scan
+    reads its own file and treats comment text as an act -- it caught these very lines twice.)"""
     root = Path(__file__).resolve().parents[1]
-    literals = tuple(f'"{p}"' for p in FIXED_SYSTEM_PARENTS if p != "/") + ("'/etc'", '"/etc"')
+    fixed = set(FIXED_SYSTEM_PARENTS)
     offenders: list[str] = []
     for path in list(root.glob("apps/**/*.py")) + list(root.glob("tests/**/*.py")):
         if "__pycache__" in path.parts:
@@ -200,7 +209,7 @@ def test_no_source_or_test_chowns_or_chmods_a_fixed_system_parent() -> None:
         for line in text.splitlines():
             if ("os.chown(" not in line) and ("os.chmod(" not in line):
                 continue
-            if any(literal in line for literal in literals):
+            if _quoted_path_literals(line) & fixed:
                 offenders.append(f"{path.relative_to(root)}: {line.strip()[:80]}")
     assert offenders == [], offenders
 
@@ -722,6 +731,10 @@ _NAMESPACE_ESCAPES = ("docker ", "podman ", "ssh ", "chroot ", "nsenter ", "unsh
 #: comment text as an act -- it caught this very comment on the first run.
 _PATH_LITERAL = re.compile(r"/[A-Za-z0-9_./-]*")
 
+#: An absolute path written as a Python string literal -- the form a mode-change call takes when
+#: its target really is a path, as opposed to pathlib's `/` join operator.
+_QUOTED_PATH_LITERAL = re.compile(r"""["'](/[^"']*)["']""")
+
 #: Container keys/flags that would import host state into the environment the gate attests. A bind
 #: mount of the host's `/etc` reinstates precisely the nondeterministic directory this work exists
 #: to remove -- and it would do so while every other proof here stayed green, because the job would
@@ -746,8 +759,37 @@ def _executable_lines(run: str) -> list[str]:
     return [line for line in run.splitlines() if not line.lstrip().startswith("#")]
 
 
+def _canonical_path(raw: str) -> str:
+    """Collapse a written path to the single spelling the fixed-parent comparison uses.
+
+    REVIEW FINDING, and a real one: `_PATH_LITERAL` matches the trailing slash, so
+    `chown -R root:root /etc/` yielded the literal `/etc/`, which is not `==` to the `/etc` in
+    `FIXED_SYSTEM_PARENTS`. The intersection was empty and the repair scan silently passed -- a
+    fence could have repaired the very posture the gate exists to observe, which is the case the
+    comment on `assert_no_root_fence_repairs_a_fixed_system_parent` calls worse than a missing
+    gate. `/etc/`, `//etc`, `/etc/.` and `/etc/..` all evaded it.
+
+    `posixpath.normpath` alone is not enough: it deliberately preserves exactly two leading slashes
+    (`//etc` stays `//etc`), so runs of slashes are collapsed first."""
+    return posixpath.normpath(re.sub(r"/{2,}", "/", raw))
+
+
 def _path_literals(text: str) -> set[str]:
-    return set(_PATH_LITERAL.findall(text))
+    """Every absolute path a SHELL line names, in canonical form.
+
+    Bare tokens are intended here: `chown root:root /` has no quotes and must still be seen."""
+    return {_canonical_path(found) for found in _PATH_LITERAL.findall(text)}
+
+
+def _quoted_path_literals(text: str) -> set[str]:
+    """Every absolute path a PYTHON line names as a string literal, in canonical form.
+
+    The bare-token form above cannot be used on Python source: `os.chmod(mount / f, 0o600)` uses
+    `/` as pathlib's join operator, which reads as the literal path `/` -- a fixed system parent --
+    and produced 14 false offenders across `apps/api/tests` on the first run of this. Python spells
+    a real path as a string, so requiring quotes separates the operator from the target while still
+    catching every evading spelling the review finding identified."""
+    return {_canonical_path(found) for found in _QUOTED_PATH_LITERAL.findall(text)}
 
 
 def _is_digest_pinned(image: str) -> bool:
@@ -1320,14 +1362,74 @@ def test_the_accounting_proof_fails_when_a_fence_is_parked_in_the_held_set(
         assert_controlled_environment(_workflow(), _manifest())
 
 
-def test_the_repair_proof_fails_when_a_fence_chowns_a_fixed_system_parent() -> None:
+@pytest.mark.parametrize(
+    "repair",
+    [
+        "chown root:root /etc",
+        # every spelling below EVADED this scan until the review finding was fixed: the regression
+        # only ever exercised the no-slash form, so it passed and gave false confidence
+        "chown -R root:root /etc/",
+        "chmod 0755 //etc",
+        "chmod 0755 /etc/.",
+        "chown root:root /etc/systemd/",
+        "chmod 0755 /etc/..",  # spelled as a parent traversal, but the target is `/`
+    ],
+)
+def test_the_repair_proof_fails_when_a_fence_chowns_a_fixed_system_parent(repair: str) -> None:
     """The worst possible break: the gate passes because the posture was REPAIRED, not observed."""
     workflow = _mutated()
     steps = workflow["jobs"]["backend-deployment-root"]["steps"]
     index = next(i for i, step in enumerate(steps) if "apt-get" in str(step.get("run", "")))
-    steps[index]["run"] = str(steps[index]["run"]) + "chown root:root /etc\n"
+    steps[index]["run"] = str(steps[index]["run"]) + repair + "\n"
     with refuses(workflow, _workflow()):
         assert_no_root_fence_repairs_a_fixed_system_parent(workflow)
+
+
+@pytest.mark.parametrize(
+    "target,expected",
+    [
+        ("/etc/", "/etc"),
+        ("//etc", "/etc"),
+        ("/etc/.", "/etc"),
+        ("/etc/..", "/"),
+        ("/etc//systemd//", "/etc/systemd"),
+        ("/root/secp-roottest", "/root/secp-roottest"),  # a legitimate target stays untouched
+        ("/usr/local/bin/docker-compose", "/usr/local/bin/docker-compose"),
+    ],
+)
+def test_a_path_is_compared_by_what_it_targets_not_how_it_is_spelled(
+    target: str, expected: str
+) -> None:
+    """The unit behind the fix, so canonicalisation cannot silently regress to string equality."""
+    assert _canonical_path(target) == expected
+
+
+def test_the_source_scan_also_matches_the_evading_spellings() -> None:
+    """The sibling static scan carried the identical defect and is fixed by the same canonicalising
+    helper -- but on QUOTED literals, because Python spells a path as a string."""
+    fixed = set(FIXED_SYSTEM_PARENTS)
+    for spelling in ('"/etc/"', '"//etc"', '"/etc/."', '"/etc"', "'/etc/systemd/'"):
+        line = f"os.chmod({spelling}, 0o777)"
+        assert _quoted_path_literals(line) & fixed, f"{spelling} evades the scan"
+    # a genuinely different target still does not match
+    assert not _quoted_path_literals('os.chmod("/root/owned", 0o700)') & fixed
+
+
+def test_the_source_scan_does_not_read_pathlib_division_as_the_root_directory() -> None:
+    """The regression for the false-positive half, which is how this fix could break the build.
+
+    `os.chmod(mount / f, 0o600)` uses `/` as pathlib's join operator. A bare-token scan reads that
+    as the path `/` -- a fixed system parent -- and flagged 14 real, correct lines across
+    `apps/api/tests`. Requiring quotes is what separates the operator from a target."""
+    fixed = set(FIXED_SYSTEM_PARENTS)
+    for innocent in (
+        "os.chmod(mount / f, 0o600)",
+        'os.chmod(mount / "manifest.json", 0o600)',
+        "os.chown(base / child, 0, 0)",
+    ):
+        assert not _quoted_path_literals(innocent) & fixed, innocent
+        # and the bare-token extractor is exactly why it cannot be used here
+        assert _path_literals("os.chmod(mount / f, 0o600)") & fixed
 
 
 def test_the_repair_proof_reads_only_executed_lines_not_comments() -> None:

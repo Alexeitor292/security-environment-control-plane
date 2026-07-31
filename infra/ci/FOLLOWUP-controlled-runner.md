@@ -95,6 +95,30 @@ The general lesson, which is the same one this document keeps arriving at: the c
 *trusted*, not *complete*. Differences from a real machine surface as fences refusing, and a
 refusal is the correct outcome — the response is to fix the environment, never to relax the fence.
 
+### The repair scan matched a spelling, not a target
+
+An independent review found that the row above — "a fence chowning `/etc` in its own prelude" —
+was true for exactly **one** spelling. The path extractor matched the trailing slash, so
+`chown -R root:root /etc/` produced the literal `/etc/`, which is not `==` to the `/etc` in
+`FIXED_SYSTEM_PARENTS`. The intersection was empty and the scan passed. `//etc`, `/etc/.` and
+`/etc/..` evaded it the same way, and the regression only ever exercised the no-slash form, so it
+passed and gave false confidence.
+
+This is the failure mode this document is about, committed by the check written to prevent it: a
+claim that reads as a guarantee and holds only for the case its author happened to type.
+
+Paths are now compared by **what they target**, canonicalised (repeated slashes collapsed, then
+`posixpath.normpath`), and the regression is parameterised over every evading spelling. Verified
+the way the reviewer found it: inserting `chown -R root:root /etc/` into all four preludes
+previously left the suite green, and now fails it. The revert was checked by hashing the file
+against the committed blob rather than assumed.
+
+The sibling static scan over `apps/**` and `tests/**` carried the identical defect and is fixed by
+the same helper — but on **quoted** literals only. A bare-token scan reads pathlib's join operator
+in `os.chmod(mount / f, 0o600)` as the path `/`, a fixed system parent, and flagged 14 correct
+lines across `apps/api/tests`. Python spells a real path as a string; requiring quotes separates
+the operator from a target. Both directions now have regressions.
+
 ## Proof discipline
 
 The properties in this document are only worth what their proofs are worth, so each one was broken
@@ -109,6 +133,7 @@ first and the proof watched to see whether it noticed. Nine did not, and all nin
 | a canary that observes neither `/` nor `/etc` | undetected |
 | the manifest's `digest` contradicting its own `image` | undetected |
 | a fence chowning `/etc` in its own prelude | undetected |
+| the same repair spelled `/etc/`, `//etc`, `/etc/.` or `/etc/..` | undetected **twice** — see below |
 | the prerequisite prelude deleted | undetected |
 | a namespace escape spelled with tabs, or via `unshare` | undetected |
 
