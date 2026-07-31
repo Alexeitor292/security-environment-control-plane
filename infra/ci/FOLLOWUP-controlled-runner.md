@@ -56,7 +56,37 @@ depend on identifying it.
 * `backend-realfs-root` — previously the one root-elevated fence with **no** attestation gate — now
   attests `/`, its complete ancestry, and is covered by `REQUIRED_GATED_JOBS`;
 * each controlled fence records the environment's pristine posture (`stat -c '%u %g %n' / /etc`)
-  as its **first** step, before any third-party action runs inside the container.
+  as its **first** step, before any third-party action runs inside the container;
+* the environment is proven to be the pinned image **and nothing else**: no `container.volumes` and
+  no host-importing `container.options` (`--privileged`, `-v`, `--volume`, `--mount`, `--userns`).
+  A digest pin fixes what the layer contains but says nothing about what is mounted over it, so a
+  single `volumes: ["/etc:/etc"]` would have put the hosted VM's `/etc` back inside the namespace
+  the gate attests while every other proof stayed green;
+* the set of root fences is **derived from the workflow**, not hand-maintained, so a new
+  `backend-<x>-root` job cannot appear without being either controlled or explicitly held;
+* the manifest's package list is checked against the packages each prelude actually installs, and
+  the manifest's `base`/`digest` fields against its own `image`, so it cannot describe an
+  environment that is not the one being built.
+
+Every property above has a mutation regression that was **observed failing before the check
+existed** — the nine listed in "Proof discipline" below.
+
+## Proof discipline
+
+The properties in this document are only worth what their proofs are worth, so each one was broken
+first and the proof watched to see whether it noticed. Nine did not, and all nine now do:
+
+| break | was |
+|---|---|
+| a 7th `-root` job with no gate and no `container:` | undetected |
+| host `/etc` bind-mounted via `container.volumes` | undetected |
+| `--privileged` / `-v /:/host` via `container.options` | undetected |
+| a step inserted above the pristine-posture canary | undetected |
+| a canary that observes neither `/` nor `/etc` | undetected |
+| the manifest's `digest` contradicting its own `image` | undetected |
+| a fence chowning `/etc` in its own prelude | undetected |
+| the prerequisite prelude deleted | undetected |
+| a namespace escape spelled with tabs, or via `unshare` | undetected |
 
 Moving the gate is sound because it is **namespace-relative by construction**: it observes the
 filesystem only through `os.lstat` on plain absolute paths, `ancestors_of` is pure string
@@ -86,8 +116,11 @@ Two prerequisites are unverified and must be settled before tier 2 is attempted:
 runs reliably as PID 1 in a privileged container on a cgroup-v2 hosted runner, and whether
 `/dev/kvm` is usable there (which decides whether the nested-VM fallback exists at all).
 
-The stale "attributable to a specific image" comment still appears on those two jobs in
-`.github/workflows/ci.yml`; it should be corrected when they move.
+The stale "attributable to a specific image" comment that used to sit on those two jobs has been
+**corrected in place** rather than deferred to the tier-2 move: it was false the moment run
+`30522895412` was read, and leaving a known-false claim in the workflow because correcting it would
+widen a diff is the failure mode this whole document is about. Both jobs now state plainly that
+they are tier-2 holdouts whose green is a coin flip. Comment-only; neither job's behaviour changed.
 
 ## Re-dispatch rule for the two remaining uncontrolled fences
 

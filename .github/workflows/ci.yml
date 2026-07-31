@@ -1123,10 +1123,21 @@ jobs:
   # or OpenTofu. (The full 8-service controller stack + real migration are the follow-on 4b job.)
   backend-management-real-adapters-root:
     name: Management real adapters E2E (root, real Docker + systemd)
-    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
-    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
-    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
-    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    # TIER-2 HOLDOUT — still on the nondeterministic hosted VM, and its green is therefore still a
+    # coin flip. This fence depends on the machine's `/etc` ancestry being root:root, and SECP-WSA
+    # showed that is nondeterministic PER VM, not per image: in run 30522895412 sibling jobs of the
+    # SAME run, on the SAME `ImageVersion 20260726.254.1`, observed `/etc` uid=1001 and uid=0.
+    # An earlier revision of this comment claimed pinning makes a recurrence "attributable to a
+    # specific image rather than to 'some runner'". That claim is FALSE and is withdrawn. The pin is
+    # kept because it still removes silent image rollover as one variable, but it is not what would
+    # make this fence's result meaningful.
+    # It cannot move into the controlled environment yet: it drives real systemd units and a real
+    # container runtime, and a GitHub `container:` job has no init system and no daemon. Doing so
+    # needs a job-constructed privileged environment — an operator decision, escalated in
+    # `infra/ci/FOLLOWUP-controlled-runner.md`, not assumed here. Nothing here relaxes the check.
+    # `tests/test_trusted_ancestry_isolation.py` names this job in `NOT_YET_CONTROLLED`, and that
+    # set is machine-checked against both this workflow and `infra/ci/controlled-root-env.json`, so
+    # the gap cannot be forgotten and a third fence cannot be quietly parked alongside it.
     runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test
@@ -1237,10 +1248,21 @@ jobs:
   # enables/starts no operator, submits no workflow, contacts no provider/OpenTofu.
   backend-management-controller-real-adapters-root:
     name: Controller full-stack real adapters + real migration (root, real Docker)
-    # Pinned, not `ubuntu-latest`: this fence depends on the image's `/etc` ancestry being
-    # root:root, and `/etc: not root:root` was observed twice on rolling runners. Pinning removes
-    # silent image rollover as a variable so a future occurrence is attributable to a specific image.
-    # It is a no-op today (`ubuntu-latest` currently resolves to 24.04) and does not relax the check.
+    # TIER-2 HOLDOUT — still on the nondeterministic hosted VM, and its green is therefore still a
+    # coin flip. This fence depends on the machine's `/etc` ancestry being root:root, and SECP-WSA
+    # showed that is nondeterministic PER VM, not per image: in run 30522895412 sibling jobs of the
+    # SAME run, on the SAME `ImageVersion 20260726.254.1`, observed `/etc` uid=1001 and uid=0.
+    # An earlier revision of this comment claimed pinning makes a recurrence "attributable to a
+    # specific image rather than to 'some runner'". That claim is FALSE and is withdrawn. The pin is
+    # kept because it still removes silent image rollover as one variable, but it is not what would
+    # make this fence's result meaningful.
+    # It cannot move into the controlled environment yet: it drives real systemd units and a real
+    # container runtime, and a GitHub `container:` job has no init system and no daemon. Doing so
+    # needs a job-constructed privileged environment — an operator decision, escalated in
+    # `infra/ci/FOLLOWUP-controlled-runner.md`, not assumed here. Nothing here relaxes the check.
+    # `tests/test_trusted_ancestry_isolation.py` names this job in `NOT_YET_CONTROLLED`, and that
+    # set is machine-checked against both this workflow and `infra/ci/controlled-root-env.json`, so
+    # the gap cannot be forgotten and a third fence cannot be quietly parked alongside it.
     runs-on: ubuntu-24.04
     env:
       SECP_APP_ENV: test

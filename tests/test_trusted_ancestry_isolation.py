@@ -24,6 +24,7 @@ import copy
 import errno
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -668,8 +669,45 @@ NOT_YET_CONTROLLED: frozenset[str] = frozenset(
 )
 
 #: Ways a gate could be made to observe some OTHER namespace than the one the product tests use.
-#: A gate that attests a machine the tests never run on proves nothing at all.
-_NAMESPACE_ESCAPES = ("docker ", "podman ", "ssh ", "chroot ", "nsenter ")
+#: A gate that attests a machine the tests never run on proves nothing at all. Scanned against
+#: whitespace-NORMALISED text (see `_assert_runs_in_this_environment`), so a tab- or newline-
+#: separated spelling matches exactly as a space-separated one does.
+_NAMESPACE_ESCAPES = ("docker ", "podman ", "ssh ", "chroot ", "nsenter ", "unshare ")
+
+#: An absolute path as it appears either in shell (`chown root:root /etc`) or in the inline Python
+#: the fences heredoc (a mode change whose first argument is a quoted absolute path). Used to
+#: compare what a line TARGETS against the exact fixed-system-parent literals.
+#: NB deliberately spelled without a quoted `/etc` literal beside a mode-change call, because
+#: `test_no_source_or_test_chowns_or_chmods_a_fixed_system_parent` scans this file too and reads
+#: comment text as an act -- it caught this very comment on the first run.
+_PATH_LITERAL = re.compile(r"/[A-Za-z0-9_./-]*")
+
+#: Container keys/flags that would import host state into the environment the gate attests. A bind
+#: mount of the host's `/etc` reinstates precisely the nondeterministic directory this work exists
+#: to remove -- and it would do so while every other proof here stayed green, because the job would
+#: still declare a digest-pinned `container:`.
+_HOST_IMPORTING_OPTIONS = ("--privileged", "-v ", "--volume", "--mount", "--userns")
+
+
+def _normalised(run: str) -> str:
+    """Collapse every run of whitespace to one space, so token scans cannot be evaded by spelling.
+
+    Without this, `sudo\tdocker\texec` passes a scan for `"docker "` while doing exactly what the
+    scan exists to refuse."""
+    return " ".join(run.split())
+
+
+def _executable_lines(run: str) -> list[str]:
+    """The lines of a `run:` block that actually EXECUTE -- comments stripped.
+
+    These fences carry long explanatory comments inside their `run:` blocks, and a scan that reads
+    them cannot distinguish "this step chowns /etc" from "this step explains that it never chowns
+    /etc". Only executed text may be evidence."""
+    return [line for line in run.splitlines() if not line.lstrip().startswith("#")]
+
+
+def _path_literals(text: str) -> set[str]:
+    return set(_PATH_LITERAL.findall(text))
 
 
 def _is_digest_pinned(image: str) -> bool:
@@ -698,10 +736,15 @@ def _assert_runs_in_this_environment(job: str, role: str, run: str) -> None:
     seen from opposite ends -- so the scan has to cover both, not just the gate.
 
     LIMITATION, recorded rather than fixed: ``_NAMESPACE_ESCAPES`` is a DENYLIST and is therefore
-    inherently incomplete. ``unshare --mount``, a tab-separated spelling, or a wrapper script would
-    all pass it. It raises the cost of an ACCIDENTAL redirect; it is not a defence against a
-    determined one.
+    inherently incomplete. A wrapper script, a differently-named tool, or a redirect assembled at
+    runtime from a variable would all still pass it. It raises the cost of an ACCIDENTAL redirect;
+    it is not a defence against a determined one.
+
+    Two spellings that USED to pass and no longer do: ``unshare`` is now named, and the scan runs
+    against whitespace-normalised text, so a tab-separated or line-broken ``sudo docker exec`` is
+    caught. Both were verified by mutation, not by reading -- see the regressions below.
     """
+    run = _normalised(run)
     for escape in _NAMESPACE_ESCAPES:
         assert escape not in run, (
             f"{job}: the {role} is redirected out of the controlled environment "
@@ -710,10 +753,64 @@ def _assert_runs_in_this_environment(job: str, role: str, run: str) -> None:
         )
 
 
+def _assert_no_host_state_is_imported(job: str, container: dict | str) -> None:
+    """The environment must be the pinned image and NOTHING ELSE.
+
+    A digest pin only fixes what the image layer contains; it says nothing about what is mounted
+    over it afterwards. ``container.volumes: ["/etc:/etc"]`` -- or the same thing spelled
+    ``options: -v /:/host`` -- would put the hosted VM's nondeterministic `/etc` back inside the
+    very namespace the gate attests, while `container:`, the digest pin, the manifest cross-check
+    and every redirect scan all stayed green. That is the exact "green while proving less" shape
+    this suite exists to refuse, so it is checked rather than assumed."""
+    if not isinstance(container, dict):
+        return  # the bare-string form has no volumes and no options to import anything through
+    assert "volumes" not in container, (
+        f"{job}: `container.volumes` mounts host paths into the attested tree, so the ancestry "
+        "the gate walks would no longer come from the pinned layer"
+    )
+    options = _normalised(str(container.get("options", "")))
+    for flag in _HOST_IMPORTING_OPTIONS:
+        assert flag not in f"{options} ", (
+            f"{job}: `container.options` contains {flag.strip()}, which imports host state into "
+            "the environment the gate attests"
+        )
+
+
+def _assert_the_prelude_matches_the_manifest(job: str, steps: list[dict], manifest: dict) -> None:
+    """The manifest's package list must be the list the fence actually installs.
+
+    A documented set that drifts from the executed set is a claim that reads as a disclosure and
+    is not one. Deriving the assertion from the workflow makes the manifest executable."""
+    preludes = [
+        step for step in steps if "apt-get install" in _normalised(str(step.get("run", "")))
+    ]
+    assert len(preludes) == 1, (
+        f"{job}: expected exactly one prerequisite prelude, found {len(preludes)}"
+    )
+    line = next(
+        candidate
+        for candidate in _executable_lines(str(preludes[0]["run"]))
+        if "apt-get install" in candidate
+    )
+    tokens = _normalised(line).split()
+    marker = "--no-install-recommends"
+    assert marker in tokens, f"{job}: the prelude must pin its install to {marker}"
+    installed = sorted(tokens[tokens.index(marker) + 1 :])
+    assert installed == sorted(manifest["packages"]), (
+        f"{job}: the prelude installs {installed}, the manifest declares "
+        f"{sorted(manifest['packages'])}"
+    )
+
+
 def assert_controlled_environment(workflow: dict, manifest: dict) -> None:
     """The SECP-WSA contract, factored so the mutation regressions can drive it directly."""
     pinned = str(manifest["image"])
     assert _is_digest_pinned(pinned), f"the manifest pin is not digest-pinned: {pinned}"
+    # the manifest must not contradict ITSELF: `base` and `digest` are what a human reads and
+    # `image` is what the workflow is checked against, so a split between them is a silent lie.
+    assert pinned == f"{manifest['base']}@{manifest['digest']}", (
+        f"the manifest's own fields disagree: {pinned} != {manifest['base']}@{manifest['digest']}"
+    )
 
     for job in controlled_jobs():
         container = workflow["jobs"][job].get("container")
@@ -722,6 +819,7 @@ def assert_controlled_environment(workflow: dict, manifest: dict) -> None:
         assert _is_digest_pinned(image), f"{job}: environment is not digest-pinned: {image}"
         # one reviewed environment, not four independently drifting ones
         assert image == pinned, f"{job}: pin drifted from the manifest ({image} != {pinned})"
+        _assert_no_host_state_is_imported(job, container)
 
         # A STEP-level scan cannot see either of these. A job-level `continue-on-error: true` makes
         # the whole fence non-blocking and a job-level `if` can switch it off entirely -- in both
@@ -751,14 +849,30 @@ def assert_controlled_environment(workflow: dict, manifest: dict) -> None:
         product_index = _index_of_step(steps, REQUIRED_GATED_JOBS[job])
         _assert_runs_in_this_environment(job, "product-test step", str(steps[product_index]["run"]))
 
-        # the pristine posture is recorded BEFORE any third-party action runs inside the container,
-        # so a posture change is attributable to the pinned image rather than to something that ran
-        # after it -- the question the old ordering (first observation only after checkout and
-        # setup-uv) could not answer.
-        first_action = next((i for i, step in enumerate(steps) if "uses" in step), len(steps))
+        # The pristine posture is recorded FIRST, so a posture change is attributable to the pinned
+        # image rather than to something that ran after it -- the question the old ordering (first
+        # observation only after checkout and setup-uv) could not answer.
+        #
+        # "Before the first third-party action" was the original assertion and it is too weak for
+        # the claim being made: `infra/ci/FOLLOWUP-controlled-runner.md` and the job comments say
+        # the canary is the FIRST step, and a repo-owned `run:` step inserted above it would leave
+        # that prose false while the proof stayed green. So the position is pinned exactly.
         canary = [i for i, step in enumerate(steps) if "stat -c" in str(step.get("run", ""))]
         assert canary, f"{job}: no pristine-posture canary"
-        assert min(canary) < first_action, f"{job}: the canary runs after a third-party action"
+        assert canary[0] == 0, (
+            f"{job}: the canary is step {canary[0]}, not the first step, so it no longer records "
+            "the environment's PRISTINE posture"
+        )
+        first_action = next((i for i, step in enumerate(steps) if "uses" in step), len(steps))
+        assert canary[0] < first_action, f"{job}: the canary runs after a third-party action"
+        # and it must observe the two components every root fence's ancestry depends on -- a canary
+        # that stopped naming them would still be a `stat -c` step and would still prove nothing.
+        observed = _path_literals(_normalised(str(steps[canary[0]]["run"])))
+        assert {"/", "/etc"} <= observed, (
+            f"{job}: the canary observes {sorted(observed)}, which does not cover / and /etc"
+        )
+
+        _assert_the_prelude_matches_the_manifest(job, steps, manifest)
 
     # the manifest is the single source of truth for the pin; neither side may drift from the other
     assert sorted(manifest["controlled_jobs"]) == controlled_jobs()
@@ -770,13 +884,19 @@ def test_every_controlled_root_fence_runs_in_the_pinned_environment() -> None:
 
 
 def test_the_uncontrolled_set_is_exactly_the_two_systemd_fences() -> None:
-    """Tier 2 is HELD, not forgotten. Naming the remainder exactly keeps the gap visible and stops a
-    later change quietly parking a third fence on the nondeterministic hosted runner.
+    """Tier 2 is HELD, not forgotten. Naming the remainder exactly keeps the gap visible.
 
-    The may-only-shrink property is carried by the EXACT-EQUALITY assertion below (plus the manifest
-    cross-check in `assert_controlled_environment`). The subset assertion that follows it does NOT
+    The may-only-shrink property is carried by the EXACT-EQUALITY assertion below, plus the manifest
+    cross-check in `assert_controlled_environment`. The subset assertion that follows it does NOT
     carry it -- a strict subset still evaluates True with a third job added -- and is only a
-    well-formedness check that every held job is a job this suite actually gates."""
+    well-formedness check that every held job is a job this suite actually gates.
+
+    CORRECTION, proven by mutation: none of that reaches ci.yml, so on its own it did NOT stop "a
+    third fence being quietly parked on the hosted runner", which is what this pairing was
+    previously described as achieving. Both constants could stay untouched while a brand-new
+    `backend-<x>-root` job appeared in the workflow with no gate and no controlled environment.
+    What closes that is `assert_every_root_fence_is_accounted_for`, which DERIVES the fence set from
+    the workflow and refuses any fence these constants do not govern."""
     assert NOT_YET_CONTROLLED == frozenset(
         {
             "backend-management-real-adapters-root",
@@ -796,6 +916,114 @@ def test_the_realfs_fence_attests_its_complete_ancestry() -> None:
     assert any(
         str(steps[index]["run"]).rstrip().endswith(f"{_GATE_SCRIPT} /") for index in gates
     ), "the RealFilesystem fence must attest exactly `/`"
+
+
+# ------------------- every root fence in the workflow is ACCOUNTED FOR, not just the known ones
+#
+# `REQUIRED_GATED_JOBS` and `NOT_YET_CONTROLLED` are hand-maintained constants, and until now
+# NOTHING tied either of them to the workflow. `test_the_uncontrolled_set_is_exactly_the_two_
+# systemd_fences` compares the constant to a literal copy of ITSELF, which stops the constant being
+# edited silently but says nothing about ci.yml. So the property claimed for the pair -- "a third
+# fence cannot be quietly parked on the nondeterministic hosted runner" -- did not hold: a new
+# `backend-<x>-root` job could be added with no gate and no `container:`, and every proof in this
+# file stayed green. Verified by mutation, not by inspection.
+#
+# Deriving the set from the workflow closes it, and closes it in a way that cannot be satisfied
+# quietly: a new root fence must be added to `REQUIRED_GATED_JOBS` (which forces a job-local gate
+# before its product step), and from there it is either controlled -- `container:` pinned to the
+# manifest, and named in the manifest's `controlled_jobs` -- or it must be added to
+# `NOT_YET_CONTROLLED`, which fails the exact-equality assertion AND the manifest cross-check.
+# Every route ends at a visible, reviewed edit.
+
+
+def root_fences(workflow: dict) -> set[str]:
+    """Every job in the workflow that executes with root authority.
+
+    Two independent discriminators, unioned, because either alone is evadable in an obvious way:
+
+    * a step that elevates via ``sudo`` -- catches a root fence named without the suffix;
+    * a job key ending in ``-root`` -- catches a fence that stops using ``sudo``, which is a real
+      possibility now that the controlled fences are already uid 0 inside their container.
+
+    They agree exactly on today's workflow (all six fences, no other job)."""
+    fences = set()
+    for job, specification in workflow["jobs"].items():
+        elevates = any(
+            "sudo " in _normalised(str(step.get("run", "")))
+            for step in specification.get("steps", [])
+        )
+        if elevates or job.endswith("-root"):
+            fences.add(job)
+    return fences
+
+
+def assert_every_root_fence_is_accounted_for(workflow: dict) -> None:
+    """No root fence may exist that this suite does not gate and classify."""
+    declared = set(REQUIRED_GATED_JOBS)
+    discovered = root_fences(workflow)
+    assert discovered == declared, (
+        "the workflow's root fences and this suite's declared set disagree; "
+        f"ungoverned in ci.yml: {sorted(discovered - declared)}; "
+        f"declared but absent from ci.yml: {sorted(declared - discovered)}"
+    )
+    # every declared fence is in exactly one of the two buckets, and the buckets do not overlap
+    assert NOT_YET_CONTROLLED <= declared, sorted(NOT_YET_CONTROLLED - declared)
+    assert set(controlled_jobs()) | NOT_YET_CONTROLLED == declared
+    assert set(controlled_jobs()) & NOT_YET_CONTROLLED == set()
+
+
+def test_every_root_fence_in_the_workflow_is_governed_by_this_suite() -> None:
+    assert_every_root_fence_is_accounted_for(_workflow())
+
+
+def test_the_two_discriminators_independently_find_the_same_fences() -> None:
+    """If they ever diverge, one of them has stopped describing what a root fence looks like and
+    the union is quietly carrying the other. Worth knowing at that moment, not later."""
+    workflow = _workflow()
+    by_elevation = {
+        job
+        for job, specification in workflow["jobs"].items()
+        if any(
+            "sudo " in _normalised(str(step.get("run", "")))
+            for step in specification.get("steps", [])
+        )
+    }
+    by_name = {job for job in workflow["jobs"] if job.endswith("-root")}
+    assert by_elevation == by_name == set(REQUIRED_GATED_JOBS)
+
+
+# ------------------------- no root fence REPAIRS the posture it is about to attest
+#
+# `test_no_source_or_test_chowns_or_chmods_a_fixed_system_parent` proves this for `apps/**` and
+# `tests/**`. The workflow was the remaining surface, and it is the one that runs as root: a
+# `sudo chown root:root /etc` in a prelude would turn every fence green by REPAIRING the exact
+# posture the gate exists to refuse, which is worse than a missing gate because it looks like a
+# pass. The job comments assert "no package repairs, chowns or chmods a system directory"; this
+# makes that sentence executable.
+
+
+def assert_no_root_fence_repairs_a_fixed_system_parent(workflow: dict) -> None:
+    offenders: list[str] = []
+    for job in sorted(root_fences(workflow)):
+        for step in workflow["jobs"][job].get("steps", []):
+            for line in _executable_lines(str(step.get("run", ""))):
+                normalised = _normalised(line)
+                if not any(
+                    call in normalised
+                    for call in ("chown ", "chmod ", "chown(", "chmod(", "chown -", "chmod -")
+                ):
+                    continue
+                targeted = _path_literals(normalised) & set(FIXED_SYSTEM_PARENTS)
+                if targeted:
+                    offenders.append(f"{job}: {sorted(targeted)} in {normalised[:70]!r}")
+    assert offenders == [], (
+        "a root fence repairs a fixed system parent, which would make the trusted-ancestor gate "
+        f"pass by construction rather than by observation: {offenders}"
+    )
+
+
+def test_no_root_fence_repairs_a_fixed_system_parent() -> None:
+    assert_no_root_fence_repairs_a_fixed_system_parent(_workflow())
 
 
 # ---- mutation regressions: each property must FAIL when broken -------------------------------
@@ -879,6 +1107,166 @@ def test_the_controlled_proof_fails_when_a_fence_is_switched_off_at_job_level() 
         assert_controlled_environment(workflow, _manifest())
 
 
+def test_the_controlled_proof_fails_when_the_host_etc_is_mounted_over_the_pinned_layer() -> None:
+    """The break that would defeat the ENTIRE change while looking perfect.
+
+    The job still declares a digest-pinned `container:`, the pin still equals the manifest, the
+    gate still runs inside it and still exits 78 on a bad posture -- but the `/etc` it walks is the
+    hosted VM's nondeterministic one, mounted straight back in. Every other proof here stayed green
+    for this mutation before the volumes check existed."""
+    workflow = _mutated()
+    workflow["jobs"]["backend-management-root"]["container"]["volumes"] = ["/etc:/etc"]
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+@pytest.mark.parametrize(
+    "options",
+    ["--privileged", "-v /:/host", "--volume /etc:/etc", "--mount type=bind,src=/etc,dst=/etc"],
+)
+def test_the_controlled_proof_fails_when_options_import_host_state(options: str) -> None:
+    """The same defect spelled through raw docker `options:` instead of the `volumes:` key."""
+    workflow = _mutated()
+    workflow["jobs"]["backend-deployment-root"]["container"]["options"] = options
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_a_step_is_inserted_above_the_canary() -> None:
+    """`before the first third-party action` was too weak: a repo-owned `run:` step above the
+    canary left the documented "first step" claim false with every proof still green."""
+    workflow = _mutated()
+    steps = workflow["jobs"]["backend-realfs-root"]["steps"]
+    steps.insert(0, {"name": "Something that runs first", "run": "echo anything\n"})
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_the_canary_stops_observing_the_ancestry() -> None:
+    """A `stat -c` step that names neither `/` nor `/etc` satisfies a substring scan and records
+    nothing about the posture every root fence depends on."""
+    workflow = _mutated()
+    steps = workflow["jobs"]["backend-realfs-root"]["steps"]
+    index = next(i for i, step in enumerate(steps) if "stat -c" in str(step.get("run", "")))
+    steps[index]["run"] = "stat -c '%u %g %n' /tmp\n"
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_the_prelude_drifts_from_the_manifest() -> None:
+    workflow = _mutated()
+    steps = workflow["jobs"]["backend-management-root"]["steps"]
+    index = next(i for i, step in enumerate(steps) if "apt-get install" in str(step.get("run", "")))
+    steps[index]["run"] = str(steps[index]["run"]).replace(" git ", " git openssh-client ")
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_the_prelude_is_removed_entirely() -> None:
+    workflow = _mutated()
+    job = "backend-management-root"
+    workflow["jobs"][job]["steps"] = [
+        step
+        for step in workflow["jobs"][job]["steps"]
+        if "apt-get install" not in str(step.get("run", ""))
+    ]
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_controlled_proof_fails_when_the_manifest_contradicts_itself() -> None:
+    """`base` + `digest` are what a human reads; `image` is what the workflow is checked against."""
+    manifest = dict(_manifest())
+    manifest["digest"] = "sha256:" + "b" * 64
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(_workflow(), manifest)
+
+
+@pytest.mark.parametrize("escape", ["sudo\tdocker\texec other-host ", "unshare --mount "])
+def test_the_redirect_scan_catches_the_spellings_that_used_to_evade_it(escape: str) -> None:
+    """Both were holes: the tab spelling passed a scan for `"docker "`, and `unshare` was named in
+    the recorded limitation but not in the denylist. Proven by mutation, not by reading."""
+    workflow = _mutated()
+    job = "backend-management-root"
+    steps = workflow["jobs"][job]["steps"]
+    index = _index_of_step(steps, REQUIRED_GATED_JOBS[job])
+    steps[index]["run"] = escape + str(steps[index]["run"]).lstrip()
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(workflow, _manifest())
+
+
+def test_the_accounting_proof_fails_when_a_new_root_fence_is_added_to_the_workflow() -> None:
+    """The hole behind the claim "a third fence cannot be quietly parked on the hosted runner":
+    before this, a whole new root job with no gate and no controlled environment was invisible."""
+    workflow = _mutated()
+    workflow["jobs"]["backend-newfence-root"] = {
+        "name": "A new root fence nobody added to the constants",
+        "runs-on": "ubuntu-24.04",
+        "steps": [{"name": "Run new root tests", "run": "sudo .venv/bin/python -m pytest x\n"}],
+    }
+    with pytest.raises(AssertionError):
+        assert_every_root_fence_is_accounted_for(workflow)
+
+
+def test_the_accounting_proof_fails_for_a_root_fence_that_avoids_the_naming_convention() -> None:
+    """The `-root` suffix alone would miss this one; the elevation discriminator catches it."""
+    workflow = _mutated()
+    workflow["jobs"]["backend-privileged-checks"] = {
+        "name": "Root work under a name the convention does not cover",
+        "runs-on": "ubuntu-24.04",
+        "steps": [{"name": "Elevate", "run": "sudo install -d -m 0755 /var/lib/secp\n"}],
+    }
+    with pytest.raises(AssertionError):
+        assert_every_root_fence_is_accounted_for(workflow)
+
+
+def test_the_accounting_proof_fails_when_a_fence_is_parked_in_the_held_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other escape route, and the one the accounting check alone does NOT close.
+
+    Declare the new fence in `REQUIRED_GATED_JOBS` (satisfying the accounting check), then hide it
+    among the tier-2 holdouts so it never needs a `container:`. That is refused one layer further
+    in: the manifest cross-check in `assert_controlled_environment` compares the held set against
+    `infra/ci/controlled-root-env.json`, so parking a fence there cannot be done without editing
+    the reviewed manifest too. Driven for real by patching the module constant."""
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "NOT_YET_CONTROLLED",
+        NOT_YET_CONTROLLED | {"backend-newfence-root"},
+    )
+    with pytest.raises(AssertionError):
+        assert_controlled_environment(_workflow(), _manifest())
+
+
+def test_the_repair_proof_fails_when_a_fence_chowns_a_fixed_system_parent() -> None:
+    """The worst possible break: the gate passes because the posture was REPAIRED, not observed."""
+    workflow = _mutated()
+    steps = workflow["jobs"]["backend-deployment-root"]["steps"]
+    index = next(i for i, step in enumerate(steps) if "apt-get" in str(step.get("run", "")))
+    steps[index]["run"] = str(steps[index]["run"]) + "chown root:root /etc\n"
+    with pytest.raises(AssertionError):
+        assert_no_root_fence_repairs_a_fixed_system_parent(workflow)
+
+
+def test_the_repair_proof_reads_only_executed_lines_not_comments() -> None:
+    """The fences explain at length that they never repair a system parent. A scan that could not
+    tell the explanation from the act would fire on the existing workflow, so this pins the
+    distinction: the same text as a comment is not evidence, and as a command it is."""
+    workflow = _mutated()
+    steps = workflow["jobs"]["backend-deployment-root"]["steps"]
+    steps[0]["run"] = "# this step does not chown /etc, and never chmod /etc either\n" + str(
+        steps[0]["run"]
+    )
+    assert_no_root_fence_repairs_a_fixed_system_parent(workflow)  # a comment is not an act
+
+    steps[0]["run"] = "chmod 0755 /etc\n" + str(steps[0]["run"])
+    with pytest.raises(AssertionError):
+        assert_no_root_fence_repairs_a_fixed_system_parent(workflow)
+
+
 def test_the_unmutated_controlled_environment_passes() -> None:
     """The control: every mutation above is a real break, not a broken assertion."""
     assert_controlled_environment(_workflow(), _manifest())
+    assert_every_root_fence_is_accounted_for(_workflow())
+    assert_no_root_fence_repairs_a_fixed_system_parent(_workflow())
