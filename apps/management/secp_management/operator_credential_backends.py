@@ -47,6 +47,20 @@ Three deliberate non-goals, so the omissions are legible rather than accidental:
   controller locator, so listing would be output with no operation behind it and more OS paths that
   no test here can exercise.
 
+**A KNOWN ASYMMETRY, stated rather than left to be discovered.** The no-prompt guarantee above is
+LINUX-ONLY. The macOS binding sets no ``kSecUseAuthenticationUI`` and no accessibility attribute, so
+on a locked keychain ``SecItemCopyMatching`` may present a system unlock prompt — meaning a
+read-only ``secpctl auth status`` can raise UI on macOS where it provably cannot on Linux.
+
+It is documented rather than fixed, and the reason is the fix's own risk profile. Suppressing the
+prompt means resolving another ``in_dll`` constant; if that symbol does not resolve, the existing
+``except`` turns the failure into ``secpctl_credential_store_unavailable`` and the ENTIRE macOS
+binding disappears — the platform silently loses secure storage altogether and falls back to the
+sealed store. No host in this repository, and no CI runner, can execute that code to find out which
+way it goes. Shipping an unverifiable change whose failure mode is "macOS has no credential storage"
+is worse than shipping a documented prompt, so this waits for a macOS host. Fixing it there is a
+small, well-scoped change.
+
 ``secretstorage``/jeepney read the session D-Bus address from the environment — that is inherent to
 reaching the operator's own session bus. No code HERE reads, writes, or branches on an environment
 variable, and no binding resolves an executable through ``PATH``.
@@ -289,6 +303,27 @@ _ERR_SEC_ITEM_NOT_FOUND = -25300
 _K_CF_STRING_ENCODING_UTF8 = 0x08000100
 
 
+def require_resolved_constants(resolved: dict[str, int | None]) -> dict[str, int]:
+    """Require every Security/CoreFoundation constant to have resolved to a real address.
+
+    ``ctypes.c_void_p.value`` is ``None`` for a NULL pointer. A constant that resolved to NULL means
+    an unusable framework surface, and passing it on would build a ``SecItem*`` dictionary with a
+    NULL key rather than fail loudly — exactly the "fail quietly" shape the explicit ``argtypes``
+    declarations exist to prevent.
+
+    This is a separate PURE function on purpose. Inline in ``_MacOSFrameworks.__init__`` the check
+    was unreachable on every host in this repository — the enclosing constructor needs a real macOS
+    Security framework to run at all — so the refusal could never be executed or proven. Extracted,
+    it is exercised on every platform while the constructor that calls it stays macOS-only.
+    """
+    checked: dict[str, int] = {}
+    for name, address in resolved.items():
+        if address is None:
+            _reject("secpctl_credential_store_unavailable")
+        checked[name] = address
+    return checked
+
+
 class _MacOSFrameworks:
     """The CoreFoundation + Security entry points and constants this binding needs.
 
@@ -368,15 +403,7 @@ class _MacOSFrameworks:
                 )
             }
             resolved["kCFBooleanTrue"] = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
-            # `c_void_p.value` is None for a NULL pointer. A constant that resolved to NULL means an
-            # unusable framework surface, and passing it on would build a dictionary with a NULL key
-            # for SecItem* rather than fail loudly -- exactly the "fail quietly" shape the explicit
-            # argtypes above exist to prevent. Refuse instead.
-            constants: dict[str, int] = {}
-            for name, address in resolved.items():
-                if address is None:
-                    _reject("secpctl_credential_store_unavailable")
-                constants[name] = address
+            constants = require_resolved_constants(resolved)
             # The two callback tables are STRUCTS, so the dictionary needs their ADDRESS, not the
             # value of their first field -- `in_dll(...).value` would silently pass garbage.
             for name in ("kCFTypeDictionaryKeyCallBacks", "kCFTypeDictionaryValueCallBacks"):
@@ -525,7 +552,17 @@ class MacOSKeychainBinding:
                 return None
             if status != _ERR_SEC_SUCCESS or not result.value:
                 _reject("secpctl_credential_backend_failed")
-            return fw.data_bytes(result.value)
+            raw = fw.data_bytes(result.value)
+            # The read-side size bound lives HERE, in the binding, not only inside the framework
+            # wrapper. `_MacOSFrameworks` cannot execute without a real Security framework, so a
+            # bound stated only there is unreachable on every host this repository can run — while
+            # the equivalent Linux check sits in its own `get_secret` and is exercised everywhere.
+            # Keeping it at this layer gives macOS the same read-side guarantee AND makes it
+            # testable. The wrapper keeps its own copy: bounding before `string_at` avoids copying
+            # an absurd buffer out of CoreFoundation in the first place.
+            if not (0 < len(raw) <= MAX_SECRET_BYTES):
+                _reject("secpctl_credential_record_invalid")
+            return raw
         finally:
             fw.release(*owned)
             if result.value:
@@ -736,6 +773,7 @@ __all__ = [
     "SecretStoreBinding",
     "WindowsCredentialManagerBinding",
     "require_identifier",
+    "require_resolved_constants",
     "require_storable",
     "resolve_secret_store_binding",
     "secret_service_attributes",

@@ -612,16 +612,27 @@ def test_logout_revokes_the_token_at_the_provider_before_deleting_it_locally():
 @pytest.mark.parametrize(
     ("outcome", "still_live"),
     [
-        (RevocationOutcome(OUTCOME_UNAVAILABLE, reason_code="x"), True),
-        (RevocationOutcome(OUTCOME_UNSUPPORTED, reason_code="x"), True),
-        (RevocationOutcome("refused", reason_code="x"), True),
+        (
+            RevocationOutcome(
+                OUTCOME_UNAVAILABLE, reason_code="secpctl_revocation_provider_unavailable"
+            ),
+            True,
+        ),
+        (
+            RevocationOutcome(
+                OUTCOME_UNSUPPORTED, reason_code="secpctl_revocation_endpoint_absent"
+            ),
+            True,
+        ),
+        (RevocationOutcome("refused", reason_code="secpctl_revocation_refused"), True),
         (RevocationOutcome(OUTCOME_REVOKED), False),
     ],
 )
 def test_the_local_credential_is_deleted_whatever_the_provider_answers(outcome, still_live):
     """A revocation failure must never strand the credential in the keystore — that would be
     strictly worse than the state the operator asked for. The report stays honest about whether the
-    token is still usable at the provider."""
+    token is still usable at the provider, and the EXIT CODE agrees with the report: a logout that
+    could not end the session must not exit 0."""
     keystore = _FakeKeystore()
     deps, _w, _p = _deps(store=_working_store(keystore))
     auth_login(deps, gate=WRITE)
@@ -631,11 +642,40 @@ def test_the_local_credential_is_deleted_whatever_the_provider_answers(outcome, 
     )
     code, report = auth_logout(out, gate=WRITE)
 
-    assert code == EXIT_OK
+    # the local credential is gone either way
     assert report["removed"] is True
     assert keystore.entries == {}
     assert report["token_still_live"] is still_live
     assert report["revoked"] is (not still_live)
+
+    if still_live:
+        assert code != EXIT_OK, "a still-live token must never exit 0"
+        assert code == exit_for(outcome.reason_code)
+        assert report["reason_code"] == outcome.reason_code
+    else:
+        assert code == EXIT_OK
+        assert "reason_code" not in report
+
+
+def test_a_script_chaining_on_logout_success_is_never_misled():
+    """`secpctl auth logout && echo revoked` must not print a falsehood. This is the whole reason
+    the exit code tracks revocation rather than local deletion."""
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+
+    unrevokable = _FakeDeviceClient(
+        revocation=RevocationOutcome(
+            OUTCOME_UNSUPPORTED, reason_code="secpctl_revocation_endpoint_absent"
+        )
+    )
+    out, _w2, _p2 = _deps(client=unrevokable, store=_working_store(keystore))
+    code, report = auth_logout(out, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    assert report["token_still_live"] is True
+    # ...and the operator is still told the local half succeeded, so they do not retry blindly
+    assert report["removed"] is True
 
 
 def test_logout_deletes_locally_even_when_the_provider_cannot_be_discovered():
@@ -647,8 +687,11 @@ def test_logout_deletes_locally_even_when_the_provider_cannot_be_discovered():
     out, _w2, _p2 = _deps(client=broken, store=_working_store(keystore))
     code, report = auth_logout(out, gate=WRITE)
 
-    assert code == EXIT_OK
+    # local deletion still happened — an unreachable provider must not strand the credential
     assert keystore.entries == {}
+    assert report["removed"] is True
+    # ...but the token is still live, so the command does not claim success
+    assert code != EXIT_OK
     assert report["revoked"] is False
     assert report["token_still_live"] is True
     assert broken.revoked == []
@@ -927,3 +970,85 @@ def test_the_auth_and_enrollment_groups_are_mutually_exclusive():
 
 def test_device_grant_type_is_reachable_from_the_engine():
     assert DEVICE_CODE_GRANT_TYPE.endswith("device_code")
+
+
+# --- human output must tell the same truth as the exit code and the JSON -------------------------
+#
+# `_render_human` used a FIXED key allowlist, so `token_still_live` never printed: a logout that
+# failed to revoke emitted `[auth logout] exit=0 mode=written` while the token stayed valid at the
+# issuer. An operator who believes they revoked and did not is a security outcome, not a display
+# bug. These pin both halves of the fix -- the field is visible, and it is visible as a WARNING.
+
+
+def test_human_output_warns_when_the_token_is_still_live():
+    from secp_management.cli import _render_human
+
+    rendered = _render_human(
+        EXIT_AUTH_UNAVAILABLE,
+        {
+            "command": "auth logout",
+            "mode": "written",
+            "removed": True,
+            "revoked": False,
+            "token_still_live": True,
+            "revocation_outcome": "unsupported",
+            "reason_code": "secpctl_revocation_endpoint_absent",
+        },
+    )
+    assert "token_still_live=True" in rendered
+    assert "WARNING" in rendered
+    assert "STILL VALID" in rendered
+    assert "exit=3" in rendered
+    # the operator is still told the local half succeeded
+    assert "removed=True" in rendered
+
+
+def test_human_output_does_not_warn_on_a_real_revocation():
+    from secp_management.cli import _render_human
+
+    rendered = _render_human(
+        EXIT_OK,
+        {
+            "command": "auth logout",
+            "mode": "written",
+            "removed": True,
+            "revoked": True,
+            "token_still_live": False,
+            "revocation_outcome": "revoked",
+        },
+    )
+    assert "WARNING" not in rendered
+    assert "token_still_live=False" in rendered
+
+
+def test_human_output_no_longer_silently_drops_unknown_fields():
+    """The renderer must not use a fixed allowlist. One did, and it swallowed the single field that
+    told an operator their session was still live -- turning every NEW report field into an
+    invisible one."""
+    from secp_management.cli import _render_human
+
+    rendered = _render_human(EXIT_OK, {"command": "auth status", "a_brand_new_field": "visible"})
+    assert "a_brand_new_field=visible" in rendered
+
+
+def test_auth_status_reports_credential_state_in_human_output():
+    from secp_management.cli import _render_human
+
+    _code, report = auth_status(_deps(store=_working_store())[0])
+    rendered = _render_human(EXIT_OK, report)
+    for key in ("has_credential", "credential_backend", "credential_store_available"):
+        assert f"{key}=" in rendered, f"{key} missing from human output"
+
+
+def test_a_rendered_report_still_carries_no_token_or_origin():
+    """Printing every scalar is only safe because reports are bounded and secret-free."""
+    from secp_management.cli import _render_human
+
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+    out, _w2, _p2 = _deps(store=_working_store(keystore))
+    code, report = auth_logout(out, gate=WRITE)
+    rendered = _render_human(code, report)
+    assert "eyJ" not in rendered
+    assert ORIGIN not in rendered and ISSUER not in rendered

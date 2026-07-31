@@ -36,6 +36,7 @@ from secp_management.operator_credential_backends import (
     SecretServiceBinding,
     WindowsCredentialManagerBinding,
     require_identifier,
+    require_resolved_constants,
     require_storable,
     resolve_secret_store_binding,
     secret_service_attributes,
@@ -636,6 +637,13 @@ def test_the_live_backend_coverage_of_this_run_is_recorded(record_testsuite_prop
     )
 
 
+# BOOKKEEPING, NOT BACKEND COVERAGE. The two tests below exercise no production code beyond
+# `resolve_secret_store_binding()` — they guard the ledger's own integrity, which is worth doing,
+# but they are assertions about assertions. They must never be counted toward "the credential
+# backend is tested": doing so would inflate a coverage number with tests that touch no binding,
+# which is the same species of error the ledger exists to prevent.
+
+
 def test_the_three_assurance_categories_stay_distinct():
     """The guard against this ledger's own worst failure: a stand-in reading as verification.
 
@@ -1003,3 +1011,87 @@ def test_the_macos_binding_repr_never_reveals_a_service_account_or_secret():
     binding, _fw = _keychain()
     assert repr(binding) == "MacOSKeychainBinding(<bound>)"
     assert ACCOUNT not in repr(binding) and SERVICE not in repr(binding)
+
+
+# --- refusals moved DOWN from the framework wrapper, where nothing could execute them -------------
+#
+# Two security-relevant refusals used to live only inside `_MacOSFrameworks`, which cannot run
+# without a real Security framework -- so on every host in this repository they were unreachable and
+# unproven. Relocating them (the read-side size bound to `MacOSKeychainBinding.get_secret`, the NULL
+# constant check to a pure helper) is what makes them testable everywhere, and gives macOS the
+# read-side parity Linux already had via `test_an_oversized_stored_item_is_refused_on_read`.
+
+
+def test_an_oversized_keychain_item_is_refused_on_read():
+    """macOS parity with the Linux read-side bound. A keychain that returns more than the shared
+    bound is a refusal, never a credential."""
+    binding, fw = _keychain()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"small")
+    # the keychain hands back something oversized on the next read
+    fw.sec.items[(SERVICE, ACCOUNT)] = b"x" * (MAX_SECRET_BYTES + 1)
+    with pytest.raises(ManagementError) as ei:
+        binding.get_secret(service=SERVICE, account=ACCOUNT)
+    assert ei.value.reason_code == "secpctl_credential_record_invalid"
+
+
+def test_an_empty_keychain_item_is_refused_on_read():
+    binding, fw = _keychain()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"small")
+    fw.sec.items[(SERVICE, ACCOUNT)] = b""
+    with pytest.raises(ManagementError) as ei:
+        binding.get_secret(service=SERVICE, account=ACCOUNT)
+    assert ei.value.reason_code == "secpctl_credential_record_invalid"
+
+
+def test_a_secret_at_exactly_the_bound_still_reads_back():
+    binding, fw = _keychain()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"small")
+    fw.sec.items[(SERVICE, ACCOUNT)] = b"x" * MAX_SECRET_BYTES
+    assert binding.get_secret(service=SERVICE, account=ACCOUNT) == b"x" * MAX_SECRET_BYTES
+
+
+def test_a_null_framework_constant_is_a_bounded_refusal():
+    """`c_void_p.value` is None for a NULL pointer. Handing that to SecItem* would build a
+    dictionary with a NULL key instead of failing loudly. Inline in the macOS-only constructor this
+    refusal could never be executed here; extracted, it is."""
+    resolved = {"kSecClass": 1, "kSecAttrService": 2}
+    assert require_resolved_constants(resolved) == resolved
+
+    with pytest.raises(ManagementError) as ei:
+        require_resolved_constants({"kSecClass": 1, "kSecAttrAccount": None})
+    assert ei.value.reason_code == "secpctl_credential_store_unavailable"
+
+
+def test_a_null_constant_refusal_names_no_symbol():
+    with pytest.raises(ManagementError) as ei:
+        require_resolved_constants({"kSecValueData": None})
+    assert "kSecValueData" not in f"{ei.value!r} {ei.value}"
+
+
+# --- over-release is as dangerous as a missed release ---------------------------------------------
+
+
+def test_no_core_foundation_object_is_released_twice():
+    """A double CFRelease is heap corruption on real CoreFoundation — the mirror image of the
+    missed-release defect this file already guards. `live_refs()` counts refs released ZERO times,
+    so it cannot see an over-release; this asserts the other side."""
+    from collections import Counter
+
+    binding, fw = _keychain()
+    binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"payload")
+    binding.get_secret(service=SERVICE, account=ACCOUNT)
+    binding.delete_secret(service=SERVICE, account=ACCOUNT)
+
+    over_released = [ref for ref, count in Counter(fw.released).items() if count > 1]
+    assert over_released == [], f"refs released more than once: {over_released}"
+
+
+def test_no_object_is_released_twice_when_the_framework_fails():
+    from collections import Counter
+
+    binding, fw = _keychain()
+    fw.sec.SecItemUpdate = lambda query, update: -25291
+    fw.sec.SecItemAdd = lambda query, result: -25291
+    with pytest.raises(ManagementError):
+        binding.set_secret(service=SERVICE, account=ACCOUNT, secret=b"payload")
+    assert [ref for ref, count in Counter(fw.released).items() if count > 1] == []

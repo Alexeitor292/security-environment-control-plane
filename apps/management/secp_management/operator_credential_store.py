@@ -414,6 +414,45 @@ def _bearer_value(token: OperatorAccessToken) -> str:
     return header[len(prefix) :]
 
 
+class ControllerScopedCredentialProvider(_NonSerializable):
+    """Resolves the operator access token from the OS credential store for the controller THIS
+    invocation targets — the seam that makes ``secpctl auth login`` actually useful.
+
+    Without this, the store and the authenticated client never meet: ``auth login`` writes a
+    credential into the OS keystore and every authenticated command keeps reading the protected
+    token FILE, so the only working operator-auth path on a real host stays a plaintext file. This
+    class is what makes the keystore the PRIMARY provider.
+
+    It satisfies :class:`~secp_management.operator_auth.OperatorAccessTokenProvider` (one
+    ``access_token()`` method), so it drops straight into ``HttpsEnrollmentControllerClient`` with
+    no client change.
+
+    Binding is LAZY — per call, not at construction. The controller locator is recorded by
+    bootstrap and may be absent when the CLI composes its deps; resolving it eagerly would turn "no
+    controller recorded yet" into a construction failure that seals the entire enrollment surface,
+    which is both wrong and invisible. Resolving per call makes it one bounded refusal on the one
+    command that needed a token.
+
+    It never falls back. A sealed store, an unreachable keystore, an absent or expired credential
+    are each a bounded refusal; none of them degrades to a file, an environment variable, or a
+    cached token.
+    """
+
+    __slots__ = ("_store", "_locator_provider")
+
+    def __init__(self, store: OperatorCredentialStore, locator_provider: Any) -> None:
+        self._store = store
+        self._locator_provider = locator_provider
+
+    def __repr__(self) -> str:  # never the account / origin / token
+        return "ControllerScopedCredentialProvider(<redacted>)"
+
+    def access_token(self) -> OperatorAccessToken:
+        """The stored token for the recorded controller's account, or a bounded refusal."""
+        locator = self._locator_provider.locate()
+        return self._store.for_account(account_for_controller(locator)).access_token()
+
+
 def build_operator_credential_store() -> OperatorCredentialStore:
     """Compose the operator credential store for the production CLI.
 
@@ -432,6 +471,7 @@ __all__ = [
     "BACKEND_SEALED",
     "CREDENTIAL_RECORD_VERSION",
     "CREDENTIAL_SERVICE_NAME",
+    "ControllerScopedCredentialProvider",
     "CredentialRecord",
     "OperatorCredentialStore",
     "OperatorCredentialStoreError",

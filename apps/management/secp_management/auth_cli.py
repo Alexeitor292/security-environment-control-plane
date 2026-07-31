@@ -516,9 +516,12 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
 
     Local deletion alone was never a real logout. Until the token is revoked it remains valid at the
     provider until its own expiry, so anyone who captured it still holds a working credential; that
-    is precisely the window RFC 7009 exists to close. When the provider advertises no
-    ``revocation_endpoint`` (RFC 8414 §2 makes it OPTIONAL) the command still succeeds, and reports
-    ``token_still_live`` so the operator knows the credential dies only when it expires.
+    is precisely the window RFC 7009 exists to close.
+
+    When the token could NOT be revoked — the provider advertises no ``revocation_endpoint`` (RFC
+    8414 §2 makes it OPTIONAL), is unreachable, or refused — the command reports
+    ``token_still_live`` AND exits NON-ZERO. The local credential is still deleted, but a zero exit
+    would tell a script the session had ended when it had not.
 
     It never touches an unrelated OS keyring entry and never touches another controller's account.
     """
@@ -537,13 +540,22 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
             }
         outcome = _revoke_stored_token(deps, selection)
         removed = selection.store.delete()
-        return EXIT_OK, {
+        report = {
             "command": command,
             "mode": "written",
             "removed": bool(removed),
             "account": account_fingerprint(selection.account),
             **outcome.to_report(),
         }
+        if not outcome.token_still_live:
+            return EXIT_OK, report
+        # The local credential IS gone — `removed` says so — but the session was NOT ended at the
+        # provider. Exiting 0 here would make `secpctl auth logout && echo revoked` print a
+        # falsehood, and an operator who believes they revoked when they did not is a security
+        # outcome, not a cosmetic one. The specific reason keeps its mapped exit category so a
+        # script can tell "provider unreachable" from "provider refused".
+        report["reason_code"] = outcome.reason_code or "secpctl_revocation_refused"
+        return exit_for(report["reason_code"]), report
     except ManagementError as exc:
         return _refused(command, exc.reason_code)
 

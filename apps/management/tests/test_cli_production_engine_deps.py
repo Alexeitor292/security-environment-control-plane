@@ -206,3 +206,101 @@ def test_main_wires_auth_deps_for_every_auth_subcommand(monkeypatch):
     ):
         cli.main(argv)
     assert captured == [{"deps": None, "enr": None, "auth": "AUTH_DEPS"}] * 4
+
+
+# --- the credential store must actually back authenticated calls ----------------------------------
+#
+# `secpctl auth login` writing a credential into the OS keystore is worth nothing unless the client
+# that makes authenticated calls READS it. It did not: `_production_enrollment_deps` composed
+# `ProtectedTokenFileProvider` or the sealed provider and never touched
+# `build_operator_credential_store()`, so the only working operator-auth path on a real host was a
+# plaintext token FILE and `auth login` was decorative. These pin the wiring so that cannot recur.
+
+
+def _enrollment_deps_with_stubbed_host(monkeypatch, *, token_file: str = ""):
+    """Compose the real enrollment deps with the POSIX filesystem stubbed, so this asserts the
+    WIRING rather than the host — the same idiom as the Stream B tripwire above."""
+    import secp_commissioning.runtime as runtime
+
+    class _StubFilesystem:
+        pass
+
+    monkeypatch.setattr(runtime, "RealFilesystem", _StubFilesystem)
+    monkeypatch.setenv("SECP_OPERATOR_TOKEN_FILE", token_file) if token_file else (
+        monkeypatch.delenv("SECP_OPERATOR_TOKEN_FILE", raising=False)
+    )
+    return cli._production_enrollment_deps()
+
+
+def test_enrollment_deps_read_the_operator_credential_store_not_a_plaintext_file(monkeypatch):
+    """The headline outcome of this workstream: what `auth login` stores is what authenticated
+    commands use. With no token-file env var set, the client's token provider must be the
+    controller-scoped OS credential store — never the sealed provider, which would make every
+    authenticated command fail even after a successful login."""
+    from secp_management.operator_auth import SealedOperatorAccessTokenProvider
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    deps = _enrollment_deps_with_stubbed_host(monkeypatch)
+    provider = deps.controller_client._token_provider
+
+    assert not isinstance(provider, SealedOperatorAccessTokenProvider), (
+        "the enrollment client composed the SEALED token provider: `secpctl auth login` would "
+        "store a credential that nothing ever reads"
+    )
+    assert isinstance(provider, ControllerScopedCredentialProvider)
+
+
+def test_the_token_file_is_reachable_only_by_explicit_opt_in(monkeypatch):
+    """The protected token FILE stays a recovery seam an operator must ASK for. It is never an
+    automatic fallback from the credential store — `operator_auth` and `operator_credential_store`
+    both state that rule, and this is what enforces it."""
+    from secp_management.operator_auth import ProtectedTokenFileProvider
+
+    deps = _enrollment_deps_with_stubbed_host(monkeypatch, token_file="/etc/secp/operator.token")
+    assert isinstance(deps.controller_client._token_provider, ProtectedTokenFileProvider)
+
+
+def test_the_client_and_the_credential_provider_share_one_locator(monkeypatch):
+    """The credential read must be scoped to the controller the request is actually sent to. Two
+    locator instances could disagree and serve one controller's credential to another."""
+    deps = _enrollment_deps_with_stubbed_host(monkeypatch)
+    client = deps.controller_client
+    assert client._token_provider._locator_provider is client._locator_provider
+
+
+def test_an_unavailable_keystore_composes_the_sealed_store_not_a_file(monkeypatch):
+    """Fail-closed survives the wiring: with no OS keystore the composed provider is backed by the
+    SEALED store. It must not quietly become a token file."""
+    import secp_management.operator_credential_store as store_module
+    from secp_management.operator_credential_store import (
+        ControllerScopedCredentialProvider,
+        SealedOperatorCredentialStore,
+    )
+
+    monkeypatch.setattr(store_module, "resolve_secret_store_binding", lambda: None)
+    provider = _enrollment_deps_with_stubbed_host(monkeypatch).controller_client._token_provider
+    assert isinstance(provider, ControllerScopedCredentialProvider)
+    assert isinstance(provider._store, SealedOperatorCredentialStore)
+
+
+def test_a_controller_scoped_provider_over_a_sealed_store_refuses():
+    """The behaviour behind the composition above, asserted without the stubbed host: an
+    unavailable keystore is a bounded refusal, never a degradation to some other location."""
+    from secp_management import ManagementError
+    from secp_management.controller_api_locator import ControllerApiLocator
+    from secp_management.operator_credential_store import (
+        ControllerScopedCredentialProvider,
+        SealedOperatorCredentialStore,
+    )
+
+    class _Locator:
+        def locate(self):
+            return ControllerApiLocator(
+                canonical_origin="https://controller.invalid",
+                ca_bundle_path="/etc/secp/controller/ca.pem",
+            )
+
+    provider = ControllerScopedCredentialProvider(SealedOperatorCredentialStore(), _Locator())
+    with pytest.raises(ManagementError) as ei:
+        provider.access_token()
+    assert ei.value.reason_code == "secpctl_credential_store_unavailable"

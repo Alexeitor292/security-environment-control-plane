@@ -345,18 +345,34 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         from secp_management.operator_auth import (
             OPERATOR_TOKEN_FILE_ENV,
             ProtectedTokenFileProvider,
-            SealedOperatorAccessTokenProvider,
+        )
+        from secp_management.operator_credential_store import (
+            ControllerScopedCredentialProvider,
+            build_operator_credential_store,
         )
 
         fs = RealFilesystem()
+        # ONE locator instance, shared by the client and the credential provider, so the credential
+        # read is scoped to exactly the controller the request is sent to.
+        locator_provider = FileControllerApiLocatorProvider(fs)
+        # The OS credential store is the PRIMARY provider: what `secpctl auth login` writes is what
+        # authenticated commands read. Before this wiring existed the two never met — login stored a
+        # credential nothing consumed, leaving the plaintext token FILE as the only working path.
+        #
+        # The token file remains reachable ONLY when the operator explicitly sets the env var. That
+        # is an opt-in recovery seam, never an automatic fallback: when it is unset the credential
+        # store is used, and a store that cannot reach a keystore REFUSES rather than degrading to a
+        # file (`operator_auth` and `operator_credential_store` both state this rule).
         token_path = os.environ.get(OPERATOR_TOKEN_FILE_ENV, "")
         token_provider = (
             ProtectedTokenFileProvider(token_path)
             if token_path
-            else SealedOperatorAccessTokenProvider()
+            else ControllerScopedCredentialProvider(
+                build_operator_credential_store(), locator_provider
+            )
         )
         client = HttpsEnrollmentControllerClient(
-            locator_provider=FileControllerApiLocatorProvider(fs),
+            locator_provider=locator_provider,
             token_provider=token_provider,
         )
         from secp_management.worker_enroller import build_worker_enroller
@@ -455,10 +471,47 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code
 
 
+#: Fields shown FIRST, in this order, because they are the ones an operator scans for.
+_HUMAN_LEADING_KEYS = ("role", "mode", "status", "ok", "trusted", "reason_code")
+
+#: Report fields that carry a WARNING an operator must not miss, and the text for each. A report
+#: field alone is not a warning: it prints among a dozen others and reads as noise.
+_HUMAN_WARNINGS = {
+    "token_still_live": (
+        "WARNING: the local credential was deleted, but the token is STILL VALID at the\n"
+        "  identity provider and remains usable until it expires. The session was NOT ended."
+    ),
+}
+
+
 def _render_human(exit_code: int, payload: dict) -> str:
+    """Render a report for a terminal.
+
+    Every scalar field is printed. This deliberately does NOT use a fixed allowlist: one used to
+    live here, and it silently swallowed ``token_still_live`` — so ``auth logout`` printed
+    ``exit=0 mode=written`` while the token was still valid at the issuer, and ``auth status``
+    reported no credential state at all. A renderer that drops fields it was not told about turns
+    every new report field into an invisible one, which is exactly the failure a bounded,
+    secret-free report format exists to make impossible. Reports are bounded and carry no secrets by
+    construction, so printing all of them is both safe and the honest default.
+    """
     command = payload.get("command", "?")
     parts = [f"[{command}] exit={exit_code}"]
-    for key in ("role", "mode", "status", "ok", "trusted", "reason_code"):
+    shown = {"command"}
+    for key in _HUMAN_LEADING_KEYS:
         if key in payload:
             parts.append(f"{key}={payload[key]}")
-    return " ".join(str(p) for p in parts) + "\n"
+            shown.add(key)
+    for key in sorted(payload):
+        if key in shown:
+            continue
+        value = payload[key]
+        # Only scalars render as `key=value`; a nested structure belongs in `--json`.
+        if value is None or isinstance(value, (str, int, float, bool)):
+            parts.append(f"{key}={value}")
+
+    line = " ".join(str(p) for p in parts)
+    warnings = [text for key, text in _HUMAN_WARNINGS.items() if payload.get(key) is True]
+    for text in warnings:
+        line += f"\n  {text}"
+    return line + "\n"
