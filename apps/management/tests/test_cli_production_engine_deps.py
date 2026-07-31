@@ -20,32 +20,48 @@ from secp_management.enrollment_cli import EnrollmentCliDeps
 # --- Stream B integration tripwire ----------------------------------------------------------------
 
 
+#: Whether Stream B's `ca_bundle` field has landed. Evaluated at COLLECTION time so the marker
+#: below activates or deactivates on its own, with no edit needed when the field appears.
+_CA_BUNDLE_ABSENT = "ca_bundle" not in {f.name for f in dataclasses.fields(EnrollmentCliDeps)}
+
+
+@pytest.mark.xfail(
+    _CA_BUNDLE_ABSENT,
+    reason=(
+        "EnrollmentCliDeps has no `ca_bundle` field yet; Stream B "
+        "(feature/secp-production-worker-installation) has not landed. This test enforces the "
+        "cli.py wiring the moment it does."
+    ),
+    strict=True,
+    raises=ImportError,
+)
 def test_enrollment_deps_compose_a_real_controller_ca_bundle_provider():
     """``secpctl enrollment invite create`` must compose a REAL controller-CA provider, never the
     sealed one — with the sealed default every invitation fails
     ``secpctl_controller_ca_unavailable`` and the whole enrollment feature is inert while every
     test still passes.
 
-    ``ca_bundle`` and ``LocatorControllerCaBundleProvider`` are Stream B's, and at this branch's
-    merge base (``e72f28f``) they do not exist: ``EnrollmentCliDeps`` has no ``ca_bundle`` field.
-    Wiring them here today would raise inside ``_production_enrollment_deps``'s ``except Exception``
-    and silently return FULLY sealed deps — strictly worse than the current state, and invisible.
+    ``ca_bundle`` and ``LocatorControllerCaBundleProvider`` are Stream B's and do not exist on this
+    branch. Wiring them here today would raise inside ``_production_enrollment_deps``'s handler and
+    seal the whole enrollment composition — strictly worse than the current state.
 
-    So this asserts the wiring the moment the field appears, and explains itself until then. It is
-    deliberately NOT a permanent conditional skip: once Stream B merges, it fails until
-    ``_production_enrollment_deps`` passes ``ca_bundle=LocatorControllerCaBundleProvider(fs,
-    locator_provider)`` reusing the SAME locator instance the controller client is built from.
+    THE MARKER IS CONDITIONAL, and that is load-bearing. Three states, and only the middle one is a
+    defect this repository can act on:
+
+    * field ABSENT — the body runs, the import raises, and the marker records an ``xfail``. Not a
+      skip: the body actually executes, so ``strict=True`` additionally fails the run if it somehow
+      PASSES, which would mean the assertions had gone vacuous while nobody was looking. A skip can
+      never establish that, because a skipped body proves nothing about itself.
+    * field PRESENT but UNWIRED — the condition is false, the marker does not apply, and this FAILS
+      loudly. An unconditional ``xfail`` would swallow exactly this state, which is the one that
+      matters most: the moment Stream B lands, an unwired composition must be a failure and not a
+      quiet "expected" one.
+    * field PRESENT and WIRED — passes, and the marker has already deactivated itself, so there is
+      no stale expectation left behind to remove.
+
+    ``raises=ImportError`` keeps the waiting state honest too: if the absent case ever fails for
+    some OTHER reason, that is a real failure rather than a silently absorbed one.
     """
-    from secp_management.enrollment_cli import EnrollmentCliDeps
-
-    field_names = {field.name for field in dataclasses.fields(EnrollmentCliDeps)}
-    if "ca_bundle" not in field_names:
-        pytest.skip(
-            "EnrollmentCliDeps has no `ca_bundle` field at this merge base; Stream B "
-            "(feature/secp-production-worker-installation) has not landed. This test starts "
-            "enforcing the cli.py wiring the moment it does."
-        )
-
     import secp_commissioning.runtime as runtime
     from secp_management.enrollment_cli import (  # type: ignore[attr-defined]
         LocatorControllerCaBundleProvider,
