@@ -10,6 +10,7 @@ or acting on an unverified adapter.
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import pytest
 from secp_management import ManagementError, cli
@@ -412,3 +413,102 @@ def test_a_tripwire_on_a_seam_inside_the_guarded_region_can_actually_fire():
             patch.setattr(runtime, "RealFilesystem", _tripwire)
             with pytest.raises(AssertionError, match="this seam must not be reached"):
                 composition()
+
+
+# --- an unexpected failure leaves as a bounded report, never a traceback --------------------------
+#
+# `_production_*_deps` now let programming and packaging errors propagate rather than silently
+# sealing. That is right -- a silent seal is invisible -- but loud must not mean a raw traceback on
+# a customer-facing installer. `build_worker_enroller()` lazily imports `secp_worker.enrollment_
+# driver` INSIDE the guarded region, so on a partial install an ImportError reached the operator
+# uncaught, where previously they got a bounded code and exit 3.
+
+
+def _break_enrollment_driver_import(monkeypatch):
+    import builtins
+
+    real = builtins.__import__
+
+    def _fake(name, *args, **kwargs):
+        if "enrollment_driver" in name:
+            raise ImportError("No module named 'secp_worker.enrollment_driver'")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake)
+    _composable_runtime(monkeypatch)
+
+
+def test_a_packaging_failure_exits_bounded_rather_than_as_a_traceback(monkeypatch, capsys):
+    _break_enrollment_driver_import(monkeypatch)
+    code = cli.main(["enrollment", "status", "--enrollment-id", "e", "--json"])
+    out = capsys.readouterr().out
+
+    assert code == 2
+    payload = json.loads(out)
+    assert payload == {"command": "secpctl", "reason_code": "secpctl_internal_error"}
+    # the exception MESSAGE is where module and filesystem paths live; it must not appear
+    assert "secp_worker" not in out and "No module named" not in out
+    assert "Traceback" not in out
+
+
+def test_the_bounded_failure_never_renders_an_exception_message():
+    """A message can carry an absolute path, a module layout, or a hostname. Only a bounded
+    `reason_code` is eligible, and only if it matches the grammar -- anything else is REPLACED
+    wholesale rather than trimmed, because a partial match is how a path fragment gets through."""
+    from secp_management.cli import INTERNAL_ERROR_REASON, _bounded_failure_reason
+
+    hostile = [
+        ImportError("No module named 'secp_worker.enrollment_driver'"),
+        OSError("/etc/secp/controller/ca.pem: permission denied"),
+        RuntimeError(r"C:\Users\operator\AppData\secrets"),
+        ValueError("x" * 200),
+        RuntimeError("UPPERCASE_REASON"),
+        RuntimeError(""),
+    ]
+    for exc in hostile:
+        assert _bounded_failure_reason(exc) == INTERNAL_ERROR_REASON
+
+    # a genuine bounded ManagementError reason is passed through
+    assert _bounded_failure_reason(ManagementError("secpctl_controller_unavailable")) == (
+        "secpctl_controller_unavailable"
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["/etc/passwd", "x" * 200, "Has Spaces", "UPPER", "ab", "has-hyphen", "", None, 7],
+)
+def test_a_hostile_reason_code_on_an_exception_is_replaced_not_trimmed(reason):
+    """The token is attacker-influenceable only via a `reason_code` attribute, but the grammar is
+    enforced regardless of where it came from."""
+    from secp_management.cli import INTERNAL_ERROR_REASON, _bounded_failure_reason
+
+    class _Odd(Exception):
+        pass
+
+    exc = _Odd("boom")
+    exc.reason_code = reason  # type: ignore[attr-defined]
+    assert _bounded_failure_reason(exc) == INTERNAL_ERROR_REASON
+
+
+def test_systemexit_and_keyboardinterrupt_still_propagate(monkeypatch):
+    """`--help` and usage errors exit through SystemExit, and Ctrl-C is an operator action --
+    neither is a failure to be rendered as a bounded report."""
+    monkeypatch.setattr(cli, "_dispatch_main", lambda _argv: (_ for _ in ()).throw(SystemExit(2)))
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+
+    monkeypatch.setattr(
+        cli, "_dispatch_main", lambda _argv: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["host", "inspect"])
+
+
+def test_the_bounded_failure_renders_for_humans_too(monkeypatch, capsys):
+    _break_enrollment_driver_import(monkeypatch)
+    code = cli.main(["enrollment", "status", "--enrollment-id", "e"])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "reason_code=secpctl_internal_error" in out
+    assert "secp_worker" not in out and "Traceback" not in out

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 from secp_management import ManagementError
@@ -467,8 +468,55 @@ def _production_engine_deps() -> EngineDeps | None:
         return None
 
 
+#: A bounded reason token: lowercase, underscore-separated, length-capped. Anything failing this is
+#: replaced wholesale rather than trimmed — a partial match is how a path fragment gets through.
+_REASON_TOKEN = re.compile(r"[a-z][a-z0-9_]{3,63}")
+
+#: The token emitted when an unexpected failure escapes the command surface.
+INTERNAL_ERROR_REASON = "secpctl_internal_error"
+
+
+def _bounded_failure_reason(exc: BaseException) -> str:
+    """A bounded reason token for an unexpected failure — NEVER the exception's message.
+
+    The message is precisely where the dangerous content lives: an ``ImportError`` carries a module
+    path, an ``OSError`` an absolute filesystem path, and either can name a deployment's layout on
+    an operator's terminal. Only a ``ManagementError``'s own ``reason_code`` is eligible, and only
+    if it matches the bounded grammar; everything else collapses to a single fixed token.
+    """
+    reason = getattr(exc, "reason_code", None)
+    if isinstance(reason, str) and _REASON_TOKEN.fullmatch(reason):
+        return reason
+    return INTERNAL_ERROR_REASON
+
+
 def main(argv: list[str] | None = None) -> int:
+    """The process entrypoint. Every failure leaves as a bounded report and an exit code.
+
+    ``SystemExit`` and ``KeyboardInterrupt`` deliberately propagate — argparse's ``--help``/usage
+    exits and an operator's Ctrl-C are not failures to be rendered.
+    """
     args_list = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return _dispatch_main(args_list)
+    except Exception as exc:  # noqa: BLE001 - bounded token, never a traceback, never the message
+        # `_production_*_deps` now let programming and packaging errors propagate rather than
+        # silently sealing (which is right — a silent seal is invisible). But loud must not mean a
+        # raw traceback on a customer-facing installer: an operator on a partial install used to
+        # get a bounded code and now must still get one. This is the boundary that guarantees it.
+        payload = {"command": "secpctl", "reason_code": _bounded_failure_reason(exc)}
+        _emit(args_list, EXIT_REFUSED, payload)
+        return EXIT_REFUSED
+
+
+def _emit(args_list: list[str], exit_code: int, payload: dict) -> None:
+    if "--json" in args_list:
+        sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    else:
+        sys.stdout.write(_render_human(exit_code, payload))
+
+
+def _dispatch_main(args_list: list[str]) -> int:
     # the enrollment/worker groups get the production controller-client composition; every OTHER
     # (engine) group gets the production management-engine deps. BOTH fall back to their SEALED
     # default on any error, so an unprovisioned/non-POSIX host still fails closed with a bounded

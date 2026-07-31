@@ -1407,9 +1407,25 @@ _FORBIDDEN_REPORT_FIELD_SHAPES = ("secret", "password", "passphrase", "private_k
 #: and widening the substring set to catch a header name would flag every one of them.
 _FORBIDDEN_EXACT_FIELD_NAMES = frozenset({"authorization", "bearer", "token", "access_token"})
 
-#: Report keys that legitimately contain a forbidden substring. Each is a NON-secret and is listed
-#: individually so adding one is a deliberate, reviewable act rather than a widened pattern.
-_REVIEWED_FIELD_EXCEPTIONS = frozenset({"has_secret_store"})
+#: Dict keys that legitimately match a forbidden shape. Scoped to (module, key) PAIRS rather than
+#: bare names: exempting `token` outright would also exempt a genuine report field called `token`
+#: anywhere in the package, which is exactly the over-broad exception that turns a guard into
+#: decoration. Each entry is a deliberate, reviewable decision with its reason.
+#:
+#: The scan reads every dict key in the package, which is a superset of report fields — so REQUEST
+#: payload keys legitimately appear here. They are not rendered: they are sent, not reported.
+_REVIEWED_FIELD_EXCEPTIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # An outbound HTTP header name, not a report field: `{"Authorization": <bearer>}` on the
+        # pinned controller request. The VALUE never enters a report; `_SECRET_SHAPES` covers that.
+        ("enrollment_controller_client.py", "Authorization"),
+        # The RFC 7009 §2.1 revocation FORM parameter. Sent in a request body, never reported —
+        # `test_a_logout_report_never_carries_the_token_or_the_origin` pins the reporting side.
+        ("operator_token_revoke.py", "token"),
+        # A boolean capability flag on the credential status projection; carries no secret.
+        ("operator_credential_store.py", "has_secret_store"),
+    }
+)
 
 
 def _report_key_literals(path) -> set[str]:
@@ -1426,33 +1442,41 @@ def _report_key_literals(path) -> set[str]:
     return keys
 
 
-def _report_producing_modules() -> list:
-    """DISCOVER the modules that build reports, rather than listing them.
+def _scanned_modules() -> list:
+    """EVERY module in the management package. Not a seed, not a list.
 
-    A hardcoded tuple is the defect this program has now hit three times: an enumeration that
-    silently stops covering what it was written to cover. A new ``*_cli.py`` — or whatever another
-    stream lands — would simply not be scanned, and a secret-shaped field name in it would reach
-    the terminal with this guard still green.
+    This guard has now under-covered three times, each time because it enumerated: a hardcoded
+    tuple, then a seed matching modules that ASSEMBLE reports (a ``"command"`` key), which missed
+    modules that merely CONTRIBUTE fields — ``StoredCredentialStatus.to_report`` and
+    ``RevocationOutcome.to_report`` both merge field names into rendered reports without ever
+    writing ``"command"``, and both demonstrably reach the terminal.
 
-    The seed is the report marker itself: every report this CLI renders carries a ``"command"``
-    key, so any module in the package that builds a dict with that key is report-producing and must
-    be scanned. That derives coverage from the code rather than from someone remembering.
+    Adding ``def to_report`` as a second seed would have worked today and failed the next time
+    someone invented a third way to contribute a field. The check is string-set membership over
+    dict keys, so scanning everything costs nothing and is the only version that cannot
+    under-cover. Legitimate matches are handled by the reviewed exceptions list, where each is a
+    deliberate, visible decision.
     """
     import pathlib as _pathlib
 
     import secp_management
 
-    pkg = _pathlib.Path(secp_management.__file__).parent
-    return sorted(path for path in pkg.glob("*.py") if "command" in _report_key_literals(path))
+    return sorted(_pathlib.Path(secp_management.__file__).parent.glob("*.py"))
 
 
-def test_the_report_module_discovery_finds_the_known_producers():
-    """Anti-vacuity for the discovery itself: if the seed stopped matching, the guard below would
-    scan nothing and pass. These three are known to build reports today."""
-    found = {path.name for path in _report_producing_modules()}
-    for expected in ("engine.py", "enrollment_cli.py", "auth_cli.py"):
-        assert expected in found, f"{expected} builds reports but discovery missed it"
-    assert len(found) >= 3
+def test_the_scan_covers_report_assemblers_and_contributors_alike():
+    """Anti-vacuity, and a regression pin for the two ways this guard has under-covered.
+
+    ``engine``/``enrollment_cli``/``auth_cli`` ASSEMBLE reports. ``operator_credential_store`` and
+    ``operator_token_revoke`` only CONTRIBUTE fields, via ``to_report`` merged into a larger report
+    — they carry no ``"command"`` key and were invisible to the previous seed, while their fields
+    (``credential_backend``, ``token_still_live``, ...) print to the terminal on every `auth`
+    command."""
+    found = {path.name for path in _scanned_modules()}
+    for assembler in ("engine.py", "enrollment_cli.py", "auth_cli.py", "cli.py"):
+        assert assembler in found, f"{assembler} assembles reports but is not scanned"
+    for contributor in ("operator_credential_store.py", "operator_token_revoke.py"):
+        assert contributor in found, f"{contributor} contributes report fields but is not scanned"
 
 
 def test_no_report_producing_module_emits_a_secret_shaped_field_name():
@@ -1460,9 +1484,9 @@ def test_no_report_producing_module_emits_a_secret_shaped_field_name():
     scalar, so a field named like a secret would reach the terminal by default. This fails in the
     file another stream would have to edit, rather than only on a host that can run that group."""
     offenders = []
-    for path in _report_producing_modules():
+    for path in _scanned_modules():
         for key in _report_key_literals(path):
-            if key in _REVIEWED_FIELD_EXCEPTIONS:
+            if (path.name, key) in _REVIEWED_FIELD_EXCEPTIONS:
                 continue
             lowered = key.lower()
             if lowered in _FORBIDDEN_EXACT_FIELD_NAMES or any(
@@ -1472,6 +1496,15 @@ def test_no_report_producing_module_emits_a_secret_shaped_field_name():
     assert offenders == [], (
         f"secret-shaped report field names would print to the terminal by default: {offenders}"
     )
+
+
+def test_an_exception_is_scoped_to_one_module_and_cannot_leak_to_another():
+    """`token` is exempt in `operator_token_revoke` because it is an RFC 7009 form parameter. That
+    must NOT exempt a report field called `token` anywhere else — an exception scoped by bare name
+    would, and that is how a guard becomes decoration."""
+    assert ("operator_token_revoke.py", "token") in _REVIEWED_FIELD_EXCEPTIONS
+    assert ("auth_cli.py", "token") not in _REVIEWED_FIELD_EXCEPTIONS
+    assert all(isinstance(entry, tuple) and len(entry) == 2 for entry in _REVIEWED_FIELD_EXCEPTIONS)
 
 
 def test_the_field_name_guard_would_actually_catch_one():
