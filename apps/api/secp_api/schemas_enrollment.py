@@ -88,6 +88,20 @@ class RevokeEnrollment(BaseModel):
     expected_revision: int = Field(ge=0)
 
 
+class MarkRecoveryRequired(BaseModel):
+    """Operator-triggered recovery: mark an enrollment as needing operator remediation.
+
+    The complement of the scheduled expiry sweep — the sweep reaches enrollments that ran out of
+    time, this reaches one an operator has decided is stuck, without waiting for the TTL. Carries
+    ONLY the last-observed ``expected_revision``; the reason code is server-owned (a bounded code,
+    never caller free-text) and the durable CAS coordinates are derived server-side.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+
+
 _DIGEST = r"^sha256:[0-9a-f]{64}$"
 
 # Progression requests carry ONLY the caller's last-observed ``expected_revision`` (a small integer

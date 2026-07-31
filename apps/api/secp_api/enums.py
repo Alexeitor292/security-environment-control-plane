@@ -856,6 +856,12 @@ class AuditAction(str, Enum):
     authorization_denied = "authorization.denied"
     enrollment_invitation_created = "enrollment.invitation_created"
     enrollment_revoked = "enrollment.revoked"
+    # WS-B R3: an operator drove an enrollment to the recovery_required terminal. Distinct from
+    # enrollment.revoked: revocation retires an invitation, recovery marks an enrollment as needing
+    # operator remediation. The scheduled expiry sweep is NOT audited per row — it is unattended
+    # platform work reported as aggregate counts, and a per-row audit would be an unbounded write
+    # amplification with no actor to attribute it to.
+    enrollment_recovery_required = "enrollment.recovery_required"
     enrollment_worker_bound = "enrollment.worker_bound"
     enrollment_offer_recorded = "enrollment.offer_recorded"
     enrollment_result_recorded = "enrollment.result_recorded"

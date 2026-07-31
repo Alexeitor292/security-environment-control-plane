@@ -412,7 +412,19 @@ def test_workflow_arguments_and_activity_dispatch_remain_ids_only():
             # composition, provider, or activity object that would drag I/O into the sandbox).
             first = node.args[0]
             assert isinstance(first, ast.Name | ast.Constant), ast.dump(first)
-    assert dispatch_calls == 9, dispatch_calls
+    # Exactly one dispatch per workflow. Derived from the module rather than hardcoded, so the
+    # guard stays "every workflow dispatches by name, and none dispatches twice" instead of a magic
+    # number a new workflow has to chase.
+    workflow_classes = sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and any(
+            isinstance(dec, ast.Attribute) and dec.attr == "defn" for dec in node.decorator_list
+        )
+    )
+    assert workflow_classes >= 9, workflow_classes  # guard against a vacuous pass
+    assert dispatch_calls == workflow_classes, (dispatch_calls, workflow_classes)
     # No composition/provider symbol is passed into a workflow argument.
     for forbidden in ("composition", "provider", "PlanExecutionComposition"):
         assert f"execute_activity({forbidden}" not in src

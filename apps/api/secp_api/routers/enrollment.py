@@ -10,6 +10,8 @@ vertical slice covers the controller invitation lifecycle:
 * ``GET  /api/v1/enrollment`` — the org-scoped, keyset-paged enrollment inventory: bounded status
   projections only, filterable by a closed set of states, including revoked and terminal ones.
 * ``GET  /api/v1/enrollment/{enrollment_id}`` — the bounded, secret-free status projection.
+* ``POST /api/v1/enrollment/{enrollment_id}/recover`` — operator-triggered recovery, the complement
+  of the scheduled expiry sweep that ``secp_worker`` drives on the ORDINARY Temporal queue.
 
 Authentication is required (``current_principal``); authorization is the organization boundary,
 enforced by the service against the authoritative persisted row (Charter invariant: organization is
@@ -62,6 +64,7 @@ from secp_api.schemas_enrollment import (
     EnrollmentListOut,
     EnrollmentStatusOut,
     MarkHealthyRequest,
+    MarkRecoveryRequired,
     RecordHandoffRequest,
     ResultExchangeOut,
     ResultExchangeRequest,
@@ -179,6 +182,27 @@ def revoke_enrollment(
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentStatusOut:
     outcome = svc.revoke_enrollment(
+        session, principal, enrollment_id=enrollment_id, expected_revision=body.expected_revision
+    )
+    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+
+
+@router.post("/{enrollment_id}/recover", response_model=EnrollmentStatusOut)
+def mark_enrollment_recovery_required(
+    enrollment_id: str,
+    body: MarkRecoveryRequired,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentStatusOut:
+    """Operator-triggered recovery — the complement of the scheduled expiry sweep.
+
+    The sweep (``secp_worker`` drives it on the ordinary Temporal queue) reaches enrollments that
+    ran out of time; this reaches one an operator has decided is stuck, without waiting for the TTL.
+    Requires ``enrollment:manage``, enforced in the SERVICE layer so a router bypass cannot evade
+    it. Idempotent on an already-terminal enrollment; a stale ``expected_revision`` on a live one
+    refuses a bounded conflict.
+    """
+    outcome = svc.mark_recovery_required(
         session, principal, enrollment_id=enrollment_id, expected_revision=body.expected_revision
     )
     return EnrollmentStatusOut.model_validate(outcome.state.public_view())

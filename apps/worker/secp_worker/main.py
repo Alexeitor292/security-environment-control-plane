@@ -30,6 +30,7 @@ from secp_worker.temporal_app import (
     destroy_activity,
     discover_activity,
     eligibility_preflight_activity,
+    enrollment_recovery_sweep_activity,
     plan_secret_readiness_activity,
     real_plan_generation_activity,
     remote_state_readiness_activity,
@@ -41,6 +42,7 @@ from secp_worker.temporal_workflows import (
     DestroyWorkflow,
     DiscoverWorkflow,
     EligibilityPreflightWorkflow,
+    EnrollmentRecoverySweepWorkflow,
     PlanSecretReadinessWorkflow,
     RealPlanGenerationWorkflow,
     RemoteStateReadinessWorkflow,
@@ -73,6 +75,10 @@ SHIPPED_WORKFLOWS: tuple = (
     # is
     # disabled so ordinary startup refuses before any execution.
     RealPlanGenerationWorkflow,
+    # WS-B R3: the scheduled worker-enrollment expiry sweep. Registered on the ORDINARY queue only —
+    # it is a pure database lifecycle transition (no provider, no OpenTofu, no host, no credential),
+    # so there is no controlled-live variant of it and the operator queue never serves it.
+    EnrollmentRecoverySweepWorkflow,
 )
 SHIPPED_ACTIVITIES: tuple = (
     deploy_activity,
@@ -90,7 +96,53 @@ SHIPPED_ACTIVITIES: tuple = (
     remote_state_readiness_activity,
     plan_secret_readiness_activity,
     real_plan_generation_activity,
+    # WS-B R3: has no sealed/controlled-live split — it contacts nothing. See the workflow note.
+    enrollment_recovery_sweep_activity,
 )
+
+
+# --- WS-B R3: the scheduled enrollment expiry sweep ----------------------------------------------
+# A STABLE workflow id, so a worker restart (or a second replica) re-attaches to the ONE existing
+# cron schedule instead of creating another. Correctness does not depend on that: each candidate is
+# locked SKIP LOCKED and transitioned under CAS, so overlapping runs recover each row exactly once.
+ENROLLMENT_RECOVERY_SWEEP_WORKFLOW_ID = "secp-enrollment-recovery-sweep"
+
+#: Every 15 minutes. The sweep only moves ALREADY-EXPIRED enrollments to ``recovery_required``, so
+#: the interval sets how promptly an expired enrollment surfaces as recovery-required — not whether
+#: it ever does. A code-owned constant rather than a deployment knob.
+ENROLLMENT_RECOVERY_SWEEP_CRON = "*/15 * * * *"
+
+
+async def _ensure_enrollment_recovery_schedule(client, task_queue: str) -> None:
+    """Ensure the enrollment expiry sweep is scheduled on the ORDINARY task queue.
+
+    Idempotent: an already-running schedule under the stable id makes this a no-op (Temporal refuses
+    the duplicate start, which is the desired outcome, not an error).
+
+    Scheduling failure MUST NOT take down the worker. The sweep is a lifecycle-liveness job — an
+    unscheduled sweep delays ``recovery_required``, it does not corrupt anything — whereas the
+    activities registered above serve the product's primary paths. Killing the worker over a
+    scheduling hiccup would trade a small delay for a full outage, so this logs and continues.
+    """
+    from temporalio.client import WorkflowAlreadyStartedError
+
+    try:
+        await client.start_workflow(
+            EnrollmentRecoverySweepWorkflow.run,
+            {},
+            id=ENROLLMENT_RECOVERY_SWEEP_WORKFLOW_ID,
+            task_queue=task_queue,  # the ORDINARY queue, never the operator queue
+            cron_schedule=ENROLLMENT_RECOVERY_SWEEP_CRON,
+        )
+        logger.info(
+            "Enrollment recovery sweep scheduled on task queue %s (%s)",
+            task_queue,
+            ENROLLMENT_RECOVERY_SWEEP_CRON,
+        )
+    except WorkflowAlreadyStartedError:
+        logger.info("Enrollment recovery sweep already scheduled; leaving the existing schedule")
+    except Exception as exc:  # noqa: BLE001 - a scheduling failure must not kill the worker
+        logger.error("Could not schedule the enrollment recovery sweep: %s", exc)
 
 
 def _start_staging_lab_consumer(stop_event: threading.Event) -> threading.Thread:
@@ -225,6 +277,10 @@ async def _run_temporal(stop_event: threading.Event) -> None:  # pragma: no cove
     _start_deployment_consumer(stop_event)
     _start_discovery_consumer(stop_event)
     _start_discovery_bundle_prep(stop_event)
+    # WS-B R3: attach the enrollment expiry sweep to the ORDINARY queue we are already polling. Done
+    # only AFTER the worker is confirmed running, so we never schedule work onto a queue this
+    # process turned out not to be serving.
+    await _ensure_enrollment_recovery_schedule(client, settings.temporal_task_queue)
     health.mark_ready(settings.temporal_task_queue)
     try:
         await asyncio.gather(worker_task, _run_outbox_publisher_loop())

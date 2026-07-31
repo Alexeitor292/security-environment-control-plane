@@ -407,3 +407,126 @@ def test_cursor_from_another_page_cannot_reach_another_organization(
     forged = svc._encode_cursor("2026-07-21T00:00:00+00:00", "sha256:" + "0" * 64)
     ids = [item["enrollment_id"] for item in _list(client, after=forged).json()["items"]]
     assert foreign.state.enrollment_id not in ids
+
+
+# --- R3: the operator-triggered recovery route ---------------------------------------------------
+
+
+def test_operator_can_mark_an_enrollment_recovery_required(client):
+    created = _create(client)
+    r = client.post(
+        f"/api/v1/enrollment/{created['enrollment_id']}/recover",
+        json={"expected_revision": 0},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "recovery_required"
+    assert r.json()["refusal_reason"] == "operator_recovery_required"
+
+
+def test_operator_recovery_is_idempotent_on_a_terminal_enrollment(client):
+    created = _create(client)
+    body = {"expected_revision": 0}
+    first = client.post(f"/api/v1/enrollment/{created['enrollment_id']}/recover", json=body)
+    second = client.post(f"/api/v1/enrollment/{created['enrollment_id']}/recover", json=body)
+    assert first.status_code == second.status_code == 200
+    assert second.json()["revision"] == first.json()["revision"], "no second write"
+
+
+def test_operator_recovery_refuses_a_stale_revision(client):
+    created = _create(client)
+    r = client.post(
+        f"/api/v1/enrollment/{created['enrollment_id']}/recover",
+        json={"expected_revision": 7},
+    )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "enrollment_revision_conflict"
+
+
+def test_operator_recovery_requires_manage(client, principal):
+    created = _create(client)
+    org = principal.organization_id
+    body = {"expected_revision": 0}
+
+    _as(client, _principal(org, [Permission.enrollment_read]))
+    assert (
+        client.post(f"/api/v1/enrollment/{created['enrollment_id']}/recover", json=body).status_code
+        == 403
+    )
+
+    _as(client, _principal(org, [Permission.enrollment_manage]))
+    assert (
+        client.post(f"/api/v1/enrollment/{created['enrollment_id']}/recover", json=body).status_code
+        == 200
+    )
+
+
+def test_operator_recovery_rejects_a_caller_supplied_reason(client):
+    """The reason code is server-owned — never caller free-text that could carry a path/secret."""
+    created = _create(client)
+    r = client.post(
+        f"/api/v1/enrollment/{created['enrollment_id']}/recover",
+        json={"expected_revision": 0, "reason": "anything"},
+    )
+    assert r.status_code == 422
+
+
+def test_cross_org_recovery_is_forbidden(client, session, other_org_principal):
+    from secp_api.services import worker_enrollment as svc
+
+    invitation = create_invitation(
+        controller_installation_id="controller-aaaaaaaa",
+        controller_key_id=CTRL_KEY,
+        controller_trust_anchor_hex=CTRL_HEX,
+        controller_origin=ORIGIN,
+        release_digest=RELEASE,
+        transaction_id="txn-recover",
+        nonce="sha256:" + "e" * 64,
+        created_at="2026-07-21T00:00:00Z",
+        expires_at="2026-07-21T01:00:00Z",
+    )
+    foreign = svc.create_invitation_and_open(
+        session,
+        other_org_principal,
+        invitation=invitation,
+        deployment_site_label=SITE,
+        now="2026-07-21T00:10:00Z",
+    )
+    session.commit()
+
+    r = client.post(
+        f"/api/v1/enrollment/{foreign.state.enrollment_id}/recover",
+        json={"expected_revision": 0},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "enrollment_forbidden"
+
+
+def test_the_lifecycle_service_now_requires_an_explicit_permission(client, session, principal):
+    """refuse/recover were authorized by the ORGANIZATION BOUNDARY ALONE; that gap is closed."""
+    from secp_api.errors import AuthorizationError
+    from secp_api.services import worker_enrollment as svc
+
+    created = _create(client)
+    org = principal.organization_id
+    # same organization, but no enrollment:manage — the org boundary alone must not authorize it
+    read_only = _principal(org, [Permission.enrollment_read])
+    loaded = svc.load_public_view(session, read_only, enrollment_id=created["enrollment_id"])
+    expected = svc.ExpectedRevision(
+        revision=loaded["revision"], state_digest="", sequence=0, predecessor_digest=""
+    )
+    with pytest.raises(AuthorizationError):
+        svc.recover_enrollment(
+            session,
+            read_only,
+            enrollment_id=created["enrollment_id"],
+            reason="operator_recovery_required",
+            expected=expected,
+        )
+    with pytest.raises(AuthorizationError):
+        svc.refuse_enrollment(
+            session,
+            read_only,
+            enrollment_id=created["enrollment_id"],
+            reason="operator_recovery_required",
+            expected=expected,
+        )

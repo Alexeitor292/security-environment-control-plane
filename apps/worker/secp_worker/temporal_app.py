@@ -12,6 +12,7 @@ Discovery is read-only and, in SECP-002A, never runs against a real endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC
 
@@ -38,6 +39,7 @@ from secp_worker.temporal_activity_names import (  # noqa: E402 - after the temp
     DESTROY_ACTIVITY_NAME,
     DISCOVER_ACTIVITY_NAME,
     ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
+    ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME,
     PLAN_SECRET_READINESS_ACTIVITY_NAME,
     REAL_PLAN_GENERATION_ACTIVITY_NAME,
     REMOTE_STATE_READINESS_ACTIVITY_NAME,
@@ -546,6 +548,37 @@ class RealPlanGenerationActivity:
         )
 
 
+# --- WS-B R3: the scheduled worker-enrollment expiry sweep ---------------------------------------
+# Gives the recovery lifecycle a real caller. ``recovery_required`` had no producer outside tests,
+# so it was unreachable in a running deployment.
+#
+# This is an ORDINARY-queue activity. It performs a pure database lifecycle transition under the
+# same compare-and-swap as every other enrollment transition: it contacts no provider, opens no
+# outbound connection, runs no OpenTofu, touches no host, and reads no credential. There is no
+# sealed/controlled-live split to make, and it is never registered on the operator queue.
+#
+# It passes the SESSION FACTORY (not a session) into the sweep, deliberately: the sweep reads its
+# candidate batch in one session and then recovers each candidate in its own transaction, which is
+# what makes it fresh-process-safe, poison-isolated and concurrent-safe.
+
+
+@activity.defn(name=ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME)
+async def enrollment_recovery_sweep_activity(arg: dict) -> str:
+    import datetime as _dt
+    import json
+
+    from secp_api.db import get_sessionmaker
+    from secp_api.services.worker_enrollment_recovery_schedule import sweep_all_organizations
+
+    # The impure clock read lives HERE, in the activity — never in the workflow, which must stay
+    # deterministic. The canonical UTC form is what the pure contract parses.
+    now = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+    report = await asyncio.to_thread(sweep_all_organizations, get_sessionmaker(), now=now)
+    # Aggregate counts only — the report is identifier-free by construction, so this result and any
+    # log line derived from it can never carry an enrollment id or an organization id.
+    return json.dumps(report.as_log_fields(), sort_keys=True)
+
+
 # --- The DEFAULT activities the SHIPPED (sealed-by-default) worker registers
 # -----------------------
 # Each is constructed with its SEALED provider, so ordinary worker startup refuses at the
@@ -582,6 +615,7 @@ from secp_worker.temporal_workflows import (  # noqa: E402 - re-export at module
     DestroyWorkflow,
     DiscoverWorkflow,
     EligibilityPreflightWorkflow,
+    EnrollmentRecoverySweepWorkflow,
     PlanSecretReadinessWorkflow,
     RealPlanGenerationWorkflow,
     RemoteStateReadinessWorkflow,
@@ -594,6 +628,7 @@ __all__ = [
     "DESTROY_ACTIVITY_NAME",
     "DISCOVER_ACTIVITY_NAME",
     "ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME",
+    "ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME",
     "PLAN_SECRET_READINESS_ACTIVITY_NAME",
     "REAL_PLAN_GENERATION_ACTIVITY_NAME",
     "REMOTE_STATE_READINESS_ACTIVITY_NAME",
@@ -603,6 +638,7 @@ __all__ = [
     "DestroyWorkflow",
     "DiscoverWorkflow",
     "EligibilityPreflightWorkflow",
+    "EnrollmentRecoverySweepWorkflow",
     "PlanSecretReadinessWorkflow",
     "RealPlanGenerationWorkflow",
     "RemoteStateReadinessWorkflow",
@@ -618,6 +654,7 @@ __all__ = [
     "destroy_activity",
     "discover_activity",
     "eligibility_preflight_activity",
+    "enrollment_recovery_sweep_activity",
     "toolchain_attestation_activity",
     "remote_state_readiness_activity",
     "plan_secret_readiness_activity",

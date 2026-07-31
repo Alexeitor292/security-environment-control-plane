@@ -1461,6 +1461,63 @@ def revoke_enrollment(
     return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
 
 
+#: The bounded reason code recorded when an OPERATOR marks an enrollment recovery-required. Distinct
+#: from the sweep's ``expiry_recovery``, so an operator decision and an automatic expiry are always
+#: distinguishable in the durable record.
+_OPERATOR_RECOVERY_REASON = "operator_recovery_required"
+
+
+def mark_recovery_required(
+    session: Session,
+    actor: Principal,
+    *,
+    enrollment_id: str,
+    expected_revision: int,
+    claimed_scope: ClaimedScope | None = None,
+) -> TransitionOutcome:
+    """Operator-triggered recovery: drive an enrollment to the ``recovery_required`` terminal.
+
+    The complement of the scheduled expiry sweep. The sweep reaches enrollments that ran out of
+    time; this reaches one an operator has decided is stuck — a worker that will never bind, a site
+    that was decommissioned mid-enrollment — without waiting for the TTL.
+
+    Shaped exactly like :func:`revoke_enrollment`, deliberately: it requires ``enrollment_manage``
+    (enforced here, not only in the router), enforces the organization boundary against the
+    authoritative persisted row, and takes ONLY the caller's last-observed ``expected_revision``.
+    The durable CAS coordinates are derived server-side from the loaded state and never cross the
+    public boundary.
+
+    **Idempotent**: an already-terminal enrollment returns its state with no write and no new audit.
+    A stale ``expected_revision`` on a live enrollment refuses ``revision_conflict``; concurrent
+    callers collide on the head CAS so exactly one wins. Exactly one bounded, secret-free audit
+    event is recorded, and only for the winning transition. Does NOT commit — the caller owns the
+    transaction boundary.
+    """
+    actor.require(Permission.enrollment_manage)
+    _assert_schema_ready(session)
+    loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
+    state = loaded.state
+    if state.state in (REFUSED, RECOVERY_REQUIRED):
+        return TransitionOutcome(state, state.revision, deduplicated=True)  # already terminal
+    if state.revision != expected_revision:
+        raise WorkerEnrollmentError(EC.revision_conflict)
+    new_state = _run_pure(lambda: require_recovery(state, _OPERATOR_RECOVERY_REASON))
+    if new_state is state:  # defensive: the contract treated it as a no-op
+        return TransitionOutcome(state, state.revision, deduplicated=True)
+    _commit(session, loaded, new_state, step=None, input_digest=None)
+    audit.record(
+        session,
+        action=AuditAction.enrollment_recovery_required,
+        resource_type="worker_enrollment",
+        resource_id=enrollment_id,
+        actor=str(actor.user_id),
+        organization_id=actor.organization_id,
+        outcome="success",
+        data={"state": new_state.state, "revision": new_state.revision},
+    )
+    return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
+
+
 def _serve_lifecycle_retry(
     session: Session,
     loaded: LoadedEnrollment,
@@ -1543,6 +1600,12 @@ def _lifecycle(
     expected: ExpectedRevision,
     claimed_scope: ClaimedScope | None,
 ) -> TransitionOutcome:
+    # Operator lifecycle transitions are MANAGE operations, and the check lives HERE so it cannot be
+    # bypassed by a direct service call or by a future router that forgets it. Without this, refuse
+    # / recover would have been authorized by the organization boundary ALONE — every other
+    # state-changing operation on this service (revoke, create, the progression steps) requires an
+    # explicit permission, and these two were the exception.
+    actor.require(Permission.enrollment_manage)
     _assert_schema_ready(session)
     loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
     # An exact lifecycle retry is recognised from the append-only history BEFORE the caller's
@@ -1752,6 +1815,7 @@ __all__ = [
     "create_invitation_and_open",
     "list_public_views",
     "load_public_view",
+    "mark_recovery_required",
     "mark_enrollment_healthy",
     "recover_enrollment",
     "record_offer",
