@@ -106,18 +106,29 @@ class RealManifestReader:
         skip would be the very trap that makes a recursive scan worse than a flat one: something
         could then hide behind the exempt name.
         """
-        found: list[str] = []
-        try:
-            # followlinks=False (the default) — a symlinked subdirectory is not descended.
-            for root, _dirs, names in os.walk(self._dir):
-                rel_root = os.path.relpath(root, self._dir)
-                for n in names:
-                    if not n.endswith(".py"):
-                        continue
-                    rel = n if rel_root == "." else f"{rel_root}/{n}"
-                    found.append(rel.replace(os.sep, "/"))
-        except OSError:
+
+        def _walk_error(_exc: OSError) -> None:
+            # os.walk SWALLOWS enumeration errors by default, so an unreadable subtree contributed
+            # nothing without complaint and a missing package dir returned () — the inventory check
+            # then matched the flat set and passed. That is the very hole this enumeration exists
+            # to close, surviving one variant down: not-present and not-readable looked identical.
             raise ManifestError("manifest_dir_unreadable") from None
+
+        found: list[str] = []
+        for root, dirs, names in os.walk(self._dir, onerror=_walk_error, followlinks=False):
+            # followlinks=False does not DESCEND a symlinked subdirectory — it silently skips it,
+            # which is the same "contributes nothing" failure. A plain nested directory is refused,
+            # so a symlinked one must be too: placing it needs the same write access to the
+            # root-owned package dir, and the asymmetry is what an attacker would use.
+            for d in dirs:
+                if os.path.islink(os.path.join(root, d)):
+                    raise ManifestError("manifest_symlinked_directory")
+            rel_root = os.path.relpath(root, self._dir)
+            for n in names:
+                if not n.endswith(".py"):
+                    continue
+                rel = n if rel_root == "." else f"{rel_root}/{n}"
+                found.append(rel.replace(os.sep, "/"))
         return tuple(sorted(found))
 
     def read(self, name: str) -> bytes:
@@ -224,11 +235,13 @@ class TrustedManifestReader:
     def list_modules(self) -> tuple[str, ...]:
         """Every ``.py`` at ANY depth, package-relative, enumerated through the trusted dir fd.
 
-        Same defect and same fix as :meth:`RealManifestReader.list_modules` — a nested module was
-        invisible to the flat listing and so sat outside the aggregate without tripping the
-        inventory check. Enumeration descends by FD (``O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`` relative
-        to the parent fd), never by a re-resolvable path, so the property that makes this reader
-        trusted is preserved: a directory-replacement race at the path cannot substitute a tree.
+        Same nested-module defect as :meth:`RealManifestReader.list_modules`, though the two differ
+        in the ERROR direction and that is worth not glossing: this reader RAISES on an unreadable
+        directory, where the source-side walk had to be given an explicit ``onerror`` to stop
+        returning partial results. Enumeration descends by FD
+        (``O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`` relative to the parent fd), never by a re-resolvable
+        path, so the property that makes this reader trusted is preserved: a directory-replacement
+        race at the path cannot substitute a tree.
 
         Descent is bounded to ONE level and refuses deeper rather than guessing. That is
         deliberate: the reviewed inventory is flat, so anything nested already fails, and a
@@ -254,6 +267,12 @@ class TrustedManifestReader:
                 st = os.stat(entry, dir_fd=self._fd, follow_symlinks=False)
             except OSError:
                 raise ManifestError("manifest_dir_unreadable") from None
+            if stat.S_ISLNK(st.st_mode):
+                # Stat'd with follow_symlinks=False, so a symlink to a directory is NOT S_ISDIR and
+                # would fall through to `continue` — enumerating nothing, silently. Refused, to
+                # match the plain nested-directory case: both need the same write access to the
+                # root-owned package dir, so treating them differently is the gap.
+                raise ManifestError("manifest_symlinked_directory")
             if not stat.S_ISDIR(st.st_mode):
                 continue  # a non-.py regular file is not a module and never was
             found.extend(f"{entry}/{n}" for n in self._list_subdirectory(entry, flags))

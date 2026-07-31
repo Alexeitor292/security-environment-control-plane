@@ -177,6 +177,9 @@ REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
     # than skipped: a directory that contributes nothing to the aggregate is exactly how a module
     # would sit outside it undetected.
     "manifest_nested_directory_unverifiable": {"dimension": "A", "remediation": _O},
+    # A symlinked subdirectory in the package. Neither reader descends one, so it would enumerate
+    # nothing silently — refused instead, matching the plain nested-directory case.
+    "manifest_symlinked_directory": {"dimension": "A", "remediation": _O},
     "manifest_dir_unreadable": {"dimension": "A", "remediation": _O},
     "manifest_module_unreadable": {"dimension": "A", "remediation": _O},
     "manifest_module_not_regular": {"dimension": "A", "remediation": _O},

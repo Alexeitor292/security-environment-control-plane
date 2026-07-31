@@ -33,26 +33,31 @@ else, so ``r = self.runner`` followed by ``r.run(verb, ...)`` was invisible to i
 while the suite stayed green. The finder now REFUSES an unrecognised ``.run(`` receiver instead of
 skipping it, which closes the alias.
 
-What remains outside these three, stated without an absolute this time:
+WHAT REMAINS, stated as ONE positive residual rather than a list of escapes:
 
-* indirection that produces no ``ast.Attribute`` func node at all — ``getattr(obj, "run")(...)``
-  — is not matched by the finder. There is none in the module today (checked), and the
-  behavioural tests are what cover it: a private method wired into a public one fails them hard,
-  including the count-equality test, because the commands actually run.
-* a private method that is never called is invisible to the PUBLIC-SURFACE check only — not to the
-  other two. Measured: an uncalled private ``_enable`` with a recognised receiver and a literal
-  verb trips both the site-count check (5 runner calls where 4 are expected) and the mutation-verb
-  literal scan. Only a private method that ALSO evades those two — an aliased receiver or a
-  constructed verb — is invisible here, and that is bullet one.
-* a verb reaching the runner from OUTSIDE this module. The runner is only ever constructed with
-  pinned executables, which is a separate property tested elsewhere.
+    **These checks analyse the AST. A call whose receiver is not an ``ast.Attribute`` node —
+    ``getattr(obj, "run")(...)`` and nothing else in this module today (checked) — is not
+    analysable by them, and is the only route they cannot see. Everything else reaching
+    ``runner.run`` is caught: an unrecognised receiver is refused, a non-literal verb is refused,
+    a mutation verb as any string constant is refused, and an added public method breaks the exact
+    surface set.**
 
-The bullet above is a correction of a correction, and worth naming as such. The first version of
-this docstring over-claimed ("cannot reach ``runner.run`` at all"); the rewrite that replaced it
-under-claimed ("invisible to every check here"), which misleads a maintainer just as effectively,
-only toward under-trust — someone reading it might add a redundant guard, or conclude these checks
-are weaker than they are. **A limit statement is what a future reader relies on when deciding
-whether a guard is needed, so it has to be exact in both directions, not merely humble.**
+    That residual is covered behaviourally instead: a private method wired into a public one fails
+    the behavioural tests hard, including the count-equality test, because the commands actually
+    run.
+
+Why it is phrased that way, since this docstring has now been wrong three times. The first version
+over-claimed ("cannot reach ``runner.run`` at all"); the second under-claimed ("invisible to every
+check here"); the third under-claimed more narrowly, naming an aliased receiver and a constructed
+verb as live escapes **after both had been closed**. Each rewrite enumerated ROUTES, and a list of
+what evades a guard decays exactly like a list of what it covers — every time a route is closed the
+list is stale, and it is stale in the direction that makes the checks look weaker than they are.
+
+So: state the single property that puts something outside analysis, and assert everything else is
+caught. **A positive statement of the one gap cannot go stale as the checks improve; an enumeration
+of escapes goes stale the moment one is closed.** An under-claim is not the safe direction — it
+gets a maintainer adding a redundant guard, or working around checks they think are weak. Humility
+is not accuracy.
 
 The general point, since it is what this file keeps demonstrating: a static check should refuse
 what it cannot analyse rather than pass over it, because silence and success are indistinguishable

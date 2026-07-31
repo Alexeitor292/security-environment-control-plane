@@ -142,3 +142,54 @@ def test_pycache_needs_no_name_exemption(tmp_path):
     # But a .py placed there is NOT skipped, because nothing is keyed on the directory's name.
     (pkg / "__pycache__" / "sneaky.py").write_text("", encoding="utf-8")
     assert "__pycache__/sneaky.py" in set(RealManifestReader(str(pkg)).list_modules())
+
+
+def test_a_missing_package_dir_raises_rather_than_enumerating_nothing(tmp_path):
+    """``os.walk`` swallows enumeration errors by default, so a missing or unreadable directory
+    returned ``()`` — and an empty listing against a flat inventory is indistinguishable from a
+    tampered one until the counts differ. Not-present and not-readable must not look like clean.
+    """
+    import pytest
+    from secp_operator_deployment.manifest import ManifestError, RealManifestReader
+
+    with pytest.raises(ManifestError) as excinfo:
+        RealManifestReader(str(tmp_path / "does_not_exist")).list_modules()
+    assert excinfo.value.reason_code == "manifest_dir_unreadable"
+
+
+def test_a_symlinked_subdirectory_is_refused_not_skipped(tmp_path):
+    """Neither reader DESCENDS a symlinked directory, so one would enumerate nothing silently —
+    the same "contributes nothing" failure as an unreadable subtree.
+
+    A plain nested directory is refused, and placing a symlink needs the same write access to the
+    root-owned package dir, so the asymmetry is the finding rather than the privilege level.
+    """
+    import pytest
+    from secp_operator_deployment.manifest import ManifestError, RealManifestReader
+
+    pkg = tmp_path / "secp_operator_deployment"
+    pkg.mkdir()
+    (pkg / "verify.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "systemd.py").write_text("hidden\n", encoding="utf-8")
+    try:
+        (pkg / "adapters").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this host")
+
+    with pytest.raises(ManifestError) as excinfo:
+        RealManifestReader(str(pkg)).list_modules()
+    assert excinfo.value.reason_code == "manifest_symlinked_directory"
+
+
+def test_the_new_manifest_reason_codes_are_catalogued():
+    """An operator meeting either must be able to look it up like any other."""
+    from secp_operator_deployment.verify import classify_reason_code
+
+    for code in (
+        "manifest_dir_unreadable",
+        "manifest_symlinked_directory",
+        "manifest_nested_directory_unverifiable",
+    ):
+        assert classify_reason_code(code) is not None, code
