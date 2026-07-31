@@ -76,6 +76,9 @@ function html(over: Partial<EnrollmentInventoryViewProps> = {}): string {
     onRevoke: () => {},
     revoking: false,
     revokeError: null,
+    onRecover: () => {},
+    recovering: false,
+    recoverError: null,
     liveNotice: null,
     nowMs: NOW,
     ...over,
@@ -373,6 +376,26 @@ describe("EnrollmentInventoryView - selection", () => {
     const out = html({ selectedId: id("1") });
     expect(out).toContain('aria-pressed="true"');
     expect(out).toContain(">Showing<");
+  });
+
+  /** The second operator write. It exists now, so it is offered — and distinguished from the first. */
+  it("offers operator-triggered recovery and says how it differs from revoking", () => {
+    const out = html({ selectedId: id("2") });
+    expect(out).toContain("Mark for recovery");
+    expect(out).toContain("Revoke withdraws the invitation");
+    expect(out).toContain("Both are permanent");
+    expect(out).toContain("neither can be reversed");
+  });
+
+  it("refuses recovery on a record that already ended, with the reason", () => {
+    const out = html({ selectedId: id("3") });
+    expect(out).toContain("already refused, so there is nothing left to recover");
+  });
+
+  it("names the missing permission when the principal cannot mark for recovery", () => {
+    const out = html({ permissions: { read: true, manage: false }, selectedId: id("2") });
+    expect(out).toContain("Mark for recovery");
+    expect(out).toContain("Requires the enrollment:manage permission");
   });
 
   it("warns that a revoke is permanent before offering it", () => {

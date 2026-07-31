@@ -6,6 +6,8 @@ import {
   ENROLLMENT_FORWARD_STATES,
   MISSING_MANAGE_REASON,
   MISSING_READ_REASON,
+  RECOVER_CONFIRM_NOTICE,
+  RECOVER_VS_REVOKE_NOTICE,
   NOT_ESTABLISHED,
   TRACKED_FILTERS,
   TRACKED_FILTER_LABELS,
@@ -32,6 +34,7 @@ import {
   removeTracked,
   resolveEnrollmentPermissions,
   revokeGate,
+  recoverGate,
   shouldWarnManageWithoutRead,
   siteLabelOf,
   statusDetailRows,
@@ -901,5 +904,53 @@ describe("working-set grouping and filters", () => {
       expect(label.length, filter).toBeGreaterThan(0);
       expect(label, filter).not.toMatch(/approv|reject|pending your|awaiting you/i);
     }
+  });
+});
+
+// --------------------------------------------------------------------- operator recovery
+
+describe("operator-triggered recovery", () => {
+  const READ = { read: true, manage: false };
+  const BOTH = { read: true, manage: true };
+
+  /** Gated exactly like revoke, because the backend gates it exactly like revoke. */
+  it("requires enrollment:manage, not enrollment:read", () => {
+    expect(recoverGate(READ, status(), false)).toEqual({
+      ok: false,
+      reason: MISSING_MANAGE_REASON,
+    });
+    expect(recoverGate(BOTH, status(), false).ok).toBe(true);
+  });
+
+  it("is offered only against a status that was actually observed", () => {
+    const gate = recoverGate(BOTH, null, false);
+    expect(gate.ok).toBe(false);
+    expect(gate.reason).toContain("Look up an enrollment");
+  });
+
+  it("is refused on an enrollment that already ended, with which terminal it is", () => {
+    const already = recoverGate(BOTH, status({ state: "recovery_required" }), false);
+    expect(already.ok).toBe(false);
+    expect(already.reason).toContain("already marked for recovery");
+
+    const refused = recoverGate(BOTH, status({ state: "refused" }), false);
+    expect(refused.ok).toBe(false);
+    expect(refused.reason).toContain("already refused");
+  });
+
+  it("is refused while a request is in flight", () => {
+    expect(recoverGate(BOTH, status(), true).ok).toBe(false);
+  });
+
+  /**
+   * Two permanent writes that both end the enrollment sit next to each other. The copy has to say
+   * what distinguishes them, or an operator picks by button label alone.
+   */
+  it("states how it differs from revoking, and that neither can be undone", () => {
+    expect(RECOVER_VS_REVOKE_NOTICE).toContain("Revoke withdraws the invitation");
+    expect(RECOVER_VS_REVOKE_NOTICE).toContain("Both are permanent");
+    expect(RECOVER_VS_REVOKE_NOTICE).toContain("neither can be reversed");
+    expect(RECOVER_CONFIRM_NOTICE).toContain("permanent");
+    expect(RECOVER_CONFIRM_NOTICE).toContain("does not resume anything");
   });
 });

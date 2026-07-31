@@ -60,6 +60,7 @@ import {
   parseTtlSeconds,
   removeTracked,
   resolveEnrollmentPermissions,
+  recoverGate,
   revokeGate,
   shouldWarnManageWithoutRead,
   trackedFromInvitation,
@@ -77,6 +78,7 @@ import {
 const CREATE_REASON = "wenr-create-reason";
 const LOOKUP_REASON = "wenr-lookup-reason";
 const REVOKE_REASON = "wenr-revoke-reason";
+const RECOVER_REASON = "wenr-recover-reason";
 const HANDOFF_REGION = "wenr-handoff-region";
 const TRACKED_TABS = "wenr-tracked";
 const DISMISS_NOTICE = "wenr-dismiss-notice";
@@ -115,6 +117,11 @@ export interface WorkerEnrollmentViewProps {
   onRevoke: () => void;
   revoking: boolean;
   revokeError: ClosedCodeCopy | null;
+
+  // operator-triggered recovery
+  onRecover: () => void;
+  recovering: boolean;
+  recoverError: ClosedCodeCopy | null;
 
   // tab-local working set
   tracked: readonly TrackedEnrollment[];
@@ -162,6 +169,9 @@ export function WorkerEnrollmentView({
   onRevoke,
   revoking,
   revokeError,
+  onRecover,
+  recovering,
+  recoverError,
   tracked,
   trackedFilter,
   onTrackedFilterChange,
@@ -176,6 +186,7 @@ export function WorkerEnrollmentView({
   const create = createGate(permissions, site, ttl, creating);
   const lookup = lookupGate(permissions, id, lookingUp);
   const revoke = revokeGate(permissions, status, revoking);
+  const recover = recoverGate(permissions, status, recovering);
 
   /**
    * Move focus to the dismissal notice when it appears.
@@ -424,6 +435,11 @@ export function WorkerEnrollmentView({
           revoking={revoking}
           onRevoke={onRevoke}
           revokeError={revokeError}
+          recoverGate={recover}
+          recoverReasonId={RECOVER_REASON}
+          recovering={recovering}
+          onRecover={onRecover}
+          recoverError={recoverError}
         />
       )}
 
@@ -597,6 +613,7 @@ export function WorkerEnrollment() {
   const createAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const lookupAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const revokeAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
+  const recoverAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
 
   /** Every observed status updates the working set, so the table can never disagree with the
    *  detail panel about a state this tab has already seen. */
@@ -658,6 +675,18 @@ export function WorkerEnrollment() {
     });
   };
 
+  /** The second operator write. Same discipline as revoke: the revision always comes from the
+   *  status this tab actually observed, never from user input. */
+  const onRecover = () => {
+    if (status === null) return;
+    const observed = status;
+    void recoverAction.run(async () => {
+      observe(
+        await api.markEnrollmentRecoveryRequired(observed.enrollment_id, observed.revision),
+      );
+    });
+  };
+
   const onCopyHandoff = () => {
     if (!invitation) return;
     const text = handoffText(invitation);
@@ -704,6 +733,9 @@ export function WorkerEnrollment() {
       onRevoke={onRevoke}
       revoking={revokeAction.busy}
       revokeError={revokeAction.error}
+      onRecover={onRecover}
+      recovering={recoverAction.busy}
+      recoverError={recoverAction.error}
       tracked={tracked}
       trackedFilter={trackedFilter}
       onTrackedFilterChange={setTrackedFilter}

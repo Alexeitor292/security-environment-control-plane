@@ -743,4 +743,13 @@ export const api = {
     request<EnrollmentStatus>("POST", `/api/v1/enrollment/${enrollmentId}/revoke`, {
       expected_revision: expectedRevision,
     }),
+  // Operator-triggered recovery: the complement of the controller's scheduled expiry sweep. The
+  // sweep reaches enrollments that ran out of time; this reaches one an operator has decided is
+  // stuck, without waiting for the TTL. Same shape and same discipline as revoke — it requires
+  // enrollment:manage, and the body carries ONLY the last observed revision. The refusal reason is
+  // server-owned (a bounded code, never caller free-text), so there is nothing here to supply.
+  markEnrollmentRecoveryRequired: (enrollmentId: string, expectedRevision: number) =>
+    request<EnrollmentStatus>("POST", `/api/v1/enrollment/${enrollmentId}/recover`, {
+      expected_revision: expectedRevision,
+    }),
 };

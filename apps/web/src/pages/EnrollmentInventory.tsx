@@ -65,6 +65,7 @@ import {
 import {
   ENROLLMENT_ERROR_TEXT,
   PAST_EXPIRY_NOTICE,
+  recoverGate,
   resolveEnrollmentPermissions,
   shouldWarnManageWithoutRead,
   type EnrollmentPermissions,
@@ -76,6 +77,7 @@ const SCOPE_TABS = "einv-scope";
 const LOAD_REASON = "einv-load-reason";
 const MORE_REASON = "einv-more-reason";
 const REVOKE_REASON = "einv-revoke-reason";
+const RECOVER_REASON = "einv-recover-reason";
 const SELECTION_REGION = "einv-selection";
 const SELECTION_HEADING = "einv-selection-heading";
 const INTEGRITY_TITLE = "einv-integrity-title";
@@ -109,6 +111,12 @@ export interface EnrollmentInventoryViewProps {
   onRevoke: () => void;
   revoking: boolean;
   revokeError: ClosedCodeCopy | null;
+
+  /** Operator-triggered recovery on the selected record — the complement of the controller's own
+   *  expiry sweep, for an enrollment an operator has decided is stuck. */
+  onRecover: () => void;
+  recovering: boolean;
+  recoverError: ClosedCodeCopy | null;
 
   /** Announced when the loaded set changes, in a region that outlives the table. */
   liveNotice: string | null;
@@ -144,6 +152,9 @@ export function EnrollmentInventoryView({
   onRevoke,
   revoking,
   revokeError,
+  onRecover,
+  recovering,
+  recoverError,
   liveNotice,
   nowMs,
 }: EnrollmentInventoryViewProps) {
@@ -153,6 +164,7 @@ export function EnrollmentInventoryView({
   const load = listGate(permissions, loading);
   const more = loadMoreGate(permissions, page, loading);
   const revoke = inventoryRevokeGate(permissions, selected, revoking);
+  const recover = recoverGate(permissions, selected, recovering);
 
   /**
    * Move focus to the selected record when one is chosen.
@@ -449,6 +461,11 @@ export function EnrollmentInventoryView({
               revoking={revoking}
               onRevoke={onRevoke}
               revokeError={revokeError}
+              recoverGate={recover}
+              recoverReasonId={RECOVER_REASON}
+              recovering={recovering}
+              onRecover={onRecover}
+              recoverError={recoverError}
               actions={
                 <>
                   <div className="wenr-actions">
@@ -498,6 +515,7 @@ export function EnrollmentInventory() {
   const listAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const rereadAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
   const revokeAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
+  const recoverAction = useAction({ codeText: ENROLLMENT_ERROR_TEXT });
 
   /**
    * What the load actually did, stated in rows rather than implied by the table changing size.
@@ -559,6 +577,20 @@ export function EnrollmentInventory() {
     });
   };
 
+  /** Same discipline as revoke: the revision comes from the record that was actually loaded. */
+  const onRecover = () => {
+    const selected: EnrollmentStatus | null = findEnrollment(page, selectedId);
+    if (selected === null) return;
+    void recoverAction.run(async () => {
+      const observed = await api.markEnrollmentRecoveryRequired(
+        selected.enrollment_id,
+        selected.revision,
+      );
+      setPage((current) => replaceRow(current, observed));
+      setLiveNotice("Enrollment marked for recovery. It is ended and cannot be resumed.");
+    });
+  };
+
   return (
     <EnrollmentInventoryView
       permissions={permissions}
@@ -582,6 +614,9 @@ export function EnrollmentInventory() {
       onRevoke={onRevoke}
       revoking={revokeAction.busy}
       revokeError={revokeAction.error}
+      onRecover={onRecover}
+      recovering={recoverAction.busy}
+      recoverError={recoverAction.error}
       liveNotice={liveNotice}
       nowMs={Date.now()}
     />

@@ -1,7 +1,7 @@
 // Static architecture/security boundary tests for the worker-enrollment UI (SECP-PR5H-B1).
 //
-// The frontend surface must stay inside the four enrollment routes that take a browser principal —
-// create, status, list and revoke. It must never call the worker-authenticated exchange routes,
+// The frontend surface must stay inside the five enrollment routes that take a browser principal —
+// create, status, list, revoke and operator-triggered recovery. It must never call the worker-authenticated exchange routes,
 // never call the sealed claim-only progression routes, never persist bearer-grade invitation
 // material, and never reach an infrastructure module.
 //
@@ -98,7 +98,18 @@ describe("enrollment client surface", () => {
     expect(CLIENT_CODE).not.toMatch(/organization_id|organisation|org_id|tenant/i);
   });
 
-  it("adds no PR5H enrollment method beyond create, status, list and revoke", () => {
+  // Operator-triggered recovery is the complement of the controller's scheduled expiry sweep and
+  // the second (and last) operator write in the lifecycle. It is a real principal-authenticated
+  // route, gated on enrollment:manage in the SERVICE layer, and it carries only a revision.
+  it("calls the operator recovery route with a revision and nothing else", () => {
+    expect(CLIENT_CODE).toContain("`/api/v1/enrollment/${enrollmentId}/recover`");
+    // The refusal reason is server-owned. A caller-supplied reason would be free text crossing the
+    // boundary into a bounded-code field.
+    const site = CLIENT_CODE.slice(CLIENT_CODE.indexOf("markEnrollmentRecoveryRequired"));
+    expect(site.slice(0, 320)).not.toMatch(/reason/);
+  });
+
+  it("adds no PR5H enrollment method beyond create, status, list, revoke and recover", () => {
     // Scoped to the supported-enrollment names: the unrelated SECP-B5 target-discovery client
     // methods (listDiscoveryEnrollments / getDiscoveryEnrollment) are a different concept that
     // merely shares the word, and are not in scope for this boundary.
@@ -109,6 +120,7 @@ describe("enrollment client surface", () => {
       "  createEnrollmentInvitation:",
       "  getEnrollmentStatus:",
       "  listEnrollments:",
+      "  markEnrollmentRecoveryRequired:",
       "  revokeEnrollment:",
     ]);
   });
@@ -124,11 +136,12 @@ describe("enrollment page I/O boundary", () => {
     }
   });
 
-  it("calls only the three supported client methods from the hand-off page", () => {
+  it("calls only the four supported client methods from the hand-off page", () => {
     const calls = PAGE_CODE.match(/api\.[a-zA-Z]+/g) ?? [];
     expect([...new Set(calls)].sort()).toEqual([
       "api.createEnrollmentInvitation",
       "api.getEnrollmentStatus",
+      "api.markEnrollmentRecoveryRequired",
       "api.revokeEnrollment",
     ]);
   });
@@ -136,11 +149,12 @@ describe("enrollment page I/O boundary", () => {
   // The inventory is a READ surface plus the one operator write that already exists. It must never
   // reach the create route: minting a bearer-grade invitation from a list page would put the
   // hand-off flow somewhere with no reveal gate and no one-time disclosure.
-  it("calls only list, status and revoke from the inventory page", () => {
+  it("calls only the read and the two operator writes from the inventory page", () => {
     const calls = INVENTORY_CODE.match(/api\.[a-zA-Z]+/g) ?? [];
     expect([...new Set(calls)].sort()).toEqual([
       "api.getEnrollmentStatus",
       "api.listEnrollments",
+      "api.markEnrollmentRecoveryRequired",
       "api.revokeEnrollment",
     ]);
   });
@@ -241,6 +255,46 @@ describe("enrollment page I/O boundary", () => {
     }
   });
 
+  /**
+   * The clipboard is a real exfiltration path for a capability, and exactly ONE surface may touch
+   * it: the hand-off page, for the hand-off block, on an explicit operator action. The inventory
+   * and the shared panel render only the bounded status projection and have no business there —
+   * and if a copy affordance were ever added to a row, this is where it would be noticed.
+   */
+  it("touches the clipboard only on the hand-off page", () => {
+    expect(PAGE_CODE).toContain("navigator.clipboard");
+    for (const [name, src] of SURFACE) {
+      if (name === "WorkerEnrollment.tsx") continue;
+      expect(src, name).not.toContain("clipboard");
+      expect(src, name).not.toContain("execCommand");
+    }
+  });
+
+  /**
+   * The invitation is a capability, not just data: the first valid binder wins. So the bearer
+   * fields must not appear ANYWHERE outside the hand-off page — not in the inventory, not in the
+   * shared panel, and not in either view model. The status projection deliberately carries none of
+   * them, and this pins that no code path reintroduces one by name.
+   */
+  it("names no bearer-grade invitation field outside the hand-off surface", () => {
+    const bearer = [
+      "invitation_id",
+      "controller_trust_anchor_hex",
+      "controller_key_id",
+      "transaction_id",
+      "release_digest",
+      "controller_origin",
+    ];
+    for (const [name, src] of SURFACE) {
+      if (name === "WorkerEnrollment.tsx" || name === "worker-enrollment.ts") continue;
+      for (const field of bearer) {
+        expect(src, `${name}: ${field}`).not.toContain(field);
+      }
+      // ...and no route that could return one
+      expect(src, name).not.toContain("createEnrollmentInvitation");
+    }
+  });
+
   it("renders no unescaped markup", () => {
     for (const [name, src] of SURFACE) {
       expect(src, name).not.toContain("dangerouslySetInnerHTML");
@@ -266,7 +320,8 @@ describe("enrollment page I/O boundary", () => {
     // panel (revoke), two on the inventory (list, re-read).
     const expected: ReadonlyArray<readonly [string, string, number]> = [
       ["WorkerEnrollment.tsx", PAGE_CODE, 2],
-      ["EnrollmentStatusPanel.tsx", PANEL_CODE, 1],
+      // two: revoke and operator-triggered recovery, the lifecycle's only operator writes
+      ["EnrollmentStatusPanel.tsx", PANEL_CODE, 2],
       ["EnrollmentInventory.tsx", INVENTORY_CODE, 2],
     ];
     for (const [name, src, count] of expected) {

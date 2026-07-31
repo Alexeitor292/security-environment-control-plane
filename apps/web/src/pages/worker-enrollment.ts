@@ -50,6 +50,17 @@ export const WORKER_DRIVEN_NOTICE =
 export const REVOKE_CONFIRM_NOTICE =
   "Revoking is permanent for this enrollment. It cannot be undone, and a worker holding this invitation will no longer be able to enrol with it.";
 
+/**
+ * The second operator write, and the one that is easy to confuse with the first. Both end the
+ * enrollment and neither can be undone; what differs is what they record, and an operator choosing
+ * between them needs that stated rather than inferred from two similar-looking buttons.
+ */
+export const RECOVER_CONFIRM_NOTICE =
+  "Marking this for recovery is permanent and ends the enrollment, exactly as revoking does. Use it when a worker is never going to finish — it records that this enrollment needs remediation rather than that you withdrew the invitation. It does not wait for the expiry, and it does not resume anything.";
+
+export const RECOVER_VS_REVOKE_NOTICE =
+  "Revoke withdraws the invitation. Mark for recovery says the enrollment is stuck and needs attention. Both are permanent, both end this enrollment, and neither can be reversed — the remedy for either is a new invitation.";
+
 // --------------------------------------------------------------------------- closed-code copy
 //
 // Fixed UI copy per closed code. A backend message is never rendered as display text.
@@ -530,6 +541,35 @@ export function revokeGate(
       status.state === "refused"
         ? "This enrollment is already refused."
         : "This enrollment already requires recovery and cannot be revoked.",
+    );
+  }
+  if (busy) return denied("A request is already in flight.");
+  return allowed;
+}
+
+/**
+ * Operator-triggered recovery. Gated exactly like revoke, because the backend gates it exactly like
+ * revoke: `enrollment:manage`, the organization boundary, and a revision the caller actually
+ * observed. Offered only against an observed status for the same reason — the request carries that
+ * status's revision, never a typed value.
+ *
+ * An already-terminal enrollment is refused here with an explanation. The backend treats it as an
+ * idempotent no-op, but presenting a live button would imply there is something left to mark.
+ */
+export function recoverGate(
+  p: EnrollmentPermissions,
+  status: EnrollmentStatus | null,
+  busy: boolean,
+): Gate {
+  if (!p.manage) return denied(MISSING_MANAGE_REASON);
+  if (status === null) {
+    return denied("Look up an enrollment before marking it for recovery.");
+  }
+  if (isTerminalState(status.state)) {
+    return denied(
+      status.state === "recovery_required"
+        ? "This enrollment is already marked for recovery."
+        : "This enrollment is already refused, so there is nothing left to recover.",
     );
   }
   if (busy) return denied("A request is already in flight.");

@@ -487,3 +487,77 @@ describe("cursor semantics as the controller actually implements them", () => {
     expect(inventorySummary(after, NOW).complete).toBe(true);
   });
 });
+
+// --------------------------------------------------------------------- no client-side row loss
+
+/**
+ * The controller fails a whole page rather than omitting a row it cannot project, precisely so an
+ * operator is never told an enrollment does not exist. A client that dropped rows would re-create
+ * that defect one layer up, where no backend decision can protect against it — so "every row the
+ * server returned is rendered" is pinned directly rather than left as a property of the code.
+ */
+describe("no row is ever dropped client-side", () => {
+  it("renders one row per item, for every state including ones it does not recognise", () => {
+    const items = [
+      status({ enrollment_id: id("1"), state: "invited" }),
+      status({ enrollment_id: id("2"), state: "healthy" }),
+      status({ enrollment_id: id("3"), state: "refused" }),
+      status({ enrollment_id: id("4"), state: "recovery_required" }),
+      status({ enrollment_id: id("5"), state: "a_state_from_the_future" }),
+      status({ enrollment_id: id("6"), state: "" }),
+    ];
+    const loaded = page(items);
+    const rows = inventoryRows(loaded, NOW);
+    expect(rows).toHaveLength(items.length);
+    expect(rows.map((r) => r.enrollmentId)).toEqual(items.map((i) => i.enrollment_id));
+  });
+
+  it("keeps a row whose fields are blank or unparseable rather than filtering it out", () => {
+    const awkward = [
+      status({ enrollment_id: id("7"), expires_at: "not a date" }),
+      status({ enrollment_id: id("8"), expires_at: "" }),
+      status({ enrollment_id: id("9"), worker_installation_id: "", refusal_reason: "" }),
+    ];
+    const rows = inventoryRows(page(awkward), NOW);
+    expect(rows).toHaveLength(3);
+    // the unparseable expiry is reported as unavailable, not silently treated as expired
+    expect(rows[0].expiry.valid).toBe(false);
+    expect(rows[0].pastExpiry).toBe(false);
+  });
+
+  it("counts every loaded row in exactly one summary group", () => {
+    const items = [
+      status({ enrollment_id: id("1"), state: "invited" }),
+      status({ enrollment_id: id("2"), state: "healthy" }),
+      status({ enrollment_id: id("3"), state: "refused" }),
+      status({ enrollment_id: id("4"), state: "a_state_from_the_future" }),
+    ];
+    const s = inventorySummary(page(items), NOW);
+    expect(s.workers + s.queue + s.attention + s.unknown).toBe(s.loaded);
+    expect(s.loaded).toBe(items.length);
+  });
+
+  /** Accumulation across pages must not lose a row either. */
+  it("keeps every distinct row across several pages", () => {
+    let acc = EMPTY_PAGE;
+    for (const char of ["1", "2", "3", "4"]) {
+      acc = appendPage(acc, {
+        items: [status({ enrollment_id: id(char) })],
+        next_cursor: char === "4" ? null : `cursor-${char}`,
+      });
+    }
+    expect(acc.items.map((i) => i.enrollment_id)).toEqual([id("1"), id("2"), id("3"), id("4")]);
+    expect(inventorySummary(acc, NOW).loaded).toBe(4);
+  });
+
+  /** A stale duplicate is kept as the NEWER row, never removed. */
+  it("never shrinks the loaded set when a duplicate arrives", () => {
+    const first = page([status({ enrollment_id: id("a"), revision: 3 })], "c1");
+    const stale = appendPage(first, {
+      items: [status({ enrollment_id: id("a"), revision: 1 })],
+      next_cursor: null,
+    });
+    expect(stale.items).toHaveLength(1);
+    expect(stale.items[0].revision).toBe(3);
+  });
+});
