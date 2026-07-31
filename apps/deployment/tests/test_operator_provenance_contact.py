@@ -100,6 +100,14 @@ def test_the_tripwires_do_fire_for_a_path_that_constructs_a_runner(monkeypatch, 
     Asserted on the RECORD, not on a propagating exception: ``load_verify_context`` catches
     ``Exception`` around this step, so the raise never escapes. It is caught here anyway — which is
     the point of recording.
+
+    ONE LIMIT, stated because this file exists to rule out vacuity and would otherwise be implying
+    more than it shows: ``_command_runner`` trips FIRST and aborts the observation, so the other
+    three traps are never exercised here. Their liveness rests on inspection — they are attached by
+    the same ``_arm`` helper, in the same way, verified by reading — not on demonstration. Proving
+    each independently would need a separate fixture per trap, arranged so the earlier ones cannot
+    fire; that is real work for a small gain, and it is not done. What IS demonstrated is that the
+    arming mechanism works at all, which is the property the provenance test above depends on.
     """
     from secp_operator_deployment import production_context
     from secp_operator_deployment.cli import main
