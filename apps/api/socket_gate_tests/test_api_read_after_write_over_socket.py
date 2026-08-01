@@ -94,6 +94,15 @@ PG_URL = os.environ.get("SECP_TEST_POSTGRES_URL")
 # instability; widening the scope is the expected next step, and it is an owner decision rather than
 # this module's to take.
 #
+# The 110/110 above was measured on a Windows host with a file-backed SQLite database — that
+# describes that machine, not a Linux runner under CI load. So the Linux distribution is now being
+# GATHERED, additively, by the SQLite leg of the `backend-api-socket-gate` job
+# (`scripts/ci/socket_gate_sqlite_leg.py`): it runs this same body from a temp copy with exactly the
+# two scope guards below removed — a preview of the promoted module — and treats an inconclusive as
+# a hard failure, so a platform difference surfaces on that already-gated job rather than on every
+# stream's PR. When that distribution is clean across several runs, the owner deletes the two
+# guards and the scaffold goes with them.
+#
 # That makes this scoping a KNOWN, MEASURED gap in the dev loop rather than a property of the
 # engine: a developer running the suite locally today does not see this regression even though it
 # would fire. Removing the scoping is the expected end state once the stability data supports it.

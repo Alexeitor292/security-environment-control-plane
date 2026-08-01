@@ -9,6 +9,7 @@ aggregate gate depending on every backend job, and stable external check names.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -902,6 +903,69 @@ def test_socket_gate_job_accounting_is_xfail_aware_and_refuses_a_plain_skip(wf):
         if "plain_skipped" in str(step.get("run", "")) and step.get("if") == "always()"
     ]
     assert parse_steps, "the JUnit-enforcement step must run with if: always()"
+
+
+def test_socket_gate_job_gathers_the_sqlite_distribution_without_rescoping(wf):
+    """The SQLite leg is additive and its accounting is as strict as the PostgreSQL leg's.
+
+    The gate stays PostgreSQL-scoped; this leg runs the same body from a temp copy with exactly the
+    two engine-scope guards removed, so a platform difference surfaces on this already-gated job
+    rather than on every stream's PR once the scoping is widened.
+    """
+    job = _jobs(wf)[SOCKET_GATE_JOB]
+    run = _run_text(job)
+    assert "scripts/ci/socket_gate_sqlite_leg.py" in run
+    assert "--runs" in run, "the leg must run repeatedly; one green run is one sample"
+    # It is ADDITIVE: the PostgreSQL leg and its accounting are untouched.
+    assert SOCKET_GATE_MODULE in run
+    assert "--junitxml=junit-api-socket-gate.xml" in run
+    upload = [
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+    ]
+    assert any(u["with"]["path"] == "sqlite-leg-summary.json" for u in upload)
+    assert all(u.get("if") == "always()" for u in upload)
+
+
+def test_the_sqlite_leg_refuses_an_inconclusive_and_cannot_run_zero_times():
+    """Checked on the loaded tool, not on the workflow text that invokes it.
+
+    Two failure modes, both of which would produce a quietly green leg: tolerating an inconclusive
+    (the very thing the distribution is being gathered to detect), and running zero iterations.
+    """
+    import subprocess
+
+    tool = REPO / "scripts" / "ci" / "socket_gate_sqlite_leg.py"
+    assert tool.exists()
+    source = tool.read_text(encoding="utf-8")
+    # a hard failure unless every run is the expected violation
+    assert "counts[VIOLATION] != len(results)" in source
+    # a zero-run invocation is refused rather than passing vacuously
+    assert "--runs must be >= 1" in source
+    result = subprocess.run(
+        [sys.executable, str(tool), "--runs", "0"],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+    assert result.returncode != 0, "a zero-run leg must fail, not pass vacuously"
+    assert "vacuously" in (result.stdout + result.stderr)
+
+
+def test_the_sqlite_leg_never_edits_the_shipped_gate_module():
+    """The preview is a temp copy. If it ever wrote to the real module, the gate would be lying."""
+    tool = (REPO / "scripts" / "ci" / "socket_gate_sqlite_leg.py").read_text(encoding="utf-8")
+    assert "hashlib.sha256(shipped.read_bytes())" in tool
+    assert "the shipped gate module changed during this run" in tool
+    # and every overlay substitution must be proven to land, or the preview is not a preview
+    for guard in (
+        "the pytestmark skipif was not found",
+        "expected exactly one dialect guard",
+        "the PostgreSQL engine fixture body was not found",
+        "a reference to the shipped package survived",
+    ):
+        assert guard in tool, f"the overlay builder must fail closed on: {guard}"
 
 
 def test_socket_gate_job_is_required_and_cached_like_its_siblings(wf):

@@ -552,6 +552,29 @@ jobs:
           name: junit-backend-api-socket-gate
           path: junit-api-socket-gate.xml
           if-no-files-found: error
+      - name: SQLite leg — gather the Linux distribution for the promotion decision
+        # ADDITIVE. The gate stays scoped to PostgreSQL; `pytestmark` and `_require_postgresql` are
+        # unchanged. This runs the SAME body against SQLite from a temp copy with exactly those two
+        # scope guards removed — which is precisely what promotion would delete, so it is a preview
+        # of the promoted module rather than an approximation. The shipped module is verified
+        # byte-unchanged by sha256 at exit.
+        #
+        # Why here: the local characterisation was 110/110 with zero inconclusives, but on Windows
+        # with a file-backed SQLite DB. That number describes that host, not a Linux runner under
+        # CI load. Promoting straight into the required shards would make every stream depend on an
+        # unmeasured platform; running it on this already-gated job surfaces a platform difference
+        # loudly and immediately instead. An inconclusive is a HARD failure, exactly as on the
+        # PostgreSQL leg — tolerating one would defeat the point of gathering the distribution.
+        run: >-
+          uv run python scripts/ci/socket_gate_sqlite_leg.py
+          --runs 5 --summary sqlite-leg-summary.json
+      - name: Upload the SQLite leg distribution
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: socket-gate-sqlite-leg-summary
+          path: sqlite-leg-summary.json
+          if-no-files-found: error
       - name: Enforce the socket gate ran, and report which state it observed
         if: always()
         # Parse the JUnit programmatically; the pytest exit code alone is NOT trusted, because a
