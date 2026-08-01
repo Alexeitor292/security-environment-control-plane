@@ -29,6 +29,7 @@ import dataclasses
 import inspect
 import types
 import typing
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 
@@ -38,7 +39,6 @@ from reconciliation_support import (
     COLLECTOR_DIGEST,
     NOW,
     desired,
-    edge,
     network,
     node,
     observed,
@@ -46,43 +46,79 @@ from reconciliation_support import (
 )
 from secp_plugin_simulator import reconciliation as simulator
 from secp_reconciliation.v1 import (
+    ActionKind,
+    ElementKind,
     ObservationFidelity,
     ObservedState,
-    PlanDisposition,
+    PlannedAction,
     ReconciliationRefused,
     RefusalCode,
+    ResetScope,
     StateElement,
+    VerifiedStatePair,
+    build_reset_intent,
+    classify_drift,
     plan_from_states,
+    plan_reconciliation,
+    require_plan_integrity,
 )
+from secp_reconciliation.v1.state import verification_digest
+
+# The simulator's own surface constant, so the record test compares against the module under test
+# rather than against a string retyped here.
+EXECUTION_SURFACE_VALUE = simulator.EXECUTION_SURFACE
 
 # --- Property 1: the input surface admits nothing that could reach anything --------------------
 
 # Every type appearing anywhere in the module's public signatures, as ``(module, qualname)``. Exact,
 # not a floor: a new parameter of a new type fails here rather than slipping in under a subset test.
 EXPECTED_SURFACE_TYPES = {
-    ("builtins", "bool"),
     ("builtins", "str"),
     ("builtins", "tuple"),
-    ("secp_plugin_simulator.reconciliation", "AppliedAction"),
+    # `now` is a parameter precisely so no ambient clock decides anything -- see INERT_VALUE_TYPES
+    ("datetime", "datetime"),
     ("secp_plugin_simulator.reconciliation", "SimulatedElement"),
-    ("secp_plugin_simulator.reconciliation", "SimulatedExecutionRecord"),
     ("secp_plugin_simulator.reconciliation", "SimulatedWorld"),
-    ("secp_reconciliation.v1.codes", "ActionKind"),
     ("secp_reconciliation.v1.codes", "ElementKind"),
     ("secp_reconciliation.v1.codes", "FacetName"),
+    ("secp_reconciliation.v1.codes", "ObservationFidelity"),
+    ("secp_reconciliation.v1.execution", "ExecutionReport"),
     ("secp_reconciliation.v1.planner", "ReconciliationPlan"),
+    ("secp_reconciliation.v1.reset", "ResetIntent"),
     ("secp_reconciliation.v1.state", "DesiredState"),
+    ("secp_reconciliation.v1.state", "ObservedState"),
+    ("secp_reconciliation.v1.state", "ReconciliationScope"),
 }
 
 # The same set closed under dataclass fields: everything reachable at any depth from anything the
 # module can be handed. Also exact.
 EXPECTED_CLOSURE_TYPES = EXPECTED_SURFACE_TYPES | {
+    # reached through ReconciliationScope's max_actions / observation_max_age_seconds
+    ("builtins", "int"),
+    ("secp_reconciliation.v1.codes", "ActionKind"),
     ("secp_reconciliation.v1.codes", "DriftReason"),
+    ("secp_reconciliation.v1.codes", "ExecutionOutcome"),
+    ("secp_reconciliation.v1.codes", "OperatorNextStep"),
     ("secp_reconciliation.v1.codes", "PlanDisposition"),
+    ("secp_reconciliation.v1.codes", "ResetScope"),
+    ("secp_reconciliation.v1.codes", "StepFailureReason"),
+    ("secp_reconciliation.v1.codes", "StepStatus"),
+    ("secp_reconciliation.v1.execution", "StepOutcome"),
     ("secp_reconciliation.v1.planner", "DeferredElement"),
     ("secp_reconciliation.v1.planner", "PlannedAction"),
     ("secp_reconciliation.v1.state", "StateElement"),
 }
+
+
+# Value types that are neither enums nor frozen dataclasses but are still inert: immutable, and
+# carrying no capability the module does not already have. `datetime` is admitted deliberately --
+# the module already may import `datetime` (it is on the pure-computation allow-list), so being
+# handed an instance grants nothing new. The one thing an instance *could* offer is a clock, which
+# would break this module's determinism claim, so the clock-reading method names are on
+# FORBIDDEN_CODE_NAMES below and that is checked on compiled code rather than assumed here.
+INERT_VALUE_TYPES = (str, bool, int, tuple, datetime)
+
+_UNION_ORIGINS = (typing.Union, types.UnionType)
 
 
 def _public_callables():
@@ -104,6 +140,13 @@ def _flatten_annotation(annotation, into: set) -> None:
     if annotation is None or annotation is type(None) or annotation is Ellipsis:
         return
     origin = typing.get_origin(annotation)
+    if origin in _UNION_ORIGINS:
+        # `X | None` is not a type a caller can pass -- X and None are. Recording the union
+        # machinery itself would put `types.UnionType` in the surface, which says nothing about
+        # what this module can be handed.
+        for argument in typing.get_args(annotation):
+            _flatten_annotation(argument, into)
+        return
     if origin is not None:
         into.add(origin)
         for argument in typing.get_args(annotation):
@@ -198,11 +241,10 @@ def test_the_annotation_and_declaration_views_agree_on_the_public_surface() -> N
 
 def test_the_public_surface_is_the_one_that_was_reviewed() -> None:
     assert [name for name, _ in _public_callables()] == [
-        "AppliedAction",
         "SimulatedElement",
-        "SimulatedExecutionRecord",
         "SimulatedWorld",
         "execute",
+        "observe",
         "world_digest",
     ]
 
@@ -217,7 +259,7 @@ def test_every_type_in_the_surface_is_an_inert_value_type() -> None:
     them with a protocol, an ABC, a callable or a mutable object fails here even if someone
     updated the pin to match."""
     for found in _surface_types():
-        if found in (str, bool, int, tuple):
+        if found in INERT_VALUE_TYPES:
             continue
         assert isinstance(found, type), found
         assert not found._is_protocol if hasattr(found, "_is_protocol") else True, found
@@ -255,7 +297,7 @@ def test_everything_reachable_through_a_field_is_also_an_inert_value_type() -> N
     transitive closure, not just the top-level signature, is builtin scalars, enums and frozen
     dataclasses."""
     for found in _transitive_value_types():
-        if found in (str, bool, int, tuple):
+        if found in INERT_VALUE_TYPES:
             continue
         assert isinstance(found, type), found
         if issubclass(found, Enum):
@@ -288,6 +330,13 @@ FORBIDDEN_CODE_NAMES = frozenset(
         "delattr",
         "eval",
         "exec",
+        # clock readers: `now` is a parameter so execution is deterministic, and being handed a
+        # datetime instance must not become a way to read the time off it
+        "monotonic",
+        "now",
+        "perf_counter",
+        "today",
+        "utcnow",
         "getattr",
         "globals",
         "import_module",
@@ -479,7 +528,12 @@ def test_the_execution_modules_globals_hold_no_module_object_at_all() -> None:
     assert bound == set()
 
 
-# --- Behaviour ----------------------------------------------------------------------------------
+# --- Refusal boundaries, re-applied on the execution side ---------------------------------------
+#
+# Execution *behaviour* -- convergence, idempotence, partial failure, reset-intent authorization --
+# lives in tests/test_reconciliation_execution.py. What stays here is the set of refusals the
+# executor must make itself rather than inherit from the planner, kept beside the isolation
+# properties above because they are the same claim: this module cannot be talked into acting.
 
 
 def _observed_from_world(world: simulator.SimulatedWorld, **overrides) -> ObservedState:
@@ -490,152 +544,212 @@ def _observed_from_world(world: simulator.SimulatedWorld, **overrides) -> Observ
     return observed(*elements, **overrides)
 
 
-def test_executing_a_plan_converges_an_empty_world_onto_the_desired_state() -> None:
-    wanted = desired(network(), node(), edge())
-    empty = simulator.SimulatedWorld()
-    _, _, plan = plan_from_states(
-        scope=scope(), desired=wanted, observed=_observed_from_world(empty), now=NOW
+def _authorized(plan):
+    return build_reset_intent(
+        plan=plan,
+        reset_scope=ResetScope.element_set,
+        issued_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
     )
-    assert plan.disposition is PlanDisposition.actionable
-
-    world, record = simulator.execute(plan=plan, desired=wanted, world=empty)
-    assert {element.ref for element in world.elements} == {
-        element.ref for element in wanted.elements
-    }
-    assert record.execution_surface == "simulator"
-    assert record.converged is True
-    assert record.world_digest_before != record.world_digest_after
-    assert len(record.applied) == len(plan.actions)
 
 
-def test_reconciling_the_converged_world_again_plans_and_changes_nothing() -> None:
-    wanted = desired(network(), node())
-    world, _ = simulator.execute(
-        plan=plan_from_states(
-            scope=scope(),
-            desired=wanted,
-            observed=_observed_from_world(simulator.SimulatedWorld()),
-            now=NOW,
-        )[2],
+def _plan_for(wanted, reconciliation_scope=None, seen=None):
+    return plan_from_states(
+        scope=reconciliation_scope or scope(),
         desired=wanted,
-        world=simulator.SimulatedWorld(),
-    )
-    _, report, plan = plan_from_states(
-        scope=scope(), desired=wanted, observed=_observed_from_world(world), now=NOW
-    )
-    assert report.findings == ()
-    assert plan.disposition is PlanDisposition.converged
-
-    again, record = simulator.execute(plan=plan, desired=wanted, world=world)
-    assert simulator.world_digest(again) == simulator.world_digest(world)
-    assert record.applied == ()
-
-
-def test_a_drifted_facet_is_repaired_by_executing_the_update() -> None:
-    wanted = desired(network(), node())
-    drifted = simulator.SimulatedWorld(
-        elements=tuple(
-            simulator.SimulatedElement(kind=e.kind, ref=e.ref, facets=e.facets)
-            for e in desired(network(), node(image="kali:2025.4")).elements
-        )
-    )
-    _, _, plan = plan_from_states(
-        scope=scope(), desired=wanted, observed=_observed_from_world(drifted), now=NOW
-    )
-    assert [action.element_ref for action in plan.actions] == ["attacker-1"]
-    repaired, record = simulator.execute(plan=plan, desired=wanted, world=drifted)
-    assert simulator.world_digest(repaired) == simulator.world_digest(
-        simulator.SimulatedWorld(
-            elements=tuple(
-                simulator.SimulatedElement(kind=e.kind, ref=e.ref, facets=e.facets)
-                for e in sorted(wanted.elements, key=lambda element: element.ref)
-            )
-        )
-    )
-    assert record.converged is True
-
-
-def test_an_unmanaged_element_is_left_untouched_and_the_record_says_it_did_not_converge() -> None:
-    wanted = desired(network())
-    world = simulator.SimulatedWorld(
-        elements=(
-            simulator.SimulatedElement(
-                kind=network().kind, ref="stranger", facets=network().facets
-            ),
-        )
-    )
-    _, _, plan = plan_from_states(
-        scope=scope(), desired=wanted, observed=_observed_from_world(world), now=NOW
-    )
-    assert plan.disposition is PlanDisposition.operator_decision_required
-    after, record = simulator.execute(plan=plan, desired=wanted, world=world)
-    assert [element.ref for element in after.elements] == ["stranger", "team-network"]
-    assert record.converged is False
-
-
-def test_execution_refuses_a_plan_that_names_any_other_surface() -> None:
-    wanted = desired(network())
-    _, _, plan = plan_from_states(
-        scope=scope(),
-        desired=wanted,
-        observed=_observed_from_world(simulator.SimulatedWorld()),
+        observed=seen if seen is not None else _observed_from_world(simulator.SimulatedWorld()),
         now=NOW,
-    )
+    )[2]
+
+
+def test_a_plan_renamed_onto_another_surface_is_caught_as_tampering_before_anything_runs() -> None:
+    """Editing the surface on a built plan no longer reaches the surface seal, because the plan no
+    longer matches its own digest. The refusal is earlier and stricter than it used to be, so the
+    code asserted here changed deliberately: `plan_integrity_invalid`, not
+    `execution_surface_sealed`."""
+    wanted = desired(network())
+    plan = _plan_for(wanted)
     for surface in ("proxmox", "vmware", "aws", ""):
         with pytest.raises(ReconciliationRefused) as raised:
             simulator.execute(
+                scope=scope(),
                 plan=dataclasses.replace(plan, execution_surface=surface),
                 desired=wanted,
                 world=simulator.SimulatedWorld(),
+                intent=_authorized(plan),
+                now=NOW,
+            )
+        assert raised.value.code is RefusalCode.plan_integrity_invalid
+
+
+def test_the_ordinary_planning_entry_point_refuses_a_non_simulator_surface() -> None:
+    """Narrow, and named for exactly what it measures: `plan_from_states` refuses these surface
+    strings, because `verify_inputs` checks the scope's surface before verifying a pair.
+
+    It does **not** show that a cross-surface plan cannot exist. An earlier version of this test
+    claimed that, and the claim was false in mechanism: the surface gate lives only in
+    `verify_inputs`, while `plan_reconciliation` calls `require_verified`, which recomputes the
+    *binding* digest and never re-checks the surface. The test below builds such a plan.
+    """
+    for surface in ("proxmox", "vmware", "aws", ""):
+        with pytest.raises(ReconciliationRefused) as raised:
+            plan_from_states(
+                scope=scope(execution_surface=surface),
+                desired=desired(network()),
+                observed=_observed_from_world(simulator.SimulatedWorld()),
+                now=NOW,
             )
         assert raised.value.code is RefusalCode.execution_surface_sealed
 
 
-def test_execution_refuses_a_desired_state_that_is_not_the_one_the_plan_came_from() -> None:
+def _cross_surface_plan(surface: str):
+    """A self-consistent plan naming another surface, built only from public exports.
+
+    `VerifiedStatePair` and `verification_digest` are both public, so the pair token can be
+    constructed directly with its real binding digest, never passing through `verify_inputs` and
+    therefore never meeting the surface gate. The result passes `require_plan_integrity` cleanly --
+    this is a *reachable* shape, not a hand-tampered object.
+    """
+    hostile = scope(execution_surface=surface)
     wanted = desired(network())
-    _, _, plan = plan_from_states(
-        scope=scope(),
+    seen = observed()
+    pair = VerifiedStatePair(
+        scope=hostile,
         desired=wanted,
-        observed=_observed_from_world(simulator.SimulatedWorld()),
+        observed=seen,
+        evaluated_at=NOW,
+        verification_digest=verification_digest(
+            scope=hostile, desired=wanted, observed=seen, evaluated_at=NOW
+        ),
+    )
+    plan = plan_reconciliation(pair, classify_drift(pair))
+    return hostile, wanted, plan
+
+
+def test_execution_refuses_a_self_consistent_plan_built_for_another_surface() -> None:
+    """The seal at the boundary this module is named after, which had no coverage at all.
+
+    Measured: deleting `execute`'s two surface-check lines left the whole four-module suite green
+    at 155 passed, while the plan below executed and mutated the world. The only assertion that
+    mentioned `execution_surface_sealed` called `plan_from_states`, so it exercised the planner
+    gate and never this one. That made the sole enforcer of the reachable cross-surface shape
+    deletable as apparently-dead code with CI staying green.
+    """
+    for surface in ("proxmox", "vmware", "aws"):
+        hostile, wanted, plan = _cross_surface_plan(surface)
+        assert plan.execution_surface == surface
+        require_plan_integrity(plan)  # genuinely self-consistent, not tampered
+
+        with pytest.raises(ReconciliationRefused) as raised:
+            simulator.execute(
+                scope=hostile,
+                plan=plan,
+                desired=wanted,
+                world=simulator.SimulatedWorld(),
+                intent=_authorized(plan),
+                now=NOW,
+            )
+        assert raised.value.code is RefusalCode.execution_surface_sealed
+
+
+def test_an_execution_record_reports_the_surface_of_the_plan_it_ran() -> None:
+    """A record built from the module constant would attest `simulator` for any plan at all, so
+    removing the seal above would produce forged work carrying clean provenance -- observed
+    directly while the seal was deleted. Deriving the field from the plan makes that
+    unrepresentable rather than merely currently-correct."""
+    wanted = desired(network())
+    plan = _plan_for(wanted)
+    _, report = simulator.execute(
+        scope=scope(),
+        plan=plan,
+        desired=wanted,
+        world=simulator.SimulatedWorld(),
+        intent=_authorized(plan),
         now=NOW,
     )
+    assert report.execution_surface == plan.execution_surface == EXECUTION_SURFACE_VALUE
+
+
+def test_execution_re_applies_the_change_budget_rather_than_trusting_the_planner() -> None:
+    """The defect this branch opened with. `plan_reconciliation` refuses a plan exceeding the
+    scope's `max_actions`, but that refusal used to live only in the planner: a plan edited
+    afterwards to carry more actions kept its original digest, executed every one of them, and
+    emitted a record attesting to the *original* `plan_digest`. Forged work with legitimate-looking
+    evidence.
+    """
+    wanted = desired(network(), node())
+    tight = scope(max_actions=1)
+    plan = _plan_for(wanted, tight, seen=observed(network()))
+    assert len(plan.actions) == 1
+
+    over_budget = dataclasses.replace(
+        plan,
+        actions=plan.actions
+        + (
+            PlannedAction(
+                kind=ActionKind.create,
+                element_kind=ElementKind.network,
+                element_ref="team-network",
+                reasons=(),
+            ),
+        ),
+    )
+    # the tamper is invisible to the digest the plan carries, which is exactly why it worked
+    assert over_budget.plan_digest == plan.plan_digest
     with pytest.raises(ReconciliationRefused) as raised:
         simulator.execute(
+            scope=tight,
+            plan=over_budget,
+            desired=wanted,
+            world=simulator.SimulatedWorld(),
+            intent=_authorized(plan),
+            now=NOW,
+        )
+    assert raised.value.code is RefusalCode.plan_integrity_invalid
+
+
+def test_execution_refuses_a_plan_presented_under_a_different_scope() -> None:
+    """Integrity alone would still allow a laxer scope to be substituted at execution time. The
+    plan binds the digest of the scope that authorized it, so the substitution is refused."""
+    wanted = desired(network(), node())
+    plan = _plan_for(wanted, scope(max_actions=2))
+    with pytest.raises(ReconciliationRefused) as raised:
+        simulator.execute(
+            scope=scope(max_actions=99),
+            plan=plan,
+            desired=wanted,
+            world=simulator.SimulatedWorld(),
+            intent=_authorized(plan),
+            now=NOW,
+        )
+    assert raised.value.code is RefusalCode.scope_mismatch
+
+
+def test_execution_refuses_a_desired_state_that_is_not_the_one_the_plan_came_from() -> None:
+    wanted = desired(network())
+    plan = _plan_for(wanted)
+    with pytest.raises(ReconciliationRefused) as raised:
+        simulator.execute(
+            scope=scope(),
             plan=plan,
             desired=desired(network(address_space="10.99.0.0/24")),
             world=simulator.SimulatedWorld(),
+            intent=_authorized(plan),
+            now=NOW,
         )
     assert raised.value.code is RefusalCode.verification_token_invalid
-
-
-def test_the_execution_record_digest_is_deterministic_and_binds_the_plan() -> None:
-    wanted = desired(network(), node())
-    empty = simulator.SimulatedWorld()
-    _, _, plan = plan_from_states(
-        scope=scope(), desired=wanted, observed=_observed_from_world(empty), now=NOW
-    )
-    _, first = simulator.execute(plan=plan, desired=wanted, world=empty)
-    _, second = simulator.execute(plan=plan, desired=wanted, world=empty)
-    assert first.record_digest == second.record_digest
-    assert first.plan_digest == plan.plan_digest
-
-    other = desired(network(), node(), edge())
-    _, _, other_plan = plan_from_states(
-        scope=scope(), desired=other, observed=_observed_from_world(empty), now=NOW
-    )
-    _, third = simulator.execute(plan=other_plan, desired=other, world=empty)
-    assert third.record_digest != first.record_digest
 
 
 def test_the_observation_a_simulated_world_produces_carries_its_own_provenance() -> None:
     # The simulator does not manufacture a collector attestation; the caller supplies it, exactly
     # as a real collector would, and the contract checks it.
-    world = simulator.SimulatedWorld()
     with pytest.raises(ReconciliationRefused) as raised:
         plan_from_states(
             scope=scope(),
             desired=desired(network()),
-            observed=_observed_from_world(world, collector_digest="not-a-digest"),
+            observed=_observed_from_world(
+                simulator.SimulatedWorld(), collector_digest="not-a-digest"
+            ),
             now=NOW,
         )
     assert raised.value.code is RefusalCode.observation_unverified

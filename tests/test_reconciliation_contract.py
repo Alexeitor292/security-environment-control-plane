@@ -19,15 +19,20 @@ from secp_reconciliation.v1 import (
     FACETS_BY_ELEMENT_KIND,
     RETRYABLE_WITH_FRESH_OBSERVATION,
     ActionKind,
+    ConvergenceState,
     DriftKind,
     DriftReason,
     ElementKind,
+    ExecutionOutcome,
     ExecutionSurface,
     FacetName,
     ObservationFidelity,
+    OperatorNextStep,
     PlanDisposition,
     RefusalCode,
     ResetScope,
+    StepFailureReason,
+    StepStatus,
     canonical_json,
     document_digest,
     is_content_digest,
@@ -47,7 +52,12 @@ EXPECTED_SIZES = {
     "ObservationFidelity": 3,
     "ExecutionSurface": 1,
     "ResetScope": 2,
-    "RefusalCode": 17,
+    "RefusalCode": 23,
+    "ExecutionOutcome": 3,
+    "StepStatus": 3,
+    "StepFailureReason": 2,
+    "OperatorNextStep": 4,
+    "ConvergenceState": 3,
 }
 
 _ENUMS = {
@@ -61,6 +71,11 @@ _ENUMS = {
     "ExecutionSurface": ExecutionSurface,
     "ResetScope": ResetScope,
     "RefusalCode": RefusalCode,
+    "ExecutionOutcome": ExecutionOutcome,
+    "StepStatus": StepStatus,
+    "StepFailureReason": StepFailureReason,
+    "OperatorNextStep": OperatorNextStep,
+    "ConvergenceState": ConvergenceState,
 }
 
 
