@@ -374,14 +374,22 @@ def test_the_wrapped_prose_spans_are_swept() -> None:
     invisibility is the thing being fixed. If paragraph joining regresses, these disappear.
     """
     swept = {
-        (name, lineno)
-        for name, lineno, _ in _documented_commands()
+        command
+        for name, _, command in _documented_commands()
         if name == "pr5e-management-bootstrap.md"
     }
-    for lineno in (46, 51):
-        assert ("pr5e-management-bootstrap.md", lineno) in swept, (
-            f"pr5e-management-bootstrap.md:{lineno} opens a wrapped `secpctl` span that is no "
-            "longer swept — the paragraph joining has regressed to per-line matching"
+    assert swept, "no commands swept from pr5e-management-bootstrap.md — the reading is broken"
+    # Keyed on CONTENT, not on line number. An earlier version pinned (46, 51) and went red the
+    # moment an unrelated edit inserted a table above them: a line number is a typed literal that
+    # drifts, which is the defect this file exists to catch, committed by this file.
+    # Only a WRAPPING span carries the long absolute bundle path; the short forms sit inside fences.
+    for needle in (
+        "secpctl release verify --bundle /var/lib/secp/bootstrap/release/",
+        "secpctl bootstrap controller --bundle",
+    ):
+        assert any(c.startswith(needle) for c in swept), (
+            f"no swept command starts with {needle!r} — a wrapped `secpctl` span is no longer "
+            "swept, so the paragraph joining has regressed to per-line matching"
         )
 
 
@@ -391,15 +399,19 @@ def test_inline_prose_commands_are_swept_not_just_fenced_ones() -> None:
     Keyed on a known inline-only command, so a regression to fenced-only extraction fails here
     rather than silently shrinking the corpus.
     """
-    rows = _documented_commands()
-    inline = {
-        (name, lineno)
-        for name, lineno, _ in rows
-        if name == "pr5e-management-bootstrap.md" and lineno in {80, 98}
+    swept = {
+        command
+        for name, _, command in _documented_commands()
+        if name == "pr5e-management-bootstrap.md"
     }
-    assert inline == {("pr5e-management-bootstrap.md", 80), ("pr5e-management-bootstrap.md", 98)}, (
-        "the inline-prose commands at pr5e-management-bootstrap.md:80/:98 are no longer swept; "
-        "those two lines are the ones a fenced-only extractor missed"
+    assert swept, "no commands swept from pr5e-management-bootstrap.md — the reading is broken"
+    # Keyed on CONTENT for the same reason as the wrapped-span test above: these two lines moved
+    # when an unrelated exit-code table was added to the runbook, and a line-number pin went red on
+    # a correct change. The commands themselves are what must stay swept.
+    expected = {"secpctl --json status controller", "secpctl --json status worker"}
+    assert expected <= swept, (
+        f"missing from the sweep: {sorted(expected - swept)} — these are inline-prose commands, "
+        "the exact shape a fenced-only extractor missed, and they carried two real defects"
     )
 
 
