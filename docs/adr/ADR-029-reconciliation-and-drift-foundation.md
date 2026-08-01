@@ -1,0 +1,142 @@
+# ADR-029 — Reconciliation and drift foundation
+
+- **Status:** Accepted
+- **Date:** 2026-07-31
+- **Milestone:** SECP reconciliation and drift foundation
+- **Related:** Charter §4 (orchestration owns state reconciliation and drift detection), §11
+  (capability surface incl. `reconcile`), §17 (SECP-002C); Invariant 9 (no provider-specific core
+  concepts); ADR-003 (plugin contract), ADR-008 (generic observed inventory and topology),
+  ADR-020 §G (state-vs-provider disagreement fails closed to an operator decision)
+
+## Context
+
+The charter assigns state reconciliation and drift detection to the orchestration engine, and
+SECP-002C is the milestone that applies them to real infrastructure. Nothing in the platform yet
+expresses *what drift is*: `apply` writes resources and `status` reads them back, and the gap
+between the two is described nowhere.
+
+The risk in filling that gap is that reconciliation is the natural place for provider concepts to
+leak into the core, for a comparison to quietly treat "the collector said nothing" as "they agree",
+and for a planner to reach for a delete when it finds something it did not expect.
+
+## Decision
+
+Add `contracts/reconciliation/secp_reconciliation` — a pure, versioned contract (`v1`) covering
+desired-versus-observed state, drift classification, reconciliation planning, and the reset-intent
+and evidence documents — plus a simulator-only execution surface. Nothing here contacts a provider,
+and no real-provider execution path is introduced.
+
+### Provider-neutral state
+
+Desired and observed state share one shape: an *element* (`network` / `node` / `edge` — ADR-008's
+generic projection, which every provider populates) carrying *facets* named for the property being
+compared (`address_space`, `address`, `node_class`), not for any provider's field. The one module
+that touches the plugin contract is `v1/topology_adapter.py`; the rest of the package imports only
+pure-computation standard-library modules and other modules of the reconciliation packages, along
+the declared layering below.
+
+The two sides are compared, never merged, and their references are treated differently on purpose:
+a desired element's reference is authored control-plane content, so it may appear in a finding, an
+action or a plan; an observed element's reference and values are provider-supplied, so they appear
+in no output at all.
+
+### Drift classification
+
+Five kinds, totally ordered by how much they block: `identity_conflict`, `indeterminate`,
+`unmanaged`, `missing`, `divergent`. Each finding carries exactly one bounded reason from a closed
+set that the kinds partition completely. There is no free-form drift description.
+
+`indeterminate` is the load-bearing one. When the desired state declares a facet and the
+observation is silent about it, the result is `indeterminate` — never "in sync". Reading silence as
+agreement is the failure this vocabulary exists to make impossible.
+
+### Refusal boundaries
+
+Refusals carry only a bounded `reconciliation_*` code — no path, endpoint, address, key material,
+provider value or raw exception — following the control plane's existing redacted-refusal
+convention. Verification happens before comparison, and the gate checks more than the state itself:
+the declared contract version, the scope's own validity and its execution surface, then the desired
+state's provenance and internal consistency, then instance identity and provider agreement, then
+the observation's provenance, fidelity, freshness and internal consistency. Any of these that
+cannot be established refuses at the gate rather than reaching classification. The exact set of
+bounded codes the gate can raise is pinned by test, so this list cannot quietly fall behind it. Classification is then total *over drift* — it declines to
+classify no disagreement — though it is not refusal-free: it re-checks the pair's binding digest and
+refuses a token whose contents were swapped after verification. Planning refuses again on drift no
+plan can honestly resolve — an identity conflict, an indeterminate facet, or a change set exceeding
+the scope's declared budget.
+
+### No removal, by construction
+
+`ActionKind` has two members, `create` and `update`. An element observed inside the scope but
+absent from the desired state is *deferred* and the plan's disposition becomes
+`operator_decision_required`. This is not a policy the planner enforces — a removal is a shape the
+plan cannot express — and it follows the charter's rule that adoption or removal of pre-existing
+assets is an explicit opt-in workflow, never the default, and ADR-020's rule that a disagreement
+between recorded and observed state is an operator decision rather than an automatic re-apply.
+
+### Reset intent and evidence
+
+Both are versioned, machine-readable and content-addressed. Every value in them is a version, a
+closed code, a count, a digest, a canonical timestamp, a boolean derived from a closed code, or the
+control plane's own instance identifier — and never an element reference, a facet value, a provider
+identity, a path, an endpoint, an address, key material or an exception. The exact key set of each
+of the three documents is pinned by test, so a field added to one is a conscious decision rather
+than a quiet widening.
+
+A reset intent is an authorization bound to an exact `plan_digest`, mirroring how change-set
+approvals bind an exact `change_set_hash`; it is not the payload. A refusal produces evidence too,
+recording the bounded code and whether a fresh observation could plausibly clear it.
+
+### Simulator-only execution
+
+The only executor is `plugins/simulator/secp_plugin_simulator/reconciliation.py`, and it is
+structurally incapable of reaching a provider rather than configured not to:
+
+- every type in its public signatures — and the whole closure of those types under their own
+  fields — is a builtin scalar, an enum or a frozen dataclass, so there is no parameter through
+  which a port, context, transport or callable could arrive. That check reads *annotations*, so it
+  is complete only if every public parameter carries one and none is variadic; both are enforced
+  separately (`test_every_public_parameter_is_annotated`,
+  `test_no_public_callable_accepts_varargs_or_keyword_args`), because an unannotated parameter was
+  found to be invisible to all four type guards *and* to the escape scan — a real hole through
+  which a caller-supplied callable reached the executor while every guard stayed green;
+- the reconciliation packages import only pure-computation standard-library modules and each other
+  along a declared layering (a plugin may import the contract; the contract may not import a
+  plugin), with every remaining edge listed as a reviewed `(module, import)` pair — three of them,
+  of which this milestone adds one, the contract's `topology_adapter` seam; the other two are the
+  pre-existing simulator plugin's, untouched here. A pair exempts one edge, not a whole file or a
+  whole import name, and an exception that no longer matches a real import fails as stale;
+- no code object in either package names any capability on an enumerated list (`open`, `getattr`,
+  `__import__`, `socket`, `connect`, `Popen` and 26 others), checked on compiled code objects
+  rather than on source text, which closes the dynamic-dispatch gap a static import scan leaves
+  open. The scan compiles each package source file and recurses it, so its *reach* is complete over
+  the file by construction and covers a callable held in a container as well as one bound as a
+  function; it also walks the loaded modules, so what the interpreter actually holds is checked
+  too. Its *vocabulary* is not complete in the same sense: the forbidden list is enumerated, so a
+  capability reached under a name nobody put on it would pass. That remains a review property, not
+  a checked one.
+
+`ExecutionSurface` has exactly one member, `simulator`; the plan model cannot name another.
+
+## Consequences
+
+**Positive:** drift becomes an auditable distribution over closed vocabularies rather than prose;
+an unverifiable input refuses instead of passing quietly; the outputs have nowhere to put provider
+naming, because the only reference a finding, action or plan carries is one the desired state
+authored and an unmanaged element's is empty by construction; and the execution surface's isolation
+is a property tests can check rather than a convention reviewers must remember.
+
+The last two are checked as well as constructed, but the checks are narrower than the sentences:
+the leak scan is a sentinel scan over one hostile observation driving one reconciliation, and the
+isolation scans establish reach and import closure, not the completeness of the capability list
+they match against.
+
+**Negative / risks:** the vocabularies are deliberately narrow, so the first real provider will
+need facets this version does not have — adding one is a contract-version decision, which is the
+intended cost. Comparison is exact string equality on canonicalized facet values, so semantically
+equal but textually different values (an address space written two ways) classify as divergent; a
+normalizing collector is the answer, not a looser comparison.
+
+**Not delivered here, deliberately:** no reconciliation against a real provider, no removal or
+adoption of unmanaged resources, no scheduling or orchestration of reconciliation runs, no API or
+persistence surface, and no change to any seal, approval gate or trust root.
