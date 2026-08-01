@@ -55,9 +55,18 @@ from secp_reconciliation.v1 import (
     RefusalCode,
     ResetScope,
     StateElement,
+    VerifiedStatePair,
     build_reset_intent,
+    classify_drift,
     plan_from_states,
+    plan_reconciliation,
+    require_plan_integrity,
 )
+from secp_reconciliation.v1.state import verification_digest
+
+# The simulator's own surface constant, so the record test compares against the module under test
+# rather than against a string retyped here.
+EXECUTION_SURFACE_VALUE = simulator.EXECUTION_SURFACE
 
 # --- Property 1: the input surface admits nothing that could reach anything --------------------
 
@@ -573,14 +582,14 @@ def test_a_plan_renamed_onto_another_surface_is_caught_as_tampering_before_anyth
         assert raised.value.code is RefusalCode.plan_integrity_invalid
 
 
-def test_a_self_consistent_plan_for_another_surface_cannot_be_built_at_all() -> None:
-    """The stronger half of the same property, and the one that carries the claim.
+def test_the_ordinary_planning_entry_point_refuses_a_non_simulator_surface() -> None:
+    """Narrow, and named for exactly what it measures: `plan_from_states` refuses these surface
+    strings, because `verify_inputs` checks the scope's surface before verifying a pair.
 
-    The test above shows a *tampered* surface is caught. It does not show the surface is
-    unreachable -- a plan that named another surface and had a matching digest would pass
-    integrity. This shows no such plan can be produced through the contract: the gate refuses a
-    non-simulator surface before a pair is ever verified, so planning never runs and there is
-    nothing to digest.
+    It does **not** show that a cross-surface plan cannot exist. An earlier version of this test
+    claimed that, and the claim was false in mechanism: the surface gate lives only in
+    `verify_inputs`, while `plan_reconciliation` calls `require_verified`, which recomputes the
+    *binding* digest and never re-checks the surface. The test below builds such a plan.
     """
     for surface in ("proxmox", "vmware", "aws", ""):
         with pytest.raises(ReconciliationRefused) as raised:
@@ -591,6 +600,74 @@ def test_a_self_consistent_plan_for_another_surface_cannot_be_built_at_all() -> 
                 now=NOW,
             )
         assert raised.value.code is RefusalCode.execution_surface_sealed
+
+
+def _cross_surface_plan(surface: str):
+    """A self-consistent plan naming another surface, built only from public exports.
+
+    `VerifiedStatePair` and `verification_digest` are both public, so the pair token can be
+    constructed directly with its real binding digest, never passing through `verify_inputs` and
+    therefore never meeting the surface gate. The result passes `require_plan_integrity` cleanly --
+    this is a *reachable* shape, not a hand-tampered object.
+    """
+    hostile = scope(execution_surface=surface)
+    wanted = desired(network())
+    seen = observed()
+    pair = VerifiedStatePair(
+        scope=hostile,
+        desired=wanted,
+        observed=seen,
+        evaluated_at=NOW,
+        verification_digest=verification_digest(
+            scope=hostile, desired=wanted, observed=seen, evaluated_at=NOW
+        ),
+    )
+    plan = plan_reconciliation(pair, classify_drift(pair))
+    return hostile, wanted, plan
+
+
+def test_execution_refuses_a_self_consistent_plan_built_for_another_surface() -> None:
+    """The seal at the boundary this module is named after, which had no coverage at all.
+
+    Measured: deleting `execute`'s two surface-check lines left the whole four-module suite green
+    at 155 passed, while the plan below executed and mutated the world. The only assertion that
+    mentioned `execution_surface_sealed` called `plan_from_states`, so it exercised the planner
+    gate and never this one. That made the sole enforcer of the reachable cross-surface shape
+    deletable as apparently-dead code with CI staying green.
+    """
+    for surface in ("proxmox", "vmware", "aws"):
+        hostile, wanted, plan = _cross_surface_plan(surface)
+        assert plan.execution_surface == surface
+        require_plan_integrity(plan)  # genuinely self-consistent, not tampered
+
+        with pytest.raises(ReconciliationRefused) as raised:
+            simulator.execute(
+                scope=hostile,
+                plan=plan,
+                desired=wanted,
+                world=simulator.SimulatedWorld(),
+                intent=_authorized(plan),
+                now=NOW,
+            )
+        assert raised.value.code is RefusalCode.execution_surface_sealed
+
+
+def test_an_execution_record_reports_the_surface_of_the_plan_it_ran() -> None:
+    """A record built from the module constant would attest `simulator` for any plan at all, so
+    removing the seal above would produce forged work carrying clean provenance -- observed
+    directly while the seal was deleted. Deriving the field from the plan makes that
+    unrepresentable rather than merely currently-correct."""
+    wanted = desired(network())
+    plan = _plan_for(wanted)
+    _, report = simulator.execute(
+        scope=scope(),
+        plan=plan,
+        desired=wanted,
+        world=simulator.SimulatedWorld(),
+        intent=_authorized(plan),
+        now=NOW,
+    )
+    assert report.execution_surface == plan.execution_surface == EXECUTION_SURFACE_VALUE
 
 
 def test_execution_re_applies_the_change_budget_rather_than_trusting_the_planner() -> None:

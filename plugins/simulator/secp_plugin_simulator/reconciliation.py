@@ -213,7 +213,12 @@ def execute(
         next_world,
         build_execution_report(
             instance_id=plan.instance_id,
-            execution_surface=EXECUTION_SURFACE,
+            # Derived from the plan, not from the module constant. With the seal above in place
+            # these are always equal -- but a record built from the constant would attest
+            # "simulator" for ANY plan, so removing the seal would produce forged work carrying
+            # clean provenance. A record that cannot misreport is better than one that happens to
+            # be correct.
+            execution_surface=plan.execution_surface,
             steps=tuple(steps),
             plan_digest=plan.plan_digest,
             intent_digest=intent.intent_digest if intent is not None else "",
