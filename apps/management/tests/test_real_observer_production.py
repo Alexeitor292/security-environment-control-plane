@@ -15,6 +15,7 @@ import hashlib
 import inspect
 import json
 
+import _mgmt_support as _MGMT
 import pytest
 from secp_commissioning.runtime import InMemoryFilesystem
 from secp_management import ManagementError
@@ -32,17 +33,34 @@ _PINS = ra.PinnedExecutables(
 )
 _CID = "b" * 64
 _IMG = "sha256:" + "e" * 64
+# The signed worker image digests used by the end-state proofs below. Taken from the SAME fixture
+# that builds the manifest those proofs verify against — re-deriving them here would only create a
+# second constant to keep in sync, not an independent check.
+_ORDINARY_IMAGE = _MGMT.WORKER_ORDINARY_IMAGE
+_OPERATOR_IMAGE = _MGMT.WORKER_OPERATOR_IMAGE
+_PACKAGE_BYTES = b"deployment package\n"
 
 
-def _op_show(*, enabled: bool = False, running: bool = False, unit_state: str | None = None) -> str:
+def _op_show(
+    *,
+    enabled: bool = False,
+    running: bool = False,
+    unit_state: str | None = None,
+    invocation: str | None = None,
+    monotonic: str = "123",
+) -> str:
     active = "active" if running else "inactive"
     # the SHIPPED sealed operator unit (render_operator_unit_disabled) has NO [Install], so systemd
     # reports UnitFileState=static (not-enabled) — that is the production not-enabled shape here;
     # 'enabled' is the breach case.
     unit = unit_state if unit_state is not None else ("enabled" if enabled else "static")
+    # DEFAULT: the never-started shape. The prepared operator is installed disabled and never run,
+    # and systemd reports an EMPTY InvocationID for such a unit. This fixture previously hardcoded
+    # a nonempty id, so the real observer was never driven over the posture it actually ships.
+    inv = invocation if invocation is not None else (("f" * 32) if running else "")
     return (
         f"LoadState=loaded\nActiveState={active}\nUnitFileState={unit}\n"
-        f"InvocationID={'f' * 32}\nStateChangeTimestampMonotonic=123\n"
+        f"InvocationID={inv}\nStateChangeTimestampMonotonic={monotonic}\n"
     )
 
 
@@ -76,8 +94,17 @@ class ObserverRunner:
                     enabled=bool(self.k.get("op_enabled")),
                     running=bool(self.k.get("op_running")),
                     unit_state=self.k.get("unit_state"),  # type: ignore[arg-type]
+                    invocation=self.k.get("op_invocation"),  # type: ignore[arg-type]
+                    monotonic=str(self.k.get("op_monotonic", "123")),
                 ),
             )
+        if head == "image" and len(a) >= 5 and a[1] == "inspect":
+            # the operator image-store presence probe: the runtime answers with the id it was asked
+            # for when that image is loaded, and fails when it is not.
+            if self.k.get("operator_image_absent"):
+                return CommandResult(1, "")
+            substitute = self.k.get("operator_image_substitute")
+            return CommandResult(0, (str(substitute) if substitute else a[4]) + "\n")
         if head == "inspect" and len(a) >= 3 and a[1] == "--format":
             fmt = a[2]
             if fmt.startswith("{{.Id}} {{.State.Running}}"):
@@ -94,7 +121,7 @@ class ObserverRunner:
             if fmt == "{{.Image}}":
                 if self.k.get("bad_image"):
                     return CommandResult(1, "")
-                return CommandResult(0, _IMG + "\n")
+                return CommandResult(0, str(self.k.get("ordinary_image", _IMG)) + "\n")
             if fmt.startswith("{{.Name}}"):
                 return CommandResult(0, "\n".join(self.k.get("controller_lines", [])))  # type: ignore[arg-type]
         if head == "exec":
@@ -483,3 +510,188 @@ def test_no_forbidden_module_imports() -> None:
             "paramiko",
         ):
             assert banned not in imported, (mod.__name__, banned)
+
+
+# --- the COMPLETE prepared end state, driven through the REAL gate --------------------------------
+# Everything above observes. These put the REAL observer's observation in front of the REAL
+# `_worker_end_state_reason` predicate, because that pairing is what production actually runs and it
+# is exactly where two defects hid: the engine suites used a FakeObserver that disagreed with the
+# production leaf on the operator InvocationID and the operator image, so both sides read "green"
+# while a correctly prepared host was refused.
+
+
+def _worker_manifest(operator_image: str | None = None):  # noqa: ANN202
+    """The signed worker manifest this host is expected to be on.
+
+    ``implementation_aggregate`` is pinned to the digest of the deployment-package bytes the host is
+    seeded with, because the end-state gate compares the two — the shared fixture's placeholder
+    constant is unreachable by any real file content.
+    """
+    from _mgmt_support import default_artifacts, manifest_dict
+    from secp_commissioning.canonical import sha256_bytes
+    from secp_management.release_bundle import ReleaseManifest
+
+    artifacts = default_artifacts("worker")
+    if operator_image is not None:
+        for art in artifacts:
+            if art.get("purpose") == "worker/operator":
+                art["image_digest"] = operator_image
+    body = manifest_dict("worker", artifacts)
+    body["implementation_aggregate"] = sha256_bytes(_PACKAGE_BYTES)
+    return ReleaseManifest.model_validate(body)
+
+
+def _prepared_worker_fs(*, record: bytes | None) -> InMemoryFilesystem:
+    """A host seeded so the OBSERVED identities match what the signed manifest expects."""
+    from _mgmt_support import _WORKER_COMPOSE_BYTES
+    from secp_management.engine import _operator_unit
+
+    fs = InMemoryFilesystem()
+    for d in _SEED_DIRS:
+        fs.seed_dir(d, uid=0, gid=0, mode=0o755)
+    loc = ManagementLocations()
+    fs.seed_file(loc.worker_compose_path(), _WORKER_COMPOSE_BYTES, uid=0, gid=0, mode=0o640)
+    fs.seed_file(loc.operator_unit_path(), _operator_unit().content, uid=0, gid=0, mode=0o644)
+    fs.seed_file(loc.worker_deployment_package_path(), _PACKAGE_BYTES, uid=0, gid=0, mode=0o640)
+    if record is not None:
+        fs.seed_file(loc.release_record_path("worker"), record, uid=0, gid=0, mode=0o640)
+    return fs
+
+
+def _end_state_reason(runner: ObserverRunner, fs: InMemoryFilesystem, manifest=None):  # noqa: ANN001,ANN202
+    from secp_management.engine import _expected_worker, _worker_end_state_reason
+
+    obs = _observer(runner, fs).observe_worker()
+    return _worker_end_state_reason(obs, _expected_worker(manifest or _worker_manifest()))
+
+
+def _prepared_runner(**knobs: object) -> ObserverRunner:
+    return ObserverRunner(ordinary_image=_ORDINARY_IMAGE, **knobs)
+
+
+def test_a_correctly_prepared_worker_host_PASSES_the_real_end_state_gate() -> None:
+    """THE regression proof. A fresh install leaves the operator unit present, disabled and NEVER
+    started, so systemd reports an empty InvocationID and no operator container exists.
+
+    Both facts were previously fatal: the gate demanded a nonempty InvocationID, and the observer
+    hardcoded operator_image_digest="" against a real sha256 expectation. Either alone refuses every
+    real host, so this fails if either regresses.
+    """
+    manifest = _worker_manifest()
+    fs = _prepared_worker_fs(record=manifest.canonical().encode("utf-8"))
+    runner = _prepared_runner()
+    obs = _observer(runner, fs).observe_worker()
+
+    # the never-started posture is REAL in this fixture, not assumed
+    assert obs.operator_present and not obs.operator_enabled and not obs.operator_running
+    assert obs.operator_invocation_id == "", "the fixture must model a never-started operator"
+    # ...and the operator image was OBSERVED, not defaulted
+    assert obs.operator_image_digest == _OPERATOR_IMAGE
+    # the ordinary worker is running and healthy, and is not polling the operator queue
+    assert obs.ordinary_running and obs.ordinary_healthy
+    assert not obs.ordinary_polls_operator_queue
+
+    assert _end_state_reason(runner, fs, manifest) is None
+
+
+def test_the_operator_image_is_refused_when_it_is_not_actually_loaded() -> None:
+    """The observation must be a real image-store proof: a host whose release record names the
+    operator image but whose runtime does not have it REFUSES. Without this, "observed" would mean
+    nothing more than "copied the expectation back"."""
+    fs = _prepared_worker_fs(record=_worker_manifest().canonical().encode("utf-8"))
+    runner = _prepared_runner(operator_image_absent=True)
+
+    assert _observer(runner, fs).observe_worker().operator_image_digest == ""
+    assert _end_state_reason(runner, fs) == "worker_operator_image_unobserved"
+
+
+def test_an_empty_operator_image_can_never_satisfy_the_gate() -> None:
+    """The defect's shape, asserted directly: an unproven (empty) operator image must refuse on its
+    own terms and must never reach the equality comparison — not even against an empty expectation,
+    where "" == "" would otherwise read as a match."""
+    from dataclasses import replace
+
+    from secp_management.engine import _expected_worker, _worker_end_state_reason
+
+    manifest = _worker_manifest()
+    fs = _prepared_worker_fs(record=manifest.canonical().encode("utf-8"))
+    exp = _expected_worker(manifest)
+
+    # CONTROL first: with a proven image this same host PASSES, so the refusals below are
+    # attributable to the operator image and not to some other unsatisfied clause.
+    assert _end_state_reason(_prepared_runner(), fs, manifest) is None
+
+    obs = _observer(_prepared_runner(operator_image_absent=True), fs).observe_worker()
+    assert obs.operator_image_digest == "", "the premise: the image was NOT observed"
+    # The dangerous case FIRST: an empty observation against an empty expectation. A bare equality
+    # comparison reads that as a match and returns None — a silent PASS certifying an end state
+    # nobody observed. It must refuse on the observation being absent, before any comparison.
+    assert (
+        _worker_end_state_reason(obs, replace(exp, operator_image=""))
+        == "worker_operator_image_unobserved"
+    )
+    assert _worker_end_state_reason(obs, exp) == "worker_operator_image_unobserved"
+
+
+def test_a_substituted_operator_image_is_refused() -> None:
+    """The runtime answering with a DIFFERENT id than the one asked for is not proof that the signed
+    image is loaded."""
+    fs = _prepared_worker_fs(record=_worker_manifest().canonical().encode("utf-8"))
+    runner = _prepared_runner(operator_image_substitute="sha256:" + "9" * 64)
+
+    assert _observer(runner, fs).observe_worker().operator_image_digest == ""
+    assert _end_state_reason(runner, fs) == "worker_operator_image_unobserved"
+
+
+def test_a_missing_release_record_refuses_rather_than_assuming_the_image() -> None:
+    """No record means the observer cannot know which operator image this host should have. That is
+    a refusal, never a pass."""
+    fs = _prepared_worker_fs(record=None)
+
+    assert _observer(_prepared_runner(), fs).observe_worker().operator_image_digest == ""
+    assert _end_state_reason(_prepared_runner(), fs) == "worker_operator_image_unobserved"
+
+
+def test_a_record_naming_another_release_operator_image_is_a_MISMATCH_not_a_pass() -> None:
+    """The engine's comparison stays a real check: a host whose installed release names a different
+    operator image than the expected one refuses, and refuses as a MISMATCH — a distinct fact from
+    "could not observe", and the reason an operator acts on differently."""
+    other = "sha256:" + "7" * 64
+    installed = _worker_manifest(operator_image=other)
+    fs = _prepared_worker_fs(record=installed.canonical().encode("utf-8"))
+    runner = _prepared_runner()
+
+    # the host truthfully reports what IT has installed...
+    assert _observer(runner, fs).observe_worker().operator_image_digest == other
+    # ...and that is not what the EXPECTED release says it must be
+    assert _end_state_reason(runner, fs, _worker_manifest()) == "worker_operator_image_mismatch"
+
+
+def test_the_operator_generation_still_moves_when_the_operator_is_started() -> None:
+    """Accepting an empty InvocationID must not remove the operator from ABA detection. A
+    never-started operator contributes a CONSTANT empty id, so the marker has to be carried by
+    StateChangeTimestampMonotonic — which advances the moment the unit changes state."""
+    fs = _prepared_worker_fs(record=_worker_manifest().canonical().encode("utf-8"))
+    never_started = _observer(_prepared_runner(), fs).observe_worker()
+
+    # CONTROL: re-observing an UNCHANGED host reproduces the same marker, so the difference below is
+    # a real state change and not per-observation noise.
+    assert _observer(_prepared_runner(), fs).observe_worker().generation_marker == (
+        never_started.generation_marker
+    )
+
+    # The monotonic stamp must move the marker ON ITS OWN. Holding the operator NOT running keeps
+    # the InvocationID empty in both observations, so this isolates the monotonic as the only
+    # differing operator fact — an earlier version of this test also started the operator, which
+    # moved the marker via the InvocationID and would have passed even if the marker ignored the
+    # stamp entirely.
+    restamped = _observer(_prepared_runner(op_monotonic="124"), fs).observe_worker()
+    assert restamped.operator_invocation_id == never_started.operator_invocation_id == ""
+    assert restamped.operator_state_change_monotonic != (
+        never_started.operator_state_change_monotonic
+    )
+    assert restamped.generation_marker != never_started.generation_marker
+
+    # ...and starting the operator moves it too (the InvocationID appearing is itself a change).
+    started = _observer(_prepared_runner(op_running=True, op_monotonic="125"), fs).observe_worker()
+    assert started.generation_marker != never_started.generation_marker

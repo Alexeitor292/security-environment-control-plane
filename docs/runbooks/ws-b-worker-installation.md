@@ -258,7 +258,8 @@ material.
 |---|---|
 | `worker_ordinary_not_ready` | The ordinary worker did not come up healthy |
 | `worker_ordinary_image_mismatch` | The running image is not the signed ordinary image |
-| `worker_operator_image_mismatch` | The operator unit is not on the signed operator image |
+| `worker_operator_image_mismatch` | The host's installed release names a different operator image than the signed one |
+| `worker_operator_image_unobserved` | The signed operator image could not be proven loaded on this host — a different fact from a mismatch: nothing was observed either way. Check that the release record is readable and that the operator image was really loaded |
 | `worker_operator_not_disabled_stopped` | **The operator was enabled or running — investigate** |
 | `worker_ordinary_polls_operator_queue` | **The worker was on the operator queue — investigate** |
 | `worker_operator_package_untrusted` | The deployment package is not trusted |

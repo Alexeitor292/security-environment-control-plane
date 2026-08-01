@@ -82,18 +82,28 @@ def worker_generation_marker(
     restart_count: str,
     started_at: str,
     operator_invocation_id: str,
+    operator_state_change_monotonic: str,
 ) -> str:
     """The reviewed worker generation identity — a SHA-256 over the COMPLETE ABA generation tuple.
     Both the observer and the engine derive it the same way, so a placeholder/constant marker that
-    ignores a restart/PID/InvocationID change is detectable (it will not equal this derivation)."""
+    ignores a restart/PID/InvocationID change is detectable (it will not equal this derivation).
+
+    ``operator_state_change_monotonic`` is part of the tuple because the canonical prepared operator
+    is present + disabled + NEVER STARTED, and systemd reports an EMPTY ``InvocationID`` for a unit
+    that has never run. In exactly the posture this plane certifies, the InvocationID is therefore a
+    constant that contributes no entropy, and the operator would contribute nothing to ABA
+    detection. ``StateChangeTimestampMonotonic`` is always reported (it is validated as a monotonic
+    integer by the deployment observer, which is why it can be relied on here) and advances on every
+    state change, so the operator remains covered before it has ever been started."""
     return sha256_digest(
         {
-            "v": "secp.management.worker-generation/v1",
+            "v": "secp.management.worker-generation/v2",
             "cid": container_id,
             "restart": restart_count,
             "started": started_at,
             "pid": running_pid,
             "operator_invocation_id": operator_invocation_id,
+            "operator_state_change_monotonic": operator_state_change_monotonic,
         }
     )
 
@@ -264,8 +274,17 @@ class WorkerObservation:
     operator_present: bool
     operator_enabled: bool
     operator_running: bool
+    #: The operator systemd ``InvocationID``. LEGITIMATELY EMPTY for the canonical prepared
+    #: operator, which is installed present + disabled and is never started — systemd reports no
+    #: InvocationID for a unit that has never run. Do not treat empty as a missing observation;
+    #: read ``operator_state_change_monotonic`` for the generation fact that is always present.
     operator_invocation_id: str
     operator_unit_identity: str
+    #: The signed operator image PROVEN PRESENT in the host's local image store. The prepared
+    #: operator is stopped, so there is no running container to inspect: what is observable — and
+    #: what the end state actually requires — is that the operator image named by the host's
+    #: installed-release record is really loaded. Empty means NOT PROVEN (unreadable/malformed
+    #: record, image absent, or a runtime that could not answer) and always refuses, never passes.
     operator_image_digest: str
     deployment_package_aggregate: str
     # True if containment could not be CERTIFIED — either an observed breach or an unfinished
@@ -278,8 +297,13 @@ class WorkerObservation:
     # commissioning or PR5D deployment verification engines); the engine re-verifies for real.
     commissioning_status: str  # observer predicate: "prepared" / "not_prepared"
     deployment_status: str  # observer predicate: "sealed_prepared" / "not_prepared"
+    #: The operator unit's systemd ``StateChangeTimestampMonotonic``. Unlike the InvocationID this
+    #: is reported for a never-started unit too, so it is the operator's ABA generation fact in the
+    #: canonical prepared posture. Defaults to "" so pre-existing constructors keep working; an
+    #: empty value is INCOMPLETE for a present operator and refuses.
+    operator_state_change_monotonic: str = ""
     # ABA generation marker over the ordinary container id/restart/start/pid + operator
-    # InvocationID;
+    # InvocationID + the operator unit's monotonic state-change stamp;
     # two adoption observations with the SAME marker prove nothing restarted between
     # admission+commit.
     generation_marker: str = ""

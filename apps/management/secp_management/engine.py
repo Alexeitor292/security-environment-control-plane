@@ -822,6 +822,7 @@ def _worker_generation(obs: WorkerObservation) -> str:
         restart_count=obs.ordinary_restart_count,
         started_at=obs.ordinary_started_at,
         operator_invocation_id=obs.operator_invocation_id,
+        operator_state_change_monotonic=obs.operator_state_change_monotonic,
     )
 
 
@@ -855,8 +856,8 @@ def _worker_generation_complete(obs: WorkerObservation) -> bool:
     generation tuple. Validate the RAW facts BEFORE deriving/comparing the marker: a nonempty
     ordinary container
     id, a nonnegative-integer restart count, a nonempty valid start timestamp, a nonzero numeric PID
-    while running, and — the reviewed rule for a present (disabled+stopped) operator — a defined
-    (nonempty) operator InvocationID. No generation component may be missing."""
+    while running, and — for a present operator — the generation facts that unit actually exposes.
+    No generation component may be missing."""
     if not obs.ordinary_container_id:
         return False
     if not _is_nonneg_int(obs.ordinary_restart_count):
@@ -865,10 +866,24 @@ def _worker_generation_complete(obs: WorkerObservation) -> bool:
         return False
     if obs.ordinary_running and not _is_positive_int(obs.ordinary_pid):
         return False
-    # a present operator (the canonical prepared posture is present + disabled + STOPPED) still
-    # exposes a defined InvocationID generation fact; its absence is a missing generation component.
-    if obs.operator_present and not obs.operator_invocation_id:
-        return False
+    if obs.operator_present:
+        # The canonical prepared operator is present + disabled + STOPPED and is NEVER started, so
+        # systemd reports an EMPTY InvocationID for it — the deployment observer documents exactly
+        # this ("Values may be empty (e.g. InvocationID of a never-started unit)") and accepts it.
+        # Requiring a nonempty InvocationID therefore refused the very end state a correct install
+        # produces: it demanded a fact that only exists once the operator has run, which is the one
+        # thing this posture forbids.
+        #
+        # The generation component that IS always present is StateChangeTimestampMonotonic. It is
+        # required nonempty and numeric here, so nothing is weakened: an observer that drops the
+        # operator's generation facts still fails, and the operator still contributes to ABA
+        # detection before it has ever been started.
+        if not _is_nonneg_int(obs.operator_state_change_monotonic):
+            return False
+        # A RUNNING unit always has an InvocationID. Empty is only legitimate for one that has not
+        # run, so an empty ID while running is a genuinely incomplete observation.
+        if obs.operator_running and not obs.operator_invocation_id:
+            return False
     return True
 
 
@@ -927,6 +942,15 @@ def _worker_end_state_reason(obs: WorkerObservation, exp: _ExpectedWorker) -> st
         return "worker_health_command_mismatch"
     if not (obs.operator_present and not obs.operator_enabled and not obs.operator_running):
         return "worker_operator_not_disabled_stopped"
+    # The operator image must be OBSERVED, never assumed. An empty observation means the observer
+    # could not prove the signed operator image is loaded on this host (unreadable/malformed release
+    # record, image absent, or a runtime that could not answer) — it is not evidence of a match, and
+    # it must not be able to reach the comparison below. Checked separately from the comparison so
+    # that an expectation which is itself empty can never be "equal" to an unproven observation.
+    if not obs.operator_image_digest:
+        return "worker_operator_image_unobserved"
+    if not exp.operator_image:
+        return "worker_operator_image_unobserved"
     if obs.operator_image_digest != exp.operator_image:
         return "worker_operator_image_mismatch"
     if obs.operator_unit_identity != exp.operator_unit_identity:

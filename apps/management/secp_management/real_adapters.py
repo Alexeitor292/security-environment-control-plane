@@ -66,6 +66,12 @@ from secp_management.adapters import (
 from secp_management.controller_compose_validation import assert_controller_compose_contract
 from secp_management.evidence import health_command_identity
 from secp_management.layout import ManagementLocations
+from secp_management.planes import Role
+from secp_management.release_bundle import (
+    WORKER_OPERATOR_PURPOSE,
+    parse_manifest_bytes,
+    signed_worker_image,
+)
 from secp_management.signing import sign_ed25519, verify_ed25519
 from secp_management.topology import (
     CONTROLLER_MIGRATION_ARGV,
@@ -723,6 +729,53 @@ class RealManagementHostObserver:
             return ""
         return sha256_bytes(data)
 
+    def _installed_operator_image(self) -> str:
+        """The signed operator image PROVEN LOADED on this host, or "" when it cannot be proven.
+
+        The canonical prepared operator is installed present + disabled + STOPPED, so there is no
+        running container whose image could be inspected — which is why this field used to be
+        hardcoded to "". But "the operator image is loaded" IS observable, and it is the fact the
+        end state depends on: without it the reviewed operator worker could never be started.
+
+        WHICH digest to look for is read from the host's own installed-release record, NOT from the
+        engine's expectation, so this stays an observation and the engine's comparison against the
+        signed manifest stays a real check. The record's authenticity is not relied on here: a
+        tampered record naming a different digest yields a value that fails that comparison, and one
+        naming the correct digest tells the truth anyway. The authority is the engine's signed
+        expectation, never this file.
+
+        Fail-closed in every direction — an unreadable or malformed record, an absent image, or a
+        runtime that cannot answer all return "", which the end-state gate refuses.
+        """
+        try:
+            raw = self._ctx.fs.safe_read(
+                self._ctx.locations.release_record_path(Role.WORKER.value),
+                max_bytes=_MAX_ARTIFACT_BYTES,
+                expected_uid=_ROOT_UID,
+            )
+        except (FilesystemError, ManagementError):
+            return ""
+        try:
+            manifest = parse_manifest_bytes(raw)
+            digest = signed_worker_image(manifest, WORKER_OPERATOR_PURPOSE)
+        except Exception:  # noqa: BLE001 - any malformed/absent record is simply not proof
+            return ""
+        if not _IMAGE_ID.fullmatch(digest or ""):
+            return ""
+        try:
+            out = self._ctx.run(
+                self._ctx.executables.container_runtime,
+                ("image", "inspect", "--format", "{{.Id}}", digest),
+                timeout=_INSPECT_TIMEOUT,
+                reason="image_query_failed",
+            )
+        except ManagementError:
+            return ""
+        # The runtime must report back the SAME content-addressed id that was asked for. Anything
+        # else (a redirect to another image, an empty answer) is not proof this image is loaded.
+        observed = out.strip()
+        return observed if observed == digest else ""
+
     def _container_image(self, container: str) -> str:
         try:
             out = self._ctx.run(
@@ -803,10 +856,12 @@ class RealManagementHostObserver:
             restart_count=gen.ordinary_restart_count,
             started_at=gen.ordinary_started_at,
             operator_invocation_id=gen.operator_invocation_id,
+            operator_state_change_monotonic=gen.operator_state_change_monotonic,
         )
         ordinary_image = (
             self._container_image(ORDINARY_CONTAINER_NAME) if gen.ordinary_present else ""
         )
+        operator_image = self._installed_operator_image() if gen.operator_present else ""
         config_id = self._identity_of(self._ctx.locations.worker_compose_path())
         unit_id = self._identity_of(self._ctx.locations.operator_unit_path())
         package_agg = self._identity_of(self._ctx.locations.worker_deployment_package_path())
@@ -849,8 +904,11 @@ class RealManagementHostObserver:
             operator_enabled=gen.operator_enabled,
             operator_running=gen.operator_running,
             operator_invocation_id=gen.operator_invocation_id,
+            operator_state_change_monotonic=gen.operator_state_change_monotonic,
             operator_unit_identity=unit_id,
-            operator_image_digest="",  # the prepared operator is stopped; no running image
+            # OBSERVED, not assumed: the signed operator image proven loaded on this host. The unit
+            # is stopped, so this is a local image-store proof, not a running-container inspection.
+            operator_image_digest=operator_image,
             deployment_package_aggregate=package_agg,
             ordinary_polls_operator_queue=polls_operator,
             package_trusted=package_trusted,
