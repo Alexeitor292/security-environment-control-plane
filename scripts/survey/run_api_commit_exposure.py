@@ -47,7 +47,6 @@ from commit_exposure_survey.census import (  # noqa: E402
     verify_commit_census,
     verify_route_census,
 )
-from commit_exposure_survey.live_api_server import live_api_server  # noqa: E402
 from commit_exposure_survey.measure import (  # noqa: E402
     CommitRecorder,
     RequestObservation,
@@ -60,6 +59,12 @@ from commit_exposure_survey.measure import (  # noqa: E402
 from secp_api.db import get_sessionmaker, reset_engine_for_tests  # noqa: E402
 from secp_api.models import Base  # noqa: E402
 from secp_api.seed import bootstrap_dev  # noqa: E402
+
+# The canonical live-server harness, imported rather than copied. This survey previously carried a
+# byte-for-byte duplicate because the socket gate was unmerged; #77 landed it on `main`, so the
+# condition that copy's own note named for its deletion has been met. One harness now means a fix
+# to its startup or shutdown determinism reaches both callers.
+from socket_gate_tests.live_api_server import live_api_server  # noqa: E402
 
 HTTP_TIMEOUT = 60.0
 
