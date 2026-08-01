@@ -8,8 +8,17 @@
 #   * a full Docker Engine runs INSIDE the host, so `docker load`, `docker compose up` and
 #     `docker inspect` in the real adapters talk to a daemon that belongs to this host alone —
 #     two hosts therefore have genuinely separate container worlds, as two real machines would;
-#   * python3 is at /usr/bin/python3, which is where the reviewed worker health command
-#     (topology.ORDINARY_HEALTH_COMMAND) and broker entrypoint (topology.BROKER_ENTRYPOINT) look.
+#   * python3 is at /usr/bin/python3, which is where the reviewed broker entrypoint
+#     (topology.BROKER_ENTRYPOINT) looks. That unit is an ExecStart on the HOST, so this is the
+#     filesystem that has to satisfy it.
+#
+# NOT so for the worker health command. topology.ORDINARY_HEALTH_COMMAND pins the same
+# /usr/bin/python3, but it is exec'd INSIDE the ordinary worker CONTAINER, so it is resolved against
+# the worker IMAGE's filesystem and this host's python3 is irrelevant to it. The worker image is
+# built from python:3.11-slim, which provides /usr/local/bin/python3 and no /usr/bin/python3 — see
+# Finding D in apps/acceptance/tests/test_acceptance_health_command_interpreter.py. Do NOT "fix"
+# that by installing a /usr/bin/python3 symlink here: it would not be on the path that matters, and
+# it would hide the finding rather than resolve it.
 #
 # Ubuntu 24.04 is the base because the project requires Python >= 3.11 and 24.04 ships 3.12; 22.04
 # ships 3.10 and would need a PPA to run the product at all.
