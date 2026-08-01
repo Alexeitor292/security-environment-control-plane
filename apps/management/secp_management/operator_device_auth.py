@@ -8,9 +8,11 @@ over, so the security-relevant logic stays testable without a socket.
 
 Two DIFFERENT transport postures, each matching its counterpart — the distinction is deliberate:
 
-* **Controller** (``GET /api/v1/auth/config``): CA-PINNED to the bootstrap-recorded controller trust
-  bundle, exactly as :mod:`secp_management.enrollment_controller_client` does. The controller is
-  SECP's own deployment-local service; system trust would defeat the pin.
+* **Controller** (public ``GET /api/v1/auth/config`` and bearer ``GET /api/v1/me``): CA-PINNED to
+  the bootstrap-recorded controller trust bundle, exactly as
+  :mod:`secp_management.enrollment_controller_client` does. The controller is SECP's own
+  deployment-local service; system trust would defeat the pin. The bearer is sent only to the exact
+  recorded origin's fixed ``/me`` path.
 * **Identity provider** (discovery, JWKS, device authorization, token): the reviewed OIDC issuer is
   an external provider with a normal public/enterprise chain, so it is verified against SYSTEM trust
   with ``trust_env=False``. This mirrors the control plane's own reviewed IdP posture in
@@ -34,6 +36,8 @@ exception chain; every failure is one bounded reason code.
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from dataclasses import dataclass
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
@@ -47,6 +51,7 @@ from secp_management.device_grant import (
     parse_device_authorization,
     validate_granted_scope,
 )
+from secp_management.operator_auth import OperatorAccessToken
 from secp_management.operator_token_revoke import (
     OUTCOME_REFUSED,
     OUTCOME_UNAVAILABLE,
@@ -68,10 +73,18 @@ OPERATOR_CLI_CLIENT_ID = "secp-cli"
 OPERATOR_CLI_SCOPE = "openid profile email"
 
 _AUTH_CONFIG_PATH = "/api/v1/auth/config"
+_PRINCIPAL_PATH = "/api/v1/me"
 _DISCOVERY_PATH = "/.well-known/openid-configuration"
 
 _MAX_DOCUMENT_BYTES = 1_048_576
+_MAX_PRINCIPAL_BYTES = 65_536
 _MAX_TOKEN_RESPONSE_BYTES = 65_536
+_MAX_PRINCIPAL_EMAIL_LENGTH = 320
+_MAX_PRINCIPAL_PERMISSIONS = 128
+_MAX_PERMISSION_LENGTH = 129
+_MAX_PERMISSION_REPORT_LENGTH = 8_192
+_PERMISSION_GRAMMAR = re.compile(r"[a-z][a-z0-9_]{0,63}:[a-z][a-z0-9_]{0,63}")
+_GRANT_TYPE_GRAMMAR = re.compile(r"[\x21-\x7e]+")
 _DEFAULT_TIMEOUT = 15.0
 
 
@@ -85,19 +98,24 @@ def _reject(reason_code: str) -> NoReturn:
 
 
 def _require_safe_url(url: object, *, require_https: bool, reason: str) -> str:
-    """Reject anything that is not a bare HTTP(S) URL with a host and no userinfo."""
+    """Reject anything that is not a fragment-free HTTP(S) URL with a host and valid port."""
     if not isinstance(url, str) or not (1 <= len(url) <= 1024):
         _reject(reason)
     if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
         _reject(reason)
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port  # forces validation; malformed/out-of-range ports raise ValueError
+    except ValueError:
+        _reject(reason)
     if parsed.scheme not in ("http", "https"):
         _reject(reason)
     if require_https and parsed.scheme != "https":
         _reject(reason)
     if parsed.username or parsed.password or "@" in parsed.netloc:
         _reject(reason)
-    if not parsed.hostname:
+    if not hostname or port == 0 or "#" in url:
         _reject(reason)
     return url
 
@@ -106,9 +124,9 @@ def _read_bounded(response: Any, *, max_bytes: int, reason: str) -> bytes:
     """Accumulate a streamed body, enforcing the cap WHILE reading (never after)."""
     body = bytearray()
     for chunk in response.iter_bytes():
-        body.extend(chunk)
-        if len(body) > max_bytes:
+        if len(chunk) > max_bytes - len(body):
             _reject(reason)
+        body.extend(chunk)
     return bytes(body)
 
 
@@ -140,6 +158,94 @@ class ReviewedAuthority:
 
     def __repr__(self) -> str:  # never the issuer / audience
         return "ReviewedAuthority(<redacted>)"
+
+
+@dataclass(frozen=True)
+class ResolvedOperatorPrincipal:
+    """The controller's authoritative, SECRET-FREE projection of ``GET /api/v1/me``.
+
+    This deliberately restates only ``PrincipalOut``'s wire fields instead of importing
+    ``secp_api`` across the management-plane boundary. Organization and permissions therefore come
+    from the controller's database-backed resolution, never from access-token claims.
+    """
+
+    user_id: str
+    organization_id: str
+    email: str
+    permissions: tuple[str, ...]
+    is_dev_fallback: bool
+
+    def __repr__(self) -> str:
+        return "ResolvedOperatorPrincipal(<redacted>)"
+
+    def to_report(self, *, active: bool = False) -> dict[str, object]:
+        """Return an explicitly stored or active projection, never an ambiguous identity."""
+        prefix = "active_principal" if active else "stored_principal"
+        return {
+            f"{prefix}_user_id": self.user_id,
+            f"{prefix}_organization_id": self.organization_id,
+            f"{prefix}_email": self.email,
+            f"{prefix}_permissions": list(self.permissions),
+            # The generic human renderer deliberately omits lists. This bounded duplicate makes
+            # the authoritative permission set visible in ordinary output as well as structured
+            # JSON, including the empty set (rendered as the empty string).
+            f"{prefix}_permissions_display": ",".join(self.permissions),
+            f"{prefix}_is_dev_fallback": self.is_dev_fallback,
+        }
+
+
+def _canonical_uuid(value: object) -> str:
+    if not isinstance(value, str) or len(value) != 36:
+        _reject("secpctl_operator_principal_invalid")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        _reject("secpctl_operator_principal_invalid")
+    canonical = str(parsed)
+    if not parsed.int or value != canonical:
+        _reject("secpctl_operator_principal_invalid")
+    return canonical
+
+
+def _parse_resolved_principal(body: dict[str, Any]) -> ResolvedOperatorPrincipal:
+    email = body.get("email")
+    if (
+        not isinstance(email, str)
+        or not (1 <= len(email) <= _MAX_PRINCIPAL_EMAIL_LENGTH)
+        or any(ch.isspace() or not ch.isprintable() for ch in email)
+    ):
+        _reject("secpctl_operator_principal_invalid")
+
+    permissions = body.get("permissions")
+    if (
+        not isinstance(permissions, list)
+        or len(permissions) > _MAX_PRINCIPAL_PERMISSIONS
+        or any(
+            not isinstance(permission, str)
+            or len(permission) > _MAX_PERMISSION_LENGTH
+            or not _PERMISSION_GRAMMAR.fullmatch(permission)
+            for permission in permissions
+        )
+        or len(set(permissions)) != len(permissions)
+        or permissions != sorted(permissions)
+    ):
+        _reject("secpctl_operator_principal_invalid")
+    if len(",".join(permissions)) > _MAX_PERMISSION_REPORT_LENGTH:
+        _reject("secpctl_operator_principal_invalid")
+
+    is_dev_fallback = body.get("is_dev_fallback")
+    # A presented bearer is resolved before the API's development fallback. ``True`` here would
+    # mean the controller ignored the credential whose mapping this call exists to establish.
+    if is_dev_fallback is not False:
+        _reject("secpctl_operator_principal_invalid")
+
+    return ResolvedOperatorPrincipal(
+        user_id=_canonical_uuid(body.get("user_id")),
+        organization_id=_canonical_uuid(body.get("organization_id")),
+        email=email,
+        permissions=tuple(permissions),
+        is_dev_fallback=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -241,7 +347,7 @@ class DeviceAuthorizationClient:
         url = self._locator.canonical_origin + _AUTH_CONFIG_PATH
         try:
             with self._controller_client() as client, client.stream("GET", url) as response:
-                if response.status_code // 100 != 2:
+                if response.status_code != 200:
                     _reject("secpctl_controller_unavailable")
                 _refuse_encoded(response, reason="secpctl_controller_response_invalid")
                 raw = _read_bounded(
@@ -262,15 +368,62 @@ class DeviceAuthorizationClient:
             require_https=self._require_https,
             reason="secpctl_device_authority_invalid",
         )
+        # RFC 8414 issuer identifiers have no query or fragment. Fragments are rejected by the
+        # shared network-URL guard; keep the issuer-only query rule here because endpoint URLs may
+        # legitimately carry a query component.
+        if urlsplit(issuer).query:
+            _reject("secpctl_device_authority_invalid")
         audience = body.get("audience")
         if not isinstance(audience, str) or not audience or len(audience) > 255:
             _reject("secpctl_device_authority_invalid")
-        return ReviewedAuthority(issuer=issuer.rstrip("/"), audience=audience)
+        # Mirror the API verifier's sole normalization exactly: remove one trailing slash. Using
+        # ``rstrip`` would collapse multiple path slashes and make secpctl trust a different issuer
+        # string than the controller verifies.
+        normalized_issuer = issuer[:-1] if issuer.endswith("/") else issuer
+        return ReviewedAuthority(issuer=normalized_issuer, audience=audience)
+
+    def resolve_principal(self, token: OperatorAccessToken) -> ResolvedOperatorPrincipal:
+        """Resolve the bearer to the controller's authoritative database-backed principal.
+
+        The request is pinned to the exact bootstrap-recorded controller origin. It is the only
+        controller request here that carries the bearer, never follows a redirect, never uses
+        ambient proxy/CA state, and bounds the response while streaming it.
+        """
+        if not isinstance(token, OperatorAccessToken):
+            _reject("secpctl_operator_token_invalid")
+        url = self._locator.canonical_origin + _PRINCIPAL_PATH
+        try:
+            with (
+                self._controller_client() as client,
+                client.stream(
+                    "GET",
+                    url,
+                    headers={
+                        "Accept": "application/json",
+                        "Accept-Encoding": "identity",
+                        "Authorization": token.authorization_header(),
+                    },
+                ) as response,
+            ):
+                if response.is_redirect or response.status_code != 200:
+                    _reject("secpctl_operator_principal_unavailable")
+                _refuse_encoded(response, reason="secpctl_operator_principal_invalid")
+                raw = _read_bounded(
+                    response,
+                    max_bytes=_MAX_PRINCIPAL_BYTES,
+                    reason="secpctl_operator_principal_invalid",
+                )
+        except ManagementError:
+            raise
+        except Exception:  # noqa: BLE001 - never leak controller / CA / token / exception
+            _reject("secpctl_controller_transport_failed")
+        body = _decode_json_object(raw, reason="secpctl_operator_principal_invalid")
+        return _parse_resolved_principal(body)
 
     def _issuer_document(self, url: str, *, reason: str) -> dict[str, Any]:
         try:
             with self._issuer_client() as client, client.stream("GET", url) as response:
-                if response.status_code // 100 != 2:
+                if response.status_code != 200:
                     _reject("secpctl_device_provider_unavailable")
                 _refuse_encoded(response, reason=reason)
                 raw = _read_bounded(response, max_bytes=_MAX_DOCUMENT_BYTES, reason=reason)
@@ -294,8 +447,15 @@ class DeviceAuthorizationClient:
         endpoint = document.get("device_authorization_endpoint")
         if endpoint is None:
             _reject("secpctl_device_grant_unsupported")
+        if "grant_types_supported" not in document:
+            _reject("secpctl_device_grant_unsupported")
         grant_types = document.get("grant_types_supported")
-        if isinstance(grant_types, list) and DEVICE_CODE_GRANT_TYPE not in grant_types:
+        if not isinstance(grant_types, list) or any(
+            not isinstance(grant_type, str) or not _GRANT_TYPE_GRAMMAR.fullmatch(grant_type)
+            for grant_type in grant_types
+        ):
+            _reject("secpctl_device_discovery_invalid")
+        if DEVICE_CODE_GRANT_TYPE not in grant_types:
             _reject("secpctl_device_grant_unsupported")
 
         # RFC 8414 §2 — `revocation_endpoint` is OPTIONAL. An ABSENT member is a provider that does
@@ -344,19 +504,25 @@ class DeviceAuthorizationClient:
         client secret and none is ever sent."""
         form = {"client_id": OPERATOR_CLI_CLIENT_ID, "scope": OPERATOR_CLI_SCOPE}
         try:
-            with self._issuer_client() as client:
-                response = client.post(
+            with (
+                self._issuer_client() as client,
+                client.stream(
+                    "POST",
                     endpoints.device_authorization_endpoint,
                     data=form,
                     headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-                )
+                ) as response,
+            ):
                 if response.is_redirect:
                     _reject("secpctl_device_authorization_invalid")
-                if response.status_code // 100 != 2:
+                _refuse_encoded(response, reason="secpctl_device_authorization_invalid")
+                if response.status_code != 200:
                     _reject("secpctl_device_authorization_refused")
-                raw = response.content
-                if len(raw) > _MAX_TOKEN_RESPONSE_BYTES:
-                    _reject("secpctl_device_authorization_invalid")
+                raw = _read_bounded(
+                    response,
+                    max_bytes=_MAX_TOKEN_RESPONSE_BYTES,
+                    reason="secpctl_device_authorization_invalid",
+                )
         except ManagementError:
             raise
         except Exception:  # noqa: BLE001
@@ -377,25 +543,35 @@ class DeviceAuthorizationClient:
             "client_id": OPERATOR_CLI_CLIENT_ID,
         }
         try:
-            with self._issuer_client() as client:
-                response = client.post(
+            with (
+                self._issuer_client() as client,
+                client.stream(
+                    "POST",
                     endpoints.token_endpoint,
                     data=form,
                     headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-                )
+                ) as response,
+            ):
                 if response.is_redirect:
                     _reject("secpctl_device_token_refused")
-                raw = response.content
-                if len(raw) > _MAX_TOKEN_RESPONSE_BYTES:
-                    _reject("secpctl_device_token_refused")
+                _refuse_encoded(response, reason="secpctl_device_token_refused")
+                raw = _read_bounded(
+                    response,
+                    max_bytes=_MAX_TOKEN_RESPONSE_BYTES,
+                    reason="secpctl_device_token_refused",
+                )
                 status = response.status_code
         except ManagementError:
             raise
         except Exception:  # noqa: BLE001
             _reject("secpctl_device_provider_unavailable")
 
+        # RFC 6749 §5.1 defines exactly 200 for a successful token response. An undefined 2xx is
+        # neither a success nor a valid §5.2 error response and must never drive the poll scheduler.
+        if status != 200 and status // 100 == 2:
+            _reject("secpctl_device_token_refused")
         body = _decode_json_object(raw, reason="secpctl_device_token_refused")
-        if status // 100 == 2:
+        if status == 200:
             access_token = body.get("access_token")
             if not isinstance(access_token, str) or not access_token:
                 _reject("secpctl_device_token_refused")
@@ -436,20 +612,32 @@ class DeviceAuthorizationClient:
 
         form = revocation_form(token=token, client_id=OPERATOR_CLI_CLIENT_ID)
         try:
-            with self._issuer_client() as client:
-                response = client.post(
+            with (
+                self._issuer_client() as client,
+                client.stream(
+                    "POST",
                     endpoints.revocation_endpoint,
                     data=form,
                     headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-                )
+                ) as response,
+            ):
                 if response.is_redirect:
                     # A redirect would forward the token to an unreviewed host. Never follow it, and
                     # never treat it as a revocation.
                     return RevocationOutcome(
                         OUTCOME_REFUSED, reason_code="secpctl_revocation_refused"
                     )
-                raw = response.content
+                _refuse_encoded(response, reason="secpctl_revocation_response_invalid")
+                raw = _read_bounded(
+                    response,
+                    max_bytes=_MAX_TOKEN_RESPONSE_BYTES,
+                    reason="secpctl_revocation_response_invalid",
+                )
                 status = response.status_code
+        except OperatorDeviceAuthError as exc:
+            # A malformed/oversized provider answer is still an OUTCOME, not an exception: logout
+            # must continue to local deletion, while reporting that the token may remain live.
+            return RevocationOutcome(OUTCOME_REFUSED, reason_code=exc.reason_code)
         except ManagementError:
             raise
         except Exception:  # noqa: BLE001 - transport failure never leaks endpoint / token / chain
@@ -477,5 +665,6 @@ __all__ = [
     "DeviceAuthorizationClient",
     "DeviceEndpoints",
     "OperatorDeviceAuthError",
+    "ResolvedOperatorPrincipal",
     "ReviewedAuthority",
 ]

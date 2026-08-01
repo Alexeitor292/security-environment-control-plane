@@ -14,7 +14,8 @@ The RFC 8628 rules pinned here are the ones implementations most often get wrong
 * ``authorization_pending`` continues polling at the current interval; ``access_denied`` and
   ``expired_token`` stop IMMEDIATELY (§3.5).
 * Polling is additionally bounded by a LOCAL deadline derived from ``expires_in`` and by a bounded
-  attempt budget, so a provider answering ``authorization_pending`` forever cannot pin the CLI.
+  attempt budget. A wait is licensed only when its resulting poll remains strictly BEFORE that
+  deadline, so a provider answering ``authorization_pending`` forever cannot pin the CLI.
 
 The ``device_code`` is a bearer credential: it is held only inside :class:`DeviceCode`, which is
 non-serializable and carries a constant redacted repr (the :class:`~secp_management.operator_auth.
@@ -24,10 +25,11 @@ values the grant exists to display and are deliberately NOT redacted.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from secp_management import ManagementError
 
@@ -96,6 +98,31 @@ def _reject(reason_code: str) -> NoReturn:
     raise DeviceGrantError(reason_code)
 
 
+def _percent_decoded_forms(value: str) -> tuple[str, ...]:
+    """Return the raw value and every successively percent-decoded form.
+
+    Each successful decode strictly shortens an ASCII percent escape, so the loop is bounded by
+    the already-bounded input length. Walking to a fixed point also closes nested-encoding tricks
+    without guessing how many encoding layers a browser might display.
+    """
+    forms = [value]
+    while True:
+        decoded = unquote(forms[-1])
+        if decoded == forms[-1]:
+            return tuple(forms)
+        forms.append(decoded)
+
+
+def _display_value_discloses_secret(displayed_value: str, secret: str) -> bool:
+    """Whether a displayed value contains the secret in a raw or percent-decoded form."""
+    secret_forms = _percent_decoded_forms(secret)
+    return any(
+        secret_form in displayed_form
+        for displayed_form in _percent_decoded_forms(displayed_value)
+        for secret_form in secret_forms
+    )
+
+
 class _NonSerializable:
     """Refuses pickling/copying so a secret can never be written to disk or a log by accident."""
 
@@ -159,14 +186,19 @@ def _safe_uri(value: object, *, require_https: bool) -> str | None:
         return None
     if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
         return None
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port  # forces validation; malformed/out-of-range ports raise ValueError
+    except ValueError:
+        return None
     if parsed.scheme not in ("http", "https"):
         return None
     if require_https and parsed.scheme != "https":
         return None
     if parsed.username or parsed.password or "@" in parsed.netloc:
         return None
-    if not parsed.hostname:
+    if not hostname or port == 0:
         return None
     return value
 
@@ -182,7 +214,10 @@ def parse_device_authorization(payload: object, *, require_https: bool) -> Devic
     if not isinstance(payload, dict):
         _reject("secpctl_device_authorization_invalid")
 
-    device_code = DeviceCode(payload.get("device_code"))  # validates the grammar, or refuses
+    device_code_raw = payload.get("device_code")
+    if not isinstance(device_code_raw, str):
+        _reject("secpctl_device_authorization_invalid")
+    device_code = DeviceCode(device_code_raw)  # validates the grammar, or refuses
 
     user_code = payload.get("user_code")
     if (
@@ -202,6 +237,19 @@ def parse_device_authorization(payload: object, *, require_https: bool) -> Devic
         verification_uri_complete = _safe_uri(complete_raw, require_https=require_https)
         if verification_uri_complete is None:
             _reject("secpctl_device_authorization_invalid")
+
+    # The device code is a bearer credential. Provider-controlled fields that reach the terminal
+    # must never smuggle it into the user code, a URI component, or a browser-decoded URI form.
+    # The guard deliberately emits only the closed reason code and never interpolates either
+    # provider value.
+    displayed_values = [user_code, verification_uri]
+    if verification_uri_complete is not None:
+        displayed_values.append(verification_uri_complete)
+    if any(
+        _display_value_discloses_secret(displayed_value, device_code_raw)
+        for displayed_value in displayed_values
+    ):
+        _reject("secpctl_device_authorization_invalid")
 
     expires_in = _bounded_int(
         payload.get("expires_in"), low=_MIN_EXPIRES_IN_SECONDS, high=_MAX_EXPIRES_IN_SECONDS
@@ -335,12 +383,18 @@ class DevicePollScheduler:
     def next_attempt(self, *, elapsed_seconds: float) -> PollDecision:
         """Decide whether to make the next poll attempt, and how long to wait first.
 
-        Stops when the LOCAL deadline derived from ``expires_in`` has passed or the bounded attempt
-        budget is exhausted — independent of anything the provider says.
+        Stops when waiting the CURRENT interval would put the poll at or beyond the LOCAL deadline
+        derived from ``expires_in``, or when the bounded attempt budget is exhausted — independent
+        of anything the provider says. The exact deadline is already expired: no sleep or request is
+        licensed at that boundary.
         """
         if not isinstance(elapsed_seconds, (int, float)) or isinstance(elapsed_seconds, bool):
             _reject("secpctl_device_authorization_invalid")
-        if elapsed_seconds >= self._deadline:
+        if elapsed_seconds < 0 or (
+            isinstance(elapsed_seconds, float) and not math.isfinite(elapsed_seconds)
+        ):
+            _reject("secpctl_device_authorization_invalid")
+        if elapsed_seconds + self._interval >= self._deadline:
             return PollDecision(ACTION_STOP, reason_code="secpctl_device_code_expired")
         if self._attempts >= self._max_attempts:
             return PollDecision(ACTION_STOP, reason_code="secpctl_device_poll_exhausted")

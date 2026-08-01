@@ -9,7 +9,6 @@ or acting on an unverified adapter.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 
 import pytest
@@ -17,71 +16,31 @@ from secp_management import ManagementError, cli
 from secp_management.auth_cli import AuthCliDeps
 from secp_management.enrollment_cli import EnrollmentCliDeps
 
-# --- Stream B integration tripwire ----------------------------------------------------------------
+
+def _assert_shared_enrollment_locator(deps: EnrollmentCliDeps) -> None:
+    from secp_management.controller_api_locator import FileControllerApiLocatorProvider
+    from secp_management.enrollment_cli import LocatorControllerCaBundleProvider
+    from secp_management.enrollment_controller_client import HttpsEnrollmentControllerClient
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    client = deps.controller_client
+    assert isinstance(client, HttpsEnrollmentControllerClient)
+    credential = client._token_provider
+    assert isinstance(credential, ControllerScopedCredentialProvider)
+    ca_bundle = deps.ca_bundle
+    assert isinstance(ca_bundle, LocatorControllerCaBundleProvider)
+
+    shared = client._locator_provider
+    assert isinstance(shared, FileControllerApiLocatorProvider)
+    assert credential._locator_provider is shared, "credential locator split"
+    assert ca_bundle._locator_provider is shared, "CA locator split"
 
 
-#: Whether Stream B's `ca_bundle` field has landed. Evaluated at COLLECTION time so the marker
-#: below activates or deactivates on its own, with no edit needed when the field appears.
-_CA_BUNDLE_ABSENT = "ca_bundle" not in {f.name for f in dataclasses.fields(EnrollmentCliDeps)}
-
-
-@pytest.mark.xfail(
-    _CA_BUNDLE_ABSENT,
-    reason=(
-        "EnrollmentCliDeps has no `ca_bundle` field yet; Stream B "
-        "(feature/secp-production-worker-installation) has not landed. This test enforces the "
-        "cli.py wiring the moment it does."
-    ),
-    strict=True,
-    raises=ImportError,
-)
-def test_enrollment_deps_compose_a_real_controller_ca_bundle_provider():
-    """``secpctl enrollment invite create`` must compose a REAL controller-CA provider, never the
-    sealed one — with the sealed default every invitation fails
-    ``secpctl_controller_ca_unavailable`` and the whole enrollment feature is inert while every
-    test still passes.
-
-    ``ca_bundle`` and ``LocatorControllerCaBundleProvider`` are Stream B's and do not exist on this
-    branch. Wiring them here today would raise inside ``_production_enrollment_deps``'s handler and
-    seal the whole enrollment composition — strictly worse than the current state.
-
-    THE MARKER IS CONDITIONAL, and that is load-bearing. Three states, and only the middle one is a
-    defect this repository can act on:
-
-    * field ABSENT — the body runs, the import raises, and the marker records an ``xfail``. Not a
-      skip: the body actually executes, so ``strict=True`` additionally fails the run if it somehow
-      PASSES, which would mean the assertions had gone vacuous while nobody was looking. A skip can
-      never establish that, because a skipped body proves nothing about itself.
-    * field PRESENT but UNWIRED — the condition is false, the marker does not apply, and this FAILS
-      loudly. An unconditional ``xfail`` would swallow exactly this state, which is the one that
-      matters most: the moment Stream B lands, an unwired composition must be a failure and not a
-      quiet "expected" one.
-    * field PRESENT and WIRED — passes, and the marker has already deactivated itself, so there is
-      no stale expectation left behind to remove.
-
-    ``raises=ImportError`` keeps the waiting state honest too: if the absent case ever fails for
-    some OTHER reason, that is a real failure rather than a silently absorbed one.
-    """
-    import secp_commissioning.runtime as runtime
-    from secp_management.enrollment_cli import (  # type: ignore[attr-defined]
-        LocatorControllerCaBundleProvider,
-        SealedControllerCaBundleProvider,
-    )
-
-    # the composition is POSIX-gated through RealFilesystem; stub it so this asserts the WIRING
-    # rather than the host, exactly as the auth-deps tests below do.
-    class _StubFilesystem:
-        pass
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(runtime, "RealFilesystem", _StubFilesystem)
-        deps = cli._production_enrollment_deps()
-
-    assert not isinstance(deps.ca_bundle, SealedControllerCaBundleProvider), (
-        "enrollment invite create composed the SEALED CA provider: every invitation will fail "
-        "secpctl_controller_ca_unavailable"
-    )
-    assert isinstance(deps.ca_bundle, LocatorControllerCaBundleProvider)
+def test_enrollment_deps_compose_a_real_controller_ca_bundle_provider(monkeypatch):
+    """The live composition shares one recorded locator across the HTTPS destination, credential
+    scope, and invitation CA. A sealed or split graph would make enrollment inert or cross
+    scopes."""
+    _assert_shared_enrollment_locator(_enrollment_deps_with_stubbed_host(monkeypatch))
 
 
 def test_production_engine_deps_falls_back_to_sealed_when_unprovisioned(monkeypatch):
@@ -182,25 +141,74 @@ def test_production_auth_deps_wires_the_recorded_controller_locator(monkeypatch)
     assert isinstance(deps.locator_provider, locator_module.FileControllerApiLocatorProvider)
 
 
-def test_production_auth_deps_falls_back_to_sealed_defaults(monkeypatch):
-    """An unprovisioned / non-POSIX host must yield sealed auth deps, never a crash.
+def test_auth_status_probe_uses_the_same_token_file_path_grammar_as_enrollment(monkeypatch):
+    from secp_management.enrollment_controller_client import SealedEnrollmentControllerClient
+    from secp_management.operator_auth import SealedOperatorAccessTokenProvider
 
-    The assertion is on the LOCATOR, not the credential store. ``_production_auth_deps`` evaluates
-    its arguments left to right, so ``build_operator_credential_store()`` has already returned
-    before the locator raises — the store therefore looks the same on the success and fallback
-    paths and cannot distinguish them. The locator can: it is sealed only on the fallback.
-    """
+    _composable_runtime(monkeypatch)
+    monkeypatch.setenv("SECP_OPERATOR_TOKEN_FILE", "relative-and-invalid.token")
+
+    auth = cli._production_auth_deps()
+    assert auth.token_file_active() is None
+    assert isinstance(auth.token_file_provider, SealedOperatorAccessTokenProvider)
+    # The enrollment composition applies the same ProtectedTokenFileProvider constructor and seals
+    # on this invalid path; auth status must not contradict it by claiming the file provider active.
+    assert isinstance(
+        cli._production_enrollment_deps().controller_client,
+        SealedEnrollmentControllerClient,
+    )
+
+
+def test_valid_token_file_selection_shares_one_truthful_provider_and_probe(monkeypatch):
+    from secp_management.operator_auth import ProtectedTokenFileProvider
+
+    _composable_runtime(monkeypatch)
+    monkeypatch.setenv("SECP_OPERATOR_TOKEN_FILE", "/etc/secp/operator.token")
+    auth = cli._production_auth_deps()
+    assert auth.token_file_active() is True
+    assert isinstance(auth.token_file_provider, ProtectedTokenFileProvider)
+
+
+def test_production_auth_deps_seals_only_the_failed_locator(monkeypatch):
+    """A locator construction failure must not erase independent credential/provider truth."""
     import secp_management.controller_api_locator as locator_module
+    import secp_management.operator_credential_store as store_module
+    from secp_management.auth_cli import StoredCredentialStatus
+    from secp_management.operator_auth import ProtectedTokenFileProvider
+    from secp_management.transaction import WriteGate
+
+    class _StatusStore:
+        def describe(self):
+            return StoredCredentialStatus(backend="windows_credential_manager", available=True)
+
+    store = _StatusStore()
 
     def _boom(*_args, **_kw):
-        raise ManagementError("locator_unavailable")
+        raise locator_module.ControllerApiLocatorError("secpctl_controller_locator_unavailable")
 
     _composable_runtime(monkeypatch)  # so the LOCATOR is the only thing that fails
+    monkeypatch.setattr(store_module, "build_operator_credential_store", lambda: store)
     monkeypatch.setattr(locator_module, "FileControllerApiLocatorProvider", _boom)
+    monkeypatch.setenv("SECP_OPERATOR_TOKEN_FILE", "/etc/secp/operator.token")
     deps = cli._production_auth_deps()
+
+    assert deps.credential_store is store
+    assert deps.token_file_active() is True
+    assert isinstance(deps.token_file_provider, ProtectedTokenFileProvider)
     assert isinstance(deps.locator_provider, locator_module.SealedControllerApiLocatorProvider)
-    with pytest.raises(ManagementError):
+    with pytest.raises(ManagementError, match="secpctl_controller_locator_unavailable"):
         deps.locator_provider.locate()
+
+    exit_code, status = cli.auth_status(deps)
+    assert exit_code == 0
+    assert status["account_selected"] is False
+    assert status["credential_backend"] == "windows_credential_manager"
+    assert status["active_token_provider"] == "token_file"
+    assert status["token_file_override_active"] is True
+
+    exit_code, login = cli.auth_login(deps, gate=WriteGate(write=True, confirm=True))
+    assert exit_code != 0
+    assert login["reason_code"] == "secpctl_controller_locator_unavailable"
 
 
 def test_main_wires_auth_deps_for_every_auth_subcommand(monkeypatch):
@@ -238,7 +246,7 @@ def test_main_wires_auth_deps_for_every_auth_subcommand(monkeypatch):
 
 def _enrollment_deps_with_stubbed_host(monkeypatch, *, token_file: str = ""):
     """Compose the real enrollment deps with the POSIX filesystem stubbed, so this asserts the
-    WIRING rather than the host — the same idiom as the Stream B tripwire above."""
+    WIRING rather than the host — the same idiom as the live CA composition test above."""
     import secp_commissioning.runtime as runtime
 
     class _StubFilesystem:
@@ -279,12 +287,26 @@ def test_the_token_file_is_reachable_only_by_explicit_opt_in(monkeypatch):
     assert isinstance(deps.controller_client._token_provider, ProtectedTokenFileProvider)
 
 
-def test_the_client_and_the_credential_provider_share_one_locator(monkeypatch):
-    """The credential read must be scoped to the controller the request is actually sent to. Two
-    locator instances could disagree and serve one controller's credential to another."""
+@pytest.mark.parametrize(
+    ("split_target", "expected_message"),
+    (("credential", "credential locator split"), ("ca_bundle", "CA locator split")),
+)
+def test_the_shared_locator_identity_check_detects_a_split(
+    monkeypatch, split_target, expected_message
+):
+    """The live identity assertion must fail if either downstream consumer is rewired."""
+    from secp_management.controller_api_locator import FileControllerApiLocatorProvider
+
     deps = _enrollment_deps_with_stubbed_host(monkeypatch)
     client = deps.controller_client
-    assert client._token_provider._locator_provider is client._locator_provider
+    target = client._token_provider if split_target == "credential" else deps.ca_bundle
+    original = target._locator_provider
+    split = FileControllerApiLocatorProvider(deps.ca_bundle._fs)
+    assert split is not original
+    monkeypatch.setattr(target, "_locator_provider", split)
+
+    with pytest.raises(AssertionError, match=expected_message):
+        _assert_shared_enrollment_locator(deps)
 
 
 def test_an_unavailable_keystore_composes_the_sealed_store_not_a_file(monkeypatch):
@@ -327,8 +349,8 @@ def test_a_controller_scoped_provider_over_a_sealed_store_refuses():
 
 def test_sealed_because_unbootstrapped_is_distinguishable_from_sealed_because_the_wiring_threw():
     """The `except Exception` in `_production_enrollment_deps` turns ANY composition error into
-    fully sealed deps -- invisibly. The `ca_bundle` tripwire above documents that trap; this asserts
-    the credential wiring does not walk into it.
+    fully sealed deps -- invisibly. The live CA composition test above exposes that trap; this
+    asserts the credential wiring does not walk into it.
 
     Account derivation raises `secpctl_controller_locator_unavailable` on an unbootstrapped host. If
     that ran at COMPOSITION time it would seal the entire enrollment surface. It must not: binding
@@ -395,10 +417,23 @@ def test_a_coding_defect_in_a_composition_is_loud_not_a_silent_seal(monkeypatch,
         cli._production_enrollment_deps()
 
 
+@pytest.mark.parametrize("boom", [TypeError, ValueError, RuntimeError])
+def test_auth_locator_programming_defects_outside_the_legacy_allowlist_are_loud(monkeypatch, boom):
+    import secp_commissioning.runtime as runtime
+
+    def _explode():
+        raise boom("constructor contract drift")
+
+    monkeypatch.setattr(runtime, "RealFilesystem", _explode)
+    with pytest.raises(boom, match="constructor contract drift"):
+        cli._production_auth_deps()
+
+
 def test_an_environmental_failure_still_seals_rather_than_propagating(monkeypatch):
-    """The other half: a non-POSIX host or an unprovisioned filesystem must still fail closed."""
+    """A non-POSIX locator still fails closed without erasing independent auth state."""
     import secp_commissioning.runtime as runtime
     from secp_commissioning.runtime import FilesystemError
+    from secp_management.controller_api_locator import SealedControllerApiLocatorProvider
 
     def _unsupported():
         raise FilesystemError("filesystem_backend_non_posix")
@@ -406,8 +441,9 @@ def test_an_environmental_failure_still_seals_rather_than_propagating(monkeypatc
     monkeypatch.setattr(runtime, "RealFilesystem", _unsupported)
     auth = cli._production_auth_deps()
     assert isinstance(auth, AuthCliDeps)
-    # sealed, and honest about not knowing which provider is live
-    assert auth.token_file_active() is None
+    assert isinstance(auth.locator_provider, SealedControllerApiLocatorProvider)
+    # The absent token-file selection is known even though the independent locator is unavailable.
+    assert auth.token_file_active() is False
     assert isinstance(cli._production_enrollment_deps(), EnrollmentCliDeps)
 
 
@@ -442,6 +478,12 @@ def test_a_tripwire_on_a_seam_inside_the_guarded_region_can_actually_fire():
 
 def _break_enrollment_driver_import(monkeypatch):
     import builtins
+    import sys
+
+    # The missing driver is imported transitively by this module. Re-establish that exact import
+    # boundary so the fake below engages even when an earlier test legitimately cached the module.
+    # MonkeyPatch restores the prior object afterward; no package-tree purge or class reload occurs.
+    monkeypatch.delitem(sys.modules, "secp_worker.enrollment_state_store", raising=False)
 
     real = builtins.__import__
 

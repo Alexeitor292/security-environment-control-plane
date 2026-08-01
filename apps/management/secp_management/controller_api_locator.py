@@ -20,7 +20,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from threading import Lock
 from typing import NoReturn, Protocol
+from urllib.parse import urlsplit
 
 from secp_commissioning.canonical import canonical_json
 from secp_commissioning.runtime import FilesystemBackend, FilesystemError
@@ -60,11 +62,20 @@ class ControllerApiLocator:
     ca_bundle_path: str
 
     def __post_init__(self) -> None:
+        try:
+            origin_port = (
+                urlsplit(self.canonical_origin).port
+                if isinstance(self.canonical_origin, str)
+                else None
+            )
+        except ValueError:
+            _reject("secpctl_controller_locator_invalid")
         if (
             not isinstance(self.canonical_origin, str)
             or len(self.canonical_origin) > _MAX_ORIGIN_LEN
             or not _HTTPS_ORIGIN.fullmatch(self.canonical_origin)
             or _CONTROL.search(self.canonical_origin)
+            or (origin_port is not None and not (1 <= origin_port <= 65535))
         ):
             _reject("secpctl_controller_locator_invalid")
         if (
@@ -115,40 +126,53 @@ def _require_root_regular(fs: FilesystemBackend, path: str, *, reason: str) -> N
 class FileControllerApiLocatorProvider:
     """Reads the protected root-owned locator through the hardened filesystem seam. A missing file
     is ``secpctl_controller_locator_unavailable``; an unsafe or malformed file is
-    ``secpctl_controller_locator_invalid``."""
+    ``secpctl_controller_locator_invalid``.
 
-    __slots__ = ("_fs", "_path")
+    The first valid value is an immutable snapshot for this provider instance. Production creates
+    one provider per CLI invocation and shares it across the HTTPS destination, CA-bundle source,
+    and credential-account selector. Re-reading the file independently in those consumers would
+    permit one invocation to cross controller trust scopes if the locator changed between reads.
+    """
+
+    __slots__ = ("_fs", "_path", "_snapshot", "_snapshot_lock")
 
     def __init__(self, fs: FilesystemBackend, *, path: str = CONTROLLER_API_LOCATOR_PATH) -> None:
         self._fs = fs
         self._path = path
+        self._snapshot: ControllerApiLocator | None = None
+        self._snapshot_lock = Lock()
 
     def __repr__(self) -> str:
         return "FileControllerApiLocatorProvider(<redacted>)"
 
     def locate(self) -> ControllerApiLocator:
-        if self._fs.lstat(self._path) is None:
-            _reject("secpctl_controller_locator_unavailable")
-        _require_root_regular(self._fs, self._path, reason="secpctl_controller_locator_invalid")
-        try:
-            raw = self._fs.safe_read(self._path, max_bytes=_MAX_BYTES, expected_uid=0)
-        except FilesystemError:
-            _reject("secpctl_controller_locator_invalid")
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception:  # noqa: BLE001 - a malformed locator is a bounded refusal
-            _reject("secpctl_controller_locator_invalid")
-        if (
-            not isinstance(data, dict)
-            or data.get("schema") != _LOCATOR_SCHEMA
-            or not isinstance(data.get("canonical_origin"), str)
-            or not isinstance(data.get("ca_bundle_path"), str)
-        ):
-            _reject("secpctl_controller_locator_invalid")
-        # construction re-validates the grammar (raises the bounded invalid code)
-        return ControllerApiLocator(
-            canonical_origin=data["canonical_origin"], ca_bundle_path=data["ca_bundle_path"]
-        )
+        with self._snapshot_lock:
+            if self._snapshot is not None:
+                return self._snapshot
+            if self._fs.lstat(self._path) is None:
+                _reject("secpctl_controller_locator_unavailable")
+            _require_root_regular(self._fs, self._path, reason="secpctl_controller_locator_invalid")
+            try:
+                raw = self._fs.safe_read(self._path, max_bytes=_MAX_BYTES, expected_uid=0)
+            except FilesystemError:
+                _reject("secpctl_controller_locator_invalid")
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except Exception:  # noqa: BLE001 - a malformed locator is a bounded refusal
+                _reject("secpctl_controller_locator_invalid")
+            if (
+                not isinstance(data, dict)
+                or data.get("schema") != _LOCATOR_SCHEMA
+                or not isinstance(data.get("canonical_origin"), str)
+                or not isinstance(data.get("ca_bundle_path"), str)
+            ):
+                _reject("secpctl_controller_locator_invalid")
+            # Construction re-validates the grammar (raises the bounded invalid code). Publish the
+            # snapshot only after every check succeeds, so a transient refusal is never cached.
+            self._snapshot = ControllerApiLocator(
+                canonical_origin=data["canonical_origin"], ca_bundle_path=data["ca_bundle_path"]
+            )
+            return self._snapshot
 
 
 def record_controller_api_locator(

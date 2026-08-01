@@ -14,11 +14,13 @@ import pytest
 from secp_management import ManagementError
 from secp_management.controller_api_locator import ControllerApiLocator
 from secp_management.device_grant import DEVICE_CODE_GRANT_TYPE, DeviceCode
+from secp_management.operator_auth import OperatorAccessToken
 from secp_management.operator_device_auth import (
     OPERATOR_CLI_CLIENT_ID,
     OPERATOR_CLI_SCOPE,
     DeviceAuthorizationClient,
     DeviceEndpoints,
+    ResolvedOperatorPrincipal,
 )
 
 ORIGIN = "https://controller.invalid"
@@ -72,6 +74,14 @@ REVOCABLE_ENDPOINTS = DeviceEndpoints(
     revocation_endpoint=REVOCATION_URL,
 )
 
+PRINCIPAL_RESPONSE = {
+    "user_id": "5ec9ad00-0000-4000-8000-000000000001",
+    "organization_id": "6ec9ad00-0000-4000-8000-000000000001",
+    "email": "operator@example.invalid",
+    "permissions": ["enrollment:manage", "enrollment:read"],
+    "is_dev_fallback": False,
+}
+
 
 class _Headers:
     def __init__(self, encodings):
@@ -82,11 +92,22 @@ class _Headers:
 
 
 class _Response:
-    def __init__(self, *, status=200, body=b"", encodings=(), redirect=False):
+    """A streaming response double whose buffered ``content`` API is forbidden.
+
+    If production regresses from ``iter_bytes`` to ``response.content``, every POST-path test fails
+    at the access itself rather than letting a post-hoc length assertion look like a read-time cap.
+    """
+
+    def __init__(self, *, status=200, body=b"", chunks=None, encodings=(), redirect=False):
         self.status_code = status
-        self.content = body
+        self._chunks = tuple(chunks) if chunks is not None else (body,)
         self.headers = _Headers(list(encodings))
         self.is_redirect = redirect
+        self.iterated_chunks = 0
+
+    @property
+    def content(self):  # pragma: no cover - touching this is the regression the fake prevents
+        raise AssertionError("buffered response.content is forbidden; stream with iter_bytes")
 
     def __enter__(self):
         return self
@@ -95,7 +116,9 @@ class _Response:
         return False
 
     def iter_bytes(self):
-        yield self.content
+        for chunk in self._chunks:
+            self.iterated_chunks += 1
+            yield chunk
 
 
 class _FakeClient:
@@ -105,6 +128,7 @@ class _FakeClient:
         self._stream = stream or (lambda url: _Response())
         self._post = post or (lambda url, data, headers: _Response())
         self.streamed: list[str] = []
+        self.requested: list[tuple[str, str, dict]] = []
         self.posted: list[tuple[str, dict, dict]] = []
 
     def __enter__(self):
@@ -113,22 +137,27 @@ class _FakeClient:
     def __exit__(self, *exc):
         return False
 
-    def stream(self, _method, url):
+    def stream(self, method, url, data=None, headers=None):
+        if method == "POST":
+            self.posted.append((url, dict(data or {}), dict(headers or {})))
+            return self._post(url, data, headers)
         self.streamed.append(url)
+        self.requested.append((method, url, dict(headers or {})))
         return self._stream(url)
 
     def post(self, url, data=None, headers=None):
-        self.posted.append((url, dict(data or {}), dict(headers or {})))
-        return self._post(url, data, headers)
+        raise AssertionError("POST responses must be streamed, never buffered")
 
 
 def _json_response(payload, **kwargs):
     return _Response(body=json.dumps(payload).encode("utf-8"), **kwargs)
 
 
-def _client(*, issuer_docs=None, post=None, pinned=None, require_https=True):
+def _client(*, issuer_docs=None, issuer_status=200, post=None, pinned=None, require_https=True):
     docs = issuer_docs or {}
-    issuer_client = _FakeClient(stream=lambda url: _json_response(docs.get(url, {})), post=post)
+    issuer_client = _FakeClient(
+        stream=lambda url: _json_response(docs.get(url, {}), status=issuer_status), post=post
+    )
     pinned_client = (
         pinned
         if pinned is not None
@@ -178,6 +207,14 @@ def test_authority_repr_never_reveals_the_issuer_or_audience():
     assert repr(client.reviewed_authority()) == "ReviewedAuthority(<redacted>)"
 
 
+def test_authority_normalization_matches_the_api_verifiers_exactly_one_slash_rule():
+    configured = ISSUER + "//"
+    pinned = _FakeClient(stream=lambda url: _json_response({**AUTH_CONFIG, "issuer": configured}))
+    client, _issuer, _pinned = _client(pinned=pinned)
+
+    assert client.reviewed_authority().issuer == ISSUER + "/"
+
+
 def test_a_dev_fallback_controller_refuses_rather_than_pretending():
     pinned = _FakeClient(stream=lambda url: _json_response({**AUTH_CONFIG, "mode": "dev_fallback"}))
     client, _issuer, _pinned = _client(pinned=pinned)
@@ -188,7 +225,20 @@ def test_a_dev_fallback_controller_refuses_rather_than_pretending():
 
 @pytest.mark.parametrize(
     "issuer",
-    ["http://idp.invalid/realms/secp", "https://u:p@idp.invalid", "not-a-url", "", None],
+    [
+        "http://idp.invalid/realms/secp",
+        "https://u:p@idp.invalid",
+        "https://[::1/realms/secp",
+        "https://idp.invalid:0/realms/secp",
+        "https://idp.invalid:65536/realms/secp",
+        "https://idp.invalid:not-a-port/realms/secp",
+        "https://idp.invalid/realms/secp?tenant=other",
+        "https://idp.invalid/realms/secp#fragment",
+        "https://idp.invalid/realms/secp#",
+        "not-a-url",
+        "",
+        None,
+    ],
 )
 def test_an_unsafe_issuer_from_the_controller_is_refused(issuer):
     pinned = _FakeClient(stream=lambda url: _json_response({**AUTH_CONFIG, "issuer": issuer}))
@@ -196,10 +246,21 @@ def test_an_unsafe_issuer_from_the_controller_is_refused(issuer):
     with pytest.raises(ManagementError) as ei:
         client.reviewed_authority()
     assert _reason(ei) == "secpctl_device_authority_invalid"
+    if isinstance(issuer, str) and issuer:
+        assert issuer not in f"{ei.value!r} {ei.value}"
 
 
 def test_a_controller_error_status_is_a_bounded_refusal():
     pinned = _FakeClient(stream=lambda url: _Response(status=503))
+    client, _issuer, _pinned = _client(pinned=pinned)
+    with pytest.raises(ManagementError) as ei:
+        client.reviewed_authority()
+    assert _reason(ei) == "secpctl_controller_unavailable"
+
+
+@pytest.mark.parametrize("status", [201, 202, 204, 299])
+def test_controller_auth_config_requires_exactly_http_200(status):
+    pinned = _FakeClient(stream=lambda url: _json_response(AUTH_CONFIG, status=status))
     client, _issuer, _pinned = _client(pinned=pinned)
     with pytest.raises(ManagementError) as ei:
         client.reviewed_authority()
@@ -212,6 +273,120 @@ def test_a_compressed_controller_response_is_refused():
     with pytest.raises(ManagementError) as ei:
         client.reviewed_authority()
     assert _reason(ei) == "secpctl_controller_response_invalid"
+
+
+# --- authoritative controller principal ----------------------------------------------------------
+
+
+def test_principal_resolution_is_an_exact_pinned_bearer_get():
+    pinned = _FakeClient(stream=lambda url: _json_response(PRINCIPAL_RESPONSE))
+    client, issuer, _pinned = _client(pinned=pinned)
+    principal = client.resolve_principal(OperatorAccessToken("a" * 40))
+
+    assert principal == ResolvedOperatorPrincipal(
+        user_id=PRINCIPAL_RESPONSE["user_id"],
+        organization_id=PRINCIPAL_RESPONSE["organization_id"],
+        email=PRINCIPAL_RESPONSE["email"],
+        permissions=tuple(PRINCIPAL_RESPONSE["permissions"]),
+        is_dev_fallback=False,
+    )
+    assert pinned.streamed == [f"{ORIGIN}/api/v1/me"]
+    assert issuer.streamed == []
+    method, url, headers = pinned.requested[0]
+    assert method == "GET" and url == f"{ORIGIN}/api/v1/me"
+    assert headers == {
+        "Accept": "application/json",
+        "Accept-Encoding": "identity",
+        "Authorization": f"Bearer {'a' * 40}",
+    }
+
+
+def test_principal_projection_is_redacted_and_reports_no_token():
+    principal = ResolvedOperatorPrincipal(
+        user_id=PRINCIPAL_RESPONSE["user_id"],
+        organization_id=PRINCIPAL_RESPONSE["organization_id"],
+        email=PRINCIPAL_RESPONSE["email"],
+        permissions=tuple(PRINCIPAL_RESPONSE["permissions"]),
+        is_dev_fallback=False,
+    )
+    assert repr(principal) == "ResolvedOperatorPrincipal(<redacted>)"
+    report = principal.to_report()
+    assert report["stored_principal_permissions"] == PRINCIPAL_RESPONSE["permissions"]
+    assert report["stored_principal_permissions_display"] == "enrollment:manage,enrollment:read"
+    rendered = json.dumps(report)
+    assert "Bearer " not in rendered and "a" * 40 not in rendered
+    assert ORIGIN not in rendered
+
+
+@pytest.mark.parametrize("status", [201, 204, 302, 401, 403, 503])
+def test_principal_resolution_requires_exactly_http_200(status):
+    pinned = _FakeClient(
+        stream=lambda url: _json_response(
+            PRINCIPAL_RESPONSE,
+            status=status,
+            redirect=status == 302,
+        )
+    )
+    client, _issuer, _pinned = _client(pinned=pinned)
+    with pytest.raises(ManagementError) as ei:
+        client.resolve_principal(OperatorAccessToken("a" * 40))
+    assert _reason(ei) == "secpctl_operator_principal_unavailable"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"user_id": "not-a-uuid"},
+        {"user_id": "00000000-0000-0000-0000-000000000000"},
+        {"organization_id": None},
+        {"email": "operator\n@example.invalid"},
+        {"email": "a" * 321},
+        {"permissions": "enrollment:read"},
+        {"permissions": ["enrollment:read", "enrollment:manage"]},
+        {"permissions": ["enrollment:read", "enrollment:read"]},
+        {"permissions": ["not a permission"]},
+        {"is_dev_fallback": True},
+        {"is_dev_fallback": 0},
+    ],
+)
+def test_malformed_principal_fields_are_bounded_refusals(change):
+    pinned = _FakeClient(stream=lambda url: _json_response({**PRINCIPAL_RESPONSE, **change}))
+    client, _issuer, _pinned = _client(pinned=pinned)
+    with pytest.raises(ManagementError) as ei:
+        client.resolve_principal(OperatorAccessToken("a" * 40))
+    assert _reason(ei) == "secpctl_operator_principal_invalid"
+
+
+def test_compressed_or_oversized_principal_responses_are_refused_while_streaming():
+    compressed = _FakeClient(
+        stream=lambda url: _json_response(PRINCIPAL_RESPONSE, encodings=["gzip"])
+    )
+    client, _issuer, _pinned = _client(pinned=compressed)
+    with pytest.raises(ManagementError) as compressed_error:
+        client.resolve_principal(OperatorAccessToken("a" * 40))
+    assert _reason(compressed_error) == "secpctl_operator_principal_invalid"
+
+    response = _Response(chunks=[b"{" + b"x" * 65_536, b"never-read"])
+    oversized = _FakeClient(stream=lambda url: response)
+    client, _issuer, _pinned = _client(pinned=oversized)
+    with pytest.raises(ManagementError) as oversized_error:
+        client.resolve_principal(OperatorAccessToken("a" * 40))
+    assert _reason(oversized_error) == "secpctl_operator_principal_invalid"
+    assert response.iterated_chunks == 1
+
+
+def test_principal_transport_failure_is_bounded_and_leaks_nothing():
+    secret = "a" * 40
+
+    def _fail(_url):
+        raise RuntimeError(f"socket failed with {secret} against {ORIGIN}")
+
+    client, _issuer, _pinned = _client(pinned=_FakeClient(stream=_fail))
+    with pytest.raises(ManagementError) as ei:
+        client.resolve_principal(OperatorAccessToken(secret))
+    assert _reason(ei) == "secpctl_controller_transport_failed"
+    assert secret not in f"{ei.value!r} {ei.value}"
+    assert ORIGIN not in f"{ei.value!r} {ei.value}"
 
 
 # --- discovery ------------------------------------------------------------------------------------
@@ -236,6 +411,14 @@ def test_discovery_endpoint_is_not_built_by_string_concatenation():
     assert endpoints.device_authorization_endpoint == "https://idp.invalid/custom/dev-auth"
 
 
+@pytest.mark.parametrize("status", [201, 202, 204, 299])
+def test_discovery_metadata_requires_exactly_http_200(status):
+    client, _issuer, _pinned = _client(issuer_docs=_discovery_docs(), issuer_status=status)
+    with pytest.raises(ManagementError) as ei:
+        client.discover(client.reviewed_authority())
+    assert _reason(ei) == "secpctl_device_provider_unavailable"
+
+
 def test_a_provider_without_the_device_endpoint_reports_the_exact_limitation():
     """ADR-028 §3: report the provider limitation; never fall back to another grant."""
     without = {k: v for k, v in DISCOVERY.items() if k != "device_authorization_endpoint"}
@@ -251,6 +434,34 @@ def test_a_provider_not_advertising_the_device_grant_type_is_refused():
     with pytest.raises(ManagementError) as ei:
         client.discover(client.reviewed_authority())
     assert _reason(ei) == "secpctl_device_grant_unsupported"
+
+
+def test_a_provider_omitting_grant_types_reports_the_exact_limitation():
+    without = {k: v for k, v in DISCOVERY.items() if k != "grant_types_supported"}
+    client, _issuer, _pinned = _client(issuer_docs=_discovery_docs(without))
+    with pytest.raises(ManagementError) as ei:
+        client.discover(client.reviewed_authority())
+    assert _reason(ei) == "secpctl_device_grant_unsupported"
+
+
+@pytest.mark.parametrize(
+    "grant_types",
+    [
+        None,
+        DEVICE_CODE_GRANT_TYPE,
+        {"device_code": True},
+        [DEVICE_CODE_GRANT_TYPE, 7],
+        [DEVICE_CODE_GRANT_TYPE, ""],
+        [DEVICE_CODE_GRANT_TYPE, "authorization code"],
+    ],
+)
+def test_malformed_grant_types_are_bounded_discovery_invalid(grant_types):
+    malformed = {**DISCOVERY, "grant_types_supported": grant_types}
+    client, _issuer, _pinned = _client(issuer_docs=_discovery_docs(malformed))
+    with pytest.raises(ManagementError) as ei:
+        client.discover(client.reviewed_authority())
+    assert _reason(ei) == "secpctl_device_discovery_invalid"
+    assert str(grant_types) not in f"{ei.value!r} {ei.value}"
 
 
 def test_a_discovery_issuer_mismatch_is_refused():
@@ -271,8 +482,67 @@ def test_an_unsafe_discovered_endpoint_is_refused(field):
     assert _reason(ei) == "secpctl_device_discovery_invalid"
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["device_authorization_endpoint", "token_endpoint", "jwks_uri", "revocation_endpoint"],
+)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[::1/endpoint",
+        "https://idp.invalid:0/endpoint",
+        "https://idp.invalid:65536/endpoint",
+        "https://idp.invalid:not-a-port/endpoint",
+        "https://idp.invalid/endpoint#fragment",
+        "https://idp.invalid/endpoint#",
+    ],
+    ids=[
+        "malformed-ipv6",
+        "zero-port",
+        "out-of-range-port",
+        "non-numeric-port",
+        "fragment",
+        "empty-fragment",
+    ],
+)
+def test_every_malformed_or_fragmented_network_endpoint_is_bounded_discovery_invalid(field, url):
+    hostile = {**DISCOVERY, field: url}
+    client, _issuer, _pinned = _client(issuer_docs=_discovery_docs(hostile))
+    with pytest.raises(ManagementError) as ei:
+        client.discover(client.reviewed_authority())
+    assert _reason(ei) == "secpctl_device_discovery_invalid"
+    assert url not in f"{ei.value!r} {ei.value}"
+
+
+@pytest.mark.parametrize(
+    ("field", "attribute"),
+    [
+        ("device_authorization_endpoint", "device_authorization_endpoint"),
+        ("token_endpoint", "token_endpoint"),
+        ("jwks_uri", "jwks_uri"),
+        ("revocation_endpoint", "revocation_endpoint"),
+    ],
+)
+def test_discovered_network_endpoints_keep_query_and_valid_explicit_port(field, attribute):
+    endpoint = "https://idp.invalid:65535/custom?tenant=blue"
+    document = {**DISCOVERY, field: endpoint}
+    client, _issuer, _pinned = _client(issuer_docs=_discovery_docs(document))
+    endpoints = client.discover(client.reviewed_authority())
+    assert getattr(endpoints, attribute) == endpoint
+
+
 def test_endpoints_repr_never_reveals_the_urls():
     assert repr(ENDPOINTS) == "DeviceEndpoints(<redacted>)"
+
+
+@pytest.mark.parametrize("status", [201, 202, 204, 299])
+def test_jwks_document_requires_exactly_http_200(status):
+    client, _issuer, _pinned = _client(
+        issuer_docs={ENDPOINTS.jwks_uri: {"keys": []}}, issuer_status=status
+    )
+    with pytest.raises(ManagementError) as ei:
+        client.fetch_jwks(ENDPOINTS)
+    assert _reason(ei) == "secpctl_device_provider_unavailable"
 
 
 # --- device authorization request (RFC 8628 §3.1) -------------------------------------------------
@@ -303,12 +573,48 @@ def test_a_redirect_on_the_device_authorization_request_is_refused():
     assert _reason(ei) == "secpctl_device_authorization_invalid"
 
 
+@pytest.mark.parametrize("status", [201, 202, 204, 299])
+def test_device_authorization_success_requires_exactly_http_200(status):
+    response = _json_response(DEVICE_RESPONSE, status=status)
+    client, _issuer, _pinned = _client(post=lambda url, data, headers: response)
+    with pytest.raises(ManagementError) as ei:
+        client.request_device_authorization(ENDPOINTS)
+    assert _reason(ei) == "secpctl_device_authorization_refused"
+    assert response.iterated_chunks == 0
+
+
 def test_an_oversized_device_authorization_body_is_refused():
-    huge = _Response(body=b"{" + b"x" * 70_000)
+    huge = _Response(chunks=(b"{" + b"x" * 32_768, b"x" * 32_769, b"not-read"))
     client, _issuer, _pinned = _client(post=lambda url, data, headers: huge)
     with pytest.raises(ManagementError) as ei:
         client.request_device_authorization(ENDPOINTS)
     assert _reason(ei) == "secpctl_device_authorization_invalid"
+    assert huge.iterated_chunks == 2, "the cap must engage before the next chunk is materialized"
+
+
+def test_one_oversized_chunk_is_refused_before_extending_the_accumulator():
+    class OversizedChunk:
+        def __len__(self):
+            return 65_537
+
+        def __iter__(self):  # pragma: no cover - extending it would be the regression
+            raise AssertionError("an over-cap chunk must not be copied into the accumulator")
+
+    huge = _Response(chunks=(OversizedChunk(), b"not-read"))
+    client, _issuer, _pinned = _client(post=lambda url, data, headers: huge)
+    with pytest.raises(ManagementError) as ei:
+        client.request_device_authorization(ENDPOINTS)
+    assert _reason(ei) == "secpctl_device_authorization_invalid"
+    assert huge.iterated_chunks == 1
+
+
+def test_an_encoded_device_authorization_body_is_refused_before_it_is_read():
+    encoded = _json_response(DEVICE_RESPONSE, encodings=["gzip"])
+    client, _issuer, _pinned = _client(post=lambda url, data, headers: encoded)
+    with pytest.raises(ManagementError) as ei:
+        client.request_device_authorization(ENDPOINTS)
+    assert _reason(ei) == "secpctl_device_authorization_invalid"
+    assert encoded.iterated_chunks == 0
 
 
 # --- token request (RFC 8628 §3.4) ----------------------------------------------------------------
@@ -365,6 +671,24 @@ def test_a_success_without_an_access_token_is_refused():
     assert _reason(ei) == "secpctl_device_token_refused"
 
 
+@pytest.mark.parametrize("status", [201, 202, 204, 299])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"access_token": "a.b.c", "token_type": "Bearer"},
+        {"error": "authorization_pending"},
+    ],
+    ids=["token-shaped", "error-shaped"],
+)
+def test_token_success_requires_exactly_http_200(status, payload):
+    client, _issuer, _pinned = _client(
+        post=lambda url, data, headers: _json_response(payload, status=status)
+    )
+    with pytest.raises(ManagementError) as ei:
+        client.request_token(ENDPOINTS, _device_code())
+    assert _reason(ei) == "secpctl_device_token_refused"
+
+
 def test_a_redirect_on_the_token_request_is_refused():
     """A redirect would forward the device code to another host."""
     client, _issuer, _pinned = _client(
@@ -373,6 +697,26 @@ def test_a_redirect_on_the_token_request_is_refused():
     with pytest.raises(ManagementError) as ei:
         client.request_token(ENDPOINTS, _device_code())
     assert _reason(ei) == "secpctl_device_token_refused"
+
+
+def test_an_oversized_token_response_stops_during_streaming():
+    huge = _Response(chunks=(b"{" + b"x" * 32_768, b"x" * 32_769, b"not-read"))
+    client, _issuer, _pinned = _client(post=lambda url, data, headers: huge)
+    with pytest.raises(ManagementError) as ei:
+        client.request_token(ENDPOINTS, _device_code())
+    assert _reason(ei) == "secpctl_device_token_refused"
+    assert huge.iterated_chunks == 2, "the cap must engage before the next chunk is materialized"
+
+
+def test_an_encoded_token_response_is_refused_before_it_is_read():
+    encoded = _json_response(
+        {"access_token": "header.payload.sig", "token_type": "Bearer"}, encodings=["gzip"]
+    )
+    client, _issuer, _pinned = _client(post=lambda url, data, headers: encoded)
+    with pytest.raises(ManagementError) as ei:
+        client.request_token(ENDPOINTS, _device_code())
+    assert _reason(ei) == "secpctl_device_token_refused"
+    assert encoded.iterated_chunks == 0
 
 
 def test_a_transport_failure_never_leaks_the_endpoint_or_exception():
@@ -480,6 +824,14 @@ def test_a_200_with_an_empty_body_is_a_successful_revocation():
     assert client.revoke_token(REVOCABLE_ENDPOINTS, "t").revoked is True
 
 
+@pytest.mark.parametrize("status", [201, 202, 204, 299])
+def test_an_undefined_2xx_never_claims_the_token_was_revoked(status):
+    client, _issuer, _pinned = _client(post=lambda url, data, headers: _Response(status=status))
+    outcome = client.revoke_token(REVOCABLE_ENDPOINTS, "t")
+    assert outcome.outcome == "refused"
+    assert outcome.token_still_live is True
+
+
 def test_a_503_reports_the_token_as_still_live():
     client, _issuer, _pinned = _client(post=lambda url, data, headers: _Response(status=503))
     outcome = client.revoke_token(REVOCABLE_ENDPOINTS, "t")
@@ -527,6 +879,26 @@ def test_an_unparseable_error_body_still_yields_a_bounded_refusal():
         post=lambda url, data, headers: _Response(status=400, body=b"<html>nope</html>")
     )
     assert client.revoke_token(REVOCABLE_ENDPOINTS, "t").outcome == "refused"
+
+
+def test_an_oversized_revocation_response_stops_during_streaming_and_stays_live():
+    huge = _Response(chunks=(b"{" + b"x" * 32_768, b"x" * 32_769, b"not-read"))
+    client, _issuer, _pinned = _client(post=lambda url, data, headers: huge)
+    outcome = client.revoke_token(REVOCABLE_ENDPOINTS, "t")
+    assert outcome.outcome == "refused"
+    assert outcome.reason_code == "secpctl_revocation_response_invalid"
+    assert outcome.token_still_live is True
+    assert huge.iterated_chunks == 2, "the cap must engage before the next chunk is materialized"
+
+
+def test_an_encoded_revocation_response_is_refused_before_it_is_read():
+    encoded = _Response(status=200, body=b"ignored", encodings=["gzip"])
+    client, _issuer, _pinned = _client(post=lambda url, data, headers: encoded)
+    outcome = client.revoke_token(REVOCABLE_ENDPOINTS, "t")
+    assert outcome.outcome == "refused"
+    assert outcome.reason_code == "secpctl_revocation_response_invalid"
+    assert outcome.token_still_live is True
+    assert encoded.iterated_chunks == 0
 
 
 # --- granted scope on the token response (RFC 6749 §5.1) ------------------------------------------

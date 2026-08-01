@@ -78,6 +78,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -104,6 +105,7 @@ DEVICE_GRANT_ATTRIBUTE = "oauth2.device.authorization.grant.enabled"
 
 #: RFC 8628 §3.4 grant type, as advertised in ``grant_types_supported``.
 DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+_GRANT_TYPE_GRAMMAR = re.compile(r"[\x21-\x7e]+")
 
 #: Client scopes that must NEVER be attached to this client, with the reason each is refused.
 REFUSED_DEFAULT_SCOPES: dict[str, str] = {
@@ -136,6 +138,9 @@ ENV_ADMIN_CLIENT_ID = "SECP_KEYCLOAK_ADMIN_CLIENT_ID"
 _DEFAULT_ADMIN_REALM = "master"
 _DEFAULT_ADMIN_CLIENT_ID = "admin-cli"
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_MAX_ADMIN_TOKEN_BYTES = 65_536
+_ADMIN_TOKEN_GRAMMAR = re.compile(r"[\x21-\x7e]+")
+_ADMIN_RESOURCE_ID_GRAMMAR = re.compile(r"[A-Za-z0-9._~-]{1,255}")
 _DEFAULT_TIMEOUT = 30.0
 
 #: Keycloak stores ``client.description`` in a ``VARCHAR(255)`` column. A longer one does not
@@ -336,12 +341,26 @@ def check_discovery(document: object, *, issuer: str, require_https: bool) -> li
             continue
         problems.extend(_check_endpoint_url(value, member, require_https=require_https))
 
-    grant_types = document.get("grant_types_supported")
-    if isinstance(grant_types, list) and DEVICE_CODE_GRANT_TYPE not in grant_types:
+    if "grant_types_supported" not in document:
         problems.append(
             f"`grant_types_supported` does not include {DEVICE_CODE_GRANT_TYPE!r}; the CLI refuses "
             "the deployment as not supporting the device grant"
         )
+    else:
+        grant_types = document.get("grant_types_supported")
+        if not isinstance(grant_types, list) or any(
+            not isinstance(grant_type, str) or not _GRANT_TYPE_GRAMMAR.fullmatch(grant_type)
+            for grant_type in grant_types
+        ):
+            problems.append(
+                "`grant_types_supported` is malformed; expected a JSON array of non-empty "
+                "printable grant-type strings"
+            )
+        elif DEVICE_CODE_GRANT_TYPE not in grant_types:
+            problems.append(
+                f"`grant_types_supported` does not include {DEVICE_CODE_GRANT_TYPE!r}; the CLI "
+                "refuses the deployment as not supporting the device grant"
+            )
 
     revocation = document.get("revocation_endpoint")
     if not isinstance(revocation, str) or not revocation:
@@ -359,15 +378,31 @@ def check_discovery(document: object, *, issuer: str, require_https: bool) -> li
 
 
 def _check_endpoint_url(value: str, member: str, *, require_https: bool) -> list[str]:
-    parsed = urllib.parse.urlsplit(value)
+    if any(
+        character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F
+        for character in value
+    ):
+        return [f"`{member}` contains whitespace or a control character"]
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+        username = parsed.username
+        password = parsed.password
+    except ValueError:
+        return [f"`{member}` is not a valid network URL"]
     if parsed.scheme not in ("http", "https"):
         return [f"`{member}` is not an http(s) URL"]
     if require_https and parsed.scheme != "https":
         return [f"`{member}` is plaintext http; the CLI refuses a non-HTTPS endpoint"]
-    if not parsed.hostname:
+    if not hostname:
         return [f"`{member}` has no host"]
-    if parsed.username or parsed.password or "@" in parsed.netloc:
+    if username or password or "@" in parsed.netloc:
         return [f"`{member}` carries userinfo"]
+    if port == 0:
+        return [f"`{member}` has an invalid port"]
+    if "#" in value:
+        return [f"`{member}` carries a URL fragment"]
     return []
 
 
@@ -381,7 +416,9 @@ def check_public_revocation_probe(status: int) -> list[str]:
     ``revocation_endpoint_auth_methods_supported`` does not list ``none``, so reading the metadata
     alone would suggest a public client cannot revoke, while in practice it can.
     """
-    if status // 100 == 2:
+    # RFC 7009 §2.2 specifies EXACTLY 200. In particular, 202 only says the request was
+    # accepted; it cannot prove the token is already dead.
+    if status == 200:
         return []
     if status in (400, 401, 403):
         return [
@@ -393,6 +430,19 @@ def check_public_revocation_probe(status: int) -> list[str]:
 
 
 # --- transport ---------------------------------------------------------------------------------
+
+
+def _read_bounded_response(response: Any) -> bytes:
+    """Read one response with a one-byte overflow sentinel.
+
+    Reading exactly the advertised maximum cannot distinguish an exact-bound body from a larger
+    body whose accepted JSON prefix happens to end at that byte.  The extra byte is never returned;
+    its presence produces one content-free deployment refusal.
+    """
+    body = response.read(_MAX_RESPONSE_BYTES + 1)
+    if len(body) > _MAX_RESPONSE_BYTES:
+        raise DeploymentError("provider response exceeded the bounded size limit")
+    return body
 
 
 def urllib_transport(
@@ -412,9 +462,9 @@ def urllib_transport(
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with opener.open(request, timeout=_DEFAULT_TIMEOUT) as response:
-            return response.status, dict(response.headers), response.read(_MAX_RESPONSE_BYTES)
+            return response.status, dict(response.headers), _read_bounded_response(response)
     except urllib.error.HTTPError as exc:  # a 4xx/5xx is an ANSWER, not a transport failure
-        return exc.code, dict(exc.headers or {}), exc.read(_MAX_RESPONSE_BYTES)
+        return exc.code, dict(exc.headers or {}), _read_bounded_response(exc)
     except urllib.error.URLError as exc:
         raise DeploymentError(
             f"cannot reach {urllib.parse.urlsplit(url).netloc}: {exc.reason}"
@@ -462,7 +512,7 @@ class KeycloakAdmin:
             {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
             form,
         )
-        if status // 100 != 2:
+        if status != 200:
             raise DeploymentError(
                 f"administrator authentication failed with HTTP {status} "
                 f"(realm {self._admin_realm!r}, client {self._admin_client_id!r})"
@@ -471,7 +521,13 @@ class KeycloakAdmin:
             token = json.loads(body.decode("utf-8"))["access_token"]
         except Exception as exc:  # noqa: BLE001 - never echo the body of a token response
             raise DeploymentError("administrator token response was not usable") from exc
-        self._token = str(token)
+        if (
+            not isinstance(token, str)
+            or len(token) > _MAX_ADMIN_TOKEN_BYTES
+            or not _ADMIN_TOKEN_GRAMMAR.fullmatch(token)
+        ):
+            raise DeploymentError("administrator token response was not usable")
+        self._token = token
 
     def _authorized(self) -> dict:
         if not self._token:
@@ -484,13 +540,13 @@ class KeycloakAdmin:
         status, _headers, body = self._transport(
             "GET", f"{self.base_url}{path}", self._authorized(), None
         )
-        if status // 100 != 2:
+        if status != 200:
             raise DeploymentError(f"GET {path} failed with HTTP {status}")
         if not body:
             return None
         try:
             return json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise DeploymentError(f"GET {path} did not return JSON") from exc
 
     def mutate(self, method: str, path: str, payload: Any = None) -> int:
@@ -514,16 +570,12 @@ class KeycloakAdmin:
 
 
 def _bounded_error(body: bytes) -> str:
-    """A short, bounded excerpt of an error body — enough to debug, never a whole page."""
-    try:
-        parsed = json.loads(body.decode("utf-8"))
-    except Exception:  # noqa: BLE001
-        return f"<{len(body)} bytes>"
-    if isinstance(parsed, dict):
-        for key in ("errorMessage", "error_description", "error"):
-            value = parsed.get(key)
-            if isinstance(value, str):
-                return value[:200]
+    """Describe a provider error body without reflecting any provider-controlled bytes.
+
+    Keycloak can echo request values in an error. That includes the administrator bearer token, so
+    even a short excerpt violates this tool's no-secret-output contract. Status/method/path are
+    reported by the caller; only the bounded byte count is safe to add here.
+    """
     return f"<{len(body)} bytes>"
 
 
@@ -676,11 +728,14 @@ def core_matches(deployed: dict[str, Any], desired_core: dict[str, Any]) -> bool
         if key in _SUBRESOURCE_KEYS:
             continue
         if key == "attributes":
-            current = deployed.get("attributes") or {}
-            if any(str(current.get(k)) != str(v) for k, v in (value or {}).items()):
+            current = deployed.get("attributes")
+            if not isinstance(current, dict) or not isinstance(value, dict):
+                return False
+            if any(str(current.get(k)) != str(v) for k, v in value.items()):
                 return False
             continue
-        if deployed.get(key) != value:
+        current_value = deployed.get(key)
+        if type(current_value) is not type(value) or current_value != value:
             return False
     return True
 
@@ -692,10 +747,16 @@ def _mapper_matches(current: dict[str, Any], desired: dict[str, Any]) -> bool:
     friends), so this compares the DESIRED keys rather than the whole object — otherwise the tool
     would rewrite an already-correct mapper on every run and never converge.
     """
-    if current.get("protocolMapper") != desired.get("protocolMapper"):
+    for field in ("protocol", "protocolMapper", "consentRequired"):
+        current_value = current.get(field)
+        desired_value = desired.get(field)
+        if type(current_value) is not type(desired_value) or current_value != desired_value:
+            return False
+    current_config = current.get("config")
+    desired_config = desired.get("config")
+    if not isinstance(current_config, dict) or not isinstance(desired_config, dict):
         return False
-    current_config = current.get("config") or {}
-    for key, value in (desired.get("config") or {}).items():
+    for key, value in desired_config.items():
         if str(current_config.get(key)) != str(value):
             return False
     return True
@@ -704,20 +765,53 @@ def _mapper_matches(current: dict[str, Any], desired: dict[str, Any]) -> bool:
 # --- live verification ---------------------------------------------------------------------------
 
 
-def check_deployed_client(client: dict[str, Any], assigned_default_scopes: list[str]) -> list[str]:
+def _assigned_scope_names(value: object, field: str) -> tuple[list[str], list[str]]:
+    """Project one authoritative scope sub-resource without letting malformed data look empty."""
+    if not isinstance(value, list):
+        return [], [f"{field} sub-resource is not a list"]
+    names = [
+        str(scope["name"])
+        for scope in value
+        if isinstance(scope, dict) and isinstance(scope.get("name"), str)
+    ]
+    if len(names) != len(value):
+        return names, [f"{field} sub-resource contains a malformed scope"]
+    return names, []
+
+
+def check_deployed_client(
+    client: dict[str, Any],
+    assigned_default_scopes: list[str],
+    assigned_optional_scopes: list[str],
+    desired: dict[str, Any],
+) -> list[str]:
     """Assert a DEPLOYED client (as the Admin REST API returns it) matches the committed posture.
 
-    ``assigned_default_scopes`` comes from the ``default-client-scopes`` sub-resource, not from the
-    client representation: the representation's copy is what a ``PUT`` ignores, so trusting it would
+    Both assigned scope lists come from their authoritative sub-resources, not from the client
+    representation: the representation's copies are what a ``PUT`` ignores, so trusting them would
     verify the wrong thing.
     """
     problems: list[str] = []
+    if not core_matches(client, desired):
+        problems.append("deployed client core differs from the committed representation")
+    if client.get("enabled") is not True:
+        problems.append("deployed client is not enabled")
+    if client.get("protocol") != desired.get("protocol"):
+        problems.append("deployed client protocol differs from the committed representation")
     if client.get("publicClient") is not True:
         problems.append("deployed client is not a public client")
     if client.get("secret"):
         problems.append("deployed client carries a client SECRET; a public client must have none")
-    if (client.get("attributes") or {}).get(DEVICE_GRANT_ATTRIBUTE) != "true":
+    if client.get("bearerOnly") is not False:
+        problems.append("deployed client has bearerOnly enabled or unspecified")
+    attributes = client.get("attributes")
+    if not isinstance(attributes, dict):
+        problems.append("deployed client attributes are not an object")
+        attributes = {}
+    if attributes.get(DEVICE_GRANT_ATTRIBUTE) != "true":
         problems.append("deployed client does not have the device authorization grant enabled")
+    if attributes.get("use.refresh.tokens") != "false":
+        problems.append("deployed client does not disable refresh-token issuance")
     for flag in REFUSED_FLOWS:
         if client.get(flag) is not False:
             problems.append(f"deployed client has {flag} enabled")
@@ -725,7 +819,64 @@ def check_deployed_client(client: dict[str, Any], assigned_default_scopes: list[
         problems.append("deployed client has fullScopeAllowed enabled (token-size control)")
     if client.get("redirectUris"):
         problems.append("deployed client declares a redirect URI")
+    if client.get("webOrigins"):
+        problems.append("deployed client declares a browser origin")
+
+    expected_default = sorted(desired_default_scopes(desired))
+    if sorted(assigned_default_scopes) != expected_default:
+        problems.append(
+            f"assigned default client scopes are {sorted(assigned_default_scopes)} but the "
+            f"committed representation pins {expected_default} (exactly {len(expected_default)}, "
+            "not a superset)"
+        )
+    desired_optional = desired.get("optionalClientScopes")
+    expected_optional = sorted(str(scope) for scope in (desired_optional or []))
+    if sorted(assigned_optional_scopes) != expected_optional:
+        problems.append(
+            f"assigned optional client scopes are {sorted(assigned_optional_scopes)} but the "
+            f"committed representation pins {expected_optional} exactly"
+        )
     problems.extend(check_scope_policy(assigned_default_scopes, "assigned default client scopes"))
+    problems.extend(check_scope_policy(assigned_optional_scopes, "assigned optional client scopes"))
+    return problems
+
+
+def check_mapper_set(mappers: object, desired_mappers: object) -> list[str]:
+    """Require the deployed mapper sub-resource to be the committed exact set.
+
+    Keycloak adds provider-owned fields and config defaults, so each desired mapper is matched as a
+    subset via :func:`_mapper_matches`; mapper NAMES are nevertheless exact, which makes any extra
+    claim-producing mapper a deployment failure rather than an invisible extension.
+    """
+    if not isinstance(mappers, list):
+        return ["deployed protocol mapper sub-resource is not a list"]
+    if not isinstance(desired_mappers, list):
+        return ["committed protocolMappers is not a list"]
+
+    deployed = [m for m in mappers if isinstance(m, dict) and isinstance(m.get("name"), str)]
+    desired = [m for m in desired_mappers if isinstance(m, dict) and isinstance(m.get("name"), str)]
+    problems: list[str] = []
+    if len(deployed) != len(mappers):
+        problems.append("deployed protocol mapper sub-resource contains a malformed mapper")
+    if len(desired) != len(desired_mappers):
+        problems.append("committed protocolMappers contains a malformed mapper")
+
+    deployed_names = [str(mapper["name"]) for mapper in deployed]
+    desired_names = [str(mapper["name"]) for mapper in desired]
+    if len(set(deployed_names)) != len(deployed_names):
+        problems.append("deployed protocol mapper set contains a duplicate name")
+    if sorted(deployed_names) != sorted(desired_names):
+        problems.append(
+            f"deployed protocol mapper set is {sorted(deployed_names)} but the committed "
+            f"representation pins {sorted(desired_names)} exactly"
+        )
+
+    deployed_by_name = {str(mapper["name"]): mapper for mapper in deployed}
+    for expected in desired:
+        name = str(expected["name"])
+        current = deployed_by_name.get(name)
+        if current is not None and not _mapper_matches(current, expected):
+            problems.append(f"deployed protocol mapper {name!r} differs from the committed mapper")
     return problems
 
 
@@ -752,18 +903,24 @@ def verify_deployment(
         return problems
 
     client = matches[0]
-    uuid = client["id"]
-    assigned = admin.get(f"/admin/realms/{realm}/clients/{uuid}/default-client-scopes") or []
-    names = sorted(str(s.get("name")) for s in assigned if isinstance(s, dict))
-    expected = sorted(desired_default_scopes(desired))
-    if names != expected:
-        problems.append(
-            f"assigned default client scopes are {names} but the committed representation pins "
-            f"{expected} (exactly {len(expected)}, not a superset)"
-        )
-    problems.extend(check_deployed_client(client, names))
+    uuid = client.get("id")
+    if not isinstance(uuid, str) or not _ADMIN_RESOURCE_ID_GRAMMAR.fullmatch(uuid):
+        problems.append("deployed client id is missing or malformed")
+        return problems
+    assigned_default = admin.get(f"/admin/realms/{realm}/clients/{uuid}/default-client-scopes")
+    default_names, scope_problems = _assigned_scope_names(
+        assigned_default, "assigned default client scopes"
+    )
+    problems.extend(scope_problems)
+    assigned_optional = admin.get(f"/admin/realms/{realm}/clients/{uuid}/optional-client-scopes")
+    optional_names, scope_problems = _assigned_scope_names(
+        assigned_optional, "assigned optional client scopes"
+    )
+    problems.extend(scope_problems)
+    problems.extend(check_deployed_client(client, default_names, optional_names, desired))
 
     mappers = admin.get(f"/admin/realms/{realm}/clients/{uuid}/protocol-mappers/models") or []
+    problems.extend(check_mapper_set(mappers, desired.get("protocolMappers")))
     problems.extend(check_audience_mappers(mappers))
     return problems
 
@@ -785,9 +942,29 @@ def _require_admin_credentials(env: dict) -> tuple[str, str]:
 def _require_base_url(base_url: str | None, *, insecure_http: bool) -> str:
     if not base_url:
         raise DeploymentError("--base-url is required for this action")
-    parsed = urllib.parse.urlsplit(base_url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    if any(
+        character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F
+        for character in base_url
+    ):
+        raise DeploymentError("--base-url contains whitespace or a control character")
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        hostname = parsed.hostname
+        port = parsed.port
+        username = parsed.username
+        password = parsed.password
+    except ValueError:
+        raise DeploymentError("--base-url must be a valid http(s) network URL") from None
+    if parsed.scheme not in ("http", "https") or not hostname:
         raise DeploymentError("--base-url must be an http(s) URL with a host")
+    if username or password or "@" in parsed.netloc:
+        raise DeploymentError("--base-url must not carry userinfo")
+    if port == 0:
+        raise DeploymentError("--base-url carries an invalid port")
+    if parsed.query:
+        raise DeploymentError("--base-url must not carry a URL query")
+    if "#" in base_url:
+        raise DeploymentError("--base-url must not carry a URL fragment")
     if parsed.scheme != "https" and not insecure_http:
         raise DeploymentError(
             "--base-url is plaintext http. Pass --insecure-http to allow it; it exists for a "
@@ -807,11 +984,11 @@ def fetch_discovery(base_url: str, realm: str, transport: Transport) -> object:
         {"Accept": "application/json"},
         None,
     )
-    if status // 100 != 2:
+    if status != 200:
         raise DeploymentError(f"discovery document request failed with HTTP {status}")
     try:
         return json.loads(body.decode("utf-8"))
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DeploymentError("discovery document is not JSON") from exc
 
 
@@ -820,7 +997,19 @@ def fetch_discovery(base_url: str, realm: str, transport: Transport) -> object:
 _REVOCATION_PROBE_TOKEN = "secp-cli-deployment-probe-not-a-token"
 
 
-def probe_revocation(base_url: str, realm: str, transport: Transport) -> int:
+def probe_revocation(
+    revocation_endpoint: str, transport: Transport, *, require_https: bool = True
+) -> int:
+    """Probe the exact revocation URL the provider advertised and the runtime will use.
+
+    Reconstructing Keycloak's conventional path would prove only that a different endpoint works;
+    a deployment whose metadata points ``secpctl`` elsewhere could then pass verification. The URL
+    is safety-checked again here so a direct caller cannot bypass the discovery validation.
+    """
+    if not isinstance(revocation_endpoint, str) or _check_endpoint_url(
+        revocation_endpoint, "revocation_endpoint", require_https=require_https
+    ):
+        raise DeploymentError("cannot probe an invalid advertised revocation endpoint")
     form = urllib.parse.urlencode(
         {
             "token": _REVOCATION_PROBE_TOKEN,
@@ -830,7 +1019,7 @@ def probe_revocation(base_url: str, realm: str, transport: Transport) -> int:
     ).encode("utf-8")
     status, _headers, _body = transport(
         "POST",
-        f"{issuer_for(base_url, realm)}/protocol/openid-connect/revoke",
+        revocation_endpoint,
         {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
         form,
     )
@@ -911,13 +1100,21 @@ def main(argv: list[str] | None = None, *, transport: Transport = urllib_transpo
 
         # verify
         document = fetch_discovery(base_url, args.realm, transport)
-        probe = probe_revocation(base_url, args.realm, transport)
         issuer = issuer_for(base_url, args.realm)
-        if args.discovery_only:
-            problems = check_discovery(
-                document, issuer=issuer, require_https=not args.insecure_http
+        require_https = not args.insecure_http
+        discovery_problems = check_discovery(document, issuer=issuer, require_https=require_https)
+        probe: int | None = None
+        if not discovery_problems:
+            # `check_discovery` established the object/member/type/URL posture. Indexing here is
+            # therefore safe, and the probe reaches those exact advertised bytes.
+            assert isinstance(document, dict)
+            probe = probe_revocation(
+                document["revocation_endpoint"], transport, require_https=require_https
             )
-            problems.extend(check_public_revocation_probe(probe))
+        if args.discovery_only:
+            problems = list(discovery_problems)
+            if probe is not None:
+                problems.extend(check_public_revocation_probe(probe))
         else:
             admin.authenticate(*_require_admin_credentials(env))
             problems = verify_deployment(
@@ -926,7 +1123,7 @@ def main(argv: list[str] | None = None, *, transport: Transport = urllib_transpo
                 desired,
                 discovery_document=document,
                 issuer=issuer,
-                require_https=not args.insecure_http,
+                require_https=require_https,
                 revocation_probe_status=probe,
             )
         report["problems"] = problems
@@ -942,21 +1139,27 @@ def main(argv: list[str] | None = None, *, transport: Transport = urllib_transpo
         return 2
 
 
+def _human_text(value: object) -> str:
+    """Render dynamic text without allowing it to control the terminal or add a report line."""
+    encoded = json.dumps(str(value), ensure_ascii=True)
+    return encoded[1:-1]
+
+
 def _emit(report: dict[str, Any], as_json: bool, *, plan: dict[str, Any] | None = None) -> None:
     if as_json:
         print(json.dumps(report, indent=2, sort_keys=True))
         return
-    print(f"action: {report['action']}  client: {report['client_id']}")
+    print(f"action: {_human_text(report['action'])}  client: {_human_text(report['client_id'])}")
     if plan is not None:
         print(json.dumps(plan, indent=2, sort_keys=True))
     for key in ("actions", "problems", "artifact_problems"):
         for line in report.get(key) or []:
-            print(f"  [{key.rstrip('s')}] {line}")
+            print(f"  [{key.rstrip('s')}] {_human_text(line)}")
     if "mutations" in report:
-        print(f"  mutating requests issued: {report['mutations']}")
+        print(f"  mutating requests issued: {_human_text(report['mutations'])}")
     if "error" in report:
-        print(f"  ERROR: {report['error']}")
-    print(f"  ok: {report.get('ok')}")
+        print(f"  ERROR: {_human_text(report['error'])}")
+    print(f"  ok: {_human_text(report.get('ok'))}")
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through main()

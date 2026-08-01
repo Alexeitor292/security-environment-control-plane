@@ -837,6 +837,15 @@ def _shard_enforcement(wf):
     return steps[0]
 
 
+def _shard_skip_classifier(wf):
+    """Execute only the repository-owned classifier definitions, never the JUnit gate body."""
+    run = str(_shard_enforcement(wf)["run"])
+    definitions = run[run.index("import re") : run.index("problems = []")]
+    namespace: dict[str, object] = {}
+    exec(definitions, namespace)  # noqa: S102 - the parsed repository workflow is the test subject
+    return namespace
+
+
 def test_the_shard_job_accounts_for_every_skip(wf):
     step = _shard_enforcement(wf)
     run = str(step["run"])
@@ -853,6 +862,37 @@ def test_the_shard_skip_accounting_keys_on_reason_not_on_test_names(wf):
         assert capability in run, f"the reason matcher must recognise {capability}"
     # it must classify the message, not the identity
     assert "message" in run and "classname" not in run.split("unexplained")[0]
+
+
+def test_the_shard_skip_accounting_accepts_only_the_exact_keystore_reasons(wf):
+    """Keystore skips stay skips, and generic uses of their words remain unexplained failures."""
+    namespace = _shard_skip_classifier(wf)
+    exact = frozenset(
+        {
+            "Windows Credential Manager only",
+            "no OS keystore binding on this host",
+        }
+    )
+    assert namespace["PLATFORM_GATED_EXACT"] == exact
+
+    platform_gated = namespace["platform_gated"]
+    assert callable(platform_gated)
+    for reason in exact:
+        assert platform_gated(reason), reason
+    for reason in (
+        "Windows",
+        "host",
+        "credential",
+        "keystore",
+        "platform",
+        "dependency unavailable",
+        "could not import 'temporalio': No module named 'temporalio'",
+        "requires Windows Credential Manager only",
+        "Windows Credential Manager only on this host",
+        "expected no OS keystore binding on this host",
+        "no OS keystore binding on this host today",
+    ):
+        assert not platform_gated(reason), reason
 
 
 def test_the_shard_skip_accounting_is_not_vacuous(wf):

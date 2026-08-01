@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 from collections.abc import Callable
@@ -82,6 +83,22 @@ class OperatorCredentialStoreError(ManagementError):
 
 def _reject(reason_code: str) -> NoReturn:
     raise OperatorCredentialStoreError(reason_code)
+
+
+def _validated_expiry_epoch(value: object) -> int:
+    """One expiry grammar for both sides of the keystore boundary.
+
+    A record accepted for writing must be accepted when it is read back. Keeping this as one helper
+    prevents the write path from persisting a credential that the strict decoder immediately calls
+    malformed (and that ``auth login`` could otherwise report as successfully stored).
+    """
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not (0 < value <= _MAX_EXPIRES_AT_EPOCH)
+    ):
+        _reject("secpctl_credential_record_invalid")
+    return value
 
 
 def validate_account(account: object) -> str:
@@ -148,6 +165,9 @@ class StoredCredentialStatus:
     has_credential: bool = False
     expired: bool = False
     subject_fingerprint: str = ""
+    # Kept out of ``to_report``: status remains a stable state projection, while command paths that
+    # must distinguish "absent" from "could not be read" can preserve the exact bounded refusal.
+    unavailable_reason: str = ""
 
     def to_report(self) -> dict:
         return {
@@ -169,6 +189,15 @@ class OperatorCredentialStore(Protocol):
 
     def access_token(self) -> OperatorAccessToken:
         """The stored token, or a bounded refusal when absent / expired / unavailable."""
+        ...
+
+    def revocation_token(self) -> OperatorAccessToken:
+        """The stored token for provider revocation, even when the LOCAL clock says it expired.
+
+        Local expiry still prevents controller replay through :meth:`access_token`. It is not,
+        however, proof that the issuer agrees about the current time; logout therefore retains the
+        ability to submit the credential to the idempotent revocation endpoint.
+        """
         ...
 
     def store(
@@ -218,7 +247,7 @@ class CredentialRecord(_NonSerializable):
             {
                 "v": CREDENTIAL_RECORD_VERSION,
                 "a": self.account,
-                "e": int(self.expires_at_epoch),
+                "e": _validated_expiry_epoch(self.expires_at_epoch),
                 "s": self.subject_fingerprint,
                 "t": self.token,
             },
@@ -240,13 +269,7 @@ class CredentialRecord(_NonSerializable):
         if not isinstance(document, dict) or document.get("v") != CREDENTIAL_RECORD_VERSION:
             _reject("secpctl_credential_record_invalid")
 
-        expires_at = document.get("e")
-        if (
-            not isinstance(expires_at, int)
-            or isinstance(expires_at, bool)
-            or not (0 < expires_at <= _MAX_EXPIRES_AT_EPOCH)
-        ):
-            _reject("secpctl_credential_record_invalid")
+        expires_at = _validated_expiry_epoch(document.get("e"))
 
         fingerprint = document.get("s")
         if not isinstance(fingerprint, str) or not _FINGERPRINT_GRAMMAR.fullmatch(fingerprint):
@@ -280,6 +303,9 @@ class SealedOperatorCredentialStore(_NonSerializable):
     def access_token(self) -> OperatorAccessToken:
         _reject("secpctl_credential_store_unavailable")
 
+    def revocation_token(self) -> OperatorAccessToken:
+        _reject("secpctl_credential_store_unavailable")
+
     def store(
         self, token: OperatorAccessToken, *, expires_at_epoch: int, subject_fingerprint: str = ""
     ) -> None:
@@ -289,7 +315,11 @@ class SealedOperatorCredentialStore(_NonSerializable):
         _reject("secpctl_credential_store_unavailable")
 
     def describe(self) -> StoredCredentialStatus:
-        return StoredCredentialStatus(backend=BACKEND_SEALED, available=False)
+        return StoredCredentialStatus(
+            backend=BACKEND_SEALED,
+            available=False,
+            unavailable_reason="secpctl_credential_store_unavailable",
+        )
 
     def for_account(self, account: str) -> SealedOperatorCredentialStore:
         return self
@@ -335,6 +365,21 @@ class OsKeystoreCredentialStore(_NonSerializable):
             _reject("secpctl_credential_account_invalid")
         return validate_account(self._account)
 
+    def _current_epoch(self) -> float:
+        """Read the injected clock as one finite, bounded failure surface."""
+        try:
+            value = self._now()
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                _reject("secpctl_credential_store_unavailable")
+            current = float(value)
+        except ManagementError:
+            raise
+        except Exception:  # noqa: BLE001 - a broken clock never escapes as a traceback
+            _reject("secpctl_credential_store_unavailable")
+        if not math.isfinite(current):
+            _reject("secpctl_credential_store_unavailable")
+        return current
+
     def _load(self) -> CredentialRecord | None:
         account = self._bound_account()
         raw = self._binding.get_secret(service=self._service, account=account)
@@ -351,16 +396,33 @@ class OsKeystoreCredentialStore(_NonSerializable):
         record = self._load()
         if record is None:
             _reject("secpctl_credential_absent")
-        if float(record.expires_at_epoch) <= self._now():
+        if float(record.expires_at_epoch) <= self._current_epoch():
             _reject("secpctl_credential_expired")
+        return OperatorAccessToken(record.token)
+
+    def revocation_token(self) -> OperatorAccessToken:
+        """Return stored material only for RFC 7009 revocation, irrespective of local expiry.
+
+        A workstation clock ahead of the issuer/controller can classify a token as locally expired
+        while the provider still accepts it. Revocation is idempotent and providers deliberately
+        answer success for already-dead tokens, so attempting it is the only conservative logout.
+        Corrupt, foreign-account and unreadable records still refuse exactly as normal reads do.
+        """
+        record = self._load()
+        if record is None:
+            _reject("secpctl_credential_absent")
         return OperatorAccessToken(record.token)
 
     def store(
         self, token: OperatorAccessToken, *, expires_at_epoch: int, subject_fingerprint: str = ""
     ) -> None:
         account = self._bound_account()
-        if not isinstance(expires_at_epoch, int) or isinstance(expires_at_epoch, bool):
-            _reject("secpctl_credential_record_invalid")
+        checked_expiry = _validated_expiry_epoch(expires_at_epoch)
+        # PyJWT permits a small verification leeway, but persisting something already expired on
+        # this workstation would make a successful login immediately unreadable. The store is the
+        # final write boundary, so it independently requires a strictly future expiry.
+        if float(checked_expiry) <= self._current_epoch():
+            _reject("secpctl_credential_expired")
         if not isinstance(subject_fingerprint, str) or not _FINGERPRINT_GRAMMAR.fullmatch(
             subject_fingerprint
         ):
@@ -368,7 +430,7 @@ class OsKeystoreCredentialStore(_NonSerializable):
         record = CredentialRecord(
             account=account,
             token=_bearer_value(token),
-            expires_at_epoch=expires_at_epoch,
+            expires_at_epoch=checked_expiry,
             subject_fingerprint=subject_fingerprint,
         )
         self._binding.set_secret(service=self._service, account=account, secret=record.to_bytes())
@@ -385,16 +447,21 @@ class OsKeystoreCredentialStore(_NonSerializable):
             return StoredCredentialStatus(backend=backend, available=True)
         try:
             record = self._load()
-        except ManagementError:
+            expired = (
+                False if record is None else float(record.expires_at_epoch) <= self._current_epoch()
+            )
+        except ManagementError as exc:
             # An unreachable or locked keystore is NOT an absent credential.
-            return StoredCredentialStatus(backend=backend, available=False)
+            return StoredCredentialStatus(
+                backend=backend, available=False, unavailable_reason=exc.reason_code
+            )
         if record is None:
             return StoredCredentialStatus(backend=backend, available=True)
         return StoredCredentialStatus(
             backend=backend,
             available=True,
             has_credential=True,
-            expired=float(record.expires_at_epoch) <= self._now(),
+            expired=expired,
             subject_fingerprint=record.subject_fingerprint,
         )
 

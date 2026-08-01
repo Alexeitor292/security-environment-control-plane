@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 import jwt
 import pytest
@@ -61,7 +62,7 @@ def _token(keypair, *, alg="RS256", kid=KID, **claim_overrides) -> str:
 
 
 def _verify(token, jwks_doc, **kwargs):
-    params = {
+    params: dict[str, Any] = {
         "jwks": jwks_by_kid(jwks_doc),
         "issuer": ISSUER,
         "audience": AUDIENCE,
@@ -162,6 +163,63 @@ def test_an_expired_token_is_refused(keypair, jwks):
     with pytest.raises(ManagementError) as ei:
         _verify(_token(keypair, iat=now - 900, exp=now - 600), jwks)
     assert _reason(ei) == "secpctl_operator_token_expired"
+
+
+def test_expiry_uses_the_injected_clock_not_the_process_wall_clock(keypair, jwks):
+    """A deterministic verifier must not let PyJWT's internal ``datetime.now`` choose the result."""
+    token = _token(keypair, iat=1_000, exp=2_000)
+
+    # Long expired according to the real wall clock, but valid at the supplied instant.
+    assert _verify(token, jwks, now_epoch=1_500).expires_at_epoch == 2_000
+
+    # The same signed token is expired when the supplied clock advances beyond its leeway.
+    with pytest.raises(ManagementError) as ei:
+        _verify(token, jwks, now_epoch=2_061)
+    assert _reason(ei) == "secpctl_operator_token_expired"
+
+
+def test_expiry_retains_the_existing_leeway_boundary(keypair, jwks):
+    now = 10_000
+    with pytest.raises(ManagementError) as ei:
+        _verify(_token(keypair, iat=9_000, exp=9_940), jwks, now_epoch=now)
+    assert _reason(ei) == "secpctl_operator_token_expired"
+
+    assert (
+        _verify(_token(keypair, iat=9_000, exp=9_941), jwks, now_epoch=now).expires_at_epoch
+        == 9_941
+    )
+
+
+def test_iat_and_optional_nbf_use_the_injected_clock_and_leeway(keypair, jwks):
+    now = 10_000
+    assert (
+        _verify(
+            _token(keypair, iat=10_060, nbf=10_060, exp=11_000), jwks, now_epoch=now
+        ).issued_at_epoch
+        == 10_060
+    )
+
+    for claim in ("iat", "nbf"):
+        claims = {"iat": 9_000, "exp": 11_000, claim: 10_061}
+        with pytest.raises(ManagementError) as ei:
+            _verify(_token(keypair, **claims), jwks, now_epoch=now)
+        assert _reason(ei) == "secpctl_operator_token_claims_invalid"
+
+
+@pytest.mark.parametrize("claim", ["iat", "exp", "nbf"])
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_non_finite_time_claims_are_bounded_refusals(keypair, jwks, claim, value):
+    with pytest.raises(ManagementError) as ei:
+        _verify(_token(keypair, **{claim: value}), jwks)
+    assert _reason(ei) == "secpctl_operator_token_claims_invalid"
+
+
+@pytest.mark.parametrize("claim", ["iat", "exp", "nbf"])
+@pytest.mark.parametrize("value", [True, "123", [123], {"value": 123}])
+def test_non_numeric_time_claims_are_bounded_refusals(keypair, jwks, claim, value):
+    with pytest.raises(ManagementError) as ei:
+        _verify(_token(keypair, **{claim: value}), jwks)
+    assert _reason(ei) == "secpctl_operator_token_claims_invalid"
 
 
 @pytest.mark.parametrize("claim", ["exp", "iat", "sub", "aud", "iss"])

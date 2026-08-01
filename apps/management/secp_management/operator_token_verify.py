@@ -44,6 +44,7 @@ exception never enter a refusal, repr, log or report.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -57,6 +58,7 @@ ALLOWED_ALGORITHMS: tuple[str, ...] = ("RS256",)
 _MAX_TOKEN_BYTES = 8192
 _MAX_SUBJECT_LENGTH = 255  # matches app_user.subject String(255)
 _DEFAULT_CLOCK_SKEW_SECONDS = 60
+_MAX_CLOCK_SKEW_SECONDS = 300  # mirrors Settings.oidc_clock_skew_seconds
 
 
 class OperatorTokenVerificationError(ManagementError):
@@ -106,6 +108,21 @@ def _signing_key(jwks: Mapping[str, Any], kid: str) -> Any:
         _reject("secpctl_operator_token_algorithm_refused")
 
 
+def _finite_numeric_date(value: object) -> int | float:
+    """A JSON NumericDate that is safe to compare and convert.
+
+    Python's JSON decoder accepts the non-standard ``NaN``/``Infinity`` spellings by default, and
+    PyJWT converts time claims with ``int()``.  ``int(±inf)`` raises a raw ``OverflowError`` before
+    PyJWT can turn it into one of its bounded exceptions.  Validate every time value ourselves so a
+    signed-but-malformed provider token is always a closed claims refusal.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _reject("secpctl_operator_token_claims_invalid")
+    if isinstance(value, float) and not math.isfinite(value):
+        _reject("secpctl_operator_token_claims_invalid")
+    return value
+
+
 def verify_operator_token(
     token: str,
     *,
@@ -127,6 +144,13 @@ def verify_operator_token(
 
     if not isinstance(token, str) or not token or len(token) > _MAX_TOKEN_BYTES:
         _reject("secpctl_operator_token_invalid")
+    now = _finite_numeric_date(now_epoch)
+    if (
+        not isinstance(clock_skew_seconds, int)
+        or isinstance(clock_skew_seconds, bool)
+        or not (0 <= clock_skew_seconds <= _MAX_CLOCK_SKEW_SECONDS)
+    ):
+        _reject("secpctl_operator_token_claims_invalid")
     segments = token.split(".")
     if len(segments) != 3 or not all(segments):
         _reject("secpctl_operator_token_invalid")
@@ -151,14 +175,17 @@ def verify_operator_token(
             algorithms=list(ALLOWED_ALGORITHMS),
             audience=audience,
             issuer=issuer,
-            leeway=clock_skew_seconds,
             options={
                 "require": ["exp", "iat", "sub", "aud", "iss"],
                 "verify_signature": True,
                 "verify_aud": True,
                 "verify_iss": True,
-                "verify_exp": True,
-                "verify_nbf": True,
+                # PyJWT validates these against an internal datetime.now().  Disable only its time
+                # checks and apply the equivalent rules below against the injected clock, so this
+                # verifier remains deterministic and no hidden wall clock can license a token.
+                "verify_exp": False,
+                "verify_iat": False,
+                "verify_nbf": False,
             },
         )
     except jwt.InvalidSignatureError:
@@ -182,18 +209,26 @@ def verify_operator_token(
     if claims.get("iss") != issuer:
         _reject("secpctl_operator_token_claims_invalid")
 
+    issued_at = _finite_numeric_date(claims.get("iat"))
+    expires_at_raw = _finite_numeric_date(claims.get("exp"))
+    expires_at = int(expires_at_raw)
+
+    # PyJWT's established boundary is `exp <= now - leeway`; retain it exactly, but against the
+    # caller-supplied clock.  NumericDate floats are truncated just as PyJWT truncates them.
+    if expires_at <= now - clock_skew_seconds:
+        _reject("secpctl_operator_token_expired")
+    if issued_at > now + clock_skew_seconds:
+        _reject("secpctl_operator_token_claims_invalid")
+
+    # `nbf` is optional.  When present, preserve PyJWT's integer NumericDate + leeway semantics
+    # while ensuring every malformed/non-finite value becomes the same bounded claims refusal.
+    if "nbf" in claims:
+        not_before = int(_finite_numeric_date(claims.get("nbf")))
+        if not_before > now + clock_skew_seconds:
+            _reject("secpctl_operator_token_claims_invalid")
+
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject or len(subject) > _MAX_SUBJECT_LENGTH:
-        _reject("secpctl_operator_token_claims_invalid")
-
-    issued_at = claims.get("iat")
-    if not isinstance(issued_at, (int, float)) or isinstance(issued_at, bool):
-        _reject("secpctl_operator_token_claims_invalid")
-    if float(issued_at) > now_epoch + clock_skew_seconds:
-        _reject("secpctl_operator_token_claims_invalid")
-
-    expires_at = claims.get("exp")
-    if not isinstance(expires_at, (int, float)) or isinstance(expires_at, bool):
         _reject("secpctl_operator_token_claims_invalid")
 
     # CLIENT: a present `azp` must name the client secpctl actually presented (OIDC Core §3.1.3.7).
@@ -211,7 +246,7 @@ def verify_operator_token(
 
     return VerifiedOperatorToken(
         subject=subject,
-        expires_at_epoch=int(expires_at),
+        expires_at_epoch=expires_at,
         issued_at_epoch=int(issued_at),
         granted_scope=granted_scope,
     )

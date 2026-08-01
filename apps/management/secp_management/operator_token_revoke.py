@@ -58,8 +58,9 @@ _MAX_ERROR_LEN = 64
 #: The provider accepted the revocation. Per §2.2 this ALSO covers an invalid/already-dead token —
 #: the credential is not usable, which is exactly what logout needed to be true.
 OUTCOME_REVOKED = "revoked"
-#: There was no live credential to revoke — none was stored, or the stored one had already expired.
-#: No request is made, and the token is NOT live, so this is a complete logout and not a shortfall.
+#: There was no credential material to revoke. No request is made, and no token is known to remain
+#: live, so this is a complete logout and not a shortfall. A merely LOCALLY expired credential does
+#: not qualify: workstation clock skew can be ahead of the issuer, so logout still submits it.
 OUTCOME_NOT_REQUIRED = "not_required"
 #: The credential could not be READ, so it could not be revoked — a corrupt record, an entry minted
 #: for another controller, or a locked/unreachable keystore. Critically this is NOT
@@ -103,9 +104,10 @@ class RevocationOutcome:
     def token_still_live(self) -> bool:
         """Whether the credential must be ASSUMED usable at the provider after this attempt.
 
-        Both a successful revocation and "there was nothing live to revoke" leave no usable token,
-        so both are false. Every other outcome — unsupported, unavailable, refused — leaves one, and
-        each says so rather than being folded into a single "logout failed".
+        Both a successful revocation and "there was no credential material to revoke" leave no
+        known usable token, so both are false. Every other outcome — unreadable, unsupported,
+        unavailable, or refused — may leave one, and each says so rather than being folded into a
+        single "logout failed".
         """
         return self.outcome not in (OUTCOME_REVOKED, OUTCOME_NOT_REQUIRED)
 
@@ -147,8 +149,10 @@ def interpret_revocation_response(status: object, *, error: object = None) -> Re
     if not isinstance(status, int) or isinstance(status, bool):
         return RevocationOutcome(OUTCOME_REFUSED, reason_code="secpctl_revocation_response_invalid")
 
-    # §2.2: 200 on success AND on an invalid token. Both mean the credential is not usable.
-    if status // 100 == 2:
+    # §2.2 specifies EXACTLY 200 on success AND on an invalid token. An undefined 2xx such as
+    # 202 cannot be promoted to success: "accepted" may mean the revocation has not happened yet,
+    # and logout's dangerous failure direction is claiming a still-live token is dead.
+    if status == 200:
         return RevocationOutcome(OUTCOME_REVOKED)
 
     # §2.2.1: the client MUST assume the token still exists and MAY retry later.

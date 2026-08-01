@@ -33,13 +33,18 @@ from secp_management.auth_cli import (
 from secp_management.cli import run
 from secp_management.controller_api_locator import ControllerApiLocator
 from secp_management.device_grant import DEVICE_CODE_GRANT_TYPE, parse_device_authorization
+from secp_management.operator_auth import OperatorAccessToken
 from secp_management.operator_credential_store import (
     OsKeystoreCredentialStore,
     SealedOperatorCredentialStore,
     account_fingerprint,
     subject_fingerprint,
 )
-from secp_management.operator_device_auth import DeviceEndpoints, ReviewedAuthority
+from secp_management.operator_device_auth import (
+    DeviceEndpoints,
+    ResolvedOperatorPrincipal,
+    ReviewedAuthority,
+)
 from secp_management.operator_token_revoke import (
     OUTCOME_NOT_REQUIRED,
     OUTCOME_REVOKED,
@@ -54,6 +59,9 @@ ISSUER = "https://idp.invalid/realms/secp"
 AUDIENCE = "secp-api"
 SUBJECT = "5ec9ad00-0000-4000-8000-000000000001"
 OTHER_SUBJECT = "5ec9ad00-0000-4000-8000-000000000002"
+ORGANIZATION_ID = "6ec9ad00-0000-4000-8000-000000000001"
+OPERATOR_EMAIL = "operator@example.invalid"
+OPERATOR_PERMISSIONS = ("enrollment:manage", "enrollment:read")
 KID = "test-key-1"
 DEVICE_CODE_VALUE = "ZGV2aWNlLWNvZGUtdmFsdWUtMDAwMDAwMDAwMDAx"
 
@@ -88,6 +96,13 @@ AUTHORIZATION = parse_device_authorization(
 _PRIVATE = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _JWK = {**json.loads(RSAAlgorithm.to_jwk(_PRIVATE.public_key())), "kid": KID, "use": "sig"}
 JWKS = {"keys": [_JWK]}
+PRINCIPAL = ResolvedOperatorPrincipal(
+    user_id=SUBJECT,
+    organization_id=ORGANIZATION_ID,
+    email=OPERATOR_EMAIL,
+    permissions=OPERATOR_PERMISSIONS,
+    is_dev_fallback=False,
+)
 
 
 def _valid_token(subject: str = SUBJECT, *, lifetime: int = 300) -> str:
@@ -111,6 +126,16 @@ class _FakeLocatorProvider:
         return self._locator
 
 
+class _StaticTokenProvider:
+    def __init__(self, token=None):
+        self._token = token or OperatorAccessToken("f" * 40)
+        self.calls = 0
+
+    def access_token(self):
+        self.calls += 1
+        return self._token
+
+
 class _FakeDeviceClient:
     """Records the grant steps so a test can prove which half of the flow actually ran."""
 
@@ -122,6 +147,9 @@ class _FakeDeviceClient:
         authority_error=None,
         discover_error=None,
         revocation=None,
+        principal=None,
+        principal_error=None,
+        events=None,
     ):
         self.calls: list[str] = []
         self.revoked: list[str] = []
@@ -129,6 +157,9 @@ class _FakeDeviceClient:
         self._errors = list(errors)
         self._authority_error = authority_error
         self._discover_error = discover_error
+        self._principal = principal if principal is not None else PRINCIPAL
+        self._principal_error = principal_error
+        self._events = events
         self._revocation = (
             revocation if revocation is not None else RevocationOutcome(OUTCOME_REVOKED)
         )
@@ -159,6 +190,16 @@ class _FakeDeviceClient:
         self.calls.append("jwks")
         return JWKS
 
+    def resolve_principal(self, token):
+        self.calls.append("principal")
+        if self._events is not None:
+            self._events.append("principal")
+        if self._principal_error:
+            raise ManagementError(self._principal_error)
+        # Exercise the purpose-specific bearer accessor without retaining or reporting its value.
+        assert token.authorization_header().startswith("Bearer ")
+        return self._principal
+
     def revoke_token(self, _endpoints, token):
         self.calls.append("revoke")
         # Recorded so a test can prove the RAW token — not a header, not a fingerprint — is what
@@ -168,7 +209,7 @@ class _FakeDeviceClient:
 
 
 class _RecordingStore(SealedOperatorCredentialStore):
-    """The sealed store, plus a record of whether a persist was attempted."""
+    """An available-at-preflight store that records and then refuses the actual persist."""
 
     def __init__(self):
         self.store_attempts = 0
@@ -178,6 +219,11 @@ class _RecordingStore(SealedOperatorCredentialStore):
         return super().store(
             token, expires_at_epoch=expires_at_epoch, subject_fingerprint=subject_fingerprint
         )
+
+    def describe(self):
+        from secp_management.operator_credential_store import StoredCredentialStatus
+
+        return StoredCredentialStatus(backend="recording", available=True)
 
 
 class _FakeKeystore:
@@ -197,6 +243,26 @@ class _FakeKeystore:
 
     def delete_secret(self, *, service, account):
         return self.entries.pop((service, account), None) is not None
+
+
+class _FailingReadKeystore(_FakeKeystore):
+    def __init__(self, reason):
+        super().__init__()
+        self._reason = reason
+
+    def get_secret(self, *, service, account):
+        raise ManagementError(self._reason)
+
+
+class _FailingWriteKeystore(_FakeKeystore):
+    def __init__(self):
+        super().__init__()
+        self.fail_writes = False
+
+    def set_secret(self, *, service, account, secret):
+        if self.fail_writes:
+            raise ManagementError("secpctl_credential_backend_failed")
+        return super().set_secret(service=service, account=account, secret=secret)
 
 
 def _working_store(keystore=None, *, now=None):
@@ -241,6 +307,15 @@ def _assert_refusal(report, command, reason, *, remedy_expected=None):
         assert ORIGIN not in report["remedy"] and ISSUER not in report["remedy"]
 
 
+def _assert_compensated_refusal(report, command, reason):
+    assert report["command"] == command
+    assert report["reason_code"] == reason
+    assert report["credential_stored"] is False
+    assert report["revocation_outcome"] == OUTCOME_REVOKED
+    assert report["revoked"] is True
+    assert report["token_still_live"] is False
+
+
 # --- exit-code alignment --------------------------------------------------------------------------
 
 
@@ -283,22 +358,80 @@ def test_dry_run_login_reports_an_unsupported_provider():
     assert report["reason_code"] == "secpctl_device_grant_unsupported"
 
 
-# --- login: the full grant, refused at persistence ------------------------------------------------
+# --- login: preflight plus post-issuance compensation ---------------------------------------------
 
 
-def test_login_runs_the_whole_grant_then_refuses_to_persist():
-    """With no OS keystore wired, the grant still runs in full and the refusal is honest."""
+def test_login_refuses_an_unavailable_store_before_starting_a_grant():
     client = _FakeDeviceClient()
-    store = _RecordingStore()
-    deps, _waits, prompts = _deps(client=client, store=store)
+    deps, waits, prompts = _deps(client=client, store=SealedOperatorCredentialStore())
     code, report = auth_login(deps, gate=WRITE)
-    assert client.calls == ["authority", "discover", "device_authorization", "token", "jwks"]
-    assert store.store_attempts == 1, "the grant must actually reach the persist step"
-    assert prompts, "the operator must have been shown the verification prompt"
+
+    assert client.calls == [] and waits == [] and prompts == []
     assert code == EXIT_AUTH_UNAVAILABLE
     _assert_refusal(
         report, "auth login", "secpctl_credential_store_unavailable", remedy_expected=True
     )
+
+
+def test_a_store_failure_after_issuance_revokes_the_new_token_and_keeps_no_orphan():
+    client = _FakeDeviceClient()
+    store = _RecordingStore()
+    deps, _waits, prompts = _deps(client=client, store=store)
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert client.calls == [
+        "authority",
+        "discover",
+        "device_authorization",
+        "token",
+        "jwks",
+        "principal",
+        "revoke",
+    ]
+    assert store.store_attempts == 1, "the grant must actually reach the persist step"
+    assert prompts, "the operator must have been shown the verification prompt"
+    assert code == EXIT_AUTH_UNAVAILABLE
+    assert report["reason_code"] == "secpctl_credential_store_unavailable"
+    assert report["credential_stored"] is False
+    assert report["revoked"] is True and report["token_still_live"] is False
+    assert client.revoked and not client.revoked[0].startswith("Bearer ")
+
+
+def test_post_issue_compensation_reports_a_live_token_when_revocation_is_unavailable():
+    unavailable = RevocationOutcome(
+        OUTCOME_UNAVAILABLE, reason_code="secpctl_revocation_provider_unavailable"
+    )
+    client = _FakeDeviceClient(revocation=unavailable)
+    store = _RecordingStore()
+    deps, _waits, _prompts = _deps(client=client, store=store)
+
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert code == EXIT_CONTROLLER_UNAVAILABLE
+    assert report["reason_code"] == "secpctl_revocation_provider_unavailable"
+    assert report["credential_refusal_reason_code"] == ("secpctl_credential_store_unavailable")
+    assert report["credential_stored"] is False
+    assert report["token_still_live"] is True and report["revoked"] is False
+    assert store.store_attempts == 1
+    assert client.calls[-1] == "revoke"
+
+
+def test_failed_relogin_revokes_only_the_new_token_and_preserves_the_existing_credential():
+    keystore = _FailingWriteKeystore()
+    initial, _waits, _prompts = _deps(store=_working_store(keystore))
+    assert auth_login(initial, gate=WRITE)[0] == EXIT_OK
+    original = dict(keystore.entries)
+    keystore.fail_writes = True
+
+    replacement = _valid_token(lifetime=1200)
+    client = _FakeDeviceClient(token=replacement)
+    deps, _waits, _prompts = _deps(client=client, store=_working_store(keystore))
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    _assert_compensated_refusal(report, "auth login", "secpctl_credential_backend_failed")
+    assert client.revoked == [replacement]
+    assert keystore.entries == original
 
 
 def test_the_refusal_report_carries_no_token_device_code_or_endpoint():
@@ -428,9 +561,9 @@ def test_login_still_refuses_with_exit_3_when_the_secret_service_is_unusable(mod
 
     assert code == EXIT_AUTH_UNAVAILABLE == 3
     _assert_refusal(report, "auth login", reason)
-    # the grant really ran and really reached the persist step before refusing
-    assert client.calls == ["authority", "discover", "device_authorization", "token", "jwks"]
-    assert prompts
+    # Preflight prevents an orphan provider token when this store can never persist it.
+    assert client.calls == []
+    assert prompts == []
 
 
 def test_a_locked_keyring_tells_the_operator_to_unlock_rather_than_nothing(monkeypatch):
@@ -471,11 +604,14 @@ def test_an_unverifiable_token_is_never_offered_for_storage():
         headers={"kid": KID},
     )
     store = _RecordingStore()
-    deps, _waits, _prompts = _deps(client=_FakeDeviceClient(token=forged), store=store)
+    client = _FakeDeviceClient(token=forged)
+    deps, _waits, _prompts = _deps(client=client, store=store)
     code, report = auth_login(deps, gate=WRITE)
     assert store.store_attempts == 0
     assert report["reason_code"] == "secpctl_operator_token_signature_invalid"
     assert code == EXIT_AUTH_UNAVAILABLE
+    assert client.revoked == [forged]
+    assert "principal" not in client.calls and client.calls[-1] == "revoke"
 
 
 def test_an_unrecorded_locator_refuses_before_any_network_step():
@@ -531,7 +667,27 @@ def test_cancellation_is_checked_before_every_attempt_not_only_the_first():
     deps, _waits, _prompts = _deps(client=client, cancelled=_cancel_after_two)
     _code, report = auth_login(deps, gate=WRITE)
     assert report["reason_code"] == "secpctl_device_authorization_cancelled"
-    assert client.calls.count("token") == 2
+    assert client.calls.count("token") == 1
+
+
+def test_cancellation_that_arrives_during_sleep_posts_no_final_token_request():
+    checks = iter((False, True))
+    client = _FakeDeviceClient()
+    store = _RecordingStore()
+    deps, waits, _prompts = _deps(
+        client=client,
+        store=store,
+        cancelled=lambda: next(checks),
+    )
+
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert code == EXIT_REFUSED
+    _assert_refusal(report, "auth login", "secpctl_device_authorization_cancelled")
+    assert waits == [AUTHORIZATION.interval]
+    assert "token" not in client.calls
+    assert "principal" not in client.calls
+    assert store.store_attempts == 0
 
 
 # --- a working keystore: persistence, selection, replay -------------------------------------------
@@ -557,6 +713,53 @@ def test_a_successful_login_report_still_carries_no_token_or_origin():
     assert "eyJ" not in rendered
     assert ORIGIN not in rendered and "controller.invalid" not in rendered
     assert DEVICE_CODE_VALUE not in rendered and ISSUER not in rendered
+
+
+def test_login_resolves_the_authoritative_principal_before_the_first_os_write():
+    events: list[str] = []
+
+    class _EventKeystore(_FakeKeystore):
+        def set_secret(self, *, service, account, secret):
+            events.append("store")
+            return super().set_secret(service=service, account=account, secret=secret)
+
+    client = _FakeDeviceClient(events=events)
+    deps, _waits, _prompts = _deps(client=client, store=_working_store(_EventKeystore()))
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert code == EXIT_OK
+    assert events == ["principal", "store"]
+    assert report["stored_principal_user_id"] == SUBJECT
+    assert report["stored_principal_organization_id"] == ORGANIZATION_ID
+    assert report["stored_principal_permissions"] == list(OPERATOR_PERMISSIONS)
+
+
+def test_login_persists_nothing_when_the_controller_cannot_resolve_the_principal():
+    keystore = _FakeKeystore()
+    client = _FakeDeviceClient(principal_error="secpctl_operator_principal_unavailable")
+    deps, _waits, _prompts = _deps(client=client, store=_working_store(keystore))
+
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    _assert_compensated_refusal(report, "auth login", "secpctl_operator_principal_unavailable")
+    assert client.calls[-2:] == ["principal", "revoke"]
+    assert keystore.entries == {}
+
+
+def test_login_never_persists_a_token_that_verified_only_inside_clock_leeway():
+    """PyJWT accepts exp=now-30 with the verifier's 60-second leeway; the write boundary must not
+    turn that into an authenticated credential that its own reader immediately calls expired."""
+    keystore = _FakeKeystore()
+    client = _FakeDeviceClient(token=_valid_token(lifetime=-30))
+    deps, _waits, _prompts = _deps(client=client, store=_working_store(keystore))
+
+    code, report = auth_login(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    _assert_compensated_refusal(report, "auth login", "secpctl_credential_expired")
+    assert client.calls[-2:] == ["principal", "revoke"]
+    assert keystore.entries == {}
 
 
 def test_a_credential_for_one_controller_is_never_selected_for_another():
@@ -725,23 +928,54 @@ def test_logout_with_nothing_stored_makes_no_revocation_request():
     assert client.calls == []
 
 
-def test_logout_of_an_expired_credential_needs_no_revocation_request():
-    """An expired token is already unusable; RFC 7009 §2.2 would have the provider answer 200 for it
-    anyway. Skipping the round trip is not a shortfall, so `token_still_live` stays false."""
+def test_logout_still_revokes_a_locally_expired_credential():
+    """Local expiry blocks replay but cannot prove the issuer's clock also considers the token dead.
+
+    RFC 7009 revocation is idempotent for an already-dead token, so the conservative path submits
+    the retained credential and only reports it dead after the provider answers successfully.
+    """
     keystore = _FakeKeystore()
     deps, _w, _p = _deps(store=_working_store(keystore))
     auth_login(deps, gate=WRITE)
+    stored = json.loads(keystore.entries[("secp-secpctl-operator", ORIGIN)])["t"]
 
     later = time.time() + 10_000
     client = _FakeDeviceClient()
     aged, _w2, _p2 = _deps(client=client, store=_working_store(keystore, now=lambda: later))
+    with pytest.raises(ManagementError) as ei:
+        aged.credential_store.for_account(ORIGIN).access_token()
+    assert ei.value.reason_code == "secpctl_credential_expired"
+
     code, report = auth_logout(aged, gate=WRITE)
 
     assert code == EXIT_OK
-    assert report["revocation_outcome"] == OUTCOME_NOT_REQUIRED
+    assert report["revocation_outcome"] == OUTCOME_REVOKED
     assert report["token_still_live"] is False
     assert report["removed"] is True and keystore.entries == {}
-    assert client.calls == []
+    assert client.revoked == [stored]
+    assert client.calls == ["authority", "discover", "revoke"]
+
+
+def test_a_locally_expired_credential_is_assumed_live_when_revocation_is_unavailable():
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+
+    unavailable = RevocationOutcome(
+        OUTCOME_UNAVAILABLE, reason_code="secpctl_revocation_provider_unavailable"
+    )
+    client = _FakeDeviceClient(revocation=unavailable)
+    aged, _w2, _p2 = _deps(
+        client=client,
+        store=_working_store(keystore, now=lambda: time.time() + 10_000),
+    )
+    code, report = auth_logout(aged, gate=WRITE)
+
+    assert code != EXIT_OK
+    assert report["revocation_outcome"] == OUTCOME_UNAVAILABLE
+    assert report["token_still_live"] is True
+    assert report["removed"] is True and keystore.entries == {}
+    assert client.calls == ["authority", "discover", "revoke"]
 
 
 def test_logout_dry_run_opens_no_socket_and_revokes_nothing():
@@ -759,6 +993,60 @@ def test_logout_dry_run_opens_no_socket_and_revokes_nothing():
     assert report["revocation_planned"] is True
     assert client.calls == [] and waits == [] and prompts == []
     assert keystore.entries == before
+
+
+def test_logout_dry_run_plans_revocation_even_when_local_expiry_has_passed():
+    keystore = _FakeKeystore()
+    deps, _w, _p = _deps(store=_working_store(keystore))
+    auth_login(deps, gate=WRITE)
+    before = dict(keystore.entries)
+
+    client = _FakeDeviceClient()
+    aged, waits, prompts = _deps(
+        client=client,
+        store=_working_store(keystore, now=lambda: time.time() + 10_000),
+    )
+    code, report = auth_logout(aged, gate=DRY)
+
+    assert code == EXIT_OK
+    assert report["credential_expired"] is True
+    assert report["revocation_planned"] is True
+    assert client.calls == [] and waits == [] and prompts == []
+    assert keystore.entries == before
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "secpctl_credential_store_locked",
+        "secpctl_credential_backend_failed",
+    ],
+)
+def test_logout_dry_run_refuses_an_unreadable_store_instead_of_planning_nothing(reason):
+    client = _FakeDeviceClient()
+    deps, waits, prompts = _deps(
+        client=client,
+        store=_working_store(_FailingReadKeystore(reason)),
+    )
+    code, report = auth_logout(deps, gate=DRY)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    _assert_refusal(report, "auth logout", reason)
+    assert client.calls == [] and waits == [] and prompts == []
+
+
+def test_logout_dry_run_refuses_a_corrupt_record_instead_of_planning_nothing():
+    keystore = _FakeKeystore()
+    keystore.entries[("secp-secpctl-operator", ORIGIN)] = b"not-json"
+    client = _FakeDeviceClient()
+    deps, waits, prompts = _deps(client=client, store=_working_store(keystore))
+    code, report = auth_logout(deps, gate=DRY)
+
+    assert code == EXIT_MALFORMED
+    _assert_refusal(report, "auth logout", "secpctl_credential_record_invalid")
+    assert "was removed" not in report["remedy"]
+    assert "--write --confirm" in report["remedy"]
+    assert client.calls == [] and waits == [] and prompts == []
 
 
 def test_a_logout_report_never_carries_the_token_or_the_origin():
@@ -796,6 +1084,62 @@ def test_refresh_refuses_when_there_is_nothing_to_renew():
     _assert_refusal(report, "auth refresh", "secpctl_credential_absent")
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "secpctl_credential_store_locked",
+        "secpctl_credential_backend_failed",
+    ],
+)
+def test_refresh_preserves_the_exact_unreadable_store_reason(reason):
+    client = _FakeDeviceClient()
+    deps, waits, prompts = _deps(
+        client=client,
+        store=_working_store(_FailingReadKeystore(reason)),
+    )
+    code, report = auth_refresh(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    _assert_refusal(report, "auth refresh", reason)
+    assert client.calls == [] and waits == [] and prompts == []
+
+
+def test_refresh_preserves_a_corrupt_record_reason_instead_of_calling_it_absent():
+    keystore = _FakeKeystore()
+    keystore.entries[("secp-secpctl-operator", ORIGIN)] = b"not-json"
+    client = _FakeDeviceClient()
+    deps, waits, prompts = _deps(client=client, store=_working_store(keystore))
+
+    code, report = auth_refresh(deps, gate=WRITE)
+
+    assert code == EXIT_MALFORMED
+    _assert_refusal(report, "auth refresh", "secpctl_credential_record_invalid")
+    assert "was removed" not in report["remedy"]
+    assert "--write --confirm" in report["remedy"]
+    assert client.calls == [] and waits == [] and prompts == []
+    assert keystore.entries[("secp-secpctl-operator", ORIGIN)] == b"not-json"
+
+
+def test_refresh_refuses_a_record_without_an_identity_binding_before_the_grant():
+    keystore = _FakeKeystore()
+    store = _working_store(keystore)
+    store.for_account(ORIGIN).store(
+        OperatorAccessToken(_valid_token()),
+        expires_at_epoch=int(time.time()) + 300,
+        subject_fingerprint="",
+    )
+    before = dict(keystore.entries)
+    client = _FakeDeviceClient(token=_valid_token(OTHER_SUBJECT))
+    deps, waits, prompts = _deps(client=client, store=store)
+
+    code, report = auth_refresh(deps, gate=WRITE)
+
+    assert code == EXIT_MALFORMED
+    _assert_refusal(report, "auth refresh", "secpctl_credential_record_invalid")
+    assert client.calls == [] and waits == [] and prompts == []
+    assert keystore.entries == before
+
+
 def test_refresh_dry_run_reports_renewal_need_without_starting_a_grant():
     keystore = _FakeKeystore()
     deps, _waits, _prompts = _deps(store=_working_store(keystore))
@@ -821,10 +1165,70 @@ def test_refresh_replaces_the_stored_credential_with_a_newly_granted_one():
     fresh, _w, prompts = _deps(client=client, store=_working_store(keystore))
     code, report = auth_refresh(fresh, gate=WRITE)
     assert code == EXIT_OK and report["mode"] == "written"
-    assert client.calls == ["authority", "discover", "device_authorization", "token", "jwks"]
+    assert client.calls == [
+        "authority",
+        "discover",
+        "device_authorization",
+        "token",
+        "jwks",
+        "principal",
+    ]
     assert prompts, "renewal is interactive: the operator must approve it again"
     assert keystore.entries[("secp-secpctl-operator", ORIGIN)] != original
     assert list(keystore.entries) == [("secp-secpctl-operator", ORIGIN)]
+
+
+def test_refresh_resolves_the_principal_before_replacing_the_os_record():
+    events: list[str] = []
+
+    class _EventKeystore(_FakeKeystore):
+        def set_secret(self, *, service, account, secret):
+            events.append("store")
+            return super().set_secret(service=service, account=account, secret=secret)
+
+    keystore = _EventKeystore()
+    initial, _waits, _prompts = _deps(store=_working_store(keystore))
+    assert auth_login(initial, gate=WRITE)[0] == EXIT_OK
+    events.clear()
+
+    client = _FakeDeviceClient(token=_valid_token(lifetime=1200), events=events)
+    deps, _waits, _prompts = _deps(client=client, store=_working_store(keystore))
+    assert auth_refresh(deps, gate=WRITE)[0] == EXIT_OK
+    assert events == ["principal", "store"]
+
+
+def test_refresh_principal_failure_preserves_the_original_credential():
+    keystore = _FakeKeystore()
+    initial, _waits, _prompts = _deps(store=_working_store(keystore))
+    assert auth_login(initial, gate=WRITE)[0] == EXIT_OK
+    original = dict(keystore.entries)
+
+    client = _FakeDeviceClient(principal_error="secpctl_operator_principal_unavailable")
+    deps, _waits, _prompts = _deps(client=client, store=_working_store(keystore))
+    code, report = auth_refresh(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    _assert_compensated_refusal(report, "auth refresh", "secpctl_operator_principal_unavailable")
+    assert client.calls[-2:] == ["principal", "revoke"]
+    assert keystore.entries == original
+
+
+def test_refresh_store_failure_revokes_only_the_replacement_and_preserves_the_original():
+    keystore = _FailingWriteKeystore()
+    initial, _waits, _prompts = _deps(store=_working_store(keystore))
+    assert auth_login(initial, gate=WRITE)[0] == EXIT_OK
+    original = dict(keystore.entries)
+    keystore.fail_writes = True
+
+    replacement = _valid_token(lifetime=1200)
+    client = _FakeDeviceClient(token=replacement)
+    deps, _waits, _prompts = _deps(client=client, store=_working_store(keystore))
+    code, report = auth_refresh(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    _assert_compensated_refusal(report, "auth refresh", "secpctl_credential_backend_failed")
+    assert client.revoked == [replacement]
+    assert keystore.entries == original
 
 
 def test_refresh_refuses_to_switch_the_stored_identity_to_a_different_operator():
@@ -834,11 +1238,13 @@ def test_refresh_refuses_to_switch_the_stored_identity_to_a_different_operator()
     auth_login(deps, gate=WRITE)
     original = keystore.entries[("secp-secpctl-operator", ORIGIN)]
 
-    other = _FakeDeviceClient(token=_valid_token(OTHER_SUBJECT))
+    replacement = _valid_token(OTHER_SUBJECT)
+    other = _FakeDeviceClient(token=replacement)
     fresh, _w, _p = _deps(client=other, store=_working_store(keystore))
     code, report = auth_refresh(fresh, gate=WRITE)
     assert code == EXIT_REFUSED
-    _assert_refusal(report, "auth refresh", "secpctl_credential_subject_changed")
+    _assert_compensated_refusal(report, "auth refresh", "secpctl_credential_subject_changed")
+    assert other.revoked == [replacement]
     assert keystore.entries[("secp-secpctl-operator", ORIGIN)] == original
 
 
@@ -851,7 +1257,14 @@ def test_refresh_never_asks_the_provider_for_a_renewal_credential():
     client = _FakeDeviceClient()
     fresh, _w, _p = _deps(client=client, store=_working_store(keystore))
     auth_refresh(fresh, gate=WRITE)
-    assert set(client.calls) <= {"authority", "discover", "device_authorization", "token", "jwks"}
+    assert set(client.calls) <= {
+        "authority",
+        "discover",
+        "device_authorization",
+        "token",
+        "jwks",
+        "principal",
+    }
 
 
 # --- status ---------------------------------------------------------------------------------------
@@ -859,7 +1272,7 @@ def test_refresh_never_asks_the_provider_for_a_renewal_credential():
 
 def test_status_is_read_only_and_reports_the_sealed_store():
     client = _FakeDeviceClient()
-    deps, waits, prompts = _deps(client=client)
+    deps, waits, prompts = _deps(client=client, store=SealedOperatorCredentialStore())
     code, report = auth_status(deps)
     assert code == EXIT_OK
     assert report["mode"] == "read"
@@ -882,6 +1295,16 @@ def test_status_reports_the_backend_even_when_no_controller_is_recorded():
     assert report["account"] == ""
     assert report["credential_backend"] == "fake_os_keystore"
     assert report["has_credential"] is False
+
+
+def test_status_refuses_an_invalid_locator_instead_of_calling_it_unrecorded():
+    deps, _waits, _prompts = _deps(
+        store=_working_store(),
+        locator=_FakeLocatorProvider("secpctl_controller_locator_invalid"),
+    )
+    code, report = auth_status(deps)
+    assert code == EXIT_CONTROLLER_UNAVAILABLE
+    _assert_refusal(report, "auth status", "secpctl_controller_locator_invalid")
 
 
 # --- logout ---------------------------------------------------------------------------------------
@@ -1044,6 +1467,62 @@ def test_human_output_no_longer_silently_drops_unknown_fields():
     assert "a_brand_new_field=visible" in rendered
 
 
+_TERMINAL_CONTROL_VALUE = (
+    "visible\n[forged command] exit=0\r"
+    "\x00\t\x1b[31mred\x1b[0m\x7f\x85\x9b"
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+    '"quoted"\\tail'
+)
+_BIDI_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("command", "role", "mode", "status", "ok", "trusted", "reason_code", "other"),
+)
+def test_every_human_scalar_string_is_terminal_escaped_on_one_physical_line(field):
+    """Command, priority and ordinary fields all cross the same terminal-safety boundary."""
+    from secp_management.cli import _render_human
+
+    payload = {"command": "safe command", "ordinary": "still visible"}
+    payload[field] = _TERMINAL_CONTROL_VALUE
+    rendered = _render_human(EXIT_OK, payload)
+
+    assert rendered.endswith("\n")
+    assert rendered.count("\n") == 1
+    line = rendered.removesuffix("\n")
+    assert json.dumps(_TERMINAL_CONTROL_VALUE, ensure_ascii=True)[1:-1] in line
+    assert r"\n[forged command] exit=0\r" in line
+    assert r"\u001b[31m" in line and r"\u009b" in line
+    assert r"\u202e" in line
+    assert r"\"quoted\"\\tail" in line
+    assert all(
+        not (ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F or char in _BIDI_CONTROLS)
+        for char in line
+    )
+
+
+def test_live_human_command_cannot_forge_a_report_line_through_site_input(monkeypatch, capsys):
+    """Exercise parser -> command report -> stdout, not just the renderer in isolation."""
+    import secp_management.cli as cli_module
+    from secp_management.enrollment_cli import EnrollmentCliDeps
+
+    malicious_site = 'north\n[auth logout] exit=0 status=revoked\r\x1b[2J\u202e"\\south'
+    monkeypatch.setattr(cli_module, "_production_enrollment_deps", EnrollmentCliDeps)
+
+    code = cli_module._dispatch_main(["enrollment", "invite", "create", "--site", malicious_site])
+    rendered = capsys.readouterr().out
+
+    assert code == EXIT_OK
+    assert rendered.count("\n") == 1
+    assert len(rendered.splitlines()) == 1
+    assert f"deployment_site_label={json.dumps(malicious_site)[1:-1]}" in rendered
+    assert "\n[auth logout]" not in rendered
+    assert "\r" not in rendered and "\x1b" not in rendered and "\u202e" not in rendered
+
+
 def test_auth_status_reports_credential_state_in_human_output():
     from secp_management.cli import _render_human
 
@@ -1070,7 +1549,7 @@ def test_a_rendered_report_still_carries_no_token_or_origin():
 # --- an UNREADABLE credential is not "nothing to revoke" ------------------------------------------
 #
 # `_revoke_stored_token` mapped every store refusal to `revocation_not_required()`, whose
-# `token_still_live` is False. That is right for absent/expired -- no live token exists -- and WRONG
+# `token_still_live` is False. That is right only for absent material, and WRONG
 # for a corrupt record or a foreign-account entry, where a perfectly live token can be sitting in
 # the keystore, `delete()` removes it, and the report affirmatively states the token is not live.
 # A false negative on the one fact the revocation path exists to establish.
@@ -1086,7 +1565,7 @@ class _UnreadableStore(SealedOperatorCredentialStore):
     def for_account(self, account):
         return self
 
-    def access_token(self):
+    def revocation_token(self):
         raise ManagementError(self._reason)
 
     def describe(self):
@@ -1124,11 +1603,9 @@ def test_an_unreadable_credential_is_never_reported_as_nothing_to_revoke(reason)
     assert store.deleted == 1 and report["removed"] is True
 
 
-@pytest.mark.parametrize("reason", ["secpctl_credential_absent", "secpctl_credential_expired"])
-def test_absent_or_expired_really_is_nothing_to_revoke(reason):
-    """The other side of the split: these two genuinely mean no live token exists, so the logout is
-    complete and exits 0."""
-    store = _UnreadableStore(reason)
+def test_an_absent_credential_really_is_nothing_to_revoke():
+    """The other side of the split: absent material genuinely leaves nothing to submit."""
+    store = _UnreadableStore("secpctl_credential_absent")
     deps, _w, _p = _deps(store=store)
     code, report = auth_logout(deps, gate=WRITE)
 
@@ -1146,7 +1623,7 @@ def test_absent_or_expired_really_is_nothing_to_revoke(reason):
 # not exist until the operator approves), so the remedy is the recoverable part.
 
 
-class _TooLargeStore(SealedOperatorCredentialStore):
+class _TooLargeStore(_RecordingStore):
     def store(self, token, *, expires_at_epoch, subject_fingerprint=""):
         raise ManagementError("secpctl_credential_too_large")
 
@@ -1277,6 +1754,52 @@ def test_auth_status_names_the_os_keystore_when_the_probe_says_so():
     assert code == EXIT_OK
     assert report["active_token_provider"] == "os_keystore"
     assert report["token_file_override_active"] is False
+    assert report["active_principal_resolved"] is False
+
+
+def test_auth_status_never_calls_a_sealed_store_an_active_os_keystore():
+    deps, _w, _p = _deps(
+        store=SealedOperatorCredentialStore(),
+        token_file_active=lambda: False,
+    )
+    code, report = auth_status(deps)
+    assert code == EXIT_OK
+    assert report["credential_store_available"] is False
+    assert report["active_token_provider"] == "unavailable"
+    assert report["token_file_override_active"] is False
+    assert report["active_principal_resolved"] is False
+
+
+def test_auth_status_resolves_the_live_os_credential_as_the_active_principal_for_human_and_json():
+    from secp_management.cli import _render_human
+
+    keystore = _FakeKeystore()
+    initial, _w, _p = _deps(store=_working_store(keystore))
+    assert auth_login(initial, gate=WRITE)[0] == EXIT_OK
+
+    client = _FakeDeviceClient()
+    deps, _w2, _p2 = _deps(
+        client=client,
+        store=_working_store(keystore),
+        token_file_active=lambda: False,
+    )
+    code, report = auth_status(deps)
+
+    assert code == EXIT_OK
+    assert report["active_token_provider"] == "os_keystore"
+    assert report["active_principal_resolved"] is True
+    assert report["active_principal_user_id"] == SUBJECT
+    assert report["active_principal_organization_id"] == ORGANIZATION_ID
+    assert report["active_principal_permissions"] == list(OPERATOR_PERMISSIONS)
+    assert client.calls == ["principal"]
+
+    human = _render_human(code, report)
+    assert f"active_principal_user_id={SUBJECT}" in human
+    assert f"active_principal_organization_id={ORGANIZATION_ID}" in human
+    assert "active_principal_permissions_display=enrollment:manage,enrollment:read" in human
+    structured = json.dumps(report)
+    assert '"active_principal_permissions": ["enrollment:manage", "enrollment:read"]' in structured
+    assert "eyJ" not in structured and ORIGIN not in structured and ISSUER not in structured
 
 
 def test_auth_status_says_unknown_rather_than_the_reassuring_answer():
@@ -1299,15 +1822,28 @@ def test_auth_status_warns_when_a_token_file_silently_overrides_the_keystore():
     FILE's token. Login looks fine and the credential it stored is never used."""
     from secp_management.cli import _render_human
 
-    deps, _w, _p = _deps(store=_working_store(), token_file_active=lambda: True)
+    provider = _StaticTokenProvider()
+    client = _FakeDeviceClient()
+    deps, _w, _p = _deps(
+        client=client,
+        store=_working_store(),
+        token_file_active=lambda: True,
+        token_file_provider=provider,
+    )
     code, report = auth_status(deps)
     assert code == EXIT_OK
     assert report["active_token_provider"] == "token_file"
     assert report["token_file_override_active"] is True
+    assert report["has_credential"] is False
+    assert report["active_principal_resolved"] is True
+    assert report["active_principal_user_id"] == SUBJECT
+    assert "stored_principal_user_id" not in report
+    assert provider.calls == 1 and client.calls == ["principal"]
 
     rendered = _render_human(code, report)
     assert "SECP_OPERATOR_TOKEN_FILE" in rendered
     assert "not the OS keystore" in rendered or "not\n  the OS keystore" in rendered
+    assert f"active_principal_user_id={SUBJECT}" in rendered
 
 
 def test_a_broken_override_probe_reports_unknown_and_never_breaks_a_read_only_status():
@@ -1419,6 +1955,9 @@ _REVIEWED_FIELD_EXCEPTIONS: frozenset[tuple[str, str]] = frozenset(
         # An outbound HTTP header name, not a report field: `{"Authorization": <bearer>}` on the
         # pinned controller request. The VALUE never enters a report; `_SECRET_SHAPES` covers that.
         ("enrollment_controller_client.py", "Authorization"),
+        # The same outbound header on the exact CA-pinned `/api/v1/me` request. It resolves the
+        # authoritative DB-backed principal and is never merged into a report.
+        ("operator_device_auth.py", "Authorization"),
         # The RFC 7009 §2.1 revocation FORM parameter. Sent in a request body, never reported —
         # `test_a_logout_report_never_carries_the_token_or_the_origin` pins the reporting side.
         ("operator_token_revoke.py", "token"),

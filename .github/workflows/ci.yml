@@ -199,12 +199,38 @@ jobs:
               r"\bpostgres",
               r"SECP_TEST_POSTGRES_URL",
           )
-          # A reason that must ALWAYS be refused, used below to prove the matcher still discriminates.
-          MUST_REFUSE = "could not import 'temporalio': No module named 'temporalio'"
-          MUST_ACCEPT = "requires dedicated Linux-root fixed-layout PR5F CI gate"
+          # These complete reasons describe the only OS-keystore capabilities intentionally absent
+          # on this Ubuntu host. Exact equality prevents generic words such as "Windows", "host",
+          # or "keystore" from becoming platform gates in unrelated skips.
+          PLATFORM_GATED_EXACT = frozenset(
+              {
+                  "Windows Credential Manager only",
+                  "no OS keystore binding on this host",
+              }
+          )
+          MUST_REFUSE = (
+              "could not import 'temporalio': No module named 'temporalio'",
+              "Windows",
+              "host",
+              "credential",
+              "keystore",
+              "platform",
+              "dependency unavailable",
+              "requires Windows Credential Manager only",
+              "Windows Credential Manager only on this host",
+              "expected no OS keystore binding on this host",
+              "no OS keystore binding on this host today",
+          )
+          MUST_ACCEPT = (
+              "requires dedicated Linux-root fixed-layout PR5F CI gate",
+              "Windows Credential Manager only",
+              "no OS keystore binding on this host",
+          )
 
           def platform_gated(reason: str) -> bool:
-              return any(re.search(p, reason, re.IGNORECASE) for p in PLATFORM_GATED)
+              return reason in PLATFORM_GATED_EXACT or any(
+                  re.search(pattern, reason, re.IGNORECASE) for pattern in PLATFORM_GATED
+              )
 
           problems = []
 
@@ -213,14 +239,16 @@ jobs:
           # "platform-gated" and the whole step would pass while checking nothing.
           if not PLATFORM_GATED:
               problems.append("PLATFORM_GATED is empty: every skip would be accepted unchecked")
-          if platform_gated(MUST_REFUSE):
-              problems.append(
-                  "the reason matcher accepts a missing-dependency skip, so it no longer discriminates"
-              )
-          if not platform_gated(MUST_ACCEPT):
-              problems.append(
-                  "the reason matcher rejects a known platform-gated skip, so it would fail valid runs"
-              )
+          for reason in MUST_REFUSE:
+              if platform_gated(reason):
+                  problems.append(
+                      f"the reason matcher accepts {reason!r}, so it no longer discriminates"
+                  )
+          for reason in MUST_ACCEPT:
+              if not platform_gated(reason):
+                  problems.append(
+                      f"the reason matcher rejects known platform gate {reason!r}"
+                  )
 
           report = Path("junit-shard-${{ matrix.shard }}.xml")
           if not report.exists():

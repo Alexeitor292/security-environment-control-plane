@@ -76,13 +76,21 @@ def test_a_refused_request_never_echoes_the_token():
 # --- the response (RFC 7009 §2.2) -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("status", [200, 204, 299])
-def test_any_2xx_is_a_successful_revocation(status):
-    outcome = interpret_revocation_response(status)
+def test_exactly_200_is_a_successful_revocation():
+    outcome = interpret_revocation_response(200)
     assert outcome.outcome == OUTCOME_REVOKED
     assert outcome.revoked is True
     assert outcome.token_still_live is False
     assert outcome.reason_code == ""
+
+
+@pytest.mark.parametrize("status", [201, 202, 204, 299])
+def test_an_undefined_2xx_is_a_conservative_refusal(status):
+    outcome = interpret_revocation_response(status)
+    assert outcome.outcome == OUTCOME_REFUSED
+    assert outcome.revoked is False
+    assert outcome.token_still_live is True
+    assert outcome.reason_code == "secpctl_revocation_refused"
 
 
 def test_a_200_for_an_invalid_token_is_a_success_and_not_an_error():

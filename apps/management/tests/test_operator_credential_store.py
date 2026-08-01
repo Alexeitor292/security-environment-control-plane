@@ -115,6 +115,12 @@ def test_sealed_store_refuses_to_load_with_a_bounded_code():
     assert ei.value.reason_code == "secpctl_credential_store_unavailable"
 
 
+def test_sealed_store_refuses_the_revocation_read_with_the_same_bounded_code():
+    with pytest.raises(ManagementError) as ei:
+        SealedOperatorCredentialStore().revocation_token()
+    assert ei.value.reason_code == "secpctl_credential_store_unavailable"
+
+
 def test_sealed_store_refuses_to_store_with_a_bounded_code():
     with pytest.raises(ManagementError) as ei:
         SealedOperatorCredentialStore().store(TOKEN, expires_at_epoch=FUTURE)
@@ -170,6 +176,7 @@ def test_no_resolvable_backend_means_the_sealed_store_never_a_file(monkeypatch):
     assert isinstance(store, SealedOperatorCredentialStore)
     for attempt in (
         lambda: store.access_token(),
+        lambda: store.revocation_token(),
         lambda: store.store(TOKEN, expires_at_epoch=FUTURE),
         lambda: store.delete(),
     ):
@@ -312,6 +319,9 @@ def test_an_expired_credential_is_refused_rather_than_replayed():
         stale.access_token()
     assert ei.value.reason_code == "secpctl_credential_expired"
     assert stale.describe().expired is True
+    # Local expiry is not proof that the issuer's clock agrees. Logout retains this purpose-specific
+    # read so it can conservatively attempt idempotent RFC 7009 revocation.
+    assert stale.revocation_token().authorization_header() == TOKEN.authorization_header()
 
 
 def test_expiry_is_refused_exactly_at_the_boundary():
@@ -320,6 +330,52 @@ def test_expiry_is_refused_exactly_at_the_boundary():
     with pytest.raises(ManagementError) as ei:
         _store(binding, now=2_000.0).access_token()
     assert ei.value.reason_code == "secpctl_credential_expired"
+
+
+@pytest.mark.parametrize("expiry", [True, 0, -1, 4_102_444_801, "2000", 2000.0])
+def test_write_rejects_every_expiry_the_reader_would_reject_before_any_os_call(expiry):
+    binding = FakeBinding()
+    with pytest.raises(ManagementError) as ei:
+        _store(binding, now=1_000.0).store(TOKEN, expires_at_epoch=expiry)
+    assert ei.value.reason_code == "secpctl_credential_record_invalid"
+    assert binding.entries == {}
+
+
+def test_the_maximum_supported_expiry_round_trips_at_the_write_boundary():
+    binding = FakeBinding()
+    store = _store(binding, now=1_000.0)
+    store.store(TOKEN, expires_at_epoch=4_102_444_800)
+    assert store.access_token().authorization_header() == TOKEN.authorization_header()
+
+
+@pytest.mark.parametrize("expiry", [999, 1_000])
+def test_write_refuses_a_nonfuture_expiry_before_any_os_call(expiry):
+    binding = FakeBinding()
+    with pytest.raises(ManagementError) as ei:
+        _store(binding, now=1_000.0).store(TOKEN, expires_at_epoch=expiry)
+    assert ei.value.reason_code == "secpctl_credential_expired"
+    assert binding.entries == {}
+
+
+@pytest.mark.parametrize("now", [float("nan"), float("inf"), float("-inf"), True, "1000"])
+def test_write_refuses_an_invalid_clock_without_touching_the_keystore(now):
+    binding = FakeBinding()
+    with pytest.raises(ManagementError) as ei:
+        _store(binding, now=now).store(TOKEN, expires_at_epoch=2_000)
+    assert ei.value.reason_code == "secpctl_credential_store_unavailable"
+    assert binding.entries == {}
+
+
+def test_write_bounds_a_clock_exception_without_touching_the_keystore():
+    binding = FakeBinding()
+    store = OsKeystoreCredentialStore(
+        binding,
+        now_epoch=lambda: (_ for _ in ()).throw(RuntimeError("clock failed")),
+    ).for_account(ACCOUNT)
+    with pytest.raises(ManagementError) as ei:
+        store.store(TOKEN, expires_at_epoch=2_000)
+    assert ei.value.reason_code == "secpctl_credential_store_unavailable"
+    assert binding.entries == {}
 
 
 def test_storing_replaces_the_previous_credential_for_that_account():
@@ -398,6 +454,7 @@ def test_an_unreachable_keystore_is_never_reported_as_an_absent_credential():
     status = store.describe()
     assert status.available is False
     assert status.has_credential is False
+    assert status.unavailable_reason == "secpctl_credential_backend_failed"
     with pytest.raises(ManagementError) as ei:
         store.access_token()
     assert ei.value.reason_code == "secpctl_credential_backend_failed"
@@ -431,6 +488,7 @@ def test_a_record_never_reveals_the_token_in_its_repr_or_a_pickle():
         b'{"v":2,"a":"x","e":1,"s":"","t":"t"}',  # wrong schema version
         b'{"v":1,"a":"https://c.invalid","e":true,"s":"","t":"tok"}',  # bool expiry
         b'{"v":1,"a":"https://c.invalid","e":0,"s":"","t":"tok"}',  # non-positive expiry
+        b'{"v":1,"a":"https://c.invalid","e":4102444801,"s":"","t":"tok"}',
         b'{"v":1,"a":"https://c.invalid","e":1,"s":"NOTHEX","t":"tok"}',
         b'{"v":1,"a":"https://c.invalid","e":1,"s":"","t":""}',  # empty token
         b'{"v":1,"a":"has space","e":1,"s":"","t":"tok"}',  # malformed account
@@ -595,24 +653,33 @@ def test_credential_store_holds_no_module_level_token_cache():
 
 
 def test_login_has_no_fallback_branch_around_the_persist_call():
-    """``auth_login`` must not wrap the store call in its own handler that writes the token
-    elsewhere. The only handler is the outer bounded-refusal one, and the only thing it may DO is
-    build that refusal — asserted on the calls it makes, not on a substring of its text."""
+    """A persist refusal may revoke the newly issued token, but may never store it elsewhere.
+
+    The inner handler is the no-orphan compensation path; the outer one projects pre-issuance
+    refusals. Their call shapes are pinned so neither can grow a plaintext fallback.
+    """
     tree = ast.parse(AUTH_CLI_CODE)
     login = next(
         n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "auth_login"
     )
     handlers = [n for n in ast.walk(login) if isinstance(n, ast.ExceptHandler)]
-    assert len(handlers) == 1, "auth_login must have exactly one bounded refusal handler"
-    called = [
-        ast.unparse(call.func)
+    assert len(handlers) == 2
+    calls_by_handler = [
+        [
+            ast.unparse(call.func)
+            for node in handler.body
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+        ]
         for handler in handlers
-        for node in handler.body
-        for call in ast.walk(node)
-        if isinstance(call, ast.Call)
     ]
-    assert called == ["_refused"], called
-    body = ast.unparse(ast.Module(body=handlers[0].body, type_ignores=[]))
+    assert sorted(calls_by_handler) == [
+        ["_compensate_issued_refusal"],
+        ["_refused"],
+    ]
+    body = "\n".join(
+        ast.unparse(ast.Module(body=handler.body, type_ignores=[])) for handler in handlers
+    )
     for forbidden in (*FILE_WRITE_SHAPES, "environ", "store", "write"):
         assert forbidden not in body
 

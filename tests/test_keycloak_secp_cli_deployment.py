@@ -367,6 +367,7 @@ def test_a_conforming_discovery_document_passes():
 
 _DISCOVERY_MUTATIONS: list[tuple[str, object, int]] = [
     ("device endpoint absent", lambda d: d.pop("device_authorization_endpoint"), 1),
+    ("grant types absent", lambda d: d.pop("grant_types_supported"), 1),
     ("revocation endpoint absent", lambda d: d.pop("revocation_endpoint"), 1),
     ("token endpoint absent", lambda d: d.pop("token_endpoint"), 1),
     ("jwks absent", lambda d: d.pop("jwks_uri"), 1),
@@ -415,14 +416,221 @@ def test_a_non_object_discovery_document_is_one_refusal():
     assert len(tool.check_discovery("not-a-document", issuer=ISSUER, require_https=True)) == 1
 
 
+@pytest.mark.parametrize("status", [201, 202, 204, 299])
+def test_discovery_fetch_requires_exactly_http_200(status):
+    def transport(_method, _url, _headers, _body):
+        return status, {}, json.dumps(GOOD_DISCOVERY).encode()
+
+    with pytest.raises(tool.DeploymentError, match=f"failed with HTTP {status}"):
+        tool.fetch_discovery("https://idp.invalid", "secp", transport)
+
+
+def test_absent_grant_types_is_the_exact_unsupported_limitation():
+    discovery = copy.deepcopy(GOOD_DISCOVERY)
+    discovery.pop("grant_types_supported")
+    expected = (
+        f"`grant_types_supported` does not include {tool.DEVICE_CODE_GRANT_TYPE!r}; "
+        "the CLI refuses "
+        "the deployment as not supporting the device grant"
+    )
+    assert tool.check_discovery(discovery, issuer=ISSUER, require_https=True) == [expected]
+
+
+@pytest.mark.parametrize(
+    "grant_types",
+    [
+        None,
+        tool.DEVICE_CODE_GRANT_TYPE,
+        {"device_code": True},
+        [tool.DEVICE_CODE_GRANT_TYPE, 7],
+        [tool.DEVICE_CODE_GRANT_TYPE, ""],
+        [tool.DEVICE_CODE_GRANT_TYPE, "authorization code"],
+    ],
+)
+def test_malformed_grant_types_is_one_bounded_configuration_problem(grant_types):
+    discovery = {**GOOD_DISCOVERY, "grant_types_supported": grant_types}
+    assert tool.check_discovery(discovery, issuer=ISSUER, require_https=True) == [
+        "`grant_types_supported` is malformed; expected a JSON array of non-empty printable "
+        "grant-type strings"
+    ]
+
+
 def test_the_revocation_probe_reads_rfc7009_status_semantics():
     # §2.2: 200 for a revoked token AND for an invalid one. A 401 means a public client cannot
     # revoke here at all, which is a deployment defect the CLI would surface only at logout.
     assert tool.check_public_revocation_probe(200) == []
-    assert tool.check_public_revocation_probe(204) == []
+    for undefined_success in (201, 202, 204, 299):
+        assert len(tool.check_public_revocation_probe(undefined_success)) == 1
     assert len(tool.check_public_revocation_probe(401)) == 1
     assert len(tool.check_public_revocation_probe(400)) == 1
     assert len(tool.check_public_revocation_probe(503)) == 1
+
+
+def test_the_revocation_probe_posts_to_the_exact_advertised_endpoint():
+    calls: list[tuple[str, str]] = []
+
+    def transport(method, url, _headers, _body):
+        calls.append((method, url))
+        return 200, {}, b""
+
+    endpoint = "https://revocation.identity.invalid/custom/revoke"
+    assert tool.probe_revocation(endpoint, transport) == 200
+    assert calls == [("POST", endpoint)]
+
+
+def test_the_revocation_probe_refuses_an_unsafe_endpoint_before_contact():
+    calls: list[str] = []
+
+    def transport(_method, url, _headers, _body):  # pragma: no cover - must remain unreachable
+        calls.append(url)
+        raise AssertionError("an unsafe advertised endpoint must not be contacted")
+
+    with pytest.raises(tool.DeploymentError, match="invalid advertised revocation endpoint"):
+        tool.probe_revocation("https://user:password@identity.invalid/revoke", transport)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "hostile_url",
+    (
+        "https://[2001:db8::1/revoke",
+        "https://idp.invalid:0/revoke",
+        "https://idp.invalid:65536/revoke",
+        "https://idp.invalid:not-a-port/revoke",
+        "https://idp.invalid/revoke#fragment",
+        "https://idp.invalid/revoke#",
+        " https://idp.invalid/revoke",
+        "https://idp.invalid/revoke\x7f",
+    ),
+)
+def test_hostile_ipv6_ports_and_fragments_are_bounded_before_network_contact(hostile_url):
+    discovery = {**GOOD_DISCOVERY, "token_endpoint": hostile_url}
+    problems = tool.check_discovery(discovery, issuer=ISSUER, require_https=True)
+    assert len(problems) == 1
+    assert hostile_url not in problems[0]
+
+    with pytest.raises(tool.DeploymentError) as base_error:
+        tool._require_base_url(hostile_url, insecure_http=False)
+    assert hostile_url not in str(base_error.value)
+
+    calls: list[str] = []
+
+    def transport(_method, url, _headers, _body):  # pragma: no cover - must remain unreachable
+        calls.append(url)
+        raise AssertionError("a malformed endpoint must not be contacted")
+
+    with pytest.raises(tool.DeploymentError, match="invalid advertised revocation endpoint"):
+        tool.probe_revocation(hostile_url, transport)
+    assert calls == []
+
+
+def test_a_well_formed_ipv6_endpoint_and_nonzero_port_remain_supported():
+    endpoint = "https://[2001:db8::1]:8443/revoke"
+    assert tool._check_endpoint_url(endpoint, "revocation_endpoint", require_https=True) == []
+    assert tool._require_base_url("https://[2001:db8::1]:8443", insecure_http=False) == (
+        "https://[2001:db8::1]:8443"
+    )
+
+
+def test_base_url_query_is_refused_while_an_endpoint_query_remains_supported():
+    base_url = "https://idp.invalid?tenant=secp"
+    with pytest.raises(tool.DeploymentError, match="must not carry a URL query"):
+        tool._require_base_url(base_url, insecure_http=False)
+    assert (
+        tool._check_endpoint_url(
+            "https://idp.invalid/token?tenant=secp", "token_endpoint", require_https=True
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ("https://user:password@idp.invalid/keycloak", "https://@idp.invalid/keycloak"),
+)
+def test_base_url_userinfo_and_raw_at_are_refused_without_echo(base_url):
+    with pytest.raises(tool.DeploymentError, match="must not carry userinfo") as exc_info:
+        tool._require_base_url(base_url, insecure_http=False)
+    assert base_url not in str(exc_info.value)
+
+
+def test_keycloak_base_url_path_prefix_remains_supported():
+    base_url = "https://idp.invalid/keycloak"
+    assert tool._require_base_url(base_url, insecure_http=False) == base_url
+
+
+# --- the shipped urllib transport enforces its response cap while reading -----------------------
+
+
+class _BoundedBody:
+    def __init__(self, body: bytes, *, status: int = 200) -> None:
+        self.body = body
+        self.status = status
+        self.headers: dict[str, str] = {}
+        self.read_sizes: list[int] = []
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        return self.body if size < 0 else self.body[:size]
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+
+
+def _install_urllib_response(monkeypatch, body: bytes, *, as_http_error: bool) -> _BoundedBody:
+    response = _BoundedBody(body, status=400 if as_http_error else 200)
+
+    class _Opener:
+        def open(self, request, *, timeout):
+            assert timeout == tool._DEFAULT_TIMEOUT
+            if as_http_error:
+                raise tool.urllib.error.HTTPError(
+                    request.full_url, response.status, "provider refusal", {}, response
+                )
+            return response
+
+    monkeypatch.setattr(tool.urllib.request, "build_opener", lambda *_handlers: _Opener())
+    return response
+
+
+@pytest.mark.parametrize("as_http_error", (False, True), ids=("success", "http-error"))
+def test_urllib_transport_accepts_an_exact_bound_body(monkeypatch, as_http_error):
+    exact_json = b'{"ok":1}'
+    monkeypatch.setattr(tool, "_MAX_RESPONSE_BYTES", len(exact_json))
+    response = _install_urllib_response(monkeypatch, exact_json, as_http_error=as_http_error)
+
+    status, _headers, body = tool.urllib_transport("GET", "https://idp.invalid/admin", {}, None)
+
+    assert status == (400 if as_http_error else 200)
+    assert body == exact_json
+    assert response.read_sizes == [len(exact_json) + 1]
+
+
+@pytest.mark.parametrize("as_http_error", (False, True), ids=("success", "http-error"))
+def test_urllib_transport_refuses_one_byte_over_the_bound_without_disclosure(
+    monkeypatch, as_http_error
+):
+    accepted_json_prefix = b'{"ok":1}'
+    provider_secret = b"provider-secret-must-not-escape"
+    oversized = accepted_json_prefix + provider_secret
+    url = "https://idp.invalid/admin?credential=url-secret-must-not-escape"
+    monkeypatch.setattr(tool, "_MAX_RESPONSE_BYTES", len(accepted_json_prefix))
+    response = _install_urllib_response(monkeypatch, oversized, as_http_error=as_http_error)
+
+    with pytest.raises(tool.DeploymentError) as exc_info:
+        tool.urllib_transport("GET", url, {}, None)
+
+    refusal = str(exc_info.value)
+    assert refusal == "provider response exceeded the bounded size limit"
+    assert url not in refusal and "idp.invalid" not in refusal
+    assert provider_secret.decode() not in refusal and "url-secret-must-not-escape" not in refusal
+    assert response.read_sizes == [len(accepted_json_prefix) + 1]
 
 
 # --- the reconciler does not write unless asked twice --------------------------------------------
@@ -459,9 +667,395 @@ class _RecordingTransport:
         return 200, {}, b"[]"
 
 
+@pytest.mark.parametrize("status", (201, 204))
+def test_administrator_token_document_requires_exact_http_200(status):
+    def transport(_method, _url, _headers, _body):
+        return status, {}, json.dumps({"access_token": "admin-token-value"}).encode()
+
+    admin = tool.KeycloakAdmin("https://idp.invalid", transport=transport)
+    with pytest.raises(tool.DeploymentError, match=f"failed with HTTP {status}"):
+        admin.authenticate("admin", "placeholder-not-a-real-password")
+
+
+@pytest.mark.parametrize("status", (201, 204))
+def test_admin_get_document_requires_exact_http_200(status):
+    def transport(_method, url, _headers, _body):
+        if url.endswith("/protocol/openid-connect/token"):
+            return 200, {}, json.dumps({"access_token": "admin-token-value"}).encode()
+        return status, {}, b"{}"
+
+    admin = tool.KeycloakAdmin("https://idp.invalid", transport=transport)
+    admin.authenticate("admin", "placeholder-not-a-real-password")
+    with pytest.raises(tool.DeploymentError, match=f"failed with HTTP {status}"):
+        admin.get("/admin/realms/secp/clients")
+
+
+@pytest.mark.parametrize("document", ("admin-token", "admin-get", "discovery"))
+def test_network_json_documents_turn_invalid_utf8_into_bounded_refusals(document):
+    def transport(_method, url, _headers, _body):
+        if url.endswith("/protocol/openid-connect/token"):
+            body = b"\xff" if document == "admin-token" else b'{"access_token":"admin-token"}'
+            return 200, {}, body
+        return 200, {}, b"\xff"
+
+    if document == "discovery":
+        with pytest.raises(tool.DeploymentError, match="discovery document is not JSON"):
+            tool.fetch_discovery("https://idp.invalid", "secp", transport)
+        return
+
+    admin = tool.KeycloakAdmin("https://idp.invalid", transport=transport)
+    if document == "admin-token":
+        expected = "administrator token response was not usable"
+        with pytest.raises(tool.DeploymentError, match=expected):
+            admin.authenticate("admin", "placeholder-not-a-real-password")
+    else:
+        admin.authenticate("admin", "placeholder-not-a-real-password")
+        with pytest.raises(tool.DeploymentError, match="did not return JSON"):
+            admin.get("/admin/realms/secp/clients")
+
+
+def test_discovery_only_cannot_pass_by_probing_a_reconstructed_revocation_path(capsys):
+    """The runtime consumes metadata, so verification must probe the same bytes.
+
+    The conventional Keycloak path answers 200 while the advertised endpoint answers 503. The old
+    verifier probed the former and returned success; the fixed verifier reaches the latter and
+    reports the deployment failure.
+    """
+    advertised = "https://wrong-provider.invalid/custom/revoke"
+    document = {**GOOD_DISCOVERY, "revocation_endpoint": advertised}
+    calls: list[tuple[str, str]] = []
+
+    def transport(method, url, _headers, _body):
+        calls.append((method, url))
+        if method == "GET":
+            return 200, {}, json.dumps(document).encode()
+        if url == advertised:
+            return 503, {}, b""
+        if url == f"{ISSUER}/protocol/openid-connect/revoke":
+            return 200, {}, b""  # the reconstructed path is a deliberate false-positive trap
+        raise AssertionError(url)
+
+    code = tool.main(
+        [
+            "verify",
+            "--base-url",
+            "https://idp.invalid",
+            "--realm",
+            "secp",
+            "--discovery-only",
+            "--json",
+        ],
+        transport=transport,
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert report["ok"] is False
+    assert len(report["problems"]) == 1
+    assert calls == [
+        ("GET", f"{ISSUER}/.well-known/openid-configuration"),
+        ("POST", advertised),
+    ]
+
+
+def test_an_invalid_advertised_revocation_endpoint_is_not_contacted(capsys):
+    document = {
+        **GOOD_DISCOVERY,
+        "revocation_endpoint": "https://user:password@wrong-provider.invalid/revoke",
+    }
+    calls: list[tuple[str, str]] = []
+
+    def transport(method, url, _headers, _body):
+        calls.append((method, url))
+        assert method == "GET", "discovery failed validation, so no probe is safe"
+        return 200, {}, json.dumps(document).encode()
+
+    code = tool.main(
+        [
+            "verify",
+            "--base-url",
+            "https://idp.invalid",
+            "--realm",
+            "secp",
+            "--discovery-only",
+            "--json",
+        ],
+        transport=transport,
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert code == 1 and report["ok"] is False
+    assert len(calls) == 1 and calls[0][0] == "GET"
+
+
+class _StaticDeploymentAdmin:
+    def __init__(
+        self,
+        client: dict,
+        default_scopes: list[str],
+        optional_scopes: list[str],
+        mappers: list[dict],
+    ) -> None:
+        self.client = client
+        self.default_scopes = default_scopes
+        self.optional_scopes = optional_scopes
+        self.mappers = mappers
+
+    def get(self, path: str):
+        if "/clients?" in path:
+            return [self.client]
+        if path.endswith("/default-client-scopes"):
+            return [
+                {"id": f"default-{i}", "name": name} for i, name in enumerate(self.default_scopes)
+            ]
+        if path.endswith("/optional-client-scopes"):
+            return [
+                {"id": f"optional-{i}", "name": name} for i, name in enumerate(self.optional_scopes)
+            ]
+        if path.endswith("/protocol-mappers/models"):
+            return self.mappers
+        raise AssertionError(path)
+
+
+def _live_deployment_state(artifact: dict) -> dict:
+    client = copy.deepcopy(artifact)
+    client["id"] = "uuid-1"
+    return {
+        "client": client,
+        "default_scopes": list(artifact["defaultClientScopes"]),
+        "optional_scopes": list(artifact["optionalClientScopes"]),
+        "mappers": copy.deepcopy(artifact["protocolMappers"]),
+    }
+
+
+def _verify_live_state(artifact: dict, state: dict) -> list[str]:
+    return tool.verify_deployment(
+        _StaticDeploymentAdmin(
+            state["client"],
+            state["default_scopes"],
+            state["optional_scopes"],
+            state["mappers"],
+        ),
+        "secp",
+        artifact,
+        discovery_document=GOOD_DISCOVERY,
+        issuer=ISSUER,
+        require_https=True,
+        revocation_probe_status=200,
+    )
+
+
+def test_a_live_client_matching_the_artifact_passes_every_authoritative_read(artifact):
+    assert _verify_live_state(artifact, _live_deployment_state(artifact)) == []
+
+
+_LIVE_DEPLOYMENT_DRIFTS = (
+    (
+        "disabled client",
+        lambda state: state["client"].__setitem__("enabled", False),
+        "not enabled",
+    ),
+    (
+        "wrong client protocol",
+        lambda state: state["client"].__setitem__("protocol", "saml"),
+        "client protocol",
+    ),
+    (
+        "client consent enabled",
+        lambda state: state["client"].__setitem__("consentRequired", True),
+        "client core differs",
+    ),
+    (
+        "front-channel logout enabled",
+        lambda state: state["client"].__setitem__("frontchannelLogout", True),
+        "client core differs",
+    ),
+    (
+        "bearer-only client",
+        lambda state: state["client"].__setitem__("bearerOnly", True),
+        "bearerOnly",
+    ),
+    (
+        "refresh tokens enabled",
+        lambda state: state["client"]["attributes"].__setitem__("use.refresh.tokens", "true"),
+        "refresh-token issuance",
+    ),
+    (
+        "device polling interval drifted",
+        lambda state: state["client"]["attributes"].__setitem__(
+            "oauth2.device.polling.interval", "30"
+        ),
+        "client core differs",
+    ),
+    (
+        "browser origin added",
+        lambda state: state["client"]["webOrigins"].append("https://browser.invalid"),
+        "browser origin",
+    ),
+    (
+        "default scope added",
+        lambda state: state["default_scopes"].append("roles"),
+        "assigned default client scopes",
+    ),
+    (
+        "optional scope added",
+        lambda state: state["optional_scopes"].append("offline_access"),
+        "assigned optional client scopes",
+    ),
+    (
+        "extra non-audience mapper added",
+        lambda state: state["mappers"].append(
+            {
+                "name": "unexpected-claims",
+                "protocol": "openid-connect",
+                "protocolMapper": "oidc-usermodel-attribute-mapper",
+                "consentRequired": False,
+                "config": {"claim.name": "unexpected"},
+            }
+        ),
+        "protocol mapper set",
+    ),
+    (
+        "wrong mapper protocol",
+        lambda state: state["mappers"][0].__setitem__("protocol", "saml"),
+        "differs from the committed mapper",
+    ),
+    (
+        "mapper consent enabled",
+        lambda state: state["mappers"][0].__setitem__("consentRequired", True),
+        "differs from the committed mapper",
+    ),
+    (
+        "malformed live mapper config",
+        lambda state: state["mappers"][0].__setitem__("config", ["not", "an", "object"]),
+        "differs from the committed mapper",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate", "expected_fragment"),
+    _LIVE_DEPLOYMENT_DRIFTS,
+    ids=[case[0] for case in _LIVE_DEPLOYMENT_DRIFTS],
+)
+def test_live_verification_refuses_each_security_posture_drift(
+    artifact, label, mutate, expected_fragment
+):
+    state = _live_deployment_state(artifact)
+    assert _verify_live_state(artifact, state) == []
+    mutate(state)
+    problems = _verify_live_state(artifact, state)
+    assert problems, f"{label}: live verification silently accepted the drift"
+    assert any(expected_fragment in problem for problem in problems), (label, problems)
+
+
+@pytest.mark.parametrize("bad_id", (None, "", 7, "../hostile\npath"))
+def test_malformed_live_client_id_refuses_before_any_subresource_path(artifact, bad_id):
+    client = copy.deepcopy(artifact)
+    if bad_id is not None:
+        client["id"] = bad_id
+    calls: list[str] = []
+
+    class _LookupOnlyAdmin:
+        def get(self, path: str):
+            calls.append(path)
+            if "/clients?" in path:
+                return [client]
+            raise AssertionError("a malformed id must never reach a client sub-resource")
+
+    problems = tool.verify_deployment(
+        _LookupOnlyAdmin(),
+        "secp",
+        artifact,
+        discovery_document=GOOD_DISCOVERY,
+        issuer=ISSUER,
+        require_https=True,
+        revocation_probe_status=200,
+    )
+    assert problems == ["deployed client id is missing or malformed"]
+    assert calls == ["/admin/realms/secp/clients?clientId=secp-cli"]
+
+
 def _admin_env(monkeypatch) -> None:
     monkeypatch.setenv(tool.ENV_ADMIN_USER, "admin")
     monkeypatch.setenv(tool.ENV_ADMIN_PASSWORD, "placeholder-not-a-real-password")
+
+
+def test_hostile_administrator_token_is_refused_before_header_use_or_output(monkeypatch, capsys):
+    _admin_env(monkeypatch)
+    hostile_token = "admin-secret\r\nX-Forged: yes"
+    calls: list[tuple[str, dict]] = []
+
+    def transport(_method, _url, headers, _body):
+        calls.append((_url, dict(headers)))
+        return 200, {}, json.dumps({"access_token": hostile_token}).encode()
+
+    code = tool.main(
+        ["apply", "--base-url", "https://idp.invalid", "--realm", "secp"],
+        transport=transport,
+    )
+    rendered = capsys.readouterr().out
+    assert code == 2
+    assert len(calls) == 1 and "Authorization" not in calls[0][1]
+    assert hostile_token not in rendered
+    assert "admin-secret" not in rendered and "X-Forged" not in rendered
+    assert "administrator token response was not usable" in rendered
+
+
+def test_provider_error_cannot_reflect_admin_bearer_or_terminal_controls(monkeypatch, capsys):
+    _admin_env(monkeypatch)
+    admin_token = "admin-bearer-secret"
+    injected = f"Bearer {admin_token}\n[forged] ok: True\r\x1b[2J\u202e"
+    provider_body = json.dumps({"errorMessage": injected}).encode()
+
+    def transport(method, url, headers, _body):
+        if url.endswith("/protocol/openid-connect/token"):
+            return 200, {}, json.dumps({"access_token": admin_token}).encode()
+        assert headers["Authorization"] == f"Bearer {admin_token}"
+        if method == "GET":
+            return 200, {}, b"[]"
+        return 400, {}, provider_body
+
+    code = tool.main(
+        [
+            "apply",
+            "--base-url",
+            "https://idp.invalid",
+            "--realm",
+            "secp",
+            "--write",
+            "--confirm",
+        ],
+        transport=transport,
+    )
+    rendered = capsys.readouterr().out
+    assert code == 2
+    assert tool._bounded_error(provider_body) == f"<{len(provider_body)} bytes>"
+    assert admin_token not in rendered and "[forged]" not in rendered
+    assert "\r" not in rendered and "\x1b" not in rendered and "\u202e" not in rendered
+    assert f"<{len(provider_body)} bytes>" in rendered
+
+
+def test_human_emitter_escapes_every_dynamic_string_to_its_code_owned_line(capsys):
+    injected = 'visible\n[forged] ok: True\r\x1b[31mred\x1b[0m\u202e"\\tail'
+    tool._emit(
+        {
+            "action": injected,
+            "client_id": injected,
+            "actions": [injected],
+            "problems": [injected],
+            "artifact_problems": [injected],
+            "mutations": 0,
+            "error": injected,
+            "ok": injected,
+        },
+        False,
+    )
+    rendered = capsys.readouterr().out
+    assert len(rendered.splitlines()) == 7
+    assert "\n[forged]" not in rendered
+    assert "\r" not in rendered and "\x1b" not in rendered and "\u202e" not in rendered
+    assert r"\n[forged] ok: True\r" in rendered
+    assert r"\u001b[31m" in rendered and r"\u202e" in rendered
+    assert r"\"\\tail" in rendered
 
 
 def test_apply_without_write_issues_no_mutating_request(monkeypatch, capsys):
@@ -594,7 +1188,9 @@ def test_a_converged_realm_produces_an_empty_action_list(monkeypatch, capsys, ar
                 {
                     "id": "m1",
                     "name": "secp-api-audience",
+                    "protocol": "openid-connect",
                     "protocolMapper": "oidc-audience-mapper",
+                    "consentRequired": False,
                     "config": {
                         "included.custom.audience": "secp-api",
                         "id.token.claim": "false",

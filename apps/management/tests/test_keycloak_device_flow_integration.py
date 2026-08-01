@@ -730,7 +730,9 @@ def test_the_disposable_realm_deploys_the_committed_artifact(provider, artifact_
     admin = tool.KeycloakAdmin(provider.base_url)
     admin.authenticate(ADMIN_USERNAME, ADMIN_PASSWORD)
     document = tool.fetch_discovery(provider.base_url, artifact_realm, tool.urllib_transport)
-    probe = tool.probe_revocation(provider.base_url, artifact_realm, tool.urllib_transport)
+    probe = tool.probe_revocation(
+        document["revocation_endpoint"], tool.urllib_transport, require_https=False
+    )
     problems = tool.verify_deployment(
         admin,
         artifact_realm,
@@ -758,7 +760,7 @@ def test_the_verifier_refuses_the_console_default_realm(provider, console_defaul
         issuer=provider.issuer(console_default_realm),
         require_https=False,
         revocation_probe_status=tool.probe_revocation(
-            provider.base_url, console_default_realm, tool.urllib_transport
+            document["revocation_endpoint"], tool.urllib_transport, require_https=False
         ),
     )
     # Exactly three: the assigned scope set is not the pinned set, `roles` is attached, and
@@ -986,9 +988,12 @@ def test_the_revocation_endpoint_accepts_this_public_client(provider, artifact_r
     """Keycloak does not advertise ``none`` in ``revocation_endpoint_auth_methods_supported``, so a
     metadata-only review would conclude a public client cannot revoke here. It can, and that is the
     behaviour ``secpctl auth logout`` depends on — so it is probed rather than assumed."""
-    status = tool.probe_revocation(provider.base_url, artifact_realm, tool.urllib_transport)
+    document = tool.fetch_discovery(provider.base_url, artifact_realm, tool.urllib_transport)
+    status = tool.probe_revocation(
+        document["revocation_endpoint"], tool.urllib_transport, require_https=False
+    )
     assert tool.check_public_revocation_probe(status) == []
-    assert status // 100 == 2
+    assert status == 200
 
 
 # --- the reconciler repairs a drifted realm on a live provider ----------------------------------
@@ -1017,17 +1022,18 @@ def test_the_reconciler_repairs_a_console_default_realm_and_then_converges(provi
 
     verifier = tool.KeycloakAdmin(provider.base_url)
     verifier.authenticate(ADMIN_USERNAME, ADMIN_PASSWORD)
+    document = tool.fetch_discovery(provider.base_url, drifted_realm, tool.urllib_transport)
     problems = tool.verify_deployment(
         verifier,
         drifted_realm,
         desired,
-        discovery_document=tool.fetch_discovery(
-            provider.base_url, drifted_realm, tool.urllib_transport
-        ),
+        discovery_document=document,
         issuer=provider.issuer(drifted_realm),
         require_https=False,
         revocation_probe_status=tool.probe_revocation(
-            provider.base_url, drifted_realm, tool.urllib_transport
+            document["revocation_endpoint"],
+            tool.urllib_transport,
+            require_https=False,
         ),
     )
     assert problems == []

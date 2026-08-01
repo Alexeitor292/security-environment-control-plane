@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+from urllib.parse import quote
 
 import pytest
 from secp_management import ManagementError
@@ -114,6 +115,31 @@ def test_unsafe_verification_uri_is_refused(value):
     assert _reason(ei) == "secpctl_device_authorization_invalid"
 
 
+@pytest.mark.parametrize("field", ["verification_uri", "verification_uri_complete"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://[::1/device",
+        "https://idp.invalid:0/device",
+        "https://idp.invalid:65536/device",
+        "https://idp.invalid:not-a-port/device",
+    ],
+    ids=["malformed-ipv6", "zero-port", "out-of-range-port", "non-numeric-port"],
+)
+def test_url_parser_and_port_defects_are_bounded_authorization_invalid(field, value):
+    with pytest.raises(ManagementError) as ei:
+        _parse(_payload(**{field: value}))
+    assert _reason(ei) == "secpctl_device_authorization_invalid"
+    assert value not in f"{ei.value!r} {ei.value}"
+
+
+@pytest.mark.parametrize("field", ["verification_uri", "verification_uri_complete"])
+def test_browser_verification_uri_keeps_query_fragment_and_valid_explicit_port(field):
+    uri = "https://idp.invalid:65535/device?tenant=blue#instructions"
+    authorization = _parse(_payload(**{field: uri}))
+    assert getattr(authorization, field) == uri
+
+
 def test_plaintext_verification_uri_allowed_only_when_https_not_required():
     auth = parse_device_authorization(
         _payload(verification_uri="http://localhost:8081/device"), require_https=False
@@ -158,6 +184,48 @@ def test_non_object_response_is_refused(payload):
 
 
 # --- device-code secrecy --------------------------------------------------------------------------
+
+
+def test_device_code_embedded_in_user_code_is_refused_without_echoing_it():
+    secret = VALID["device_code"]
+    with pytest.raises(ManagementError) as ei:
+        _parse(_payload(user_code=f"X{secret}Y"))
+    assert _reason(ei) == "secpctl_device_authorization_invalid"
+    assert secret not in f"{ei.value!r} {ei.value}"
+
+
+@pytest.mark.parametrize("field", ["verification_uri", "verification_uri_complete"])
+@pytest.mark.parametrize(
+    "uri",
+    [
+        f"https://idp.invalid/device/{VALID['device_code']}",
+        f"https://idp.invalid/device?credential={VALID['device_code']}",
+        f"https://idp.invalid/device#{VALID['device_code']}",
+    ],
+    ids=["path", "query", "fragment"],
+)
+def test_device_code_in_any_displayed_uri_component_is_refused_without_echoing_it(field, uri):
+    secret = VALID["device_code"]
+    with pytest.raises(ManagementError) as ei:
+        _parse(_payload(**{field: uri}))
+    assert _reason(ei) == "secpctl_device_authorization_invalid"
+    assert secret not in f"{ei.value!r} {ei.value}"
+
+
+@pytest.mark.parametrize("field", ["verification_uri", "verification_uri_complete"])
+@pytest.mark.parametrize("encoding_depth", [1, 2])
+def test_percent_encoded_device_code_in_a_displayed_uri_is_refused(field, encoding_depth):
+    secret = "device/code+opaque=123456"
+    encoded = secret
+    for _ in range(encoding_depth):
+        encoded = quote(encoded, safe="")
+    uri = f"https://idp.invalid/device?credential={encoded}"
+    with pytest.raises(ManagementError) as ei:
+        _parse(_payload(device_code=secret, **{field: uri}))
+    assert _reason(ei) == "secpctl_device_authorization_invalid"
+    rendered = f"{ei.value!r} {ei.value}"
+    assert secret not in rendered
+    assert encoded not in rendered
 
 
 def test_device_code_repr_never_reveals_the_value():
@@ -252,10 +320,47 @@ def test_any_other_error_stops_rather_than_polling_on(error):
 
 def test_polling_stops_at_the_local_deadline_derived_from_expires_in():
     sched = _scheduler(expires_in=600)
-    assert sched.next_attempt(elapsed_seconds=599).action == ACTION_POLL
     decision = sched.next_attempt(elapsed_seconds=600)
     assert decision.action == ACTION_STOP
     assert decision.reason_code == "secpctl_device_code_expired"
+
+
+@pytest.mark.parametrize("elapsed", [595, 599, 600])
+def test_a_wait_that_reaches_or_crosses_the_deadline_is_never_licensed(elapsed):
+    """The scheduler controls the sleep AND the request that follows it. Checking only whether the
+    clock is expired now lets ``elapsed=595, interval=5`` sleep to the exact 600-second boundary and
+    still post an already-expired device code. ``>=`` rather than ``>`` is therefore
+    load-bearing."""
+    sched = _scheduler(interval=5, expires_in=600)
+    decision = sched.next_attempt(elapsed_seconds=elapsed)
+    assert decision.action == ACTION_STOP
+    assert decision.wait_seconds == 0
+    assert decision.reason_code == "secpctl_device_code_expired"
+    assert sched.attempts == 0
+
+
+def test_a_poll_strictly_before_the_deadline_is_still_licensed():
+    """Boundary control: closing the expiry window must not shorten the RFC-licensed interval or
+    reject the final poll when its scheduled time remains strictly before expiry."""
+    sched = _scheduler(interval=5, expires_in=600)
+    elapsed = 594.999
+    decision = sched.next_attempt(elapsed_seconds=elapsed)
+    assert decision.action == ACTION_POLL
+    assert decision.wait_seconds == 5
+    assert elapsed + decision.wait_seconds < 600
+    assert sched.attempts == 1
+
+
+def test_deadline_uses_the_permanently_increased_slow_down_interval():
+    """A stale copy of the original interval would license a poll at expiry after ``slow_down``.
+    The current, permanently increased interval is authoritative for pacing and the deadline."""
+    sched = _scheduler(interval=5, expires_in=15)
+    sched.record_error("slow_down")
+    assert sched.interval_seconds == 10
+    decision = sched.next_attempt(elapsed_seconds=5)
+    assert decision.action == ACTION_STOP
+    assert decision.reason_code == "secpctl_device_code_expired"
+    assert sched.attempts == 0
 
 
 def test_polling_stops_when_the_attempt_budget_is_exhausted():
@@ -272,7 +377,8 @@ def test_polling_stops_when_the_attempt_budget_is_exhausted():
 def test_scheduler_is_built_from_a_parsed_authorization():
     sched = DevicePollScheduler.for_authorization(_parse(_payload(interval=7, expires_in=300)))
     assert sched.interval_seconds == 7
-    assert sched.next_attempt(elapsed_seconds=299).action == ACTION_POLL
+    assert sched.next_attempt(elapsed_seconds=292.999).action == ACTION_POLL
+    assert sched.next_attempt(elapsed_seconds=293).action == ACTION_STOP
     assert sched.next_attempt(elapsed_seconds=300).action == ACTION_STOP
 
 
@@ -287,9 +393,16 @@ def test_scheduler_refuses_out_of_bound_construction(interval, expires_in, attem
         )
 
 
-def test_scheduler_refuses_a_non_numeric_elapsed_time():
-    with pytest.raises(ManagementError):
-        _scheduler().next_attempt(elapsed_seconds="0")
+@pytest.mark.parametrize(
+    "elapsed_seconds",
+    [float("nan"), float("inf"), float("-inf"), -1, -0.001, True, False, "0", None],
+)
+def test_scheduler_refuses_non_finite_negative_bool_or_non_numeric_elapsed_time(elapsed_seconds):
+    scheduler = _scheduler()
+    with pytest.raises(ManagementError) as ei:
+        scheduler.next_attempt(elapsed_seconds=elapsed_seconds)
+    assert _reason(ei) == "secpctl_device_authorization_invalid"
+    assert scheduler.attempts == 0
 
 
 def test_scheduler_performs_no_io():

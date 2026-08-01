@@ -23,9 +23,10 @@ Three properties are worth stating because they are easy to lose in a later edit
 * **Polling is bounded three ways** — the provider's ``interval`` (with the permanent ``slow_down``
   increase), a LOCAL deadline from ``expires_in``, and an attempt budget — and is additionally
   cancellable, so neither a hostile provider nor an inattentive operator can pin the CLI.
-* **Persistence is the last step and has no alternative.** The token is verified before it is
-  offered to the store, and a store that refuses ends the command. There is deliberately no
-  ``except`` around the persist call that writes the token somewhere else instead.
+* **Persistence is the last step and has no alternative.** The token is verified and resolved by
+  the controller's authoritative ``/api/v1/me`` before it is offered to the store. An unavailable
+  store refuses before issuance; a post-issuance refusal best-effort revokes only the new token.
+  There is deliberately no fallback location.
 * **Logout revokes before it deletes.** Deleting the local copy does not end the session — the token
   stays valid at the provider until it expires — so ``auth logout`` first asks the issuer to revoke
   it (RFC 7009) and only then removes it from the keystore. Local deletion is unconditional, so a
@@ -51,7 +52,11 @@ from secp_management.device_grant import (
     DeviceAuthorization,
     DevicePollScheduler,
 )
-from secp_management.operator_auth import OperatorAccessToken
+from secp_management.operator_auth import (
+    OperatorAccessToken,
+    OperatorAccessTokenProvider,
+    SealedOperatorAccessTokenProvider,
+)
 from secp_management.operator_credential_store import (
     OperatorCredentialStore,
     SealedOperatorCredentialStore,
@@ -63,6 +68,7 @@ from secp_management.operator_credential_store import (
 from secp_management.operator_device_auth import (
     OPERATOR_CLI_CLIENT_ID,
     DeviceAuthorizationClient,
+    ResolvedOperatorPrincipal,
 )
 from secp_management.operator_token_revoke import (
     OUTCOME_UNAVAILABLE,
@@ -112,12 +118,17 @@ _EXIT_BY_REASON: dict[str, int] = {
     # --- token verification ---
     "secpctl_operator_token_expired": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_invalid": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_operator_token_unsafe": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_operator_auth_unavailable": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_signature_invalid": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_algorithm_refused": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_claims_invalid": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_client_invalid": EXIT_REFUSED,
     "secpctl_operator_token_key_unknown": EXIT_AUTH_UNAVAILABLE,
     "secpctl_operator_token_jwks_invalid": EXIT_MALFORMED,
+    # --- authoritative controller principal resolution ---
+    "secpctl_operator_principal_unavailable": EXIT_AUTH_UNAVAILABLE,
+    "secpctl_operator_principal_invalid": EXIT_MALFORMED,
     # --- revocation (RFC 7009). These never fail the command — logout deletes locally regardless —
     # but they are categorised so a reason code that DOES surface has a stable exit.
     "secpctl_revocation_provider_unavailable": EXIT_CONTROLLER_UNAVAILABLE,
@@ -150,17 +161,13 @@ _EXIT_BY_REASON: dict[str, int] = {
 }
 
 
-#: Store refusals that mean there is genuinely NO LIVE credential — nothing was stored, or what was
-#: stored has already expired and is therefore already unusable. EVERY other store refusal means the
-#: credential could not be READ, which is a different fact: a live token may still be sitting there.
+#: Store refusals that mean there is genuinely NO credential material to submit for revocation.
+#: EVERY other store refusal means the credential could not be read, which is a different fact: a
+#: live token may still be sitting there. Local expiry is deliberately NOT enough: the workstation
+#: clock can be ahead of the issuer, and RFC 7009 revocation is safe for an already-dead token.
 #: Keeping this set explicit (rather than treating "any refusal" as "nothing to revoke") is what
 #: stops ``auth logout`` reporting ``token_still_live: false`` over a live, un-revoked credential.
-_NOTHING_LIVE_TO_REVOKE = frozenset(
-    {
-        "secpctl_credential_absent",
-        "secpctl_credential_expired",
-    }
-)
+_NOTHING_LIVE_TO_REVOKE = frozenset({"secpctl_credential_absent"})
 
 #: Stable, secret-free remedies for the refusals an operator can actually DO something about. A
 #: bounded reason code says what failed; without this it never says what to do next — and these are
@@ -180,7 +187,9 @@ _REMEDY_BY_REASON: dict[str, str] = {
         "until it expires and cannot be revoked from here"
     ),
     "secpctl_credential_record_invalid": (
-        "the stored credential could not be read and was removed; run 'secpctl auth login' again"
+        "the credential record is invalid; if this was not a confirmed logout, run "
+        "'secpctl auth logout --write --confirm' to remove any stored entry, then run "
+        "'secpctl auth login' again"
     ),
     "secpctl_credential_account_mismatch": (
         "the keystore entry belongs to a different controller and was not used; run "
@@ -287,6 +296,11 @@ class AuthCliDeps:
     #: surface is scanned for that), and the env read already lives in ``cli.py`` where the token
     #: provider is composed. See :func:`auth_status` for why it is reported.
     token_file_active: Callable[[], bool | None] = _token_file_unknown
+    #: The exact token-file provider selected by production composition. It is consulted only when
+    #: the probe above says that provider is selected; the sealed default exposes no credential.
+    token_file_provider: OperatorAccessTokenProvider = field(
+        default_factory=SealedOperatorAccessTokenProvider
+    )
 
 
 @dataclass(frozen=True)
@@ -329,21 +343,22 @@ def _prompt_payload(authorization: DeviceAuthorization) -> dict:
 #: The provider an AUTHENTICATED command will use, as reported by ``auth status``.
 PROVIDER_OS_KEYSTORE = "os_keystore"
 PROVIDER_TOKEN_FILE = "token_file"
+PROVIDER_UNAVAILABLE = "unavailable"
 #: The probe did not run, or the deps did not compose — so which provider is live is NOT KNOWN.
 PROVIDER_UNKNOWN = "unknown"
 
 
-def _active_provider_report(deps: AuthCliDeps) -> dict:
+def _active_provider_report(deps: AuthCliDeps, status: StoredCredentialStatus) -> dict:
     """Name the provider authenticated commands will actually use, and flag a silent override.
 
     ``token_file_override_active`` is the operator-facing warning: when it is true, ``auth login``
     can succeed and store a perfectly good credential that NOTHING will use, because the explicitly
     selected token file wins. Without this the two facts never appear together.
 
-    THREE values, not two. A failed probe and a sealed composition both mean the answer is UNKNOWN,
-    and they must not report ``os_keystore``/``false`` — the reassuring pair — because that is a
-    positive claim made precisely when nothing was established. ``token_file_override_active`` is
-    OMITTED rather than set false when unknown, so no boolean can be read as a settled answer.
+    A failed probe means UNKNOWN; a validated absent override plus an unavailable store means
+    UNAVAILABLE. Neither may report ``os_keystore`` — the reassuring answer — because that is a
+    positive claim made precisely when no usable keystore exists. ``token_file_override_active`` is
+    omitted when unknown so no boolean can be read as a settled answer.
     """
     try:
         file_active = deps.token_file_active()
@@ -351,6 +366,11 @@ def _active_provider_report(deps: AuthCliDeps) -> dict:
         file_active = None
     if file_active is None:
         return {"active_token_provider": PROVIDER_UNKNOWN}
+    if not file_active and not status.available:
+        return {
+            "active_token_provider": PROVIDER_UNAVAILABLE,
+            "token_file_override_active": False,
+        }
     return {
         "active_token_provider": PROVIDER_TOKEN_FILE if file_active else PROVIDER_OS_KEYSTORE,
         "token_file_override_active": bool(file_active),
@@ -375,18 +395,66 @@ def _discover(deps: AuthCliDeps, locator: ControllerApiLocator) -> tuple[Any, An
     return client, authority, client.discover(authority)
 
 
-def _authenticate(
-    deps: AuthCliDeps, client: Any, endpoints: Any, authority: Any
-) -> tuple[str, Any]:
-    """Run the interactive grant and VERIFY the issued token. Returns ``(token, verified)``.
-
-    Verification happens here, before the caller can reach a store, so no caller can persist an
-    unverified token by forgetting a step (ADR-028 §3).
-    """
+def _issue_token(deps: AuthCliDeps, client: Any, endpoints: Any) -> str:
+    """Run the interactive grant and return its newly issued raw bearer to the immediate caller."""
     authorization = client.request_device_authorization(endpoints)
     deps.present(_prompt_payload(authorization))
-    token = _poll_for_token(deps, client, endpoints, authorization)
-    return token, _verify(deps, client, endpoints, authority, token)
+    return _poll_for_token(deps, client, endpoints, authorization)
+
+
+def _verify_and_resolve_issued_token(
+    deps: AuthCliDeps,
+    client: Any,
+    endpoints: Any,
+    authority: Any,
+    raw_token: str,
+) -> tuple[OperatorAccessToken, Any, ResolvedOperatorPrincipal]:
+    """Verify an issued token and resolve its authoritative controller principal.
+
+    The raw token remains with the caller so ANY refusal here can compensate by revoking that exact
+    newly issued credential. Token claims never supply organization or permissions.
+    """
+    verified = _verify(deps, client, endpoints, authority, raw_token)
+    token = OperatorAccessToken(raw_token)
+    principal = client.resolve_principal(token)
+    return token, verified, principal
+
+
+def _compensate_issued_refusal(
+    command: str,
+    reason_code: str,
+    *,
+    client: Any,
+    endpoints: Any,
+    raw_token: str,
+) -> tuple[int, dict]:
+    """Best-effort revoke a newly issued token that the command cannot safely retain.
+
+    This never deletes or overwrites an existing local credential. If revocation cannot be
+    established, the outstanding live-token reason becomes primary while the original bounded
+    refusal is retained separately.
+    """
+    try:
+        outcome = client.revoke_token(endpoints, raw_token)
+    except ManagementError as exc:
+        outcome = RevocationOutcome(OUTCOME_UNAVAILABLE, reason_code=exc.reason_code)
+    except Exception:  # noqa: BLE001 - compensation never leaks token/provider/exception detail
+        outcome = RevocationOutcome(
+            OUTCOME_UNAVAILABLE,
+            reason_code="secpctl_revocation_provider_unavailable",
+        )
+
+    primary_reason = reason_code
+    report = {
+        "command": command,
+        "credential_stored": False,
+        **outcome.to_report(),
+    }
+    if outcome.token_still_live:
+        report["credential_refusal_reason_code"] = reason_code
+        primary_reason = outcome.reason_code or "secpctl_revocation_refused"
+    report["reason_code"] = primary_reason
+    return exit_for(primary_reason), _with_remedy(report, primary_reason)
 
 
 def auth_login(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
@@ -397,13 +465,20 @@ def auth_login(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
     discovers the issuer's endpoints, then reports whether the provider actually advertises the
     device grant. It never starts a grant, so it never produces a user code.
 
-    ``--write --confirm`` runs the full grant, verifies the token, and offers it to the store. When
-    no OS keystore is available the store refuses and the token is discarded — there is deliberately
-    no fallback location.
+    ``--write --confirm`` first requires an available store, then runs the full grant, verifies the
+    token, resolves its controller principal, and offers it to the store. A refusal after issuance
+    best-effort revokes that new token; there is deliberately no fallback location.
     """
     command = "auth login"
     try:
         selection = _select(deps)
+        status = selection.store.describe()
+        if gate.is_write and not status.available:
+            # Do not mint a live provider credential when there is nowhere safe to retain it.
+            return _refused(
+                command,
+                status.unavailable_reason or "secpctl_credential_store_unavailable",
+            )
         client, authority, endpoints = _discover(deps, selection.locator)
 
         if not gate.is_write:
@@ -411,22 +486,34 @@ def auth_login(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
                 "command": command,
                 "mode": "dry_run",
                 "device_grant_supported": bool(endpoints.device_authorization_endpoint),
-                **_credential_report(selection.account, selection.store.describe()),
+                **_credential_report(selection.account, status),
             }
 
-        token, verified = _authenticate(deps, client, endpoints, authority)
+        raw_token = _issue_token(deps, client, endpoints)
+        try:
+            token, verified, principal = _verify_and_resolve_issued_token(
+                deps, client, endpoints, authority, raw_token
+            )
 
-        # The one place the token is persisted. There is deliberately no `except` here that writes
-        # it somewhere else instead: a store that refuses ends the command.
-        selection.store.store(
-            OperatorAccessToken(token),
-            expires_at_epoch=verified.expires_at_epoch,
-            subject_fingerprint=subject_fingerprint(verified.subject),
-        )
+            # The one place the token is persisted. There is deliberately no fallback location.
+            selection.store.store(
+                token,
+                expires_at_epoch=verified.expires_at_epoch,
+                subject_fingerprint=subject_fingerprint(verified.subject),
+            )
+        except ManagementError as exc:
+            return _compensate_issued_refusal(
+                command,
+                exc.reason_code,
+                client=client,
+                endpoints=endpoints,
+                raw_token=raw_token,
+            )
         return EXIT_OK, {
             "command": command,
             "mode": "written",
             "authenticated": True,
+            **principal.to_report(),
             **_credential_report(selection.account, selection.store.describe()),
         }
     except ManagementError as exc:
@@ -449,6 +536,15 @@ def auth_refresh(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
     try:
         selection = _select(deps)
         current = selection.store.describe()
+        if not current.available:
+            # ``describe`` is intentionally non-raising, but refresh must not turn "could not read
+            # the keyring" into "no credential exists". Preserve the exact bounded store refusal
+            # captured by the status projection; third-party stores without one fail closed to the
+            # generic unavailable reason.
+            return _refused(
+                command,
+                current.unavailable_reason or "secpctl_credential_store_unavailable",
+            )
         if not current.has_credential:
             return _refused(command, "secpctl_credential_absent")
 
@@ -460,21 +556,54 @@ def auth_refresh(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
                 **_credential_report(selection.account, current),
             }
 
-        client, authority, endpoints = _discover(deps, selection.locator)
-        token, verified = _authenticate(deps, client, endpoints, authority)
-        fingerprint = subject_fingerprint(verified.subject)
-        if current.subject_fingerprint and fingerprint != current.subject_fingerprint:
-            return _refused(command, "secpctl_credential_subject_changed")
+        if not current.subject_fingerprint:
+            # Refresh is an identity-preserving replacement, so a legacy/corrupt record without the
+            # only stored identity binding cannot safely authorize an overwrite.
+            return _refused(command, "secpctl_credential_record_invalid")
 
-        selection.store.store(
-            OperatorAccessToken(token),
-            expires_at_epoch=verified.expires_at_epoch,
-            subject_fingerprint=fingerprint,
-        )
+        client, authority, endpoints = _discover(deps, selection.locator)
+        raw_token = _issue_token(deps, client, endpoints)
+        try:
+            token, verified, principal = _verify_and_resolve_issued_token(
+                deps, client, endpoints, authority, raw_token
+            )
+            fingerprint = subject_fingerprint(verified.subject)
+        except ManagementError as exc:
+            return _compensate_issued_refusal(
+                command,
+                exc.reason_code,
+                client=client,
+                endpoints=endpoints,
+                raw_token=raw_token,
+            )
+        if fingerprint != current.subject_fingerprint:
+            return _compensate_issued_refusal(
+                command,
+                "secpctl_credential_subject_changed",
+                client=client,
+                endpoints=endpoints,
+                raw_token=raw_token,
+            )
+
+        try:
+            selection.store.store(
+                token,
+                expires_at_epoch=verified.expires_at_epoch,
+                subject_fingerprint=fingerprint,
+            )
+        except ManagementError as exc:
+            return _compensate_issued_refusal(
+                command,
+                exc.reason_code,
+                client=client,
+                endpoints=endpoints,
+                raw_token=raw_token,
+            )
         return EXIT_OK, {
             "command": command,
             "mode": "written",
             "authenticated": True,
+            **principal.to_report(),
             **_credential_report(selection.account, selection.store.describe()),
         }
     except ManagementError as exc:
@@ -509,6 +638,11 @@ def _poll_for_token(
             if decision.action == ACTION_STOP:
                 raise ManagementError(decision.reason_code)
             deps.sleep(decision.wait_seconds)
+            # Cancellation can arrive while the scheduler-directed sleep is in progress. Recheck
+            # at the actual network boundary so a cancelled grant cannot post one final token
+            # request and persist its answer.
+            if deps.cancelled():
+                raise ManagementError("secpctl_device_authorization_cancelled")
             token, error = client.request_token(endpoints, authorization.device_code)
             if not error:
                 return token
@@ -545,8 +679,9 @@ def _verify(
 
 def auth_status(deps: AuthCliDeps) -> tuple[int, dict]:
     """``secpctl auth status`` — read-only. Reports the credential store's bounded, secret-free
-    state for the selected controller; it makes no mutation, starts no grant, opens no socket, and
-    never prints a token.
+    state for the selected controller and, for a readable live credential, resolves the controller's
+    authoritative database-backed principal. It makes no mutation, starts no grant, and never
+    prints a token.
 
     An UNRECORDED locator is not an error here: the backend is still reportable, and "a keystore is
     available but no controller is selected" is exactly what an operator needs to see on a host that
@@ -559,31 +694,64 @@ def auth_status(deps: AuthCliDeps) -> tuple[int, dict]:
     that reported only keystore state would show nothing wrong. The precedence itself is deliberate
     (the file is an explicit opt-in recovery seam); what was missing was saying which one is live.
 
-    Resolving the authoritative operator principal from ``/api/v1/me`` remains out of scope: the DB
-    is the sole authority for organization, role and permission, and a token claim never determines
-    them. This command reports LOCAL credential state only.
+    The ``/api/v1/me`` request uses only the bootstrap-pinned controller transport. Its result, not
+    token claims, supplies user, organization and permissions. When the protected token-file seam is
+    selected, that exact provider is resolved; otherwise the selected OS-keystore credential is.
     """
     command = "auth status"
     try:
         selection = _select(deps)
-    except ManagementError:
+    except ManagementError as exc:
+        if exc.reason_code != "secpctl_controller_locator_unavailable":
+            # Only a genuinely UNRECORDED locator is a healthy pre-bootstrap status. A present but
+            # corrupt/unsafe locator is a trust-input failure and must never be projected as
+            # ``account_selected: false`` with exit 0.
+            return _refused(command, exc.reason_code)
         backend = _describe_unbound(deps)
         return EXIT_OK, {
             "command": command,
             "mode": "read",
-            **_active_provider_report(deps),
+            "active_principal_resolved": False,
+            **_active_provider_report(deps, backend),
             **_credential_report("", backend),
         }
     try:
         status = selection.store.describe()
     except ManagementError as exc:
         return _refused(command, exc.reason_code)
-    return EXIT_OK, {
+    provider_report = _active_provider_report(deps, status)
+    report = {
         "command": command,
         "mode": "read",
-        **_active_provider_report(deps),
+        "active_principal_resolved": False,
+        **provider_report,
         **_credential_report(selection.account, status),
     }
+    active_provider = provider_report["active_token_provider"]
+    token: OperatorAccessToken | None = None
+    if active_provider == PROVIDER_TOKEN_FILE:
+        try:
+            token = deps.token_file_provider.access_token()
+        except ManagementError as exc:
+            return _refused(command, exc.reason_code)
+    elif (
+        active_provider == PROVIDER_OS_KEYSTORE
+        and status.available
+        and status.has_credential
+        and not status.expired
+    ):
+        try:
+            token = selection.store.access_token()
+        except ManagementError as exc:
+            return _refused(command, exc.reason_code)
+    if token is not None:
+        try:
+            principal = deps.device_client(selection.locator).resolve_principal(token)
+        except ManagementError as exc:
+            return _refused(command, exc.reason_code)
+        report["active_principal_resolved"] = True
+        report.update(principal.to_report(active=True))
+    return EXIT_OK, report
 
 
 def _describe_unbound(deps: AuthCliDeps) -> StoredCredentialStatus:
@@ -593,7 +761,11 @@ def _describe_unbound(deps: AuthCliDeps) -> StoredCredentialStatus:
     try:
         return deps.credential_store.describe()
     except ManagementError:
-        return StoredCredentialStatus(backend="sealed", available=False)
+        return StoredCredentialStatus(
+            backend="sealed",
+            available=False,
+            unavailable_reason="secpctl_credential_store_unavailable",
+        )
 
 
 def _revoke_stored_token(deps: AuthCliDeps, selection: _Selection) -> RevocationOutcome:
@@ -609,11 +781,10 @@ def _revoke_stored_token(deps: AuthCliDeps, selection: _Selection) -> Revocation
     live at the provider, and ``auth logout`` reports it.
     """
     try:
-        token = selection.store.access_token()
+        token = selection.store.revocation_token()
     except ManagementError as exc:
         if exc.reason_code in _NOTHING_LIVE_TO_REVOKE:
-            # Genuinely nothing to revoke: no credential was stored, or the stored one had already
-            # expired and is therefore already unusable.
+            # Genuinely nothing to revoke: no credential material was stored.
             return revocation_not_required()
         # Everything else means the credential could not be READ, not that none exists — a corrupt
         # record, an entry minted for a different controller, a locked or unreachable keystore. A
@@ -656,12 +827,21 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
         selection = _select(deps)
         if not gate.is_write:
             status = selection.store.describe()
+            if not status.available:
+                # An unreadable credential is not an absent credential. A dry run cannot truthfully
+                # say no revocation is planned when a live token may be hidden behind a locked,
+                # failed, or corrupt store.
+                return _refused(
+                    command,
+                    status.unavailable_reason or "secpctl_credential_store_unavailable",
+                )
             return EXIT_OK, {
                 "command": command,
                 "mode": "dry_run",
                 # Stated WITHOUT a network call: a dry run opens no socket, so it reports what the
-                # write path would attempt rather than what the provider would answer.
-                "revocation_planned": bool(status.has_credential and not status.expired),
+                # write path would attempt rather than what the provider would answer. Local expiry
+                # does not suppress the attempt because the issuer's clock is authoritative.
+                "revocation_planned": bool(status.has_credential),
                 **_credential_report(selection.account, status),
             }
         outcome = _revoke_stored_token(deps, selection)

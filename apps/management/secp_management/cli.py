@@ -404,44 +404,69 @@ def _production_auth_deps() -> AuthCliDeps:
     """Compose the operator-auth deps: the real bootstrap-recorded controller locator plus the
     credential store from :func:`build_operator_credential_store`.
 
-    That builder resolves the platform's OS keystore (Windows Credential Manager, macOS Keychain, or
-    the freedesktop Secret Service) or, when none is reachable, the SEALED store — in which case
-    ``auth login`` completes the grant and then refuses to persist, with no plaintext fallback. Any
-    construction failure falls back to the fully sealed defaults, so an unconfigured or non-POSIX
-    host fails closed with a code rather than crashing. No identity, endpoint or trust input is read
-    from a flag or an env var."""
+    That builder resolves the platform's OS keystore (Windows Credential Manager, macOS Keychain,
+    or the freedesktop Secret Service) or, when none is reachable, the SEALED store; ``auth login``
+    then refuses before starting a grant and never falls back to plaintext. The protected token-file
+    selection is likewise composed independently.
+
+    The root-owned locator has a narrower platform surface than those credential providers. If its
+    hardened filesystem cannot be constructed (notably on Windows), ONLY the locator is sealed:
+    locator-dependent commands still refuse, while pre-bootstrap ``auth status`` can truthfully
+    report the selected credential backend and token provider. No identity, endpoint or trust input
+    is read from a flag or an env var."""
+    import os
+
+    from secp_commissioning.runtime import FilesystemError, RealFilesystem
+
+    from secp_management.controller_api_locator import (
+        ControllerApiLocatorError,
+        ControllerApiLocatorProvider,
+        FileControllerApiLocatorProvider,
+        SealedControllerApiLocatorProvider,
+    )
+    from secp_management.operator_auth import (
+        OPERATOR_TOKEN_FILE_ENV,
+        OperatorAccessTokenProvider,
+        ProtectedTokenFileProvider,
+        SealedOperatorAccessTokenProvider,
+    )
+    from secp_management.operator_credential_store import build_operator_credential_store
+
+    credential_store = build_operator_credential_store()
+
+    # Snapshot one selection for both the report probe and the provider status will actually read.
+    # Constructing a protected provider validates only the path; no file/token I/O occurs until
+    # `auth status` resolves the selected active principal.
+    token_path = os.environ.get(OPERATOR_TOKEN_FILE_ENV, "")
+    token_file_provider: OperatorAccessTokenProvider = SealedOperatorAccessTokenProvider()
+    token_file_state: bool | None = False
+    if token_path:
+        try:
+            token_file_provider = ProtectedTokenFileProvider(token_path)
+        except ManagementError:
+            token_file_state = None
+        else:
+            token_file_state = True
+
+    locator_provider: ControllerApiLocatorProvider = SealedControllerApiLocatorProvider()
+    # A coding defect must be LOUD, never a silent locator degradation. Only the bounded
+    # filesystem/locator refusals at this construction boundary become a sealed locator.
     try:
-        import os
+        locator_provider = FileControllerApiLocatorProvider(RealFilesystem())
+    except (FilesystemError, ControllerApiLocatorError):
+        # These are the two bounded environmental contracts at this construction boundary. Anything
+        # else is a programming/packaging defect and must remain loud.
+        pass
 
-        from secp_commissioning.runtime import RealFilesystem
-
-        from secp_management.controller_api_locator import FileControllerApiLocatorProvider
-        from secp_management.operator_auth import OPERATOR_TOKEN_FILE_ENV
-        from secp_management.operator_credential_store import build_operator_credential_store
-
-        return AuthCliDeps(
-            credential_store=build_operator_credential_store(),
-            locator_provider=FileControllerApiLocatorProvider(RealFilesystem()),
-            # The env read lives HERE, beside the composition it governs — `auth_cli` must never
-            # touch the environment. `auth status` reports the result so an operator can see that a
-            # token file is overriding the keystore they just logged in to.
-            token_file_active=lambda: bool(os.environ.get(OPERATOR_TOKEN_FILE_ENV, "")),
-        )
-    # A coding defect must be LOUD, never a silent total degradation. This `except` exists for
-    # legitimate environmental failures (a non-POSIX host, an unprovisioned filesystem), but it
-    # previously swallowed programming errors too: an `os` name that was out of scope here would
-    # have sealed the auth deps on every real host while every test passed, visible nowhere. None of
-    # these is ever a legitimate runtime condition in a first-party composition, so they propagate
-    # instead of being converted into a sealed default.
-    #
-    # `AssertionError` is in the list for a second reason: a TEST TRIPWIRE installed on a seam
-    # inside this region raises into this handler, so a broad `except` makes it inert — the guard
-    # looks green and proves nothing. Letting it through is what keeps such a tripwire able to
-    # reach its assertion.
-    except (NameError, AttributeError, ImportError, AssertionError):
-        raise
-    except Exception:  # noqa: BLE001 - fail closed to the sealed default; commands refuse, bounded
-        return AuthCliDeps()
+    return AuthCliDeps(
+        credential_store=credential_store,
+        locator_provider=locator_provider,
+        # The env read lives HERE, beside the composition it governs — `auth_cli` must never touch
+        # the environment. `auth status` reports the result so an operator can see that a token file
+        # is overriding the keystore they just logged in to.
+        token_file_active=lambda: token_file_state,
+        token_file_provider=token_file_provider,
+    )
 
 
 def _controller_install_engine_deps() -> EngineDeps | None:
@@ -585,6 +610,20 @@ _HUMAN_WARNINGS: dict[str, dict[object, str]] = {
 }
 
 
+def _human_scalar(value: str | int | float | bool | None) -> str:
+    """Render one scalar without allowing its bytes to control the terminal.
+
+    Removing JSON's surrounding quotes preserves the established ``key=value`` layout while
+    retaining JSON's deterministic escaping of quotes, backslashes, C0/C1 controls, and every
+    non-ASCII code point (including bidi controls).  Consequently an untrusted scalar remains on
+    one physical report line and cannot manufacture a second ``[command] exit=...`` record.
+    """
+    if isinstance(value, str):
+        encoded = json.dumps(value, ensure_ascii=True)
+        return encoded[1:-1]
+    return str(value)
+
+
 def _render_human(exit_code: int, payload: dict) -> str:
     """Render a report for a terminal.
 
@@ -611,13 +650,25 @@ def _render_human(exit_code: int, payload: dict) -> str:
     can read out of their own configuration; it identifies a service, not a secret anyone holds.
     Fingerprinting the first and not the second is therefore consistent, and the guard above is what
     keeps the line where it was drawn. Neither is a secret, and nothing here prints one.
+
+    Scalar strings are JSON-escaped without their surrounding quotes. This keeps the familiar
+    ``key=value`` form for ordinary ASCII while ensuring provider-, controller-, or operator-derived
+    text cannot emit terminal controls or forge an additional physical report line. Warning text is
+    code-owned and deliberately remains multiline.
     """
-    command = payload.get("command", "?")
+    command_value = payload.get("command", "?")
+    command = (
+        _human_scalar(command_value)
+        if command_value is None or isinstance(command_value, (str, int, float, bool))
+        else "?"
+    )
     parts = [f"[{command}] exit={exit_code}"]
     shown = {"command"}
     for key in _HUMAN_LEADING_KEYS:
         if key in payload:
-            parts.append(f"{key}={payload[key]}")
+            value = payload[key]
+            if value is None or isinstance(value, (str, int, float, bool)):
+                parts.append(f"{_human_scalar(key)}={_human_scalar(value)}")
             shown.add(key)
     for key in sorted(payload):
         if key in shown:
@@ -625,7 +676,7 @@ def _render_human(exit_code: int, payload: dict) -> str:
         value = payload[key]
         # Only scalars render as `key=value`; a nested structure belongs in `--json`.
         if value is None or isinstance(value, (str, int, float, bool)):
-            parts.append(f"{key}={value}")
+            parts.append(f"{_human_scalar(key)}={_human_scalar(value)}")
 
     line = " ".join(str(p) for p in parts)
     warnings = [
