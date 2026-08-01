@@ -2,10 +2,14 @@
 
 Evidence records what a reconciliation decided and what it decided it *from*, in a form safe to
 persist, serve and audit. Like the control plane's existing redacted evidence documents, every
-value is a version, a closed code, a count, a digest or a canonical timestamp — never an element
-reference, a facet value, a provider identity, a path, an endpoint, an address, key material or an
-exception. Drift is therefore auditable as a distribution over the closed vocabularies without the
-evidence itself becoming a channel for what was observed.
+value is a version, a closed code, a count, a digest, a canonical timestamp, a boolean derived from
+a closed code, or the control plane's own ``instance_id`` — never an element reference, a facet
+value, a provider identity, a path, an endpoint, an address, key material or an exception. Drift is
+therefore auditable as a distribution over the closed vocabularies without the evidence itself
+becoming a channel for what was observed.
+
+The exact key set of both documents is pinned by ``tests/test_reconciliation_drift_and_planning.py``
+so a field added here is a conscious decision rather than a quiet widening of that list.
 
 A refusal produces evidence too. A reconciliation that refused is a fact worth keeping, and its
 document records the bounded code plus whether a fresh observation could plausibly clear it.

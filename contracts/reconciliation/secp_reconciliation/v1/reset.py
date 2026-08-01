@@ -2,8 +2,10 @@
 
 A reset intent is the *authorization* artefact, not the payload. Like the control plane's existing
 change-set approvals, it binds an exact content address — here the ``plan_digest``, which in turn
-binds the exact desired state, observation and drift report the plan came from. It therefore
-carries counts and digests only: no element reference, no facet value, no provider identity.
+binds the exact desired state, observation and drift report the plan came from. Every value it
+carries is a version, a closed code, a count, a digest, a canonical timestamp or the control
+plane's own ``instance_id``: no element reference, no facet value, no provider identity. Its exact
+key set is pinned by ``tests/test_reconciliation_drift_and_planning.py``.
 
 It also has its own refusal boundaries. An instance-wide reset over a plan that has deferred
 elements would sweep across resources the planner deliberately declined to touch, so it refuses;

@@ -1,7 +1,11 @@
 """Drift classification (v1): verified desired + observed state -> a bounded drift report.
 
-Classification is *total* — it never refuses, because refusal is the verification gate's job and
-has already happened by the time a :class:`~secp_reconciliation.v1.state.VerifiedStatePair` exists.
+Classification is total *over drift*: every disagreement it can see becomes a finding, and there is
+no disagreement it declines to classify. It is not refusal-free — :func:`classify_drift` re-checks
+the pair's binding digest first and refuses ``verification_token_invalid`` on a token whose contents
+were swapped after verification. That is a precondition check, not a classification outcome: once
+the pair is genuinely verified, classification always produces a report.
+
 What classification must never do is invent agreement: a desired facet with no observed counterpart
 is ``indeterminate``, not "in sync", and the planner refuses on it.
 

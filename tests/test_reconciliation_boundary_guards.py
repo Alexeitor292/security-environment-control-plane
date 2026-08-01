@@ -183,9 +183,34 @@ ALLOWED_STDLIB_IMPORTS = frozenset(
     {"__future__", "dataclasses", "datetime", "enum", "hashlib", "ipaddress", "json"}
 )
 
-# First-party packages that are part of the surface being scanned, so importing them adds no
-# dependency the scan has not already covered.
+# First-party packages that are part of the surface being scanned.
 SCANNED_PACKAGES = frozenset({"secp_reconciliation", "secp_plugin_simulator"})
+
+# Which first-party packages each scanned package may import. This is a *layering* rule, and it has
+# to be a per-package map rather than one flat allow-set: the contract is the lower layer, so a
+# plugin may depend on it and it may not depend on a plugin. A flat "these packages are under scan,
+# so importing them adds nothing" set permits both directions, which means the core could import a
+# plugin package -- a layering inversion -- with every guard here still green.
+FIRST_PARTY_IMPORTS_BY_PACKAGE: dict[str, frozenset[str]] = {
+    "secp_reconciliation": frozenset({"secp_reconciliation"}),
+    "secp_plugin_simulator": frozenset({"secp_plugin_simulator", "secp_reconciliation"}),
+}
+
+
+def _first_party_allowed(module_name: str) -> frozenset[str]:
+    return FIRST_PARTY_IMPORTS_BY_PACKAGE[module_name.split(".", 1)[0]]
+
+
+def test_the_first_party_layering_is_declared_for_every_scanned_package_and_is_asymmetric() -> None:
+    """The rule the map exists to express, asserted directly: a plugin may import the contract, and
+    the contract may not import a plugin. A symmetric rule would not be a layering at all."""
+    assert set(FIRST_PARTY_IMPORTS_BY_PACKAGE) == SCANNED_PACKAGES
+    assert "secp_reconciliation" in FIRST_PARTY_IMPORTS_BY_PACKAGE["secp_plugin_simulator"]
+    assert "secp_plugin_simulator" not in FIRST_PARTY_IMPORTS_BY_PACKAGE["secp_reconciliation"]
+    for package, allowed in FIRST_PARTY_IMPORTS_BY_PACKAGE.items():
+        assert package in allowed, package
+        assert allowed <= SCANNED_PACKAGES, package
+
 
 # Narrow, reviewed exceptions as ``(module, imported top-level name)`` pairs. A bare module name
 # would exempt a whole file, and a bare import name would exempt it everywhere — a pair exempts
@@ -205,6 +230,34 @@ def test_every_import_exception_is_a_module_and_name_pair() -> None:
         assert isinstance(entry, tuple)
         assert len(entry) == 2
         assert all(isinstance(part, str) and part for part in entry)
+
+
+def test_the_exception_set_is_exactly_the_reviewed_one_the_adr_describes() -> None:
+    """ADR-029 states how many exceptions exist and which package each belongs to. That is a
+    countable claim, so it is counted here rather than left to a reader: a fourth exception, or a
+    contract-side one beyond the single `topology_adapter` seam, fails until the ADR is updated
+    with it.
+    """
+    assert set(IMPORT_EXCEPTIONS) == {
+        ("secp_reconciliation.v1.topology_adapter", "secp_plugin_api"),
+        ("secp_plugin_simulator.plugin", "secp_plugin_api"),
+        ("secp_plugin_simulator.plugin", "secp_scenario_schema"),
+    }
+    contract_side = [
+        entry for entry in IMPORT_EXCEPTIONS if entry[0].startswith("secp_reconciliation.")
+    ]
+    assert contract_side == [("secp_reconciliation.v1.topology_adapter", "secp_plugin_api")]
+
+    adr = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "adr"
+        / "ADR-029-reconciliation-and-drift-foundation.md"
+    )
+    body = " ".join(adr.read_text(encoding="utf-8").replace("`", "").split())
+    assert "three of them, of which this milestone adds one" in body
+    assert len(IMPORT_EXCEPTIONS) == 3
+    assert "a plugin may import the contract; the contract may not import a plugin" in body
 
 
 def _package_sources() -> list[tuple[str, Path]]:
@@ -245,8 +298,9 @@ def test_the_core_imports_only_pure_computation() -> None:
                 imported = [(statement.module or "").split(".", 1)[0]]
             else:
                 continue
+            allowed_first_party = _first_party_allowed(module_name)
             for name in imported:
-                if name in ALLOWED_STDLIB_IMPORTS or name in SCANNED_PACKAGES:
+                if name in ALLOWED_STDLIB_IMPORTS or name in allowed_first_party:
                     continue
                 if (module_name, name) in IMPORT_EXCEPTIONS:
                     continue
@@ -277,11 +331,12 @@ def test_no_loaded_module_object_in_the_core_references_an_unallowed_module() ->
     violations: list[tuple[str, str]] = []
     for module_name, _ in _package_sources():
         module = importlib.import_module(module_name)
+        allowed_first_party = _first_party_allowed(module_name)
         for attribute, value in vars(module).items():
             if not isinstance(value, types.ModuleType):
                 continue
             top_level = value.__name__.split(".", 1)[0]
-            if top_level in ALLOWED_STDLIB_IMPORTS or top_level in SCANNED_PACKAGES:
+            if top_level in ALLOWED_STDLIB_IMPORTS or top_level in allowed_first_party:
                 continue
             if (module_name, top_level) in IMPORT_EXCEPTIONS:
                 continue

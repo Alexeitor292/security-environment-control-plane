@@ -55,9 +55,11 @@ Refusals carry only a bounded `reconciliation_*` code — no path, endpoint, add
 provider value or raw exception — following the control plane's existing redacted-refusal
 convention. Verification happens before comparison: an input whose provenance, instance identity,
 provider, fidelity, freshness or internal consistency cannot be established refuses at the gate
-rather than reaching classification. Classification then cannot refuse (it accepts only a verified
-pair), and planning refuses again on drift no plan can honestly resolve — an identity conflict, an
-indeterminate facet, or a change set exceeding the scope's declared budget.
+rather than reaching classification. Classification is then total *over drift* — it declines to
+classify no disagreement — though it is not refusal-free: it re-checks the pair's binding digest and
+refuses a token whose contents were swapped after verification. Planning refuses again on drift no
+plan can honestly resolve — an identity conflict, an indeterminate facet, or a change set exceeding
+the scope's declared budget.
 
 ### No removal, by construction
 
@@ -70,11 +72,16 @@ between recorded and observed state is an operator decision rather than an autom
 
 ### Reset intent and evidence
 
-Both are versioned, machine-readable and content-addressed, and both carry only versions, closed
-codes, counts, digests and canonical timestamps. A reset intent is an authorization bound to an
-exact `plan_digest`, mirroring how change-set approvals bind an exact `change_set_hash`; it is not
-the payload. A refusal produces evidence too, recording the bounded code and whether a fresh
-observation could plausibly clear it.
+Both are versioned, machine-readable and content-addressed. Every value in them is a version, a
+closed code, a count, a digest, a canonical timestamp, a boolean derived from a closed code, or the
+control plane's own instance identifier — and never an element reference, a facet value, a provider
+identity, a path, an endpoint, an address, key material or an exception. The exact key set of each
+of the three documents is pinned by test, so a field added to one is a conscious decision rather
+than a quiet widening.
+
+A reset intent is an authorization bound to an exact `plan_digest`, mirroring how change-set
+approvals bind an exact `change_set_hash`; it is not the payload. A refusal produces evidence too,
+recording the bounded code and whether a fresh observation could plausibly clear it.
 
 ### Simulator-only execution
 
@@ -84,8 +91,12 @@ structurally incapable of reaching a provider rather than configured not to:
 - every type in its public signatures — and the whole closure of those types under their own
   fields — is a builtin scalar, an enum or a frozen dataclass, so there is no parameter through
   which a port, context, transport or callable could arrive;
-- the reconciliation packages import only pure-computation standard-library modules, with the
-  plugin-contract seam declared as a single reviewed `(module, import)` exception;
+- the reconciliation packages import only pure-computation standard-library modules and each other
+  along a declared layering (a plugin may import the contract; the contract may not import a
+  plugin), with every remaining edge listed as a reviewed `(module, import)` pair — three of them,
+  of which this milestone adds one, the contract's `topology_adapter` seam; the other two are the
+  pre-existing simulator plugin's, untouched here. A pair exempts one edge, not a whole file or a
+  whole import name, and an exception that no longer matches a real import fails as stale;
 - no code object in either package names an escape (`open`, `getattr`, `__import__`, `socket`,
   `connect`, `Popen`, …), checked on compiled code objects rather than on source text, which
   closes the dynamic-dispatch gap a static import scan leaves open. The scan compiles each package

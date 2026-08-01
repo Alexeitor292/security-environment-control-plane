@@ -7,8 +7,9 @@ topology projection (ADR-008), not any provider's object model.
 The package is layered so each layer can only do one thing:
 
 * :mod:`~secp_reconciliation.v1.state` verifies inputs and refuses; nothing unverified gets past it.
-* :mod:`~secp_reconciliation.v1.classify` compares and is total; it never refuses, and it never
-  reads an absent observation as agreement.
+* :mod:`~secp_reconciliation.v1.classify` compares and is total over drift: it declines to
+  classify no disagreement, and it never reads an absent observation as agreement. It refuses only
+  on a verification token whose contents were swapped after verification.
 * :mod:`~secp_reconciliation.v1.planner` plans and refuses; it executes nothing and holds no port
   or transport through which it could.
 * :mod:`~secp_reconciliation.v1.reset` and :mod:`~secp_reconciliation.v1.evidence` emit versioned,

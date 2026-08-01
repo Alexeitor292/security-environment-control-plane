@@ -585,6 +585,150 @@ def test_a_naive_timestamp_is_read_as_utc_rather_than_as_a_local_time() -> None:
     assert naive_report.observed_digest == aware_report.observed_digest
 
 
+# --- Document shape -------------------------------------------------------------------------------
+# ADR-029 claims every value in these documents is a version, a closed code, a count, a digest, a
+# canonical timestamp, a boolean derived from a closed code, or the control plane's own instance
+# identifier. The leak scan proves no *provider* value appears; these pin the key sets exactly, so a
+# field added to any of the three fails here instead of quietly widening that claim.
+
+RESET_INTENT_KEYS = {
+    "schema_version",
+    "contract_version",
+    "instance_id",
+    "reset_scope",
+    "execution_surface",
+    "disposition",
+    "desired_digest",
+    "observed_digest",
+    "report_digest",
+    "plan_digest",
+    "action_counts",
+    "element_kind_counts",
+    "deferred_count",
+    "issued_at",
+    "expires_at",
+    "intent_digest",
+}
+
+RECONCILIATION_EVIDENCE_KEYS = {
+    "schema_version",
+    "contract_version",
+    "classifier_version",
+    "planner_version",
+    "outcome",
+    "instance_id",
+    "scope_digest",
+    "execution_surface",
+    "desired_digest",
+    "observed_digest",
+    "report_digest",
+    "plan_digest",
+    "disposition",
+    "drift_counts_by_kind",
+    "drift_counts_by_reason",
+    "action_counts",
+    "action_element_counts",
+    "deferred_count",
+    "evaluated_at",
+    "evidence_digest",
+}
+
+REFUSAL_EVIDENCE_KEYS = {
+    "schema_version",
+    "contract_version",
+    "classifier_version",
+    "planner_version",
+    "outcome",
+    "instance_id",
+    "scope_digest",
+    "refusal_code",
+    "retryable_with_fresh_observation",
+    "evaluated_at",
+    "evidence_digest",
+}
+
+
+def test_every_document_carries_exactly_the_reviewed_key_set() -> None:
+    _, report, plan = _run(desired(network(), node()), observed(network(), node("foreign-1")))
+    intent = build_reset_intent(
+        plan=plan,
+        reset_scope=ResetScope.element_set,
+        issued_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
+    )
+    assert set(intent.document()) == RESET_INTENT_KEYS
+    assert (
+        set(
+            build_reconciliation_evidence(scope=scope(), report=report, plan=plan, evaluated_at=NOW)
+        )
+        == RECONCILIATION_EVIDENCE_KEYS
+    )
+    assert (
+        set(
+            build_refusal_evidence(
+                scope=scope(), code=RefusalCode.observation_stale, evaluated_at=NOW
+            )
+        )
+        == REFUSAL_EVIDENCE_KEYS
+    )
+
+
+def test_no_document_value_is_a_free_form_string_outside_the_reviewed_categories() -> None:
+    """The key pin says *which* fields; this says *what may be in them*. Every scalar is an int, a
+    bool, a schema/contract version, a closed code, a `sha256:` digest, a canonical timestamp, or
+    the instance id the caller declared in the scope. Nested values are count maps, so their values
+    are ints. A provider value landing in any field fails here even if the key set was updated.
+    """
+    _, report, plan = _run(desired(network(), node()), observed(network(), node("foreign-1")))
+    documents = [
+        build_reset_intent(
+            plan=plan,
+            reset_scope=ResetScope.element_set,
+            issued_at=NOW,
+            expires_at=NOW + timedelta(hours=1),
+        ).document(),
+        build_reconciliation_evidence(scope=scope(), report=report, plan=plan, evaluated_at=NOW),
+        build_refusal_evidence(scope=scope(), code=RefusalCode.observation_stale, evaluated_at=NOW),
+    ]
+    closed_codes = {
+        member.value
+        for enum in (
+            DriftKind,
+            DriftReason,
+            ElementKind,
+            ActionKind,
+            PlanDisposition,
+            RefusalCode,
+            ResetScope,
+        )
+        for member in enum
+    }
+    allowed_scalars = closed_codes | {
+        "simulator",
+        "planned",
+        "refused",
+        scope().instance_id,
+        NOW.isoformat(),
+        (NOW + timedelta(hours=1)).isoformat(),
+    }
+    versions = {"secp-recon/", "secp-recon/v1"}
+
+    for document in documents:
+        for key, value in document.items():
+            if isinstance(value, dict):
+                assert all(isinstance(count, int) for count in value.values()), key
+                continue
+            if isinstance(value, bool) or isinstance(value, int):
+                continue
+            assert isinstance(value, str), (key, value)
+            if value.startswith("sha256:"):
+                assert len(value) == len("sha256:") + 64, key
+                continue
+            if any(value.startswith(prefix) for prefix in versions):
+                continue
+            assert value in allowed_scalars, (key, value)
+
+
 def test_the_collector_digest_is_part_of_what_the_observation_digest_covers() -> None:
     _, base, _ = _run(desired(network()), observed(network()))
     _, other, _ = _run(
