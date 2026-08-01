@@ -19,6 +19,19 @@ MODE_ADOPTED = "adopted"
 # Exit codes: 0 success (dry-run plan or a completed write/adoption), 2 refused/fail-closed.
 EXIT_OK = 0
 EXIT_REFUSED = 2
+#: A refusal the caller could not have avoided and must not read as a finding: the operator-queue
+#: containment probe did not complete, so NOTHING was observed about which queues the ordinary
+#: worker serves. Still fail-closed and still non-zero — it never certifies — but distinct from
+#: ``EXIT_REFUSED``, which for this dimension means "a containment breach was OBSERVED".
+#:
+#: The exit code is the only channel a shell reads without parsing the report, so conflating the
+#: two here would leave automation paging someone for a containment incident when the real fault is
+#: an unreachable probe. See ``queue_containment`` in ``secpctl status worker``.
+#:
+#: 11 is chosen because ``secpctl`` is ONE binary with ONE exit-code namespace: 0/1/2 are taken
+#: here and by the signer broker, 3-9 by ``enrollment_cli``, and 10/20 by the discovery-activation
+#: CLI. ADDITIVE ONLY — no existing code changes meaning.
+EXIT_CONTAINMENT_UNPROVABLE = 11
 
 
 @dataclass(frozen=True)

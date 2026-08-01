@@ -41,6 +41,29 @@ secpctl evidence  controller|worker
 secpctl rollback  controller|worker                 [--write --confirm]
 ```
 
+### Stable exit codes
+
+Scripts should branch on the exit code; it is the only channel readable without parsing `--json`.
+
+| code | meaning |
+|---|---|
+| `0` | success — a dry-run plan, or a completed write/adoption |
+| `2` | refused, fail-closed. Something was **observed** to be wrong |
+| `11` | **containment unprovable** — the operator-queue probe did not complete, so *nothing* was observed about which queues the ordinary worker serves |
+
+`11` is deliberately distinct from `2`. For the queue-containment dimension a `2` means a breach was
+**observed** — the ordinary worker was seen serving the controlled-live queue — whereas `11` means
+the probe could not run at all (the container runtime was unreachable, or the probe command failed
+inside the container). Both refuse and neither certifies, but they need different responses: `2` is a
+containment incident, `11` is a broken probe. Do not page on `11` as though it were a breach.
+
+The refusal reason is in `dimensions.queue_containment_reason`
+(`queue_probe_command_failed` — the probe ran and exited non-zero; or
+`queue_probe_runtime_unavailable` — the container runtime could not be invoked at all), alongside the
+three-valued `dimensions.queue_containment` (`contained` / `breached` / `unprovable`).
+
+Enrollment commands use a separate, non-overlapping range (`3`–`9`); see `enrollment_cli`.
+
 ## Local controller bootstrap (human-supervised, on the controller host)
 
 1. **Obtain + verify the signed offline release bundle** (no network): `secpctl release verify

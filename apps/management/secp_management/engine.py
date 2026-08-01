@@ -150,6 +150,7 @@ from secp_management.topology import (
     read_seals,
 )
 from secp_management.transaction import (
+    EXIT_CONTAINMENT_UNPROVABLE,
     EXIT_OK,
     EXIT_REFUSED,
     MODE_DRY_RUN,
@@ -3209,6 +3210,18 @@ def _verify_installed_documents(
     return None
 
 
+#: Refusal reason -> its own stable exit code. ADDITIVE: any reason not listed keeps EXIT_REFUSED,
+#: so no existing refusal changes what it exits with.
+_REFUSAL_EXIT_CODES: dict[str, int] = {
+    "worker_ordinary_queue_containment_unprovable": EXIT_CONTAINMENT_UNPROVABLE,
+}
+
+
+def _refusal_exit_code(reason: str | None) -> int:
+    """The exit code for a refusal. Never ``EXIT_OK`` — every branch here is a refusal."""
+    return _REFUSAL_EXIT_CODES.get(reason or "", EXIT_REFUSED)
+
+
 def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
     role = Role.WORKER
     seals = read_seals()
@@ -3306,7 +3319,7 @@ def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
         and record is not None
         and obs is not None
     )
-    return (EXIT_OK if ok else EXIT_REFUSED), {
+    return (EXIT_OK if ok else _refusal_exit_code(drift)), {
         "command": "status",
         "role": "worker",
         "ok": ok,

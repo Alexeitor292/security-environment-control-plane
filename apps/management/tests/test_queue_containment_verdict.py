@@ -44,6 +44,8 @@ from secp_management.adapters import (
     CONTAINMENT_VERDICTS,
     resolve_queue_containment,
 )
+from secp_management.engine import _refusal_exit_code
+from secp_management.transaction import EXIT_CONTAINMENT_UNPROVABLE, EXIT_OK, EXIT_REFUSED
 from test_management_status import _worker_status
 from test_real_observer_production import CommandResult, ObserverRunner, _observer
 
@@ -210,6 +212,73 @@ def test_the_operator_report_distinguishes_the_two_refusals_and_both_exit_nonzer
     assert ok["dimensions"]["queue_containment_reason"] is None
     assert ok["dimensions"]["no_operator_queue_polling"] is True
     assert ok_code == 0
+
+
+# ------------------------------------------------- (3b) the exit code, DERIVED not transcribed
+
+
+def test_the_verdict_to_exit_code_mapping_is_closed_and_derived_by_running_it() -> None:
+    """verdict -> exit code, built by RUNNING each path rather than by typing the pairs.
+
+    A table of expected pairs written by hand is a second copy of the mapping that agrees with
+    itself; this drives ``secpctl status worker`` three times and reads what actually came back.
+    Compared as a whole dict so a fourth verdict, a changed code, or a collapsed pair all fail.
+    """
+    observed = {
+        CONTAINMENT_CONTAINED: _worker_status(prepared_worker_world())[0],
+        CONTAINMENT_BREACHED: _worker_status(
+            prepared_worker_world(
+                ordinary_polls_operator_queue=True,
+                ordinary_queue_containment=CONTAINMENT_BREACHED,
+            )
+        )[0],
+        CONTAINMENT_UNPROVABLE: _worker_status(
+            prepared_worker_world(
+                ordinary_polls_operator_queue=True,
+                ordinary_queue_containment=CONTAINMENT_UNPROVABLE,
+                ordinary_queue_containment_reason=PROBE_FAILED,
+            )
+        )[0],
+    }
+    assert observed == {
+        CONTAINMENT_CONTAINED: EXIT_OK,
+        CONTAINMENT_BREACHED: EXIT_REFUSED,
+        CONTAINMENT_UNPROVABLE: EXIT_CONTAINMENT_UNPROVABLE,
+    }
+    # The vocabulary and the mapping cover exactly the same verdicts — a verdict with no exit code
+    # would exit as a generic refusal and be invisible to a shell.
+    assert set(observed) == set(CONTAINMENT_VERDICTS)
+
+
+def test_the_new_exit_code_is_additive_and_collides_with_nothing() -> None:
+    """``secpctl`` is ONE binary with ONE exit-code namespace.
+
+    ``enrollment_cli`` owns 3-9 and ``cli.py`` imports both it and ``transaction``, so a reused
+    number would mean two conditions with one code in the same program.
+    """
+    from secp_management import enrollment_cli
+
+    taken = {
+        value
+        for name, value in vars(enrollment_cli).items()
+        if name.startswith("EXIT_") and isinstance(value, int)
+    }
+    assert EXIT_CONTAINMENT_UNPROVABLE not in taken
+    assert EXIT_CONTAINMENT_UNPROVABLE not in {EXIT_OK, EXIT_REFUSED}
+    assert EXIT_CONTAINMENT_UNPROVABLE != 0  # never mistakable for success
+
+
+def test_every_other_refusal_still_exits_as_it_did() -> None:
+    """Additive means additive: an unrelated refusal must be untouched.
+
+    Without this, "distinct code for unprovable" could have been implemented by re-routing every
+    refusal, which would be a silent contract change for every existing consumer.
+    """
+    code, report = _worker_status(prepared_worker_world(operator_running=True))
+    assert report["ok"] is False
+    assert code == EXIT_REFUSED  # NOT the new code
+    assert _refusal_exit_code("some_unrelated_reason") == EXIT_REFUSED
+    assert _refusal_exit_code(None) == EXIT_REFUSED
 
 
 # ---------------------------------------------------------- (4) back-compat of the resolver
