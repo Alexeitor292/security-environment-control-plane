@@ -9,16 +9,32 @@ row that no subsequent request can yet read.
 
 Why nothing caught it
 ---------------------
-Two independent blind spots had to coincide, and they did:
+**One** blind spot, not two: the socket. Every API test drives the app through ``TestClient``, which
+runs the ASGI app to completion in-process, so the request scope — and every ``Depends``-with-yield
+teardown — is always closed before the assertion. Read-your-writes cannot fail there regardless of
+which database is underneath.
 
-* **No socket.** Every API test drives the app through ``TestClient``, which runs the ASGI app to
-  completion in-process; the request scope is always closed before the assertion. Read-your-writes
-  cannot fail there regardless of the database.
-* **The engine alone is not enough.** CI does run real PostgreSQL 16 — it has the engine without the
-  socket. And SQLite serialises the race away at its database-level write lock, so the SQLite dev
-  loop reports zero violations where PostgreSQL reports many.
+An earlier version of this file claimed a second blind spot: that SQLite "serialises the race away
+at its database-level write lock", making the defect invisible to the dev loop. **That is wrong, and
+it was never measured — it was inherited from the original defect report and restated here as
+though established.** It conflates writer-serialisation with reader-visibility. SQLite's write lock
+serialises *writers*; it does not block a reader against an uncommitted writer. In this flow
+``secp_api.services.catalog.create_template`` calls ``session.flush()`` and never commits, so the
+INSERT is live in an open transaction on pooled connection A while the follow-up GET checks out
+connection B and reads the database file without the pending row — the same read-your-writes
+violation MVCC produces, by a different route.
 
-This module supplies both halves at once. It is deliberately NOT the fix: migrating the
+Measured here, running this module's own body against SQLite with only the engine-scope guards
+removed: **110/110 ``ReadAfterWriteViolation``, 0 inconclusive, 0 pass** — 50 runs serial and 60
+runs at 4-way concurrency (the shard layout). Independently, the PR #77 reviewer measured 5/5
+through this harness, and the PR #72 reviewer measured 40/40 stale reads on the enrollment revoke
+path at a 200 ms widened window with reader latency p50 0.0 ms / max 93 ms, where a reader waiting
+on a lock would have shown ~200 ms.
+
+The module is still scoped to PostgreSQL below, but for a different and much narrower reason — see
+the note on ``pytestmark``.
+
+This module supplies the missing socket. It is deliberately NOT the fix: migrating the
 ``Depends(db_session)`` call sites to ``Depends(db_session, scope="function")`` is separate, owned
 work. This is the gate that would have failed before that work was needed.
 
@@ -69,11 +85,20 @@ from socket_gate_tests.live_api_server import live_api_server  # noqa: E402
 
 PG_URL = os.environ.get("SECP_TEST_POSTGRES_URL")
 
-# SQLite serialises this race away at its database-level write lock, so a green SQLite run would
-# read as coverage while proving nothing — the exact failure this module exists to prevent. The
-# module is therefore PostgreSQL-only, and every test additionally asserts the live dialect (see
-# ``_require_postgresql``) so a mis-set URL cannot quietly downgrade the gate either. The dedicated
-# CI job refuses a skip outright, so this can never hide the gate where PostgreSQL is present.
+# Scoped to PostgreSQL — but NOT because SQLite cannot show the defect. It demonstrably can: 110/110
+# violations, 0 inconclusive, across 50 serial and 60 4-way-concurrent runs (module docstring).
+# The scoping is a deliberate, temporary CI-coupling decision awaiting an owner's call: this job
+# feeds the required aggregate on every PR in the program, so the SQLite leg's run-to-run stability
+# had to be characterised before it could enter the shards, where an intermittent inconclusive would
+# go red for every stream and look like their change. That characterisation is now done and shows no
+# instability; widening the scope is the expected next step, and it is an owner decision rather than
+# this module's to take.
+#
+# That makes this scoping a KNOWN, MEASURED gap in the dev loop rather than a property of the
+# engine: a developer running the suite locally today does not see this regression even though it
+# would fire. Removing the scoping is the expected end state once the stability data supports it.
+# The dedicated CI job refuses a plain skip outright, so this can never hide the gate where
+# PostgreSQL is present.
 pytestmark = pytest.mark.skipif(
     not PG_URL,
     reason="set SECP_TEST_POSTGRES_URL to run the PostgreSQL live-socket read-after-write gate",
@@ -291,11 +316,18 @@ def live_base_url(built_app: object) -> Iterator[str]:
 
 
 def _require_postgresql(engine: Engine) -> None:
+    """Refuse an engine this gate is not currently scoped to.
+
+    This is a SCOPE assertion, not a claim that other engines cannot show the defect — SQLite
+    demonstrably can. It exists so a mis-set ``SECP_TEST_POSTGRES_URL`` cannot silently run the
+    gate somewhere its CI accounting was not calibrated for, which would be a green that nobody
+    calibrated rather than a green that was earned.
+    """
     if engine.dialect.name != "postgresql":
         raise LiveGateInconclusive(
-            f"this gate is only meaningful on PostgreSQL; the live engine is "
-            f"{engine.dialect.name!r}. SQLite serialises the race away, so a green run here would "
-            "read as coverage while proving nothing."
+            f"this gate is currently scoped to PostgreSQL; the live engine is "
+            f"{engine.dialect.name!r}. That scoping is a CI-coupling decision pending stability "
+            "data, NOT a claim that this engine hides the defect — see the module docstring."
         )
 
 

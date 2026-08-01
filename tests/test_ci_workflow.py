@@ -973,12 +973,20 @@ def test_socket_gate_expected_failure_is_strict_and_narrowly_typed():
     assert not issubclass(LiveServerError, AssertionError)
 
 
-def test_socket_gate_is_postgresql_only_so_a_green_sqlite_run_is_not_coverage():
-    """SQLite serialises the race away at its database-level write lock.
+def test_socket_gate_declares_its_engine_scope_and_refuses_anything_else():
+    """The gate runs only where its CI accounting was calibrated, and says so.
 
-    So the module is gated on a real PostgreSQL URL *and* every test re-asserts the live dialect —
-    belt and braces, because a mis-set URL would otherwise produce a green run that reads as a
-    passing gate while proving nothing.
+    NOT because other engines hide the defect. An earlier version of this test asserted that
+    "SQLite serialises the race away at its database-level write lock"; that is wrong and was never
+    measured. SQLite's write lock serialises *writers* — it does not block a reader against an
+    uncommitted writer, and `create_template` only flushes, so the follow-up read checks out a
+    second pooled connection and misses the pending row. Measured: 110/110 violations and 0
+    inconclusives running this gate's own body on SQLite (50 serial + 60 at 4-way concurrency),
+    corroborated by 5/5 from the PR #77 reviewer and 40/40 on the enrollment revoke path from the
+    PR #72 reviewer.
+
+    What the scoping buys is narrower and still real: a mis-set ``SECP_TEST_POSTGRES_URL`` cannot
+    silently run the gate somewhere the job's JUnit accounting was not calibrated for.
     """
     gate = _socket_gate_module()
     reasons = [mark.kwargs.get("reason", "") for mark in _marks(gate) if mark.name == "skipif"]
