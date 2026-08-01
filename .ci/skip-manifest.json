@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "description": "DRAFT - permitted set to be seeded from a real run.",
+  "collect_targets": [
+    "apps/api/tests",
+    "tests",
+    "contracts/scenario-schema/tests",
+    "apps/commissioning/tests",
+    "apps/deployment/tests",
+    "apps/management/tests"
+  ],
+  "permitted": [
+    {
+      "reason": "a call-time skip with a literal reason",
+      "why": "probe fixture",
+      "always_expected": true
+    },
+    {
+      "reason": "skipped from inside the test body",
+      "why": "probe fixture"
+    },
+    {
+      "reason": "a reason nothing ever produces",
+      "why": "stale permit",
+      "always_expected": true
+    }
+  ]
+}
