@@ -107,6 +107,35 @@ root = "plugins/proxmox"
 distribution = "shipped"
 why = "Resolved by name at runtime (secp_worker.discovery imports ProxmoxPlugin lazily); secp_api.live_read_contract pins constants that must equal this package's."
 
+[packages.secp_reconciliation]
+root = "contracts/reconciliation"
+distribution = "shipped"
+why = "The provider-neutral desired-vs-observed state, drift classification and planning contract (ADR-029). Landed on main in #76, which added it to the wheel `packages` list, so it must be declared shipped or the wheel carries an unshipped package."
+
+# DELIBERATELY NOT DECLARED: apps/api/socket_gate_tests
+#
+# The guard refuses this package under BOTH classifications, and that refusal is correct -- it is
+# the first real finding this contract produced on contact with main, not a gap in this file.
+#
+#   importable-only -> refused: forbidden to share a root with a shipped package (`secp_api`),
+#                      because the image COPYies roots wholesale and would ship it anyway. The
+#                      declaration would be true on paper and false in the artifact.
+#   shipped         -> refused: `shipped-not-in-wheel` -- it is absent from pyproject's `packages`,
+#                      so it is never installed as a distribution.
+#
+# Both refusals are accurate. The package (the PostgreSQL + real-socket read-after-write gate,
+# landed on main via #77) sits in a position where no honest declaration exists: its files reach the
+# production image via the root copy while the distribution does not carry it.
+#
+# The fix is structural, not a declaration: move it out of `apps/api` to its own root, at which
+# point `importable-only` becomes both available and true, and it is the first instance of that
+# class. That touches `.ci/pytest-suite.json`, the `backend-api-socket-gate` job's paths and
+# `pyproject.toml` -- shared, collision-prone files on main -- so it is sequenced separately rather
+# than folded into this contract's own landing.
+#
+# Until then this contract does not pass against the real repository, and that is the honest state:
+# suppressing it by weakening the rule is exactly the pressure this file's own preamble warns about.
+
 # --------------------------------------------------------------------------- importable-only
 #
 # None today. The class is not speculative: `apps/acceptance/secp_acceptance` (the two-host
