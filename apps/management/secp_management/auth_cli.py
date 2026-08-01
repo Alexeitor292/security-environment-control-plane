@@ -29,9 +29,8 @@ Three properties are worth stating because they are easy to lose in a later edit
   There is deliberately no fallback location.
 * **Logout revokes before it deletes.** Deleting the local copy does not end the session — the token
   stays valid at the provider until it expires — so ``auth logout`` first asks the issuer to revoke
-  it (RFC 7009) and only then removes it from the keystore. Local deletion is unconditional, so a
-  provider outage cannot leave the credential on the workstation, and the report says plainly
-  whether the token must still be assumed live.
+  it (RFC 7009) and only then removes the exact generation it read. A concurrent replacement is
+  retained and reported as potentially live rather than being deleted by a stale process.
 """
 
 from __future__ import annotations
@@ -58,6 +57,8 @@ from secp_management.operator_auth import (
     SealedOperatorAccessTokenProvider,
 )
 from secp_management.operator_credential_store import (
+    CredentialMutationResult,
+    CredentialSnapshot,
     OperatorCredentialStore,
     SealedOperatorCredentialStore,
     StoredCredentialStatus,
@@ -101,6 +102,8 @@ _EXIT_BY_REASON: dict[str, int] = {
     "secpctl_credential_backend_failed": EXIT_AUTH_UNAVAILABLE,
     "secpctl_credential_too_large": EXIT_AUTH_UNAVAILABLE,
     "secpctl_credential_subject_changed": EXIT_REFUSED,
+    "secpctl_credential_generation_changed": EXIT_REFUSED,
+    "secpctl_credential_lock_unavailable": EXIT_AUTH_UNAVAILABLE,
     "secpctl_credential_record_invalid": EXIT_MALFORMED,
     # --- device grant outcomes ---
     "secpctl_device_authorization_denied": EXIT_REFUSED,
@@ -167,8 +170,6 @@ _EXIT_BY_REASON: dict[str, int] = {
 #: clock can be ahead of the issuer, and RFC 7009 revocation is safe for an already-dead token.
 #: Keeping this set explicit (rather than treating "any refusal" as "nothing to revoke") is what
 #: stops ``auth logout`` reporting ``token_still_live: false`` over a live, un-revoked credential.
-_NOTHING_LIVE_TO_REVOKE = frozenset({"secpctl_credential_absent"})
-
 #: Stable, secret-free remedies for the refusals an operator can actually DO something about. A
 #: bounded reason code says what failed; without this it never says what to do next — and these are
 #: reached after an interactive approval, where "exit 3" alone strands the operator.
@@ -194,6 +195,9 @@ _REMEDY_BY_REASON: dict[str, str] = {
     "secpctl_credential_account_mismatch": (
         "the keystore entry belongs to a different controller and was not used; run "
         "'secpctl auth login' again for this controller"
+    ),
+    "secpctl_credential_generation_changed": (
+        "the credential changed in another secpctl process; inspect auth status and retry"
     ),
 }
 
@@ -479,6 +483,10 @@ def auth_login(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
                 command,
                 status.unavailable_reason or "secpctl_credential_store_unavailable",
             )
+        expected_generation: str | None = None
+        if gate.is_write:
+            before_grant = selection.store.snapshot()
+            expected_generation = None if before_grant is None else before_grant.generation
         client, authority, endpoints = _discover(deps, selection.locator)
 
         if not gate.is_write:
@@ -496,11 +504,20 @@ def auth_login(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
             )
 
             # The one place the token is persisted. There is deliberately no fallback location.
-            selection.store.store(
+            persist_result = selection.store.compare_and_store(
+                expected_generation,
                 token,
                 expires_at_epoch=verified.expires_at_epoch,
                 subject_fingerprint=subject_fingerprint(verified.subject),
             )
+            if persist_result is not CredentialMutationResult.STORED:
+                return _compensate_issued_refusal(
+                    command,
+                    "secpctl_credential_generation_changed",
+                    client=client,
+                    endpoints=endpoints,
+                    raw_token=raw_token,
+                )
         except ManagementError as exc:
             return _compensate_issued_refusal(
                 command,
@@ -556,7 +573,10 @@ def auth_refresh(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
                 **_credential_report(selection.account, current),
             }
 
-        if not current.subject_fingerprint:
+        before_grant = selection.store.snapshot()
+        if before_grant is None:
+            return _refused(command, "secpctl_credential_absent")
+        if not before_grant.subject_fingerprint:
             # Refresh is an identity-preserving replacement, so a legacy/corrupt record without the
             # only stored identity binding cannot safely authorize an overwrite.
             return _refused(command, "secpctl_credential_record_invalid")
@@ -576,7 +596,7 @@ def auth_refresh(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
                 endpoints=endpoints,
                 raw_token=raw_token,
             )
-        if fingerprint != current.subject_fingerprint:
+        if fingerprint != before_grant.subject_fingerprint:
             return _compensate_issued_refusal(
                 command,
                 "secpctl_credential_subject_changed",
@@ -586,11 +606,20 @@ def auth_refresh(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
             )
 
         try:
-            selection.store.store(
+            persist_result = selection.store.compare_and_store(
+                before_grant.generation,
                 token,
                 expires_at_epoch=verified.expires_at_epoch,
                 subject_fingerprint=fingerprint,
             )
+            if persist_result is not CredentialMutationResult.STORED:
+                return _compensate_issued_refusal(
+                    command,
+                    "secpctl_credential_generation_changed",
+                    client=client,
+                    endpoints=endpoints,
+                    raw_token=raw_token,
+                )
         except ManagementError as exc:
             return _compensate_issued_refusal(
                 command,
@@ -768,7 +797,11 @@ def _describe_unbound(deps: AuthCliDeps) -> StoredCredentialStatus:
         )
 
 
-def _revoke_stored_token(deps: AuthCliDeps, selection: _Selection) -> RevocationOutcome:
+def _revoke_stored_token(
+    deps: AuthCliDeps,
+    selection: _Selection,
+    snapshot: CredentialSnapshot | None,
+) -> RevocationOutcome:
     """Best-effort RFC 7009 revocation of the stored token, BEFORE it is deleted locally.
 
     This function NEVER raises. That is the whole point of it: local deletion is what makes a logout
@@ -780,18 +813,9 @@ def _revoke_stored_token(deps: AuthCliDeps, selection: _Selection) -> Revocation
     Nothing is hidden by that: the returned outcome records whether the token must be assumed still
     live at the provider, and ``auth logout`` reports it.
     """
-    try:
-        token = selection.store.revocation_token()
-    except ManagementError as exc:
-        if exc.reason_code in _NOTHING_LIVE_TO_REVOKE:
-            # Genuinely nothing to revoke: no credential material was stored.
-            return revocation_not_required()
-        # Everything else means the credential could not be READ, not that none exists — a corrupt
-        # record, an entry minted for a different controller, a locked or unreachable keystore. A
-        # perfectly live token may be sitting there, and `delete()` is about to remove it without it
-        # ever being revoked. Reporting "nothing to revoke" here would be a FALSE NEGATIVE on the
-        # one fact this path exists to establish.
-        return revocation_credential_unreadable(exc.reason_code)
+    if snapshot is None:
+        return revocation_not_required()
+    token = snapshot.token
     try:
         client, _authority, endpoints = _discover(deps, selection.locator)
         return client.revoke_token(endpoints, token.revocation_request_value())
@@ -806,10 +830,9 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
     (RFC 7009), then delete ONLY the credential material this store owns for THIS controller's
     account. Dry-run unless ``--write --confirm``.
 
-    The ORDER is deliberate: revoke first, delete second. Revocation needs the token, so deleting
-    first would throw away the only thing that can end the session at the provider. Deletion then
-    happens UNCONDITIONALLY — see :func:`_revoke_stored_token` — so a provider outage can never
-    leave the credential on the workstation.
+    The ORDER is deliberate: snapshot first, revoke second, generation-checked deletion last.
+    Revocation needs the token, so deleting first would throw away the only thing that can end the
+    session at the provider. The compare-and-delete step never removes a concurrent replacement.
 
     Local deletion alone was never a real logout. Until the token is revoked it remains valid at the
     provider until its own expiry, so anyone who captured it still holds a working credential; that
@@ -844,8 +867,26 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
                 "revocation_planned": bool(status.has_credential),
                 **_credential_report(selection.account, status),
             }
-        outcome = _revoke_stored_token(deps, selection)
-        removed = selection.store.delete()
+        try:
+            snapshot = selection.store.snapshot()
+        except ManagementError as exc:
+            outcome = revocation_credential_unreadable(exc.reason_code)
+            report = {
+                "command": command,
+                "mode": "written",
+                "removed": False,
+                "account": account_fingerprint(selection.account),
+                **outcome.to_report(),
+                "reason_code": exc.reason_code,
+            }
+            return exit_for(exc.reason_code), _with_remedy(report, exc.reason_code)
+        outcome = _revoke_stored_token(deps, selection, snapshot)
+        mutation = (
+            CredentialMutationResult.ABSENT
+            if snapshot is None
+            else selection.store.delete_if_generation(snapshot.generation)
+        )
+        removed = mutation is CredentialMutationResult.DELETED
         report = {
             "command": command,
             "mode": "written",
@@ -853,6 +894,18 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
             "account": account_fingerprint(selection.account),
             **outcome.to_report(),
         }
+        if mutation is CredentialMutationResult.GENERATION_MISMATCH:
+            # The old token may have been revoked, but a newer generation is now known to exist.
+            # This operation neither owns nor deletes it and therefore cannot call logout complete.
+            reason_code = "secpctl_credential_generation_changed"
+            report.update(
+                {
+                    "concurrent_credential_present": True,
+                    "token_still_live": True,
+                    "reason_code": reason_code,
+                }
+            )
+            return exit_for(reason_code), _with_remedy(report, reason_code)
         if not outcome.token_still_live:
             return EXIT_OK, report
         # The local credential IS gone — `removed` says so — but the session was NOT ended at the

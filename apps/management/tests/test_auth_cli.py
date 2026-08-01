@@ -35,6 +35,7 @@ from secp_management.controller_api_locator import ControllerApiLocator
 from secp_management.device_grant import DEVICE_CODE_GRANT_TYPE, parse_device_authorization
 from secp_management.operator_auth import OperatorAccessToken
 from secp_management.operator_credential_store import (
+    CredentialMutationResult,
     OsKeystoreCredentialStore,
     SealedOperatorCredentialStore,
     account_fingerprint,
@@ -220,6 +221,17 @@ class _RecordingStore(SealedOperatorCredentialStore):
             token, expires_at_epoch=expires_at_epoch, subject_fingerprint=subject_fingerprint
         )
 
+    def snapshot(self):
+        return None
+
+    def compare_and_store(
+        self, expected_generation, token, *, expires_at_epoch, subject_fingerprint=""
+    ):
+        self.store(
+            token, expires_at_epoch=expires_at_epoch, subject_fingerprint=subject_fingerprint
+        )
+        return CredentialMutationResult.STORED
+
     def describe(self):
         from secp_management.operator_credential_store import StoredCredentialStatus
 
@@ -305,6 +317,174 @@ def _assert_refusal(report, command, reason, *, remedy_expected=None):
         assert report.get("remedy"), f"{reason} should tell the operator what to do"
         # a remedy is code-owned prose, never a value from the environment or the provider
         assert ORIGIN not in report["remedy"] and ISSUER not in report["remedy"]
+
+
+class _AfterPrincipalClient(_FakeDeviceClient):
+    def __init__(self, *, after_principal, **kwargs):
+        super().__init__(**kwargs)
+        self._after_principal = after_principal
+
+    def resolve_principal(self, token):
+        principal = super().resolve_principal(token)
+        callback, self._after_principal = self._after_principal, None
+        if callback is not None:
+            callback()
+        return principal
+
+
+class _AfterRevokeClient(_FakeDeviceClient):
+    def __init__(self, *, after_revoke, **kwargs):
+        super().__init__(**kwargs)
+        self._after_revoke = after_revoke
+
+    def revoke_token(self, endpoints, token):
+        outcome = super().revoke_token(endpoints, token)
+        callback, self._after_revoke = self._after_revoke, None
+        if callback is not None:
+            callback()
+        return outcome
+
+
+def _stored_auth_fixture(*, lifetime=300):
+    binding = _FakeKeystore()
+    store = _working_store(binding)
+    raw = _valid_token(lifetime=lifetime)
+    store.for_account(ORIGIN).store(
+        OperatorAccessToken(raw),
+        expires_at_epoch=int(time.time()) + lifetime,
+        subject_fingerprint=subject_fingerprint(SUBJECT),
+    )
+    return binding, store, raw
+
+
+def test_refresh_vs_logout_logout_wins_and_the_minted_token_is_compensated():
+    _binding, store, old_raw = _stored_auth_fixture(lifetime=310)
+    minted_raw = _valid_token(lifetime=311)
+    logout_client = _FakeDeviceClient()
+    logout_result = []
+
+    def logout_between_snapshot_and_cas():
+        deps, _waits, _prompts = _deps(client=logout_client, store=store)
+        logout_result.append(auth_logout(deps, gate=WRITE))
+
+    refresh_client = _AfterPrincipalClient(
+        token=minted_raw, after_principal=logout_between_snapshot_and_cas
+    )
+    deps, _waits, _prompts = _deps(client=refresh_client, store=store)
+    code, report = auth_refresh(deps, gate=WRITE)
+
+    assert logout_result[0][0] == EXIT_OK
+    assert logout_client.revoked == [old_raw]
+    assert code == EXIT_REFUSED
+    assert report["reason_code"] == "secpctl_credential_generation_changed"
+    assert refresh_client.revoked == [minted_raw]
+    assert store.for_account(ORIGIN).snapshot() is None
+
+
+def test_generation_conflict_refuses_live_when_compensating_revocation_fails():
+    _binding, store, _old_raw = _stored_auth_fixture(lifetime=312)
+    minted_raw = _valid_token(lifetime=313)
+
+    def delete_between_snapshot_and_cas():
+        current = store.for_account(ORIGIN).snapshot()
+        assert current is not None
+        assert (
+            store.for_account(ORIGIN).delete_if_generation(current.generation)
+            is CredentialMutationResult.DELETED
+        )
+
+    refresh_client = _AfterPrincipalClient(
+        token=minted_raw,
+        after_principal=delete_between_snapshot_and_cas,
+        revocation=RevocationOutcome(
+            OUTCOME_UNAVAILABLE, reason_code="secpctl_revocation_provider_unavailable"
+        ),
+    )
+    deps, _waits, _prompts = _deps(client=refresh_client, store=store)
+    code, report = auth_refresh(deps, gate=WRITE)
+
+    assert code == EXIT_CONTROLLER_UNAVAILABLE
+    assert report["token_still_live"] is True
+    assert report["credential_refusal_reason_code"] == ("secpctl_credential_generation_changed")
+    assert report["reason_code"] == "secpctl_revocation_provider_unavailable"
+    assert refresh_client.revoked == [minted_raw]
+
+
+def test_refresh_vs_logout_refresh_wins_and_logout_reports_the_new_generation_live():
+    _binding, store, old_raw = _stored_auth_fixture(lifetime=320)
+    minted_raw = _valid_token(lifetime=321)
+    refresh_client = _FakeDeviceClient(token=minted_raw)
+    refresh_result = []
+
+    def refresh_during_revocation():
+        deps, _waits, _prompts = _deps(client=refresh_client, store=store)
+        refresh_result.append(auth_refresh(deps, gate=WRITE))
+
+    logout_client = _AfterRevokeClient(after_revoke=refresh_during_revocation)
+    deps, _waits, _prompts = _deps(client=logout_client, store=store)
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert logout_client.revoked == [old_raw]
+    assert refresh_result[0][0] == EXIT_OK
+    assert code == EXIT_REFUSED
+    assert report["reason_code"] == "secpctl_credential_generation_changed"
+    assert report["token_still_live"] is True
+    assert report["concurrent_credential_present"] is True
+    current = store.for_account(ORIGIN).snapshot()
+    assert current is not None
+    assert current.token.authorization_header() == f"Bearer {minted_raw}"
+
+
+def test_refresh_vs_refresh_has_one_durable_winner_and_revokes_the_loser():
+    _binding, store, _old_raw = _stored_auth_fixture(lifetime=330)
+    losing_raw = _valid_token(lifetime=331)
+    winning_raw = _valid_token(lifetime=332)
+    winner_client = _FakeDeviceClient(token=winning_raw)
+    winner_result = []
+
+    def winning_refresh_between_snapshot_and_cas():
+        deps, _waits, _prompts = _deps(client=winner_client, store=store)
+        winner_result.append(auth_refresh(deps, gate=WRITE))
+
+    loser_client = _AfterPrincipalClient(
+        token=losing_raw, after_principal=winning_refresh_between_snapshot_and_cas
+    )
+    deps, _waits, _prompts = _deps(client=loser_client, store=store)
+    loser_code, loser_report = auth_refresh(deps, gate=WRITE)
+
+    assert winner_result[0][0] == EXIT_OK
+    assert loser_code == EXIT_REFUSED
+    assert loser_report["reason_code"] == "secpctl_credential_generation_changed"
+    assert loser_client.revoked == [losing_raw]
+    assert winner_client.revoked == []
+    current = store.for_account(ORIGIN).snapshot()
+    assert current is not None
+    assert current.token.authorization_header() == f"Bearer {winning_raw}"
+
+
+def test_logout_vs_login_replacement_never_deletes_or_calls_the_replacement_dead():
+    _binding, store, old_raw = _stored_auth_fixture(lifetime=340)
+    replacement_raw = _valid_token(lifetime=341)
+    login_client = _FakeDeviceClient(token=replacement_raw)
+    login_result = []
+
+    def replace_during_revocation():
+        deps, _waits, _prompts = _deps(client=login_client, store=store)
+        login_result.append(auth_login(deps, gate=WRITE))
+
+    logout_client = _AfterRevokeClient(after_revoke=replace_during_revocation)
+    deps, _waits, _prompts = _deps(client=logout_client, store=store)
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert logout_client.revoked == [old_raw]
+    assert login_result[0][0] == EXIT_OK
+    assert code == EXIT_REFUSED
+    assert report["removed"] is False
+    assert report["token_still_live"] is True
+    assert report["reason_code"] == "secpctl_credential_generation_changed"
+    current = store.for_account(ORIGIN).snapshot()
+    assert current is not None
+    assert current.token.authorization_header() == f"Bearer {replacement_raw}"
 
 
 def _assert_compensated_refusal(report, command, reason):
@@ -582,7 +762,15 @@ def test_a_locked_keyring_tells_the_operator_to_unlock_rather_than_nothing(monke
     ):
         code, report = result
         assert code == EXIT_AUTH_UNAVAILABLE
-        _assert_refusal(report, command, "secpctl_credential_store_locked", remedy_expected=True)
+        if command == "auth logout":
+            assert report["reason_code"] == "secpctl_credential_store_locked"
+            assert report["token_still_live"] is True
+            assert report["removed"] is False
+            assert report.get("remedy")
+        else:
+            _assert_refusal(
+                report, command, "secpctl_credential_store_locked", remedy_expected=True
+            )
     # and `auth status` names the real backend rather than reporting a sealed one
     status = auth_status(deps)[1]
     assert status["credential_backend"] == "secret_service"
@@ -1319,7 +1507,7 @@ def test_logout_dry_run_makes_no_deletion():
 
 
 def test_logout_write_refuses_closed_on_the_sealed_store():
-    deps, _waits, _prompts = _deps()
+    deps, _waits, _prompts = _deps(store=SealedOperatorCredentialStore())
     code, report = auth_logout(deps, gate=WRITE)
     assert code == EXIT_AUTH_UNAVAILABLE
     assert report["reason_code"] == "secpctl_credential_store_unavailable"
@@ -1568,6 +1756,11 @@ class _UnreadableStore(SealedOperatorCredentialStore):
     def revocation_token(self):
         raise ManagementError(self._reason)
 
+    def snapshot(self):
+        if self._reason == "secpctl_credential_absent":
+            return None
+        raise ManagementError(self._reason)
+
     def describe(self):
         from secp_management.operator_credential_store import StoredCredentialStatus
 
@@ -1599,8 +1792,8 @@ def test_an_unreadable_credential_is_never_reported_as_nothing_to_revoke(reason)
     )
     assert report["revoked"] is False
     assert code != EXIT_OK
-    # the entry is still removed locally
-    assert store.deleted == 1 and report["removed"] is True
+    # Without a validated generation the operation owns nothing and must not delete the entry.
+    assert store.deleted == 0 and report["removed"] is False
 
 
 def test_an_absent_credential_really_is_nothing_to_revoke():

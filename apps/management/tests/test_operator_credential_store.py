@@ -31,6 +31,7 @@ from secp_management.operator_credential_backends import (
 from secp_management.operator_credential_store import (
     BACKEND_SEALED,
     CREDENTIAL_SERVICE_NAME,
+    CredentialMutationResult,
     CredentialRecord,
     OsKeystoreCredentialStore,
     SealedOperatorCredentialStore,
@@ -387,6 +388,37 @@ def test_storing_replaces_the_previous_credential_for_that_account():
     assert len(binding.entries) == 1
 
 
+def test_compare_and_store_never_overwrites_a_newer_generation():
+    binding = FakeBinding()
+    store = _store(binding)
+    store.store(TOKEN, expires_at_epoch=FUTURE)
+    observed = store.snapshot()
+    assert observed is not None
+
+    assert (
+        store.compare_and_store(observed.generation, OTHER_TOKEN, expires_at_epoch=FUTURE)
+        is CredentialMutationResult.STORED
+    )
+    assert (
+        store.compare_and_store(observed.generation, TOKEN, expires_at_epoch=FUTURE)
+        is CredentialMutationResult.GENERATION_MISMATCH
+    )
+    assert store.access_token().authorization_header() == OTHER_TOKEN.authorization_header()
+
+
+def test_delete_if_generation_never_deletes_a_replacement():
+    store = _store()
+    store.store(TOKEN, expires_at_epoch=FUTURE)
+    stale = store.snapshot()
+    assert stale is not None
+    store.store(OTHER_TOKEN, expires_at_epoch=FUTURE)
+
+    assert (
+        store.delete_if_generation(stale.generation) is CredentialMutationResult.GENERATION_MISMATCH
+    )
+    assert store.access_token().authorization_header() == OTHER_TOKEN.authorization_header()
+
+
 def test_deleting_removes_the_credential_and_nothing_survives_in_memory():
     """After logout there must be no cached copy that a later call can still serve."""
     store = _store()
@@ -697,9 +729,9 @@ def test_every_write_command_persists_through_exactly_one_call_site():
             for node in ast.walk(function)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "store"
+            and node.func.attr == "compare_and_store"
         ]
-        assert len(persists) == 1, f"{name} must persist at exactly one call site"
+        assert len(persists) == 1, f"{name} must CAS-persist at exactly one call site"
 
 
 def test_auth_surface_never_implements_a_password_or_client_credentials_grant():
@@ -804,6 +836,7 @@ def test_auth_surface_never_requests_or_stores_a_long_lived_renewal_credential()
         "token",
         "expires_at_epoch",
         "subject_fingerprint",
+        "generation",
     }
 
 

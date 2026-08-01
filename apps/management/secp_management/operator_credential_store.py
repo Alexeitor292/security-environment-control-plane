@@ -36,9 +36,11 @@ import hashlib
 import json
 import math
 import re
+import secrets
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, NoReturn, Protocol, runtime_checkable
 
 from secp_management import ManagementError
@@ -49,6 +51,7 @@ from secp_management.operator_credential_backends import (
     require_storable,
     resolve_secret_store_binding,
 )
+from secp_management.operator_credential_lock import credential_account_lock
 
 #: The bounded, code-owned service identifier a backend registers credentials under. It is never
 #: selected by a CLI flag, an environment variable, or a provider response.
@@ -59,7 +62,7 @@ BACKEND_SEALED = "sealed"
 
 #: The stored-record schema version. A record that does not carry EXACTLY this is refused rather
 #: than best-effort parsed — a credential is not a place for lenient decoding.
-CREDENTIAL_RECORD_VERSION = 1
+CREDENTIAL_RECORD_VERSION = 2
 
 _MAX_ACCOUNT_LEN = 255
 _MIN_ACCOUNT_LEN = 1
@@ -70,6 +73,8 @@ _ACCOUNT_GRAMMAR = re.compile(r"[\x21-\x7e]{1,255}")
 _SUBJECT_FINGERPRINT_LEN = 32
 _ACCOUNT_FINGERPRINT_LEN = 16
 _FINGERPRINT_GRAMMAR = re.compile(r"[0-9a-f]{0,64}")
+_GENERATION_LEN = 32
+_GENERATION_GRAMMAR = re.compile(r"[0-9a-f]{32}")
 _MAX_EXPIRES_AT_EPOCH = 4_102_444_800  # 2100-01-01; a farther expiry is a malformed record
 # A stored record can never be larger than what the tightest supported keystore accepts, so the
 # read side uses the SAME bound as the write side rather than a second, drifting number.
@@ -99,6 +104,22 @@ def _validated_expiry_epoch(value: object) -> int:
     ):
         _reject("secpctl_credential_record_invalid")
     return value
+
+
+def _validated_generation(value: object) -> str:
+    """Validate the opaque immutable identity used for credential compare-and-swap."""
+    if (
+        not isinstance(value, str)
+        or len(value) != _GENERATION_LEN
+        or not _GENERATION_GRAMMAR.fullmatch(value)
+    ):
+        _reject("secpctl_credential_record_invalid")
+    return value
+
+
+def _new_generation() -> str:
+    """Mint a process-independent identity; random identity avoids delete/recreate ABA."""
+    return secrets.token_hex(_GENERATION_LEN // 2)
 
 
 def validate_account(account: object) -> str:
@@ -178,6 +199,40 @@ class StoredCredentialStatus:
         }
 
 
+class CredentialMutationResult(Enum):
+    """Secret-free outcomes from generation-checked mutations."""
+
+    STORED = "stored"
+    DELETED = "deleted"
+    ABSENT = "absent"
+    GENERATION_MISMATCH = "generation_mismatch"
+
+
+class _NonSerializable:
+    def __reduce__(self) -> NoReturn:
+        _reject("secpctl_credential_store_not_serializable")
+
+    def __getstate__(self) -> NoReturn:
+        _reject("secpctl_credential_store_not_serializable")
+
+
+@dataclass(frozen=True, repr=False)
+class CredentialSnapshot(_NonSerializable):
+    """One immutable credential generation read under the account's process lock.
+
+    Its representation is constant.  The token stays in the redacted holder and is exposed only to
+    the existing verification or revocation seams.
+    """
+
+    token: OperatorAccessToken
+    expires_at_epoch: int
+    subject_fingerprint: str
+    generation: str
+
+    def __repr__(self) -> str:
+        return "CredentialSnapshot(<redacted>)"
+
+
 @runtime_checkable
 class OperatorCredentialStore(Protocol):
     """Persists the operator access token in OS-managed storage.
@@ -200,14 +255,33 @@ class OperatorCredentialStore(Protocol):
         """
         ...
 
+    def snapshot(self) -> CredentialSnapshot | None:
+        """Read one immutable generation, including locally expired material, or ``None``."""
+        ...
+
     def store(
         self, token: OperatorAccessToken, *, expires_at_epoch: int, subject_fingerprint: str = ""
     ) -> None:
-        """Atomically replace any existing credential for the bound account."""
+        """Replace the observed credential, refusing if another process changes it first."""
+        ...
+
+    def compare_and_store(
+        self,
+        expected_generation: str | None,
+        token: OperatorAccessToken,
+        *,
+        expires_at_epoch: int,
+        subject_fingerprint: str = "",
+    ) -> CredentialMutationResult:
+        """Store only if the current generation still equals ``expected_generation``."""
         ...
 
     def delete(self) -> bool:
-        """Remove ONLY credential material this store owns. Returns whether anything was removed."""
+        """Remove the observed generation only. Returns whether that generation was removed."""
+        ...
+
+    def delete_if_generation(self, expected_generation: str) -> CredentialMutationResult:
+        """Delete only the generation the caller previously read and owns."""
         ...
 
     def describe(self) -> StoredCredentialStatus:
@@ -217,14 +291,6 @@ class OperatorCredentialStore(Protocol):
     def for_account(self, account: str) -> OperatorCredentialStore:
         """The same store bound to one controller's account — the multi-controller selection."""
         ...
-
-
-class _NonSerializable:
-    def __reduce__(self) -> NoReturn:
-        _reject("secpctl_credential_store_not_serializable")
-
-    def __getstate__(self) -> NoReturn:
-        _reject("secpctl_credential_store_not_serializable")
 
 
 @dataclass(frozen=True, repr=False)
@@ -237,6 +303,7 @@ class CredentialRecord(_NonSerializable):
     token: str
     expires_at_epoch: int
     subject_fingerprint: str = ""
+    generation: str = field(default_factory=_new_generation)
 
     def __repr__(self) -> str:  # never the token
         return "CredentialRecord(<redacted>)"
@@ -248,6 +315,7 @@ class CredentialRecord(_NonSerializable):
                 "v": CREDENTIAL_RECORD_VERSION,
                 "a": self.account,
                 "e": _validated_expiry_epoch(self.expires_at_epoch),
+                "g": _validated_generation(self.generation),
                 "s": self.subject_fingerprint,
                 "t": self.token,
             },
@@ -270,6 +338,7 @@ class CredentialRecord(_NonSerializable):
             _reject("secpctl_credential_record_invalid")
 
         expires_at = _validated_expiry_epoch(document.get("e"))
+        generation = _validated_generation(document.get("g"))
 
         fingerprint = document.get("s")
         if not isinstance(fingerprint, str) or not _FINGERPRINT_GRAMMAR.fullmatch(fingerprint):
@@ -284,6 +353,7 @@ class CredentialRecord(_NonSerializable):
             token=token,
             expires_at_epoch=expires_at,
             subject_fingerprint=fingerprint,
+            generation=generation,
         )
 
 
@@ -306,12 +376,28 @@ class SealedOperatorCredentialStore(_NonSerializable):
     def revocation_token(self) -> OperatorAccessToken:
         _reject("secpctl_credential_store_unavailable")
 
+    def snapshot(self) -> CredentialSnapshot | None:
+        _reject("secpctl_credential_store_unavailable")
+
     def store(
         self, token: OperatorAccessToken, *, expires_at_epoch: int, subject_fingerprint: str = ""
     ) -> None:
         _reject("secpctl_credential_store_unavailable")
 
+    def compare_and_store(
+        self,
+        expected_generation: str | None,
+        token: OperatorAccessToken,
+        *,
+        expires_at_epoch: int,
+        subject_fingerprint: str = "",
+    ) -> CredentialMutationResult:
+        _reject("secpctl_credential_store_unavailable")
+
     def delete(self) -> bool:
+        _reject("secpctl_credential_store_unavailable")
+
+    def delete_if_generation(self, expected_generation: str) -> CredentialMutationResult:
         _reject("secpctl_credential_store_unavailable")
 
     def describe(self) -> StoredCredentialStatus:
@@ -380,7 +466,8 @@ class OsKeystoreCredentialStore(_NonSerializable):
             _reject("secpctl_credential_store_unavailable")
         return current
 
-    def _load(self) -> CredentialRecord | None:
+    def _load_unlocked(self) -> CredentialRecord | None:
+        """Read one record while the caller holds this account's process lock."""
         account = self._bound_account()
         raw = self._binding.get_secret(service=self._service, account=account)
         if raw is None:
@@ -392,13 +479,30 @@ class OsKeystoreCredentialStore(_NonSerializable):
             _reject("secpctl_credential_account_mismatch")
         return record
 
-    def access_token(self) -> OperatorAccessToken:
+    def _load(self) -> CredentialRecord | None:
+        account = self._bound_account()
+        with credential_account_lock(self._service, account):
+            return self._load_unlocked()
+
+    def snapshot(self) -> CredentialSnapshot | None:
+        """Return one validated immutable generation under the account's process lock."""
         record = self._load()
         if record is None:
+            return None
+        return CredentialSnapshot(
+            token=OperatorAccessToken(record.token),
+            expires_at_epoch=record.expires_at_epoch,
+            subject_fingerprint=record.subject_fingerprint,
+            generation=record.generation,
+        )
+
+    def access_token(self) -> OperatorAccessToken:
+        snapshot = self.snapshot()
+        if snapshot is None:
             _reject("secpctl_credential_absent")
-        if float(record.expires_at_epoch) <= self._current_epoch():
+        if float(snapshot.expires_at_epoch) <= self._current_epoch():
             _reject("secpctl_credential_expired")
-        return OperatorAccessToken(record.token)
+        return snapshot.token
 
     def revocation_token(self) -> OperatorAccessToken:
         """Return stored material only for RFC 7009 revocation, irrespective of local expiry.
@@ -408,14 +512,18 @@ class OsKeystoreCredentialStore(_NonSerializable):
         answer success for already-dead tokens, so attempting it is the only conservative logout.
         Corrupt, foreign-account and unreadable records still refuse exactly as normal reads do.
         """
-        record = self._load()
-        if record is None:
+        snapshot = self.snapshot()
+        if snapshot is None:
             _reject("secpctl_credential_absent")
-        return OperatorAccessToken(record.token)
+        return snapshot.token
 
-    def store(
-        self, token: OperatorAccessToken, *, expires_at_epoch: int, subject_fingerprint: str = ""
-    ) -> None:
+    def _record_for_store(
+        self,
+        token: OperatorAccessToken,
+        *,
+        expires_at_epoch: int,
+        subject_fingerprint: str,
+    ) -> CredentialRecord:
         account = self._bound_account()
         checked_expiry = _validated_expiry_epoch(expires_at_epoch)
         # PyJWT permits a small verification leeway, but persisting something already expired on
@@ -427,17 +535,71 @@ class OsKeystoreCredentialStore(_NonSerializable):
             subject_fingerprint
         ):
             _reject("secpctl_credential_record_invalid")
-        record = CredentialRecord(
+        return CredentialRecord(
             account=account,
             token=_bearer_value(token),
             expires_at_epoch=checked_expiry,
             subject_fingerprint=subject_fingerprint,
+            generation=_new_generation(),
         )
-        self._binding.set_secret(service=self._service, account=account, secret=record.to_bytes())
+
+    def store(
+        self, token: OperatorAccessToken, *, expires_at_epoch: int, subject_fingerprint: str = ""
+    ) -> None:
+        before = self.snapshot()
+        result = self.compare_and_store(
+            None if before is None else before.generation,
+            token,
+            expires_at_epoch=expires_at_epoch,
+            subject_fingerprint=subject_fingerprint,
+        )
+        if result is not CredentialMutationResult.STORED:
+            _reject("secpctl_credential_generation_changed")
+
+    def compare_and_store(
+        self,
+        expected_generation: str | None,
+        token: OperatorAccessToken,
+        *,
+        expires_at_epoch: int,
+        subject_fingerprint: str = "",
+    ) -> CredentialMutationResult:
+        """Atomically replace only the generation the caller observed before provider I/O."""
+        if expected_generation is not None:
+            expected_generation = _validated_generation(expected_generation)
+        record = self._record_for_store(
+            token,
+            expires_at_epoch=expires_at_epoch,
+            subject_fingerprint=subject_fingerprint,
+        )
+        with credential_account_lock(self._service, record.account):
+            current = self._load_unlocked()
+            current_generation = None if current is None else current.generation
+            if current_generation != expected_generation:
+                return CredentialMutationResult.GENERATION_MISMATCH
+            self._binding.set_secret(
+                service=self._service, account=record.account, secret=record.to_bytes()
+            )
+            return CredentialMutationResult.STORED
 
     def delete(self) -> bool:
+        snapshot = self.snapshot()
+        if snapshot is None:
+            return False
+        return self.delete_if_generation(snapshot.generation) is CredentialMutationResult.DELETED
+
+    def delete_if_generation(self, expected_generation: str) -> CredentialMutationResult:
+        """Delete only an owned generation; never remove a replacement created after snapshot."""
+        checked_generation = _validated_generation(expected_generation)
         account = self._bound_account()
-        return bool(self._binding.delete_secret(service=self._service, account=account))
+        with credential_account_lock(self._service, account):
+            current = self._load_unlocked()
+            if current is None:
+                return CredentialMutationResult.ABSENT
+            if current.generation != checked_generation:
+                return CredentialMutationResult.GENERATION_MISMATCH
+            removed = self._binding.delete_secret(service=self._service, account=account)
+            return CredentialMutationResult.DELETED if removed else CredentialMutationResult.ABSENT
 
     def describe(self) -> StoredCredentialStatus:
         backend = self._binding.backend_id
@@ -540,6 +702,8 @@ __all__ = [
     "CREDENTIAL_SERVICE_NAME",
     "ControllerScopedCredentialProvider",
     "CredentialRecord",
+    "CredentialMutationResult",
+    "CredentialSnapshot",
     "OperatorCredentialStore",
     "OperatorCredentialStoreError",
     "OsKeystoreCredentialStore",
