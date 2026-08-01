@@ -19,12 +19,17 @@ harness must be importable and type-checked and must never ship in the productio
 asymmetry is legitimate, so it is DECLARED in ``packaging-contract.toml`` and enforced as declared.
 
 Worth recording precisely, because the proposal that prompted this was justified by a measurement
-that does not hold: the three lists are NOT "identical, 10 entries each". Wheel ``packages`` has 10
-entries; ``pythonpath`` and ``mypy_path`` have 9. They agree only after deriving package ROOTS from
-the wheel entries (10 packages over 9 roots — ``apps/deployment`` hosts two). Compared as written,
-their symmetric difference is 19, not 0. A literal equality guard would have been red on the day it
-landed. ``test_the_three_lists_are_not_naively_equal`` pins that, so the idea is not re-proposed
-from the same wrong premise.
+that does not hold: the three lists are NOT "identical, 10 entries each". Measured on ``main`` at
+``bfdccd7e``, wheel ``packages`` had 10 entries while ``pythonpath`` and ``mypy_path`` had 9 — they
+agree only after deriving package ROOTS from the wheel entries (10 packages over 9 roots, because
+``apps/deployment`` hosts two), and compared as written their symmetric difference was 19, not 0. A
+literal equality guard would have been red on the day it landed.
+
+Those numbers are recorded here as a dated observation, NOT asserted anywhere. What
+``test_the_three_lists_are_not_naively_equal`` pins is the invariant SHAPE behind them — wheel
+entries are ``<root>/<name>`` while the two paths are ``<root>``, so they can never be equal as
+written. Asserting the counts would make this file fail on every legitimate package addition, which
+is the same trap the flat equality rule falls into.
 
 THE ANCHOR IS THE FILESYSTEM
 ----------------------------
@@ -340,31 +345,46 @@ def test_the_real_repository_satisfies_the_contract():
 
 
 def test_the_three_lists_are_not_naively_equal():
-    """Pins the measurement that makes a flat equality guard wrong, so it is not re-proposed."""
+    """Pins the STRUCTURE that makes a flat equality guard wrong, so it is not re-proposed.
+
+    Deliberately free of hardcoded counts. At the time of writing they were 10 / 9 / 9 with a
+    symmetric difference of 19 — but asserting those numbers would make this test fail on every
+    legitimate package addition, which is the same trap the flat equality rule falls into. What is
+    invariant is the SHAPE: wheel entries are ``<root>/<name>`` while the two paths are ``<root>``,
+    so they can never be equal as written and can only agree after deriving roots.
+    """
     inputs = real_inputs()
-    assert len(inputs.wheel_packages) == 10
-    assert len(inputs.pythonpath) == 9
-    assert len(inputs.mypy_path) == 9
-    assert len(set(inputs.wheel_packages) ^ set(inputs.pythonpath)) == 19
-    roots = {entry.rsplit("/", 1)[0] for entry in inputs.wheel_packages}
-    assert roots == set(inputs.pythonpath) == set(inputs.mypy_path)
-    assert len(roots) == 9, "10 packages over 9 roots — apps/deployment hosts two"
+    assert inputs.wheel_packages and inputs.pythonpath and inputs.mypy_path
+    assert set(inputs.wheel_packages) != set(inputs.pythonpath), (
+        "wheel entries are <root>/<name>; pythonpath entries are <root>. If these ever compare "
+        "equal, the shape assumed throughout this file has changed."
+    )
+    shipped_roots = {entry.rsplit("/", 1)[0] for entry in inputs.wheel_packages}
+    # Every SHIPPED root must be on both paths. The reverse does not hold — an importable-only root
+    # is on both paths and in no wheel entry — which is exactly the asymmetry a flat rule forbids.
+    assert shipped_roots <= set(inputs.pythonpath)
+    assert shipped_roots <= set(inputs.mypy_path)
+    assert set(inputs.pythonpath) == set(inputs.mypy_path), (
+        "importable or type-checked, but not both, is never intentional"
+    )
 
 
-def test_the_repository_currently_declares_ten_shipped_and_no_importable_only():
-    """Today's state, counted exactly rather than as a floor.
+def test_the_declared_shape_is_recorded_and_consistent():
+    """Reports today's composition without gating on it.
 
-    A floor would let a package be added without anyone re-reading the manifest, which is the habit
-    that produced the original hole. This is also the test that records — visibly, as a passing
-    assertion rather than as a skip — that the importable-only class has no instance yet; its rules
-    are exercised below against constructed inputs.
+    An earlier version asserted "exactly 10 shipped and 0 importable-only" on the grounds that a
+    floor would let a package be added without anyone re-reading the manifest. That reasoning was
+    wrong: :func:`test_every_package_on_disk_is_declared` already makes it impossible to add a
+    package without editing the manifest, so the exact count added no protection and would have
+    gone red on the first legitimate addition — reproducing, in miniature, the very failure this
+    contract exists to prevent. Found by running the future state rather than reasoning about it.
     """
     declared = real_inputs().declared
-    shipped = [n for n, e in declared.items() if e["distribution"] == SHIPPED]
-    importable_only = [n for n, e in declared.items() if e["distribution"] == IMPORTABLE_ONLY]
-    assert len(shipped) == 10
-    assert importable_only == []
-    assert len(declared) == 10
+    assert declared, "the manifest declares nothing"
+    for name, entry in declared.items():
+        assert entry["distribution"] in DISTRIBUTIONS, name
+    # every declared package is discoverable and vice versa — the anchor, restated as one equality
+    assert set(declared) == set(discover_packages())
 
 
 # --------------------------------------------------------------------------- constructed inputs
