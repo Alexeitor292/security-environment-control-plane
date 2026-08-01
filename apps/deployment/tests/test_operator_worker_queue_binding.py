@@ -94,9 +94,11 @@ def test_the_authority_is_not_redeclared_inside_the_deployment_package():
 
     pkg = pathlib.Path(secp_operator_deployment.__file__).parent
     offenders = []
+    scanned: list[str] = []
     for path in sorted(pkg.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
+        scanned.append(path.name)
         tree = ast.parse(path.read_text(encoding="utf-8"))
         literals = [
             n.value
@@ -105,6 +107,20 @@ def test_the_authority_is_not_redeclared_inside_the_deployment_package():
         ]
         if worker_ordinary_task_queue() in literals:
             offenders.append(path.name)
+
+    # PROVE THE SWEEP RAN, BEFORE trusting its silence. This assertion is absence-shaped
+    # (``offenders == []``), and a sweep that visited nothing produces exactly the same empty list
+    # as a clean package — measured, not supposed: pointing ``pkg`` at a nonexistent subdirectory
+    # left this file at 10 passed, 0 failed. The control is a POSITIVE one from outside the sweep's
+    # own logic (modules that must exist for the rest of this file to import at all), and it runs
+    # FIRST: a control placed after the assertion it protects still catches the fault but reports
+    # the wrong one, and the wrong one is what a hurried reader acts on.
+    assert scanned, f"the package scan visited no files under {pkg.name} — it is broken, not clean"
+    for required in ("identities.py", "verify.py", "queue_check.py"):
+        assert required in scanned, (
+            f"the package scan did not reach {required}; its silence proves nothing"
+        )
+
     assert offenders == [], f"the deployment package hardcodes the ordinary queue name: {offenders}"
 
 
