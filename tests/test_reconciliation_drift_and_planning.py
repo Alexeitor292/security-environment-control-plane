@@ -39,6 +39,8 @@ from secp_reconciliation.v1 import (
     classify_drift,
     plan_from_states,
     plan_reconciliation,
+    require_plan_integrity,
+    require_planned_under,
     verify_inputs,
 )
 
@@ -416,6 +418,14 @@ def test_every_refusal_code_is_actually_reachable() -> None:
             )
         ),
         _raised_code(lambda: plan_reconciliation(ok_pair, classify_drift(other_pair))),
+        # A plan edited after planning no longer matches its own digest.
+        _raised_code(
+            lambda: require_plan_integrity(
+                replace(creating_plan, actions=creating_plan.actions * 2)
+            )
+        ),
+        # A plan presented under a scope other than the one that authorized it.
+        _raised_code(lambda: require_planned_under(creating_plan, scope(max_actions=49))),
     }
     assert triggered == set(RefusalCode)
 

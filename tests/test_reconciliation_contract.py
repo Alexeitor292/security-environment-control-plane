@@ -47,7 +47,7 @@ EXPECTED_SIZES = {
     "ObservationFidelity": 3,
     "ExecutionSurface": 1,
     "ResetScope": 2,
-    "RefusalCode": 17,
+    "RefusalCode": 19,
 }
 
 _ENUMS = {

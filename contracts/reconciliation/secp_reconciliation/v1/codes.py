@@ -138,6 +138,8 @@ class RefusalCode(str, Enum):
     change_budget_exceeded = "reconciliation_change_budget_exceeded"
     reset_scope_unsafe = "reconciliation_reset_scope_unsafe"
     reset_window_invalid = "reconciliation_reset_window_invalid"
+    plan_integrity_invalid = "reconciliation_plan_integrity_invalid"
+    scope_mismatch = "reconciliation_scope_mismatch"
 
 
 class ReconciliationRefused(Exception):

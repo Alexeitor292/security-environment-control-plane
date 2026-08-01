@@ -38,8 +38,12 @@ from secp_reconciliation.v1.codes import (
     RefusalCode,
 )
 from secp_reconciliation.v1.digest import document_digest
-from secp_reconciliation.v1.planner import ReconciliationPlan
-from secp_reconciliation.v1.state import DesiredState, desired_state_digest
+from secp_reconciliation.v1.planner import ReconciliationPlan, require_planned_under
+from secp_reconciliation.v1.state import (
+    DesiredState,
+    ReconciliationScope,
+    desired_state_digest,
+)
 
 SIMULATED_EXECUTION_SCHEMA_VERSION = "secp-recon/simulated-execution/v1"
 SIMULATED_WORLD_SCHEMA_VERSION = "secp-recon/simulated-world/v1"
@@ -107,17 +111,30 @@ def world_digest(world: SimulatedWorld) -> str:
 
 def execute(
     *,
+    scope: ReconciliationScope,
     plan: ReconciliationPlan,
     desired: DesiredState,
     world: SimulatedWorld,
 ) -> tuple[SimulatedWorld, SimulatedExecutionRecord]:
     """Apply a plan to an in-memory world and return the new world plus an execution record.
 
-    Refuses with a bounded code when the plan names a surface other than the simulator, or when the
-    desired state handed in is not the one the plan was derived from — the plan carries references
-    and reasons, never facet values, so executing it against a different desired state would apply
-    values nobody planned.
+    Every refusal boundary is re-applied *here*, on the execution side, rather than being trusted
+    because the planner applied it once:
+
+    * the plan's contents must still match its own digest, so a plan edited after planning cannot
+      be executed while emitting evidence that attests to the original;
+    * the scope presented must be the scope the plan was planned under, and its declared change
+      budget and execution surface are re-checked against the plan rather than assumed;
+    * the plan must name the simulator surface;
+    * the desired state must be the one the plan was derived from — the plan carries references and
+      reasons, never facet values, so executing it against a different desired state would apply
+      values nobody planned.
+
+    A boundary enforced only where a document is produced is not a boundary on the document; it is
+    a boundary on one producer. These are the same checks the planner makes, made again by the
+    component that acts.
     """
+    require_planned_under(plan, scope)
     if plan.execution_surface != EXECUTION_SURFACE:
         raise ReconciliationRefused(RefusalCode.execution_surface_sealed)
     if desired_state_digest(desired) != plan.desired_digest:

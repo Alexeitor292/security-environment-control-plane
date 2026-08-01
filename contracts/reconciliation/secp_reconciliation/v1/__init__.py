@@ -69,8 +69,11 @@ from secp_reconciliation.v1.planner import (
     DeferredElement,
     PlannedAction,
     ReconciliationPlan,
+    plan_digest_of,
     plan_from_states,
     plan_reconciliation,
+    require_plan_integrity,
+    require_planned_under,
 )
 from secp_reconciliation.v1.reset import (
     RESET_INTENT_SCHEMA_VERSION,
@@ -145,8 +148,11 @@ __all__ = [
     "facet_digest",
     "is_content_digest",
     "observed_state_digest",
+    "plan_digest_of",
     "plan_from_states",
     "plan_reconciliation",
+    "require_plan_integrity",
+    "require_planned_under",
     "require_verified",
     "scope_digest",
     "sha256_digest",
