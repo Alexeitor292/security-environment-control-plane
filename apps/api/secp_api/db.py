@@ -39,6 +39,38 @@ def _make_engine(database_url: str) -> Engine:
             cur.execute("PRAGMA foreign_keys=ON")
             cur.close()
 
+        @event.listens_for(engine, "before_cursor_execute")
+        def _begin_before_savepoint(  # type: ignore[no-untyped-def]
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            """Make sure a SAVEPOINT is never the OUTERMOST transaction on SQLite.
+
+            pysqlite's legacy mode emits an implicit ``BEGIN`` only for statements it recognizes
+            as DML.  It does **not** recognize ``SAVEPOINT``.  So a ``Session.begin_nested()``
+            taken before any INSERT/UPDATE/DELETE on that connection opens the savepoint in
+            autocommit — and SQLite *commits* an outermost savepoint on ``RELEASE``.  The nested
+            block's writes become durable at ``RELEASE``, before the caller commits, and the
+            caller's later ``rollback()`` cannot undo them.
+
+            Beginning a real transaction first keeps the savepoint nested, so ``RELEASE``
+            releases and the caller's transaction stays the only commit point.
+
+            Deliberately narrow: this fires ONLY for ``SAVEPOINT``, so read-only and ordinary
+            DML transactions keep pysqlite's existing behaviour and hold no lock they did not
+            hold before.  Emitting ``BEGIN`` for every transaction instead would make read-only
+            work hold SHARED to commit and deadlock concurrent writers.
+
+            PostgreSQL needs none of this: psycopg opens a transaction before the first
+            statement, so a savepoint is always nested there already.
+            """
+            if not statement.lstrip().upper().startswith("SAVEPOINT"):
+                return
+            dbapi_conn = conn.connection.dbapi_connection
+            if not dbapi_conn.in_transaction:
+                # raw DBAPI execute: does not re-enter this event, and leaves pysqlite's own
+                # bookkeeping consistent (it defers to sqlite3_get_autocommit()).
+                dbapi_conn.execute("BEGIN")
+
     return engine
 
 
