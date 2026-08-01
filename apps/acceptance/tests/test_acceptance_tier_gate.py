@@ -216,8 +216,11 @@ def _write_suite(pytester: pytest.Pytester, monkeypatch) -> None:
 
         @pytest.mark.container_tier
         def test_container_one():
-            from secp_acceptance.tier import witness
-            for stage in ("fleet_created", "fleet_proved", "fleet_destroyed"):
+            # Iterate the real stage list rather than restating it: a stage added to the tier must
+            # not leave this fixture silently witnessing a stale subset, which would make the
+            # "declared tier executed" proof weaker than the tier it is proving.
+            from secp_acceptance.tier import CONTAINER_TIER_STAGES, witness
+            for stage in CONTAINER_TIER_STAGES:
                 witness(stage)
         """
     )

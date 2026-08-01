@@ -60,7 +60,17 @@ TIERS: frozenset[str] = frozenset({TIER_HERMETIC, TIER_CONTAINER})
 
 #: The stages the container tier must witness. Named individually so a partially-executed tier is
 #: distinguishable from a fully-executed one — "some container test ran" is not the claim.
-CONTAINER_TIER_STAGES: tuple[str, ...] = ("fleet_created", "fleet_proved", "fleet_destroyed")
+#:
+#: ``worker_image_probed`` covers the interpreter measurement, which needs the outer runtime but no
+#: fleet. It is listed because a declared tier that built hosts and never probed the image would
+#: otherwise be indistinguishable from a complete one, and the image probe is what discharges
+#: Finding D's antecedent.
+CONTAINER_TIER_STAGES: tuple[str, ...] = (
+    "fleet_created",
+    "fleet_proved",
+    "fleet_destroyed",
+    "worker_image_probed",
+)
 
 _witnessed: set[str] = set()
 

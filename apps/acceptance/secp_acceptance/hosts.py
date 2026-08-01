@@ -106,6 +106,16 @@ class HostFleet:
     created: int = 0
     destroyed: int = 0
     image_identity: str = ""
+    #: Witnesses for the two facts the evidence document reports about the fleet's NATURE. Both
+    #: start empty and are filled only by a real observation, so :meth:`record` can DERIVE the
+    #: booleans instead of stating them. They were literals once: ``record()`` returned
+    #: ``nested_container_runtime=True, real_service_manager=True`` unconditionally, and the
+    #: container-tier test asserted the same two constants — a fleet that created nothing still
+    #: reported both true. The evidence document is this harness's product, so its two defining
+    #: facts must be measured, not declared.
+    inner_daemons: dict[str, str] = field(default_factory=dict)  # role -> inner Docker daemon id
+    service_managers: dict[str, str] = field(default_factory=dict)  # role -> systemd version line
+    outer_daemon: str = ""
 
     # --- naming -------------------------------------------------------------------------
 
@@ -144,6 +154,12 @@ class HostFleet:
         Waiting on the container merely existing would let every later stage fail with a confusing
         error that has nothing to do with the thing being tested.
         """
+        # The OUTER daemon's identity, taken before anything is built. It is the reference the
+        # nesting claim is made against: an inner daemon that turned out to BE the outer one would
+        # mean the hosts were sharing the developer's Docker, and every isolation claim after that
+        # would be about one machine.
+        outer = docker("info", "--format", "{{.ID}}", timeout=60)
+        self.outer_daemon = outer.stdout.strip() if outer.ok else ""
         if not docker("network", "create", self.network, timeout=60).ok:
             raise AcceptanceError("acceptance_host_create_failed")
         for role in ROLES:
@@ -201,11 +217,39 @@ class HostFleet:
             time.sleep(_POLL_SECONDS)
         if systemd_state not in _SYSTEMD_READY_STATES:
             raise AcceptanceError("acceptance_host_systemd_not_running")
+        # Readiness is also the moment both fleet-nature witnesses are taken: this host answered a
+        # real `systemctl` and a real `docker info` of its own. Recorded here rather than asserted
+        # later, so the evidence document's booleans have a producer.
+        version = host.exec(("systemctl", "--version"), timeout=30)
+        if version.ok and version.stdout.strip():
+            self.service_managers[host.role] = version.stdout.split("\n", 1)[0].strip()[:64]
         while time.monotonic() < deadline:
-            if host.exec(("docker", "info", "--format", "{{.ID}}"), timeout=60).ok:
+            probe = host.exec(("docker", "info", "--format", "{{.ID}}"), timeout=60)
+            if probe.ok and probe.stdout.strip():
+                self.inner_daemons[host.role] = probe.stdout.strip()
                 return
             time.sleep(_POLL_SECONDS)
         raise AcceptanceError("acceptance_host_dockerd_not_active")
+
+    # --- the two facts the evidence document reports about the fleet's nature ------------
+
+    def nesting_is_proven(self) -> bool:
+        """Each host runs its OWN Docker daemon, distinct from the other's AND from the outer one.
+
+        All three conditions are required. Two hosts answering the same daemon id would be one
+        machine wearing two names; either host answering the OUTER daemon id would mean the harness
+        was driving the developer's Docker and had built nothing nested at all.
+        """
+        ids = [self.inner_daemons.get(role, "") for role in ROLES]
+        if not all(ids):
+            return False
+        if len(set(ids)) != len(ROLES):
+            return False
+        return self.outer_daemon != "" and self.outer_daemon not in ids
+
+    def service_manager_is_proven(self) -> bool:
+        """Every host answered a real systemd. Empty until each one actually did."""
+        return all(self.service_managers.get(role) for role in ROLES)
 
     def observe_readiness(self, host: Host) -> dict[str, object]:
         """The bounded readiness projection a fleet check records.
@@ -291,8 +335,12 @@ class HostFleet:
             network_identity=observation_digest({"network": self.network}),
             hosts_created=self.created,
             hosts_destroyed=self.destroyed,
-            nested_container_runtime=True,
-            real_service_manager=True,
+            # DERIVED from what was observed, never stated. A fleet that built nothing reports
+            # False for both, which is what a later reader of the evidence needs — a degraded or
+            # non-nested run must not emit `nested_container_runtime: true` to someone who has no
+            # way to know it was a constant.
+            nested_container_runtime=self.nesting_is_proven(),
+            real_service_manager=self.service_manager_is_proven(),
         )
 
     def controller(self) -> Host:

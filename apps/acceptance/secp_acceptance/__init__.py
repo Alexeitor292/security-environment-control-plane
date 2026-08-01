@@ -24,7 +24,8 @@ enrollment surface over real TLS against a real PostgreSQL, the real root-gated 
 broker, and the real ``secp_worker`` Temporal worker against a real Temporal server. Where local
 disposable infrastructure genuinely cannot reach, the harness records an explicit
 :class:`~secp_acceptance.evidence.GapRecord` in the evidence document rather than leaving the
-substitution implicit — see :mod:`secp_acceptance.gaps`.
+substitution implicit — declared through
+:meth:`AcceptanceRecorder.declare_gap <secp_acceptance.recorder.AcceptanceRecorder.declare_gap>`.
 """
 
 from __future__ import annotations

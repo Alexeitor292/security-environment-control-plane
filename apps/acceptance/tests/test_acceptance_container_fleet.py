@@ -119,11 +119,33 @@ def test_the_fleet_record_is_nonsecret_and_records_what_was_built(fleet: HostFle
     container id, an address, or an image list."""
     record = fleet.record()
     assert record.hosts_created == 2
-    assert record.nested_container_runtime is True
-    assert record.real_service_manager is True
     for value in record.canonical().values():
         if isinstance(value, str):
             assert "/" not in value or value.startswith("sha256:")
+
+
+def test_the_two_fleet_nature_facts_are_true_because_they_were_observed(fleet: HostFleet):
+    """The document's two defining facts, checked against the witnesses that produced them.
+
+    These assertions used to compare ``record.nested_container_runtime is True`` against a literal
+    ``True`` set in ``record()`` — a constant against itself, unable to fail even on a fleet that
+    built nothing. Now the booleans are derived, so the meaningful check is that the underlying
+    observations exist and say what the booleans claim.
+    """
+    record = fleet.record()
+
+    # nesting: three distinct daemons — one per host, and neither is the outer one
+    assert len(fleet.inner_daemons) == 2
+    assert all(fleet.inner_daemons.values())
+    assert len(set(fleet.inner_daemons.values())) == 2
+    assert fleet.outer_daemon
+    assert fleet.outer_daemon not in fleet.inner_daemons.values()
+    assert record.nested_container_runtime is True
+
+    # service manager: every host answered a real `systemctl --version`
+    assert len(fleet.service_managers) == 2
+    assert all("systemd" in value.lower() for value in fleet.service_managers.values())
+    assert record.real_service_manager is True
 
 
 def test_a_fleet_stage_can_be_recorded_into_the_evidence_document(fleet: HostFleet):

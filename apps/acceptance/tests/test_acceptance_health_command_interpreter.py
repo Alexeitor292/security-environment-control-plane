@@ -28,9 +28,15 @@ THE SHAPE OF THIS PROOF
 -----------------------
 The premise "``python:3.11-slim`` has no ``/usr/bin/python3``" is a fact about an upstream image,
 not about this repo — exactly like Finding A's premise about systemd. So this file proves the
-CONDITIONAL and the structural facts that make the conditional bite, and the container tier measures
-the antecedent against the actually-built image
-(``worker_health_command_resolves_in_the_worker_image``).
+CONDITIONAL and the structural facts that make the conditional bite, and the ANTECEDENT is
+discharged in the container tier by ``test_acceptance_container_worker_image.py``, which runs the
+base image the Dockerfile declares and looks for the path.
+
+Read that division precisely: **nothing in this file measures the antecedent**, and until the
+container tier has actually run, Finding D is a proven conditional with an unmeasured premise. The
+check id is ``worker_health_command_resolves_in_the_worker_image`` under ``worker_install``, and the
+tier witnesses ``worker_image_probed``, so a declared tier that never probed the image fails rather
+than passing quietly.
 
 WHY CI IS GREEN
 ---------------
