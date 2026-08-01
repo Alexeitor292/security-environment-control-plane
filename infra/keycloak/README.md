@@ -82,14 +82,21 @@ own default for it is `true`.
 `secpctl` needs no role claims. The database is the sole authority for organization, role and
 permission, and a token claim never determines them.
 
-Measured against a real Keycloak 25 realm whose operator carries 48 realm roles:
+The two postures are separated by a **measurement, not by an estimate** — but the measurement is
+made at run time, by `test_keycloak_device_flow_integration.py`, against a real Keycloak issuing to
+an operator carrying 48 realm roles. It is not reproduced here as a byte count, because a number
+written into a README is not re-derived by anything and drifts silently from the provider version,
+the role load and the record encoding that produced it.
 
-| Posture | access token | keystore record | 2560-byte bound |
-| --- | --- | --- | --- |
-| this artifact | 1133 B | 1226 B | fits, with headroom |
-| Keycloak console defaults (`roles` + `fullScopeAllowed`) | 3023 B | 3116 B | **refused** |
+What is asserted, on real tokens from a real provider:
 
-The artifact's token size does not move when the role count changes; the console-default one does.
+| Posture | assertion |
+| --- | --- |
+| this artifact | the encoded record is under **half** the 2560-byte bound — headroom, not a coin flip |
+| Keycloak console defaults (`roles` + `fullScopeAllowed`) | the **token alone** already exceeds 2560 bytes, and `auth login` refuses with `secpctl_credential_too_large` *after* the approval |
+
+Run the module to see the actual sizes for a given provider version and role load. The artifact's
+token size does not move when the role count changes; the console-default one does.
 
 ## Proving it, for real
 

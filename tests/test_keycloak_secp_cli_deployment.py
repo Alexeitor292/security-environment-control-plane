@@ -145,19 +145,34 @@ def test_the_refused_scope_policy_agrees_across_the_boundary():
     assert REFUSED_SCOPES <= frozenset(tool.REFUSED_DEFAULT_SCOPES)
 
 
-def test_the_measured_token_sizes_straddle_the_keystore_bound():
-    """The numbers behind the size control, as MEASURED against a real Keycloak 25 realm carrying 48
-    realm roles on the operator (``test_keycloak_device_flow_integration.py`` re-measures both).
+def test_the_keystore_bound_the_size_control_is_measured_against():
+    """The bound itself. NOT the token sizes — nothing hermetic can know those.
 
-    They are recorded here so the non-container shards still fail if the bound ever moves under
-    them: the artifact's token must fit with room to spare, and the console-default posture must
-    genuinely NOT fit — a control that is not actually load-bearing is worse than no control.
+    This file cannot measure a token: that needs a real provider issuing against a real role load,
+    which is ``test_keycloak_device_flow_integration.py``'s job. So this pins only the thing that IS
+    knowable here — the bound the control is measured against — and the test below pins that the
+    measurements themselves still exist to do the measuring.
     """
-    artifact_record_bytes = 1226
-    console_default_record_bytes = 3116
-    assert MAX_SECRET_BYTES == 2560
-    assert artifact_record_bytes < MAX_SECRET_BYTES
-    assert console_default_record_bytes > MAX_SECRET_BYTES
+    assert MAX_SECRET_BYTES == 2560  # CRED_MAX_CREDENTIAL_BLOB_SIZE, applied on every platform
+
+
+def test_the_size_control_has_a_real_measurer_in_both_directions():
+    """The size control is only load-bearing if something actually measures a REAL token on each
+    side of the bound. Neither direction can be established here, so what this guards is that both
+    measurements still exist to be run — a deletion of either is the failure this catches.
+
+    Keyed on the assertion text rather than on test names, so renaming a test does not silently
+    drop the coverage while leaving this green.
+    """
+    source = (
+        REPO / "apps" / "management" / "tests" / "test_keycloak_device_flow_integration.py"
+    ).read_text(encoding="utf-8")
+    # The artifact posture FITS, with headroom rather than by a margin of one claim...
+    assert "assert len(encoded) < MAX_SECRET_BYTES // 2" in source
+    # ...and the console-default posture genuinely does NOT, measured on the token alone.
+    assert "assert len(token) > MAX_SECRET_BYTES" in source
+    # ...and the refusal lands AFTER the operator approved, which is the whole point.
+    assert 'assert report["reason_code"] == "secpctl_credential_too_large", report' in source
 
 
 # --- the artifact checker refuses what it claims to ----------------------------------------------
