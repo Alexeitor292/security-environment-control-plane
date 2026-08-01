@@ -54,6 +54,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -109,6 +110,23 @@ LOCATOR = ControllerApiLocator(
 _STARTUP_TIMEOUT_SECONDS = 240.0
 _HTTP_TIMEOUT = 30.0
 
+#: Keycloak 25 serves ``/health/*`` on a separate MANAGEMENT interface (port 9000), not on the HTTP
+#: port. Gating readiness on the provider's own health endpoint rather than on a sleep is what keeps
+#: this job from going flaky for every stream once it is a required check.
+_MANAGEMENT_PORT = 9000
+
+#: Sub-budget for the health port to answer AT ALL. Distinguishing "the management interface never
+#: appeared" from "the provider was slow" matters: the first means the image moved the port (a
+#: version bump) and the second means a loaded runner. Reported as different failures.
+_HEALTH_PORT_BUDGET_SECONDS = 90.0
+
+#: RFC 8628 §3.5: on ``slow_down`` the client MUST increase its polling interval by 5 seconds.
+_SLOW_DOWN_INCREMENT_SECONDS = 5
+
+#: Ceiling for a device-grant poll after the approval has been submitted. Generous, because it is a
+#: failure bound and not an expected duration — the loop exits as soon as the provider answers.
+_TOKEN_POLL_BUDGET_SECONDS = 120.0
+
 
 def _load_tool():
     spec = importlib.util.spec_from_file_location("secp_cli_client_tool_live", TOOL_PATH)
@@ -135,10 +153,26 @@ def _keycloak_image() -> str:
     return str(compose["services"]["keycloak"]["image"])
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _free_ports(count: int) -> list[int]:
+    """``count`` DISTINCT free ports.
+
+    Every socket is held open until all of them are bound, then all are closed. Calling a
+    single-port helper twice can return the SAME port — the first socket is closed before the
+    second binds, so the kernel is free to hand it back — and the container would then fail to
+    publish with a message about the port, not about the race that caused it.
+    """
+    held: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            held.append(sock)
+        ports = [int(sock.getsockname()[1]) for sock in held]
+    finally:
+        for sock in held:
+            sock.close()
+    assert len(set(ports)) == count, f"port allocation collided: {ports}"
+    return ports
 
 
 def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -218,7 +252,7 @@ def provider():
         # been asked to run, "Docker was missing" must not read as "the proof passed".
         pytest.fail(f"Docker is required and did not answer: {probe.stderr.strip()}")
 
-    port = _free_port()
+    port, management_port = _free_ports(2)
     name = f"secp-cli-device-flow-{uuid.uuid4().hex[:12]}"
     _docker(
         "run",
@@ -227,6 +261,10 @@ def provider():
         name,
         "-p",
         f"127.0.0.1:{port}:8080",
+        # The management interface, published so readiness can be gated on the provider's OWN
+        # health endpoint rather than on a sleep or on a guess about when it is up.
+        "-p",
+        f"127.0.0.1:{management_port}:{_MANAGEMENT_PORT}",
         "-e",
         f"KEYCLOAK_ADMIN={ADMIN_USERNAME}",
         "-e",
@@ -235,33 +273,88 @@ def provider():
         "KC_HTTP_PORT=8080",
         _keycloak_image(),
         "start-dev",
+        # Off by default. The dev compose service enables it; this container is started by this
+        # module and would not have it otherwise.
+        "--health-enabled=true",
     )
     base_url = f"http://127.0.0.1:{port}"
     try:
-        _await_ready(base_url, name)
+        _await_ready(base_url, f"http://127.0.0.1:{management_port}", name)
         yield Provider(base_url, name)
     finally:
         _docker("rm", "-f", name, check=False)
 
 
-def _await_ready(base_url: str, container: str) -> None:
-    deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
-    last = ""
+def _poll_until(probe: Callable[[], str | None], *, budget: float, interval: float = 2.0) -> str:
+    """Call ``probe`` until it returns ``None`` (ready) or the budget expires.
+
+    ``probe`` returns a short string describing why it is not ready yet, so the caller can report
+    the LAST reason rather than only that time ran out. Returns "" on success, else that reason.
+    """
+    deadline = time.monotonic() + budget
+    last = "never answered"
     while time.monotonic() < deadline:
+        reason = probe()
+        if reason is None:
+            return ""
+        last = reason
+        time.sleep(interval)
+    return last
+
+
+def _await_ready(base_url: str, management_url: str, container: str) -> None:
+    """Gate on the provider's OWN readiness signal, in two phases with distinguishable failures.
+
+    Never a fixed sleep. This job is a required check for every stream once it lands, so a flaky
+    readiness gate would turn every unrelated PR red with a cause that looks like their change.
+
+    The two phases fail differently ON PURPOSE. "The management interface never answered" means the
+    image moved the health port (Keycloak 24 and earlier served it on the HTTP port; 25 moved it to
+    the management interface), which is a version-bump defect. "Health answered but OIDC did not"
+    means a slow or wedged realm subsystem. Collapsing them into one timeout message would make a
+    version bump read as runner slowness, which is the diagnosis that costs the most time.
+    """
+
+    def health_probe() -> str | None:
+        try:
+            response = httpx.get(f"{management_url}/health/ready", timeout=5.0)
+        except httpx.HTTPError as exc:
+            return type(exc).__name__
+        return None if response.status_code == 200 else f"HTTP {response.status_code}"
+
+    started = time.monotonic()
+    reason = _poll_until(health_probe, budget=_HEALTH_PORT_BUDGET_SECONDS)
+    if reason:
+        logs = _docker("logs", "--tail", "40", container, check=False)
+        pytest.fail(
+            f"the Keycloak management interface at {management_url}/health/ready did not answer "
+            f"within {_HEALTH_PORT_BUDGET_SECONDS:.0f}s (last: {reason}). This is NOT ordinary "
+            f"runner slowness: --health-enabled=true was passed, so either the image moved the "
+            f"health endpoint off port {_MANAGEMENT_PORT} (check the image pin in "
+            f"{DEV_COMPOSE_PATH.name}) or the container never started. "
+            f"Container logs:\n{logs.stdout}{logs.stderr}"
+        )
+
+    # Health-ready is necessary but not sufficient: it says the server is up, not that this realm's
+    # OIDC endpoints are serving. The flow needs the second thing, so both are gated.
+    def oidc_probe() -> str | None:
         try:
             response = httpx.get(
                 f"{base_url}/realms/master/.well-known/openid-configuration", timeout=5.0
             )
-            if response.status_code == 200:
-                return
-            last = f"HTTP {response.status_code}"
-        except httpx.HTTPError as exc:  # not ready yet
-            last = type(exc).__name__
-        time.sleep(2.0)
-    logs = _docker("logs", "--tail", "40", container, check=False)
-    pytest.fail(
-        f"Keycloak did not become ready ({last}). Container logs:\n{logs.stdout}{logs.stderr}"
-    )
+        except httpx.HTTPError as exc:
+            return type(exc).__name__
+        return None if response.status_code == 200 else f"HTTP {response.status_code}"
+
+    remaining = max(10.0, _STARTUP_TIMEOUT_SECONDS - (time.monotonic() - started))
+    reason = _poll_until(oidc_probe, budget=remaining)
+    if reason:
+        logs = _docker("logs", "--tail", "40", container, check=False)
+        pytest.fail(
+            f"Keycloak reported health-ready but its OIDC discovery endpoint did not answer within "
+            f"{remaining:.0f}s (last: {reason}) — the realm subsystem is slow or wedged, not the "
+            f"container. Container logs:\n{logs.stdout}{logs.stderr}"
+        )
 
 
 # --- realms built from the committed artifact -----------------------------------------------------
@@ -536,6 +629,86 @@ class _FixedLocator:
         return LOCATOR
 
 
+def _poll_for_token(client, endpoints, authorization) -> str:
+    """Poll the token endpoint the way RFC 8628 §3.5 says to, and return the access token.
+
+    The three tests that drive the transport directly (rather than through ``auth_login``, which
+    has the shipped scheduler) previously slept ``interval + 1`` once and asserted the very next
+    response was the token. That is a wall-clock assumption in two ways, and both are the shape
+    that goes flaky under CI load once this job is a required check for every stream:
+
+    * it assumes the approval has propagated by the time the single request goes out, so a slow
+      provider reads as a device-flow defect;
+    * it ignores ``slow_down``. §3.5 says a client that polls too fast gets ``slow_down`` and MUST
+      add 5 seconds to its interval. A single-shot assertion turns that CORRECT provider behaviour
+      into a test failure.
+
+    So this honours the server's own numbers: the interval it licensed in the authorization
+    response, increased by 5 whenever the server says to. The budget is a failure bound, not an
+    expected duration — the loop returns as soon as the provider answers.
+    """
+    interval = float(authorization.interval)
+    deadline = time.monotonic() + _TOKEN_POLL_BUDGET_SECONDS
+    attempts = 0
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        attempts += 1
+        token, error = client.request_token(endpoints, authorization.device_code)
+        if not error:
+            return token
+        if error == "slow_down":
+            interval += _SLOW_DOWN_INCREMENT_SECONDS
+            continue
+        if error == "authorization_pending":
+            continue
+        # expired_token, access_denied, invalid_grant: terminal, and worth naming exactly.
+        pytest.fail(
+            f"the provider refused the device grant with {error!r} after {attempts} poll(s). "
+            "This is a provider answer, not a timeout."
+        )
+    pytest.fail(
+        f"no token after {attempts} poll(s) over {_TOKEN_POLL_BUDGET_SECONDS:.0f}s at a final "
+        f"interval of {interval:.0f}s. The provider kept answering authorization_pending, so the "
+        "approval submission did not take effect."
+    )
+
+
+def _poll_raw_token(token_endpoint: str, authorization) -> dict:
+    """:func:`_poll_for_token`'s semantics against the provider's RAW token response.
+
+    Kept separate rather than parameterised because the caller needs the response BODY, including
+    members (``refresh_token``) the shipped client refuses outright — routing it through the client
+    would hide exactly the misconfiguration that caller is checking for.
+    """
+    interval = float(authorization.interval)
+    deadline = time.monotonic() + _TOKEN_POLL_BUDGET_SECONDS
+    attempts = 0
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        attempts += 1
+        body = httpx.post(
+            token_endpoint,
+            data={
+                "grant_type": DEVICE_CODE_GRANT_TYPE,
+                "device_code": authorization.device_code.token_request_value(),
+                "client_id": OPERATOR_CLI_CLIENT_ID,
+            },
+            timeout=_HTTP_TIMEOUT,
+        ).json()
+        error = body.get("error")
+        if not error:
+            return body
+        if error == "slow_down":
+            interval += _SLOW_DOWN_INCREMENT_SECONDS
+            continue
+        if error == "authorization_pending":
+            continue
+        pytest.fail(f"the provider refused the grant with {error!r} after {attempts} poll(s)")
+    pytest.fail(
+        f"no raw token response after {attempts} poll(s) over {_TOKEN_POLL_BUDGET_SECONDS:.0f}s"
+    )
+
+
 def _claims(token: str) -> dict:
     payload = token.split(".")[1]
     payload += "=" * (-len(payload) % 4)
@@ -675,9 +848,7 @@ def test_the_provider_answers_authorization_pending_before_the_operator_approves
     )
     assert composition.approval.submissions >= 2  # sign-in, then the grant confirmation
 
-    time.sleep(authorization.interval + 1)  # the provider answers slow_down if polled faster
-    token, error = client.request_token(endpoints, authorization.device_code)
-    assert error == ""
+    token = _poll_for_token(client, endpoints, authorization)
     assert len(token.split(".")) == 3  # a real signed JWT, not a stub string
 
 
@@ -768,9 +939,7 @@ def test_the_console_default_token_really_is_the_thing_that_is_too_large(
             "verification_uri_complete": authorization.verification_uri_complete,
         }
     )
-    time.sleep(authorization.interval + 1)
-    token, error = client.request_token(endpoints, authorization.device_code)
-    assert error == ""
+    token = _poll_for_token(client, endpoints, authorization)
 
     claims = _claims(token)
     assert len(claims["realm_access"]["roles"]) >= OPERATOR_ROLE_COUNT
@@ -903,16 +1072,11 @@ def test_the_grant_never_yields_a_refresh_token(provider, artifact_realm):
             "verification_uri_complete": authorization.verification_uri_complete,
         }
     )
-    time.sleep(authorization.interval + 1)
-    raw = httpx.post(
-        endpoints.token_endpoint,
-        data={
-            "grant_type": DEVICE_CODE_GRANT_TYPE,
-            "device_code": authorization.device_code.token_request_value(),
-            "client_id": OPERATOR_CLI_CLIENT_ID,
-        },
-        timeout=_HTTP_TIMEOUT,
-    ).json()
+    # Polled RAW rather than through `_poll_for_token`: the shipped client REFUSES a response
+    # carrying a refresh token, so routing this through it would turn the misconfiguration this
+    # test looks for into a bounded reason code and hide it. Same RFC 8628 §3.5 semantics as the
+    # helper — honour the licensed interval, add 5s on slow_down, never a bare sleep-and-assert.
+    raw = _poll_raw_token(endpoints.token_endpoint, authorization)
     assert "access_token" in raw
     assert "refresh_token" not in raw
     assert set(raw["scope"].split()) == {"openid", "profile", "email"}

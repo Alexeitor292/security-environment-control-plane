@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -173,6 +174,75 @@ def test_the_size_control_has_a_real_measurer_in_both_directions():
     assert "assert len(token) > MAX_SECRET_BYTES" in source
     # ...and the refusal lands AFTER the operator approved, which is the whole point.
     assert 'assert report["reason_code"] == "secpctl_credential_too_large", report' in source
+
+
+# --- the required job must be deterministic, not merely passing ----------------------------------
+
+#: Read once; several guards below key on its text.
+_LIVE_MODULE = (
+    REPO / "apps" / "management" / "tests" / "test_keycloak_device_flow_integration.py"
+).read_text(encoding="utf-8")
+
+
+def test_the_device_flow_proof_gates_readiness_on_the_provider_health_endpoint():
+    """Once `backend-keycloak-device-flow` is required, a flaky readiness gate turns EVERY stream's
+    PR red with a cause that looks like their change. So readiness is gated on Keycloak's own
+    health endpoint, and the container is started with the flag that serves it.
+
+    Keycloak 25 moved `/health/*` to the management interface, so the flag alone is not enough —
+    the port has to be published too, and this pins both.
+    """
+    assert '"--health-enabled=true",' in _LIVE_MODULE
+    assert "/health/ready" in _LIVE_MODULE
+    assert "_MANAGEMENT_PORT = 9000" in _LIVE_MODULE
+    assert 'f"127.0.0.1:{management_port}:{_MANAGEMENT_PORT}",' in _LIVE_MODULE
+
+
+def test_the_device_flow_proof_has_no_bare_sleep_before_an_assertion():
+    """Every `time.sleep` in the live module must be a poll interval, never a "wait and hope".
+
+    A fixed sleep followed by a single assertion is the canonical CI flake: it passes on a quiet
+    runner and fails on a loaded one, and the failure reads as a device-flow defect. This asserts
+    the shape structurally — the only sleeps are on a variable named `interval`.
+    """
+    sleeps = re.findall(r"time\.sleep\(([^)]*)\)", _LIVE_MODULE)
+    assert sleeps, "the live module has no sleeps at all — this guard is measuring nothing"
+    assert set(sleeps) == {"interval"}, f"a sleep on something other than a poll interval: {sleeps}"
+
+
+def test_the_device_flow_proof_honours_rfc8628_slow_down():
+    """RFC 8628 §3.5: a client polled too fast gets `slow_down` and MUST add 5 seconds.
+
+    Both poll loops (through the shipped client, and raw) must handle it, or CORRECT provider
+    behaviour under load becomes a test failure. Counted, not merely present: there are two loops
+    and both need it.
+    """
+    assert _LIVE_MODULE.count('if error == "slow_down":') == 2
+    assert _LIVE_MODULE.count("interval += _SLOW_DOWN_INCREMENT_SECONDS") == 2
+    assert "_SLOW_DOWN_INCREMENT_SECONDS = 5" in _LIVE_MODULE
+    assert _LIVE_MODULE.count('if error == "authorization_pending":') == 2
+
+
+def test_the_device_flow_proof_distinguishes_runner_slowness_from_a_real_defect():
+    """A bounded timeout is not enough; the message has to say WHICH failure it is.
+
+    "The management interface never answered" means the image moved the health port (a version
+    bump). "Health answered but OIDC did not" means a slow realm subsystem. One collapsed timeout
+    message would make a version bump read as runner slowness.
+    """
+    assert "This is NOT ordinary " in _LIVE_MODULE
+    assert "reported health-ready but its OIDC discovery endpoint did not answer" in _LIVE_MODULE
+    assert "_HEALTH_PORT_BUDGET_SECONDS" in _LIVE_MODULE
+    assert "_TOKEN_POLL_BUDGET_SECONDS" in _LIVE_MODULE
+
+
+def test_the_device_flow_proof_allocates_distinct_ports_atomically():
+    """Two calls to a single-port helper can return the SAME port — the first socket is closed
+    before the second binds. The container would then fail to publish, with a message about the
+    port rather than about the race. All sockets are held until every port is bound."""
+    assert "def _free_ports(count: int) -> list[int]:" in _LIVE_MODULE
+    assert "assert len(set(ports)) == count" in _LIVE_MODULE
+    assert "def _free_port()" not in _LIVE_MODULE  # the racy single-port helper is gone
 
 
 # --- the artifact checker refuses what it claims to ----------------------------------------------
