@@ -28,10 +28,9 @@ import secrets
 import sqlite3
 
 import pytest
+from secp_api.db import _make_engine
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
-
-from secp_api.db import _make_engine
 
 
 def _sqlite_engine(tmp_path, name="boundary.db"):
@@ -120,8 +119,8 @@ def test_savepoint_rollback_still_discards_only_the_nested_work(tmp_path):
 
 
 def test_sqlite_foreign_keys_stay_enforced(tmp_path):
-    """``_make_engine`` also sets ``PRAGMA foreign_keys=ON``; turning off pysqlite's implicit
-    BEGIN must not cost that (a PRAGMA is ignored inside an open transaction)."""
+    """``_make_engine`` also sets ``PRAGMA foreign_keys=ON``; touching transaction handling must
+    not cost that (SQLite ignores this PRAGMA while a transaction is open)."""
     engine, _ = _sqlite_engine(tmp_path, "fk.db")
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
