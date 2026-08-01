@@ -285,6 +285,19 @@ def test_the_extractor_actually_reaches_the_runbooks() -> None:
     expected: set[tuple[str, int]] = set()
     for runbook in RUNBOOKS:
         expected |= {(runbook.name, lineno) for lineno in _independently_documented_lines(runbook)}
+
+    # PROVE THE INDEPENDENT READING ACTUALLY SPOKE, before comparing anything to it. An empty
+    # ``expected`` makes ``missing`` empty too, and two empty sets compare equal — so a broken
+    # second reading would report a perfectly healthy sweep. Deriving from a different source and
+    # proving that source answered are SEPARABLE requirements and both are needed; an independent
+    # reading that can silently return nothing is not independent, it is a second way to say yes.
+    assert expected, "the independent reading found nothing — it is broken, not the corpus clean"
+    for runbook in RUNBOOKS:
+        if "secpctl" in runbook.read_text(encoding="utf-8"):
+            assert any(name == runbook.name for name, _ in expected), (
+                f"{runbook.name} mentions secpctl but the independent reading saw nothing in it"
+            )
+
     swept = {(name, lineno) for name, lineno, _ in rows}
     # Family references are exempt by design and contribute no argv.
     exempt = {
