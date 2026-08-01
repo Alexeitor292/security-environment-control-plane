@@ -169,8 +169,12 @@ def test_valid_token_file_selection_shares_one_truthful_provider_and_probe(monke
     assert isinstance(auth.token_file_provider, ProtectedTokenFileProvider)
 
 
-def test_production_auth_deps_seals_only_the_failed_locator(monkeypatch):
-    """A locator construction failure must not erase independent credential/provider truth."""
+def test_a_live_windows_keystore_does_not_claim_production_controller_trust(monkeypatch):
+    """Credential-backend assurance and controller trust are independent.
+
+    A live Windows Credential Manager may be reported truthfully, but without the separately
+    reviewed locator + CA provisioning workflow every locator-dependent command still refuses.
+    """
     import secp_management.controller_api_locator as locator_module
     import secp_management.operator_credential_store as store_module
     from secp_management.auth_cli import StoredCredentialStatus

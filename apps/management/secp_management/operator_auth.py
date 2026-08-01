@@ -14,10 +14,14 @@ output. The shipped default provider is SEALED (``secpctl_operator_auth_unavaila
 Interactive device-authorization login now lives in :mod:`secp_management.auth_cli` (ADR-028 §3),
 which obtains and verifies a token and then offers it to
 :mod:`secp_management.operator_credential_store`. That store now resolves a real OS keystore on
-Windows, macOS and Linux, so a login completes and the keystore is the ordinary provider. The
-protected token FILE below stays a deliberate test/recovery seam reachable solely when an operator
-sets ``SECP_OPERATOR_TOKEN_FILE``; it is never an automatic fallback from the credential store, and
-a store that cannot reach a keystore refuses rather than degrading to it.
+Windows, macOS and Linux. Backend availability alone does not make login complete: production
+authenticated controller access is supported only from the trusted POSIX/controller-local posture,
+where bootstrap has provisioned the protected locator and reviewed CA bundle. In particular, the
+live-tested Windows Credential Manager backend is not a claim of production Windows controller
+trust; that requires a separate reviewed locator + CA provisioning workflow. The protected token
+FILE below stays a deliberate test/recovery seam reachable solely when an operator sets
+``SECP_OPERATOR_TOKEN_FILE``; it is never an automatic fallback from the credential store, and a
+store that cannot reach a keystore refuses rather than degrading to it.
 """
 
 from __future__ import annotations

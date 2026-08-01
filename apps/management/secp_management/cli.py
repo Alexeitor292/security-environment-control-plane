@@ -412,8 +412,11 @@ def _production_auth_deps() -> AuthCliDeps:
     The root-owned locator has a narrower platform surface than those credential providers. If its
     hardened filesystem cannot be constructed (notably on Windows), ONLY the locator is sealed:
     locator-dependent commands still refuse, while pre-bootstrap ``auth status`` can truthfully
-    report the selected credential backend and token provider. No identity, endpoint or trust input
-    is read from a flag or an env var."""
+    report the selected credential backend and token provider. A live Windows Credential Manager
+    report is therefore backend assurance, not a production Windows controller-trust claim. The MVP
+    production posture is trusted POSIX/controller-local; Windows requires a separately reviewed
+    locator + CA provisioning workflow. No identity, endpoint or trust input is read from a flag or
+    an env var."""
     import os
 
     from secp_commissioning.runtime import FilesystemError, RealFilesystem

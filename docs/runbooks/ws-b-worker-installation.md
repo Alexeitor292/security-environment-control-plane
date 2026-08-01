@@ -78,6 +78,28 @@ effects it made. See §8 for the reason codes.
 Installation and enrollment are separate steps. Enrollment is driven from the **non-secret
 invitation file** the controller operator gives you.
 
+Run the authenticated controller-side commands from the **trusted POSIX controller-local management
+host**. Its bootstrap-created, fixed root-owned locator supplies both the canonical controller origin
+and the reviewed CA-bundle path; there is no supported `--url`, `--ca`, issuer or trust override.
+Before creating an invitation, establish and inspect the operator session:
+
+```
+secpctl auth login --write --confirm
+secpctl auth status
+```
+
+The OS credential backend and controller trust source are separate assurances:
+
+| Host/backend | What is assured | Production posture for authenticated controller commands |
+|---|---|---|
+| Windows Credential Manager | Implemented and genuinely round-tripped against the real Credential Manager on the Windows developer host | **Not production-supported for end-to-end controller access.** A separate reviewed workflow must provision and protect the Windows locator and CA bundle first. |
+| macOS Keychain | Binding logic exercised against a stand-in only, not the real framework; read-only status may prompt on a locked Keychain | No live-host claim. Only a host satisfying the trusted POSIX/controller-local posture is in scope. |
+| Linux Secret Service | Binding logic exercised against a stand-in only, not the real library; headless Ubuntu CI has no session D-Bus and exercises no live keystore | Supported on the trusted controller-local POSIX host only when bootstrap locator/CA state and a reachable OS keystore are present. |
+
+Do not interpret `auth status` reporting `windows_credential_manager` as proof that Windows
+controller trust is provisioned. The credential backend remains available for development and
+future reviewed provisioning, but locator-dependent commands refuse closed today.
+
 On the controller:
 
 ```

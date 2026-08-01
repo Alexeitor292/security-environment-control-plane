@@ -6,7 +6,12 @@ derivation. :mod:`secp_management.operator_credential_store` owns all of that an
 through the narrow :class:`SecretStoreBinding` seam, so the no-plaintext-fallback rules are enforced
 in ONE reviewed place and are not restated per platform.
 
-Three bindings ship, one per supported operator workstation, and **no process is ever spawned**:
+Three credential-storage bindings ship, and **no process is ever spawned**. Their presence says
+nothing by itself about whether that host has a production-supported controller locator and CA trust
+source. For this MVP, authenticated controller commands are production-supported only in the
+trusted POSIX/controller-local posture; the Windows binding remains implemented and live-tested for
+developer-host assurance while Windows end-to-end controller trust awaits a separate reviewed
+locator + CA provisioning workflow:
 
 * **Windows** — Credential Manager via ``advapi32`` ``CredWriteW`` / ``CredReadW`` / ``CredDeleteW``
   (``wincred.h``), through :mod:`ctypes`. A ``CRED_TYPE_GENERIC`` credential is "stored securely" by

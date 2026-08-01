@@ -516,6 +516,10 @@ def test_windows_credential_manager_refuses_an_oversized_blob_before_calling_the
 #     runner has no session D-Bus and therefore no Secret Service — so NO live OS keystore is
 #     exercised on CI at all.
 # Neither fact is a defect, but a silently skipped backend must never read as a passing one.
+# This ledger measures ONLY the OS-keystore binding. In particular, Windows `live` means the real
+# Credential Manager round-tripped on the developer host; it does NOT mean the protected controller
+# locator and CA were provisioned there. MVP production authenticated controller access remains the
+# trusted POSIX/controller-local posture, and Windows end-to-end trust awaits a separate review.
 #
 # THREE assurance categories, deliberately kept distinct. Collapsing them is the failure mode this
 # ledger exists to prevent, and adding stand-in tests is exactly when that collapse would happen:
@@ -624,9 +628,12 @@ def test_the_host_keystore_resolves_where_the_platform_guarantees_one():
         assert binding is None
 
 
-def test_the_live_backend_coverage_of_this_run_is_recorded(record_testsuite_property):
+def test_the_live_keystore_backend_not_controller_trust_of_this_run_is_recorded(
+    record_testsuite_property,
+):
     """Publish which backend this run actually exercised against a real OS keystore, so a reader of
-    the CI report can see it rather than assume it.
+    the CI report can see it rather than assume it. This is explicitly not an end-to-end controller
+    trust or production-support claim.
 
     ``record_testsuite_property`` rather than ``record_property``: CI runs pytest with
     ``--junitxml`` under the default ``xunit2`` family, where a per-test property is dropped with a
@@ -650,6 +657,8 @@ def test_the_live_backend_coverage_of_this_run_is_recorded(record_testsuite_prop
         "os_keystore_assurance",
         ",".join(f"{backend}={category}" for backend, category in assurance.items()),
     )
+    record_testsuite_property("operator_auth_production_posture", "trusted_posix_controller_local")
+    record_testsuite_property("windows_controller_trust_provisioning", "not_production_supported")
 
     assert live in _ALL_BACKENDS | {"none"}
     # Every backend is categorised, and at most one can be live (only one binding runs per host).

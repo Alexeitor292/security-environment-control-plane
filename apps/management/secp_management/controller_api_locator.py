@@ -13,6 +13,12 @@ locator carries PUBLIC deployment facts only — an origin and a CA-bundle path,
 The shipped default provider is SEALED (``secpctl_controller_locator_unavailable``); a controller on
 which ``secpctl bootstrap controller`` recorded the locator resolves it. No ``--url``/``--ca`` input
 exists; the origin/CA are never chosen by a CLI argument, environment variable, or HTTP payload.
+
+For the MVP this is a trusted POSIX/controller-local production posture. The invocation snapshot
+prevents one command from crossing controller identities, but does not provision trust on a new
+platform. Windows Credential Manager may be live while this locator stays sealed: Windows
+end-to-end authenticated controller access is not production-supported until a separate reviewed
+workflow provisions and protects the locator and CA bundle there.
 """
 
 from __future__ import annotations

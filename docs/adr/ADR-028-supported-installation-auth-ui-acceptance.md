@@ -172,9 +172,31 @@ The worker performs **outbound HTTPS only**; all controller identity/trust comes
 
 `secpctl auth login` uses the **OAuth 2.0 Device Authorization Grant** (RFC 8628) against the controller's *reviewed* OIDC authority (discovered from the recorded controller/OIDC config — **no arbitrary issuer override in production**). It displays bounded verification URI + user code; polls with the server-provided interval honouring `authorization_pending`/`slow_down`, with a bounded timeout + cancellation; verifies issuer/audience/signature/expiry/required claims and the org+role/permission mapping; and persists the resulting `OperatorAccessToken` into the credential store. No password is ever collected; no token appears in argv/env/logs/telemetry/output. `auth status` shows the resolved operator principal (no token); `auth logout` deletes only owned credential material; expired/revoked credentials fail closed. If the configured provider does not advertise device grant, `auth login` reports the exact provider limitation and does **not** fall back to a password grant.
 
+### 3.1 MVP production host and controller-trust posture
+
+Production authenticated enrollment commands are supported only from the **trusted POSIX,
+controller-local management posture**. The controller bootstrap records the canonical HTTPS origin
+and reviewed CA-bundle path in the fixed root-owned locator, and `secpctl` reads that locator through
+the POSIX hardened filesystem seam. The invocation-pinned locator guarantees that the HTTPS
+destination, CA source and credential account observe one immutable controller identity during a
+command. That consistency property does not provision or authenticate a trust root by itself.
+
+PR5H-B2 deliberately does **not** invent a Windows locator or CA-provisioning workflow. The Windows
+Credential Manager binding remains implemented, fail-closed and genuinely exercised end to end on
+the Windows developer host, but that is assurance of the **credential backend only**. Windows
+end-to-end authenticated controller access is not production-supported until a separate reviewed
+workflow provisions and protects both the controller locator and CA bundle on Windows. No operator
+may supply a replacement URL, CA path, issuer or trust override.
+
+| Host / backend | Credential-backend assurance in this repository | MVP production authenticated controller access |
+|---|---|---|
+| Windows / Credential Manager | `live` on the Windows developer host: the real ctypes binding round-trips against the real Credential Manager | **Not production-supported.** No reviewed Windows locator + CA provisioning workflow exists. |
+| macOS / Keychain | `stand_in`: binding logic runs against a documented substitute; this is not verification of the real frameworks. A read-only status can still prompt on a locked Keychain. | Only the trusted POSIX/controller-local posture is in scope; no macOS live-keystore or end-to-end host claim is made. |
+| Linux / Secret Service | `stand_in`: binding logic runs against a documented substitute; this is not verification of the real library. Headless Ubuntu CI has no session D-Bus and exercises no live OS keystore. | Supported only on the trusted POSIX/controller-local management host when the bootstrap locator/CA and a reachable OS keystore are present; otherwise it refuses closed. |
+
 ## 4. OS credential storage contract (Phase 5)
 
-A typed `OperatorCredentialStore` implements `OperatorAccessTokenProvider` with: a **sealed default**; a platform (Linux Secret Service/keyring) implementation; bounded account/service identifiers; access+refresh lifecycle; non-serializable + constant redacted repr (the `OperatorAccessToken`/`ProtectedTokenFileProvider` posture); atomic replacement; explicit logout deletion; expiry validation; concurrency safety. The protected token **file** remains only as a sealed/test/recovery seam. **No silent plaintext fallback**: if no supported backend is present, return a bounded setup error with the installation requirement. Tests use a fake store; never real tokens.
+A typed `OperatorCredentialStore` implements `OperatorAccessTokenProvider` with: a **sealed default**; Windows Credential Manager, macOS Keychain and Linux Secret Service bindings; bounded account/service identifiers; access+refresh lifecycle; non-serializable + constant redacted repr (the `OperatorAccessToken`/`ProtectedTokenFileProvider` posture); atomic replacement; explicit logout deletion; expiry validation; concurrency safety. A backend's availability or live backend test is not an end-to-end controller-trust claim; the production host posture remains §3.1. The protected token **file** remains only as a sealed/test/recovery seam. **No silent plaintext fallback**: if no supported backend is present, return a bounded setup error with the installation requirement. Tests use a fake store; never real tokens.
 
 ## 5. Minimal enrollment UI contract (Phase 6)
 
