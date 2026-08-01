@@ -815,3 +815,199 @@ def test_the_shard_skip_accounting_is_not_vacuous(wf):
     assert "PLATFORM_GATED is empty" in run, "an empty pattern set must fail, not accept everything"
     assert "no testcases at all" in run, "an empty corpus must fail rather than pass vacuously"
     assert "missing" in run, "a missing report must fail rather than pass vacuously"
+
+
+# --- PostgreSQL + real-socket API regression gate ----------------------------------------------
+#
+# The defect that motivated this job (a create answered 201 before its transaction committed)
+# survived because no gate exercised PostgreSQL and a real HTTP socket at the same time: 88
+# `TestClient` references and no live-server harness anywhere. `TestClient` drives the ASGI app to
+# completion in-process, so the request exit stack always closes before the assertion.
+#
+# The module is deliberately OUTSIDE the sharded corpus, which means exactly one job runs it. These
+# proofs tie the three parts together — the exclusion, the job, and the module's own marker — so
+# that no single edit can leave the gate excluded from the corpus and run by nothing.
+
+SOCKET_GATE_JOB = "backend-api-socket-gate"
+SOCKET_GATE_MODULE = "apps/api/socket_gate_tests/test_api_read_after_write_over_socket.py"
+SOCKET_GATE_TEST = "test_a_created_template_is_readable_by_the_immediately_following_request"
+
+
+def test_socket_gate_module_is_excluded_from_the_corpus_and_names_its_job(suite):
+    """The exclusion is what keeps the inventory fail-closed for a pytest file outside `roots`.
+
+    It must also record WHICH job runs the module, so the pairing below is not folklore.
+    """
+    entries = {entry["path"]: entry for entry in suite.get("exclusions", [])}
+    assert SOCKET_GATE_MODULE in entries, (
+        "the socket gate lives outside the canonical roots, so it must be an explicit exclusion or "
+        "the inventory proof fails closed"
+    )
+    entry = entries[SOCKET_GATE_MODULE]
+    assert entry["job"] == SOCKET_GATE_JOB
+    assert entry["reason"].strip(), "an exclusion without a justification is not a decision"
+    # It is genuinely outside the roots: an excluded file *inside* a root would be collected by the
+    # canonical directory-level collection and missing from every shard, failing `verify --collect`.
+    assert not any(
+        SOCKET_GATE_MODULE == root or SOCKET_GATE_MODULE.startswith(root + "/")
+        for root in suite["roots"]
+    )
+
+
+def test_socket_gate_job_runs_the_exact_module_against_real_postgres(wf):
+    jobs = _jobs(wf)
+    assert SOCKET_GATE_JOB in jobs, "the excluded module must have exactly one job that runs it"
+    job = jobs[SOCKET_GATE_JOB]
+    assert job["services"]["postgres"]["image"].startswith("postgres:16")
+    assert job["env"]["SECP_TEST_POSTGRES_URL"].startswith("postgresql+psycopg://")
+    run = _run_text(job)
+    assert SOCKET_GATE_MODULE in run
+    # scoped to the gate: it does not elevate or re-run any other corpus
+    assert "apps/api/tests" not in run
+    assert "pytest_shards.py" not in run
+    # it contacts no deployment infrastructure; the only listener is loopback inside the runner
+    for forbidden in ("ssh ", "opentofu", "terraform", "proxmox", "secp-operator"):
+        assert forbidden not in run.lower()
+
+
+def test_socket_gate_job_accounting_is_xfail_aware_and_refuses_a_plain_skip(wf):
+    """A strict xfail is recorded in JUnit as `<skipped type="pytest.xfail">`.
+
+    So the accounting must discriminate on that type: an expected failure is the pending state, a
+    plain skip means PostgreSQL was absent and the gate never executed. Collapsing the two would
+    let an unrun gate read as a passing one — the exact failure this whole job exists to prevent.
+    """
+    job = _jobs(wf)[SOCKET_GATE_JOB]
+    run = _run_text(job)
+    assert "--junitxml=junit-api-socket-gate.xml" in run
+    assert "pytest.xfail" in run, "the accounting must tell an expected failure from a real skip"
+    assert "plain_skipped" in run and "SKIPPED outright" in run
+    assert "STATE=PENDING" in run and "STATE=FIXED" in run, (
+        "the job must name which of the two acceptable states it observed, rather than being "
+        "silently green in both"
+    )
+    assert "tests != EXPECTED_TESTS" in run, "an exact count, never a floor"
+    assert "sys.exit(1)" in run
+    upload = next(
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+    )
+    assert upload.get("if") == "always()"
+    assert upload["with"]["path"] == "junit-api-socket-gate.xml"
+    assert upload["with"]["if-no-files-found"] == "error"
+    parse_steps = [
+        step
+        for step in _steps(job)
+        if "plain_skipped" in str(step.get("run", "")) and step.get("if") == "always()"
+    ]
+    assert parse_steps, "the JUnit-enforcement step must run with if: always()"
+
+
+def test_socket_gate_job_is_required_and_cached_like_its_siblings(wf):
+    jobs = _jobs(wf)
+    assert SOCKET_GATE_JOB in jobs["backend"]["needs"]
+    assert f"needs.{SOCKET_GATE_JOB}.result" in _run_text(jobs["backend"])
+    assert jobs["backend"]["name"] == BACKEND_AGG_NAME
+    setup = next(
+        step
+        for step in _steps(jobs[SOCKET_GATE_JOB])
+        if str(step.get("uses", "")).startswith("astral-sh/setup-uv")
+    )
+    assert setup["with"]["enable-cache"] is True
+    assert "uv.lock" in setup["with"]["cache-dependency-glob"]
+
+
+def test_socket_gate_job_is_additive_and_changes_no_existing_coverage(wf, suite):
+    """Adding the gate must not shrink anything: same roots, same shards, same sibling fences."""
+    jobs = _jobs(wf)
+    assert jobs["backend-pytest"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
+    assert len(jobs["backend-pytest"]["strategy"]["matrix"]["shard"]) == suite["shard_count"]
+    for root in ("apps/api/tests", "tests", "apps/commissioning/tests", "apps/deployment/tests"):
+        assert root in suite["roots"]
+    assert "pytest_shards.py verify --collect" in _run_text(jobs["backend-test-inventory"])
+    # the sibling PostgreSQL fences keep their own no-skip accounting untouched
+    assert "skipped != 0" in _run_text(jobs["backend-pr5f-postgres-finalization"])
+    assert "expected 0 skipped" in _run_text(jobs["backend-pr5h-postgres-enrollment"])
+
+
+def _socket_gate_module():
+    from socket_gate_tests import test_api_read_after_write_over_socket as gate
+
+    return gate
+
+
+def _marks(owner) -> list:
+    """Normalize a `pytestmark` attribute to a list of marks.
+
+    A module-level `pytestmark = pytest.mark.skipif(...)` is a single MarkDecorator; marks applied
+    to a function are collected into a list of Mark objects. Both expose `.name` and `.kwargs`.
+    """
+    marks = getattr(owner, "pytestmark", [])
+    return list(marks) if isinstance(marks, (list, tuple)) else [marks]
+
+
+def test_socket_gate_expected_failure_is_strict_and_narrowly_typed():
+    """Checked on the LOADED marker object, not on source text.
+
+    Three properties, and each closes a different way for the gate to go quietly useless:
+      * `strict=True` — once the fix lands the test passes, pytest turns that into a failure, and
+        the marker cannot outlive the defect it documents.
+      * `raises=ReadAfterWriteViolation` — only the specific defect is absorbed. A broken harness,
+        an unreachable server or the wrong database surfaces as an ordinary failure.
+      * `LiveGateInconclusive` is NOT a subclass of it — so a run that could not measure what it
+        claims can never be reported as "the known defect, still pending".
+    """
+    from socket_gate_tests.live_api_server import LiveServerError
+
+    gate = _socket_gate_module()
+    target = getattr(gate, SOCKET_GATE_TEST)
+    xfails = [mark for mark in _marks(target) if mark.name == "xfail"]
+    assert len(xfails) == 1, f"expected exactly one xfail marker, found {len(xfails)}"
+    kwargs = xfails[0].kwargs
+    assert kwargs["strict"] is True
+    assert kwargs["raises"] is gate.ReadAfterWriteViolation
+    assert issubclass(gate.ReadAfterWriteViolation, AssertionError)
+    assert not issubclass(gate.LiveGateInconclusive, gate.ReadAfterWriteViolation)
+    # A harness failure is not even an AssertionError, so no expected-failure marker can take it.
+    assert not issubclass(LiveServerError, AssertionError)
+
+
+def test_socket_gate_is_postgresql_only_so_a_green_sqlite_run_is_not_coverage():
+    """SQLite serialises the race away at its database-level write lock.
+
+    So the module is gated on a real PostgreSQL URL *and* every test re-asserts the live dialect —
+    belt and braces, because a mis-set URL would otherwise produce a green run that reads as a
+    passing gate while proving nothing.
+    """
+    gate = _socket_gate_module()
+    reasons = [mark.kwargs.get("reason", "") for mark in _marks(gate) if mark.name == "skipif"]
+    assert any("SECP_TEST_POSTGRES_URL" in reason for reason in reasons), (
+        "the skip must say out loud which capability is missing, so an absent gate is visible"
+    )
+    import sqlalchemy
+
+    sqlite = sqlalchemy.create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with pytest.raises(gate.LiveGateInconclusive):
+            gate._require_postgresql(sqlite)
+    finally:
+        sqlite.dispose()
+
+
+def test_socket_gate_job_expects_exactly_the_module_s_test_count(wf):
+    """Couple the workflow's exact count to the module, so neither can drift alone."""
+    import re
+
+    run = _run_text(_jobs(wf)[SOCKET_GATE_JOB])
+    declared = re.search(r"EXPECTED_TESTS\s*=\s*(\d+)", run)
+    assert declared, "the socket-gate job must declare an exact expected test count"
+    gate = _socket_gate_module()
+    defined = [
+        name for name in dir(gate) if name.startswith("test_") and callable(getattr(gate, name))
+    ]
+    assert int(declared.group(1)) == len(defined), (
+        f"the job expects {declared.group(1)} tests but the module defines {len(defined)}: "
+        f"{sorted(defined)}"
+    )
+    assert SOCKET_GATE_TEST in defined
