@@ -98,7 +98,7 @@ structurally incapable of reaching a provider rather than configured not to:
   pre-existing simulator plugin's, untouched here. A pair exempts one edge, not a whole file or a
   whole import name, and an exception that no longer matches a real import fails as stale;
 - no code object in either package names any capability on an enumerated list (`open`, `getattr`,
-  `__import__`, `socket`, `connect`, `Popen` and 26 others), checked on compiled code objects
+  `__import__`, `socket`, `connect`, `Popen` and 31 others, including the clock readers that would let a passed `datetime` become an ambient clock), checked on compiled code objects
   rather than on source text, which closes the dynamic-dispatch gap a static import scan leaves
   open. The scan compiles each package source file and recurses it, so its *reach* is complete over
   the file by construction and covers a callable held in a container as well as one bound as a

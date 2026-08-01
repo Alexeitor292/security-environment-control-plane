@@ -28,24 +28,36 @@ value in a tuple.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from secp_reconciliation.v1.codes import (
-    ActionKind,
     ElementKind,
     ExecutionSurface,
     FacetName,
+    ObservationFidelity,
     ReconciliationRefused,
     RefusalCode,
+    StepFailureReason,
+    StepStatus,
 )
 from secp_reconciliation.v1.digest import document_digest
+from secp_reconciliation.v1.execution import (
+    ExecutionReport,
+    StepOutcome,
+    build_execution_report,
+    require_execution_authorized,
+)
 from secp_reconciliation.v1.planner import ReconciliationPlan, require_planned_under
+from secp_reconciliation.v1.reset import ResetIntent
 from secp_reconciliation.v1.state import (
     DesiredState,
+    ObservedState,
     ReconciliationScope,
+    StateElement,
+    decode_edge_ref,
     desired_state_digest,
 )
 
-SIMULATED_EXECUTION_SCHEMA_VERSION = "secp-recon/simulated-execution/v1"
 SIMULATED_WORLD_SCHEMA_VERSION = "secp-recon/simulated-world/v1"
 
 # The one surface this module will execute for. It equals the only member the contract's
@@ -69,29 +81,6 @@ class SimulatedWorld:
     elements: tuple[SimulatedElement, ...] = ()
 
 
-@dataclass(frozen=True)
-class AppliedAction:
-    """One action the simulator carried out, in the order the plan listed it."""
-
-    kind: ActionKind
-    element_kind: ElementKind
-    element_ref: str
-
-
-@dataclass(frozen=True)
-class SimulatedExecutionRecord:
-    """Immutable, content-addressed record of one simulated execution."""
-
-    schema_version: str
-    execution_surface: str
-    plan_digest: str
-    applied: tuple[AppliedAction, ...]
-    world_digest_before: str
-    world_digest_after: str
-    converged: bool
-    record_digest: str
-
-
 def world_digest(world: SimulatedWorld) -> str:
     """Content address of an in-memory world."""
     return document_digest(
@@ -109,13 +98,34 @@ def world_digest(world: SimulatedWorld) -> str:
     )
 
 
+def _unsatisfied_dependency(element: StateElement, present: dict[str, SimulatedElement]) -> bool:
+    """Whether this element's structural prerequisites are absent from the world.
+
+    A real invariant, not injected fakery: a node cannot exist attached to a network that is not
+    there, and an edge cannot relate endpoints that do not exist. This is what makes a *genuine*
+    mid-plan failure reachable — the plan is emitted in dependency order, so a step fails here only
+    when the world it is being applied to is not the world the plan was computed against.
+    """
+    if element.kind is ElementKind.node:
+        attachment = element.facet_map().get(FacetName.network_attachment)
+        return bool(attachment) and attachment not in present
+    if element.kind is ElementKind.edge:
+        source, target = decode_edge_ref(element.ref)
+        if source is None or target is None:
+            return True
+        return source not in present or target not in present
+    return False
+
+
 def execute(
     *,
     scope: ReconciliationScope,
     plan: ReconciliationPlan,
     desired: DesiredState,
     world: SimulatedWorld,
-) -> tuple[SimulatedWorld, SimulatedExecutionRecord]:
+    intent: ResetIntent | None,
+    now: datetime,
+) -> tuple[SimulatedWorld, ExecutionReport]:
     """Apply a plan to an in-memory world and return the new world plus an execution record.
 
     Every refusal boundary is re-applied *here*, on the execution side, rather than being trusted
@@ -134,6 +144,7 @@ def execute(
     a boundary on one producer. These are the same checks the planner makes, made again by the
     component that acts.
     """
+    require_execution_authorized(plan=plan, intent=intent, now=now)
     require_planned_under(plan, scope)
     if plan.execution_surface != EXECUTION_SURFACE:
         raise ReconciliationRefused(RefusalCode.execution_surface_sealed)
@@ -142,46 +153,101 @@ def execute(
 
     desired_by_ref = {element.ref: element for element in desired.elements}
     current = {element.ref: element for element in world.elements}
-    applied: list[AppliedAction] = []
+    steps: list[StepOutcome] = []
+    stopped = False
 
     for action in plan.actions:
+        if stopped:
+            steps.append(
+                StepOutcome(
+                    status=StepStatus.not_attempted,
+                    kind=action.kind,
+                    element_kind=action.element_kind,
+                    element_ref=action.element_ref,
+                )
+            )
+            continue
+
         source = desired_by_ref.get(action.element_ref)
         if source is None:
-            raise ReconciliationRefused(RefusalCode.verification_token_invalid)
+            steps.append(
+                StepOutcome(
+                    status=StepStatus.failed,
+                    kind=action.kind,
+                    element_kind=action.element_kind,
+                    element_ref=action.element_ref,
+                    failure_reason=StepFailureReason.element_not_in_desired,
+                )
+            )
+            stopped = True
+            continue
+
+        missing = _unsatisfied_dependency(source, current)
+        if missing:
+            steps.append(
+                StepOutcome(
+                    status=StepStatus.failed,
+                    kind=action.kind,
+                    element_kind=action.element_kind,
+                    element_ref=action.element_ref,
+                    failure_reason=StepFailureReason.dependency_absent,
+                )
+            )
+            stopped = True
+            continue
+
         current[action.element_ref] = SimulatedElement(
             kind=source.kind, ref=source.ref, facets=source.facets
         )
-        applied.append(
-            AppliedAction(
+        steps.append(
+            StepOutcome(
+                status=StepStatus.applied,
                 kind=action.kind,
                 element_kind=action.element_kind,
                 element_ref=action.element_ref,
             )
         )
 
-    next_world = SimulatedWorld(
-        elements=tuple(current[ref] for ref in sorted(current)),
+    next_world = SimulatedWorld(elements=tuple(current[ref] for ref in sorted(current)))
+    return (
+        next_world,
+        build_execution_report(
+            instance_id=plan.instance_id,
+            execution_surface=EXECUTION_SURFACE,
+            steps=tuple(steps),
+            plan_digest=plan.plan_digest,
+            intent_digest=intent.intent_digest if intent is not None else "",
+            world_digest_before=world_digest(world),
+            world_digest_after=world_digest(next_world),
+            executed_at=now,
+        ),
     )
-    before = world_digest(world)
-    after = world_digest(next_world)
-    body = {
-        "execution_surface": EXECUTION_SURFACE,
-        "plan_digest": plan.plan_digest,
-        "applied": [
-            [item.kind.value, item.element_kind.value, item.element_ref] for item in applied
-        ],
-        "world_digest_before": before,
-        "world_digest_after": after,
-        "converged": not plan.deferred,
-    }
-    record = SimulatedExecutionRecord(
-        schema_version=SIMULATED_EXECUTION_SCHEMA_VERSION,
-        execution_surface=EXECUTION_SURFACE,
-        plan_digest=plan.plan_digest,
-        applied=tuple(applied),
-        world_digest_before=before,
-        world_digest_after=after,
-        converged=not plan.deferred,
-        record_digest=document_digest(SIMULATED_EXECUTION_SCHEMA_VERSION, body),
+
+
+def observe(
+    *,
+    world: SimulatedWorld,
+    instance_id: str,
+    provider: str,
+    collector_digest: str,
+    observed_at: datetime,
+    fidelity: ObservationFidelity,
+) -> ObservedState:
+    """Report the world as an ordinary observation, so convergence can be *measured*.
+
+    This is deliberately the same shape any collector produces, and it carries the caller's own
+    fidelity attestation rather than manufacturing one: the simulator does not get to certify its
+    own output as complete. Convergence is then decided by putting this through the ordinary
+    verification and classification path, not by reading the execution report.
+    """
+    return ObservedState(
+        instance_id=instance_id,
+        provider=provider,
+        collector_digest=collector_digest,
+        observed_at=observed_at,
+        fidelity=fidelity,
+        elements=tuple(
+            StateElement(kind=element.kind, ref=element.ref, facets=element.facets)
+            for element in world.elements
+        ),
     )
-    return (next_world, record)

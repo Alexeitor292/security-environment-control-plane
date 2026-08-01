@@ -117,6 +117,62 @@ class ResetScope(str, Enum):
     element_set = "element_set"
 
 
+class ExecutionOutcome(str, Enum):
+    """What an execution attempt did, taken whole.
+
+    ``no_op`` and ``applied`` are deliberately distinct. "The system is fine after running twice"
+    and "the second run did nothing" are different claims, and only the second is idempotence.
+    """
+
+    no_op = "no_op"
+    applied = "applied"
+    partial = "partial"
+
+
+class StepStatus(str, Enum):
+    """What became of one planned step. Every step in the plan gets exactly one.
+
+    ``not_attempted`` exists so a partial execution is legible: without it, a step that never ran
+    is indistinguishable from one that ran and changed nothing.
+    """
+
+    applied = "applied"
+    failed = "failed"
+    not_attempted = "not_attempted"
+
+
+class StepFailureReason(str, Enum):
+    """The bounded reason a step failed. Carries no value and no provider detail."""
+
+    dependency_absent = "dependency_absent"
+    element_not_in_desired = "element_not_in_desired"
+
+
+class OperatorNextStep(str, Enum):
+    """What the operator can actually do next. Bounded, and never "see logs".
+
+    An execution report that says only *that* something failed is not actionable. Each member
+    names a concrete next action, and the mapping from outcome to member is total.
+    """
+
+    none_required = "none_required"
+    reobserve_and_replan = "reobserve_and_replan"
+    resolve_dependency_then_replan = "resolve_dependency_then_replan"
+    operator_decision_required = "operator_decision_required"
+
+
+class ConvergenceState(str, Enum):
+    """Whether the instance actually converged, established by re-observing it.
+
+    ``unverifiable`` is the fail-closed member: when the re-observation cannot itself be verified,
+    convergence is *unknown*, which is not the same as false and must never read as true.
+    """
+
+    converged = "converged"
+    drift_remains = "drift_remains"
+    unverifiable = "unverifiable"
+
+
 class RefusalCode(str, Enum):
     """The closed set of reasons the planner refuses to produce a plan. Fail closed: an input the
     contract cannot verify refuses here rather than reaching classification or planning."""
@@ -140,6 +196,10 @@ class RefusalCode(str, Enum):
     reset_window_invalid = "reconciliation_reset_window_invalid"
     plan_integrity_invalid = "reconciliation_plan_integrity_invalid"
     scope_mismatch = "reconciliation_scope_mismatch"
+    reset_intent_plan_mismatch = "reconciliation_reset_intent_plan_mismatch"
+    reset_intent_expired = "reconciliation_reset_intent_expired"
+    reset_intent_not_yet_valid = "reconciliation_reset_intent_not_yet_valid"
+    execution_unauthorized = "reconciliation_execution_unauthorized"
 
 
 class ReconciliationRefused(Exception):
@@ -194,6 +254,19 @@ ELEMENT_KIND_ORDER: tuple[ElementKind, ...] = (
 )
 
 ACTION_KIND_ORDER: tuple[ActionKind, ...] = (ActionKind.create, ActionKind.update)
+
+# Step statuses, most blocking first. An execution report enumerates counts in this order, so a
+# report reads with the problem first rather than burying it after the successes.
+STEP_STATUS_ORDER: tuple[StepStatus, ...] = (
+    StepStatus.failed,
+    StepStatus.not_attempted,
+    StepStatus.applied,
+)
+
+STEP_FAILURE_REASON_ORDER: tuple[StepFailureReason, ...] = (
+    StepFailureReason.dependency_absent,
+    StepFailureReason.element_not_in_desired,
+)
 
 
 # --- Complete partitions ------------------------------------------------------------------------
@@ -265,6 +338,21 @@ ACTION_FOR_DRIFT_KIND: dict[DriftKind, ActionKind] = {
 
 # Refusals a *fresh observation* could plausibly clear. Every other refusal needs a change to the
 # desired state, the scope, or an operator decision — retrying the same call cannot help.
+# The operator action each step-failure reason calls for. Total over StepFailureReason, so a new
+# failure reason cannot be added without deciding what the operator is supposed to do about it —
+# which is the whole difference between a bounded reason and an unactionable one.
+NEXT_STEP_FOR_STEP_FAILURE: dict[StepFailureReason, OperatorNextStep] = {
+    StepFailureReason.dependency_absent: OperatorNextStep.resolve_dependency_then_replan,
+    StepFailureReason.element_not_in_desired: OperatorNextStep.reobserve_and_replan,
+}
+
+# The operator action each convergence state calls for. Total over ConvergenceState.
+NEXT_STEP_FOR_CONVERGENCE: dict[ConvergenceState, OperatorNextStep] = {
+    ConvergenceState.converged: OperatorNextStep.none_required,
+    ConvergenceState.drift_remains: OperatorNextStep.reobserve_and_replan,
+    ConvergenceState.unverifiable: OperatorNextStep.reobserve_and_replan,
+}
+
 RETRYABLE_WITH_FRESH_OBSERVATION: frozenset[RefusalCode] = frozenset(
     {
         RefusalCode.observation_unverified,

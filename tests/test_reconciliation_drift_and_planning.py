@@ -39,6 +39,7 @@ from secp_reconciliation.v1 import (
     classify_drift,
     plan_from_states,
     plan_reconciliation,
+    require_execution_authorized,
     require_plan_integrity,
     require_planned_under,
     verify_inputs,
@@ -370,6 +371,7 @@ def test_every_refusal_code_is_actually_reachable() -> None:
         now=NOW,
     )
     creating_plan = _actionable_plan()
+    other_plan = _run(desired(network(), node()), observed())[2]
     converged_plan = _run(desired(network()), observed(network()))[2]
     window = {"issued_at": NOW, "expires_at": NOW + timedelta(hours=1)}
 
@@ -426,6 +428,29 @@ def test_every_refusal_code_is_actually_reachable() -> None:
         ),
         # A plan presented under a scope other than the one that authorized it.
         _raised_code(lambda: require_planned_under(creating_plan, scope(max_actions=49))),
+        # An execution that would change something, presented with no authorization at all.
+        _raised_code(
+            lambda: require_execution_authorized(plan=creating_plan, intent=None, now=NOW)
+        ),
+        # An intent issued for a different plan than the one being executed.
+        _raised_code(
+            lambda: require_execution_authorized(
+                plan=creating_plan, intent=_intent_for(other_plan), now=NOW
+            )
+        ),
+        # Outside the intent's own validity window, in both directions.
+        _raised_code(
+            lambda: require_execution_authorized(
+                plan=creating_plan, intent=_intent_for(creating_plan), now=NOW + timedelta(days=1)
+            )
+        ),
+        _raised_code(
+            lambda: require_execution_authorized(
+                plan=creating_plan,
+                intent=_intent_for(creating_plan),
+                now=NOW - timedelta(days=1),
+            )
+        ),
     }
     assert triggered == set(RefusalCode)
 
@@ -466,6 +491,15 @@ def test_the_plan_binds_the_exact_desired_observation_and_report_it_came_from() 
 
 
 # --- Reset intent ---------------------------------------------------------------------------------
+
+
+def _intent_for(plan):
+    return build_reset_intent(
+        plan=plan,
+        reset_scope=ResetScope.element_set,
+        issued_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
+    )
 
 
 def _actionable_plan():
