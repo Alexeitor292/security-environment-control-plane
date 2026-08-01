@@ -122,6 +122,80 @@ def _surface_types() -> set:
     return types_found
 
 
+def _public_parameters():
+    """Every declared parameter of every public callable, as ``(callable, name, Parameter)``.
+
+    Read off :func:`inspect.signature`, which sees *declarations*. Everything else in this section
+    reads :func:`typing.get_type_hints`, which sees *annotations* — and those two disagree exactly
+    when a parameter is unannotated. That disagreement is the hole the next two tests close.
+    """
+    found = []
+    for name, value in _public_callables():
+        target = value.__init__ if inspect.isclass(value) else value
+        for parameter_name, parameter in inspect.signature(target).parameters.items():
+            if parameter_name in ("self", "cls"):
+                continue
+            found.append((name, parameter_name, parameter))
+    return found
+
+
+def test_every_public_parameter_is_annotated() -> None:
+    """The precondition the whole input-surface property rests on, and which nothing else checks.
+
+    ``_surface_types()`` collects through ``typing.get_type_hints()``, which returns only
+    *annotated* parameters. An unannotated one contributes nothing to that set and is therefore
+    invisible to all four guards built on it — the exact pin, the inert-value-type check, the
+    transitive closure, and the no-``Callable`` check. It is invisible to the escape scan too,
+    because a parameter name lands in ``co_varnames`` rather than ``co_names``.
+
+    Demonstrated rather than theorised: a single ``progress_sink=None`` added to ``execute`` and
+    called in its action loop left all 50 isolation and leak guards green while a caller-supplied
+    lambda received the real ``socket.socket`` class. Written *with* an annotation the same
+    parameter fails five guards, so the boundary was precisely annotated-caught /
+    unannotated-invisible. mypy does not cover the gap either: this repo sets
+    ``check_untyped_defs`` but not ``disallow_incomplete_defs``.
+    """
+    unannotated = [
+        (owner, parameter_name)
+        for owner, parameter_name, parameter in _public_parameters()
+        if parameter.annotation is inspect.Parameter.empty
+    ]
+    assert unannotated == []
+
+
+def test_no_public_callable_accepts_varargs_or_keyword_args() -> None:
+    """The residual route the annotation check alone leaves open, closed rather than disclosed.
+
+    ``*args`` / ``**kwargs`` have nothing to annotate per-argument, so a public callable accepting
+    them takes values no pinned type set describes — a second way in, differing from the first only
+    in spelling. No public callable here needs them, so this is closed at zero cost rather than
+    written down as a caveat. If one ever genuinely needs a variadic, this test is where that
+    decision has to be argued.
+    """
+    variadic = [
+        (owner, parameter_name)
+        for owner, parameter_name, parameter in _public_parameters()
+        if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+    assert variadic == []
+
+
+def test_the_annotation_and_declaration_views_agree_on_the_public_surface() -> None:
+    """Ties the two views together, so neither can drift into covering less than the other.
+
+    Without this, `_public_parameters` and `_surface_types` could diverge silently — the first
+    walking declarations, the second annotations — and the tests above would still pass while
+    guarding a different set of parameters than the pins actually read.
+    """
+    for name, value in _public_callables():
+        target = value.__init__ if inspect.isclass(value) else value
+        annotated = set(typing.get_type_hints(target)) - {"return"}
+        declared = {
+            parameter_name for owner, parameter_name, _ in _public_parameters() if owner == name
+        }
+        assert declared == annotated, (name, declared ^ annotated)
+
+
 def test_the_public_surface_is_the_one_that_was_reviewed() -> None:
     assert [name for name, _ in _public_callables()] == [
         "AppliedAction",

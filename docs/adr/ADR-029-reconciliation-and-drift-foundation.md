@@ -32,7 +32,8 @@ Desired and observed state share one shape: an *element* (`network` / `node` / `
 generic projection, which every provider populates) carrying *facets* named for the property being
 compared (`address_space`, `address`, `node_class`), not for any provider's field. The one module
 that touches the plugin contract is `v1/topology_adapter.py`; the rest of the package imports only
-the standard library.
+pure-computation standard-library modules and other modules of the reconciliation packages, along
+the declared layering below.
 
 The two sides are compared, never merged, and their references are treated differently on purpose:
 a desired element's reference is authored control-plane content, so it may appear in a finding, an
@@ -53,9 +54,12 @@ agreement is the failure this vocabulary exists to make impossible.
 
 Refusals carry only a bounded `reconciliation_*` code — no path, endpoint, address, key material,
 provider value or raw exception — following the control plane's existing redacted-refusal
-convention. Verification happens before comparison: an input whose provenance, instance identity,
-provider, fidelity, freshness or internal consistency cannot be established refuses at the gate
-rather than reaching classification. Classification is then total *over drift* — it declines to
+convention. Verification happens before comparison, and the gate checks more than the state itself:
+the declared contract version, the scope's own validity and its execution surface, then the desired
+state's provenance and internal consistency, then instance identity and provider agreement, then
+the observation's provenance, fidelity, freshness and internal consistency. Any of these that
+cannot be established refuses at the gate rather than reaching classification. The exact set of
+bounded codes the gate can raise is pinned by test, so this list cannot quietly fall behind it. Classification is then total *over drift* — it declines to
 classify no disagreement — though it is not refusal-free: it re-checks the pair's binding digest and
 refuses a token whose contents were swapped after verification. Planning refuses again on drift no
 plan can honestly resolve — an identity conflict, an indeterminate facet, or a change set exceeding
@@ -90,7 +94,12 @@ structurally incapable of reaching a provider rather than configured not to:
 
 - every type in its public signatures — and the whole closure of those types under their own
   fields — is a builtin scalar, an enum or a frozen dataclass, so there is no parameter through
-  which a port, context, transport or callable could arrive;
+  which a port, context, transport or callable could arrive. That check reads *annotations*, so it
+  is complete only if every public parameter carries one and none is variadic; both are enforced
+  separately (`test_every_public_parameter_is_annotated`,
+  `test_no_public_callable_accepts_varargs_or_keyword_args`), because an unannotated parameter was
+  found to be invisible to all four type guards *and* to the escape scan — a real hole through
+  which a caller-supplied callable reached the executor while every guard stayed green;
 - the reconciliation packages import only pure-computation standard-library modules and each other
   along a declared layering (a plugin may import the contract; the contract may not import a
   plugin), with every remaining edge listed as a reviewed `(module, import)` pair — three of them,

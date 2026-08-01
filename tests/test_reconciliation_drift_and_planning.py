@@ -256,33 +256,35 @@ def test_no_plan_over_any_input_combination_can_contain_a_removal() -> None:
 # --- Input verification gate ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("case", "expected"),
-    [
-        ("bad_contract_version", RefusalCode.contract_version_unsupported),
-        ("empty_instance", RefusalCode.scope_invalid),
-        ("empty_provider", RefusalCode.scope_invalid),
-        ("negative_budget", RefusalCode.scope_invalid),
-        ("zero_max_age", RefusalCode.scope_invalid),
-        ("real_execution_surface", RefusalCode.execution_surface_sealed),
-        ("no_definition_digest", RefusalCode.desired_unverified),
-        ("malformed_definition_digest", RefusalCode.desired_unverified),
-        ("duplicate_desired_ref", RefusalCode.desired_state_inconsistent),
-        ("desired_facet_for_wrong_kind", RefusalCode.desired_state_inconsistent),
-        ("dangling_desired_edge", RefusalCode.desired_state_inconsistent),
-        ("desired_instance_mismatch", RefusalCode.instance_mismatch),
-        ("observed_instance_mismatch", RefusalCode.instance_mismatch),
-        ("provider_mismatch", RefusalCode.provider_mismatch),
-        ("malformed_collector_digest", RefusalCode.observation_unverified),
-        ("unverified_fidelity", RefusalCode.observation_unverified),
-        ("future_dated_observation", RefusalCode.observation_unverified),
-        ("partial_fidelity", RefusalCode.observation_incomplete),
-        ("stale_observation", RefusalCode.observation_stale),
-        ("duplicate_observed_ref", RefusalCode.observed_state_inconsistent),
-        ("dangling_observed_edge", RefusalCode.observed_state_inconsistent),
-    ],
-)
-def test_the_verification_gate_refuses_with_the_expected_bounded_code(case, expected) -> None:
+# The gate's case table, module-level so more than one test can be derived from it. Keeping it
+# in one place is what lets the code-set pin below be *derived by running the gate* rather than
+# transcribed from the source it is supposed to be checking.
+_GATE_CASES = [
+    ("bad_contract_version", RefusalCode.contract_version_unsupported),
+    ("empty_instance", RefusalCode.scope_invalid),
+    ("empty_provider", RefusalCode.scope_invalid),
+    ("negative_budget", RefusalCode.scope_invalid),
+    ("zero_max_age", RefusalCode.scope_invalid),
+    ("real_execution_surface", RefusalCode.execution_surface_sealed),
+    ("no_definition_digest", RefusalCode.desired_unverified),
+    ("malformed_definition_digest", RefusalCode.desired_unverified),
+    ("duplicate_desired_ref", RefusalCode.desired_state_inconsistent),
+    ("desired_facet_for_wrong_kind", RefusalCode.desired_state_inconsistent),
+    ("dangling_desired_edge", RefusalCode.desired_state_inconsistent),
+    ("desired_instance_mismatch", RefusalCode.instance_mismatch),
+    ("observed_instance_mismatch", RefusalCode.instance_mismatch),
+    ("provider_mismatch", RefusalCode.provider_mismatch),
+    ("malformed_collector_digest", RefusalCode.observation_unverified),
+    ("unverified_fidelity", RefusalCode.observation_unverified),
+    ("future_dated_observation", RefusalCode.observation_unverified),
+    ("partial_fidelity", RefusalCode.observation_incomplete),
+    ("stale_observation", RefusalCode.observation_stale),
+    ("duplicate_observed_ref", RefusalCode.observed_state_inconsistent),
+    ("dangling_observed_edge", RefusalCode.observed_state_inconsistent),
+]
+
+
+def _gate_refusal(case) -> RefusalCode:
     kwargs = {"reconciliation_scope": scope(), "now": NOW}
     wanted = desired(network())
     seen = observed(network())
@@ -335,7 +337,42 @@ def test_the_verification_gate_refuses_with_the_expected_bounded_code(case, expe
     else:  # pragma: no cover - the parametrization is closed
         raise AssertionError(case)
 
-    assert _refusal(wanted, seen, **kwargs) is expected
+    return _refusal(wanted, seen, **kwargs)
+
+
+@pytest.mark.parametrize(("case", "expected"), _GATE_CASES)
+def test_the_verification_gate_refuses_with_the_expected_bounded_code(case, expected) -> None:
+    assert _gate_refusal(case) is expected
+
+
+# The bounded codes `verify_inputs` itself can raise. Exact, not a floor: ADR-029 enumerates the
+# properties this gate checks, and that prose can only be trusted if the code set behind it is
+# pinned. A gate that stopped checking something would shrink this set; one that grew a new check
+# would extend it. Either way the ADR has to be revisited rather than silently outrun.
+GATE_REFUSAL_CODES = frozenset(
+    {
+        RefusalCode.contract_version_unsupported,
+        RefusalCode.scope_invalid,
+        RefusalCode.execution_surface_sealed,
+        RefusalCode.desired_unverified,
+        RefusalCode.desired_state_inconsistent,
+        RefusalCode.instance_mismatch,
+        RefusalCode.provider_mismatch,
+        RefusalCode.observation_unverified,
+        RefusalCode.observation_incomplete,
+        RefusalCode.observation_stale,
+        RefusalCode.observed_state_inconsistent,
+    }
+)
+
+
+def test_the_verification_gate_raises_exactly_the_reviewed_set_of_codes() -> None:
+    """Derived by running the gate over the parametrized case table above, not by reading the
+    source — so a code the gate can raise but no case triggers fails here as an untested branch."""
+    triggered = set()
+    for case, _ in _GATE_CASES:
+        triggered.add(_gate_refusal(case))
+    assert triggered == GATE_REFUSAL_CODES
 
 
 def _raised_code(call) -> RefusalCode:
