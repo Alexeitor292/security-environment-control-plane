@@ -41,6 +41,8 @@ from secp_commissioning.runtime import FileStat
 
 from secp_management import BOOTSTRAP_CONTRACT_VERSION, ManagementError
 from secp_management.adapters import (
+    CONTAINMENT_BREACHED,
+    CONTAINMENT_UNPROVABLE,
     BootstrapReceipt,
     CompensationResult,
     ControllerBootstrapAdapter,
@@ -63,6 +65,7 @@ from secp_management.adapters import (
     WorkerObservation,
     controller_generation_marker,
     is_generation_marker,
+    resolve_queue_containment,
     worker_generation_marker,
 )
 from secp_management.controller_compose_validation import (
@@ -147,6 +150,7 @@ from secp_management.topology import (
     read_seals,
 )
 from secp_management.transaction import (
+    EXIT_CONTAINMENT_UNPROVABLE,
     EXIT_OK,
     EXIT_REFUSED,
     MODE_DRY_RUN,
@@ -514,6 +518,15 @@ def bootstrap(
         if not read_seals().safe:
             raise ManagementError("seals_unsafe")
         summary = _managed_plan_summary(role, vr, deps)
+        # Classify BEFORE any mutation, and refuse in the DRY RUN too. An operator must not be
+        # handed a plan for an operation that would then refuse — the same rule ``controller
+        # install`` follows. For the worker this is also where a managed upgrade is admitted.
+        worker_classification: str | None = None
+        if role is Role.WORKER:
+            wcls = _classify_worker_install(vr, deps)
+            if wcls.reason is not None:
+                raise ManagementError(wcls.reason)
+            worker_classification = wcls.classification
     except ManagementError as exc:
         return EXIT_REFUSED, _refused("bootstrap", role_value, exc.reason_code)
 
@@ -521,6 +534,7 @@ def bootstrap(
         "command": "bootstrap",
         "role": role.value,
         "release_aggregate_digest": vr.aggregate_digest,
+        "classification": worker_classification,
         "plan": summary,
         "code_seals": _seal_section(),
         "operator_started": False,
@@ -808,6 +822,7 @@ def _worker_generation(obs: WorkerObservation) -> str:
         restart_count=obs.ordinary_restart_count,
         started_at=obs.ordinary_started_at,
         operator_invocation_id=obs.operator_invocation_id,
+        operator_state_change_monotonic=obs.operator_state_change_monotonic,
     )
 
 
@@ -841,8 +856,8 @@ def _worker_generation_complete(obs: WorkerObservation) -> bool:
     generation tuple. Validate the RAW facts BEFORE deriving/comparing the marker: a nonempty
     ordinary container
     id, a nonnegative-integer restart count, a nonempty valid start timestamp, a nonzero numeric PID
-    while running, and — the reviewed rule for a present (disabled+stopped) operator — a defined
-    (nonempty) operator InvocationID. No generation component may be missing."""
+    while running, and — for a present operator — the generation facts that unit actually exposes.
+    No generation component may be missing."""
     if not obs.ordinary_container_id:
         return False
     if not _is_nonneg_int(obs.ordinary_restart_count):
@@ -851,10 +866,24 @@ def _worker_generation_complete(obs: WorkerObservation) -> bool:
         return False
     if obs.ordinary_running and not _is_positive_int(obs.ordinary_pid):
         return False
-    # a present operator (the canonical prepared posture is present + disabled + STOPPED) still
-    # exposes a defined InvocationID generation fact; its absence is a missing generation component.
-    if obs.operator_present and not obs.operator_invocation_id:
-        return False
+    if obs.operator_present:
+        # The canonical prepared operator is present + disabled + STOPPED and is NEVER started, so
+        # systemd reports an EMPTY InvocationID for it — the deployment observer documents exactly
+        # this ("Values may be empty (e.g. InvocationID of a never-started unit)") and accepts it.
+        # Requiring a nonempty InvocationID therefore refused the very end state a correct install
+        # produces: it demanded a fact that only exists once the operator has run, which is the one
+        # thing this posture forbids.
+        #
+        # The generation component that IS always present is StateChangeTimestampMonotonic. It is
+        # required nonempty and numeric here, so nothing is weakened: an observer that drops the
+        # operator's generation facts still fails, and the operator still contributes to ABA
+        # detection before it has ever been started.
+        if not _is_nonneg_int(obs.operator_state_change_monotonic):
+            return False
+        # A RUNNING unit always has an InvocationID. Empty is only legitimate for one that has not
+        # run, so an empty ID while running is a genuinely incomplete observation.
+        if obs.operator_running and not obs.operator_invocation_id:
+            return False
     return True
 
 
@@ -913,14 +942,30 @@ def _worker_end_state_reason(obs: WorkerObservation, exp: _ExpectedWorker) -> st
         return "worker_health_command_mismatch"
     if not (obs.operator_present and not obs.operator_enabled and not obs.operator_running):
         return "worker_operator_not_disabled_stopped"
+    # The operator image must be OBSERVED, never assumed. An empty observation means the observer
+    # could not prove the signed operator image is loaded on this host (unreadable/malformed release
+    # record, image absent, or a runtime that could not answer) — it is not evidence of a match, and
+    # it must not be able to reach the comparison below. Checked separately from the comparison so
+    # that an expectation which is itself empty can never be "equal" to an unproven observation.
+    if not obs.operator_image_digest:
+        return "worker_operator_image_unobserved"
+    if not exp.operator_image:
+        return "worker_operator_image_unobserved"
     if obs.operator_image_digest != exp.operator_image:
         return "worker_operator_image_mismatch"
     if obs.operator_unit_identity != exp.operator_unit_identity:
         return "worker_operator_unit_mismatch"
     if obs.deployment_package_aggregate != exp.deployment_aggregate:
         return "worker_deployment_package_mismatch"
-    if obs.ordinary_polls_operator_queue:
+    # Containment is THREE-valued. Both non-contained verdicts refuse (fail closed, unchanged), but
+    # they are different facts and an operator must be able to act on the difference: one says the
+    # worker was observed polling the controlled-live queue, the other says the probe never
+    # completed and NOTHING was observed either way.
+    containment = resolve_queue_containment(obs)
+    if containment == CONTAINMENT_BREACHED:
         return "worker_ordinary_polls_operator_queue"
+    if containment == CONTAINMENT_UNPROVABLE:
+        return "worker_ordinary_queue_containment_unprovable"
     if not obs.package_trusted:
         return "worker_operator_package_untrusted"
     if obs.commissioning_status != "prepared":
@@ -968,6 +1013,20 @@ def _controller_end_state_reason(
 class _Classification:
     reason: str | None
     fresh: bool
+
+
+@dataclass(frozen=True)
+class _WorkerInstallClassification:
+    """The worker equivalent of :class:`_ControllerInstallClassification` (SECP WS-B).
+
+    ``classification`` is one of the closed ``CLASSIFY_*`` values and is meaningful only when
+    ``reason`` is None. The worker has no finalization, identity activation, generation CAS or
+    stack, so there is no generation to carry — which is exactly why it needs its own small type
+    rather than reusing the controller's.
+    """
+
+    reason: str | None
+    classification: str | None
 
 
 def _classify_preexisting(
@@ -1453,6 +1512,60 @@ def _classify_controller_install(
     return _ControllerInstallClassification(
         None, CLASSIFY_EXACT_SAME_RELEASE, ev.finalization.generation, ev
     )
+
+
+def _classify_worker_install(vr: VerifiedRelease, deps: EngineDeps) -> _WorkerInstallClassification:
+    """Classify a worker install before ANY host op: fresh, exact same-release, or managed upgrade.
+
+    ``_classify_preexisting`` refuses every changed-release state, which is correct as a DEFAULT —
+    an unconditional "install whatever bundle you were handed over whatever is already there" is
+    precisely the operation a managed plane must not offer. A managed UPGRADE is the narrow,
+    authenticated exception, and this function is where that exception is granted.
+
+    The worker's rule is the controller's linear-successor trust window, minus everything the worker
+    does not have. There is no finalization, no identity activation, no generation CAS and no stack,
+    so there is no generation to thread and no marker to bind — the eligibility question reduces to:
+    is the PRIOR install still fully authenticated and undrifted, and is the NEW release a signed
+    linear successor of it?
+    """
+    base = _classify_preexisting(Role.WORKER, vr, deps, mode=MODE_INSTALLED)
+    if base.fresh:
+        return _WorkerInstallClassification(None, CLASSIFY_FRESH)
+    if base.reason is None:
+        # the base classifier already fully revalidated an exact idempotent same-release install
+        return _WorkerInstallClassification(None, CLASSIFY_EXACT_SAME_RELEASE)
+    if base.reason != "preexisting_changed_release":
+        return _WorkerInstallClassification(base.reason, None)  # partial/foreign/drifted/mode-cross
+    return _classify_worker_upgrade_eligibility(vr, deps)
+
+
+def _classify_worker_upgrade_eligibility(
+    vr: VerifiedRelease, deps: EngineDeps
+) -> _WorkerInstallClassification:
+    """A changed worker release qualifies as a MANAGED_UPGRADE only when the PRIOR install is fully
+    re-authenticated (evidence + attestation + record binding + document integrity) AND the new
+    release is proven an authenticated LINEAR SUCCESSOR of it (``new.parent_sha ==
+    prior.source_sha`` — both signed). Every other changed-release state refuses.
+
+    The linear-successor rule is what makes the upgrade a *trust window* rather than a substitution:
+    an attacker holding a validly-signed but UNRELATED release cannot install it over a running
+    worker, because it does not descend from what is actually installed. Sideways moves and
+    downgrades are refused for the same reason.
+
+    The prior state is re-authenticated from the SIGNATURE-VERIFIED record and the release-bound
+    identity, never from the (re-authorable) evidence alone — the same rule every other worker
+    command follows.
+    """
+    ev, ident, record, reason = _revalidate_records(Role.WORKER, deps)
+    if reason is not None:  # prior unreadable / unauthenticated / mutually inconsistent
+        return _WorkerInstallClassification("worker_upgrade_prior_unauthenticated", None)
+    assert ev is not None and ident is not None and record is not None
+    if _verify_installed_documents(Role.WORKER, deps, ev, ident, record) is not None:
+        return _WorkerInstallClassification("worker_upgrade_prior_drifted", None)
+    prior_source = record.manifest.source_sha
+    if not vr.manifest.parent_sha or vr.manifest.parent_sha != prior_source:
+        return _WorkerInstallClassification("worker_upgrade_not_linear_successor", None)
+    return _WorkerInstallClassification(None, CLASSIFY_MANAGED_UPGRADE)
 
 
 def _classify_upgrade_eligibility(
@@ -2258,9 +2371,24 @@ def _write_transaction(
             if prior_ev.finalization.tls_mode != install.tls_mode:
                 raise ManagementError("controller_upgrade_tls_mode_change_unsupported")
     else:
-        classify = _classify_preexisting(role, vr, deps, mode=MODE_INSTALLED)
-        if classify.reason is not None:
-            raise ManagementError(classify.reason)
+        if role is Role.WORKER:
+            # The worker admits one narrow changed-release case — an authenticated linear successor
+            # (a managed upgrade). Re-classified HERE as well as in ``bootstrap`` so the write path
+            # is self-defending: a caller reaching the transaction directly cannot skip the check.
+            #
+            # ``classification`` is deliberately LEFT at CLASSIFY_FRESH. It is the CONTROLLER's
+            # notion — downstream it selects the controller candidate-stack upgrade and the
+            # generation/identity-reactivation compensation, none of which a worker has. A worker
+            # upgrade re-runs the ordinary worker ops and rebinds its documents; the _DocWriter
+            # already captures the prior documents and restores them if the new end state cannot be
+            # proven, which IS the worker's upgrade rollback.
+            wcls = _classify_worker_install(vr, deps)
+            if wcls.reason is not None:
+                raise ManagementError(wcls.reason)
+        else:
+            classify = _classify_preexisting(role, vr, deps, mode=MODE_INSTALLED)
+            if classify.reason is not None:
+                raise ManagementError(classify.reason)
 
     ident = _build_identity(role, vr, deps.now())
     identity_bytes = canonical_bytes(ident)
@@ -3106,6 +3234,18 @@ def _verify_installed_documents(
     return None
 
 
+#: Refusal reason -> its own stable exit code. ADDITIVE: any reason not listed keeps EXIT_REFUSED,
+#: so no existing refusal changes what it exits with.
+_REFUSAL_EXIT_CODES: dict[str, int] = {
+    "worker_ordinary_queue_containment_unprovable": EXIT_CONTAINMENT_UNPROVABLE,
+}
+
+
+def _refusal_exit_code(reason: str | None) -> int:
+    """The exit code for a refusal. Never ``EXIT_OK`` — every branch here is a refusal."""
+    return _REFUSAL_EXIT_CODES.get(reason or "", EXIT_REFUSED)
+
+
 def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
     role = Role.WORKER
     seals = read_seals()
@@ -3175,7 +3315,16 @@ def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
             and obs.deployment_package_aggregate == exp.deployment_aggregate
         ),
         "ordinary_queue": ORDINARY_TASK_QUEUE,
+        # Kept, fail-closed and unchanged: True ONLY on a positive proof of containment. It stays
+        # False for an unfinished probe, so no existing consumer becomes more permissive.
         "no_operator_queue_polling": bool(obs and not obs.ordinary_polls_operator_queue),
+        # The honest verdict alongside it. "unprovable" means the probe did not complete and
+        # nothing was observed about the queues — NOT that a breach was seen.
+        "queue_containment": resolve_queue_containment(obs) if obs else CONTAINMENT_UNPROVABLE,
+        # Bounded reason naming WHY containment could not be established; None otherwise.
+        "queue_containment_reason": (
+            obs.ordinary_queue_containment_reason if obs else "worker_not_observed"
+        ),
         "operator_package_trust": bool(obs and obs.package_trusted),
         "operator_service_present": bool(obs and obs.operator_present),
         "operator_disabled": obs is not None and not obs.operator_enabled,
@@ -3194,7 +3343,7 @@ def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
         and record is not None
         and obs is not None
     )
-    return (EXIT_OK if ok else EXIT_REFUSED), {
+    return (EXIT_OK if ok else _refusal_exit_code(drift)), {
         "command": "status",
         "role": "worker",
         "ok": ok,

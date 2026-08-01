@@ -81,14 +81,36 @@ def test_partial_existing_refuses_before_any_host_op():
     assert deps.worker_adapter._w.ops == []  # classification precedes every host op
 
 
-def test_changed_release_refuses():
+def test_an_unrelated_changed_release_refuses():
+    """A validly-signed release that does not DESCEND from what is installed is not an upgrade.
+
+    WS-B added the managed worker upgrade, so a changed release is no longer refused with a blanket
+    ``preexisting_changed_release``: it is classified, and an unrelated one is refused with the
+    specific reason it failed — it is not an authenticated linear successor. That is the rule that
+    stops a validly-signed but unrelated bundle from being installed over a running worker.
+    """
     trust, kid, priv, fs, bd = _installed()
     alt = default_artifacts("worker")
     alt[1]["image_digest"] = "sha256:" + "b" * 64  # a different release → different aggregate
     bd2 = "/var/lib/secp/bootstrap/release/w2"
+    # no parent_sha → not a successor of anything, let alone of the installed release
     seed_signed_bundle(fs, bd2, "worker", kid, priv, artifacts=alt)
     code, rep, deps = _rebootstrap(trust, fs, bd2)
-    assert code == 2 and rep["reason_code"] == "preexisting_changed_release"
+    assert code == 2 and rep["reason_code"] == "worker_upgrade_not_linear_successor"
+    assert deps.worker_adapter._w.ops == []  # classification still precedes every host op
+
+
+def test_a_successor_of_a_different_release_refuses():
+    """Descending from SOMETHING is not enough — it must descend from what is actually installed."""
+    trust, kid, priv, fs, bd = _installed()
+    alt = default_artifacts("worker")
+    alt[1]["image_digest"] = "sha256:" + "b" * 64
+    bd2 = "/var/lib/secp/bootstrap/release/w3"
+    seed_signed_bundle(
+        fs, bd2, "worker", kid, priv, artifacts=alt, source_sha="e" * 40, parent_sha="f" * 40
+    )
+    code, rep, deps = _rebootstrap(trust, fs, bd2)
+    assert code == 2 and rep["reason_code"] == "worker_upgrade_not_linear_successor"
     assert deps.worker_adapter._w.ops == []
 
 

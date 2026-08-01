@@ -41,6 +41,29 @@ secpctl evidence  controller|worker
 secpctl rollback  controller|worker                 [--write --confirm]
 ```
 
+### Stable exit codes
+
+Scripts should branch on the exit code; it is the only channel readable without parsing `--json`.
+
+| code | meaning |
+|---|---|
+| `0` | success — a dry-run plan, or a completed write/adoption |
+| `2` | refused, fail-closed. Something was **observed** to be wrong |
+| `11` | **containment unprovable** — the operator-queue probe did not complete, so *nothing* was observed about which queues the ordinary worker serves |
+
+`11` is deliberately distinct from `2`. For the queue-containment dimension a `2` means a breach was
+**observed** — the ordinary worker was seen serving the controlled-live queue — whereas `11` means
+the probe could not run at all (the container runtime was unreachable, or the probe command failed
+inside the container). Both refuse and neither certifies, but they need different responses: `2` is a
+containment incident, `11` is a broken probe. Do not page on `11` as though it were a breach.
+
+The refusal reason is in `dimensions.queue_containment_reason`
+(`queue_probe_command_failed` — the probe ran and exited non-zero; or
+`queue_probe_runtime_unavailable` — the container runtime could not be invoked at all), alongside the
+three-valued `dimensions.queue_containment` (`contained` / `breached` / `unprovable`).
+
+Enrollment commands use a separate, non-overlapping range (`3`–`9`); see `enrollment_cli`.
+
 ## Local controller bootstrap (human-supervised, on the controller host)
 
 1. **Obtain + verify the signed offline release bundle** (no network): `secpctl release verify
@@ -77,7 +100,7 @@ secpctl rollback  controller|worker                 [--write --confirm]
    written; absent a provisioned evidence authenticator (or with a bad one — malformed/invalid/wrong-key
    signature) it refuses (`evidence_authenticator_not_provisioned` / `evidence_attestation_untrusted`)
    and never returns `written`.
-4. **Verify**: `secpctl status controller --json` reloads evidence + identity + the installed-release
+4. **Verify**: `secpctl --json status controller` reloads evidence + identity + the installed-release
    record (reverifying its signature), reobserves the stack, and reports release binding, container
    topology, image identity, migrations, service health, unknown-privileged services, and drift.
 
@@ -95,7 +118,7 @@ secpctl rollback  controller|worker                 [--write --confirm]
    is present-disabled-stopped and not polling the operator queue, the package is trusted, and the
    observer reports `commissioning = prepared` AND `deployment = sealed_prepared`. Absent a reviewed
    worker adapter the write **refuses** (`worker_bootstrap_adapter_not_provisioned`), writing nothing.
-4. `secpctl status worker --json` — reloads evidence + identity + the reverified installed-release
+4. `secpctl --json status worker` — reloads evidence + identity + the reverified installed-release
    record and reobserves; worker success requires BOTH `commissioning = prepared` AND `deployment =
    sealed_prepared` (as composed by the observer from the real PR5C/PR5D checks) over the same coherent
    observation, plus a matching image and no operator-queue polling.

@@ -8,9 +8,10 @@ submitting the detached attestation; the controller VERIFIES that signature befo
 single-use invitation. No private key ever leaves this process.
 
 Transport posture (mirrors the reviewed admission transport, ``HttpxAdmissionTransport``):
-server TLS is verified against the EXACT deployment-local CA bundle (``verify`` is provably never
-``True``/``False`` — always an ``ssl.SSLContext`` over the configured CA path; never the public /
-system trust store and never disabled); ambient environment networking is disabled
+server TLS is verified against the EXACT controller CA chain CARRIED IN THE INVITATION (``verify``
+is provably never ``True``/``False`` — always an ``ssl.SSLContext`` built with ``cadata`` over that
+exact chain; never the public / system trust store and never disabled); ambient environment
+networking is disabled
 (``trust_env=False``); redirects are refused (``follow_redirects=False``); the outbound origin
 is the EXACT ``controller_origin`` from the invitation, strictly validated (``https`` only, plain
 host[:port], no userinfo/query/fragment/non-root path); request/response bodies are bounded; the
@@ -18,10 +19,27 @@ content type is strict; no cookies / credential forwarding; and a connect / TLS 
 fails closed with a bounded reason code — the ``httpx`` chain (which can carry the host) is dropped
 with ``from None``.
 
+TRUST ANCHOR — READ THIS BEFORE CHANGING THE CA SOURCE
+------------------------------------------------------
+The controller CA travels in the INVITATION, not in the signed release bundle and not from a
+deployment-local file. That is a deliberate, narrower anchor than the one this module was originally
+designed for, and it has a direct consequence: the integrity of the channel over which the operator
+hands the worker its invitation is now LOAD-BEARING for server authentication. An attacker who can
+substitute the invitation substitutes the CA with it, and the worker will faithfully verify the
+attacker's TLS against the attacker's CA.
+
+Two things still bound that exposure, and neither is the CA: the controller OFFER is verified
+against ``controller_key_id`` pinned in the same invitation, and the worker's own key never leaves
+this process — so a substituted invitation yields a failed enrollment against an impostor, not a
+disclosed secret or a worker enrolled to the wrong controller under the right identity. Operators
+who cannot trust the hand-off channel should verify the ``controller_key_id`` fingerprint out of
+band; ``secpctl worker enroll`` displays it on first use for exactly that reason.
+
 This module lives at the worker TOP LEVEL on purpose (the ``httpx`` seam): the enrollment
 subpackages stay transport-free. The shipped default is :class:`SealedEnrollmentTransport`, which
 fails closed (``enrollment_transport_not_activated``) until a deployment-local profile builds the
-real transport with an explicit controller origin + CA bundle + worker signer.
+real transport — which the driver now does per-invitation, taking the origin and CA chain from the
+validated invitation and the signer from the protected key seam.
 """
 
 from __future__ import annotations
@@ -92,6 +110,28 @@ def _validate_controller_origin(origin: str) -> str:
     return f"https://{host}"
 
 
+_PEM_BEGIN = "-----BEGIN CERTIFICATE-----"
+_PEM_END = "-----END CERTIFICATE-----"
+
+
+def _looks_like_pem_chain(value: str) -> bool:
+    """A bounded structural check that ``value`` is a PEM CERTIFICATE chain — never a private key.
+
+    This is a grammar gate, not a cryptographic validation: ``ssl`` still parses and validates the
+    chain. Its job is to make a malformed or wrong-kind value refuse HERE, with a bounded reason
+    code, instead of surfacing as an opaque ``ssl`` error at connect time. It explicitly rejects any
+    PEM whose blocks are not CERTIFICATE blocks, so a private key pasted into the invitation is a
+    refusal rather than something this process loads."""
+    text = value.strip()
+    if not text.startswith(_PEM_BEGIN) or _PEM_END not in text:
+        return False
+    if text.count(_PEM_BEGIN) != text.count(_PEM_END):
+        return False
+    # every BEGIN block in the file must be a CERTIFICATE block (no keys, no unknown block types)
+    begins = [line for line in text.splitlines() if line.strip().startswith("-----BEGIN")]
+    return bool(begins) and all(line.strip() == _PEM_BEGIN for line in begins)
+
+
 class _NonSerializable:
     """A base that refuses every serialization/copy path so a signer holding a private key can never
     be pickled, copied, or asdict-ed into logs / plans / events."""
@@ -155,7 +195,12 @@ class WorkerEnrollmentSigner(_NonSerializable):
 class EnrollmentInvitationInputs:
     """The non-secret invitation fields the worker received out of band (from the create response).
     The worker echoes these EXACTLY into the binding claim; the controller re-derives them from its
-    authoritative invitation and refuses any mismatch."""
+    authoritative invitation and refuses any mismatch.
+
+    ``controller_ca_bundle_pem`` is the deployment's controller CA chain, carried IN the invitation
+    rather than in the signed release bundle. It is the only trust anchor the worker has for the
+    controller's server TLS, so the integrity of the invitation hand-off channel is load-bearing —
+    see the module docstring. It is public material (certificates, never a private key)."""
 
     enrollment_id: str
     invitation_id: str
@@ -165,6 +210,7 @@ class EnrollmentInvitationInputs:
     controller_transaction_id: str
     release_digest: str
     expires_at: str
+    controller_ca_bundle_pem: str
 
 
 def _attestation_payload(att: DetachedAttestation) -> dict[str, str]:
@@ -187,14 +233,17 @@ class HttpxWorkerEnrollmentTransport(_NonSerializable):
         self,
         *,
         controller_origin: str,
-        ca_path: str,
+        ca_bundle_pem: str,
         signer: WorkerEnrollmentSigner,
         timeout: float = _DEFAULT_TIMEOUT,
     ) -> None:
         self._origin = _validate_controller_origin(controller_origin)
-        if not (isinstance(ca_path, str) and ca_path.strip()):
+        if not (isinstance(ca_bundle_pem, str) and ca_bundle_pem.strip()):
             raise EnrollmentTransportError("enrollment_ca_required")
-        self._ca_path = ca_path
+        if not _looks_like_pem_chain(ca_bundle_pem):
+            # a shaped refusal here, rather than an opaque ssl error at connect time
+            raise EnrollmentTransportError("enrollment_ca_invalid")
+        self._ca_bundle_pem = ca_bundle_pem
         if not isinstance(signer, WorkerEnrollmentSigner):
             raise EnrollmentTransportError("enrollment_signer_invalid")
         self._signer = signer
@@ -208,7 +257,7 @@ class HttpxWorkerEnrollmentTransport(_NonSerializable):
             raise EnrollmentTransportError("enrollment_timeout_invalid")
         self._timeout = float(timeout)
 
-    def __repr__(self) -> str:  # never the origin / CA path / signer private material
+    def __repr__(self) -> str:  # never the origin / CA chain / signer private material
         return "HttpxWorkerEnrollmentTransport(<redacted>)"
 
     def submit_binding(self, invitation: EnrollmentInvitationInputs) -> tuple[int, dict]:
@@ -216,8 +265,15 @@ class HttpxWorkerEnrollmentTransport(_NonSerializable):
         the claim is the signer's own key id, so the claim is self-consistent and the controller can
         pin the presented key."""
         if invitation.controller_origin.strip().rstrip("/") != self._origin:
-            # the invitation must point at the exact origin this transport is pinned to
-            raise EnrollmentTransportError("enrollment_origin_mismatch")
+            # INTERNAL CONSISTENCY ONLY — not origin validation. Since the driver now builds this
+            # transport FROM this same invitation, both sides of this comparison derive from one
+            # source, so it cannot authenticate the origin against anything independent. What it
+            # still catches is a real bug class: the driver is long-lived and `enroll()` is
+            # per-invitation, so a future change that caches or reuses a transport across
+            # invitations would trip here instead of silently posting invitation A's binding to
+            # invitation B's controller. The reason code says what it is; a self-comparison wearing
+            # a security name would be worse than no check.
+            raise EnrollmentTransportError("enrollment_transport_invitation_mismatch")
         claim = worker_binding_claim(
             enrollment_id=invitation.enrollment_id,
             invitation_id=invitation.invitation_id,
@@ -276,10 +332,13 @@ class HttpxWorkerEnrollmentTransport(_NonSerializable):
 
         import httpx
 
-        ssl_context = ssl.create_default_context(cafile=self._ca_path)
+        # cadata (not cafile): the CA arrives as PEM TEXT in the invitation, so there is no file to
+        # create, no fixed path to reserve, and nothing to clean up. `verify` stays provably an
+        # SSLContext over exactly this chain — never system trust, never True/False.
+        ssl_context = ssl.create_default_context(cadata=self._ca_bundle_pem)
         async with asyncio.timeout(self._timeout):
             async with httpx.AsyncClient(
-                verify=ssl_context,  # EXACT deployment-local CA; never system trust, never disabled
+                verify=ssl_context,  # EXACT invitation CA chain; never system trust, never disabled
                 trust_env=False,  # ignore *_PROXY / SSL_CERT_* / ambient env networking
                 follow_redirects=False,  # a redirect is never a valid enrollment response
                 timeout=self._timeout,
@@ -351,8 +410,9 @@ class HttpxWorkerEnrollmentTransport(_NonSerializable):
 
 class SealedEnrollmentTransport(_NonSerializable):
     """The shipped default: no worker-initiated enrollment transport is activated. Every call fails
-    closed (``enrollment_transport_not_activated``) until a deployment-local profile constructs the
-    real :class:`HttpxWorkerEnrollmentTransport` with an explicit origin + CA bundle + signer."""
+    closed (``enrollment_transport_not_activated``) until a deployment-local profile supplies a
+    transport factory that builds the real :class:`HttpxWorkerEnrollmentTransport` from the
+    per-invitation origin + CA chain and the protected signer."""
 
     def __repr__(self) -> str:
         return "SealedEnrollmentTransport(<sealed>)"
@@ -373,6 +433,22 @@ class SealedEnrollmentTransport(_NonSerializable):
         raise EnrollmentTransportError("enrollment_transport_not_activated")
 
 
+def build_invitation_transport(
+    signer: WorkerEnrollmentSigner, invitation: EnrollmentInvitationInputs
+) -> HttpxWorkerEnrollmentTransport:
+    """The production transport factory, matching the driver's ``transport_factory`` signature.
+
+    Builds a transport pinned to THIS invitation's controller origin and CA chain. A deployment
+    passes this to :class:`~secp_worker.enrollment_driver.WorkerEnrollmentDriver` to replace the
+    sealed default; nothing is cached, so each ``enroll()`` gets a transport that can only speak to
+    the controller its own invitation names."""
+    return HttpxWorkerEnrollmentTransport(
+        controller_origin=invitation.controller_origin,
+        ca_bundle_pem=invitation.controller_ca_bundle_pem,
+        signer=signer,
+    )
+
+
 def _installation_from_key(worker_key_id: str) -> str:
     # a deterministic, bounded worker installation label derived from the pinned key id (lowercase
     # hex, grammar-valid); the authoritative worker identity is the key id, this is only a label
@@ -385,4 +461,5 @@ __all__ = [
     "HttpxWorkerEnrollmentTransport",
     "SealedEnrollmentTransport",
     "WorkerEnrollmentSigner",
+    "build_invitation_transport",
 ]

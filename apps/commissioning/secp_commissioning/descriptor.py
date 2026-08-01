@@ -87,6 +87,16 @@ _FORBIDDEN_FIELD_FRAGMENTS: tuple[str, ...] = (
 # detect committed CREDENTIALS, not documentation host names (an image reference legitimately names
 # a
 # documentation registry such as ``registry.example.test``).
+#
+# ADDING A PATTERN HERE IS NOT A LOCAL CHANGE. `secp_api.worker_enrollment_contract
+# .is_deployment_site_label` calls `scan_forbidden`, and that helper runs on the enrollment LOAD
+# path as well as the write path — so a new pattern RETROACTIVELY narrows the deployment-site-label
+# grammar, and stored labels that were legal when persisted can begin refusing on load. Those rows
+# degrade to `enrollment_page_integrity` with a working recovery cursor (they stay pageable-past
+# rather than bricking the organization's inventory), which is a designed landing zone, not luck.
+# See that helper's docstring and
+# `apps/api/tests/test_enrollment_site_label_projection_agreement.py`, which simulates exactly this
+# narrowing. Expect existing enrollment rows to need remediation before assuming a pattern is free.
 _FORBIDDEN_VALUE_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
     re.compile(r"\bssh-(rsa|ed25519|dss)\s+AAAA"),

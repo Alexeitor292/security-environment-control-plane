@@ -104,9 +104,35 @@ def test_worker_nonnumeric_restart_count_refuses():
     _assert_worker_incomplete(restart_count="x")
 
 
-def test_worker_missing_operator_invocation_refuses():
-    # a present (disabled+stopped) operator must expose a defined InvocationID generation fact
-    _assert_worker_incomplete(invocation_id="")
+def test_a_never_started_operator_with_an_empty_invocation_id_is_COMPLETE():
+    """The canonical prepared operator is present + disabled + NEVER started, and systemd reports
+    no InvocationID for a unit that has never run — the deployment observer's own parser documents
+    and accepts exactly that. Requiring a nonempty id refused the end state a correct install
+    produces, demanding a fact that only exists once the operator has run.
+
+    This is the CONTROL for the two refusals below: they are only meaningful if the ordinary
+    never-started posture is accepted here.
+    """
+    _code, st = _worker_status(prepared_worker_world(invocation_id=""))
+
+    assert st["dimensions"]["drift"] != "worker_generation_marker_invalid"
+
+
+def test_a_running_operator_without_an_invocation_id_refuses():
+    """Empty is legitimate ONLY for a unit that has not run. A RUNNING unit always has an
+    InvocationID, so an empty one there is a genuinely incomplete observation."""
+    _assert_worker_incomplete(invocation_id="", operator_running=True)
+
+
+def test_a_present_operator_without_a_monotonic_state_stamp_refuses():
+    """The generation fact that replaces the InvocationID for a never-started unit must itself be
+    present and numeric — otherwise accepting an empty InvocationID would have removed the
+    operator's generation coverage instead of relocating it."""
+    _assert_worker_incomplete(operator_state_change_monotonic="")
+
+
+def test_a_present_operator_with_a_nonnumeric_monotonic_stamp_refuses():
+    _assert_worker_incomplete(operator_state_change_monotonic="not-a-stamp")
 
 
 # --- controller incomplete tuples (correct marker over incomplete maps; image map stays complete)

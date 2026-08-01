@@ -98,6 +98,35 @@ def assert_parity(label: str, mgmt_fn, api_fn) -> None:
     assert m_value.digest() == a_value.digest(), f"{label}: digest differs"
 
 
+#: The EXHAUSTIVE set of keys the API-side public projection may carry that the authoritative
+#: management contract does not.
+#:
+#: ``deployment_site_label`` is the opaque deployment-site grouping label (ADR-027). It is
+#: NON-CANONICAL on the API side — absent from ``canonical()``, so it can never reach a
+#: ``state_digest``, the predecessor chain, the CAS predicate or an append-only history snapshot
+#: (``test_deployment_site_label_is_not_part_of_the_canonical_contract`` pins that independently).
+#: The management contract stays authoritative for CANONICAL semantics only and deliberately does
+#: not model a projection-only field, so this divergence is by design rather than drift.
+#:
+#: This allowance is deliberately narrow: it permits exactly these extra keys and nothing else. Any
+#: other added key, any dropped shared key, and any differing shared VALUE still fails closed.
+API_ONLY_PROJECTION_KEYS = frozenset({"deployment_site_label"})
+
+
+def assert_projection_parity(m_state, a_state, label: str = "") -> None:
+    """Both projections agree on every shared key, and the API side adds only the documented,
+    non-canonical, projection-only keys."""
+    m_view, a_view = m_state.public_view(), a_state.public_view()
+    assert set(a_view) - set(m_view) == API_ONLY_PROJECTION_KEYS, (
+        f"{label}: undocumented API-only projection keys {set(a_view) - set(m_view)}"
+    )
+    assert set(m_view) - set(a_view) == set(), (
+        f"{label}: the API projection dropped shared keys {set(m_view) - set(a_view)}"
+    )
+    shared = {key: value for key, value in a_view.items() if key not in API_ONLY_PROJECTION_KEYS}
+    assert shared == m_view, f"{label}: shared projection values differ"
+
+
 # --- inventory parity (fails closed if either side gains/loses a state or edge) ----------------
 
 
@@ -732,7 +761,7 @@ def test_every_state_has_identical_canonical_bytes_and_digest(label: str, build)
     assert m.state == a.state == (label if label != "invited" else mgmt.INVITED)
     assert _canonical_bytes(m) == _canonical_bytes(a), label
     assert m.digest() == a.digest(), label
-    assert m.public_view() == a.public_view(), label
+    assert_projection_parity(m, a, label)
 
 
 def test_full_forward_path_digest_chain_is_identical() -> None:
@@ -1190,9 +1219,11 @@ def test_mutated_state_fields_digest_identically(label: str, mutate: dict) -> No
 @pytest.mark.parametrize("build", [_states, _bound, _offered, _resulted, _verified, _healthy])
 def test_public_projection_parity_and_redaction(build) -> None:
     m, a = build()
-    assert m.public_view() == a.public_view()
-    blob = json.dumps(m.public_view(), sort_keys=True)
-    # the projection exposes fingerprints only — never a full key id, anchor, or raw digest
-    assert CTRL_HEX not in blob and WORKER_HEX not in blob
-    assert CTRL_KEY not in blob and WORKER_KEY not in blob
-    assert RELEASE not in blob
+    assert_projection_parity(m, a)
+    # redaction is asserted on BOTH projections, so the API-only key cannot become a leak channel
+    for view in (m.public_view(), a.public_view()):
+        blob = json.dumps(view, sort_keys=True)
+        # the projection exposes fingerprints only — never a full key id, anchor, or raw digest
+        assert CTRL_HEX not in blob and WORKER_HEX not in blob
+        assert CTRL_KEY not in blob and WORKER_KEY not in blob
+        assert RELEASE not in blob

@@ -55,6 +55,7 @@ _STATUS = {
     "release_fingerprint": "sha256:d…",
     "offer_fingerprint": "sha256:e…",
     "result_fingerprint": "sha256:f…",
+    "deployment_site_label": "rack-01.eu_a",
     "expires_at": "2026-07-27T01:00:00+00:00",
     "updated_at": "2026-07-27T00:30:00+00:00",
     "refusal_reason": "",

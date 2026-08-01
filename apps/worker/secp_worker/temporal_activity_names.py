@@ -18,6 +18,11 @@ TOOLCHAIN_ATTESTATION_ACTIVITY_NAME = "toolchain_attestation_activity"
 REMOTE_STATE_READINESS_ACTIVITY_NAME = "remote_state_readiness_activity"
 PLAN_SECRET_READINESS_ACTIVITY_NAME = "plan_secret_readiness_activity"
 
+# WS-B R3: the scheduled worker-enrollment expiry sweep. A pure database lifecycle transition — it
+# contacts no provider, runs no OpenTofu and reads no credential — so it belongs on the ORDINARY
+# task queue and is never registered on the controlled-live operator queue.
+ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME = "enrollment_recovery_sweep_activity"
+
 # Legacy deploy/reset/destroy/discover activities. These MUST equal the original implicit function
 # names, so pinning ``@activity.defn(name=...)`` does not change any registration.
 DEPLOY_ACTIVITY_NAME = "deploy_activity"

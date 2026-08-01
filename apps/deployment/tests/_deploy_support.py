@@ -30,7 +30,14 @@ ORDINARY_QUEUE = "secp-orchestration"
 OPERATOR_QUEUE = "secp-controlled-live-v1"
 OPERATOR_SERVICE = "secp-operator-worker.service"
 ORDINARY_CONTAINER = "secp-ordinary-worker"
-HEALTH_ARGV = ("/usr/bin/python3", "-m", "secp_worker.health", "check")
+# The ordinary worker's health argv as a VALID profile carries it. The interpreter is the one the
+# worker CONTAINER image provides (``python:3.11-slim`` installs under ``/usr/local``), not the
+# management host's ``/usr/bin/python3``. Left as a literal on purpose — this module is imported by
+# most of the deployment suite and must not drag in the management plane — but it is no longer
+# merely restated: ``tests/test_health_command_interpreter.py`` asserts it equals
+# ``secp_management.topology.WORKER_CONTAINER_INTERPRETER``, so the two can no longer drift apart
+# while agreeing with each other by coincidence.
+HEALTH_ARGV = ("/usr/local/bin/python3", "-m", "secp_worker.health", "check")
 
 
 def _reviewed_pins() -> dict:

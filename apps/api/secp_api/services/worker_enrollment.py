@@ -29,14 +29,17 @@ OpenTofu or operator activation lives here; PR5H-A stays an inert durable founda
 
 from __future__ import annotations
 
+import base64
+import datetime as _dt
 import hashlib
 import json
 import secrets
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Final
 
-from secp_commissioning.canonical import canonical_json, sha256_digest
+from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_digest
 from secp_commissioning.controller_enrollment_signer import AuthorizedControllerOfferContext
 from secp_commissioning.enrollment_attestation import (
     WORKER_RESULT_OUTCOME_HEALTHY,
@@ -64,6 +67,7 @@ from secp_api.errors import WorkerEnrollmentError
 from secp_api.models import _utcnow
 from secp_api.services import controller_identity
 from secp_api.worker_enrollment_contract import (
+    ALL_STATES,
     ENROLLMENT_CONTRACT_VERSION,
     INVITED,
     RECOVERY_REQUIRED,
@@ -74,7 +78,7 @@ from secp_api.worker_enrollment_contract import (
     WorkerEnrollmentInvitation,
     bind_worker_identity,
     create_invitation,
-    is_deployment_site_label,
+    deployment_site_label_refusal,
     mark_healthy,
     mark_verified,
     open_enrollment,
@@ -322,6 +326,12 @@ def _serve_receipt(
         raise WorkerEnrollmentError(EC.state_corrupt)
     if loaded.state.revision < receipt.resulting_revision:  # head behind a recorded result
         raise WorkerEnrollmentError(EC.history_inconsistent)
+    # The history snapshot is CANONICAL material, so it cannot carry the non-canonical
+    # ``deployment_site_label``. Re-stamp it from the authoritative loaded row (the label is
+    # immutable for an enrollment and is cross-checked against the invitation on every load), so a
+    # delayed idempotent retry projects the same site as the original response. Done AFTER every
+    # digest/consistency compare above — and harmless to them, since the label is not canonical.
+    historical = replace(historical, deployment_site_label=loaded.deployment_site_label)
     return TransitionOutcome(
         state=historical, committed_revision=receipt.resulting_revision, deduplicated=True
     )
@@ -408,8 +418,12 @@ def create_invitation_and_open(
     """
     actor.require(Permission.enrollment_manage)
     _assert_schema_ready(session)
-    if not is_deployment_site_label(deployment_site_label):
-        raise WorkerEnrollmentError(EC.scope_mismatch)
+    # A SPECIFIC code: `scope_mismatch` means "a worker claimed a site that disagrees with the
+    # authoritative binding", and creation has no binding to disagree with yet. Reporting it here
+    # sent an operator to look at permissions when the answer was "rename your site".
+    label_refusal = deployment_site_label_refusal(deployment_site_label)
+    if label_refusal is not None:
+        raise WorkerEnrollmentError(label_refusal)
     try:
         loaded = repo.create_invitation_and_open(
             session,
@@ -503,8 +517,12 @@ def create_supported_invitation(
     """
     actor.require(Permission.enrollment_manage)
     _assert_schema_ready(session)
-    if not is_deployment_site_label(deployment_site_label):
-        raise WorkerEnrollmentError(EC.scope_mismatch)
+    # A SPECIFIC code: `scope_mismatch` means "a worker claimed a site that disagrees with the
+    # authoritative binding", and creation has no binding to disagree with yet. Reporting it here
+    # sent an operator to look at permissions when the answer was "rename your site".
+    label_refusal = deployment_site_label_refusal(deployment_site_label)
+    if label_refusal is not None:
+        raise WorkerEnrollmentError(label_refusal)
     identity = controller_identity.load_active_controller_identity(session)
     nonce = _idempotency_nonce(actor.organization_id, idempotency_key)
     invitation = build_invitation(
@@ -1451,6 +1469,63 @@ def revoke_enrollment(
     return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
 
 
+#: The bounded reason code recorded when an OPERATOR marks an enrollment recovery-required. Distinct
+#: from the sweep's ``expiry_recovery``, so an operator decision and an automatic expiry are always
+#: distinguishable in the durable record.
+_OPERATOR_RECOVERY_REASON = "operator_recovery_required"
+
+
+def mark_recovery_required(
+    session: Session,
+    actor: Principal,
+    *,
+    enrollment_id: str,
+    expected_revision: int,
+    claimed_scope: ClaimedScope | None = None,
+) -> TransitionOutcome:
+    """Operator-triggered recovery: drive an enrollment to the ``recovery_required`` terminal.
+
+    The complement of the scheduled expiry sweep. The sweep reaches enrollments that ran out of
+    time; this reaches one an operator has decided is stuck — a worker that will never bind, a site
+    that was decommissioned mid-enrollment — without waiting for the TTL.
+
+    Shaped exactly like :func:`revoke_enrollment`, deliberately: it requires ``enrollment_manage``
+    (enforced here, not only in the router), enforces the organization boundary against the
+    authoritative persisted row, and takes ONLY the caller's last-observed ``expected_revision``.
+    The durable CAS coordinates are derived server-side from the loaded state and never cross the
+    public boundary.
+
+    **Idempotent**: an already-terminal enrollment returns its state with no write and no new audit.
+    A stale ``expected_revision`` on a live enrollment refuses ``revision_conflict``; concurrent
+    callers collide on the head CAS so exactly one wins. Exactly one bounded, secret-free audit
+    event is recorded, and only for the winning transition. Does NOT commit — the caller owns the
+    transaction boundary.
+    """
+    actor.require(Permission.enrollment_manage)
+    _assert_schema_ready(session)
+    loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
+    state = loaded.state
+    if state.state in (REFUSED, RECOVERY_REQUIRED):
+        return TransitionOutcome(state, state.revision, deduplicated=True)  # already terminal
+    if state.revision != expected_revision:
+        raise WorkerEnrollmentError(EC.revision_conflict)
+    new_state = _run_pure(lambda: require_recovery(state, _OPERATOR_RECOVERY_REASON))
+    if new_state is state:  # defensive: the contract treated it as a no-op
+        return TransitionOutcome(state, state.revision, deduplicated=True)
+    _commit(session, loaded, new_state, step=None, input_digest=None)
+    audit.record(
+        session,
+        action=AuditAction.enrollment_recovery_required,
+        resource_type="worker_enrollment",
+        resource_id=enrollment_id,
+        actor=str(actor.user_id),
+        organization_id=actor.organization_id,
+        outcome="success",
+        data={"state": new_state.state, "revision": new_state.revision},
+    )
+    return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
+
+
 def _serve_lifecycle_retry(
     session: Session,
     loaded: LoadedEnrollment,
@@ -1533,6 +1608,12 @@ def _lifecycle(
     expected: ExpectedRevision,
     claimed_scope: ClaimedScope | None,
 ) -> TransitionOutcome:
+    # Operator lifecycle transitions are MANAGE operations, and the check lives HERE so it cannot be
+    # bypassed by a direct service call or by a future router that forgets it. Without this, refuse
+    # / recover would have been authorized by the organization boundary ALONE — every other
+    # state-changing operation on this service (revoke, create, the progression steps) requires an
+    # explicit permission, and these two were the exception.
+    actor.require(Permission.enrollment_manage)
     _assert_schema_ready(session)
     loaded = _load_authorized(session, actor, enrollment_id, claimed_scope)
     # An exact lifecycle retry is recognised from the append-only history BEFORE the caller's
@@ -1593,6 +1674,203 @@ def load_public_view(
         raise WorkerEnrollmentError(EC.state_corrupt) from None
 
 
+# --------------------------------------------------------------- org-scoped inventory listing (R1)
+
+#: The default page size when the caller does not ask for one.
+DEFAULT_LIST_LIMIT: Final = 50
+
+#: The hard, code-owned server-side ceiling on one page. Re-applied HERE as well as in the router
+#: and the repository, so a direct service call can never exceed it either.
+MAX_LIST_LIMIT: Final = repo.MAX_LIST_PAGE
+
+#: The cursor is an opaque url-safe base64 blob over
+#: ``"<canonical utc>|<enrollment id>|<filter digest>"``. Every part is re-validated on decode, and
+#: a decoded cursor is only ever used as a keyset position WITHIN the caller's own
+#: organization-scoped query — so a forged or replayed cursor can at worst skip the caller past
+#: their own rows, never reach another organization's.
+_CURSOR_SEPARATOR: Final = "|"
+_MAX_CURSOR_LEN: Final = 256
+
+#: The sentinel filter digest for "no state filter" — distinct from any real digest.
+_NO_FILTER: Final = "all"
+
+
+def _filter_digest(states: tuple[str, ...] | None) -> str:
+    """A short, stable digest of the CANONICALISED state filter a cursor was minted under.
+
+    A keyset cursor is only meaningful within the filtered order that produced it. Replaying a
+    cursor from one filter against another silently skips every row the new filter matches that
+    sorts before the old cursor's position — a short page that looks exactly like a genuinely short
+    page. Binding the filter in turns that silent wrong answer into a bounded refusal.
+
+    Canonicalised (sorted, de-duplicated) so a caller reordering ``?state=`` parameters, or
+    repeating one, still gets a cursor that matches — the filter is a set, and its digest must
+    behave like one.
+    """
+    if not states:
+        return _NO_FILTER
+    joined = ",".join(sorted(set(states)))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _encode_cursor(expires_at: str, enrollment_id: str, states: tuple[str, ...] | None) -> str:
+    raw = _CURSOR_SEPARATOR.join((expires_at, enrollment_id, _filter_digest(states)))
+    return base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str, states: tuple[str, ...] | None) -> tuple[_dt.datetime, str]:
+    """Decode an opaque cursor to its ``(expires_at_ts, enrollment_id)`` keyset position.
+
+    Refuses when the cursor was minted under a DIFFERENT state filter than the request presenting
+    it. Every failure — malformed, over-long, non-decoding, or filter-mismatched — is the SAME
+    bounded ``enrollment_cursor_invalid``: the rejected value is never echoed, the filter it was
+    minted under is never echoed, and a bad cursor is never allowed to degrade into a silently
+    incomplete page or an unfiltered scan.
+    """
+    if not isinstance(cursor, str) or not (1 <= len(cursor) <= _MAX_CURSOR_LEN):
+        raise WorkerEnrollmentError(EC.cursor_invalid)
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        raise WorkerEnrollmentError(EC.cursor_invalid) from None
+    parts = raw.split(_CURSOR_SEPARATOR)
+    if len(parts) != 3:
+        raise WorkerEnrollmentError(EC.cursor_invalid)
+    head, enrollment_id, bound_filter = parts
+    expires_ts = repo.parse_canonical_utc(head)
+    if expires_ts is None or not is_sha256_digest(enrollment_id):
+        raise WorkerEnrollmentError(EC.cursor_invalid)
+    if bound_filter != _filter_digest(states):
+        # a position carried across filters would silently omit matching rows — refuse, never serve
+        raise WorkerEnrollmentError(EC.cursor_invalid)
+    return expires_ts, enrollment_id
+
+
+def _validated_states(states: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """Reduce the requested filter to a closed-set tuple, or None for "every state".
+
+    An unknown state name is refused rather than ignored: silently dropping it would return a page
+    the operator did not ask for. Duplicates collapse; the caller's order is irrelevant because the
+    filter is a set membership test, not a sort key.
+    """
+    if states is None:
+        return None
+    unique = tuple(sorted({state for state in states}))
+    if not unique:
+        return None
+    if any(state not in ALL_STATES for state in unique):
+        raise WorkerEnrollmentError(EC.state_invalid)
+    return unique
+
+
+def list_public_views(
+    session: Session,
+    actor: Principal,
+    *,
+    states: tuple[str, ...] | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+    after: str | None = None,
+) -> tuple[list[dict[str, object]], str | None]:
+    """One org-scoped page of bounded, secret-free status projections + the next opaque cursor.
+
+    Authorization is the organization boundary and nothing else: the query is filtered in SQL by the
+    authenticated principal's own organization, and every loaded row is INDEPENDENTLY re-checked
+    with :meth:`Principal.require_org` — never a raw id comparison — so a repository change that
+    dropped the SQL filter would fail closed here rather than leaking another tenant's inventory.
+
+    ``enrollment:read`` is required, enforced HERE so a direct service call cannot bypass RBAC.
+    ``enrollment:manage`` does NOT imply it (pinned decision: strict read/manage separation).
+
+    NO invitation material is returned — only :meth:`EnrollmentState.public_view`. Unlike the expiry
+    sweep's candidate query, the page includes revoked, terminal and healthy enrollments.
+
+    ``next_cursor`` is a WEAK signal, deliberately: it is non-null whenever this page came back
+    FULL, which includes the case where the page behind it turns out to be empty. It means "there
+    MAY be more", never "there certainly is". A caller must page until it comes back null rather
+    than treating a non-null value as proof of a further page. (Same rule the recovery sweep uses
+    for its own keyset continuation.)
+
+    A row that cannot be projected raises the DISTINCT ``enrollment_page_integrity`` — "this page
+    contains a row I cannot render", not "this one enrollment is corrupt" — carrying an opaque
+    ``recovery_cursor`` so the caller can page PAST it and still reach the rest of the inventory.
+    """
+    actor.require(Permission.enrollment_read)
+    _assert_schema_ready(session)
+    bounded_limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    selected = _validated_states(states)
+    cursor = _decode_cursor(after, selected) if after is not None else None
+
+    try:
+        page = repo.load_page(
+            session,
+            organization_id=actor.organization_id,
+            states=selected,
+            limit=bounded_limit,
+            after=cursor,
+        )
+    except repo.PageIntegrityRefusal as exc:
+        # The row is preserved, never repaired, and never silently dropped. Two things happen:
+        # (1) the failing enrollment id is recorded SERVER-SIDE so the condition is diagnosable at
+        #     all — it is org-scoped and audited, never returned as free text or logged bare;
+        # (2) the caller gets an opaque cursor positioned AT the failing row, bound to the SAME
+        #     state filter, so `after=<recovery_cursor>` steps past it. Without this, every
+        #     enrollment ordered after a poison row is permanently unreachable from the list.
+        _audit_page_integrity(session, actor, exc)
+        raise WorkerEnrollmentError(
+            EC.page_integrity,
+            # the audit row above must SURVIVE this failed request — ``db_session`` would otherwise
+            # roll it back, and an audit entry that only exists on the happy path is no audit at all
+            durable_transition=True,
+            recovery_cursor=_encode_cursor(exc.expires_at, exc.enrollment_id, selected),
+        ) from None
+    except RepositoryRefusal as exc:  # a corrupt row is preserved, never surfaced, never repaired
+        raise _surface(exc) from None
+
+    items: list[dict[str, object]] = []
+    for loaded in page:
+        # organization is the ONLY authorization boundary — re-proven per row against the
+        # authoritative binding, independently of the SQL filter that selected it
+        actor.require_org(loaded.organization_id)
+        try:
+            items.append(loaded.state.public_view())
+        except WorkerEnrollmentError:
+            raise
+        except Exception:  # noqa: BLE001 - a projection failure must not escape unbounded
+            raise WorkerEnrollmentError(EC.state_corrupt) from None
+
+    next_cursor = None
+    if len(page) == bounded_limit and page:
+        last = page[-1].state
+        next_cursor = _encode_cursor(last.expires_at, last.enrollment_id, selected)
+    return items, next_cursor
+
+
+def _audit_page_integrity(
+    session: Session, actor: Principal, exc: repo.PageIntegrityRefusal
+) -> None:
+    """Record WHICH row could not be projected, server-side, so the condition is diagnosable.
+
+    The enrollment id appears here and nowhere else on this path: the audit row is organization-
+    scoped and durable, whereas a bare log line is neither. ``reason`` is the bounded repository
+    code, never free text. Auditing must never convert a bounded refusal into an unbounded one, so
+    a failure to record is swallowed — the caller still gets the page-integrity refusal.
+    """
+    try:
+        audit.record(
+            session,
+            action=AuditAction.enrollment_page_integrity_failed,
+            resource_type="worker_enrollment",
+            resource_id=exc.enrollment_id,
+            actor=str(actor.user_id),
+            organization_id=actor.organization_id,
+            outcome="failure",
+            data={"reason": exc.reason_code},
+        )
+    except Exception:  # noqa: BLE001 - never let auditing mask or replace the bounded refusal
+        pass
+
+
 # --------------------------------------------------------------------------- invitation expiry
 
 
@@ -1608,6 +1886,8 @@ def _assert_invitation_unexpired(invitation: object, now: str) -> None:
 
 
 __all__ = [
+    "DEFAULT_LIST_LIMIT",
+    "MAX_LIST_LIMIT",
     "ClaimedScope",
     "ExchangeOutcome",
     "ExpectedRevision",
@@ -1617,7 +1897,9 @@ __all__ = [
     "bind_worker",
     "bind_worker_exchange",
     "create_invitation_and_open",
+    "list_public_views",
     "load_public_view",
+    "mark_recovery_required",
     "mark_enrollment_healthy",
     "recover_enrollment",
     "record_offer",

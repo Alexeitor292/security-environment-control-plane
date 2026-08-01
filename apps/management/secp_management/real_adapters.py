@@ -49,6 +49,9 @@ from secp_operator_deployment.pinned_exec import ExecutablePin
 
 from secp_management import ManagementError
 from secp_management.adapters import (
+    CONTAINMENT_BREACHED,
+    CONTAINMENT_CONTAINED,
+    CONTAINMENT_UNPROVABLE,
     BootstrapReceipt,
     CompensationResult,
     ControllerObservation,
@@ -63,6 +66,12 @@ from secp_management.adapters import (
 from secp_management.controller_compose_validation import assert_controller_compose_contract
 from secp_management.evidence import health_command_identity
 from secp_management.layout import ManagementLocations
+from secp_management.planes import Role
+from secp_management.release_bundle import (
+    WORKER_OPERATOR_PURPOSE,
+    parse_manifest_bytes,
+    signed_worker_image,
+)
 from secp_management.signing import sign_ed25519, verify_ed25519
 from secp_management.topology import (
     CONTROLLER_MIGRATION_ARGV,
@@ -133,15 +142,30 @@ class RealAdapterContext:
         self.locations.assert_writable(path)
         return path
 
-    def run(self, pin: ExecutablePin, argv: tuple[str, ...], *, timeout: int, reason: str) -> str:
+    def run(
+        self,
+        pin: ExecutablePin,
+        argv: tuple[str, ...],
+        *,
+        timeout: int,
+        reason: str,
+        fault_reason: str | None = None,
+    ) -> str:
         """Run one closed pinned command; return bounded stdout or raise ``reason`` on non-zero exit
-        or runner fault.  Never a shell/generic-argv verb — argv is fixed by the caller."""
+        or runner fault.  Never a shell/generic-argv verb — argv is fixed by the caller.
+
+        ``fault_reason`` optionally separates "the command ran and refused" (non-zero exit →
+        ``reason``) from "it could not be invoked at all" (runner fault → ``fault_reason``).
+        Callers that do not pass it are unchanged: both paths still raise ``reason``. The
+        distinction exists because a caller reporting a THIRD state needs to name WHY it could not
+        ask, and those two causes have different remediations.
+        """
         try:
             result = self.runner.run(
                 pin, argv, timeout_seconds=timeout, max_output_bytes=_MAX_OUTPUT
             )
         except Exception:  # noqa: BLE001 - any runner fault is a fail-closed host-op error
-            raise ManagementError(reason) from None
+            raise ManagementError(fault_reason or reason) from None
         if result.exit_code != 0:
             raise ManagementError(reason)
         return result.stdout
@@ -705,6 +729,53 @@ class RealManagementHostObserver:
             return ""
         return sha256_bytes(data)
 
+    def _installed_operator_image(self) -> str:
+        """The signed operator image PROVEN LOADED on this host, or "" when it cannot be proven.
+
+        The canonical prepared operator is installed present + disabled + STOPPED, so there is no
+        running container whose image could be inspected — which is why this field used to be
+        hardcoded to "". But "the operator image is loaded" IS observable, and it is the fact the
+        end state depends on: without it the reviewed operator worker could never be started.
+
+        WHICH digest to look for is read from the host's own installed-release record, NOT from the
+        engine's expectation, so this stays an observation and the engine's comparison against the
+        signed manifest stays a real check. The record's authenticity is not relied on here: a
+        tampered record naming a different digest yields a value that fails that comparison, and one
+        naming the correct digest tells the truth anyway. The authority is the engine's signed
+        expectation, never this file.
+
+        Fail-closed in every direction — an unreadable or malformed record, an absent image, or a
+        runtime that cannot answer all return "", which the end-state gate refuses.
+        """
+        try:
+            raw = self._ctx.fs.safe_read(
+                self._ctx.locations.release_record_path(Role.WORKER.value),
+                max_bytes=_MAX_ARTIFACT_BYTES,
+                expected_uid=_ROOT_UID,
+            )
+        except (FilesystemError, ManagementError):
+            return ""
+        try:
+            manifest = parse_manifest_bytes(raw)
+            digest = signed_worker_image(manifest, WORKER_OPERATOR_PURPOSE)
+        except Exception:  # noqa: BLE001 - any malformed/absent record is simply not proof
+            return ""
+        if not _IMAGE_ID.fullmatch(digest or ""):
+            return ""
+        try:
+            out = self._ctx.run(
+                self._ctx.executables.container_runtime,
+                ("image", "inspect", "--format", "{{.Id}}", digest),
+                timeout=_INSPECT_TIMEOUT,
+                reason="image_query_failed",
+            )
+        except ManagementError:
+            return ""
+        # The runtime must report back the SAME content-addressed id that was asked for. Anything
+        # else (a redirect to another image, an empty answer) is not proof this image is loaded.
+        observed = out.strip()
+        return observed if observed == digest else ""
+
     def _container_image(self, container: str) -> str:
         try:
             out = self._ctx.run(
@@ -734,21 +805,47 @@ class RealManagementHostObserver:
             return False
         return bool(gen.operator_present)
 
-    def _polls_operator_queue(self) -> bool:
-        # a bounded read-only probe of the ordinary worker's SELF-DECLARED readiness queue (what it
-        # recorded at mark_ready) — a self-report used to CHECK ordinary-queue containment, not an
-        # independent enumeration of what the Temporal poller actually serves; fail-closed on error
+    def _observe_queue_containment(self) -> tuple[str, str | None]:
+        """A bounded read-only probe of the ordinary worker's SELF-DECLARED served queues.
+
+        Returns ``(verdict, why)``. The verdict is THREE-valued, because this probe has three
+        genuinely different outcomes and collapsing them loses the one that matters:
+
+        * ``contained``  — the probe ran and the operator queue was NOT among the served queues.
+        * ``breached``   — the probe ran and the operator queue WAS among them.
+        * ``unprovable`` — the probe did not complete. NOTHING was observed about the queues.
+
+        Folding ``unprovable`` into ``breached`` (as this did) is fail-closed and therefore SAFE,
+        but it is not honest: it reports a containment breach on the exact isolation property this
+        plane exists to guarantee, when in fact nothing was observed. A false breach is acted on,
+        so the false-alarm direction is the damaging one. Fail-closed behaviour is unchanged —
+        ``unprovable`` still refuses to certify — but the operator can now tell the two apart.
+
+        ``why`` names the CAUSE, not merely the fact, because the remediations differ:
+        ``queue_probe_command_failed`` means the runtime ran the probe and it exited non-zero (the
+        container is gone, the interpreter path does not resolve inside the image, or the health
+        module itself errored); ``queue_probe_runtime_unavailable`` means the container runtime
+        could not be invoked at all (absent, timed out, or the runner faulted).
+
+        This reads a SELF-REPORT recorded at ``mark_ready`` — not an independent enumeration of
+        what the Temporal poller actually serves. That limit is unchanged by this fix.
+        """
         try:
             out = self._ctx.run(
                 self._ctx.executables.container_runtime,
                 ("exec", ORDINARY_CONTAINER_NAME, *ORDINARY_HEALTH_COMMAND[:-1], "queues"),
                 timeout=_INSPECT_TIMEOUT,
-                reason="queue_probe_failed",
+                reason="queue_probe_command_failed",
+                fault_reason="queue_probe_runtime_unavailable",
             )
-        except ManagementError:
-            return True  # cannot prove containment → conservatively assume a breach (fail closed)
+        except ManagementError as exc:
+            # Cannot prove containment. Still refuses to certify (fail closed) — but as its own
+            # verdict, carrying the bounded reason, never as a fabricated observation of a breach.
+            return CONTAINMENT_UNPROVABLE, exc.reason_code
         queues = {line.strip() for line in out.splitlines() if line.strip()}
-        return OPERATOR_TASK_QUEUE in queues
+        if OPERATOR_TASK_QUEUE in queues:
+            return CONTAINMENT_BREACHED, None
+        return CONTAINMENT_CONTAINED, None
 
     def observe_worker(self) -> WorkerObservation:
         gen = self._service.observe_generation()  # THE single PR5D coherent worker observation
@@ -759,18 +856,25 @@ class RealManagementHostObserver:
             restart_count=gen.ordinary_restart_count,
             started_at=gen.ordinary_started_at,
             operator_invocation_id=gen.operator_invocation_id,
+            operator_state_change_monotonic=gen.operator_state_change_monotonic,
         )
         ordinary_image = (
             self._container_image(ORDINARY_CONTAINER_NAME) if gen.ordinary_present else ""
         )
+        operator_image = self._installed_operator_image() if gen.operator_present else ""
         config_id = self._identity_of(self._ctx.locations.worker_compose_path())
         unit_id = self._identity_of(self._ctx.locations.operator_unit_path())
         package_agg = self._identity_of(self._ctx.locations.worker_deployment_package_path())
-        polls_operator = (
-            self._polls_operator_queue()
-            if (gen.ordinary_present and gen.ordinary_running)
-            else False
-        )
+        if gen.ordinary_present and gen.ordinary_running:
+            containment, containment_reason = self._observe_queue_containment()
+        else:
+            # Nothing is running, so nothing can be polling. This is an OBSERVATION (the container
+            # state was read coherently), not an unfinished probe — so it is "contained", not
+            # "unprovable". Conflating the two would make a stopped worker look like a broken one.
+            containment, containment_reason = CONTAINMENT_CONTAINED, None
+        # Fail-closed projection onto the two-valued field every existing caller reads: anything
+        # that is not a POSITIVE proof of containment must refuse to certify. Unchanged behaviour.
+        polls_operator = containment != CONTAINMENT_CONTAINED
         package_trusted = package_agg != ""
         prepared = bool(
             coherent
@@ -800,14 +904,19 @@ class RealManagementHostObserver:
             operator_enabled=gen.operator_enabled,
             operator_running=gen.operator_running,
             operator_invocation_id=gen.operator_invocation_id,
+            operator_state_change_monotonic=gen.operator_state_change_monotonic,
             operator_unit_identity=unit_id,
-            operator_image_digest="",  # the prepared operator is stopped; no running image
+            # OBSERVED, not assumed: the signed operator image proven loaded on this host. The unit
+            # is stopped, so this is a local image-store proof, not a running-container inspection.
+            operator_image_digest=operator_image,
             deployment_package_aggregate=package_agg,
             ordinary_polls_operator_queue=polls_operator,
             package_trusted=package_trusted,
             commissioning_status="prepared" if prepared else "not_prepared",
             deployment_status="sealed_prepared" if sealed else "not_prepared",
             generation_marker=marker,
+            ordinary_queue_containment=containment,
+            ordinary_queue_containment_reason=containment_reason,
         )
 
     # --- controller ---

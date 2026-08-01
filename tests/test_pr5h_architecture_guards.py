@@ -365,6 +365,21 @@ def test_api_enrollment_surface_gains_no_privileged_capability() -> None:
 # the single production entry point permitted to import the enrollment service (PR5H-B1 slice 1)
 _ALLOWED_ENROLLMENT_SERVICE_REACHERS = {"apps/api/secp_api/routers/enrollment.py"}
 
+#: WS-B R3: the expiry sweep is no longer unwired — it now has exactly ONE production caller, the
+#: scheduled all-organizations driver. Before R3 it had none, and ``recovery_required`` was
+#: unreachable in a running deployment. The guard therefore changed from "nothing may reach it" to
+#: "exactly this one module may", which is a tighter statement than the original once a caller has
+#: to exist at all: any SECOND caller — a router, a CLI, an operator module — still fails closed.
+_ALLOWED_RECOVERY_SWEEP_REACHERS = {
+    "apps/api/secp_api/services/worker_enrollment_recovery_schedule.py"
+}
+
+#: ...and the scheduled driver itself is reachable from exactly one place: the ordinary-queue
+#: Temporal activity. This is what keeps the sweep on the ordinary queue by construction — a module
+#: that could reach the driver could schedule it anywhere, so the reachability set IS the routing
+#: guarantee. A controlled-live/operator module appearing here would be the failure to catch.
+_ALLOWED_RECOVERY_SCHEDULE_REACHERS = {"apps/worker/secp_worker/temporal_app.py"}
+
 
 #: C1: the two SUPPORTED evidence-driven exchange routes authenticate by the worker's SIGNED
 #: EVIDENCE (verified against the authoritative persisted invitation), NOT a control-plane OIDC
@@ -424,17 +439,28 @@ def test_enrollment_api_router_is_registered_and_authenticated() -> None:
     assert not offending, f"the enrollment router reaches forbidden capability: {sorted(offending)}"
 
 
-def test_only_the_enrollment_router_reaches_the_service_and_recovery_stays_unwired() -> None:
+def test_only_the_enrollment_router_reaches_the_service_and_the_sweep_has_one_caller() -> None:
     """The enrollment SERVICE is reachable from exactly one production entry point (the controller
     API router); nothing else — no operator, worker, provider, CLI or bootstrap module — may import
-    it, and the restart/recovery SWEEP service stays unwired until its own PR5H-B1 slice."""
+    it.
+
+    The restart/recovery SWEEP is reachable from exactly one module (the scheduled driver), and that
+    driver from exactly one module (the ordinary-queue Temporal activity). Reachability IS the
+    routing guarantee here: anything able to reach the driver could schedule the sweep onto any
+    queue, so a second reacher — especially an operator/controlled-live module — must fail closed.
+    """
     service_reachers: list[str] = []
     recovery_reachers: list[str] = []
+    schedule_reachers: list[str] = []
     for root in (REPO / "apps", REPO / "plugins", REPO / "contracts"):
         for path in sorted(root.rglob("*.py")):
             if "__pycache__" in path.parts or "tests" in path.parts:
                 continue
-            if path.name in {"worker_enrollment.py", "worker_enrollment_recovery.py"}:
+            if path.name in {
+                "worker_enrollment.py",
+                "worker_enrollment_recovery.py",
+                "worker_enrollment_recovery_schedule.py",
+            }:
                 continue  # the modules themselves
             names = set(_imports(path))
             for node in ast.walk(_tree(path)):
@@ -446,14 +472,37 @@ def test_only_the_enrollment_router_reaches_the_service_and_recovery_stays_unwir
                 and rel not in _ALLOWED_ENROLLMENT_SERVICE_REACHERS
             ):
                 service_reachers.append(rel)
-            if "secp_api.services.worker_enrollment_recovery" in names:
+            if (
+                "secp_api.services.worker_enrollment_recovery" in names
+                and rel not in _ALLOWED_RECOVERY_SWEEP_REACHERS
+            ):
                 recovery_reachers.append(rel)
+            if (
+                "secp_api.services.worker_enrollment_recovery_schedule" in names
+                and rel not in _ALLOWED_RECOVERY_SCHEDULE_REACHERS
+            ):
+                schedule_reachers.append(rel)
     assert not service_reachers, (
         f"the enrollment service is wired into unexpected modules: {service_reachers}"
     )
     assert not recovery_reachers, (
-        f"the recovery sweep must stay unwired until its slice: {recovery_reachers}"
+        f"the recovery sweep may only be reached by its scheduled driver: {recovery_reachers}"
     )
+    assert not schedule_reachers, (
+        "the scheduled sweep driver may only be reached by the ordinary-queue Temporal activity: "
+        f"{schedule_reachers}"
+    )
+
+
+def test_the_scheduled_sweep_driver_really_is_reached_by_its_one_caller() -> None:
+    """Anti-vacuity for the guard above: an allowlist naming a module that reaches nothing would
+    let the real invariant rot silently. The single permitted reacher must ACTUALLY reach it."""
+    driver = (
+        REPO / "apps" / "api" / "secp_api" / "services" / "worker_enrollment_recovery_schedule.py"
+    )
+    assert driver.exists(), "the scheduled sweep driver must exist for the guard to mean anything"
+    activity = REPO / "apps" / "worker" / "secp_worker" / "temporal_app.py"
+    assert "worker_enrollment_recovery_schedule" in activity.read_text(encoding="utf-8")
 
 
 def test_enrollment_transport_remains_sealed() -> None:

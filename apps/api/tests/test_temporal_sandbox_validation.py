@@ -32,6 +32,9 @@ WORKFLOW_NAMES = (
     "RemoteStateReadinessWorkflow",
     "PlanSecretReadinessWorkflow",
     "RealPlanGenerationWorkflow",
+    # WS-B R3: the scheduled enrollment expiry sweep. It must satisfy the SAME sandbox rule as every
+    # other workflow — dispatch by activity NAME only, so nothing I/O-capable enters the sandbox.
+    "EnrollmentRecoverySweepWorkflow",
 )
 
 
@@ -55,7 +58,7 @@ def test_workflow_module_import_is_clean_in_a_fresh_process():
     assert result.stdout.strip() == "[]", result.stdout
 
 
-def test_all_nine_production_workflows_validate_under_the_default_sandbox():
+def test_every_production_workflow_validates_under_the_default_sandbox():
     """The exact production registration list validates under the DEFAULT sandbox — DeployWorkflow
     (which raised at base) and every later workflow."""
     pytest.importorskip("temporalio")
@@ -65,7 +68,7 @@ def test_all_nine_production_workflows_validate_under_the_default_sandbox():
     from temporalio import workflow as tw
     from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
-    assert len(SHIPPED_WORKFLOWS) == 9
+    assert len(SHIPPED_WORKFLOWS) == len(WORKFLOW_NAMES)
 
     async def _validate() -> None:
         runner = SandboxedWorkflowRunner()  # the DEFAULT sandboxed runner (never unsandboxed)
