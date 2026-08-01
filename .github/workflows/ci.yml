@@ -489,6 +489,175 @@ jobs:
           print("live Alembic head verified: a1d4f7c2e9b6")
           PY
 
+  # --- PostgreSQL + real-socket API regression gate ---------------------------------------------
+  # The one thing no job in this workflow has ever had: PostgreSQL AND a real HTTP socket at the
+  # same time. Every API test drives the app through `TestClient`, which runs the ASGI app to
+  # completion in-process, so the request exit stack — and every `Depends`-with-yield teardown —
+  # is always closed before the assertion. Response-ordering defects are structurally invisible
+  # there whatever the database is. CI already runs real PostgreSQL 16: it had the engine without
+  # the socket. This job supplies the socket.
+  #
+  # Why a dedicated job rather than extending an existing PostgreSQL one. Every PostgreSQL job here
+  # enforces `skipped == 0`, and pytest records an expected failure in JUnit as
+  # `<skipped type="pytest.xfail">` — so adding this module to `backend-pr5f-postgres-finalization`
+  # or `backend-pr5h-postgres-enrollment` would turn those fences red for the wrong reason, and
+  # adding it to the shards would let its xfail be classified by the shard skip-REASON matcher,
+  # which would accept it only because the marker text happens to contain "PostgreSQL". This job's
+  # accounting instead understands xfail explicitly and names the two states out loud.
+  #
+  # It creates no container, starts no service beyond its own job-local PostgreSQL, and binds only
+  # an ephemeral 127.0.0.1 listener inside the runner.
+  backend-api-socket-gate:
+    name: API socket gate (real PostgreSQL + real HTTP socket)
+    runs-on: ubuntu-latest
+    env:
+      SECP_APP_ENV: test
+      SECP_TEST_POSTGRES_URL: postgresql+psycopg://secp:secp@localhost:5432/secptest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: secp
+          POSTGRES_PASSWORD: secp
+          POSTGRES_DB: secptest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U secp -d secptest"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Create venv and install project
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[dev]"
+      - name: Run the live-socket read-after-write gate against real PostgreSQL
+        run: >-
+          uv run pytest
+          apps/api/socket_gate_tests/test_api_read_after_write_over_socket.py
+          -q -p no:cacheprovider -rxXs
+          --junitxml=junit-api-socket-gate.xml
+      - name: Upload API socket gate JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-backend-api-socket-gate
+          path: junit-api-socket-gate.xml
+          if-no-files-found: error
+      - name: Enforce the socket gate ran, and report which state it observed
+        if: always()
+        # Parse the JUnit programmatically; the pytest exit code alone is NOT trusted, because a
+        # module that skipped every test exits 0. EXACTLY TWO shapes are acceptable and each is
+        # named in the log — anything else is red:
+        #
+        #   PENDING  every test ran, none failed, and exactly ONE is an expected failure: the
+        #            read-after-write gate. The defect is present and the gate saw it.
+        #   FIXED    every test ran and none failed or xfailed: the defect is gone and the marker
+        #            has been removed.
+        #
+        # Self-deactivating in both directions. Once `Depends(db_session, scope="function")` lands
+        # the strict xfail XPASSes, which pytest records as a FAILURE, so this job goes red until
+        # the now-obsolete marker is deleted. And a plain skip — PostgreSQL absent, so the gate
+        # never executed — is refused outright rather than counted as coverage.
+        run: |
+          "$(pwd)/.venv/bin/python" - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          # Count-based, exact: the module's full test count, not a floor. Machine-checked against
+          # the module itself by tests/test_ci_workflow.py, so adding a test here without updating
+          # that count (or vice versa) fails rather than silently under-enforcing.
+          EXPECTED_TESTS = 4
+          GATE_TEST = "test_a_created_template_is_readable_by_the_immediately_following_request"
+
+          report = Path("junit-api-socket-gate.xml")
+          if not report.exists():
+              print("::error::junit-api-socket-gate.xml missing - the gate produced no results")
+              sys.exit(1)
+          root = ET.parse(report).getroot()
+
+          tests = failures = errors = 0
+          for suite in root.iter("testsuite"):
+              tests += int(suite.get("tests", 0))
+              failures += int(suite.get("failures", 0))
+              errors += int(suite.get("errors", 0))
+
+          xfailed, plain_skipped = [], []
+          for case in root.iter("testcase"):
+              marker = case.find("skipped")
+              if marker is None:
+                  continue
+              name = f"{case.get('classname', '')}::{case.get('name', '')}"
+              entry = (name, (marker.get("message") or "").strip())
+              if (marker.get("type") or "") == "pytest.xfail":
+                  xfailed.append(entry)
+              else:
+                  plain_skipped.append(entry)
+
+          print(f"collected={tests} failures={failures} errors={errors} "
+                f"xfailed={len(xfailed)} plain_skipped={len(plain_skipped)}")
+          for name, message in xfailed:
+              print(f"  expected failure: {name}: {message}")
+          for name, message in plain_skipped:
+              print(f"  SKIPPED:          {name}: {message}")
+
+          problems = []
+          if tests != EXPECTED_TESTS:
+              problems.append(
+                  f"expected exactly {EXPECTED_TESTS} socket-gate tests, collected {tests}"
+              )
+          if failures:
+              problems.append(
+                  f"{failures} failing socket-gate test(s) - note that a strict xfail which now "
+                  "PASSES is reported here, and means the defect is fixed and the marker must go"
+              )
+          if errors:
+              problems.append(f"{errors} errored socket-gate test(s)")
+          if plain_skipped:
+              problems.append(
+                  f"{len(plain_skipped)} test(s) were SKIPPED outright - PostgreSQL was "
+                  "unavailable, so the gate never executed and its silence proves nothing"
+              )
+
+          if not problems:
+              if len(xfailed) == 1:
+                  observed = xfailed[0][0].rsplit("::", 1)[-1]
+                  if observed != GATE_TEST:
+                      problems.append(
+                          f"the expected failure is {observed!r}, not the read-after-write gate "
+                          f"{GATE_TEST!r}"
+                      )
+                  else:
+                      print(
+                          "STATE=PENDING: the read-after-write defect is still present and the "
+                          "gate observed it over a real socket against real PostgreSQL. Expected "
+                          'until Depends(db_session, scope="function") lands.'
+                      )
+              elif not xfailed:
+                  print(
+                      "STATE=FIXED: every socket-gate test passed outright, so the defect is gone "
+                      "and the expected-failure marker has been removed."
+                  )
+              else:
+                  problems.append(
+                      f"expected 0 or 1 expected-failures, got {len(xfailed)}: "
+                      f"{[name for name, _ in xfailed]}"
+                  )
+
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+          PY
+
   # --- dependency/security scan ----------------------------------------------------------------
   backend-security:
     name: Backend security (pip-audit)
@@ -1618,6 +1787,7 @@ jobs:
         backend-pytest,
         backend-pr5f-postgres-finalization,
         backend-pr5h-postgres-enrollment,
+        backend-api-socket-gate,
         backend-realfs-root,
         backend-discovery-activation-root,
         backend-deployment-root,
@@ -1636,6 +1806,7 @@ jobs:
           echo "backend-pytest          = ${{ needs.backend-pytest.result }}"
           echo "backend-pr5f-postgres   = ${{ needs.backend-pr5f-postgres-finalization.result }}"
           echo "backend-pr5h-postgres   = ${{ needs.backend-pr5h-postgres-enrollment.result }}"
+          echo "backend-api-socket-gate = ${{ needs.backend-api-socket-gate.result }}"
           echo "backend-realfs-root     = ${{ needs.backend-realfs-root.result }}"
           echo "backend-pr5f-root       = ${{ needs.backend-discovery-activation-root.result }}"
           echo "backend-deployment-root = ${{ needs.backend-deployment-root.result }}"
@@ -1651,6 +1822,7 @@ jobs:
             "${{ needs.backend-pytest.result }}" \
             "${{ needs.backend-pr5f-postgres-finalization.result }}" \
             "${{ needs.backend-pr5h-postgres-enrollment.result }}" \
+            "${{ needs.backend-api-socket-gate.result }}" \
             "${{ needs.backend-realfs-root.result }}" \
             "${{ needs.backend-discovery-activation-root.result }}" \
             "${{ needs.backend-deployment-root.result }}" \
