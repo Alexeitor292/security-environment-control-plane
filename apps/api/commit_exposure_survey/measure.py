@@ -88,6 +88,7 @@ class RequestObservation:
     label: str
     method: str
     path: str
+    template: str = ""
     status: int | None = None
     response_completed_at: float | None = None
     commits: list[CommitEvent] = field(default_factory=list)
@@ -268,6 +269,102 @@ def verify_instrument(recorder: CommitRecorder, timer: ResponseCompletionTimer) 
             "is not engaging"
         )
     return problems
+
+
+def verify_writes_were_seen(observations: list[RequestObservation]) -> list[str]:
+    """End-to-end counterpart to ``verify_write_detection``: writes must have been SEEN as writes.
+
+    The in-process check proves the flag works on a synthetic session. This proves it engaged on
+    the real application, over the socket, for the requests this survey actually made. A ``201
+    Created`` that produced no writing commit anywhere is not a harmless endpoint — it is an
+    instrument that stopped detecting writes, and the whole report would silently read as zero
+    exposure.
+    """
+    problems: list[str] = []
+    created = [
+        obs for obs in observations if obs.status == 201 and obs.response_completed_at is not None
+    ]
+    if not created:
+        problems.append(
+            "no 201-Created request was observed at all, so nothing here demonstrates that write "
+            "detection engaged against the real application"
+        )
+    silent = [obs.label for obs in created if not obs.writing_commits]
+    if silent:
+        problems.append(
+            f"{len(silent)} request(s) returned 201 Created but produced NO writing commit: "
+            f"{silent}. Either the write flag is not engaging or those endpoints commit nothing — "
+            "both make every verdict in this report unsafe to read."
+        )
+    return problems
+
+
+def verify_write_detection() -> tuple[bool, str]:
+    """Prove, in-process and in BOTH directions, that the write flag actually tracks writes.
+
+    ``verdict()`` branches entirely on ``wrote``, and ``wrote`` comes from one condition in
+    ``after_flush``. Neutralise that condition and the survey reports **zero exposure with every
+    other guard still green** — six 201-Created endpoints classified harmless, exit 0. That is the
+    clean-looking zero this whole instrument exists to prevent, in the direction that understates a
+    blast radius.
+
+    Hand-built ``CommitEvent(wrote=...)`` objects cannot catch it: they bypass the flag path
+    entirely. So this drives a real INSERT through a real session and asserts the flag is set, and
+    drives a real no-op commit and asserts it is not. Both halves are required — a mutation pinning
+    ``wrote`` to ``True`` would pass the first alone.
+    """
+    from sqlalchemy import Column, Integer, create_engine
+    from sqlalchemy.orm import declarative_base, sessionmaker
+
+    base = declarative_base()
+
+    class _Probe(base):  # type: ignore[misc, valid-type]
+        __tablename__ = "secp_write_detection_probe"
+        id = Column(Integer, primary_key=True)
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, future=True)
+    probe = CommitRecorder()
+    try:
+        with probe.installed(engine):
+            writing = factory()
+            writing.add(_Probe())
+            writing.commit()
+            writing.close()
+            after_write = list(probe.events)
+
+            probe.reset()
+            reading = factory()
+            reading.execute(select_probe_count(_Probe))
+            reading.commit()
+            reading.close()
+            after_read = list(probe.events)
+    finally:
+        engine.dispose()
+
+    if len(after_write) != 1 or not after_write[0].wrote:
+        return False, (
+            f"a real INSERT+commit produced {len(after_write)} event(s) with "
+            f"wrote={[e.wrote for e in after_write]}; expected exactly one with wrote=True. The "
+            "write flag is not tracking writes, so every endpoint would read as harmless."
+        )
+    if any(event.wrote for event in after_read):
+        return False, (
+            f"a read-only commit was flagged as writing ({[e.wrote for e in after_read]}); the "
+            "flag no longer discriminates, so this check would pass whatever it was pinned to"
+        )
+    return True, (
+        f"INSERT+commit -> 1 event, wrote=True; read-only commit -> "
+        f"{len(after_read)} event(s), wrote=False"
+    )
+
+
+def select_probe_count(model: object):
+    """A trivial SELECT against the probe table (kept separate so the import stays local)."""
+    from sqlalchemy import func, select
+
+    return select(func.count()).select_from(model)  # type: ignore[arg-type]
 
 
 def verify_savepoint_discrimination(recorder: CommitRecorder) -> tuple[bool, str]:

@@ -131,6 +131,49 @@ def test_the_recorder_distinguishes_a_real_commit_from_a_savepoint_release():
     assert "0 recorded commits" in note
 
 
+def test_the_write_flag_actually_tracks_writes_on_a_live_session():
+    """The gap that mattered most, and the one the hand-built-event test below cannot see.
+
+    Every verdict branches on ``wrote``, which comes from a single condition in ``after_flush``.
+    Neutralise that condition and the survey reports **zero exposure with every other guard green
+    and exit 0** — six 201-Created endpoints classified harmless. Constructing ``CommitEvent`` by
+    hand, as the verdict test does, bypasses the flag path entirely and passes either way; this
+    drives a real INSERT through a real session instead.
+
+    Both directions are asserted inside ``verify_write_detection``: a write must set the flag AND a
+    read must not, so a mutation pinning it to ``True`` fails just as loudly as one pinning it to
+    ``False``.
+    """
+    from commit_exposure_survey.measure import verify_write_detection
+
+    ok, note = verify_write_detection()
+    assert ok, note
+    assert "wrote=True" in note
+
+
+def test_a_created_response_with_no_writing_commit_is_refused():
+    """End-to-end counterpart: a 201 that recorded no write means the instrument stopped seeing."""
+    from commit_exposure_survey.measure import (
+        CommitEvent,
+        RequestObservation,
+        verify_writes_were_seen,
+    )
+
+    created_and_wrote = RequestObservation(label="ok", method="POST", path="/x", status=201)
+    created_and_wrote.response_completed_at = 100.0
+    created_and_wrote.commits = [CommitEvent(at=100.5, wrote=True, in_dependency_teardown=True)]
+    assert verify_writes_were_seen([created_and_wrote]) == []
+
+    created_silently = RequestObservation(label="silent", method="POST", path="/x", status=201)
+    created_silently.response_completed_at = 100.0
+    created_silently.commits = [CommitEvent(at=100.5, wrote=False, in_dependency_teardown=True)]
+    problems = verify_writes_were_seen([created_silently])
+    assert problems and "NO writing commit" in problems[0]
+
+    # And it must not pass vacuously when there was nothing to check.
+    assert verify_writes_were_seen([]) != []
+
+
 def test_an_undrivable_endpoint_is_never_reported_as_safe():
     """``NOT_MEASURED`` and ``NOT_EXPOSED`` must stay distinct outcomes.
 
