@@ -1,0 +1,77 @@
+# Disposable SECP acceptance HOST (SECP WS-B two-host acceptance).
+#
+# This is not a product image and never ships. It is a throwaway stand-in for one physical or
+# virtual SECP host, built so the REAL management-plane installer can execute against it unchanged:
+#
+#   * systemd is PID 1, so `systemctl daemon-reload` and the operator unit's
+#     enabled/active/UnitFileState observation are real systemd answers, not simulated ones;
+#   * a full Docker Engine runs INSIDE the host, so `docker load`, `docker compose up` and
+#     `docker inspect` in the real adapters talk to a daemon that belongs to this host alone —
+#     two hosts therefore have genuinely separate container worlds, as two real machines would;
+#   * python3 is at /usr/bin/python3, which is where the reviewed worker health command
+#     (topology.ORDINARY_HEALTH_COMMAND) and broker entrypoint (topology.BROKER_ENTRYPOINT) look.
+#
+# Ubuntu 24.04 is the base because the project requires Python >= 3.11 and 24.04 ships 3.12; 22.04
+# ships 3.10 and would need a PPA to run the product at all.
+#
+# Running this requires --privileged and a volume-backed /var/lib/docker (overlayfs cannot stack on
+# overlayfs). Both are set by the harness, not here. Nothing in this image contacts a provider,
+# holds a credential, or embeds a trust anchor.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    container=docker \
+    LANG=C.UTF-8
+
+# systemd + the product's runtime prerequisites + the Docker Engine the inner host runs.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus \
+      ca-certificates curl gnupg \
+      python3 python3-venv python3-dev \
+      build-essential git iproute2 iptables uidmap openssl \
+ && install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
+ && chmod a+r /etc/apt/keyrings/docker.asc \
+ && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
+      > /etc/apt/sources.list.d/docker.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      docker-ce docker-ce-cli containerd.io docker-compose-plugin \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# The management adapters invoke the compose runtime as a STANDALONE binary with global flags
+# before the subcommand (`<compose> --project-name P --file F up ...`). The v2 plugin binary
+# supports exactly that invocation, so expose it at a stable absolute path the harness can pin.
+RUN ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+
+# Strip the units a throwaway host does not need, so `systemctl is-system-running` reaches
+# `running` instead of sitting in `degraded` over a failed getty or network target.
+RUN find /etc/systemd/system /lib/systemd/system \
+      -path '*.wants/*' \
+      \( -name '*getty*' -o -name '*udev*' -o -name '*networkd*' -o -name '*resolved*' \
+         -o -name '*timesync*' -o -name '*journald-audit*' \) \
+      -exec rm -f {} + \
+ && systemctl mask systemd-udevd.service systemd-udev-trigger.service \
+      systemd-networkd.service systemd-resolved.service systemd-timesyncd.service \
+ && systemctl set-default multi-user.target
+
+# The install roots the management layout owns. Created root:root 0755 up front so the hardened
+# filesystem's trusted-ancestor walk has a real, root-owned ancestry to walk (it refuses to write
+# under any ancestor it cannot prove is root-owned and not group/other-writable).
+RUN mkdir -p /opt/secp /opt/secp/bootstrap /opt/secp/controller /opt/secp/worker \
+             /etc/secp /etc/secp/controller /etc/secp/worker /etc/secp/operator-deployment \
+             /var/lib/secp /var/lib/secp/bootstrap /var/lib/secp/commissioning \
+ && chown -R root:root /opt/secp /etc/secp /var/lib/secp \
+ && chmod -R 0755 /opt/secp /etc/secp /var/lib/secp
+
+# The reviewed non-root controller-API runtime identity (topology.API_RUNTIME_UID/GID = 10001).
+# The API container runs as this pair and the broker allowlists exactly it over SO_PEERCRED, so the
+# host needs the same uid/gid to exist for ownership of the socket and the read-only mounts.
+RUN groupadd --gid 10001 secp && useradd --uid 10001 --gid 10001 --no-create-home secp
+
+VOLUME ["/var/lib/docker", "/var/lib/containerd"]
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]
