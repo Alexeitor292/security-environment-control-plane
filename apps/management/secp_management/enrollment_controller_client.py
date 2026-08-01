@@ -88,6 +88,11 @@ class ControllerEnrollmentStatus:
     release_fingerprint: str
     offer_fingerprint: str
     result_fingerprint: str
+    #: The opaque deployment-site grouping label (WS-B R2). Outside the canonical enrollment
+    #: contract, so it never affects a digest or the CAS chain; carried here only to keep this
+    #: projection field-for-field with the API's ``EnrollmentStatusOut``, which the parity test
+    #: pins.
+    deployment_site_label: str
     expires_at: str
     updated_at: str
     refusal_reason: str

@@ -178,6 +178,7 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
     from secp_api.config import Settings
     from secp_worker import main
     from secp_worker import temporal_app as T
+    from secp_worker import temporal_workflows as W
 
     # Ordinary queue is exactly secp-orchestration. The operator queue is a DEPLOYMENT-LOCAL config
     # value (SECP_TEMPORAL_OPERATOR_TASK_QUEUE) that is EMPTY on the shipped default — no operator
@@ -187,13 +188,20 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
     assert settings.temporal_task_queue == "secp-orchestration"
     assert settings.temporal_operator_task_queue == ""
 
-    captured: dict = {}
+    # EVERY Worker construction is recorded, not just the last one. A dict that overwrites per
+    # construction would let a first Worker built on the operator queue hide behind a second one
+    # built on the ordinary queue.
+    constructions: list[dict] = []
 
     class _FakeWorker:
         def __init__(self, client, *, task_queue, workflows, activities):  # noqa: ANN001, ANN204
-            captured["task_queue"] = task_queue
-            captured["workflows"] = list(workflows)
-            captured["activities"] = list(activities)
+            constructions.append(
+                {
+                    "task_queue": task_queue,
+                    "workflows": list(workflows),
+                    "activities": list(activities),
+                }
+            )
 
         async def run(self):  # noqa: ANN202
             return None
@@ -214,14 +222,58 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
 
     asyncio.run(main._run_temporal(threading.Event()))
 
-    assert captured["task_queue"] == "secp-orchestration"
-    assert captured["task_queue"] != settings.temporal_operator_task_queue or (
-        settings.temporal_operator_task_queue == ""
-    )
-    assert len(captured["workflows"]) == 9
-    assert len(captured["activities"]) == 9
+    # CONTROL, first: the entrypoint really did construct a worker. Every "no unexpected X" and
+    # "every registration uses the ordinary queue" assertion below is vacuously true against zero
+    # constructions, so this must hold before any of them means anything.
+    assert constructions, "the shipped entrypoint constructed no Temporal Worker at all"
+    # Exactly ONE worker: the shipped entrypoint has no second registration to hide anything in.
+    assert len(constructions) == 1, [c["task_queue"] for c in constructions]
+
+    # EVERY registration is on the ordinary queue — never the operator queue.
+    for construction in constructions:
+        assert construction["task_queue"] == "secp-orchestration"
+        assert construction["task_queue"] != settings.temporal_operator_task_queue or (
+            settings.temporal_operator_task_queue == ""
+        )
+
+    captured = constructions[0]
+
+    # --- EXACT WORKFLOW IDENTITY ------------------------------------------------------------------
+    # Enumerated here against the workflow MODULE (secp_worker.temporal_workflows), NOT against
+    # main.SHIPPED_WORKFLOWS: comparing the registration to the tuple it is built from is a
+    # tautology that a deletion from both sides would satisfy. A count alone is worse still — it
+    # passes an omission paired with an addition, and says nothing about WHICH classes registered.
+    expected_workflows = {
+        W.DeployWorkflow,
+        W.ResetWorkflow,
+        W.DestroyWorkflow,
+        W.DiscoverWorkflow,
+        W.EligibilityPreflightWorkflow,
+        W.ToolchainAttestationWorkflow,
+        W.RemoteStateReadinessWorkflow,
+        W.PlanSecretReadinessWorkflow,
+        W.RealPlanGenerationWorkflow,
+        # WS-B R3: the scheduled enrollment expiry sweep is ORDINARY-queue work.
+        W.EnrollmentRecoverySweepWorkflow,
+    }
+    registered_workflows = set(captured["workflows"])
+    # Both directions, reported separately so a failure names the actual defect.
+    assert not (expected_workflows - registered_workflows), "intended workflow NOT registered"
+    assert not (registered_workflows - expected_workflows), "UNEXPECTED workflow registered"
+    assert registered_workflows == expected_workflows
+    # No duplicate registration (set equality above cannot see a repeated entry).
+    assert len(captured["workflows"]) == len(expected_workflows)
+    # The recovery sweep specifically — named, so its removal fails with its own message.
+    assert W.EnrollmentRecoverySweepWorkflow in registered_workflows
+
+    # Every registered workflow class comes from the import-clean workflow module. A controlled-live
+    # operator workflow class arriving from operator_bootstrap (or any other module) fails here even
+    # if someone also added it to the expected set above.
+    assert {w.__module__ for w in captured["workflows"]} == {"secp_worker.temporal_workflows"}
+
+    # --- EXACT ACTIVITY IDENTITY ------------------------------------------------------------------
     # Exactly the SEALED default activity callables — never a controlled-live operator instance.
-    assert set(captured["activities"]) == {
+    expected_activities = {
         T.deploy_activity,
         T.reset_activity,
         T.destroy_activity,
@@ -231,13 +283,35 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
         T.remote_state_readiness_activity,
         T.plan_secret_readiness_activity,
         T.real_plan_generation_activity,
+        # WS-B R3: the sweep activity has no sealed/controlled-live split — it contacts nothing.
+        T.enrollment_recovery_sweep_activity,
     }
-    # None of the registered activities is an operator (controlled-live) bound method: they are all
-    # the module-level SEALED default callables from temporal_app (asserted above). The controlled-
-    # live set is built ONLY by operator_bootstrap on a DISTINCT queue, never imported here.
-    assert "operator_bootstrap" not in {
-        m.__module__ for m in captured["activities"] if hasattr(m, "__module__")
-    }
+    registered_activities = set(captured["activities"])
+    assert not (expected_activities - registered_activities), "intended activity NOT registered"
+    assert not (registered_activities - expected_activities), "UNEXPECTED activity registered"
+    assert registered_activities == expected_activities
+    assert len(captured["activities"]) == len(expected_activities)
+
+    # What actually excludes a controlled-live activity is the exact-INSTANCE equality asserted
+    # above, not the defining module. operator_bootstrap builds its controlled-live set from these
+    # SAME temporal_app classes under a reviewed composition, so ``__module__`` is
+    # "secp_worker.temporal_app" for the sealed and the controlled-live variant alike. These are
+    # bound methods, and bound-method equality/hashing includes ``__self__`` — so a controlled-live
+    # instance of the same class does NOT satisfy ``registered_activities == expected_activities``.
+    # Pinned here so the identity assertion is not later "simplified" into a class/module check:
+    sealed_module_level = {id(getattr(T, name)) for name in dir(T)}
+    owners = [
+        activity.__self__
+        for activity in captured["activities"]
+        if getattr(activity, "__self__", None) is not None
+    ]
+    # CONTROL: the five composed activities really are bound methods, so the loop below is not
+    # vacuous. (The other five are plain module-level functions with no composition to check.)
+    assert len(owners) == 5, owners
+    for owner in owners:
+        assert type(owner).__module__ == "secp_worker.temporal_app"
+        # the registered instance IS the module-level SEALED singleton, not a fresh composition
+        assert id(owner) in sealed_module_level, owner
 
 
 def test_shipped_worker_entrypoint_never_reads_the_operator_queue():

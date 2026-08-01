@@ -53,6 +53,7 @@ _STATUS = ControllerEnrollmentStatus(
     release_fingerprint="sha256:d",
     offer_fingerprint="sha256:e",
     result_fingerprint="sha256:f",
+    deployment_site_label="rack-01.eu_a",
     expires_at="2026-07-27T01:00:00+00:00",
     updated_at="2026-07-27T00:30:00+00:00",
     refusal_reason="",
@@ -87,8 +88,23 @@ class _FakeClient:
         return ControllerEnrollmentStatus(**{**_STATUS.__dict__, "state": "refused", "revision": 1})
 
 
-def _deps(client, *, key="idem-key-000000000000000000") -> EnrollmentCliDeps:
-    return EnrollmentCliDeps(controller_client=client, idempotency_key=lambda: key)
+CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBfakeControllerCA000000000==\n-----END CERTIFICATE-----\n"
+
+
+class _FakeCaBundle:
+    """Stands in for the locator-backed provider. The CA is sourced from the operator's OWN
+    bootstrap-recorded locator, never from the controller API response."""
+
+    def read_pem(self) -> str:
+        return CA_PEM
+
+
+def _deps(client, *, key="idem-key-000000000000000000", ca_bundle=None) -> EnrollmentCliDeps:
+    return EnrollmentCliDeps(
+        controller_client=client,
+        idempotency_key=lambda: key,
+        ca_bundle=ca_bundle or _FakeCaBundle(),
+    )
 
 
 def _run(argv, client=None, key="idem-key-000000000000000000"):

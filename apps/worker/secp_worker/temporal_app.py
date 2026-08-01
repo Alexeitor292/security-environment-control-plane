@@ -12,6 +12,7 @@ Discovery is read-only and, in SECP-002A, never runs against a real endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC
 
@@ -38,6 +39,7 @@ from secp_worker.temporal_activity_names import (  # noqa: E402 - after the temp
     DESTROY_ACTIVITY_NAME,
     DISCOVER_ACTIVITY_NAME,
     ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
+    ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME,
     PLAN_SECRET_READINESS_ACTIVITY_NAME,
     REAL_PLAN_GENERATION_ACTIVITY_NAME,
     REMOTE_STATE_READINESS_ACTIVITY_NAME,
@@ -546,6 +548,55 @@ class RealPlanGenerationActivity:
         )
 
 
+# --- WS-B R3: the scheduled worker-enrollment expiry sweep ---------------------------------------
+# Gives the recovery lifecycle a real caller. ``recovery_required`` had no producer outside tests,
+# so it was unreachable in a running deployment.
+#
+# This is an ORDINARY-queue activity. It performs a pure database lifecycle transition under the
+# same compare-and-swap as every other enrollment transition: it contacts no provider, opens no
+# outbound connection, runs no OpenTofu, touches no host, and reads no credential. There is no
+# sealed/controlled-live split to make, and it is never registered on the operator queue.
+#
+# It passes the SESSION FACTORY (not a session) into the sweep, deliberately: the sweep reads its
+# candidate batch in one session and then recovers each candidate in its own transaction, which is
+# what makes it fresh-process-safe, poison-isolated and concurrent-safe.
+
+
+@activity.defn(name=ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME)
+async def enrollment_recovery_sweep_activity(arg: dict) -> str:
+    import datetime as _dt
+    import json
+
+    from secp_api.db import get_sessionmaker
+    from secp_api.services.worker_enrollment_recovery_schedule import sweep_all_organizations
+
+    # The impure clock read lives HERE, in the activity — never in the workflow, which must stay
+    # deterministic. The canonical UTC form is what the pure contract parses.
+    now = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+
+    def _heartbeat() -> None:
+        """One heartbeat per organization, so a stalled sweep is VISIBLE and can be cancelled.
+
+        ``asyncio.to_thread`` copies the current context, so the activity context propagates into
+        the worker thread and ``activity.heartbeat()`` is valid there. Guarded anyway: outside a
+        real activity (tests, a direct call) there is no context and this must be a no-op rather
+        than an error — the sweep's correctness does not depend on liveness reporting.
+        """
+        if not TEMPORAL_AVAILABLE:
+            return
+        try:
+            activity.heartbeat()
+        except Exception:  # noqa: BLE001 - never fail a sweep over a heartbeat
+            pass
+
+    report = await asyncio.to_thread(
+        sweep_all_organizations, get_sessionmaker(), now=now, on_progress=_heartbeat
+    )
+    # Aggregate counts only — the report is identifier-free by construction, so this result and any
+    # log line derived from it can never carry an enrollment id or an organization id.
+    return json.dumps(report.as_log_fields(), sort_keys=True)
+
+
 # --- The DEFAULT activities the SHIPPED (sealed-by-default) worker registers
 # -----------------------
 # Each is constructed with its SEALED provider, so ordinary worker startup refuses at the
@@ -582,6 +633,7 @@ from secp_worker.temporal_workflows import (  # noqa: E402 - re-export at module
     DestroyWorkflow,
     DiscoverWorkflow,
     EligibilityPreflightWorkflow,
+    EnrollmentRecoverySweepWorkflow,
     PlanSecretReadinessWorkflow,
     RealPlanGenerationWorkflow,
     RemoteStateReadinessWorkflow,
@@ -594,6 +646,7 @@ __all__ = [
     "DESTROY_ACTIVITY_NAME",
     "DISCOVER_ACTIVITY_NAME",
     "ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME",
+    "ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME",
     "PLAN_SECRET_READINESS_ACTIVITY_NAME",
     "REAL_PLAN_GENERATION_ACTIVITY_NAME",
     "REMOTE_STATE_READINESS_ACTIVITY_NAME",
@@ -603,6 +656,7 @@ __all__ = [
     "DestroyWorkflow",
     "DiscoverWorkflow",
     "EligibilityPreflightWorkflow",
+    "EnrollmentRecoverySweepWorkflow",
     "PlanSecretReadinessWorkflow",
     "RealPlanGenerationWorkflow",
     "RemoteStateReadinessWorkflow",
@@ -618,6 +672,7 @@ __all__ = [
     "destroy_activity",
     "discover_activity",
     "eligibility_preflight_activity",
+    "enrollment_recovery_sweep_activity",
     "toolchain_attestation_activity",
     "remote_state_readiness_activity",
     "plan_secret_readiness_activity",
