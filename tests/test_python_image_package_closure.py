@@ -25,6 +25,7 @@ _DOCKERFILE = _REPO / "infra" / "dev" / "Dockerfile.python"
 _EXPECTED_PACKAGE_ROOTS = {
     "apps/api",
     "apps/worker",
+    "apps/commissioning",
     "apps/deployment",
     "apps/management",
     "contracts/scenario-schema",

@@ -177,7 +177,9 @@ def contract_violations(inputs: PackagingInputs) -> list[str]:
             )
 
     # --- an installed entry point must resolve inside the wheel ---
-    importable_only = {n for n, e in inputs.declared.items() if e.get("distribution") == IMPORTABLE_ONLY}
+    importable_only = {
+        n for n, e in inputs.declared.items() if e.get("distribution") == IMPORTABLE_ONLY
+    }
     for script, target in sorted(inputs.scripts.items()):
         top_level = target.split(":", 1)[0].split(".", 1)[0]
         if top_level in importable_only:
@@ -197,10 +199,20 @@ def _manifest() -> dict:
     return tomllib.loads(_MANIFEST.read_text(encoding="utf-8"))
 
 
+class DuplicatePackageName(AssertionError):
+    """Two package roots declare the same top-level import name."""
+
+
 def discover_packages(repo: Path | None = None) -> dict[str, str]:
     """Every importable package directory on disk, as ``{package_name: root}``.
 
     The independent witness. Reads neither ``pyproject.toml`` nor the manifest.
+
+    Refuses a duplicate top-level name rather than letting the later root win. Keying by name is
+    what makes the manifest readable, but it means a collision would silently collapse two packages
+    into one entry — and the one that vanished would then be neither discovered nor required to be
+    declared, which is a hole in the anchor itself. (Python could not import both anyway; one would
+    shadow the other depending on path order.)
     """
     base = repo or _REPO
     found: dict[str, str] = {}
@@ -213,7 +225,13 @@ def discover_packages(repo: Path | None = None) -> dict[str, str]:
                 continue
             for candidate in sorted(root.iterdir()):
                 if candidate.is_dir() and (candidate / "__init__.py").is_file():
-                    found[candidate.name] = f"{container}/{root.name}"
+                    where = f"{container}/{root.name}"
+                    if candidate.name in found:
+                        raise DuplicatePackageName(
+                            f"{candidate.name} exists under both {found[candidate.name]} and "
+                            f"{where}; one would shadow the other and only one could be declared"
+                        )
+                    found[candidate.name] = where
     return found
 
 
@@ -274,6 +292,38 @@ def test_discovery_is_not_vacuous():
     assert found.get("secp_api") == "apps/api"
 
 
+def _make_package(base: Path, container: str, root: str, name: str) -> None:
+    package = base / container / root / name
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+
+
+def test_discovery_actually_walks_a_tree(tmp_path: Path):
+    """CONTROL for the anchor. Every "is it declared?" assertion rests on this walk, and against
+    the real repo a walk that returned a hardcoded answer would look identical."""
+    _make_package(tmp_path, "apps", "alpha", "secp_alpha")
+    _make_package(tmp_path, "plugins", "beta", "secp_beta")
+    (tmp_path / "apps" / "alpha" / "not_a_package").mkdir()  # no __init__.py
+    assert discover_packages(tmp_path) == {
+        "secp_alpha": "apps/alpha",
+        "secp_beta": "plugins/beta",
+    }
+
+
+def test_discovery_refuses_a_duplicate_top_level_name(tmp_path: Path):
+    """A collision must not silently collapse two packages into one entry — the one that vanished
+    would be neither discovered nor required to be declared, a hole in the anchor itself."""
+    _make_package(tmp_path, "apps", "one", "secp_same")
+    _make_package(tmp_path, "apps", "two", "secp_same")
+    with pytest.raises(DuplicatePackageName) as exc:
+        discover_packages(tmp_path)
+    assert "secp_same" in str(exc.value)
+
+
+def test_the_real_repository_has_no_duplicate_package_names():
+    discover_packages()  # raises DuplicatePackageName if it does
+
+
 def test_discovery_covers_every_wheel_package():
     """The walk must be at least as wide as the wheel list, or the anchor has a hole exactly where
     it matters most."""
@@ -324,7 +374,7 @@ def test_the_repository_currently_declares_ten_shipped_and_no_importable_only():
 
 
 def _case(**overrides) -> PackagingInputs:
-    """A minimal contract that is SATISFIED, so any violation below is attributable to the change."""
+    """A minimal SATISFIED contract, so any violation below is attributable to the perturbation."""
     base = {
         "discovered": {"secp_thing": "apps/thing"},
         "declared": {
@@ -359,7 +409,9 @@ def test_the_coordinated_two_place_removal_is_refused():
     that used to leave every test green — and the contract refuses, because the code is still on
     disk and is now unclassified."""
     violations = contract_violations(_case(declared={}, wheel_packages=()))
-    assert violations == ["undeclared: secp_thing exists on disk (apps/thing) but is not classified"]
+    assert violations == [
+        "undeclared: secp_thing exists on disk (apps/thing) but is not classified"
+    ]
 
 
 def test_dropping_it_from_the_wheel_alone_is_also_refused():
@@ -482,7 +534,9 @@ def test_the_same_asymmetry_declared_shipped_is_refused():
 
 def test_an_importable_only_package_that_reaches_the_wheel_is_refused():
     violations = contract_violations(
-        _acceptance_like(wheel_packages=("apps/thing/secp_thing", "apps/acceptance/secp_acceptance"))
+        _acceptance_like(
+            wheel_packages=("apps/thing/secp_thing", "apps/acceptance/secp_acceptance")
+        )
     )
     assert "importable-only-in-wheel: secp_acceptance must not be installed" in violations
 
