@@ -708,3 +708,53 @@ def test_python_image_smoke_is_fail_closed_on_skip_or_failure(wf):
     assert "tests < 5" in run
     assert "skipped != 0" in run
     assert "failures != 0" in run
+
+
+# --- real device flow against a disposable Keycloak (SECP-PR5H-B2 WS-C deployment) --------------
+
+DEVICE_FLOW_JOB = "backend-keycloak-device-flow"
+DEVICE_FLOW_MODULE = "apps/management/tests/test_keycloak_device_flow_integration.py"
+
+
+def test_device_flow_job_exists_and_is_required(wf):
+    jobs = _jobs(wf)
+    assert DEVICE_FLOW_JOB in jobs
+    assert DEVICE_FLOW_JOB in jobs["backend"]["needs"]
+    assert f"needs.{DEVICE_FLOW_JOB}.result" in _run_text(jobs["backend"])
+
+
+def test_device_flow_job_opts_into_the_real_grant(wf):
+    job = _jobs(wf)[DEVICE_FLOW_JOB]
+    # The module skips itself unless this is set, so the job that must NOT skip has to set it.
+    assert job["env"]["SECP_TEST_KEYCLOAK_DEVICE_FLOW"] == "1"
+    assert DEVICE_FLOW_MODULE in _run_text(job)
+
+
+def test_device_flow_job_refuses_a_skipped_or_miscollected_run(wf):
+    run = _run_text(_jobs(wf)[DEVICE_FLOW_JOB])
+    assert "junit-keycloak-device-flow.xml" in run
+    # An EXACT collection count, not a floor: a floor would let a deleted proof pass unnoticed.
+    assert "EXPECTED_TESTS = 17" in run
+    assert "tests != EXPECTED_TESTS" in run
+    assert "skipped != 0" in run
+    assert "failures != 0" in run
+    assert "errors != 0" in run
+
+
+def test_device_flow_job_proves_the_disposable_provider_was_destroyed(wf):
+    run = _run_text(_jobs(wf)[DEVICE_FLOW_JOB])
+    assert 'docker ps -a --filter "name=secp-cli-device-flow-"' in run
+
+
+def test_device_flow_job_does_not_use_continue_on_error(wf):
+    job = _jobs(wf)[DEVICE_FLOW_JOB]
+    assert "continue-on-error" not in job
+    for step in _steps(job):
+        assert "continue-on-error" not in step
+
+
+def test_device_flow_job_caches_uv_like_siblings(wf):
+    steps = _steps(_jobs(wf)[DEVICE_FLOW_JOB])
+    uv = [s for s in steps if str(s.get("uses", "")).startswith("astral-sh/setup-uv")]
+    assert len(uv) == 1
+    assert uv[0]["with"]["enable-cache"] is True
