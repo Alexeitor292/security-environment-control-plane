@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "description": "The controlled environment the SECP root-security fences execute inside (SECP-WSA tier 1). The trusted-ancestor rule enforced by infra/ci/attest_trusted_ancestry.py is NOT relaxed, repaired or special-cased anywhere by this environment; the environment only makes the ancestry the rule observes DETERMINISTIC. This file is the single source of truth for the pin: .github/workflows/ci.yml repeats the `image` literal once per controlled job, and tests/test_trusted_ancestry_isolation.py machine-checks that every one of them equals this value, so the copies cannot drift.",
+  "image": "ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90",
+  "base": "ubuntu:24.04",
+  "digest": "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90",
+  "digest_kind": "oci-image-index",
+  "resolved_on": "2026-07-30",
+  "options": "--init",
+  "options_reason": "--init runs a real init as PID 1 so orphaned processes are REAPED. Without it the first CI run of this environment (30609943702) failed backend-deployment-root's test_timeout_proves_full_group_disappearance_no_orphan with reason_code command_group_not_terminated: a GitHub `container:` job's PID 1 does not reap, so after the deployment runner's bounded SIGTERM -> grace -> SIGKILL sequence the killed grandchild remained a ZOMBIE, killpg(pgid, 0) kept succeeding instead of returning ESRCH, and the runner could not prove the process group had disappeared. It refused rather than reporting a termination it had not proven — the fence working exactly as designed — so the defect was in this environment definition, which lacked a property every real machine has. This is NOT a relaxation: the runner's proof obligation is unchanged, no capability is granted, no host path is mounted, and the ancestry the gate attests is untouched. The same option is applied to all four controlled fences so there is ONE reviewed environment rather than four drifting ones; tests/test_trusted_ancestry_isolation.py checks every copy against this value.",
+  "packages": [
+    "ca-certificates",
+    "curl",
+    "git",
+    "sudo",
+    "tar",
+    "xz-utils"
+  ],
+  "controlled_jobs": [
+    "backend-realfs-root",
+    "backend-discovery-activation-root",
+    "backend-deployment-root",
+    "backend-management-root"
+  ],
+  "not_yet_controlled": [
+    "backend-management-real-adapters-root",
+    "backend-management-controller-real-adapters-root"
+  ],
+  "not_yet_controlled_reason": "Both drive real systemd units (systemctl daemon-reload / is-enabled / is-active) and a real container runtime. A GitHub `container:` job has no init system and no daemon, so it cannot host them. Moving them needs a job-constructed privileged environment (tier 2), which is an operator decision that has been escalated and is NOT implemented here. This list may only ever SHRINK.",
+  "notes": [
+    "WHY: the hosted runner's /etc ownership is nondeterministic PER VM, not per image. In run 30522895412 (main, e72f28f) job 90807107915 observed /etc uid=1001 gid=1001 mode 0o755 dev 2049 inode 42 and exited 78, while sibling jobs 90807108008 and 90807107993 of the SAME run, on the SAME ImageVersion 20260726.254.1, observed /etc uid=0. /etc shares dev 2049 and mount / with / (inode 2), so this is a real targeted non-recursive chown of exactly /etc, not a mount or overlay artefact. Pinning runs-on to a specific image therefore cannot fix it.",
+    "HOW IT IS SOUND: attest_trusted_ancestry.py observes the filesystem only through os.lstat on plain absolute paths, ancestors_of is pure string splitting, and the single /proc read is /proc/self/mountinfo (evidence only, it feeds no verdict). The gate is therefore namespace-relative: executed inside this container it observes THIS environment's ancestry. The script is unchanged by SECP-WSA.",
+    "The image is pinned by digest, not by tag, so the /etc every controlled fence walks comes from one content-addressed layer. A tag alone would reintroduce exactly the silent-rollover variable this work removes.",
+    "Third-party actions (actions/checkout, astral-sh/setup-uv, actions/upload-artifact) run INSIDE the controlled environment as uid 0, so even if one of them is the unidentified cause of the /etc chown, a chown to $(id -u) is a chown to 0. The fix does not depend on identifying the root cause.",
+    "The package set is deliberately minimal and installs no service. sudo is installed so every root command keeps its reviewed `sudo` form even though the container is already uid 0 — the elevation contract stays visible in the workflow and in tests/test_ci_workflow.py.",
+    "OPERATIONAL RISK, not yet mitigated: the base is pulled anonymously and shared GitHub runner egress is subject to registry rate limits. If that becomes a real failure mode the mitigation is to mirror this exact digest to a public registry the project controls, never to unpin it."
+  ]
+}
