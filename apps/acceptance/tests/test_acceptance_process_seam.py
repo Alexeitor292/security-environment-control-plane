@@ -91,12 +91,51 @@ def _called_names(tree: ast.Module) -> set[str]:
 # --------------------------------------------------------------------------- premise guard
 
 
-def test_the_module_sweep_is_not_vacuous():
-    modules = _modules()
-    assert len(modules) >= 6, f"expected the whole harness package, read {sorted(modules)}"
-    assert _SEAM_MODULE in modules
+def _git_tracked_harness_modules() -> set[str]:
+    """The harness ``.py`` files GIT knows about — an INDEPENDENT second reading.
+
+    Not another filesystem walk: git's index is maintained by a different tool, so a bug in
+    :func:`_modules` cannot shrink both readings together.
+    """
+    import subprocess
+
+    result = subprocess.run(  # noqa: S603,S607 - fixed argv, no user input, bounded
+        ["git", "ls-files", "--", "apps/acceptance/secp_acceptance"],
+        cwd=_package_root().parents[2],  # apps/acceptance/secp_acceptance -> repo root
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, "git ls-files failed; cannot take the independent reading"
+    return {
+        line.strip().rsplit("/", 1)[-1]
+        for line in result.stdout.splitlines()
+        if line.strip().endswith(".py") and "__pycache__" not in line
+    }
+
+
+def test_the_module_sweep_reads_every_harness_module():
+    """The sweep must cover the whole package EXACTLY, not merely clear a floor.
+
+    This replaced ``len(modules) >= 6`` against a package of 7. A floor set at "one less than
+    reality" lets exactly one module vanish from the sweep unnoticed — and the module most worth
+    covering here is ``tier.py``, which must never import pytest. Every assertion in this file is a
+    statement about "no module does X", so any module missing from the sweep is silently exempt
+    from all of them.
+    """
+    swept = set(_modules())
+    tracked = _git_tracked_harness_modules()
+    assert tracked, "the independent reading found nothing; it is not a usable control"
+    assert swept == tracked, (
+        f"the module sweep and the git-tracked inventory disagree.\n"
+        f"  tracked but not swept: {sorted(tracked - swept)}\n"
+        f"  swept but not tracked: {sorted(swept - tracked)}\n"
+        f"(a newly added harness module must be `git add`ed before this can see it)"
+    )
+    assert _SEAM_MODULE in swept
     # and the parser must actually see imports, or every assertion below is trivially satisfied
-    assert _imported_roots(modules[_SEAM_MODULE])
+    assert _imported_roots(_modules()[_SEAM_MODULE])
 
 
 # --------------------------------------------------------------------------- one seam

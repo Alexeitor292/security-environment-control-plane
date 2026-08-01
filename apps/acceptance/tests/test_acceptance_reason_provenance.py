@@ -71,11 +71,59 @@ def _files_declaring(code: str) -> list[str]:
 # --------------------------------------------------------------------------- premise guards
 
 
-def test_the_product_source_sweep_is_not_vacuous():
-    """If the sweep read no files, every provenance assertion below would fail — but if it read
-    only a few, they could pass for the wrong reason. Pin that all six roots contributed."""
+def _git_tracked_product_sources() -> set[str]:
+    """The product ``.py`` files GIT knows about — an INDEPENDENT second reading of the corpus.
+
+    Deliberately not another filesystem walk. Git's index is maintained by a different tool with
+    different semantics, so a bug in :func:`_product_sources` (a wrong root, a broken glob, an
+    over-eager exclusion) cannot shrink both readings in step.
+    """
+    import subprocess
+
+    result = subprocess.run(  # noqa: S603,S607 - fixed argv, no user input, bounded
+        ["git", "ls-files", "--", *_PRODUCT_ROOTS],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, "git ls-files failed; cannot take the independent reading"
+    return {
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip().endswith(".py") and "__pycache__" not in line
+    }
+
+
+def test_the_product_source_sweep_reads_the_whole_tracked_corpus():
+    """The sweep must equal the tracked corpus EXACTLY — not merely exceed a floor.
+
+    This replaced ``len(sources) > 50``. The real corpus is ~385 files, so that floor tolerated the
+    sweep losing roughly seven-eighths of the product tree while still reporting itself healthy.
+    That slack is only dangerous in one direction, but it is the direction that matters here:
+    :func:`test_no_harness_reason_code_is_emitted_by_the_product` SUCCEEDS on "pattern not found",
+    so a silently-shrunken corpus turns it into a vacuous pass.
+
+    The expectation is derived from ``git ls-files`` rather than from :func:`_product_sources`, so
+    a mutation that halves the sweep cannot halve the expectation with it. Deriving an expectation
+    by calling the very function under test satisfies "derived, not typed" in form while being
+    defeated in substance — credit to the queue-integration stream, which hit exactly that and
+    found it only by mutation.
+    """
+    swept = set(_product_sources())
+    tracked = _git_tracked_product_sources()
+    assert tracked, "the independent reading found nothing; it is not a usable control"
+    assert swept == tracked, (
+        f"the sweep and the git-tracked inventory disagree.\n"
+        f"  tracked but not swept: {sorted(tracked - swept)[:10]}\n"
+        f"  swept but not tracked: {sorted(swept - tracked)[:10]}\n"
+        f"(a newly added product module must be `git add`ed before this can see it)"
+    )
+
+
+def test_every_product_root_contributed_sources():
     sources = _product_sources()
-    assert len(sources) > 50, f"expected a substantial product source tree, read {len(sources)}"
     for relative in _PRODUCT_ROOTS:
         assert any(rel.startswith(relative) for rel in sources), f"no sources read from {relative}"
 
