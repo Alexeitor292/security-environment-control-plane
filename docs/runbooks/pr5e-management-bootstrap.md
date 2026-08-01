@@ -77,7 +77,7 @@ secpctl rollback  controller|worker                 [--write --confirm]
    written; absent a provisioned evidence authenticator (or with a bad one — malformed/invalid/wrong-key
    signature) it refuses (`evidence_authenticator_not_provisioned` / `evidence_attestation_untrusted`)
    and never returns `written`.
-4. **Verify**: `secpctl status controller --json` reloads evidence + identity + the installed-release
+4. **Verify**: `secpctl --json status controller` reloads evidence + identity + the installed-release
    record (reverifying its signature), reobserves the stack, and reports release binding, container
    topology, image identity, migrations, service health, unknown-privileged services, and drift.
 
@@ -95,7 +95,7 @@ secpctl rollback  controller|worker                 [--write --confirm]
    is present-disabled-stopped and not polling the operator queue, the package is trusted, and the
    observer reports `commissioning = prepared` AND `deployment = sealed_prepared`. Absent a reviewed
    worker adapter the write **refuses** (`worker_bootstrap_adapter_not_provisioned`), writing nothing.
-4. `secpctl status worker --json` — reloads evidence + identity + the reverified installed-release
+4. `secpctl --json status worker` — reloads evidence + identity + the reverified installed-release
    record and reobserves; worker success requires BOTH `commissioning = prepared` AND `deployment =
    sealed_prepared` (as composed by the observer from the real PR5C/PR5D checks) over the same coherent
    observation, plus a matching image and no operator-queue polling.

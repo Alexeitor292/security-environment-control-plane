@@ -61,13 +61,28 @@ _FENCE = re.compile(r"^```")
 _ANGLE = re.compile(r"<[^>]+>")
 _OPTIONAL = re.compile(r"\[([^\]]+)\]")
 _BARE_DIR = re.compile(r"(?<![\w/-])DIR(?![\w-])")
+#: A backtick-delimited span in PROSE that starts with ``secpctl``.
+_INLINE = re.compile(r"`(secpctl [^`]+)`")
+
+#: Command-FAMILY references, not invocations. Prose says "no --url argument on any `secpctl
+#: worker` command" — a noun phrase naming a group of commands, which has no argv to check.
+#:
+#: This list is the guard's one escape hatch, so it is constrained rather than trusted:
+#: :func:`test_every_family_reference_exemption_is_justified` requires each entry to still appear
+#: in the docs (a stale exemption fails) AND to fail parsing for an INCOMPLETE-PATH reason
+#: ("required"), never for "invalid choice" or "unrecognized arguments". A real defect produces
+#: the latter, so an exemption cannot be used to silence one.
+_FAMILY_REFERENCES = frozenset({"secpctl worker"})
 
 
 def _fenced_secpctl_lines(text: str) -> list[tuple[int, str]]:
-    """Lines inside fenced blocks that INVOKE secpctl.
+    """Every documented secpctl invocation: fenced block lines AND inline prose commands.
 
-    Restricted to fenced blocks deliberately: prose mentions a command inside backticks in a
-    sentence, where surrounding words are not argv and would produce noise rather than coverage.
+    Inline commands were originally excluded as noise. That was wrong, and the exclusion hid two
+    real defects: ``pr5e-management-bootstrap.md`` documented ``secpctl status controller --json``
+    and ``secpctl status worker --json`` in prose only, and ``--json`` is a ROOT-level flag that
+    must precede the subcommand — the trailing form exits 2 with "unrecognized arguments: --json".
+    Neither appeared inside a fence, so no fenced-only sweep could ever see them.
     """
     out: list[tuple[int, str]] = []
     inside = False
@@ -75,8 +90,16 @@ def _fenced_secpctl_lines(text: str) -> list[tuple[int, str]]:
         if _FENCE.match(raw.strip()):
             inside = not inside
             continue
-        if inside and raw.strip().startswith("secpctl "):
-            out.append((lineno, raw.strip()))
+        if inside:
+            if raw.strip().startswith("secpctl "):
+                out.append((lineno, raw.strip()))
+            continue
+        for match in _INLINE.finditer(raw):
+            # Trailing sentence punctuation belongs to the prose, not to the argv.
+            command = match.group(1).strip().rstrip(".,;")
+            if command in _FAMILY_REFERENCES:
+                continue
+            out.append((lineno, command))
     return out
 
 
@@ -185,6 +208,46 @@ def test_the_harness_can_reject() -> None:
     assert _parse("secpctl enrollment invite create --site X --write --confirm") is None
 
 
+def test_every_family_reference_exemption_is_justified() -> None:
+    """The one escape hatch must not be able to hide a real defect.
+
+    Each exemption has to (a) still appear in the docs, so a stale entry fails rather than lingers,
+    and (b) fail parsing because its command PATH is incomplete — argparse's "required" message —
+    never because a flag or subcommand is wrong. A genuinely broken documented command produces
+    "invalid choice" or "unrecognized arguments", so it can never be exempted by this list.
+    """
+    corpus = "\n".join(rb.read_text(encoding="utf-8") for rb in RUNBOOKS)
+    assert _FAMILY_REFERENCES, "the exemption list is empty; this test is checking nothing"
+    for fragment in _FAMILY_REFERENCES:
+        assert f"`{fragment}`" in corpus, (
+            f"exemption {fragment!r} no longer appears in any runbook — remove it"
+        )
+        error = _parse(fragment)
+        assert error is not None, f"{fragment!r} parses fine and needs no exemption"
+        assert "required" in error, (
+            f"{fragment!r} is exempted but fails for a NON-structural reason ({error}); that is a "
+            "real defect being silenced, not a command-family reference"
+        )
+
+
+def test_inline_prose_commands_are_swept_not_just_fenced_ones() -> None:
+    """Pin the reach that the two ``--json`` defects proved was missing.
+
+    Keyed on a known inline-only command, so a regression to fenced-only extraction fails here
+    rather than silently shrinking the corpus.
+    """
+    rows = _documented_commands()
+    inline = {
+        (name, lineno)
+        for name, lineno, _ in rows
+        if name == "pr5e-management-bootstrap.md" and lineno in {80, 98}
+    }
+    assert inline == {("pr5e-management-bootstrap.md", 80), ("pr5e-management-bootstrap.md", 98)}, (
+        "the inline-prose commands at pr5e-management-bootstrap.md:80/:98 are no longer swept; "
+        "those two lines are the ones a fenced-only extractor missed"
+    )
+
+
 def test_the_expander_produces_both_optional_and_alternative_forms() -> None:
     """The expansion is what keeps five invocations from being skipped; check it directly."""
     expanded = _expand("secpctl bootstrap controller|worker --bundle DIR   [--write --confirm]")
@@ -210,8 +273,15 @@ def test_the_guard_is_keyed_on_the_parser_not_on_a_command_list() -> None:
     ]
     assert actions, "the parser no longer exposes subcommands"
     top_level = set(actions[0].choices)
-    # Every documented command's FIRST token must be a subcommand the parser really declares.
-    documented = {shlex.split(cmd)[1] for _, _, cmd in _documented_commands()}
+    # Every documented command's subcommand must be one the parser really declares. Root-level
+    # flags may precede it (``secpctl --json status worker``), so skip leading options rather than
+    # assuming argv[1] — that assumption held only while the sweep missed the inline commands.
+    documented = set()
+    for _, _, cmd in _documented_commands():
+        for token in shlex.split(cmd)[1:]:
+            if not token.startswith("-"):
+                documented.add(token)
+                break
     assert documented <= top_level, (
         f"runbooks document unknown subcommands: {documented - top_level}"
     )
