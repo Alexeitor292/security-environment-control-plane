@@ -40,20 +40,54 @@
 [contract]
 version = "secp.packaging-contract/v1"
 
-# The two admissible classifications. Closed on purpose — a third value is a refusal, not a new
-# behaviour to be inferred.
+# THE THREE ADMISSIBLE CLASSIFICATIONS
+# ------------------------------------
+# Closed on purpose — a fourth value is a refusal, not a new behaviour to be inferred.
 #
-#   shipped         — installed into the wheel and COPYied into the production Python image. Must
-#                     appear in wheel `packages`, in `pythonpath`, and in `mypy_path`, and its root
-#                     must be COPYied into the image before the install step.
-#   importable-only — importable and type-checked for development and testing, and DELIBERATELY
-#                     absent from the wheel and the image. Must appear in `pythonpath` and
-#                     `mypy_path`, must NOT appear in wheel `packages`, and its root must NOT be
-#                     COPYied into the image.
+# There are TWO independent facts about a package, and the classification names a combination of
+# them rather than a single spectrum:
+#
+#   (A) is it a member of the DISTRIBUTION?      — i.e. does it appear in wheel `packages`
+#   (B) is it present in the production IMAGE?   — i.e. is its root COPYied, making it importable
+#
+#   shipped         — A yes, B yes. Must appear in wheel `packages`, in `pythonpath` and in
+#                     `mypy_path`, and its root must be COPYied into the image BEFORE the install.
+#   importable-only — A no, B no. Importable and type-checked for development and testing, and
+#                     genuinely absent from both the wheel and the image. Must appear in
+#                     `pythonpath` and `mypy_path`, must NOT appear in wheel `packages`, and its
+#                     root must NOT be COPYied into the image.
+#   image-resident  — A no, B YES. Not installed as a distribution, yet present in the image and
+#                     importable at runtime there, because it shares a root with a shipped package
+#                     and `infra/dev/Dockerfile.python` copies roots wholesale. Must appear in
+#                     `pythonpath` and `mypy_path`, must NOT appear in wheel `packages`, its root
+#                     MUST be COPYied, and its root MUST host a shipped package.
+#
+# WHY THE THIRD ONE EXISTS (it is not an escape hatch)
+# ----------------------------------------------------
+# The first version of this file had only `shipped` and `importable-only`, and it could not classify
+# `apps/api/socket_gate_tests` at all — the guard refused it under both, and both refusals were
+# correct. The model, not the manifest, was wrong: it assumed (A) and (B) always agree. Established
+# by building the artifacts rather than by reading intent off the names:
+#
+#   * `uv build --wheel` yields a wheel whose top-level entries are exactly the eleven declared
+#     packages. `socket_gate_tests` is not among them — not a distribution member. (A = no)
+#   * The Dockerfile does `COPY apps/api ./apps/api`, a whole-root copy, so its source is in the
+#     image. (B = yes)
+#   * The image installs `-e` (editable). Hatchling's editable install writes `_editable_impl_secp.pth`
+#     whose lines are package ROOTS — `/app/apps/api`, not `/app/apps/api/secp_api`. So `/app/apps/api`
+#     is on `sys.path` and `import socket_gate_tests` SUCCEEDS inside the production image.
+#
+# `image-resident` states exactly that, and it is constrained rather than permissive: it REQUIRES a
+# shared root with a shipped package. A package in a root of its own has nothing sweeping it into
+# the image, so `image-resident` there would be a lie used to dodge `importable-only`'s image rule —
+# the guard refuses it (`image-resident-in-own-root`). Neither non-shipped posture may back a
+# console script: those are installed by the distribution, and a script resolving only via the
+# editable `.pth` breaks the moment the project is installed non-editable.
 #
 # An `importable-only` package may not share a package ROOT with a shipped one. The Dockerfile
 # copies by root, so a root containing both would carry the importable-only package into the image
 # regardless of its declaration — the declaration would be true on paper and false in the artifact.
+# A package genuinely in that position is `image-resident`, which says so.
 
 # --------------------------------------------------------------------------- shipped
 
@@ -112,29 +146,22 @@ root = "contracts/reconciliation"
 distribution = "shipped"
 why = "The provider-neutral desired-vs-observed state, drift classification and planning contract (ADR-029). Landed on main in #76, which added it to the wheel `packages` list, so it must be declared shipped or the wheel carries an unshipped package."
 
-# DELIBERATELY NOT DECLARED: apps/api/socket_gate_tests
-#
-# The guard refuses this package under BOTH classifications, and that refusal is correct -- it is
-# the first real finding this contract produced on contact with main, not a gap in this file.
-#
-#   importable-only -> refused: forbidden to share a root with a shipped package (`secp_api`),
-#                      because the image COPYies roots wholesale and would ship it anyway. The
-#                      declaration would be true on paper and false in the artifact.
-#   shipped         -> refused: `shipped-not-in-wheel` -- it is absent from pyproject's `packages`,
-#                      so it is never installed as a distribution.
-#
-# Both refusals are accurate. The package (the PostgreSQL + real-socket read-after-write gate,
-# landed on main via #77) sits in a position where no honest declaration exists: its files reach the
-# production image via the root copy while the distribution does not carry it.
-#
-# The fix is structural, not a declaration: move it out of `apps/api` to its own root, at which
-# point `importable-only` becomes both available and true, and it is the first instance of that
-# class. That touches `.ci/pytest-suite.json`, the `backend-api-socket-gate` job's paths and
-# `pyproject.toml` -- shared, collision-prone files on main -- so it is sequenced separately rather
-# than folded into this contract's own landing.
-#
-# Until then this contract does not pass against the real repository, and that is the honest state:
-# suppressing it by weakening the rule is exactly the pressure this file's own preamble warns about.
+# --------------------------------------------------------------------------- image-resident
+
+[packages.socket_gate_tests]
+root = "apps/api"
+distribution = "image-resident"
+why = """The PostgreSQL + real-socket read-after-write gate (landed on main via #77). It is not in \
+the wheel, so it is not a distribution member; but `COPY apps/api ./apps/api` puts its source in \
+the production image and the editable install's root-level .pth makes `import socket_gate_tests` \
+succeed there. Both halves were established by building the wheel and by performing the editable \
+install and importing the module, not by reading its name. It is the first `image-resident` \
+instance and the finding that showed the two-value model was wrong about the artifact. NOTE FOR \
+WHOEVER TOUCHES THE IMAGE NEXT: this means a test harness that imports uvicorn and binds a real \
+listener is importable in the production image. Declaring it does not endorse it — it makes it \
+visible and un-silently-changeable. Giving it a root of its own would move it to \
+`importable-only`, but that edit lands in `.ci/pytest-suite.json`, the `backend-api-socket-gate` \
+job and `pyproject.toml`, so it is sequenced separately from this contract."""
 
 # --------------------------------------------------------------------------- importable-only
 #
@@ -143,6 +170,12 @@ why = "The provider-neutral desired-vs-observed state, drift classification and 
 # is exactly why a flat equality rule could not be adopted — it belongs in `pythonpath` and
 # `mypy_path` so it can drive and type-check against the real product, and it must never be
 # installed into the controller/worker runtime image.
+#
+# It qualifies for `importable-only` rather than `image-resident` because it gets a ROOT OF ITS OWN
+# (`apps/acceptance`), which no `COPY` line names — so its absence from the image is a fact about
+# the Dockerfile, not a claim about intent. That is precisely the distinction the third posture
+# exists to keep honest, and `test_the_incoming_acceptance_harness_is_importable_only_not_resident`
+# pins the acceptance harness's shape against both classes so it cannot land as the wrong one.
 #
 # It is deliberately NOT declared here yet, because it does not exist on this branch and the guard
 # refuses a declaration with no code on disk. It is added in the same commit that adds the package.

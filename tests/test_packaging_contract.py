@@ -39,6 +39,42 @@ directories on disk and requires each to be declared. Deleting a package from th
 from the manifest therefore leaves it discovered-but-undeclared, and this refuses. The only silent
 path out is to actually delete the code, which is a real removal.
 
+THE TWO AXES ARE INDEPENDENT, AND A TWO-VALUE MODEL DENIED IT
+-------------------------------------------------------------
+The first version of this contract had two classifications, ``shipped`` and ``importable-only``, and
+it could not classify ``apps/api/socket_gate_tests`` at all: it refused the package under BOTH,
+correctly, and each refusal was accurate. That is not a gap in the manifest — it is the model being
+wrong about the artifact. Two facts were being treated as one:
+
+* **membership of the distribution** — does the package appear in the wheel ``packages`` list?
+* **presence in the production image** — does its source reach the image, and can it be imported
+  there at runtime?
+
+``shipped`` asserts both, ``importable-only`` denies both, and the model had no way to say that they
+disagree. They do disagree, and the reason was established by building the artifacts rather than by
+reading the intent off the file names:
+
+1. ``uv build --wheel`` produces a wheel whose top-level entries are exactly the eleven declared
+   ``packages``. ``socket_gate_tests`` is absent. It is not a member of the distribution.
+2. ``infra/dev/Dockerfile.python`` does ``COPY apps/api ./apps/api`` — a whole-root copy. The
+   package's source is therefore in the production image.
+3. The image installs with ``uv pip install --system -e`` — **editable**. Hatchling's editable
+   install writes a ``.pth`` file, ``_editable_impl_secp.pth``, whose lines are the package
+   **ROOTS** (``/app/apps/api``, ``/app/apps/worker``, ...) and NOT the packages themselves. So
+   ``/app/apps/api`` is on ``sys.path`` at runtime, and ``import socket_gate_tests`` **succeeds
+   inside the production image**. Verified by performing that same editable install and importing
+   the module, not by reading the Dockerfile.
+
+So the honest description is neither "shipped" nor "deliberately absent": the package is *in the
+image and importable there, while not being installed as a distribution*. That is what
+``image-resident`` names. It is a third posture rather than an exemption, and it carries obligations
+the other two do not — in particular it MUST share a root with a shipped package. A package in its
+own root has no reason to be in the image, so ``image-resident`` there would be a lie used to dodge
+``importable-only``'s image rule; that case is refused (``image-resident-in-own-root``).
+
+``importable-only`` survives unchanged and is still the right class for ``apps/acceptance``, which
+gets its own root, is copied by nothing, and is in no wheel entry.
+
 WHY THE RULES ARE A PURE FUNCTION
 ---------------------------------
 :func:`contract_violations` takes the four inputs as plain data and returns the violations. The
@@ -52,6 +88,7 @@ tree to all of them.
 
 from __future__ import annotations
 
+import json
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,10 +102,17 @@ _DOCKERFILE = _REPO / "infra" / "dev" / "Dockerfile.python"
 
 CONTRACT_VERSION = "secp.packaging-contract/v1"
 
+#: Installed as a distribution AND present in the production image.
 SHIPPED = "shipped"
+#: In neither the distribution nor the image. Requires a root of its own, which is what makes the
+#: absence real rather than declared.
 IMPORTABLE_ONLY = "importable-only"
-#: Closed on purpose. A third value is a refusal, never a behaviour to be inferred.
-DISTRIBUTIONS = frozenset({SHIPPED, IMPORTABLE_ONLY})
+#: In the image and importable there, but NOT installed as a distribution — the state produced by a
+#: whole-root ``COPY`` plus an editable install whose ``.pth`` lines are roots. See the module
+#: docstring; this posture is only available to a package sharing a root with a shipped one.
+IMAGE_RESIDENT = "image-resident"
+#: Closed on purpose. A fourth value is a refusal, never a behaviour to be inferred.
+DISTRIBUTIONS = frozenset({SHIPPED, IMPORTABLE_ONLY, IMAGE_RESIDENT})
 
 _REQUIRED_KEYS = frozenset({"root", "distribution", "why"})
 _MIN_WHY = 40
@@ -107,6 +151,12 @@ def contract_violations(inputs: PackagingInputs) -> list[str]:
     first — a guard that stops at the first problem trains people to fix them one CI run at a time.
     """
     problems: list[str] = []
+
+    # Computed up front because the per-package rules below need them: `image-resident` is only
+    # available to a package sharing a root with a shipped one, and `importable-only` is forbidden
+    # from doing so.
+    shipped = {n for n, e in inputs.declared.items() if e.get("distribution") == SHIPPED}
+    shipped_roots = {inputs.declared[n].get("root") for n in shipped}
 
     # --- the anchor: disk and manifest must agree on WHICH packages exist ---
     for name in sorted(set(inputs.discovered) - set(inputs.declared)):
@@ -149,6 +199,34 @@ def contract_violations(inputs: PackagingInputs) -> list[str]:
                     f"shipped-not-in-image: {root} is not COPYied before the install, so "
                     f"{name} installs but fails to import at runtime"
                 )
+        elif distribution == IMAGE_RESIDENT:
+            # Declares: not installed as a distribution, but present and importable in the image.
+            # Every clause below is that sentence, enforced.
+            if root not in inputs.pythonpath:
+                problems.append(f"image-resident-not-on-pythonpath: {name} ({root})")
+            if root not in inputs.mypy_path:
+                problems.append(f"image-resident-not-on-mypy-path: {name} ({root})")
+            if wheel_entry in inputs.wheel_packages:
+                problems.append(
+                    f"image-resident-in-wheel: {name} is declared uninstalled but the wheel "
+                    f"installs it; declare it '{SHIPPED}' or take it out of the wheel"
+                )
+            if not _covers(root, inputs.copied_at_all):
+                problems.append(
+                    f"image-resident-absent-from-image: {root} is not COPYied into the production "
+                    f"image, so {name} is not in the image its declaration describes"
+                )
+            # THE RULE THAT KEEPS THIS POSTURE HONEST. `image-resident` describes a package swept
+            # into the image by a shipped sibling's whole-root COPY. In a root of its own there is
+            # no sibling and no reason to copy it, so the posture would be a way to declare "in the
+            # image, uninstalled" for a package that should simply be `importable-only` — dodging
+            # that class's image rule while sounding more precise than it.
+            if root not in shipped_roots:
+                problems.append(
+                    f"image-resident-in-own-root: {name} declares '{IMAGE_RESIDENT}' but {root!r} "
+                    f"hosts no shipped package, so nothing sweeps it into the image; it is "
+                    f"'{IMPORTABLE_ONLY}'"
+                )
         else:  # importable-only
             if root not in inputs.pythonpath:
                 problems.append(f"importable-only-not-on-pythonpath: {name} ({root})")
@@ -162,7 +240,6 @@ def contract_violations(inputs: PackagingInputs) -> list[str]:
                 )
 
     # --- the wheel may not carry something unclassified or classified otherwise ---
-    shipped = {n for n, e in inputs.declared.items() if e.get("distribution") == SHIPPED}
     for entry_path in inputs.wheel_packages:
         root, name = entry_path.rsplit("/", 1)
         if name not in shipped:
@@ -172,8 +249,8 @@ def contract_violations(inputs: PackagingInputs) -> list[str]:
 
     # --- an importable-only package may not share a ROOT with a shipped one ---
     # The image COPYies by root, so a shared root carries the importable-only package in regardless
-    # of its declaration: true on paper, false in the artifact.
-    shipped_roots = {inputs.declared[n].get("root") for n in shipped}
+    # of its declaration: true on paper, false in the artifact. A package genuinely in that position
+    # is `image-resident`, which says so; `importable-only` there is simply false.
     for name, entry in sorted(inputs.declared.items()):
         if entry.get("distribution") == IMPORTABLE_ONLY and entry.get("root") in shipped_roots:
             problems.append(
@@ -182,13 +259,20 @@ def contract_violations(inputs: PackagingInputs) -> list[str]:
             )
 
     # --- an installed entry point must resolve inside the wheel ---
-    importable_only = {
-        n for n, e in inputs.declared.items() if e.get("distribution") == IMPORTABLE_ONLY
+    # A console script is installed by the DISTRIBUTION, so its target must be a distribution
+    # member. `image-resident` is deliberately included: such a package resolves in the image only
+    # by accident of the editable install's root-level `.pth`, so a script pointing at it works
+    # today and breaks the moment the project is installed non-editable — the wheel does not carry
+    # the module at all. Both non-shipped postures are therefore invalid script targets.
+    uninstalled = {
+        n
+        for n, e in inputs.declared.items()
+        if e.get("distribution") in (IMPORTABLE_ONLY, IMAGE_RESIDENT)
     }
     for script, target in sorted(inputs.scripts.items()):
         top_level = target.split(":", 1)[0].split(".", 1)[0]
-        if top_level in importable_only:
-            problems.append(f"script-targets-unshipped: {script} -> {top_level}")
+        if top_level in uninstalled:
+            problems.append(f"script-targets-uninstalled: {script} -> {top_level}")
 
     return sorted(problems)
 
@@ -196,12 +280,18 @@ def contract_violations(inputs: PackagingInputs) -> list[str]:
 # --------------------------------------------------------------------------- readers
 
 
-def _pyproject() -> dict:
-    return tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+def _pyproject(repo: Path | None = None) -> dict:
+    return tomllib.loads(((repo or _REPO) / _PYPROJECT.name).read_text(encoding="utf-8"))
 
 
-def _manifest() -> dict:
-    return tomllib.loads(_MANIFEST.read_text(encoding="utf-8"))
+def _manifest(repo: Path | None = None) -> dict:
+    return tomllib.loads(((repo or _REPO) / _MANIFEST.name).read_text(encoding="utf-8"))
+
+
+def _dockerfile_text(repo: Path | None = None) -> str:
+    if repo is None:
+        return _DOCKERFILE.read_text(encoding="utf-8")
+    return (repo / "infra" / "dev" / _DOCKERFILE.name).read_text(encoding="utf-8")
 
 
 class DuplicatePackageName(AssertionError):
@@ -261,15 +351,21 @@ def _copy_sources(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def real_inputs() -> PackagingInputs:
-    pyproject = _pyproject()
-    text = _DOCKERFILE.read_text(encoding="utf-8")
+def real_inputs(repo: Path | None = None) -> PackagingInputs:
+    """Read all four inputs from a repository tree — the real one by default.
+
+    Parameterised by ``repo`` so the mutation tests can apply an edit to real files on disk and
+    have THIS function re-read it, rather than hand-building a dict that only resembles what the
+    reader would have produced. A mutation the readers cannot see is not a mutation.
+    """
+    pyproject = _pyproject(repo)
+    text = _dockerfile_text(repo)
     install_index = text.find("uv pip install")
     assert install_index != -1, "the Dockerfile must install the project"
     sources = _copy_sources(text)
     return PackagingInputs(
-        discovered=discover_packages(),
-        declared=_manifest().get("packages", {}),
+        discovered=discover_packages(repo),
+        declared=_manifest(repo).get("packages", {}),
         wheel_packages=tuple(pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]),
         pythonpath=tuple(pyproject["tool"]["pytest"]["ini_options"]["pythonpath"]),
         mypy_path=tuple(pyproject["tool"]["mypy"]["mypy_path"]),
@@ -337,6 +433,28 @@ def test_discovery_covers_every_wheel_package():
         root, name = entry.rsplit("/", 1)
         assert name in found, f"wheel declares {name} but discovery cannot see it (root {root})"
         assert found[name] == root
+
+
+def test_every_real_input_was_actually_read():
+    """CONTROL, and it must run BEFORE the ``== []`` assertion below.
+
+    ``contract_violations`` sweeps four inputs and returns the empty list when it finds nothing
+    wrong. It returns the same empty list when it finds nothing AT ALL — a reader that silently
+    produced an empty ``wheel_packages`` or an empty ``copied_at_all`` would make the next test
+    green while checking nothing. So every field is asserted non-empty here first, and the two
+    Dockerfile-derived fields are checked separately because they come from different slices of the
+    same parse and a broken ``install_index`` would empty only one of them.
+    """
+    inputs = real_inputs()
+    assert len(inputs.discovered) >= 10, sorted(inputs.discovered)
+    assert len(inputs.declared) >= 10, sorted(inputs.declared)
+    assert len(inputs.wheel_packages) >= 10, inputs.wheel_packages
+    assert inputs.pythonpath and inputs.mypy_path
+    assert inputs.copied_before_install, "no COPY was seen to precede the install"
+    assert inputs.copied_at_all >= inputs.copied_before_install
+    assert inputs.scripts, "pyproject declares console scripts; the reader saw none"
+    # and the sweep reaches the specific package this contract's hardest case is about
+    assert inputs.discovered.get("socket_gate_tests") == "apps/api"
 
 
 def test_the_real_repository_satisfies_the_contract():
@@ -621,7 +739,7 @@ def test_a_console_script_may_not_target_an_importable_only_package():
     violations = contract_violations(
         _acceptance_like(scripts={"secp-acc": "secp_acceptance.cli:main"})
     )
-    assert "script-targets-unshipped: secp-acc -> secp_acceptance" in violations
+    assert "script-targets-uninstalled: secp-acc -> secp_acceptance" in violations
 
 
 def test_a_console_script_targeting_a_shipped_package_is_fine():
@@ -646,3 +764,536 @@ def test_violations_are_reported_together_not_one_per_run():
         _case(wheel_packages=(), pythonpath=(), mypy_path=(), copied_before_install=frozenset())
     )
     assert len(violations) == 4
+
+
+# --- the image-resident posture, over constructed inputs ----------------------------------
+#
+# Modelled on the real `apps/api` shape: a shipped package and a harness sharing its root, where the
+# root's wholesale COPY puts both in the image while only one is in the wheel.
+
+
+def _resident_like(**overrides) -> PackagingInputs:
+    base = {
+        "discovered": {"secp_thing": "apps/thing", "thing_gate_tests": "apps/thing"},
+        "declared": {
+            "secp_thing": {
+                "root": "apps/thing",
+                "distribution": SHIPPED,
+                "why": "x" * _MIN_WHY,
+            },
+            "thing_gate_tests": {
+                "root": "apps/thing",
+                "distribution": IMAGE_RESIDENT,
+                "why": "z" * _MIN_WHY,
+            },
+        },
+        "wheel_packages": ("apps/thing/secp_thing",),
+        "pythonpath": ("apps/thing",),
+        "mypy_path": ("apps/thing",),
+        "copied_before_install": frozenset({"apps/thing"}),
+        "copied_at_all": frozenset({"apps/thing"}),
+        "scripts": {},
+    }
+    base.update(overrides)
+    return PackagingInputs(**base)  # type: ignore[arg-type]
+
+
+def test_the_image_resident_baseline_is_satisfied():
+    """CONTROL for the perturbations below, and the positive statement of the posture: a harness
+    sharing a shipped root, absent from the wheel, present in the image, is admissible AS DECLARED.
+    """
+    assert contract_violations(_resident_like()) == []
+
+
+def test_an_image_resident_package_that_reaches_the_wheel_is_refused():
+    violations = contract_violations(
+        _resident_like(wheel_packages=("apps/thing/secp_thing", "apps/thing/thing_gate_tests"))
+    )
+    assert any(v.startswith("image-resident-in-wheel: thing_gate_tests") for v in violations)
+    assert "wheel-carries-unshipped: thing_gate_tests is in the wheel but not 'shipped'" in (
+        violations
+    )
+
+
+def test_an_image_resident_package_whose_root_stops_being_copied_is_refused():
+    """The posture asserts presence in the image. If the COPY goes, the declaration is stale and
+    must refuse — otherwise `image-resident` would be a label that survives its own subject."""
+    violations = contract_violations(
+        _resident_like(copied_at_all=frozenset(), copied_before_install=frozenset())
+    )
+    assert any(v.startswith("image-resident-absent-from-image: apps/thing") for v in violations), (
+        violations
+    )
+
+
+def test_an_image_resident_package_must_still_be_importable_and_type_checked():
+    violations = contract_violations(_resident_like(pythonpath=()))
+    assert "image-resident-not-on-pythonpath: thing_gate_tests (apps/thing)" in violations
+    violations = contract_violations(_resident_like(mypy_path=()))
+    assert "image-resident-not-on-mypy-path: thing_gate_tests (apps/thing)" in violations
+
+
+def test_image_resident_cannot_be_used_to_smuggle_a_package_into_its_own_root():
+    """THE anti-abuse rule, and the reason the third posture is not an escape hatch.
+
+    Without it, anyone refused by `importable-only-in-image` could relabel the package
+    `image-resident`, add a COPY for its own root, and ship a harness into production with a
+    declaration that sounds MORE precise than the one it dodged. The posture describes a package
+    swept in by a shipped sibling; with no sibling there is nothing doing the sweeping.
+    """
+    violations = contract_violations(
+        _resident_like(
+            discovered={"secp_thing": "apps/thing", "thing_gate_tests": "apps/gate"},
+            declared=dict(_resident_like().declared)
+            | {
+                "thing_gate_tests": {
+                    "root": "apps/gate",
+                    "distribution": IMAGE_RESIDENT,
+                    "why": "z" * _MIN_WHY,
+                }
+            },
+            pythonpath=("apps/thing", "apps/gate"),
+            mypy_path=("apps/thing", "apps/gate"),
+            copied_at_all=frozenset({"apps/thing", "apps/gate"}),
+        )
+    )
+    assert any(v.startswith("image-resident-in-own-root: thing_gate_tests") for v in violations), (
+        violations
+    )
+
+
+def test_a_console_script_may_not_target_an_image_resident_package():
+    """It would resolve today only through the editable install's root-level `.pth`, and break the
+    moment the project is installed non-editable — the wheel does not carry the module at all."""
+    violations = contract_violations(
+        _resident_like(scripts={"secp-gate": "thing_gate_tests.server:main"})
+    )
+    assert "script-targets-uninstalled: secp-gate -> thing_gate_tests" in violations
+
+
+def test_the_incoming_acceptance_harness_is_importable_only_not_resident():
+    """``apps/acceptance`` must land as `importable-only`, and the model must make that the only
+    admissible reading — otherwise the third posture added here would quietly become the default
+    for anything test-shaped, which is exactly the naming-convention reasoning this contract
+    refuses. Pinned before the package exists so it cannot land as the wrong class.
+    """
+    # as it will be: its own root, in no wheel entry, named by no COPY
+    assert contract_violations(_acceptance_like()) == []
+
+    # the same package declared `image-resident` instead is refused — nothing sweeps it in
+    declared = dict(_acceptance_like().declared)
+    declared["secp_acceptance"] = dict(declared["secp_acceptance"]) | {
+        "distribution": IMAGE_RESIDENT
+    }
+    violations = contract_violations(_acceptance_like(declared=declared))
+    assert any(v.startswith("image-resident-in-own-root: secp_acceptance") for v in violations), (
+        violations
+    )
+
+    # and if the Dockerfile ever grew a COPY for its root, `importable-only` becomes false and
+    # the guard says so rather than letting the declaration outlive its subject
+    violations = contract_violations(
+        _acceptance_like(copied_at_all=frozenset({"apps/thing", "apps/acceptance"}))
+    )
+    assert "importable-only-in-image: apps/acceptance is COPYied into the production image" in (
+        violations
+    )
+
+
+# --------------------------------------------------------------------------- mutation-backed
+#
+# Everything above this line runs the rules over data. That proves the rules, and proves nothing
+# about whether the READERS would ever hand them the data a real edit produces. These tests apply
+# the edit to real files on disk, have `real_inputs` re-read it, and assert the refusal — so a
+# mutation the readers cannot see fails here rather than passing quietly.
+
+_CONTRACT_FILES = ("pyproject.toml", "packaging-contract.toml", "infra/dev/Dockerfile.python")
+
+
+class MutationDidNotLand(AssertionError):
+    """A substitution left the file unchanged, so any refusal observed after it is unattributed."""
+
+
+def _materialise(tmp_path: Path) -> Path:
+    """A writable repository whose contract inputs are the REAL ones.
+
+    The three input FILES are copied verbatim. The package tree is rebuilt as a skeleton — one
+    empty ``__init__.py`` per discovered package — because that is the entirety of what discovery
+    reads, and copying the whole monorepo once per test makes these slow enough to get deleted.
+    :func:`test_the_materialised_copy_reproduces_the_real_contract` proves the skeleton is faithful
+    where it counts, and it runs before every test that depends on it.
+    """
+    repo = tmp_path / "repo"
+    for rel in _CONTRACT_FILES:
+        destination = repo / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text((_REPO / rel).read_text(encoding="utf-8"), encoding="utf-8")
+    for name, root in discover_packages().items():
+        package = repo / root / name
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    return repo
+
+
+def _mutate(repo: Path, rel: str, old: str, new: str) -> str:
+    """Apply one substitution to a real file, prove it LANDED, and return what disk now holds.
+
+    The clauses, in order, because a mutation test that skips any of them can report a refusal it
+    did not cause:
+
+    1. ``old`` must occur EXACTLY once — zero occurrences mutate nothing and the test then measures
+       the unmutated tree; several occurrences mutate more than the test claims to;
+    2. the substitution must change the text;
+    3. the result is written and then RE-READ FROM DISK, and the re-read must equal what was
+       written — the re-read copy is what every later reader parses;
+    4. the re-read must differ from the original, so the change is proven present in the bytes the
+       guard will see rather than only in the string this function built;
+    5. the file must still PARSE. A TOML file broken by the edit fails everything downstream, and
+       that red would be misattributed to the guard instead of to the edit.
+
+    The sixth clause — WHICH violation appeared — is the one clause this helper cannot perform for
+    its caller, so every caller below asserts it explicitly.
+    """
+    target = repo / rel
+    original = target.read_text(encoding="utf-8")
+
+    occurrences = original.count(old)
+    if occurrences != 1:
+        raise MutationDidNotLand(f"{rel}: target text occurs {occurrences} times, expected 1")
+    mutated = original.replace(old, new)
+    if mutated == original:
+        raise MutationDidNotLand(f"{rel}: the substitution changed nothing")
+
+    target.write_text(mutated, encoding="utf-8")
+    on_disk = target.read_text(encoding="utf-8")
+    if on_disk != mutated:
+        raise MutationDidNotLand(f"{rel}: re-read from disk differs from what was written")
+    if on_disk == original:
+        raise MutationDidNotLand(f"{rel}: re-read from disk is still the original")
+
+    if rel.endswith(".toml"):
+        tomllib.loads(on_disk)  # raises if the edit broke the file; red here is the EDIT's fault
+    else:
+        assert "uv pip install" in on_disk, f"{rel}: the edit removed the install step"
+        assert _copy_sources(on_disk), f"{rel}: the edit removed every COPY"
+    return on_disk
+
+
+def _manifest_block(name: str) -> str:
+    """The exact source text of one ``[packages.<name>]`` table, for removal as a unit.
+
+    Removing a declaration one line at a time would leave the file unparseable, and the resulting
+    red would be attributed to the guard rather than to the edit.
+    """
+    text = _MANIFEST.read_text(encoding="utf-8")
+    start = text.index(f"[packages.{name}]")
+    return text[start : text.index("\n\n", start) + 1]
+
+
+def _redeclared(name: str, distribution: str) -> tuple[str, str]:
+    """``(old_block, new_block)`` for re-classifying a real package, preserving root and why."""
+    block = _manifest_block(name)
+    entry = tomllib.loads(block)["packages"][name]
+    replacement = (
+        f"[packages.{name}]\n"
+        f"root = {json.dumps(entry['root'])}\n"
+        f"distribution = {json.dumps(distribution)}\n"
+        f"why = {json.dumps(entry['why'])}\n"
+    )
+    return block, replacement
+
+
+# --- controls for the harness itself, before anything depends on it -----------------------
+
+
+def test_the_materialised_copy_reproduces_the_real_contract(tmp_path: Path):
+    """CONTROL, and it must run BEFORE every mutation test below.
+
+    Each of those asserts "clean before the mutation, refused after". If the copy were not clean to
+    begin with — a file not copied, a skeleton package missing — the "after" refusal would prove
+    nothing about the mutation. And if the skeleton were EMPTY, the discovery sweep would visit
+    nothing and the contract would be vacuously satisfied, which reads identically to correct.
+    """
+    repo = _materialise(tmp_path)
+    for rel in _CONTRACT_FILES:
+        assert (repo / rel).read_text(encoding="utf-8") == (_REPO / rel).read_text(encoding="utf-8")
+    assert discover_packages(repo) == discover_packages()  # the sweep visited the same packages
+    assert len(discover_packages(repo)) >= 10, "the skeleton is too small to prove anything"
+    assert discover_packages(repo)["socket_gate_tests"] == "apps/api"
+    assert contract_violations(real_inputs(repo)) == []
+
+
+def test_the_mutation_helper_refuses_a_substitution_that_did_not_land(tmp_path: Path):
+    """Clause 1, self-applied. Without this the helper could silently no-op and every mutation test
+    below would pass by measuring an unmutated tree."""
+    repo = _materialise(tmp_path)
+    with pytest.raises(MutationDidNotLand) as exc:
+        _mutate(repo, "pyproject.toml", "text that is definitely not in the file", "x")
+    assert "occurs 0 times" in str(exc.value)
+    # the tree is untouched, so a failed mutation cannot leave a half-edited repo behind
+    assert contract_violations(real_inputs(repo)) == []
+
+
+def test_the_mutation_helper_refuses_an_ambiguous_target(tmp_path: Path):
+    """Clause 1's other half: ``distribution = "shipped"`` appears many times, and a helper that
+    replaced them all would produce a repo no reviewer intended and a refusal no test described."""
+    repo = _materialise(tmp_path)
+    with pytest.raises(MutationDidNotLand) as exc:
+        _mutate(repo, "packaging-contract.toml", 'distribution = "shipped"', "x")
+    assert "occurs 11 times" in str(exc.value)
+
+
+def test_the_mutation_helper_refuses_an_edit_that_breaks_the_file(tmp_path: Path):
+    """Clause 5. An unparseable TOML fails every downstream test, and that red would be read as the
+    guard catching the mutation when it is really the edit being malformed."""
+    repo = _materialise(tmp_path)
+    with pytest.raises(tomllib.TOMLDecodeError):
+        _mutate(repo, "pyproject.toml", "[tool.uv]", "[tool.uv")
+
+
+# --- M1: a real shipped package silently dropped from the wheel AND the image -------------
+
+
+def test_m1_a_shipped_package_dropped_from_wheel_manifest_and_image_is_refused(tmp_path: Path):
+    """THE deliverable, over real files. ``secp_management`` is removed from all three places at
+    once — the coordinated edit that used to leave every test green — while its code stays on disk.
+    The filesystem anchor is the only thing left that knows it exists, and it refuses.
+    """
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    pyproject_after = _mutate(
+        repo, "pyproject.toml", '    "apps/management/secp_management",\n', ""
+    )
+    _mutate(repo, "packaging-contract.toml", _manifest_block("secp_management"), "")
+    dockerfile_after = _mutate(
+        repo, "infra/dev/Dockerfile.python", "COPY apps/management ./apps/management\n", ""
+    )
+
+    # intent achieved, measured on the RE-READ text and again through the readers
+    assert "apps/management/secp_management" not in pyproject_after
+    assert "COPY apps/management" not in dockerfile_after
+    inputs = real_inputs(repo)
+    assert "apps/management/secp_management" not in inputs.wheel_packages
+    assert "secp_management" not in inputs.declared
+    assert not _covers("apps/management", inputs.copied_at_all)
+    assert inputs.discovered["secp_management"] == "apps/management", "the code is still on disk"
+
+    assert contract_violations(inputs) == [
+        "undeclared: secp_management exists on disk (apps/management) but is not classified"
+    ]
+
+
+# --- M2: an undeclared package-like directory ---------------------------------------------
+
+
+def test_m2_an_undeclared_package_like_directory_is_refused(tmp_path: Path):
+    """The class of finding that produced ``socket_gate_tests`` in the first place. Nothing but the
+    filesystem sweep can see a package nobody wrote down."""
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    stowaway = repo / "apps" / "api" / "stowaway"
+    stowaway.mkdir(parents=True)
+    (stowaway / "__init__.py").write_text("", encoding="utf-8")
+    assert (stowaway / "__init__.py").is_file(), "the mutation must exist on disk"
+
+    inputs = real_inputs(repo)
+    assert inputs.discovered.get("stowaway") == "apps/api", "the sweep must have SEEN it"
+    assert contract_violations(inputs) == [
+        "undeclared: stowaway exists on disk (apps/api) but is not classified"
+    ]
+
+
+def test_m2b_a_directory_without_an_init_is_correctly_not_a_package(tmp_path: Path):
+    """Attribution for M2: the refusal is caused by the directory being an importable PACKAGE, not
+    by any directory appearing. Without this, M2 would be consistent with a sweep that refused
+    every new folder — which would refuse ``apps/api/migrations`` and be deleted within the week."""
+    repo = _materialise(tmp_path)
+    (repo / "apps" / "api" / "not_a_package").mkdir(parents=True)
+
+    inputs = real_inputs(repo)
+    assert "not_a_package" not in inputs.discovered
+    assert contract_violations(inputs) == []
+
+
+# --- M3: the harness is admitted only under its declared posture --------------------------
+
+
+def test_m3_the_socket_gate_harness_is_admitted_as_image_resident(tmp_path: Path):
+    """The positive half. The two refusals that make this the ONLY admissible posture are the two
+    tests that follow."""
+    repo = _materialise(tmp_path)
+    assert real_inputs(repo).declared["socket_gate_tests"]["distribution"] == IMAGE_RESIDENT
+    assert contract_violations(real_inputs(repo)) == []
+
+
+def test_m3a_the_harness_declared_shipped_is_refused(tmp_path: Path):
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    after = _mutate(repo, "packaging-contract.toml", *_redeclared("socket_gate_tests", SHIPPED))
+    assert 'distribution = "shipped"' in after.split("[packages.socket_gate_tests]")[1]
+    inputs = real_inputs(repo)
+    assert inputs.declared["socket_gate_tests"]["distribution"] == SHIPPED  # intent achieved
+
+    assert contract_violations(inputs) == [
+        "shipped-not-in-wheel: socket_gate_tests would not be installed"
+    ]
+
+
+def test_m3b_the_harness_declared_importable_only_is_refused(tmp_path: Path):
+    """Both refusals, and both are about the ARTIFACT: the root is copied, and it is copied because
+    a shipped package lives in it. This is the pair that has no honest resolution under two values.
+    """
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    _mutate(repo, "packaging-contract.toml", *_redeclared("socket_gate_tests", IMPORTABLE_ONLY))
+    inputs = real_inputs(repo)
+    assert inputs.declared["socket_gate_tests"]["distribution"] == IMPORTABLE_ONLY
+
+    assert contract_violations(inputs) == [
+        "importable-only-in-image: apps/api is COPYied into the production image",
+        "shared-root: socket_gate_tests is 'importable-only' but shares root 'apps/api' with a "
+        "shipped package, so the image ships it anyway",
+    ]
+
+
+def test_m3c_an_unknown_posture_on_a_real_package_still_refuses(tmp_path: Path):
+    """The value set is closed over real files too — adding a third posture did not turn
+    ``distribution`` into free text."""
+    repo = _materialise(tmp_path)
+    _mutate(repo, "packaging-contract.toml", *_redeclared("socket_gate_tests", "test-only"))
+
+    assert contract_violations(real_inputs(repo)) == [
+        "unknown-distribution: socket_gate_tests declares 'test-only'"
+    ]
+
+
+# --- M4: the artifact posture changes without the contract changing -----------------------
+
+
+def test_m4a_installing_the_harness_without_updating_the_contract_is_refused(tmp_path: Path):
+    """Production-INSTALLED: the package is added to the wheel while the manifest still says it is
+    not installed. The manifest is untouched, which is the point — the artifact moved under it."""
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    before = real_inputs(repo).declared["socket_gate_tests"]
+    _mutate(
+        repo,
+        "pyproject.toml",
+        '    "apps/api/secp_api",\n',
+        '    "apps/api/secp_api",\n    "apps/api/socket_gate_tests",\n',
+    )
+    inputs = real_inputs(repo)
+    assert "apps/api/socket_gate_tests" in inputs.wheel_packages  # intent achieved
+    assert inputs.declared["socket_gate_tests"] == before, "the manifest must be untouched"
+
+    assert contract_violations(inputs) == [
+        "image-resident-in-wheel: socket_gate_tests is declared uninstalled but the wheel "
+        "installs it; declare it 'shipped' or take it out of the wheel",
+        "wheel-carries-unshipped: socket_gate_tests is in the wheel but not 'shipped'",
+    ]
+
+
+def test_m4b_removing_the_harness_from_the_image_without_updating_the_contract_is_refused(
+    tmp_path: Path,
+):
+    """The other direction: the declaration asserts presence in the image, so dropping the COPY
+    makes it false. Both packages in the root notice, each in its own terms — which is the evidence
+    that the two postures are enforced separately rather than by one shared approximation."""
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    after = _mutate(repo, "infra/dev/Dockerfile.python", "COPY apps/api ./apps/api\n", "")
+    assert "COPY apps/api" not in after  # intent achieved, on the re-read text
+    inputs = real_inputs(repo)
+    assert not _covers("apps/api", inputs.copied_at_all)
+
+    assert contract_violations(inputs) == [
+        "image-resident-absent-from-image: apps/api is not COPYied into the production image, so "
+        "socket_gate_tests is not in the image its declaration describes",
+        "shipped-not-in-image: apps/api is not COPYied before the install, so secp_api installs "
+        "but fails to import at runtime",
+    ]
+
+
+def test_m4c_a_console_script_pointed_at_the_harness_is_refused(tmp_path: Path):
+    """Production-IMPORTABLE in the strongest sense — an installed entry point. It would resolve in
+    today's image only through the editable ``.pth``, and vanish the moment the project is
+    installed non-editable, because the wheel does not carry the module."""
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    _mutate(
+        repo,
+        "pyproject.toml",
+        'secpctl = "secp_management.cli:main"\n',
+        'secpctl = "secp_management.cli:main"\n'
+        'secp-socket-gate = "socket_gate_tests.live_api_server:main"\n',
+    )
+    inputs = real_inputs(repo)
+    assert "secp-socket-gate" in inputs.scripts  # intent achieved
+
+    assert contract_violations(inputs) == [
+        "script-targets-uninstalled: secp-socket-gate -> socket_gate_tests"
+    ]
+
+
+# --- M5 / M6: the coordinated edit, and where the refusal comes from -----------------------
+
+
+def test_m5_a_coordinated_manifest_and_pyproject_edit_cannot_hide_a_package(tmp_path: Path):
+    """The two-place version of the original hole: drop the package from the wheel list and from
+    the manifest in the same breath, leaving the Dockerfile alone so nothing else notices. Under
+    the old guards this was silent. The filesystem still holds the code, so it refuses."""
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    _mutate(repo, "pyproject.toml", '    "contracts/reconciliation/secp_reconciliation",\n', "")
+    _mutate(repo, "packaging-contract.toml", _manifest_block("secp_reconciliation"), "")
+
+    inputs = real_inputs(repo)
+    assert "contracts/reconciliation/secp_reconciliation" not in inputs.wheel_packages
+    assert "secp_reconciliation" not in inputs.declared
+    assert inputs.discovered["secp_reconciliation"] == "contracts/reconciliation"
+
+    assert contract_violations(inputs) == [
+        "undeclared: secp_reconciliation exists on disk (contracts/reconciliation) but is not "
+        "classified"
+    ]
+
+
+def test_m6_the_refusal_is_attributable_to_the_clause_the_test_names(tmp_path: Path):
+    """Attribution, staged. Two edits are applied one at a time to the same repository, and the
+    violation must CHANGE between them.
+
+    A test that only observes "clean, then refused" is consistent with a guard that refuses any
+    disturbance at all. Here stage 1 must produce the wheel clause and stage 2 the anchor clause —
+    so the guard is demonstrably reading the specific thing each stage changed, and stage 2's
+    refusal is not stage 1's leaking forward.
+    """
+    repo = _materialise(tmp_path)
+    assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
+
+    block = _manifest_block("secp_reconciliation")
+
+    # Stage 1 — drop it from the wheel only. It is still DECLARED shipped, so the shipped clause is
+    # the one that must speak.
+    after = _mutate(
+        repo, "pyproject.toml", '    "contracts/reconciliation/secp_reconciliation",\n', ""
+    )
+    assert "contracts/reconciliation/secp_reconciliation" not in after
+    stage1 = contract_violations(real_inputs(repo))
+    assert stage1 == ["shipped-not-in-wheel: secp_reconciliation would not be installed"]
+
+    # Stage 2 — now also drop the declaration. The refusal must MOVE to the anchor clause.
+    _mutate(repo, "packaging-contract.toml", block, "")
+    stage2 = contract_violations(real_inputs(repo))
+    assert stage2 == [
+        "undeclared: secp_reconciliation exists on disk (contracts/reconciliation) but is not "
+        "classified"
+    ]
+    assert stage1 != stage2, "the two clauses must be distinguishable, not one generic refusal"
