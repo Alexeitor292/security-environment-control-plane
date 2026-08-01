@@ -97,21 +97,30 @@ structurally incapable of reaching a provider rather than configured not to:
   of which this milestone adds one, the contract's `topology_adapter` seam; the other two are the
   pre-existing simulator plugin's, untouched here. A pair exempts one edge, not a whole file or a
   whole import name, and an exception that no longer matches a real import fails as stale;
-- no code object in either package names an escape (`open`, `getattr`, `__import__`, `socket`,
-  `connect`, `Popen`, …), checked on compiled code objects rather than on source text, which
-  closes the dynamic-dispatch gap a static import scan leaves open. The scan compiles each package
-  source file and recurses it, so it is complete over the file by construction and covers a
-  callable held in a container as well as one bound as a function; it also walks the loaded
-  modules, so what the interpreter actually holds is checked too.
+- no code object in either package names any capability on an enumerated list (`open`, `getattr`,
+  `__import__`, `socket`, `connect`, `Popen` and 26 others), checked on compiled code objects
+  rather than on source text, which closes the dynamic-dispatch gap a static import scan leaves
+  open. The scan compiles each package source file and recurses it, so its *reach* is complete over
+  the file by construction and covers a callable held in a container as well as one bound as a
+  function; it also walks the loaded modules, so what the interpreter actually holds is checked
+  too. Its *vocabulary* is not complete in the same sense: the forbidden list is enumerated, so a
+  capability reached under a name nobody put on it would pass. That remains a review property, not
+  a checked one.
 
 `ExecutionSurface` has exactly one member, `simulator`; the plan model cannot name another.
 
 ## Consequences
 
 **Positive:** drift becomes an auditable distribution over closed vocabularies rather than prose;
-an unverifiable input refuses instead of passing quietly; no reconciliation output can carry
-provider naming; and the execution surface's isolation is a property tests can check rather than a
-convention reviewers must remember.
+an unverifiable input refuses instead of passing quietly; the outputs have nowhere to put provider
+naming, because the only reference a finding, action or plan carries is one the desired state
+authored and an unmanaged element's is empty by construction; and the execution surface's isolation
+is a property tests can check rather than a convention reviewers must remember.
+
+The last two are checked as well as constructed, but the checks are narrower than the sentences:
+the leak scan is a sentinel scan over one hostile observation driving one reconciliation, and the
+isolation scans establish reach and import closure, not the completeness of the capability list
+they match against.
 
 **Negative / risks:** the vocabularies are deliberately narrow, so the first real provider will
 need facets this version does not have — adding one is a contract-version decision, which is the

@@ -366,6 +366,29 @@ def test_the_source_walk_reaches_a_callable_a_container_would_hide() -> None:
     assert bound == set(), bound
 
 
+def test_the_adrs_account_of_the_escape_vocabulary_matches_it() -> None:
+    """ADR-029 names six capabilities and gives a count for the rest. Both are countable claims
+    about this set, so both are counted here — the ADR's own wording is what a reader trusts when
+    deciding how much the escape scan proves, and an uncounted number goes stale silently.
+
+    Note what this does *not* establish: the list's completeness. A capability reached under a name
+    nobody enumerated passes the scan, which is why the ADR says so in the same breath.
+    """
+    named = ("open", "getattr", "__import__", "socket", "connect", "Popen")
+    assert set(named) <= FORBIDDEN_CODE_NAMES
+    remaining = len(FORBIDDEN_CODE_NAMES) - len(named)
+
+    adr = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "adr"
+        / "ADR-029-reconciliation-and-drift-foundation.md"
+    )
+    body = " ".join(adr.read_text(encoding="utf-8").replace("`", "").split())
+    assert f"{', '.join(named)} and {remaining} others" in body
+    assert "a capability reached under a name nobody put on it would pass" in body
+
+
 def test_no_code_in_the_reconciliation_packages_names_an_escape() -> None:
     violations = []
     for code in _scanned_code_objects():
