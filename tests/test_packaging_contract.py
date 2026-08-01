@@ -1202,8 +1202,19 @@ def test_m4b_removing_the_harness_from_the_image_without_updating_the_contract_i
     tmp_path: Path,
 ):
     """The other direction: the declaration asserts presence in the image, so dropping the COPY
-    makes it false. Both packages in the root notice, each in its own terms — which is the evidence
-    that the two postures are enforced separately rather than by one shared approximation."""
+    makes it false. EVERY package in the root notices, each in the terms of its own posture — which
+    is the evidence that the postures are enforced separately rather than by one shared
+    approximation.
+
+    The expectation is DERIVED from the manifest rather than typed. An earlier version listed the
+    two violations literally and went red the moment ``apps/api`` gained a second
+    ``image-resident`` package (``commit_exposure_survey``, on the commit-exposure survey branch) —
+    even though the guard was behaving correctly and the new package was correctly declared. That
+    is the exact-count trap :func:`test_the_declared_shape_is_recorded_and_consistent` records one
+    level up: a literal list silently pins the POPULATION of a root, so a legitimate addition
+    reads as a regression. Deriving keeps the assertion an exact equality — it is not a floor, and
+    an unexpected extra violation still fails — while surviving a package being added.
+    """
     repo = _materialise(tmp_path)
     assert contract_violations(real_inputs(repo)) == [], "control: the copy must start clean"
 
@@ -1212,12 +1223,23 @@ def test_m4b_removing_the_harness_from_the_image_without_updating_the_contract_i
     inputs = real_inputs(repo)
     assert not _covers("apps/api", inputs.copied_at_all)
 
-    assert contract_violations(inputs) == [
-        "image-resident-absent-from-image: apps/api is not COPYied into the production image, so "
-        "socket_gate_tests is not in the image its declaration describes",
-        "shipped-not-in-image: apps/api is not COPYied before the install, so secp_api installs "
-        "but fails to import at runtime",
-    ]
+    in_root = {n: e for n, e in inputs.declared.items() if e.get("root") == "apps/api"}
+    postures = {e["distribution"] for e in in_root.values()}
+    # CONTROL: the root must actually host BOTH postures, or "each in its own terms" is vacuous
+    # and this test would pass while proving only that one rule fires.
+    assert {SHIPPED, IMAGE_RESIDENT} <= postures, f"apps/api hosts only {sorted(postures)}"
+
+    expected = sorted(
+        (
+            f"image-resident-absent-from-image: apps/api is not COPYied into the production "
+            f"image, so {name} is not in the image its declaration describes"
+            if entry["distribution"] == IMAGE_RESIDENT
+            else f"shipped-not-in-image: apps/api is not COPYied before the install, so {name} "
+            f"installs but fails to import at runtime"
+        )
+        for name, entry in in_root.items()
+    )
+    assert contract_violations(inputs) == expected
 
 
 def test_m4c_a_console_script_pointed_at_the_harness_is_refused(tmp_path: Path):

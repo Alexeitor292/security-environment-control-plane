@@ -163,6 +163,19 @@ visible and un-silently-changeable. Giving it a root of its own would move it to
 `importable-only`, but that edit lands in `.ci/pytest-suite.json`, the `backend-api-socket-gate` \
 job and `pyproject.toml`, so it is sequenced separately from this contract."""
 
+[packages.commit_exposure_survey]
+root = "apps/api"
+distribution = "image-resident"
+why = """The response-before-commit survey instrument (route/commit census plus the socket \
+measurement). Absent from pyproject's `packages`, so it is not a distribution member — verified by \
+building the wheel, whose twelve top-level entries do not include it. But `COPY apps/api \
+./apps/api` puts its source in the production image and the editable install's root-level .pth \
+lists `/app/apps/api`, so `import commit_exposure_survey` succeeds there — verified by performing \
+that install and importing it, not by reading its name. Same posture and same cause as \
+`socket_gate_tests`: swept into the image by a shipped sibling's whole-root COPY. It ships no \
+runtime code and nothing in `secp_api` imports it; giving it a root of its own would move it to \
+`importable-only`."""
+
 # --------------------------------------------------------------------------- importable-only
 #
 # None today. The class is not speculative: `apps/acceptance/secp_acceptance` (the two-host
