@@ -268,8 +268,10 @@ class WorkerObservation:
     operator_unit_identity: str
     operator_image_digest: str
     deployment_package_aggregate: str
-    # True if the ordinary worker is observed polling the operator (controlled-live) queue — a
-    # containment breach; a prepared worker polls ONLY the ordinary queue.
+    # True if containment could not be CERTIFIED — either an observed breach or an unfinished
+    # probe. FAIL-CLOSED and deliberately two-valued: every existing caller treats True as "do not
+    # certify", and that behaviour is unchanged. It does NOT distinguish "I observed a breach" from
+    # "I could not ask" — read ``ordinary_queue_containment`` for that.
     ordinary_polls_operator_queue: bool
     package_trusted: bool
     # host-side readiness LABELS derived by the observer's own predicate (NOT a call into the PR5C
@@ -281,6 +283,40 @@ class WorkerObservation:
     # two adoption observations with the SAME marker prove nothing restarted between
     # admission+commit.
     generation_marker: str = ""
+    #: THREE-valued containment verdict over the ordinary worker's SELF-DECLARED served queues.
+    #: ``CONTAINMENT_CONTAINED`` / ``CONTAINMENT_BREACHED`` / ``CONTAINMENT_UNPROVABLE``.
+    #:
+    #: The two-valued ``ordinary_polls_operator_queue`` above cannot express the third case, and
+    #: folding it into "breached" makes a probe that could not run indistinguishable from an
+    #: observed breach — a FALSE ALARM on the exact isolation property this plane exists to
+    #: guarantee, in the direction that gets acted on. Defaults to "" so every existing
+    #: constructor keeps working; :func:`resolve_queue_containment` derives the verdict from the
+    #: boolean when it is unset, so an observation that predates this field is still read
+    #: correctly (as contained/breached, never as unprovable — only a real probe knows it failed).
+    ordinary_queue_containment: str = ""
+    #: WHY containment could not be established. A BOUNDED reason code, never a host string, path
+    #: or upstream message. None unless the verdict is ``CONTAINMENT_UNPROVABLE``.
+    ordinary_queue_containment_reason: str | None = None
+
+
+#: The closed containment vocabulary. "unprovable" is a REFUSAL, never a pass.
+CONTAINMENT_CONTAINED = "contained"
+CONTAINMENT_BREACHED = "breached"
+CONTAINMENT_UNPROVABLE = "unprovable"
+CONTAINMENT_VERDICTS = (CONTAINMENT_CONTAINED, CONTAINMENT_BREACHED, CONTAINMENT_UNPROVABLE)
+
+
+def resolve_queue_containment(obs: WorkerObservation) -> str:
+    """The effective verdict for an observation, including ones that predate the field.
+
+    Reads the explicit verdict when the observer set one; otherwise derives it from the fail-closed
+    boolean. Derivation can only ever yield contained/breached — "unprovable" is knowledge only the
+    probe itself has, so it is never invented here.
+    """
+    verdict = obs.ordinary_queue_containment
+    if verdict in CONTAINMENT_VERDICTS:
+        return verdict
+    return CONTAINMENT_BREACHED if obs.ordinary_polls_operator_queue else CONTAINMENT_CONTAINED
 
 
 # --------------------------------------------------------------------------- protocols

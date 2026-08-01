@@ -49,6 +49,9 @@ from secp_operator_deployment.pinned_exec import ExecutablePin
 
 from secp_management import ManagementError
 from secp_management.adapters import (
+    CONTAINMENT_BREACHED,
+    CONTAINMENT_CONTAINED,
+    CONTAINMENT_UNPROVABLE,
     BootstrapReceipt,
     CompensationResult,
     ControllerObservation,
@@ -133,15 +136,30 @@ class RealAdapterContext:
         self.locations.assert_writable(path)
         return path
 
-    def run(self, pin: ExecutablePin, argv: tuple[str, ...], *, timeout: int, reason: str) -> str:
+    def run(
+        self,
+        pin: ExecutablePin,
+        argv: tuple[str, ...],
+        *,
+        timeout: int,
+        reason: str,
+        fault_reason: str | None = None,
+    ) -> str:
         """Run one closed pinned command; return bounded stdout or raise ``reason`` on non-zero exit
-        or runner fault.  Never a shell/generic-argv verb — argv is fixed by the caller."""
+        or runner fault.  Never a shell/generic-argv verb — argv is fixed by the caller.
+
+        ``fault_reason`` optionally separates "the command ran and refused" (non-zero exit →
+        ``reason``) from "it could not be invoked at all" (runner fault → ``fault_reason``).
+        Callers that do not pass it are unchanged: both paths still raise ``reason``. The
+        distinction exists because a caller reporting a THIRD state needs to name WHY it could not
+        ask, and those two causes have different remediations.
+        """
         try:
             result = self.runner.run(
                 pin, argv, timeout_seconds=timeout, max_output_bytes=_MAX_OUTPUT
             )
         except Exception:  # noqa: BLE001 - any runner fault is a fail-closed host-op error
-            raise ManagementError(reason) from None
+            raise ManagementError(fault_reason or reason) from None
         if result.exit_code != 0:
             raise ManagementError(reason)
         return result.stdout
@@ -734,21 +752,47 @@ class RealManagementHostObserver:
             return False
         return bool(gen.operator_present)
 
-    def _polls_operator_queue(self) -> bool:
-        # a bounded read-only probe of the ordinary worker's SELF-DECLARED readiness queue (what it
-        # recorded at mark_ready) — a self-report used to CHECK ordinary-queue containment, not an
-        # independent enumeration of what the Temporal poller actually serves; fail-closed on error
+    def _observe_queue_containment(self) -> tuple[str, str | None]:
+        """A bounded read-only probe of the ordinary worker's SELF-DECLARED served queues.
+
+        Returns ``(verdict, why)``. The verdict is THREE-valued, because this probe has three
+        genuinely different outcomes and collapsing them loses the one that matters:
+
+        * ``contained``  — the probe ran and the operator queue was NOT among the served queues.
+        * ``breached``   — the probe ran and the operator queue WAS among them.
+        * ``unprovable`` — the probe did not complete. NOTHING was observed about the queues.
+
+        Folding ``unprovable`` into ``breached`` (as this did) is fail-closed and therefore SAFE,
+        but it is not honest: it reports a containment breach on the exact isolation property this
+        plane exists to guarantee, when in fact nothing was observed. A false breach is acted on,
+        so the false-alarm direction is the damaging one. Fail-closed behaviour is unchanged —
+        ``unprovable`` still refuses to certify — but the operator can now tell the two apart.
+
+        ``why`` names the CAUSE, not merely the fact, because the remediations differ:
+        ``queue_probe_command_failed`` means the runtime ran the probe and it exited non-zero (the
+        container is gone, the interpreter path does not resolve inside the image, or the health
+        module itself errored); ``queue_probe_runtime_unavailable`` means the container runtime
+        could not be invoked at all (absent, timed out, or the runner faulted).
+
+        This reads a SELF-REPORT recorded at ``mark_ready`` — not an independent enumeration of
+        what the Temporal poller actually serves. That limit is unchanged by this fix.
+        """
         try:
             out = self._ctx.run(
                 self._ctx.executables.container_runtime,
                 ("exec", ORDINARY_CONTAINER_NAME, *ORDINARY_HEALTH_COMMAND[:-1], "queues"),
                 timeout=_INSPECT_TIMEOUT,
-                reason="queue_probe_failed",
+                reason="queue_probe_command_failed",
+                fault_reason="queue_probe_runtime_unavailable",
             )
-        except ManagementError:
-            return True  # cannot prove containment → conservatively assume a breach (fail closed)
+        except ManagementError as exc:
+            # Cannot prove containment. Still refuses to certify (fail closed) — but as its own
+            # verdict, carrying the bounded reason, never as a fabricated observation of a breach.
+            return CONTAINMENT_UNPROVABLE, exc.reason_code
         queues = {line.strip() for line in out.splitlines() if line.strip()}
-        return OPERATOR_TASK_QUEUE in queues
+        if OPERATOR_TASK_QUEUE in queues:
+            return CONTAINMENT_BREACHED, None
+        return CONTAINMENT_CONTAINED, None
 
     def observe_worker(self) -> WorkerObservation:
         gen = self._service.observe_generation()  # THE single PR5D coherent worker observation
@@ -766,11 +810,16 @@ class RealManagementHostObserver:
         config_id = self._identity_of(self._ctx.locations.worker_compose_path())
         unit_id = self._identity_of(self._ctx.locations.operator_unit_path())
         package_agg = self._identity_of(self._ctx.locations.worker_deployment_package_path())
-        polls_operator = (
-            self._polls_operator_queue()
-            if (gen.ordinary_present and gen.ordinary_running)
-            else False
-        )
+        if gen.ordinary_present and gen.ordinary_running:
+            containment, containment_reason = self._observe_queue_containment()
+        else:
+            # Nothing is running, so nothing can be polling. This is an OBSERVATION (the container
+            # state was read coherently), not an unfinished probe — so it is "contained", not
+            # "unprovable". Conflating the two would make a stopped worker look like a broken one.
+            containment, containment_reason = CONTAINMENT_CONTAINED, None
+        # Fail-closed projection onto the two-valued field every existing caller reads: anything
+        # that is not a POSITIVE proof of containment must refuse to certify. Unchanged behaviour.
+        polls_operator = containment != CONTAINMENT_CONTAINED
         package_trusted = package_agg != ""
         prepared = bool(
             coherent
@@ -808,6 +857,8 @@ class RealManagementHostObserver:
             commissioning_status="prepared" if prepared else "not_prepared",
             deployment_status="sealed_prepared" if sealed else "not_prepared",
             generation_marker=marker,
+            ordinary_queue_containment=containment,
+            ordinary_queue_containment_reason=containment_reason,
         )
 
     # --- controller ---
