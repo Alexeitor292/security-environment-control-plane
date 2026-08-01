@@ -1,0 +1,119 @@
+# The SECP packaging contract: which Python packages SHIP, which are importable-only, and why.
+#
+# WHAT PROBLEM THIS SOLVES
+# -----------------------
+# `pyproject.toml` declares each package in three places — the wheel `packages` list, pytest's
+# `pythonpath`, and mypy's `mypy_path` — and `infra/dev/Dockerfile.python` COPYies each package root
+# into the build context a fourth time. Nothing tied those four to each other, and the guard that
+# checked the Dockerfile derived its expectation from the same wheel list it was meant to protect.
+# So a COORDINATED edit that dropped a package from `pyproject.toml` and from the guard's
+# hand-maintained `_EXPECTED_PACKAGE_ROOTS` left every test green while the package silently
+# vanished from the wheel and the production image. The failure surfaces at runtime as
+# `ModuleNotFoundError` — which is exactly how the reviewed PR5F image regressed once already.
+#
+# WHY A FLAT "THE LISTS MUST AGREE" RULE IS WRONG
+# ----------------------------------------------
+# Because they must NOT always agree. A package can legitimately be importable and type-checked
+# without shipping: a test harness must run against the product and must never be installed into the
+# production image. A guard demanding equality would go red on that correct case, and the pressure
+# would be to weaken the guard rather than to declare the intent.
+#
+# So the asymmetry is DECLARED here rather than discovered. Each package states its `distribution`
+# and the reason, and the guard enforces exactly what was declared — no default, no fallback.
+#
+# THE ANCHOR
+# ----------
+# This file is not the source of truth on its own; it could be edited in the same breath as
+# `pyproject.toml`, which is the very failure being closed. The anchor is the FILESYSTEM.
+# `tests/test_packaging_contract.py` discovers every importable package directory on disk and
+# requires each to be declared here. A package cannot be silently dropped from the wheel while its
+# code is still in the tree: removing it from `pyproject.toml` and from this file leaves it
+# discovered-but-undeclared, and the guard refuses. The only way to remove a package without a
+# refusal is to actually delete its code — which is a real removal, not a silent one.
+#
+# ADDING A PACKAGE
+# ----------------
+# Create the package, add it here with a `distribution` and a real `why`, then make `pyproject.toml`
+# and the Dockerfile match what you declared. An undeclared package REFUSES rather than defaulting
+# to either class: a mapping that falls back is the defect wearing the fix's clothes.
+
+[contract]
+version = "secp.packaging-contract/v1"
+
+# The two admissible classifications. Closed on purpose — a third value is a refusal, not a new
+# behaviour to be inferred.
+#
+#   shipped         — installed into the wheel and COPYied into the production Python image. Must
+#                     appear in wheel `packages`, in `pythonpath`, and in `mypy_path`, and its root
+#                     must be COPYied into the image before the install step.
+#   importable-only — importable and type-checked for development and testing, and DELIBERATELY
+#                     absent from the wheel and the image. Must appear in `pythonpath` and
+#                     `mypy_path`, must NOT appear in wheel `packages`, and its root must NOT be
+#                     COPYied into the image.
+#
+# An `importable-only` package may not share a package ROOT with a shipped one. The Dockerfile
+# copies by root, so a root containing both would carry the importable-only package into the image
+# regardless of its declaration — the declaration would be true on paper and false in the artifact.
+
+# --------------------------------------------------------------------------- shipped
+
+[packages.secp_api]
+root = "apps/api"
+distribution = "shipped"
+why = "The control-plane API. It is the image's default CMD (uvicorn secp_api.main:app)."
+
+[packages.secp_worker]
+root = "apps/worker"
+distribution = "shipped"
+why = "The durable Temporal worker. The compose worker service runs secp_worker.main from this image."
+
+[packages.secp_commissioning]
+root = "apps/commissioning"
+distribution = "shipped"
+why = "Canonical JSON, descriptor scanning and host inspection. Imported at runtime by the management and deployment planes; absent from the image, secpctl cannot canonicalise or verify anything."
+
+[packages.secp_operator_deployment]
+root = "apps/deployment"
+distribution = "shipped"
+why = "The PR5D read-only host adapters and pinned executable seam the management observer drives on a real host."
+
+[packages.secp_discovery_activation]
+root = "apps/deployment"
+distribution = "shipped"
+why = "Backs two console scripts (secp-admission-proxy, secp-discovery-activation). This package being installed while its tree was absent from the image is the exact PR5F regression this contract exists to prevent."
+
+[packages.secp_management]
+root = "apps/management"
+distribution = "shipped"
+why = "Backs the secpctl console script — the customer-facing management-plane installer."
+
+[packages.secp_scenario_schema]
+root = "contracts/scenario-schema"
+distribution = "shipped"
+why = "The versioned scenario contract the API validates against at runtime."
+
+[packages.secp_plugin_api]
+root = "contracts/plugin-api"
+distribution = "shipped"
+why = "The provider plugin contract both shipped plugins implement and the registry resolves against."
+
+[packages.secp_plugin_simulator]
+root = "plugins/simulator"
+distribution = "shipped"
+why = "Resolved by name at runtime (secp_api.registry imports SimulatorPlugin lazily), so a missing tree fails only when a scenario runs, not at image build."
+
+[packages.secp_plugin_proxmox]
+root = "plugins/proxmox"
+distribution = "shipped"
+why = "Resolved by name at runtime (secp_worker.discovery imports ProxmoxPlugin lazily); secp_api.live_read_contract pins constants that must equal this package's."
+
+# --------------------------------------------------------------------------- importable-only
+#
+# None today. The class is not speculative: `apps/acceptance/secp_acceptance` (the two-host
+# acceptance harness, in flight on `feature/secp-two-host-acceptance`) is the first instance, and it
+# is exactly why a flat equality rule could not be adopted — it belongs in `pythonpath` and
+# `mypy_path` so it can drive and type-check against the real product, and it must never be
+# installed into the controller/worker runtime image.
+#
+# It is deliberately NOT declared here yet, because it does not exist on this branch and the guard
+# refuses a declaration with no code on disk. It is added in the same commit that adds the package.
