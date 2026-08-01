@@ -342,6 +342,7 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         from secp_commissioning.runtime import RealFilesystem
 
         from secp_management.controller_api_locator import FileControllerApiLocatorProvider
+        from secp_management.enrollment_cli import LocatorControllerCaBundleProvider
         from secp_management.enrollment_controller_client import HttpsEnrollmentControllerClient
         from secp_management.operator_auth import (
             OPERATOR_TOKEN_FILE_ENV,
@@ -353,8 +354,12 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         )
 
         fs = RealFilesystem()
-        # ONE locator instance, shared by the client and the credential provider, so the credential
-        # read is scoped to exactly the controller the request is sent to.
+        # ONE locator instance, shared by the client, the credential provider AND the controller-CA
+        # provider, so the credential read is scoped to exactly the controller the request is sent
+        # to, and the CA chain put into the invitation is the one this client pinned its TLS to.
+        # A SECOND FileControllerApiLocatorProvider(fs) here would type-check, satisfy "a real
+        # provider is composed", and still be the defect: two instances can resolve two different
+        # locators, handing the worker a chain the operator's own client never trusted.
         locator_provider = FileControllerApiLocatorProvider(fs)
         # The OS credential store is the PRIMARY provider: what `secpctl auth login` writes is what
         # authenticated commands read. Before this wiring existed the two never met — login stored a
@@ -378,7 +383,15 @@ def _production_enrollment_deps() -> EnrollmentCliDeps:
         )
         from secp_management.worker_enroller import build_worker_enroller
 
-        return EnrollmentCliDeps(controller_client=client, worker_enroller=build_worker_enroller())
+        return EnrollmentCliDeps(
+            controller_client=client,
+            worker_enroller=build_worker_enroller(),
+            # Sourced from the operator's OWN bootstrap-recorded locator, never from the controller
+            # API's response — a controller serving its own CA is circular. Without this the field
+            # falls to SealedControllerCaBundleProvider and every `enrollment invite create` refuses
+            # secpctl_controller_ca_unavailable, i.e. the CA distribution feature ships inert.
+            ca_bundle=LocatorControllerCaBundleProvider(fs, locator_provider),
+        )
     # Same rule as `_production_auth_deps`: an environmental failure seals, a coding defect -- or a
     # test tripwire installed on a seam inside this region -- is loud.
     except (NameError, AttributeError, ImportError, AssertionError):
