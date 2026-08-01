@@ -247,8 +247,17 @@ class HostFleet:
         }
 
     def destroy(self) -> tuple[bool, dict[str, object]]:
-        """Remove every object this fleet created. Idempotent; reports residual honestly."""
+        """Remove every object this fleet created. Idempotent; reports residual honestly.
+
+        The daemon is probed FIRST. Without that probe every removal below fails, every
+        ``_exists`` check answers "no" for the same reason, and the method reports a clean teardown
+        having done nothing at all — the worst possible answer here, because the caller stops
+        looking for the privileged containers it just leaked. An unreachable runtime is reported as
+        residual, not as success.
+        """
         residual: list[str] = []
+        if not docker("version", "--format", "{{.Server.Os}}", timeout=60).ok:
+            return False, {"residual": ["runtime_unreachable"], "destroyed": self.destroyed}
         for role in ROLES:
             name = self.container_name(role)
             if docker("rm", "--force", "--volumes", name, timeout=300).ok:

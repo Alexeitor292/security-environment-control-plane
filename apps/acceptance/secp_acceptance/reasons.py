@@ -153,6 +153,13 @@ RUN_OUTCOMES: frozenset[str] = frozenset({RUN_PASSED, RUN_FAILED})
 
 HARNESS_REASONS: frozenset[str] = frozenset(
     {
+        # --- tier gating (see secp_acceptance.tier) ---
+        # A declared container tier that left no witness is the one failure a passing test report
+        # cannot express on its own, so it gets its own code rather than being folded into an
+        # infrastructure error.
+        "acceptance_tier_undeclared",
+        "acceptance_tier_unknown_witness",
+        "acceptance_container_tier_not_executed",
         # --- fleet ---
         "acceptance_container_runtime_unavailable",
         "acceptance_host_image_build_failed",
