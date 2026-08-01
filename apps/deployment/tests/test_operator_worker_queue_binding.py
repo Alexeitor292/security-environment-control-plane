@@ -29,8 +29,11 @@ declaration on the loaded ``Settings`` field and showing the operator-side verdi
 BOTH directions: the value that was valid becomes refused, and the new value becomes accepted. A
 copied literal cannot produce that pair of outcomes.
 
-Every refusal is asserted on the EXACT ``reason_code``, and the failure SETS are compared by
-membership rather than by count, so a swapped code cannot hide behind an equal total.
+Every refusal is asserted on the EXACT ``reason_code``, so a swapped code cannot pass as the right
+one. Set-membership comparison of the refusal codes is done in
+``tests/test_queue_contract_integration.py``; this file asserts codes individually. (An earlier
+version of this paragraph claimed the set comparison happened here too — it does not, and the
+sentence was describing a stronger check than the code performs.)
 """
 
 from __future__ import annotations
@@ -149,11 +152,19 @@ def test_the_binding_follows_the_worker_not_a_copied_literal(monkeypatch):
     assert _refusal(ordinary_task_queue=original) == DRIFT_CODE  # now refused
 
 
-def test_the_previously_invisible_drift_is_now_the_only_new_refusal(monkeypatch):
+def test_the_previously_invisible_drift_is_now_the_only_new_refusal():
     """Profile and pins agreeing with each other on a wrong name is now caught — and ONLY that.
 
-    Compared as SETS: an equal number of failures before and after would hide a swap, so the claim
-    is about which checks refuse, not how many.
+    Three separate readings, each asserted directly: ``require_profile_agreement`` still PASSES on
+    the drifted pair (unchanged behaviour), ``assert_expected_package_identity`` REFUSES it with
+    the exact code, and a correct deployment passes BOTH. That is what makes the new refusal the
+    only one added.
+
+    An earlier docstring here claimed the comparison was made "as SETS", with counts unable to
+    hide a swap. This body builds no set and compares no before/after totals — the set comparison
+    lives in ``tests/test_queue_contract_integration.py``, which genuinely does it over the
+    refusal codes. Corrected rather than reworded: the sentence described a stronger check than
+    the code performs.
     """
     profile = valid_profile(ordinary_task_queue=DRIFTED)
     expected = valid_expected(ordinary_task_queue=DRIFTED)
@@ -180,14 +191,46 @@ def test_pins_alone_cannot_authorize_a_shared_queue():
     assert _refusal(operator_task_queue=authority) == SHARED_CODE
 
 
-def test_the_two_new_codes_are_distinct_from_the_codes_that_already_existed():
-    """Membership, not counts: a new code that collided with an existing one would silently
-    re-label an unrelated failure."""
-    from secp_operator_deployment.identities import _AGREEMENT_FIELDS
+def test_no_catalogued_reason_code_is_declared_twice():
+    """A colliding code would silently re-label an unrelated failure — and leave NO trace.
 
-    pre_existing = {reason for _, _, reason in _AGREEMENT_FIELDS}
-    assert DRIFT_CODE not in pre_existing
-    assert SHARED_CODE not in pre_existing
+    ``REFUSAL_CATALOGUE`` is a dict literal, so a duplicate key is not an error: Python keeps the
+    last and the collision is invisible at runtime. Both the count and the key set look healthy
+    afterwards, which is why this is read from the SOURCE by AST rather than from the loaded dict.
+
+    Supersedes an earlier version of this test that compared the new codes against
+    ``_AGREEMENT_FIELDS``. Those are the 29 profile-vs-pins AGREEMENT codes, every one of them
+    ``*_mismatch``; the codes added here are IDENTITY codes raised by
+    ``assert_expected_package_identity`` and all begin ``expected_``. The two sets are disjoint by
+    naming convention, so that assertion was structurally guaranteed to pass and established
+    nothing about the 101 codes an operator actually meets.
+    """
+    import ast
+    import pathlib
+
+    import secp_operator_deployment.verify as verify_module
+
+    tree = ast.parse(pathlib.Path(verify_module.__file__).read_text(encoding="utf-8"))
+    catalogue_keys: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.AnnAssign)
+            and getattr(node.target, "id", None) == "REFUSAL_CATALOGUE"
+        ):
+            assert isinstance(node.value, ast.Dict), "REFUSAL_CATALOGUE is no longer a dict literal"
+            catalogue_keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+    assert catalogue_keys, "the catalogue literal was not found; this guard is reading nothing"
+
+    duplicates = {code for code in catalogue_keys if catalogue_keys.count(code) > 1}
+    assert duplicates == set(), f"reason codes declared more than once: {sorted(duplicates)}"
+
+    # Non-vacuity: the AST read really did reach every entry, so an empty/partial parse cannot
+    # masquerade as "no duplicates".
+    assert len(catalogue_keys) == len(verify_module.REFUSAL_CATALOGUE)
+
+    # The two codes this branch adds are among them, exactly once each.
+    for code in (DRIFT_CODE, SHARED_CODE):
+        assert catalogue_keys.count(code) == 1, code
     assert DRIFT_CODE != SHARED_CODE
 
 
@@ -202,7 +245,7 @@ def test_both_new_codes_are_catalogued_for_the_operator():
         assert entry["remediation"] in REMEDIATION_CLASSES
 
 
-def test_the_refusal_reaches_the_operators_verify_report(monkeypatch):
+def test_the_refusal_reaches_the_operators_verify_report():
     """The check is only worth having if the READ-ONLY command an operator runs surfaces it.
 
     ``verify`` catches the IdentityError and reports it, so this asserts on the emitted section
