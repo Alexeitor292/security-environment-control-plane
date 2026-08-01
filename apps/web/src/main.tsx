@@ -10,6 +10,7 @@ import { Approvals } from "./pages/Approvals";
 import { AuditLog } from "./pages/AuditLog";
 import { Dashboard } from "./pages/Dashboard";
 import { DefinitionEditor } from "./pages/DefinitionEditor";
+import { EnrollmentInventory } from "./pages/EnrollmentInventory";
 import { EnvironmentPublication } from "./pages/EnvironmentPublication";
 import { ExerciseDetail } from "./pages/ExerciseDetail";
 import { Exercises } from "./pages/Exercises";
@@ -24,6 +25,7 @@ import { StagingDeployment } from "./pages/StagingDeployment";
 import { StagingLab } from "./pages/StagingLab";
 import { TargetDiscovery } from "./pages/TargetDiscovery";
 import { Templates } from "./pages/Templates";
+import { WorkerEnrollment } from "./pages/WorkerEnrollment";
 // The topology workspace (with the React Flow + ELK runtime) is code-split so
 // the heavy canvas libraries load only when the workspace route is opened.
 const TopologyView = React.lazy(() =>
@@ -71,6 +73,18 @@ const router = createBrowserRouter([
       { path: "readonly-preflight", element: <ReadonlyPreflight /> },
       { path: "resolver-activation", element: <ResolverActivation /> },
       { path: "approvals", element: <Approvals /> },
+      // SECP-PR5H-B1: the supported worker-enrollment controller surface, split across two routes
+      // because they are two different jobs with two different permissions.
+      //
+      // `worker-enrollment` is the create-and-hand-over surface: it needs enrollment:manage to be
+      // useful, and its sidebar entry is gated on read OR manage — ANY rather than ALL is
+      // load-bearing, because manage without read can still run the entire hand-off flow.
+      //
+      // `enrollment-inventory` is the organization-wide read, built on the list route. It is gated
+      // on enrollment:read alone, since that is exactly what the list requires and manage does not
+      // include it.
+      { path: "worker-enrollment", element: <WorkerEnrollment /> },
+      { path: "enrollment-inventory", element: <EnrollmentInventory /> },
       { path: "audit", element: <AuditLog /> },
     ],
   },
