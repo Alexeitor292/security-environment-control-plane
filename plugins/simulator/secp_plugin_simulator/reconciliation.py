@@ -14,9 +14,11 @@ carry that claim, and each is checked mechanically by ``tests/test_reconciliatio
    library's ``dataclasses`` and the reconciliation contract, and nothing else. No socket, HTTP,
    subprocess, filesystem, provider-SDK or plugin-transport module appears anywhere in the closure.
 
-3. **Its compiled code names no escape.** No function here references ``open``, ``getattr``,
-   ``__import__``, ``eval``, ``exec``, ``socket``, ``connect`` or any similar capability by name,
-   so it cannot reach one dynamically either — the gap that a purely static import scan leaves.
+3. **Its compiled code names no escape.** No code object compiled from this file — not just the
+   functions bound in its namespace, but every lambda, comprehension and nested definition
+   wherever it is held — references ``open``, ``getattr``, ``__import__``, ``eval``, ``exec``,
+   ``socket``, ``connect`` or any similar capability by name, so it cannot reach one dynamically
+   either — the gap that a purely static import scan leaves.
 
 Execution is a pure function over an in-memory world: it returns a new world and an immutable,
 content-addressed record. Nothing is persisted, and "applying" an action means recomputing a

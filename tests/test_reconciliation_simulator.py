@@ -8,8 +8,13 @@ Three independent properties carry it, each checked mechanically:
    module's public signatures is pinned, and every one of them is a builtin scalar, an enum, or a
    frozen dataclass. There is no protocol, no callable, no context and no port among them, so no
    caller — and no configuration — can hand this module a connection.
-2. **Its compiled code names no escape.** Checked on the loaded code objects, so a sentinel that
-   merely appears in a comment proves nothing here.
+2. **Its compiled code names no escape.** Checked on compiled code objects, never on source text,
+   so a sentinel that merely appears in a comment proves nothing here. Two walks contribute: one
+   compiles each package source file and recurses it, which is complete over the file *by
+   construction*; the other walks what the interpreter actually loaded. The first exists because
+   the second alone reaches only callables bound in module globals or a class body, and so missed
+   a callable held in a module-level container -- the exact shape an escape would take, and one
+   every other guard in this file also misses.
 3. **Its import closure is pure computation.** Asserted over both packages in
    ``tests/test_reconciliation_boundary_guards.py``; this file checks the loaded module's own
    globals as well.
@@ -246,12 +251,46 @@ def _package_source_files() -> set[str]:
     return files
 
 
+def _nested_code(code: types.CodeType, seen: set[int], found: list[types.CodeType]) -> None:
+    if id(code) in seen:
+        return
+    seen.add(id(code))
+    found.append(code)
+    for constant in code.co_consts:
+        if isinstance(constant, types.CodeType):
+            _nested_code(constant, seen, found)
+
+
+def _source_code_objects() -> list[types.CodeType]:
+    """Every code object *lexically defined in* a package source file, reached by compiling the
+    file and recursing through ``co_consts``.
+
+    This is the walk the escape scan relies on, because it is complete over the file **by
+    construction**: a code object is reached because of where it is written, not because of what
+    happens to hold it at runtime. The loaded-object walk below reaches only callables bound in a
+    module's globals or in a class body, so a callable held in a module-level container --
+    ``_TABLE = {"probe": lambda: open(path)}`` -- was invisible to it. That is precisely the shape
+    an escape would take, and every other isolation guard in this file misses it too: it imports
+    nothing (``open`` is a builtin), it binds no module, and it appears in no signature.
+    """
+    seen: set[int] = set()
+    found: list[types.CodeType] = []
+    for path in sorted(_package_source_files()):
+        source = Path(path).read_text(encoding="utf-8")
+        _nested_code(compile(source, path, "exec"), seen, found)
+    return found
+
+
 def _code_objects():
     """Every code object *defined in* a package source file, reached from the loaded modules.
 
     Keyed on ``co_filename`` rather than on a name, so compiler-generated code (a frozen
     dataclass's ``__init__``, built by ``exec`` inside the stdlib) is correctly out of scope while
     every function actually written in these packages is in scope.
+
+    Kept alongside :func:`_source_code_objects` rather than replaced by it: this one observes what
+    the interpreter actually loaded, so a module whose loaded content diverges from its source is
+    still scanned.
     """
     import importlib
 
@@ -260,13 +299,9 @@ def _code_objects():
     found: list[types.CodeType] = []
 
     def visit(code: types.CodeType) -> None:
-        if id(code) in seen or code.co_filename not in sources:
+        if code.co_filename not in sources:
             return
-        seen.add(id(code))
-        found.append(code)
-        for constant in code.co_consts:
-            if isinstance(constant, types.CodeType):
-                visit(constant)
+        _nested_code(code, seen, found)
 
     for package in (secp_reconciliation, "secp_plugin_simulator"):
         name = package if isinstance(package, str) else package.__name__
@@ -285,20 +320,55 @@ def _code_objects():
     return found
 
 
+def _scanned_code_objects() -> list[types.CodeType]:
+    """The union both walks contribute. The escape scan reads exactly this."""
+    return _source_code_objects() + _code_objects()
+
+
 def test_the_code_object_scan_actually_reaches_the_packages_functions() -> None:
     """Without this the forbidden-name assertion below could pass by scanning nothing."""
-    found = _code_objects()
-    names = {code.co_name for code in found}
+    names = {code.co_name for code in _scanned_code_objects()}
     assert "execute" in names
     assert "verify_inputs" in names
     assert "classify_drift" in names
     assert "plan_reconciliation" in names
-    assert len(found) > 30
+
+
+def test_the_source_walk_covers_every_package_file_exactly() -> None:
+    """Exact, not a floor: the set of files the escape scan compiled is the set of files in the
+    two packages, so a module added later cannot sit outside the scan."""
+    compiled = {code.co_filename for code in _source_code_objects()}
+    assert compiled == _package_source_files()
+
+
+def test_the_source_walk_reaches_a_callable_a_container_would_hide() -> None:
+    """Positive control for the gap the source walk exists to close, proven on a synthetic module
+    rather than by planting an escape in product code.
+
+    The container-held lambda's ``open`` is reached by recursing the compiled module, and the
+    loaded-object walk's discipline -- visit functions and classes bound in ``vars(module)`` -- is
+    shown to bind neither, so it could never have reached it.
+    """
+    source = '_TABLE = {"probe": lambda: open("x").read()}\n'
+    module_code = compile(source, "<container-probe>", "exec")
+
+    reached: list[types.CodeType] = []
+    _nested_code(module_code, set(), reached)
+    assert "open" in {name for code in reached for name in code.co_names}
+
+    namespace: dict = {}
+    exec(module_code, namespace)  # noqa: S102 - a synthetic probe, not product code
+    bound = {
+        name
+        for name, value in namespace.items()
+        if not name.startswith("__") and (inspect.isfunction(value) or inspect.isclass(value))
+    }
+    assert bound == set(), bound
 
 
 def test_no_code_in_the_reconciliation_packages_names_an_escape() -> None:
     violations = []
-    for code in _code_objects():
+    for code in _scanned_code_objects():
         for name in code.co_names:
             if name in FORBIDDEN_CODE_NAMES:
                 violations.append((code.co_name, name))

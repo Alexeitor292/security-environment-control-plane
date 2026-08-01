@@ -87,8 +87,11 @@ structurally incapable of reaching a provider rather than configured not to:
 - the reconciliation packages import only pure-computation standard-library modules, with the
   plugin-contract seam declared as a single reviewed `(module, import)` exception;
 - no code object in either package names an escape (`open`, `getattr`, `__import__`, `socket`,
-  `connect`, `Popen`, …), checked on the loaded code objects rather than on source text, which
-  closes the dynamic-dispatch gap a static import scan leaves open.
+  `connect`, `Popen`, …), checked on compiled code objects rather than on source text, which
+  closes the dynamic-dispatch gap a static import scan leaves open. The scan compiles each package
+  source file and recurses it, so it is complete over the file by construction and covers a
+  callable held in a container as well as one bound as a function; it also walks the loaded
+  modules, so what the interpreter actually holds is checked too.
 
 `ExecutionSurface` has exactly one member, `simulator`; the plan model cannot name another.
 
