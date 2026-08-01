@@ -220,6 +220,18 @@ def test_no_suite_anywhere_asserts_the_interpreter_exists_in_the_worker_image():
         "tests/test_pr5h_signer_boundary_guards.py": 1,
     }
     accounted = {**product_pins, **fixtures_restating_it}
+
+    # The positive control runs FIRST, deliberately. The assertion below succeeds on ABSENCE, so a
+    # sweep that silently read nothing would satisfy it vacuously. Requiring these seven files to be
+    # present with these exact counts means a broken or shrunken sweep fails HERE, naming the real
+    # cause, instead of passing the negative check and failing later with a confusing message.
+    for rel, expected in accounted.items():
+        assert occurrences.get(rel) == expected, (
+            f"{rel} now has {occurrences.get(rel)} references, expected {expected}. If this is "
+            f"None, the sweep did not read the file at all and the absence check below would have "
+            f"been vacuous."
+        )
+
     unaccounted = {
         rel: n
         for rel, n in occurrences.items()
@@ -230,10 +242,6 @@ def test_no_suite_anywhere_asserts_the_interpreter_exists_in_the_worker_image():
         "the path against the real worker image (which would close Finding D), or does it restate "
         f"the literal (which does not)?  {unaccounted}"
     )
-    for rel, expected in accounted.items():
-        assert occurrences.get(rel) == expected, (
-            f"{rel} now has {occurrences.get(rel)} references, expected {expected}"
-        )
 
 
 def test_the_broker_entrypoint_shares_the_literal_but_not_the_finding():

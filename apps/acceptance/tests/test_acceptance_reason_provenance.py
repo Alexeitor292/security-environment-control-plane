@@ -16,6 +16,21 @@ Proven: each code is a literal that still appears in the shipped product package
 that finds it can actually fail. NOT proven: that the code is still emitted on the path the scenario
 drives — only executing that path proves that, which is what the stage scenarios do. This file is
 the cheap check that catches a rename at build time; it does not replace the expensive one.
+
+WHICH ASSERTIONS ARE LOAD-BEARING AGAINST CORPUS LOSS
+-----------------------------------------------------
+Worth knowing before changing anything here, because the two halves of this file fail in opposite
+directions if the source sweep silently shrinks:
+
+* :func:`test_every_product_reason_code_still_exists_in_the_product` is POSITIVE-form — it succeeds
+  on "found". A shrunken corpus makes it FAIL. Safe: it cannot be fooled by reading less.
+* :func:`test_no_harness_reason_code_is_emitted_by_the_product` is NEGATIVE-form — it succeeds on
+  "not found". A shrunken corpus makes it pass VACUOUSLY, and it looks identical to a real pass.
+
+So exactly one assertion in this file inverts under corpus loss, and it is the one
+:func:`test_the_product_source_sweep_reads_the_whole_tracked_corpus` exists to protect. That guard
+compares the sweep against git's index rather than against a floor or a second walk, because a
+negative-form assertion is only worth the corpus it was evaluated over.
 """
 
 from __future__ import annotations
@@ -163,6 +178,11 @@ def test_no_harness_reason_code_is_emitted_by_the_product():
 
     A ``HARNESS_REASONS`` member found in product source would mean the single fact a reader of the
     evidence most needs — WHO refused, the harness or the product — is ambiguous for that code.
+
+    THIS IS THE NEGATIVE-FORM ASSERTION in this file: it succeeds on "not found", so its worth is
+    exactly the worth of the corpus it was evaluated over. If
+    :func:`test_the_product_source_sweep_reads_the_whole_tracked_corpus` is failing, treat a pass
+    here as unproven rather than as evidence — a sweep that read nothing would satisfy it perfectly.
     """
     leaked = {code: _files_declaring(code) for code in sorted(HARNESS_REASONS)}
     assert {code: files for code, files in leaked.items() if files} == {}
