@@ -191,6 +191,26 @@ def _survives_projection_scan(value: str) -> bool:
     ``eyJ....`` both match ``^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$`` and are both refused by the
     projection scan. Without this clause the API accepts a label it can never render, and the row
     becomes unlistable AFTER it is persisted.
+
+    .. warning::
+
+       **Tightening ``scan_forbidden`` is a MIGRATION EVENT for stored labels, not a local change.**
+
+       Because this helper runs on the load path as well as the write path
+       (``worker_enrollment_repository._validate_rehydrated``), adding a pattern to the secret scan
+       in ``secp_commissioning.descriptor`` RETROACTIVELY narrows the label grammar: labels that
+       were legal when they were persisted can begin refusing on load.
+
+       That is survivable BY DESIGN and not by accident — such a row fails
+       ``_validate_rehydrated``, ``load_page`` wraps the refusal with the failing row's keyset
+       position, and the caller pages past it on the ``enrollment_page_integrity``
+       ``recovery_cursor``. The inventory degrades to "one row unreadable, the rest reachable"
+       rather than "the organization's list is dead", which is exactly the landing zone this
+       recovery path exists to provide. ``test_enrollment_site_label_projection_agreement.py``
+       pins that behaviour by simulating a scan that narrows after the fact.
+
+       So: a change in ``secp_commissioning`` touches worker enrollment. Expect existing rows to
+       need remediation, and check that test before assuming a new pattern is free.
     """
     try:
         scan_forbidden(value)
@@ -216,11 +236,36 @@ def is_deployment_site_label(value: object) -> bool:
     (``services.worker_enrollment``) and the load path (``worker_enrollment_repository``) already
     call, is what keeps them from drifting apart again.
     """
+    return deployment_site_label_refusal(value) is None
+
+
+#: Bounded reason codes for a refused label. Mirrored in ``secp_api.enums`` — this module must not
+#: import the enum (it is the pure API-side contract mirror), so the literals are stated twice and
+#: pinned by a test, the same documented non-import pair pattern used elsewhere in this file.
+SITE_LABEL_INVALID = "enrollment_site_label_invalid"
+SITE_LABEL_FORBIDDEN_SHAPE = "enrollment_site_label_forbidden_shape"
+
+
+def deployment_site_label_refusal(value: object) -> str | None:
+    """``None`` if the label is acceptable, else the bounded code saying WHICH clause refused.
+
+    Two codes rather than one because the two failures need different operator actions, and the
+    second is the one nobody guesses. A label failing the grammar is visibly wrong — it has a colon
+    or a slash in it, or it is an IP address. A label failing the projection scan looks *completely
+    ordinary*: ``x-vault-token`` is thirteen lowercase letters and hyphens, and an operator naming a
+    site after a header convention reaches it with no adversarial intent whatsoever. Told only
+    "invalid", they would re-read a well-formed string and conclude the API is broken.
+
+    The refusal is a bounded CODE and never echoes the value: the label is caller-controlled, so
+    quoting it back would put a caller-shaped string into logs and error bodies.
+    """
     if not isinstance(value, str) or _DEPLOYMENT_SITE_LABEL.fullmatch(value) is None:
-        return False
+        return SITE_LABEL_INVALID
     if _is_ip_literal(value):
-        return False
-    return _survives_projection_scan(value)
+        return SITE_LABEL_INVALID
+    if not _survives_projection_scan(value):
+        return SITE_LABEL_FORBIDDEN_SHAPE
+    return None
 
 
 # --------------------------------------------------------------------------- invitation contract
@@ -682,6 +727,7 @@ __all__ = [
     "WorkerEnrollmentInvitation",
     "bind_worker_identity",
     "create_invitation",
+    "deployment_site_label_refusal",
     "is_deployment_site_label",
     "mark_healthy",
     "mark_verified",

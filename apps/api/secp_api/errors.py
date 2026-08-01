@@ -363,6 +363,10 @@ class WorkerEnrollmentError(DomainError):
         "enrollment_not_found": 404,
         "enrollment_forbidden": 403,
         "enrollment_scope_mismatch": 409,
+        # 422, not 409: the submitted label is unprocessable input, not a conflict with existing
+        # state. Creation has no authoritative binding to conflict WITH.
+        "enrollment_site_label_invalid": 422,
+        "enrollment_site_label_forbidden_shape": 422,
         "enrollment_revision_conflict": 409,
         "enrollment_state_corrupt": 409,
         "enrollment_history_inconsistent": 409,

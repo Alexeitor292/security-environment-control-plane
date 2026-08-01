@@ -159,6 +159,119 @@ def test_the_fix_does_not_over_reject_ordinary_labels(client, label):
     )
 
 
+# --- the refusal has to tell the operator what to DO ---------------------------------------------
+#
+# Closing the defect converted a catastrophic failure into a confusing one. The refusal an operator
+# saw was `enrollment_scope_mismatch` — a code whose documented meaning is "a worker CLAIMED a site
+# that disagrees with the authoritative binding", i.e. a tenancy question about an EXISTING
+# enrollment. Creation has no binding to disagree with yet. So the operator most likely to hit this
+# was sent to look at permissions and org membership when the answer was "rename your site".
+
+
+def test_a_refused_label_does_not_report_a_tenancy_problem(client):
+    """`scope_mismatch` is about a worker's claim against an authoritative binding. Reusing it for
+    a creation-time input refusal is a diagnostic that sends the operator to the wrong place."""
+    r = _create(client, label="x-vault-token")
+    assert r.status_code != 201
+    assert r.json()["error"]["code"] != "enrollment_scope_mismatch", (
+        "the refusal still reads as a tenancy/permission problem"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        # Looks ordinary. Thirteen lowercase letters and hyphens, reachable by naming a site after
+        # a header convention — no adversarial intent and no pasted credential.
+        ("x-vault-token", "enrollment_site_label_forbidden_shape"),
+        ("AKIAIOSFODNN7EXAMPLE", "enrollment_site_label_forbidden_shape"),
+        (
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefgh",
+            "enrollment_site_label_forbidden_shape",
+        ),
+        # Visibly wrong: the grammar rejects these outright.
+        ("rack 01", "enrollment_site_label_invalid"),
+        ("-leading-hyphen", "enrollment_site_label_invalid"),
+        ("A" * 121, "enrollment_site_label_invalid"),
+        ("10.0.0.1", "enrollment_site_label_invalid"),
+    ],
+)
+def test_the_refusal_names_which_clause_rejected_the_label(client, label, expected):
+    """Two codes, because the two failures need different operator actions.
+
+    A grammar failure is visibly wrong. A projection-scan failure looks *completely ordinary*, so an
+    operator told only "invalid" would re-read a well-formed string and conclude the API is broken.
+    """
+    r = _create(client, label=label)
+    assert r.status_code != 201, f"{label!r} was accepted"
+    body = r.json()
+    # A pydantic pattern refusal (422 with `detail`) is also a legitimate, bounded outcome for the
+    # grammar cases — what must never happen is the tenancy code or an unbounded body.
+    if "error" in body:
+        assert body["error"]["code"] == expected, body
+    else:
+        assert expected == "enrollment_site_label_invalid", body
+        assert r.status_code == 422, body
+
+
+def test_the_refusal_never_echoes_the_submitted_label(client):
+    """The label is caller-controlled, so quoting it back would put a caller-shaped string into an
+    error body and the logs behind it."""
+    label = "x-vault-token"
+    r = _create(client, label=label)
+    assert r.status_code != 201
+    body = r.json()
+    if "error" in body:
+        assert label not in str(body["error"]), body
+
+
+def test_the_contract_literals_agree_with_the_closed_enum():
+    """The contract module must not import the enum (it is the pure API-side mirror), so the codes
+    are stated twice. Pinned here, the same documented non-import pair pattern this file uses for
+    the client id elsewhere in the program."""
+    from secp_api.enums import WorkerEnrollmentErrorCode as EC
+    from secp_api.errors import WorkerEnrollmentError
+    from secp_api.worker_enrollment_contract import (
+        SITE_LABEL_FORBIDDEN_SHAPE,
+        SITE_LABEL_INVALID,
+    )
+
+    assert SITE_LABEL_INVALID == EC.site_label_invalid.value
+    assert SITE_LABEL_FORBIDDEN_SHAPE == EC.site_label_forbidden_shape.value
+    # ...and both are routable: an unmapped code would silently take the 409 default, which would
+    # report unprocessable input as a conflict with existing state.
+    for code in (SITE_LABEL_INVALID, SITE_LABEL_FORBIDDEN_SHAPE):
+        assert WorkerEnrollmentError._STATUS[code] == 422
+
+
+def test_the_refusal_helper_and_the_boolean_helper_cannot_disagree():
+    """``is_deployment_site_label`` is now a thin wrapper. Pinned so a future edit cannot make the
+    boolean accept something the refusal helper rejects, or vice versa — which would put the write
+    path and the load path back out of step."""
+    from secp_api.worker_enrollment_contract import (
+        deployment_site_label_refusal,
+        is_deployment_site_label,
+    )
+
+    corpus = (
+        *PROJECTION_HOSTILE_LABELS,
+        *LEGITIMATE_LABELS,
+        "x-vault-token",
+        "rack 01",
+        "10.0.0.1",
+        "::1",
+        "",
+        "-bad",
+        "A" * 121,
+        None,
+        123,
+    )
+    for value in corpus:
+        assert is_deployment_site_label(value) is (deployment_site_label_refusal(value) is None), (
+            f"the two helpers disagree about {value!r}"
+        )
+
+
 # --- the operator-visible outcome the defect produced --------------------------------------------
 
 
@@ -308,6 +421,61 @@ def _plant_unrenderable_label(session, enrollment_id: str, value: str) -> None:
     assert invitation_row is not None
     invitation_row.deployment_site_label = value
     session.commit()
+
+
+def test_a_label_the_scan_forbids_only_LATER_lands_in_the_recovery_path(
+    client, session, monkeypatch
+):
+    """Retroactive narrowing is a stated, tested property — not an accident.
+
+    Reconciling the two validators in one helper has a forward consequence: because that helper
+    also runs on the LOAD path, adding a pattern to ``scan_forbidden`` in ``secp_commissioning``
+    retroactively narrows the label grammar, and labels that were legal when persisted can begin
+    refusing on load.
+
+    The required landing zone is the existing ``page_integrity`` recovery, NOT the dead end this
+    slice removed. This simulates the narrowing directly — an ordinary label is persisted, then the
+    scan is taught to forbid its shape — and pins that the inventory degrades to "one row
+    unreadable, the rest reachable" rather than "the organization's list is dead".
+
+    Patching the module-global is faithful rather than convenient: both ``is_deployment_site_label``
+    and ``public_view`` resolve ``scan_forbidden`` through it, which is exactly what a real change
+    in ``secp_commissioning`` would affect.
+    """
+    from secp_api import worker_enrollment_contract as contract
+
+    doomed = "rack-99.eu_z"
+    ids = [_create(client, ttl=3600 + i).json()["enrollment_id"] for i in range(5)]
+    # persisted while the label is still perfectly legal
+    late = _create(client, label=doomed, ttl=3500)
+    assert late.status_code == 201, late.text
+    ids.append(late.json()["enrollment_id"])
+    assert client.get("/api/v1/enrollment").status_code == 200
+
+    real_scan = contract.scan_forbidden
+
+    def narrowed(obj):
+        real_scan(obj)
+        flat = obj if isinstance(obj, str) else str(obj)
+        if doomed in flat:
+            raise DescriptorError("forbidden_secret_value")
+
+    monkeypatch.setattr(contract, "scan_forbidden", narrowed)
+
+    refused = client.get("/api/v1/enrollment")
+    assert refused.status_code == 409, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == "enrollment_page_integrity", (
+        f"retroactive narrowing must land in the recovery path, not a dead end: {error}"
+    )
+    recovery = error.get("recovery_cursor")
+    assert isinstance(recovery, str) and recovery, (
+        "no recovery cursor: a scan change would brick the inventory"
+    )
+
+    rest = client.get("/api/v1/enrollment", params={"after": recovery})
+    assert rest.status_code == 200, rest.text
+    assert late.json()["enrollment_id"] not in [i["enrollment_id"] for i in rest.json()["items"]]
 
 
 def test_a_row_persisted_before_the_fix_stays_pageable_past(client, session):
