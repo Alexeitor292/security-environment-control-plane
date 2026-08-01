@@ -245,6 +245,15 @@ REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
     "verify_context_type_invalid": {"dimension": "B", "remediation": _D},
     "queue_not_distinct": {"dimension": "B", "remediation": _D},
     "queue_separation_unavailable": {"dimension": "B", "remediation": _D},
+    # The trusted pins name an ordinary queue the SHIPPED WORKER does not poll. Dimension B and
+    # operator-closable deployment material rather than reviewed code: the worker's queue is the
+    # authority, so what is wrong here is the material naming a different one. The queue-check's
+    # ``isolation`` section cannot report this — it reads the profile, and the profile agreeing with
+    # a wrong pin is exactly the state this code exists to catch.
+    "expected_ordinary_queue_not_worker_queue": {"dimension": "B", "remediation": _D},
+    # The pins alone declared one queue for both roles, which is what would let the sealed ordinary
+    # worker pick up controlled-live work (ADR-022 §12).
+    "expected_operator_queue_not_distinct": {"dimension": "B", "remediation": _D},
     # --- (C) the controlled-live queue CONSUMER (queue_check) -------------------------------------
     "operator_consumer_unobservable": {"dimension": "C", "remediation": _O},
     "operator_consumer_active": {"dimension": "C", "remediation": _O},

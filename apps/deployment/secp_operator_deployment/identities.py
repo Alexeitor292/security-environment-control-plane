@@ -11,6 +11,14 @@ is
 absent/sealed; tests inject trusted pins through typed DI. ``require_profile_agreement`` fails
 closed
 on any disagreement with a bounded reason that never echoes a value.
+
+THE QUEUE PAIR IS ANCHORED TO CODE, NOT ONLY TO THE PROFILE. ``require_profile_agreement`` makes the
+profile and these pins agree with EACH OTHER, which is not the same as either agreeing with the
+worker. :func:`assert_expected_package_identity` therefore binds ``ordinary_task_queue`` to
+:func:`worker_ordinary_task_queue` — the ``Settings`` attribute the shipped worker entrypoint hands
+to ``Worker(task_queue=...)`` — so a deployment cannot name a queue nothing polls and still verify
+green. The operator queue is constrained to be DISTINCT rather than equal to a code-owned name,
+because it is deployment-local by design.
 """
 
 from __future__ import annotations
@@ -53,6 +61,26 @@ ELIGIBILITY_PROVIDER_IDENTITY = (
 
 class IdentityError(DeploymentPackageError):
     """A profile value disagreed with an independent trusted pin (bounded reason code)."""
+
+
+def worker_ordinary_task_queue() -> str:
+    """The ONE code-owned authority for the ordinary queue name: the queue the shipped worker polls.
+
+    Read from the LOADED ``Settings`` field default — the very attribute
+    ``secp_worker.main._run_temporal`` passes to ``Worker(task_queue=...)``. Deliberately NOT
+    re-declared here: this module must add no further copy of the name. Binding to the value rather
+    than restating it is what makes the check follow a change to the worker instead of having to be
+    remembered alongside one.
+
+    The FIELD DEFAULT, not ``Settings()``. Instantiating would read this process's environment, and
+    this runs in the OPERATOR's CLI process, whose environment is not the worker container's — an
+    env-sensitive answer here would describe the wrong process. The default is what the shipped
+    image runs with, and it is the value every other plane's literal is proven equal to
+    (``tests/test_task_queue_consistency.py``).
+    """
+    from secp_api.config import Settings
+
+    return str(Settings.model_fields["temporal_task_queue"].default)
 
 
 @dataclass(frozen=True)
@@ -266,6 +294,27 @@ def assert_expected_package_identity(expected: ExpectedDeploymentIdentities) -> 
         expected.eligibility_provider_identity == ELIGIBILITY_PROVIDER_IDENTITY,
         "expected_eligibility_provider_invalid",
     )  # noqa: E501
+    # --- the queue pair (SECP queue-integration) --------------------------------------------------
+    # Until this existed, the queue names were the ONLY security-sensitive pins never anchored to
+    # code. ``_AGREEMENT_FIELDS`` binds the profile to these pins, and the pins were then binding to
+    # nothing: profile and pins could agree with each other on a name the shipped worker does not
+    # poll, and every operator-side check stayed green — correctly, since each was reporting about
+    # the artefact it reads. This is the edge that closes the triangle profile == pins == code.
+    _require(
+        expected.ordinary_task_queue == worker_ordinary_task_queue(),
+        "expected_ordinary_queue_not_worker_queue",
+    )
+    # The pins must not be able to authorize a SHARED queue on their own. The profile validator
+    # already refuses ordinary == operator at parse time, but this function is also called with the
+    # pins ALONE (``verify`` runs it before ``require_profile_agreement``; ``compositions`` before
+    # the profile is resolved), and a shared queue is what would let the sealed ordinary worker pick
+    # up controlled-live work (ADR-022 §12). Deliberately NOT pinned to a code-owned operator NAME:
+    # the operator queue is deployment-local by design and its runtime setting is empty by default,
+    # so its identity constraint is distinctness, not equality.
+    _require(
+        expected.operator_task_queue != expected.ordinary_task_queue,
+        "expected_operator_queue_not_distinct",
+    )
 
 
 # --------------------------------------------------------------------------- independent loader
