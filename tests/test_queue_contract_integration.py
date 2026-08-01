@@ -97,9 +97,7 @@ def _run_shipped_worker(monkeypatch, tmp_path, *, operator_queue: str):
     from secp_api.config import Settings
     from secp_worker import health, main
 
-    settings = Settings(
-        temporal_task_queue=ORDINARY, temporal_operator_task_queue=operator_queue
-    )
+    settings = Settings(temporal_task_queue=ORDINARY, temporal_operator_task_queue=operator_queue)
 
     _RecordingWorker.constructions = []
     ready_calls: list[str] = []
@@ -227,9 +225,7 @@ def test_a_worker_that_never_started_would_fail_the_observation_above(monkeypatc
     async def _failing_connect(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
         raise RuntimeError("temporal unreachable")
 
-    monkeypatch.setattr(
-        main, "get_settings", lambda: Settings(temporal_task_queue=ORDINARY)
-    )
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(temporal_task_queue=ORDINARY))
     monkeypatch.setattr(temporalio.client.Client, "connect", _failing_connect)
     monkeypatch.setattr(temporalio.worker, "Worker", _RecordingWorker)
     monkeypatch.setattr(health, "mark_ready", lambda q: ready_calls.append(q))
