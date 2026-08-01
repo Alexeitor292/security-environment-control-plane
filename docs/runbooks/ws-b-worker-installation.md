@@ -81,7 +81,7 @@ invitation file** the controller operator gives you.
 On the controller:
 
 ```
-secpctl enrollment invitation create --site <site-label> --write --confirm
+secpctl enrollment invite create --site <site-label> --write --confirm
 ```
 
 The invitation is displayed **once**. This is deliberate and is not a defect: the invitation is

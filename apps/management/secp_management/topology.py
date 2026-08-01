@@ -15,11 +15,29 @@ from dataclasses import dataclass
 ORDINARY_TASK_QUEUE = "secp-orchestration"
 OPERATOR_TASK_QUEUE = "secp-controlled-live-v1"
 
+#: The interpreter INSIDE THE ORDINARY WORKER CONTAINER, which ``real_adapters`` reaches with
+#: ``docker exec <container> <argv>``. The image is built by ``infra/dev/Dockerfile.python`` from
+#: ``python:3.11-slim``, whose interpreter lives under ``/usr/local`` (the official image builds
+#: CPython with the default ``configure`` prefix and symlinks only within ``/usr/local/bin``).
+#: Bound to that base image by ``tests/test_health_command_interpreter.py``, so changing the
+#: ``FROM`` line fails loudly here instead of silently breaking the probe on a real host.
+#:
+#: This is the CONTAINER's interpreter only. The management HOST has its own at
+#: ``/usr/bin/python3`` (see ``BROKER_ENTRYPOINT`` below) and the two must not be unified: the host
+#: is not the container. They once held the same literal for unrelated reasons, which is the shape
+#: a well-meant "fix one, fix them all" edit turns into a defect.
+#:
+#: ABSOLUTE, never resolved from PATH — a reviewed property, not an oversight: an argv whose
+#: executable is looked up at run time is hijackable by whatever PATH the unit or container
+#: inherits. ``profile.py::_v_health`` enforces the same independently ("health command executable
+#: must be an absolute POSIX path").
+WORKER_CONTAINER_INTERPRETER = "/usr/local/bin/python3"
+
 # Worker topology identities (mirror the PR5D reviewed documentation values).
 OPERATOR_SERVICE_NAME = "secp-operator-worker.service"
 ORDINARY_CONTAINER_NAME = "secp-ordinary-worker"
 ORDINARY_HEALTH_COMMAND: tuple[str, ...] = (
-    "/usr/bin/python3",
+    WORKER_CONTAINER_INTERPRETER,
     "-m",
     "secp_worker.health",
     "check",
@@ -62,6 +80,9 @@ CONTROLLER_STACK_ENTRYPOINT: tuple[str, ...] = ("/opt/secp/controller/bin/stack-
 # python convention). It takes NO argument — the socket, key, credential, DB role and peer policy
 # are
 # all code constants — so a rendered unit can never point the broker at another socket/key/role/DSN.
+# NOTE: this runs on the management HOST, where /usr/bin/python3 is correct. It is deliberately NOT
+# the worker container's interpreter (see WORKER_CONTAINER_INTERPRETER above) and must not be
+# "unified" with it — the convention is shared, the path is not.
 BROKER_ENTRYPOINT: tuple[str, ...] = (
     "/usr/bin/python3",
     "-m",

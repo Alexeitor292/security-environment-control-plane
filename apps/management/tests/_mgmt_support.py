@@ -420,6 +420,10 @@ class FakeWorld:
         operator_image_digest: str = "",
         deployment_package_aggregate: str = "",
         ordinary_polls_operator_queue: bool = False,
+        # Three-valued containment verdict + bounded why. Default "" so every existing caller keeps
+        # its exact semantics (resolve_queue_containment derives from the boolean when unset).
+        ordinary_queue_containment: str = "",
+        ordinary_queue_containment_reason: str | None = None,
         package_trusted: bool = False,
         coherent: bool = True,
         restart_count: str = "0",
@@ -491,6 +495,8 @@ class FakeWorld:
         self.operator_image_digest = operator_image_digest
         self.deployment_package_aggregate = deployment_package_aggregate
         self.ordinary_polls_operator_queue = ordinary_polls_operator_queue
+        self.ordinary_queue_containment = ordinary_queue_containment
+        self.ordinary_queue_containment_reason = ordinary_queue_containment_reason
         self.package_trusted = package_trusted
         self.coherent = coherent
         self.restart_count = restart_count
@@ -773,6 +779,8 @@ class FakeObserver:
             commissioning_status=commissioning,
             deployment_status=deployment,
             generation_marker=marker,
+            ordinary_queue_containment=w.ordinary_queue_containment,
+            ordinary_queue_containment_reason=w.ordinary_queue_containment_reason,
         )
 
 

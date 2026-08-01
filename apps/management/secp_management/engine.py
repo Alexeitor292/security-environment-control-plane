@@ -41,6 +41,8 @@ from secp_commissioning.runtime import FileStat
 
 from secp_management import BOOTSTRAP_CONTRACT_VERSION, ManagementError
 from secp_management.adapters import (
+    CONTAINMENT_BREACHED,
+    CONTAINMENT_UNPROVABLE,
     BootstrapReceipt,
     CompensationResult,
     ControllerBootstrapAdapter,
@@ -63,6 +65,7 @@ from secp_management.adapters import (
     WorkerObservation,
     controller_generation_marker,
     is_generation_marker,
+    resolve_queue_containment,
     worker_generation_marker,
 )
 from secp_management.controller_compose_validation import (
@@ -147,6 +150,7 @@ from secp_management.topology import (
     read_seals,
 )
 from secp_management.transaction import (
+    EXIT_CONTAINMENT_UNPROVABLE,
     EXIT_OK,
     EXIT_REFUSED,
     MODE_DRY_RUN,
@@ -929,8 +933,15 @@ def _worker_end_state_reason(obs: WorkerObservation, exp: _ExpectedWorker) -> st
         return "worker_operator_unit_mismatch"
     if obs.deployment_package_aggregate != exp.deployment_aggregate:
         return "worker_deployment_package_mismatch"
-    if obs.ordinary_polls_operator_queue:
+    # Containment is THREE-valued. Both non-contained verdicts refuse (fail closed, unchanged), but
+    # they are different facts and an operator must be able to act on the difference: one says the
+    # worker was observed polling the controlled-live queue, the other says the probe never
+    # completed and NOTHING was observed either way.
+    containment = resolve_queue_containment(obs)
+    if containment == CONTAINMENT_BREACHED:
         return "worker_ordinary_polls_operator_queue"
+    if containment == CONTAINMENT_UNPROVABLE:
+        return "worker_ordinary_queue_containment_unprovable"
     if not obs.package_trusted:
         return "worker_operator_package_untrusted"
     if obs.commissioning_status != "prepared":
@@ -3199,6 +3210,18 @@ def _verify_installed_documents(
     return None
 
 
+#: Refusal reason -> its own stable exit code. ADDITIVE: any reason not listed keeps EXIT_REFUSED,
+#: so no existing refusal changes what it exits with.
+_REFUSAL_EXIT_CODES: dict[str, int] = {
+    "worker_ordinary_queue_containment_unprovable": EXIT_CONTAINMENT_UNPROVABLE,
+}
+
+
+def _refusal_exit_code(reason: str | None) -> int:
+    """The exit code for a refusal. Never ``EXIT_OK`` — every branch here is a refusal."""
+    return _REFUSAL_EXIT_CODES.get(reason or "", EXIT_REFUSED)
+
+
 def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
     role = Role.WORKER
     seals = read_seals()
@@ -3268,7 +3291,16 @@ def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
             and obs.deployment_package_aggregate == exp.deployment_aggregate
         ),
         "ordinary_queue": ORDINARY_TASK_QUEUE,
+        # Kept, fail-closed and unchanged: True ONLY on a positive proof of containment. It stays
+        # False for an unfinished probe, so no existing consumer becomes more permissive.
         "no_operator_queue_polling": bool(obs and not obs.ordinary_polls_operator_queue),
+        # The honest verdict alongside it. "unprovable" means the probe did not complete and
+        # nothing was observed about the queues — NOT that a breach was seen.
+        "queue_containment": resolve_queue_containment(obs) if obs else CONTAINMENT_UNPROVABLE,
+        # Bounded reason naming WHY containment could not be established; None otherwise.
+        "queue_containment_reason": (
+            obs.ordinary_queue_containment_reason if obs else "worker_not_observed"
+        ),
         "operator_package_trust": bool(obs and obs.package_trusted),
         "operator_service_present": bool(obs and obs.operator_present),
         "operator_disabled": obs is not None and not obs.operator_enabled,
@@ -3287,7 +3319,7 @@ def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
         and record is not None
         and obs is not None
     )
-    return (EXIT_OK if ok else EXIT_REFUSED), {
+    return (EXIT_OK if ok else _refusal_exit_code(drift)), {
         "command": "status",
         "role": "worker",
         "ok": ok,
