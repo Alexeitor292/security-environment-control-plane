@@ -1,0 +1,312 @@
+/* Worker enrollment surface. Semantic tokens only — never a raw --secp-* primitive.
+   Text never uses --ink-muted (3.1:1, below WCAG AA); it is decorative only. */
+
+.wenr {
+  display: grid;
+  /* minmax(0, 1fr), not the implicit `auto`: a grid item's automatic minimum size is its
+     MIN-CONTENT width, so the widest thing on the page — the data table, or a 64-hex digest —
+     pushes this column wider than the viewport and the whole document scrolls sideways instead
+     of the table scrolling inside its own region. Measured at a 560px viewport, not assumed:
+     before this, .wenr reported scrollWidth 767 against clientWidth 497. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+
+/* Same reason, one level down: each card is itself a container for a table or a long digest, so
+   it needs to be allowed to shrink below its own min-content rather than propagate it upward. */
+.wenr > * {
+  min-width: 0;
+}
+
+.wenr-head h1 {
+  margin: 0 0 6px;
+}
+.wenr-intro {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+  max-width: 92ch;
+}
+
+.wenr-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 1050px) {
+  .wenr-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.wenr-form {
+  display: grid;
+  gap: 10px;
+}
+.wenr-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+/* The reason a control is unavailable, sat next to it. Secondary ink, not muted. */
+.wenr-reason {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  margin: 0;
+}
+
+/* ---- hand-off ------------------------------------------------------------ */
+
+.wenr-handoff {
+  display: grid;
+  gap: 10px;
+}
+.wenr-handoff__block {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface-well);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--ink-primary);
+  /* Long digests must scroll inside the block, never widen the page. */
+  overflow-x: auto;
+  white-space: pre;
+}
+.wenr-handoff__region {
+  display: grid;
+  gap: 10px;
+}
+/* The region is always present so aria-controls resolves; `hidden` must still win over the
+   display above, which the UA sheet's [hidden] rule would otherwise lose to. */
+.wenr-handoff__region[hidden] {
+  display: none;
+}
+.wenr-handoff__meta {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+/* ---- status -------------------------------------------------------------- */
+
+.wenr-status__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.wenr-status__head h3 {
+  margin: 0;
+}
+.wenr-expiry {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+.wenr-expiry--expired {
+  color: var(--tone-danger-ink);
+}
+
+.wenr-rail {
+  margin-top: 12px;
+}
+
+/* Focus lands here when the invitation card unmounts, so the landing point has to be visible
+   even though the element is not otherwise interactive. */
+.wenr-dismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* CyberTable's scroll region is keyboard-focusable but is not in ui.css's shared focus-ring
+   list, so it alone falls back to the UA default outline while every other control on this page
+   shows the app ring — measured in a browser, not inferred. Scoped to this page rather than
+   fixed in ui.css, which is shared with every other surface in the app. */
+.wenr .ui-table-wrap:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Every identifier on this surface is a content address: "sha256:" plus 64 hex is a single
+   unbreakable token wider than any phone, so a key/value row holding one widened the whole page.
+   Measured at a 560px viewport — the row reported 507px inside a 463px column. Scoped here rather
+   than fixed in ui.css, which is shared with surfaces whose values are short. */
+.wenr .ui-kv__row .mono {
+  overflow-wrap: anywhere;
+}
+
+.wenr-subhead {
+  margin: 14px 0 6px;
+  font-size: var(--text-base);
+  color: var(--ink-primary);
+}
+
+/* ---- scope disclosure ---------------------------------------------------- */
+
+.wenr-scope {
+  padding: 10px 12px;
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--border-divider);
+  border-radius: var(--radius-md);
+}
+.wenr-scope > summary {
+  cursor: pointer;
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+/* Native <summary> focus is easy to lose against the panel; give it the shared ring. */
+.wenr-scope > summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+.wenr-scope__list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.wenr-scope__item {
+  display: grid;
+  grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: 2px 12px;
+  padding: 8px 10px;
+  border: var(--border-width) solid var(--border-divider);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+.wenr-scope__item--yes {
+  border-left-color: var(--tone-ok);
+}
+.wenr-scope__item--no {
+  border-left-color: var(--tone-warn);
+}
+/* The verdict is a word, never a colour alone. */
+.wenr-scope__verdict {
+  grid-row: 1 / span 2;
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+.wenr-scope__label {
+  color: var(--ink-primary);
+}
+.wenr-scope__detail {
+  color: var(--ink-secondary);
+}
+@media (max-width: 640px) {
+  .wenr-scope__item {
+    grid-template-columns: 1fr;
+  }
+  .wenr-scope__verdict {
+    grid-row: auto;
+  }
+}
+
+/* ---- out-of-band verification -------------------------------------------- */
+
+.wenr-verify {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.wenr-verify__item {
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  background: var(--surface-well);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+.wenr-verify__label {
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+.wenr-verify__value {
+  color: var(--ink-primary);
+  font-family: var(--font-mono);
+  /* A 64-hex anchor must wrap inside its row rather than widen the card. */
+  overflow-wrap: anywhere;
+}
+.wenr-verify__proves {
+  color: var(--ink-secondary);
+}
+
+/* ---- evidence ------------------------------------------------------------ */
+
+.wenr-evidence {
+  display: grid;
+  gap: 8px;
+}
+.wenr-evidence__label,
+.wenr-evidence__proves,
+.wenr-evidence__value {
+  display: block;
+}
+.wenr-evidence__label {
+  color: var(--ink-primary);
+  font-weight: var(--weight-semibold);
+}
+.wenr-evidence__proves {
+  color: var(--ink-secondary);
+}
+.wenr-evidence__value {
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  color: var(--ink-primary);
+  overflow-wrap: anywhere;
+}
+
+/* ---- recovery ------------------------------------------------------------ */
+
+.wenr-recovery {
+  margin-bottom: 10px;
+}
+.wenr-recovery__body {
+  margin: 4px 0 0;
+}
+.wenr-recovery__steps {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+/* ---- tab-local working set ----------------------------------------------- */
+
+.wenr-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+.wenr-revision,
+.wenr-unknown {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+}
+/* Past-expiry is spelled out, not signalled by colour alone. */
+.wenr-past-expiry {
+  display: block;
+  margin-top: 3px;
+  color: var(--tone-danger-ink);
+  font-size: var(--text-sm);
+  /* Inside a horizontally scrolling table the expiry column collapses hard on a phone, and this
+     sentence rendered one character per line — legible in principle, unreadable in practice.
+     The table already scrolls sideways, so the note gets a readable minimum rather than being
+     allowed to shrink to nothing. Measured at a 560px viewport. */
+  min-width: 24ch;
+}
