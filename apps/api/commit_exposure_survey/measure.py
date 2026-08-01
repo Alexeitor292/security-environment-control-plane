@@ -9,9 +9,20 @@ running them over a real TCP socket and comparing two timestamps taken from the 
 * when the session that carried the request's writes actually committed (SQLAlchemy session events).
 
 If the writing commit lands *after* the response, the client can hold a 2xx for a row no other
-connection can yet read. That ordering is engine-independent, which is why it is measured here on
-SQLite; the *consequence* — a follow-up read seeing nothing — is PostgreSQL-specific and is proven
-separately by the socket gate on ``feature/secp-api-socket-gate``.
+connection can yet read. That ordering is engine-independent, which is why measuring it on SQLite
+is sound.
+
+An earlier version of this docstring added that "the *consequence* — a follow-up read seeing
+nothing — is PostgreSQL-specific". **That is now known to be false and has been withdrawn.** It
+rested on the same unmeasured claim that SQLite's write lock serialises the race away; it does not
+(the lock serialises *writers*, not a reader against an uncommitted writer). Measured since: the
+socket gate's own body reproduces the violation on SQLite **110/110 with 0 inconclusive** across 50
+serial and 60 four-way-concurrent runs, and the enrollment revoke path shows 40/40 stale reads at a
+widened window with reader latency p50 0.0 ms against a 200 ms hold.
+
+This strengthens rather than weakens the survey: the ordering it measures was always the
+engine-independent part, and the consequence is now known to follow on both engines rather than
+only on the one this instrument does not use.
 
 Two details decide whether this instrument tells the truth:
 
