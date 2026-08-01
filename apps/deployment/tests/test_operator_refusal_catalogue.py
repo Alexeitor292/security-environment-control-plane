@@ -12,14 +12,14 @@ closable when it is not. Two complementary guards keep it honest:
 Scope, stated plainly rather than implied, and MEASURED rather than estimated — the numbers below
 are asserted by :func:`test_the_scan_coverage_is_exactly_what_this_docstring_claims`, so they
 cannot rot into decoration. The scan recognises five syntactic shapes across the two source files
-and covers **27 of the 99** catalogued codes: 26 in ``verify.py``, and exactly one —
+and covers **27 of the 101** catalogued codes: 26 in ``verify.py``, and exactly one —
 ``operator_consumer_active`` — in ``queue_check.py``.
 
 The ratio keeps getting WORSE as the catalogue grows, and that is the honest signal: every code
 added so far has been raised in a module the scan does not read. Read the coverage as "this scan
 guards one corner", never as "the catalogue is guarded".
 
-Of the other 72, measured by asking whether the literal appears in each module outside the
+Of the other 74, measured by asking whether the literal appears in each module outside the
 catalogue block itself:
 
 * **23 appear in ``verify.py``** in shapes no pattern matches: inline positional arguments to
@@ -36,15 +36,19 @@ catalogue block itself:
   ``operator_consumer_unobservable`` as an ``x or "literal"`` fallback; ``submission_stop_open`` as
   a conditional dict-literal value; and ``submission_stop_unobservable`` reached through the
   ``STOP_UNOBSERVABLE`` module constant.
-* **44 are raised elsewhere** — ``identities.py``, ``profile.py``, ``manifest.py``,
+* **46 are raised elsewhere** — ``identities.py``, ``profile.py``, ``manifest.py``,
   ``compositions.py``, ``runtime_seams.py``, ``cli.py``, ``production_context.py``, ``runner.py``
   and ``secp_worker``. This bucket includes the four POSIX/backend refusals surfaced by the CLI's
   bounded guard and the nine ``expected_identities_*`` codes the pins reader raises — exactly the
   sort of addition a scan over two files cannot see. The pins codes have their own targeted guard
   in ``test_operator_release_provenance.py``, which scans ``identities.py`` directly, because they
-  reach an operator through ``provenance`` and were uncatalogued until measured.
+  reach an operator through ``provenance`` and were uncatalogued until measured. The two most
+  recent members are the queue-anchor refusals
+  (``expected_ordinary_queue_not_worker_queue``, ``expected_operator_queue_not_distinct``), also
+  raised from ``identities.py`` and guarded in ``test_operator_worker_queue_binding.py`` — another
+  instance of the same pattern, and the reason this bucket is the one that keeps growing.
 
-This 23/5/44 split is re-measured on every run by
+This 23/5/46 split is re-measured on every run by
 :func:`test_the_blind_spot_breakdown_is_re_measured_not_remembered`, so the prose above cannot
 quietly stop describing the code.
 
@@ -89,9 +93,9 @@ _PKG = pathlib.Path(__file__).resolve().parents[1] / "secp_operator_deployment"
 _SCANNED_SOURCES = (_PKG / "verify.py", _PKG / "queue_check.py")
 
 # The measured coverage the module docstring states. Asserted below so the prose cannot drift.
-_EXPECTED_COVERAGE = (27, 99)
+_EXPECTED_COVERAGE = (27, 101)
 # The measured blind-spot split: (in verify.py, in queue_check.py only, elsewhere).
-_EXPECTED_BLIND_SPOTS = (23, 5, 44)
+_EXPECTED_BLIND_SPOTS = (23, 5, 46)
 
 # The exact shapes a bounded reason code is produced in inside the scanned sources.
 _REFUSAL_PATTERNS = (
