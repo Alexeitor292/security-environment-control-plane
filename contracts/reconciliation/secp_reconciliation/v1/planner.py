@@ -49,6 +49,7 @@ from secp_reconciliation.v1.state import (
     desired_state_digest,
     observed_state_digest,
     require_verified,
+    scope_digest,
     verify_inputs,
 )
 
@@ -95,6 +96,7 @@ class ReconciliationPlan:
     disposition: PlanDisposition
     actions: tuple[PlannedAction, ...]
     deferred: tuple[DeferredElement, ...]
+    scope_digest: str
     desired_digest: str
     observed_digest: str
     report_digest: str
@@ -120,6 +122,7 @@ def _plan_document(
     disposition: PlanDisposition,
     actions: tuple[PlannedAction, ...],
     deferred: tuple[DeferredElement, ...],
+    scope_digest: str,
     desired_digest: str,
     observed_digest: str,
     report_digest: str,
@@ -138,10 +141,65 @@ def _plan_document(
             for action in actions
         ],
         "deferred": [[item.element_kind.value, item.reason.value] for item in deferred],
+        "scope_digest": scope_digest,
         "desired_digest": desired_digest,
         "observed_digest": observed_digest,
         "report_digest": report_digest,
     }
+
+
+def plan_digest_of(plan: ReconciliationPlan) -> str:
+    """Recompute a plan's content address from the plan's own fields.
+
+    The plan carries its digest, so a consumer can recompute it and find out whether the two still
+    agree. Note precisely what that establishes and what it does not: it binds *contents to digest*,
+    so a plan mutated after planning — in transit, or by a caller that edited a field — no longer
+    verifies. It is not a signature. Anyone able to construct a plan can also compute a matching
+    digest, so this does not authenticate the producer; the reset intent is the authorization layer,
+    and a trust root would be a separate decision this contract does not make.
+    """
+    return document_digest(
+        RECONCILIATION_PLAN_SCHEMA_VERSION,
+        _plan_document(
+            instance_id=plan.instance_id,
+            execution_surface=plan.execution_surface,
+            disposition=plan.disposition,
+            actions=plan.actions,
+            deferred=plan.deferred,
+            scope_digest=plan.scope_digest,
+            desired_digest=plan.desired_digest,
+            observed_digest=plan.observed_digest,
+            report_digest=plan.report_digest,
+        ),
+    )
+
+
+def require_plan_integrity(plan: ReconciliationPlan) -> None:
+    """Refuse a plan whose contents no longer match its own digest.
+
+    Every consumer that *acts* on a plan calls this first. Without it the planner's refusal
+    boundaries guard only the planner: a plan tampered after `plan_reconciliation` returned keeps
+    its original digest, and an executor that trusts that digest applies actions nobody planned
+    while emitting evidence that attests to the original plan.
+    """
+    if plan_digest_of(plan) != plan.plan_digest:
+        raise ReconciliationRefused(RefusalCode.plan_integrity_invalid)
+
+
+def require_planned_under(plan: ReconciliationPlan, scope: ReconciliationScope) -> None:
+    """Refuse a plan that was not planned under the scope now being presented.
+
+    The plan binds the digest of the scope that authorized it, so execution can check that the
+    scope it was handed is that same scope rather than a laxer one substituted afterwards — and
+    can then re-apply the scope's own limits itself instead of trusting that the planner did.
+    """
+    require_plan_integrity(plan)
+    if plan.scope_digest != scope_digest(scope):
+        raise ReconciliationRefused(RefusalCode.scope_mismatch)
+    if scope.execution_surface != plan.execution_surface:
+        raise ReconciliationRefused(RefusalCode.scope_mismatch)
+    if len(plan.actions) > scope.max_actions:
+        raise ReconciliationRefused(RefusalCode.change_budget_exceeded)
 
 
 def plan_reconciliation(pair: VerifiedStatePair, report: DriftReport) -> ReconciliationPlan:
@@ -204,12 +262,14 @@ def plan_reconciliation(pair: VerifiedStatePair, report: DriftReport) -> Reconci
     else:
         disposition = PlanDisposition.converged
 
+    authorizing_scope_digest = scope_digest(pair.scope)
     document = _plan_document(
         instance_id=pair.scope.instance_id,
         execution_surface=pair.scope.execution_surface,
         disposition=disposition,
         actions=actions,
         deferred=ordered_deferred,
+        scope_digest=authorizing_scope_digest,
         desired_digest=desired_digest,
         observed_digest=observed_digest,
         report_digest=report.report_digest,
@@ -221,6 +281,7 @@ def plan_reconciliation(pair: VerifiedStatePair, report: DriftReport) -> Reconci
         disposition=disposition,
         actions=actions,
         deferred=ordered_deferred,
+        scope_digest=authorizing_scope_digest,
         desired_digest=desired_digest,
         observed_digest=observed_digest,
         report_digest=report.report_digest,
