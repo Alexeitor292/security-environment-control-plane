@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 
 import pytest
+from secp_management.topology import WORKER_CONTAINER_INTERPRETER
 
 _HAVE_DOCKER = shutil.which("docker") is not None
 _HAVE_SYSTEMCTL = shutil.which("systemctl") is not None
@@ -42,11 +43,18 @@ _OPERATOR_UNIT = "secp-operator-worker.service"  # must equal topology.OPERATOR_
 _LOAD_IMAGE = "hello-world:latest"  # tiny disposable image for the load/digest-verify proof
 _BASE_IMAGE = "busybox:latest"  # disposable base for the observable ordinary container
 
-# A fake `/usr/bin/python3` mirroring the REAL secp_worker.health exec contract
+# A fake interpreter mirroring the REAL secp_worker.health exec contract
 # (`python3 -m secp_worker.health <check|queues>`): check -> exit 0 when ready; queues -> print
 # the recorded ordinary task queue (one per line), exit 0.  See apps/worker/secp_worker/health.py;
 # the real contract is proven hermetically in test_worker_health.py.  Lets a stock busybox
 # container satisfy the observer's health/queue probes without a bespoke image build.
+#
+# MOUNTED AT topology.WORKER_CONTAINER_INTERPRETER, never at a literal path.  This fixture
+# MANUFACTURES the interpreter inside a busybox container -- it does not load the real worker
+# image -- so it can prove the adapter's exec MECHANICS but can NEVER be evidence that the real
+# image provides that path.  Binding the mount to the constant keeps it from vouching for a path
+# the code no longer names; whether the shipped image actually has it is measured by
+# tests/test_health_command_interpreter.py's opt-in container probe, not here.
 _FAKE_PY3 = """#!/bin/sh
 for a in "$@"; do last="$a"; done
 case "$last" in
@@ -269,7 +277,7 @@ def _run_ordinary(script_dir: str) -> None:
         "--name",
         _ORDINARY,
         "-v",
-        f"{py3}:/usr/bin/python3:ro",
+        f"{py3}:{WORKER_CONTAINER_INTERPRETER}:ro",
         _BASE_IMAGE,
         "sleep",
         "100000",

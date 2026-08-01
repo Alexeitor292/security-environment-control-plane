@@ -15,31 +15,23 @@ from dataclasses import dataclass
 ORDINARY_TASK_QUEUE = "secp-orchestration"
 OPERATOR_TASK_QUEUE = "secp-controlled-live-v1"
 
-# Interpreter paths. TWO constants, because there are TWO execution contexts and they are NOT the
-# same machine. They were previously the same literal for unrelated reasons, which is the shape a
-# well-meant "fix one, fix them all" edit turns into a defect.
-#
-# Both stay ABSOLUTE and are never resolved from PATH. That is a reviewed property, not an
-# oversight: an argv whose executable is looked up at run time is hijackable by whatever PATH the
-# unit or container inherits. ``profile.py::_v_health`` enforces it independently
-# ("health command executable must be an absolute POSIX path"), so "just call python3" is not
-# available here even if it were desirable.
-
-#: Inside the ORDINARY WORKER CONTAINER, which ``real_adapters`` reaches with
+#: The interpreter INSIDE THE ORDINARY WORKER CONTAINER, which ``real_adapters`` reaches with
 #: ``docker exec <container> <argv>``. The image is built by ``infra/dev/Dockerfile.python`` from
-#: ``python:3.11-slim``, whose interpreter lives under ``/usr/local``. It provides NO
-#: ``/usr/bin/python3``: the slim Debian base ships no system interpreter and the official image
-#: installs its own into ``/usr/local`` (default ``configure`` prefix) and symlinks only within
-#: ``/usr/local/bin``. Bound to the base image by
-#: ``tests/test_health_command_interpreter.py``, so changing the ``FROM`` line fails loudly here
-#: instead of silently breaking the health probe on a real host.
+#: ``python:3.11-slim``, whose interpreter lives under ``/usr/local`` (the official image builds
+#: CPython with the default ``configure`` prefix and symlinks only within ``/usr/local/bin``).
+#: Bound to that base image by ``tests/test_health_command_interpreter.py``, so changing the
+#: ``FROM`` line fails loudly here instead of silently breaking the probe on a real host.
+#:
+#: This is the CONTAINER's interpreter only. The management HOST has its own at
+#: ``/usr/bin/python3`` (see ``BROKER_ENTRYPOINT`` below) and the two must not be unified: the host
+#: is not the container. They once held the same literal for unrelated reasons, which is the shape
+#: a well-meant "fix one, fix them all" edit turns into a defect.
+#:
+#: ABSOLUTE, never resolved from PATH — a reviewed property, not an oversight: an argv whose
+#: executable is looked up at run time is hijackable by whatever PATH the unit or container
+#: inherits. ``profile.py::_v_health`` enforces the same independently ("health command executable
+#: must be an absolute POSIX path").
 WORKER_CONTAINER_INTERPRETER = "/usr/local/bin/python3"
-
-#: On the MANAGEMENT HOST, where the root-gated systemd unit runs. This is an ordinary Debian/Ubuntu
-#: host with a distro-packaged interpreter at ``/usr/bin/python3``. Deliberately NOT bound to the
-#: worker image: the host is not the container, and binding them would be a fresh defect wearing
-#: the shape of a consistency fix.
-MANAGEMENT_HOST_INTERPRETER = "/usr/bin/python3"
 
 # Worker topology identities (mirror the PR5D reviewed documentation values).
 OPERATOR_SERVICE_NAME = "secp-operator-worker.service"
@@ -83,15 +75,16 @@ CONTROLLER_MIGRATION_ARGV: tuple[str, ...] = ("alembic", "upgrade", "head")
 OPERATOR_ENTRYPOINT: tuple[str, ...] = ("/opt/secp/operator/bin/entrypoint",)
 CONTROLLER_STACK_ENTRYPOINT: tuple[str, ...] = ("/opt/secp/controller/bin/stack-supervisor",)
 # The fixed root-gated enrollment-signer broker entrypoint (SECP-PR5H-B2, 2b-3b-iii): an absolute
-# ``python -m`` invocation of the code-owned serve module. It shares ORDINARY_HEALTH_COMMAND's
-# absolute-interpreter CONVENTION but deliberately NOT its PATH — this unit runs on the management
-# HOST, that argv runs inside the worker CONTAINER, and the two interpreters live in different
-# places. They were once the same literal, which read as a shared value rather than as a
-# coincidence; do not re-unify them.
-# It takes NO argument — the socket, key, credential, DB role and peer policy are all code
-# constants — so a rendered unit can never point the broker at another socket/key/role/DSN.
+# ``python -m`` invocation of the code-owned serve module (mirrors ORDINARY_HEALTH_COMMAND's
+# absolute
+# python convention). It takes NO argument — the socket, key, credential, DB role and peer policy
+# are
+# all code constants — so a rendered unit can never point the broker at another socket/key/role/DSN.
+# NOTE: this runs on the management HOST, where /usr/bin/python3 is correct. It is deliberately NOT
+# the worker container's interpreter (see WORKER_CONTAINER_INTERPRETER above) and must not be
+# "unified" with it — the convention is shared, the path is not.
 BROKER_ENTRYPOINT: tuple[str, ...] = (
-    MANAGEMENT_HOST_INTERPRETER,
+    "/usr/bin/python3",
     "-m",
     "secp_management.enrollment_signer_broker_serve",
 )

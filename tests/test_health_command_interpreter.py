@@ -14,6 +14,20 @@ interpreter could have been any string at all and the suite stayed green. Redund
 incidental rather than structural is not coverage, and that measurement is what proves it here
 rather than asserting it.
 
+A THIRD agreeing site is why real-Docker CI was green: ``test_management_real_adapters_root.py``
+drives the real observer against a real daemon, but from a ``busybox`` base with a fake interpreter
+BIND-MOUNTED in. The only suite with the authority to catch this manufactured the very precondition
+whose absence is the defect, and never loaded the real worker image. See
+:func:`test_the_root_fixture_cannot_vouch_for_a_path_the_code_no_longer_names`.
+
+WHY THIS IS SECURITY-RELEVANT, NOT COSMETIC
+-------------------------------------------
+The same argv drives ``real_adapters._polls_operator_queue``, which is FAIL-CLOSED: it returns
+``True`` — "assume a breach" — on any exec error. An unresolvable interpreter therefore does not
+merely block an install; it MANUFACTURES a false operator-queue containment breach, i.e. a false
+report against the exact isolation property this program exists to guarantee. The blast radius is a
+security signal, not a failed health check.
+
 THE LIMIT OF THIS GUARD, STATED PLAINLY
 ---------------------------------------
 The default gate binds the constant to the image's published BUILD RECIPE — the ``FROM`` line plus
@@ -29,12 +43,14 @@ What the default gate *does* guarantee is the part that actually rots: the const
 drift from the base image silently. Change the ``FROM`` line to something whose interpreter lives
 elsewhere and this fails loudly.
 
-WHY THERE ARE TWO INTERPRETER CONSTANTS
----------------------------------------
+WHAT IS DELIBERATELY OUT OF SCOPE
+--------------------------------
 ``BROKER_ENTRYPOINT`` runs on the management HOST under systemd, where ``/usr/bin/python3`` is
-correct. It was previously the SAME literal as the container's, for unrelated reasons. That is the
-shape in which a well-meant "make all three consistent" edit becomes a defect, so the two are now
-separate named constants and this guard asserts they stay separate.
+correct, and it is NOT changed. It held the same literal as the container's for unrelated reasons —
+it shares the absolute-interpreter CONVENTION, not the defect. "Fixing" it for consistency would
+have broken working, security-sensitive code, so the boundary is pinned as its own assertion in
+:func:`test_the_broker_entrypoint_is_out_of_scope_and_stays_unchanged` and the finding cannot be
+read wider than it was measured.
 """
 
 from __future__ import annotations
@@ -49,7 +65,6 @@ import subprocess
 import pytest
 from secp_management.topology import (
     BROKER_ENTRYPOINT,
-    MANAGEMENT_HOST_INTERPRETER,
     ORDINARY_HEALTH_COMMAND,
     WORKER_CONTAINER_INTERPRETER,
 )
@@ -159,20 +174,20 @@ def test_the_deployment_profile_fixture_agrees_with_the_code_constant() -> None:
 # ------------------------------------------------------- the host interpreter is a DIFFERENT thing
 
 
-def test_the_host_and_container_interpreters_are_separate_and_stay_separate() -> None:
-    """They differ today. The point is that they are declared separately and for stated reasons.
+def test_the_broker_entrypoint_is_out_of_scope_and_stays_unchanged() -> None:
+    """``BROKER_ENTRYPOINT`` is CORRECT code and is deliberately NOT part of this fix.
 
-    If a future base image did put the interpreter at ``/usr/bin/python3``, the two constants would
-    hold equal strings — which is fine. What must not happen is the two USES collapsing into one
-    constant, so the assertions are about the broker reading the HOST constant, not about the two
-    strings differing.
+    It is an ``ExecStart=`` in a host systemd unit, and a Debian/Ubuntu host does provide
+    ``/usr/bin/python3``. It shares the container argv's absolute-interpreter CONVENTION, not its
+    defect. Pinned here so the finding cannot later be read wider than it was measured — a change
+    that "consistently" moved this one to the container's interpreter would break a working,
+    security-sensitive host entrypoint, which is the failure direction nobody re-checks.
+
+    NOTE: the acceptance stream also pins this boundary. One of the two should ship; see the PR
+    body for which.
     """
-    assert BROKER_ENTRYPOINT[0] == MANAGEMENT_HOST_INTERPRETER
-    assert ORDINARY_HEALTH_COMMAND[0] == WORKER_CONTAINER_INTERPRETER
-    # The broker must not be bound to the worker image's interpreter, whatever that image becomes.
-    assert BROKER_ENTRYPOINT[0] != WORKER_CONTAINER_INTERPRETER or (
-        MANAGEMENT_HOST_INTERPRETER == WORKER_CONTAINER_INTERPRETER
-    )
+    assert BROKER_ENTRYPOINT[0] == "/usr/bin/python3"
+    assert BROKER_ENTRYPOINT[0] != WORKER_CONTAINER_INTERPRETER
 
 
 def test_both_interpreters_are_absolute_so_neither_is_resolved_from_path() -> None:
@@ -181,9 +196,34 @@ def test_both_interpreters_are_absolute_so_neither_is_resolved_from_path() -> No
     ``profile.py::_v_health`` enforces this for the profile; asserted here for the code constants
     so the property holds on both sides of that boundary.
     """
-    for interpreter in (WORKER_CONTAINER_INTERPRETER, MANAGEMENT_HOST_INTERPRETER):
+    for interpreter in (WORKER_CONTAINER_INTERPRETER, BROKER_ENTRYPOINT[0]):
         assert interpreter.startswith("/"), interpreter
         assert "//" not in interpreter and ".." not in interpreter
+
+
+def test_the_root_fixture_cannot_vouch_for_a_path_the_code_no_longer_names() -> None:
+    """The one suite with the authority to catch this MANUFACTURES the precondition.
+
+    ``test_management_real_adapters_root.py`` runs the real observer against a real Docker daemon,
+    but it builds the container from ``busybox`` and bind-mounts a fake interpreter INTO it — it
+    never loads the real worker image. So it proves exec mechanics and can never be evidence that
+    the shipped image provides the path.
+
+    That fixture is root-gated (``skipif``) and therefore invisible to every local run, while its
+    CI job fails closed on any skip. A mount left at a literal ``/usr/bin/python3`` would have gone
+    red in root CI only. Keyed on the mount expression's CONTENT so a comment mentioning the
+    constant cannot satisfy it.
+    """
+    source = (
+        REPO / "apps" / "management" / "tests" / "test_management_real_adapters_root.py"
+    ).read_text(encoding="utf-8")
+    assert "{py3}:{WORKER_CONTAINER_INTERPRETER}:ro" in source, (
+        "the root fixture no longer binds its bind-mount to WORKER_CONTAINER_INTERPRETER; it can "
+        "again vouch for an interpreter path the code does not name"
+    )
+    assert ":/usr/bin/python3:ro" not in source, (
+        "the root fixture mounts a hardcoded /usr/bin/python3 again"
+    )
 
 
 # --------------------------------------------------------------------------- discriminating power
