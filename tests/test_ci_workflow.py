@@ -708,3 +708,110 @@ def test_python_image_smoke_is_fail_closed_on_skip_or_failure(wf):
     assert "tests < 5" in run
     assert "skipped != 0" in run
     assert "failures != 0" in run
+
+
+# --- the optional `worker` extra must be installed where the shared corpus EXECUTES -------------
+#
+# `temporalio` is declared only in the `worker` extra (pyproject.toml). Every install site in the
+# workflow used `.[dev]`, so seven tests reached `pytest.importorskip("temporalio")` and SKIPPED in
+# CI while passing on any developer machine -- among them a fail-closed worker guard and the
+# regression for a startup-fatal import bug. The shard jobs have no no-skip enforcement, so nothing
+# surfaced it. These proofs stop the extra being dropped again in silence.
+#
+# SEVEN, counted rather than estimated: `test_temporal_sandbox_validation.py` gates 1 test at its
+# own `importorskip`, `test_worker_fail_closed.py` gates 2 (two separate test bodies), and
+# `test_worker_readiness_timing.py` gates 4 (one `importorskip` in the shared `_install_common`
+# helper, which four of its five tests call). Six sites in this file and in ci.yml previously said
+# "eight" against ci.yml's own "seven"; the JUnit from a run without the extra reports exactly 7
+# skips whose reason is `could not import 'temporalio'`, and no other module gates on it.
+
+WORKER_EXTRA_TESTS = (
+    "apps/api/tests/test_temporal_sandbox_validation.py",
+    "apps/api/tests/test_worker_fail_closed.py",
+    "apps/api/tests/test_worker_readiness_timing.py",
+)
+
+
+def test_the_shard_job_installs_the_worker_extra(wf):
+    """The job that executes the shared corpus must have `temporalio` available."""
+    run = _run_text(_jobs(wf)["backend-pytest"])
+    assert '".[dev,worker]"' in run, (
+        "backend-pytest executes the shared corpus, so it must install the worker extra or the "
+        "temporalio-gated tests silently skip"
+    )
+
+
+def test_the_shard_job_proves_the_worker_extra_is_present(wf):
+    """Installing it is not enough: a revert to `.[dev]` must FAIL the job rather than restore the
+    skip. The import step is what makes that true."""
+    run = _run_text(_jobs(wf)["backend-pytest"])
+    assert "import temporalio" in run, (
+        "backend-pytest must prove temporalio is importable, otherwise dropping the extra silently "
+        "re-skips seven tests"
+    )
+
+
+def test_the_temporalio_gated_modules_are_in_the_authoritative_corpus(suite):
+    """The extra only helps if these modules are actually collected by the sharded corpus."""
+    assert "apps/api/tests" in suite["roots"]
+
+
+def test_the_worker_extra_is_not_quietly_added_everywhere(wf):
+    """The narrowest placement is deliberate: only the job that EXECUTES the corpus needs it.
+
+    Recorded as a test so the choice is visible if someone later widens it -- widening is not
+    forbidden, but it should be a decision rather than a drift."""
+    jobs = _jobs(wf)
+    with_extra = {name for name, job in jobs.items() if '".[dev,worker]"' in _run_text(job)}
+    assert with_extra == {"backend-pytest"}, (
+        f"the worker extra is installed in {sorted(with_extra)}; if that is intended, update this "
+        "test deliberately"
+    )
+
+
+# --- shard skip accounting: absence must not read as coverage ---------------------------------
+#
+# The shard jobs were the ONLY pytest jobs with no skip accounting. Every dedicated fence refuses a
+# skip outright, but the shards cannot -- ~80 tests are legitimately gated on POSIX/root/docker/
+# systemd a normal runner lacks -- so a genuinely missing dependency (`temporalio`) sat in the
+# corpus reading as coverage. The enforcement keys on the skip REASON, never on test identity.
+
+
+def _shard_enforcement(wf):
+    steps = [
+        s
+        for s in _steps(_jobs(wf)["backend-pytest"])
+        if "platform-gated" in str(s.get("name", "")) or "PLATFORM_GATED" in str(s.get("run", ""))
+    ]
+    assert len(steps) == 1, f"expected exactly one shard skip-accounting step, found {len(steps)}"
+    return steps[0]
+
+
+def test_the_shard_job_accounts_for_every_skip(wf):
+    step = _shard_enforcement(wf)
+    run = str(step["run"])
+    assert "sys.exit(1)" in run, "the skip accounting must fail the job, not merely report"
+    assert step.get("continue-on-error") in (None, False)
+    assert "if" not in step, "a conditional skip gate stops nothing"
+
+
+def test_the_shard_skip_accounting_keys_on_reason_not_on_test_names(wf):
+    """An enumerated allowlist of test names decays silently the moment a test is renamed. A
+    capability shape does not, and a newly added root-gated test needs no maintenance."""
+    run = str(_shard_enforcement(wf)["run"])
+    for capability in ("posix", "root", "docker", "systemctl", "systemd", "postgres"):
+        assert capability in run, f"the reason matcher must recognise {capability}"
+    # it must classify the message, not the identity
+    assert "message" in run and "classname" not in run.split("unexplained")[0]
+
+
+def test_the_shard_skip_accounting_is_not_vacuous(wf):
+    """A matcher broadened to accept everything would pass while checking nothing, so the step
+    proves in-process that it still discriminates: a known missing-dependency reason must be
+    refused and a known platform-gated reason accepted, or the step fails."""
+    run = str(_shard_enforcement(wf)["run"])
+    assert "MUST_REFUSE" in run and "MUST_ACCEPT" in run
+    assert "temporalio" in run, "the anti-vacuity sample must be the real defect it exists to catch"
+    assert "PLATFORM_GATED is empty" in run, "an empty pattern set must fail, not accept everything"
+    assert "no testcases at all" in run, "an empty corpus must fail rather than pass vacuously"
+    assert "missing" in run, "a missing report must fail rather than pass vacuously"
