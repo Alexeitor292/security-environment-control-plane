@@ -1,16 +1,30 @@
 """Operator authentication for secpctl controller enrollment commands (SECP-PR5H-B1, Phase 4).
 
 The controller invitation/status/revoke commands are operator-authenticated API operations over the
-existing OIDC bearer boundary. secpctl obtains the short-lived operator access token ONLY from a
-protected, operator-owned token FILE — never from a ``--token`` argument, a positional value, a URL,
-a JSON payload, or an environment variable carrying the token itself. The file location is named by
-a dedicated, validated authentication profile (an env var carrying the PATH, never the token); the
-token is read through hardened filesystem checks and attached solely as ``Authorization: Bearer`` on
-the pinned controller origin (never forwarded across a redirect — redirects are forbidden).
+existing OIDC bearer boundary. secpctl obtains the short-lived operator access token from the
+controller-scoped OS credential store, or from an explicitly configured protected operator-owned
+token FILE — never from a ``--token`` argument, positional value, URL, JSON payload, or environment
+variable carrying the token itself. The file location is named by a dedicated, validated
+authentication profile (an env var carrying the PATH, never the token); the token is read through
+hardened filesystem checks and attached solely as ``Authorization: Bearer`` on the pinned
+controller origin (never forwarded across a redirect — redirects are forbidden).
 
 The token never appears in a repr, exception, log, audit line, or serialized/deterministic-JSON
-output. The shipped default provider is SEALED (``secpctl_operator_auth_unavailable``). Interactive
-OIDC login / device-authorization and OS credential storage remain PR5H-B2 auth-UX work.
+output. The shipped default provider is SEALED (``secpctl_operator_auth_unavailable``).
+
+Interactive device-authorization login now lives in :mod:`secp_management.auth_cli` (ADR-028 §3),
+which obtains and verifies a token and then offers it to
+:mod:`secp_management.operator_credential_store`. That store now resolves a real OS keystore on
+Windows, macOS and Linux. Backend availability alone does not make login complete: production
+authenticated controller access is supported only from the trusted POSIX/controller-local posture,
+where bootstrap has provisioned the protected locator and reviewed CA bundle. In particular, the
+live-tested Windows Credential Manager backend is not a claim of production Windows controller
+trust; that requires a separate reviewed locator + CA provisioning workflow. The protected token
+FILE below stays a deliberate test/recovery seam reachable solely when an operator sets
+``SECP_OPERATOR_TOKEN_FILE``; it is never an automatic fallback from the credential store, and a
+store that cannot reach a keystore refuses rather than degrading to it. Logout attempts revocation
+for both a configured file token and the selected OS-store token, but never deletes or rewrites the
+user-managed file.
 """
 
 from __future__ import annotations
@@ -48,8 +62,13 @@ class _NonSerializable:
 
 class OperatorAccessToken(_NonSerializable):
     """Holds a short-lived operator OIDC access token IN MEMORY. It is never represented, logged,
-    serialized, or copied; it is exposed ONLY as the ``Authorization: Bearer`` header value the
-    pinned controller client attaches to a single request."""
+    serialized, or copied; it is exposed only through the two narrow, purpose-named accessors below
+    and by no general getter.
+
+    Each accessor names the ONE request it feeds, so widening this surface is a visible edit
+    rather than an incidental one — the same posture
+    :class:`~secp_management.device_grant.DeviceCode` takes with its own single accessor.
+    """
 
     __slots__ = ("_token",)
 
@@ -62,7 +81,17 @@ class OperatorAccessToken(_NonSerializable):
         return "OperatorAccessToken(<redacted>)"
 
     def authorization_header(self) -> str:
+        """The ``Authorization`` header value for one request to the pinned controller origin."""
         return f"Bearer {self._token}"
+
+    def revocation_request_value(self) -> str:
+        """The ``token`` form parameter for one RFC 7009 revocation request.
+
+        Revocation is the one exchange that carries the token in a request BODY rather than a
+        header, so it cannot reuse :meth:`authorization_header`. It exists solely for
+        ``secpctl auth logout`` and is deliberately not a general "give me the token" getter.
+        """
+        return self._token
 
 
 class OperatorAccessTokenProvider(Protocol):

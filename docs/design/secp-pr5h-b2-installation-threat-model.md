@@ -19,6 +19,12 @@ Companion to [ADR-028](../adr/ADR-028-supported-installation-auth-ui-acceptance.
 - **Controller host ↔ worker host.** Worker→controller is outbound HTTPS pinned to the invitation's CA/origin; no inbound path to the worker; no controller→worker push.
 - **CLI process ↔ OS credential store.** Tokens live in the OS keyring, not in argv/env/files-in-repo.
 
+For the MVP, the operator ↔ controller API boundary is production-supported only from the trusted
+POSIX, controller-local management posture, where bootstrap records the fixed root-owned controller
+locator and reviewed CA-bundle path. A live Windows Credential Manager round trip proves only the
+credential backend. It does not establish Windows controller trust, and no Windows end-to-end
+production-support claim is made without a separately reviewed locator + CA provisioning workflow.
+
 ## Threats & mitigations
 
 | # | Threat | Mitigation (this PR) |
@@ -38,4 +44,4 @@ Companion to [ADR-028](../adr/ADR-028-supported-installation-auth-ui-acceptance.
 
 ## Residual / out of scope
 
-Provider/cloud/Kubernetes mutation, OpenTofu, operator activation, controlled-live submission, PR6, and remote root SSH remain unreachable by construction (guarded); this PR adds no path to them. Secrets-at-rest hardening of the OS keyring backend itself is delegated to the platform. Network-level MITM is mitigated by CA-pinned TLS (PR5H-B1) and is not re-litigated here.
+Provider/cloud/Kubernetes mutation, OpenTofu, operator activation, controlled-live submission, PR6, and remote root SSH remain unreachable by construction (guarded); this PR adds no path to them. Secrets-at-rest hardening of the OS keyring backend itself is delegated to the platform. Network-level MITM is mitigated by CA-pinned TLS (PR5H-B1) in the supported POSIX/controller-local posture and is not re-litigated here. Provisioning and protecting an equivalent locator + CA trust source on Windows is explicitly deferred to a separate review; no user-selected CA path, controller URL, issuer or trust override substitutes for it.

@@ -388,32 +388,12 @@ def test_the_dry_run_shows_the_fingerprint_before_the_worker_commits(tmp_path):
     )
 
 
-# --- the backend contract this branch owns, and the composition-root obligation it does not -------
-# `EnrollmentCliDeps.ca_bundle`, `LocatorControllerCaBundleProvider` and the `invite create` path
-# are WS-B's and are contract-tested here, executable and unconditional.
-#
-# The COMPOSITION ROOT is not WS-B's. `_production_enrollment_deps` lives in
-# `apps/management/secp_management/cli.py`, which this branch does not modify at all (that file is
-# byte-identical to origin/main here) and which WS-C rewrites — it already builds the single shared
-# `locator_provider = FileControllerApiLocatorProvider(fs)` the CA provider needs, and passes it to
-# `HttpsEnrollmentControllerClient`, but does not yet pass `ca_bundle=`.
-#
-# THE OUTSTANDING OBLIGATION, stated exactly so it cannot be paraphrased away — in
-# `_production_enrollment_deps`, the returned `EnrollmentCliDeps` must add:
-#
-#     ca_bundle=LocatorControllerCaBundleProvider(fs, locator_provider)
-#
-# reusing the SAME `locator_provider` instance already handed to the controller client. Until that
-# lands, `EnrollmentCliDeps.ca_bundle` falls to `SealedControllerCaBundleProvider` in production and
-# every `secpctl enrollment invite create` refuses `secpctl_controller_ca_unavailable` — the CA
-# distribution feature is inert on the host.
-#
-# That consequence is not asserted by narration: it is executed by
-# `test_invite_create_fails_closed_before_contacting_the_controller_without_a_ca` above, and the
-# target composition is executed by `test_the_reference_production_composition_...` below. Neither
-# is skipped or xfailed — a marker on the shared corpus reports as a skip with a non-platform
-# reason, which the CI skip-accounting gate correctly rejects, and would in any case assert against
-# a file this branch does not own.
+# --- fail-closed default and CA-provider composition controls -------------------------------------
+# `EnrollmentCliDeps.ca_bundle`, `LocatorControllerCaBundleProvider`, and the `invite create` path
+# are contract-tested here, executable and unconditional. The live production composition is
+# tested in `test_cli_production_engine_deps.py`, including three-way object identity across the
+# HTTPS client, credential provider, and CA provider. These tests isolate the permanent sealed
+# default and the CA-bearing invitation behavior behind that composition.
 
 
 def test_the_shipped_default_ca_provider_is_sealed():
@@ -460,13 +440,11 @@ class _StubControllerClient:
 
 
 def test_the_reference_production_composition_issues_a_usable_invitation():
-    """The EXACT object graph the composition root must build, executed end to end.
+    """Execute the CA-bearing invitation path end to end with a stub controller client.
 
-    This is the executable form of the obligation above: one `FileControllerApiLocatorProvider`
-    instance feeds BOTH the controller client and `LocatorControllerCaBundleProvider`, and the
-    invitation that comes out carries the CA read through that locator. It proves the backend
-    surface is complete and correct, so the composition root has only to supply it — and it holds on
-    this branch today, with no skip and no xfail.
+    The live production graph and its shared locator identity are asserted separately in
+    `test_cli_production_engine_deps.py`; this test proves the invitation carries the CA read
+    through the configured locator rather than a controller assertion or ambient default.
     """
     fs = _FakeFs(content=CA_PEM.encode("utf-8"))
     locator_provider = _FakeLocatorProvider()  # the ONE shared instance
@@ -497,12 +475,11 @@ def test_the_reference_production_composition_issues_a_usable_invitation():
 
 
 def test_the_reference_composition_shares_one_locator_between_client_and_ca_provider():
-    """Why ONE instance is load-bearing, asserted on object identity rather than on prose.
+    """Isolate the client-to-CA identity edge with real adapter types.
 
     Two `FileControllerApiLocatorProvider` instances could resolve two DIFFERENT locators: the
     client would pin its TLS to one controller's CA while the invitation handed the worker another.
-    A composition root that constructs a second instance for the CA provider satisfies "a real
-    provider is present" and still ships that split.
+    The live composition's additional credential-provider edge is asserted at its composition root.
     """
     from secp_management.enrollment_controller_client import HttpsEnrollmentControllerClient
 

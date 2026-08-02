@@ -199,12 +199,38 @@ jobs:
               r"\bpostgres",
               r"SECP_TEST_POSTGRES_URL",
           )
-          # A reason that must ALWAYS be refused, used below to prove the matcher still discriminates.
-          MUST_REFUSE = "could not import 'temporalio': No module named 'temporalio'"
-          MUST_ACCEPT = "requires dedicated Linux-root fixed-layout PR5F CI gate"
+          # These complete reasons describe the only OS-keystore capabilities intentionally absent
+          # on this Ubuntu host. Exact equality prevents generic words such as "Windows", "host",
+          # or "keystore" from becoming platform gates in unrelated skips.
+          PLATFORM_GATED_EXACT = frozenset(
+              {
+                  "Windows Credential Manager only",
+                  "no OS keystore binding on this host",
+              }
+          )
+          MUST_REFUSE = (
+              "could not import 'temporalio': No module named 'temporalio'",
+              "Windows",
+              "host",
+              "credential",
+              "keystore",
+              "platform",
+              "dependency unavailable",
+              "requires Windows Credential Manager only",
+              "Windows Credential Manager only on this host",
+              "expected no OS keystore binding on this host",
+              "no OS keystore binding on this host today",
+          )
+          MUST_ACCEPT = (
+              "requires dedicated Linux-root fixed-layout PR5F CI gate",
+              "Windows Credential Manager only",
+              "no OS keystore binding on this host",
+          )
 
           def platform_gated(reason: str) -> bool:
-              return any(re.search(p, reason, re.IGNORECASE) for p in PLATFORM_GATED)
+              return reason in PLATFORM_GATED_EXACT or any(
+                  re.search(pattern, reason, re.IGNORECASE) for pattern in PLATFORM_GATED
+              )
 
           problems = []
 
@@ -213,14 +239,16 @@ jobs:
           # "platform-gated" and the whole step would pass while checking nothing.
           if not PLATFORM_GATED:
               problems.append("PLATFORM_GATED is empty: every skip would be accepted unchecked")
-          if platform_gated(MUST_REFUSE):
-              problems.append(
-                  "the reason matcher accepts a missing-dependency skip, so it no longer discriminates"
-              )
-          if not platform_gated(MUST_ACCEPT):
-              problems.append(
-                  "the reason matcher rejects a known platform-gated skip, so it would fail valid runs"
-              )
+          for reason in MUST_REFUSE:
+              if platform_gated(reason):
+                  problems.append(
+                      f"the reason matcher accepts {reason!r}, so it no longer discriminates"
+                  )
+          for reason in MUST_ACCEPT:
+              if not platform_gated(reason):
+                  problems.append(
+                      f"the reason matcher rejects known platform gate {reason!r}"
+                  )
 
           report = Path("junit-shard-${{ matrix.shard }}.xml")
           if not report.exists():
@@ -1777,6 +1805,111 @@ jobs:
           print("Image smoke green: full closure, scripts, 10001:10001, sole head, deterministic overlay.")
           PY
 
+  # --- Real RFC 8628 device flow against a disposable containerised Keycloak -------------------
+  # Deploys the COMMITTED secp-cli client artifact into a throwaway Keycloak the test itself
+  # creates and destroys, then drives `secpctl auth login` / `auth logout` through a genuine
+  # device-authorization grant with a genuine interactive approval. Nothing on the identity-provider
+  # side is stubbed. The headline proof is the token-size control: two realms differing ONLY in the
+  # two settings the artifact pins, where the console-default one refuses with
+  # `secpctl_credential_too_large` AFTER the operator has approved. FAILS CLOSED by parsing the
+  # JUnit — a skipped body proves nothing about itself, so a skip here is a failure.
+  backend-keycloak-device-flow:
+    name: secpctl device flow (disposable Keycloak, real grant, no skips)
+    runs-on: ubuntu-latest
+    env:
+      SECP_APP_ENV: test
+      SECP_TEST_KEYCLOAK_DEVICE_FLOW: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Create venv and install project
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[dev]"
+      - name: Pre-pull the provider image the dev stack pins
+        # The image comes from infra/dev/docker-compose.yml so the test and the deployment can never
+        # run different Keycloak versions. Pulling here keeps the pull out of the readiness window.
+        run: |
+          uv run python - <<'PY'
+          import subprocess
+          import yaml
+          image = yaml.safe_load(open("infra/dev/docker-compose.yml"))["services"]["keycloak"]["image"]
+          print(f"pulling {image}")
+          subprocess.run(["docker", "pull", image], check=True)
+          PY
+      - name: Offline plan of the committed client artifact
+        run: uv run python scripts/keycloak/secp_cli_client.py plan --json
+      - name: Run the real device-flow proof
+        run: >-
+          uv run pytest
+          apps/management/tests/test_keycloak_device_flow_integration.py
+          -q -p no:cacheprovider
+          --junitxml=junit-keycloak-device-flow.xml
+      - name: Upload device-flow JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-backend-keycloak-device-flow
+          path: junit-keycloak-device-flow.xml
+          if-no-files-found: error
+      - name: Enforce the device-flow proof actually executed (no skips, exact collection)
+        if: always()
+        run: |
+          "$(pwd)/.venv/bin/python" - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          # An EXACT count, not a floor. The module has no parametrization, so this is the number of
+          # test functions in it; adding or removing one is a deliberate edit here as well.
+          EXPECTED_TESTS = 17
+          path = Path("junit-keycloak-device-flow.xml")
+          if not path.exists() or path.stat().st_size == 0:
+              print("::error::junit-keycloak-device-flow.xml missing/empty - the proof produced no result")
+              sys.exit(1)
+          root = ET.parse(path).getroot()
+          tests = failures = errors = skipped = 0
+          for suite in root.iter("testsuite"):
+              tests += int(suite.get("tests", 0))
+              failures += int(suite.get("failures", 0))
+              errors += int(suite.get("errors", 0))
+              skipped += int(suite.get("skipped", 0))
+          print(f"collected={tests} failures={failures} errors={errors} skipped={skipped}")
+          problems = []
+          if tests != EXPECTED_TESTS:
+              problems.append(f"expected exactly {EXPECTED_TESTS} device-flow tests, collected {tests}")
+          if skipped != 0:
+              problems.append(
+                  f"expected 0 skipped, got {skipped} - the opt-in env var or Docker was missing, so"
+                  " the real device grant did not actually run"
+              )
+          if failures != 0:
+              problems.append(f"{failures} failing device-flow test(s)")
+          if errors != 0:
+              problems.append(f"{errors} errored device-flow test(s)")
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+          print(f"Real device-flow proof executed: {tests} tests, zero skipped/failed/errored.")
+          PY
+      - name: Prove no disposable realm container survived the run
+        if: always()
+        # The provider is created and destroyed by the test. A surviving container would mean the
+        # teardown did not run, and the next run would inherit state this proof assumes is fresh.
+        run: |
+          leftover=$(docker ps -a --filter "name=secp-cli-device-flow-" --format '{{.Names}}')
+          if [ -n "$leftover" ]; then
+            echo "::error::disposable Keycloak container(s) survived: $leftover"
+            exit 1
+          fi
+          echo "no disposable provider container survived"
+
   backend:
     name: Backend (format, lint, types, tests, schema, boundary, security)
     runs-on: ubuntu-latest
@@ -1796,6 +1929,7 @@ jobs:
         backend-management-controller-real-adapters-root,
         backend-security,
         backend-python-image-smoke,
+        backend-keycloak-device-flow,
       ]
     if: always()
     steps:
@@ -1815,6 +1949,7 @@ jobs:
           echo "backend-ctrl-real-adpt  = ${{ needs.backend-management-controller-real-adapters-root.result }}"
           echo "backend-security        = ${{ needs.backend-security.result }}"
           echo "backend-image-smoke     = ${{ needs.backend-python-image-smoke.result }}"
+          echo "backend-device-flow     = ${{ needs.backend-keycloak-device-flow.result }}"
           fail=0
           for r in \
             "${{ needs.backend-static.result }}" \
@@ -1830,7 +1965,8 @@ jobs:
             "${{ needs.backend-management-real-adapters-root.result }}" \
             "${{ needs.backend-management-controller-real-adapters-root.result }}" \
             "${{ needs.backend-security.result }}" \
-            "${{ needs.backend-python-image-smoke.result }}"; do
+            "${{ needs.backend-python-image-smoke.result }}" \
+            "${{ needs.backend-keycloak-device-flow.result }}"; do
             if [ "$r" != "success" ]; then fail=1; fi
           done
           if [ "$fail" -ne 0 ]; then

@@ -37,6 +37,44 @@
       ]
     },
     {
+      "clientId": "secp-cli",
+      "name": "SECP secpctl operator CLI",
+      "description": "Public OAuth 2.0 Device Authorization Grant client for `secpctl auth login` (RFC 8628). No client secret. The grant has no browser redirect, so this representation holds no hostname and is identical in dev, test and production.",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": true,
+      "bearerOnly": false,
+      "consentRequired": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true",
+        "oauth2.device.polling.interval": "5",
+        "use.refresh.tokens": "false"
+      },
+      "defaultClientScopes": ["basic", "email", "profile"],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "secp-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "secp-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
       "clientId": "secp-api",
       "name": "SECP API (dev)",
       "enabled": true,
