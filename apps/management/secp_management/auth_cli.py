@@ -27,14 +27,15 @@ Three properties are worth stating because they are easy to lose in a later edit
   the controller's authoritative ``/api/v1/me`` before it is offered to the store. An unavailable
   store refuses before issuance; a post-issuance refusal best-effort revokes only the new token.
   There is deliberately no fallback location.
-* **Logout revokes before it deletes.** Deleting the local copy does not end the session — the token
-  stays valid at the provider until it expires — so ``auth logout`` first asks the issuer to revoke
-  it (RFC 7009) and only then removes the exact generation it read. A concurrent replacement is
-  retained and reported as potentially live rather than being deleted by a stale process.
+* **Logout covers every known source.** It reads an explicitly configured protected token file and
+  the selected OS-store generation independently, deduplicates an identical token, and asks the
+  issuer to revoke every unique readable token before deleting only the exact OS generation it
+  owns. The user-managed file and any concurrent OS replacement are retained.
 """
 
 from __future__ import annotations
 
+import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -72,7 +73,12 @@ from secp_management.operator_device_auth import (
     ResolvedOperatorPrincipal,
 )
 from secp_management.operator_token_revoke import (
+    OUTCOME_CONCURRENT_REPLACEMENT,
+    OUTCOME_PARTIAL,
+    OUTCOME_REFUSED,
+    OUTCOME_REVOKED,
     OUTCOME_UNAVAILABLE,
+    OUTCOME_UNSUPPORTED,
     RevocationOutcome,
     revocation_credential_unreadable,
     revocation_not_required,
@@ -164,12 +170,6 @@ _EXIT_BY_REASON: dict[str, int] = {
 }
 
 
-#: Store refusals that mean there is genuinely NO credential material to submit for revocation.
-#: EVERY other store refusal means the credential could not be read, which is a different fact: a
-#: live token may still be sitting there. Local expiry is deliberately NOT enough: the workstation
-#: clock can be ahead of the issuer, and RFC 7009 revocation is safe for an already-dead token.
-#: Keeping this set explicit (rather than treating "any refusal" as "nothing to revoke") is what
-#: stops ``auth logout`` reporting ``token_still_live: false`` over a live, un-revoked credential.
 #: Stable, secret-free remedies for the refusals an operator can actually DO something about. A
 #: bounded reason code says what failed; without this it never says what to do next — and these are
 #: reached after an interactive approval, where "exit 3" alone strands the operator.
@@ -188,8 +188,8 @@ _REMEDY_BY_REASON: dict[str, str] = {
         "until it expires and cannot be revoked from here"
     ),
     "secpctl_credential_record_invalid": (
-        "the credential record is invalid; if this was not a confirmed logout, run "
-        "'secpctl auth logout --write --confirm' to remove any stored entry, then run "
+        "the credential record is invalid and secpctl cannot verify a generation it owns; remove "
+        "the secp-secpctl-operator entry with the OS keystore's own tooling, then run "
         "'secpctl auth login' again"
     ),
     "secpctl_credential_account_mismatch": (
@@ -204,6 +204,13 @@ _REMEDY_BY_REASON: dict[str, str] = {
 
 def exit_for(reason_code: str) -> int:
     return _EXIT_BY_REASON.get(reason_code, EXIT_REFUSED)
+
+
+def _bounded_reason(reason_code: object, fallback: str) -> str:
+    """Accept only this module's closed reason vocabulary at a report boundary."""
+    return (
+        reason_code if isinstance(reason_code, str) and reason_code in _EXIT_BY_REASON else fallback
+    )
 
 
 def _with_remedy(report: dict, reason_code: str) -> dict:
@@ -800,35 +807,144 @@ def _describe_unbound(deps: AuthCliDeps) -> StoredCredentialStatus:
 def _revoke_stored_token(
     deps: AuthCliDeps,
     selection: _Selection,
-    snapshot: CredentialSnapshot | None,
-) -> RevocationOutcome:
-    """Best-effort RFC 7009 revocation of the stored token, BEFORE it is deleted locally.
-
-    This function NEVER raises. That is the whole point of it: local deletion is what makes a logout
-    mean something on the operator's own machine, and it must be reached whether the provider
-    revoked the token, refused, or could not be contacted at all. A revocation failure that aborted
-    the command would leave the credential sitting in the keystore — strictly worse than the state
-    the operator asked for.
-
-    Nothing is hidden by that: the returned outcome records whether the token must be assumed still
-    live at the provider, and ``auth logout`` reports it.
-    """
-    if snapshot is None:
-        return revocation_not_required()
-    token = snapshot.token
+    tokens: tuple[OperatorAccessToken, ...],
+) -> tuple[RevocationOutcome, ...]:
+    """Revoke every unique readable token after one shared discovery operation."""
+    if not tokens:
+        return ()
     try:
         client, _authority, endpoints = _discover(deps, selection.locator)
-        return client.revoke_token(endpoints, token.revocation_request_value())
     except ManagementError as exc:
-        # Discovery failed (unreachable controller or issuer, malformed document). The token stays
-        # live, and the outcome says so.
-        return RevocationOutcome(OUTCOME_UNAVAILABLE, reason_code=exc.reason_code)
+        unavailable = RevocationOutcome(
+            OUTCOME_UNAVAILABLE,
+            reason_code=_bounded_reason(exc.reason_code, "secpctl_revocation_provider_unavailable"),
+        )
+        return tuple(unavailable for _token in tokens)
+    except Exception:  # noqa: BLE001 - discovery detail must never escape into output
+        unavailable = RevocationOutcome(
+            OUTCOME_UNAVAILABLE, reason_code="secpctl_revocation_provider_unavailable"
+        )
+        return tuple(unavailable for _token in tokens)
+
+    outcomes: list[RevocationOutcome] = []
+    for token in tokens:
+        try:
+            outcome = client.revoke_token(endpoints, token.revocation_request_value())
+        except ManagementError as exc:
+            outcome = RevocationOutcome(
+                OUTCOME_UNAVAILABLE,
+                reason_code=_bounded_reason(
+                    exc.reason_code, "secpctl_revocation_provider_unavailable"
+                ),
+            )
+        except Exception:  # noqa: BLE001 - never reflect provider/transport exception detail
+            outcome = RevocationOutcome(
+                OUTCOME_UNAVAILABLE,
+                reason_code="secpctl_revocation_provider_unavailable",
+            )
+        if (
+            not isinstance(outcome, RevocationOutcome)
+            or outcome.outcome
+            not in {OUTCOME_REFUSED, OUTCOME_REVOKED, OUTCOME_UNAVAILABLE, OUTCOME_UNSUPPORTED}
+            or (
+                outcome.reason_code
+                and _bounded_reason(outcome.reason_code, "") != outcome.reason_code
+            )
+        ):
+            outcome = RevocationOutcome(
+                OUTCOME_REFUSED, reason_code="secpctl_revocation_response_invalid"
+            )
+        outcomes.append(outcome)
+    return tuple(outcomes)
+
+
+@dataclass(frozen=True, repr=False)
+class _LogoutSources:
+    """Secret-redacted snapshot of every source known to this invocation."""
+
+    tokens: tuple[OperatorAccessToken, ...]
+    os_snapshot: CredentialSnapshot | None
+    read_failures: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        return "_LogoutSources(<redacted>)"
+
+
+def _read_logout_sources(deps: AuthCliDeps, selection: _Selection) -> _LogoutSources:
+    """Read token-file and OS-store sources independently, then deduplicate identical tokens."""
+    tokens: list[OperatorAccessToken] = []
+    failures: list[str] = []
+
+    try:
+        token_file_active = deps.token_file_active()
+    except Exception:  # noqa: BLE001 - a broken probe is unreadable, not absence
+        token_file_active = None
+    if type(token_file_active) is not bool:
+        failures.append("secpctl_operator_auth_unavailable")
+    elif token_file_active:
+        try:
+            file_token = deps.token_file_provider.access_token()
+            if not isinstance(file_token, OperatorAccessToken):
+                raise ManagementError("secpctl_operator_token_invalid")
+            tokens.append(file_token)
+        except ManagementError as exc:
+            failures.append(_bounded_reason(exc.reason_code, "secpctl_operator_auth_unavailable"))
+        except Exception:  # noqa: BLE001 - never expose a token-file path or exception
+            failures.append("secpctl_operator_auth_unavailable")
+
+    os_snapshot: CredentialSnapshot | None = None
+    try:
+        candidate = selection.store.snapshot()
+        if candidate is not None and not isinstance(candidate, CredentialSnapshot):
+            raise ManagementError("secpctl_credential_record_invalid")
+        os_snapshot = candidate
+        if os_snapshot is not None:
+            tokens.append(os_snapshot.token)
+    except ManagementError as exc:
+        failures.append(_bounded_reason(exc.reason_code, "secpctl_credential_store_unavailable"))
+    except Exception:  # noqa: BLE001 - never expose backend/path/exception detail
+        failures.append("secpctl_credential_store_unavailable")
+
+    unique: list[OperatorAccessToken] = []
+    for token in tokens:
+        raw = token.revocation_request_value()
+        if not any(
+            secrets.compare_digest(raw, prior.revocation_request_value()) for prior in unique
+        ):
+            unique.append(token)
+    return _LogoutSources(tuple(unique), os_snapshot, tuple(failures))
+
+
+def _aggregate_logout_outcome(
+    tokens: tuple[OperatorAccessToken, ...],
+    read_failures: tuple[str, ...],
+    outcomes: tuple[RevocationOutcome, ...],
+) -> RevocationOutcome:
+    """Project many source/outcome facts into one conservative, deterministic result."""
+    dead_count = sum(not outcome.token_still_live for outcome in outcomes)
+    if read_failures:
+        if dead_count:
+            return RevocationOutcome(OUTCOME_PARTIAL, reason_code=read_failures[0])
+        return revocation_credential_unreadable(read_failures[0])
+    live = tuple(outcome for outcome in outcomes if outcome.token_still_live)
+    if live:
+        if dead_count:
+            return RevocationOutcome(
+                OUTCOME_PARTIAL,
+                reason_code=live[0].reason_code or "secpctl_revocation_refused",
+            )
+        return live[0]
+    if tokens and len(outcomes) == len(tokens):
+        return RevocationOutcome(OUTCOME_REVOKED)
+    if not tokens:
+        return revocation_not_required()
+    return RevocationOutcome(OUTCOME_REFUSED, reason_code="secpctl_revocation_response_invalid")
 
 
 def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
-    """``secpctl auth logout`` — revoke this controller's operator token at the identity provider
-    (RFC 7009), then delete ONLY the credential material this store owns for THIS controller's
-    account. Dry-run unless ``--write --confirm``.
+    """``secpctl auth logout`` — revoke every readable token known for this controller/account,
+    then delete ONLY the OS-store generation this invocation owns. A configured user-managed token
+    file is read and revoked but never deleted or rewritten. Dry-run unless ``--write --confirm``.
 
     The ORDER is deliberate: snapshot first, revoke second, generation-checked deletion last.
     Revocation needs the token, so deleting first would throw away the only thing that can end the
@@ -838,10 +954,9 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
     provider until its own expiry, so anyone who captured it still holds a working credential; that
     is precisely the window RFC 7009 exists to close.
 
-    When the token could NOT be revoked — the provider advertises no ``revocation_endpoint`` (RFC
-    8414 §2 makes it OPTIONAL), is unreachable, or refused — the command reports
-    ``token_still_live`` AND exits NON-ZERO. The local credential is still deleted, but a zero exit
-    would tell a script the session had ended when it had not.
+    When any known source is unreadable or any token cannot be proven revoked, the command reports
+    ``token_still_live`` and exits non-zero. ``removed`` describes only owned OS-store cleanup; it
+    never claims that a configured token file was removed.
 
     It never touches an unrelated OS keyring entry and never touches another controller's account.
     """
@@ -849,6 +964,9 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
     try:
         selection = _select(deps)
         if not gate.is_write:
+            sources = _read_logout_sources(deps, selection)
+            if sources.read_failures:
+                return _refused(command, sources.read_failures[0])
             status = selection.store.describe()
             if not status.available:
                 # An unreadable credential is not an absent credential. A dry run cannot truthfully
@@ -864,28 +982,26 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
                 # Stated WITHOUT a network call: a dry run opens no socket, so it reports what the
                 # write path would attempt rather than what the provider would answer. Local expiry
                 # does not suppress the attempt because the issuer's clock is authoritative.
-                "revocation_planned": bool(status.has_credential),
+                "revocation_planned": bool(sources.tokens),
                 **_credential_report(selection.account, status),
             }
-        try:
-            snapshot = selection.store.snapshot()
-        except ManagementError as exc:
-            outcome = revocation_credential_unreadable(exc.reason_code)
-            report = {
-                "command": command,
-                "mode": "written",
-                "removed": False,
-                "account": account_fingerprint(selection.account),
-                **outcome.to_report(),
-                "reason_code": exc.reason_code,
-            }
-            return exit_for(exc.reason_code), _with_remedy(report, exc.reason_code)
-        outcome = _revoke_stored_token(deps, selection, snapshot)
-        mutation = (
-            CredentialMutationResult.ABSENT
-            if snapshot is None
-            else selection.store.delete_if_generation(snapshot.generation)
-        )
+        sources = _read_logout_sources(deps, selection)
+        outcomes = _revoke_stored_token(deps, selection, sources.tokens)
+        outcome = _aggregate_logout_outcome(sources.tokens, sources.read_failures, outcomes)
+
+        cleanup_reason = ""
+        mutation = CredentialMutationResult.ABSENT
+        if sources.os_snapshot is not None:
+            try:
+                mutation = selection.store.delete_if_generation(sources.os_snapshot.generation)
+                if not isinstance(mutation, CredentialMutationResult):
+                    cleanup_reason = "secpctl_credential_backend_failed"
+            except ManagementError as exc:
+                cleanup_reason = _bounded_reason(
+                    exc.reason_code, "secpctl_credential_backend_failed"
+                )
+            except Exception:  # noqa: BLE001 - never expose backend/path/exception detail
+                cleanup_reason = "secpctl_credential_backend_failed"
         removed = mutation is CredentialMutationResult.DELETED
         report = {
             "command": command,
@@ -897,7 +1013,12 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
         if mutation is CredentialMutationResult.GENERATION_MISMATCH:
             # The old token may have been revoked, but a newer generation is now known to exist.
             # This operation neither owns nor deletes it and therefore cannot call logout complete.
-            reason_code = "secpctl_credential_generation_changed"
+            outcome = RevocationOutcome(
+                OUTCOME_CONCURRENT_REPLACEMENT,
+                reason_code="secpctl_credential_generation_changed",
+            )
+            report.update(outcome.to_report())
+            reason_code = outcome.reason_code
             report.update(
                 {
                     "concurrent_credential_present": True,
@@ -906,13 +1027,15 @@ def auth_logout(deps: AuthCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
                 }
             )
             return exit_for(reason_code), _with_remedy(report, reason_code)
+        if cleanup_reason:
+            report["credential_cleanup_reason_code"] = cleanup_reason
         if not outcome.token_still_live:
+            if cleanup_reason:
+                report["reason_code"] = cleanup_reason
+                return exit_for(cleanup_reason), _with_remedy(report, cleanup_reason)
             return EXIT_OK, report
-        # The local credential IS gone — `removed` says so — but the session was NOT ended at the
-        # provider. Exiting 0 here would make `secpctl auth logout && echo revoked` print a
-        # falsehood, and an operator who believes they revoked when they did not is a security
-        # outcome, not a cosmetic one. The specific reason keeps its mapped exit category so a
-        # script can tell "provider unreachable" from "provider refused".
+        # At least one known source may still carry a live provider token. Exiting 0 here would make
+        # `secpctl auth logout && echo revoked` print a falsehood.
         report["reason_code"] = outcome.reason_code or "secpctl_revocation_refused"
         return exit_for(report["reason_code"]), _with_remedy(report, report["reason_code"])
     except ManagementError as exc:

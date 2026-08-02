@@ -606,8 +606,9 @@ _HUMAN_WARNINGS: dict[str, dict[object, str]] = {
     },
     "token_still_live": {
         True: (
-            "WARNING: the local credential was deleted, but the token is STILL VALID at the\n"
-            "  identity provider and remains usable until it expires. The session was NOT ended."
+            "WARNING: logout is INCOMPLETE; at least one known credential may still be live at\n"
+            "  the identity provider. 'removed' describes only owned OS-keystore cleanup; a\n"
+            "  configured token file is never deleted or rewritten."
         )
     },
 }

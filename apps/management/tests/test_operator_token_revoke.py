@@ -16,12 +16,15 @@ import pytest
 from secp_management import ManagementError
 from secp_management.operator_token_revoke import (
     ERROR_UNSUPPORTED_TOKEN_TYPE,
+    OUTCOME_CONCURRENT_REPLACEMENT,
     OUTCOME_NOT_REQUIRED,
+    OUTCOME_PARTIAL,
     OUTCOME_REFUSED,
     OUTCOME_REVOKED,
     OUTCOME_UNAVAILABLE,
     OUTCOME_UNSUPPORTED,
     TOKEN_TYPE_HINT_ACCESS_TOKEN,
+    RevocationOutcome,
     interpret_revocation_response,
     revocation_form,
     revocation_not_required,
@@ -196,8 +199,7 @@ def test_the_report_is_bounded_and_states_both_facts():
 
 
 def test_token_still_live_is_not_merely_the_negation_of_revoked():
-    """Two distinct outcomes leave no usable token, and three leave one. Collapsing them into a
-    single boolean would tell an operator with an unrevokable token that they had logged out."""
+    """Only revoked/absent are known-dead; every other bounded outcome remains conservative."""
     not_live = {OUTCOME_REVOKED, OUTCOME_NOT_REQUIRED}
     for outcome in [
         interpret_revocation_response(200),
@@ -205,6 +207,8 @@ def test_token_still_live_is_not_merely_the_negation_of_revoked():
         interpret_revocation_response(503),
         revocation_unsupported(),
         interpret_revocation_response(400),
+        RevocationOutcome(OUTCOME_PARTIAL),
+        RevocationOutcome(OUTCOME_CONCURRENT_REPLACEMENT),
     ]:
         assert outcome.token_still_live is (outcome.outcome not in not_live)
     assert revocation_not_required().revoked is False

@@ -67,6 +67,10 @@ OUTCOME_NOT_REQUIRED = "not_required"
 #: :data:`OUTCOME_NOT_REQUIRED`: a perfectly live token may be sitting in that entry, and the logout
 #: is about to delete it locally without ever revoking it.
 OUTCOME_UNREADABLE = "credential_unreadable"
+#: At least one readable token was proven dead while another known source was not.
+OUTCOME_PARTIAL = "partial"
+#: A newer OS-store generation replaced the one logout read; it was deliberately retained.
+OUTCOME_CONCURRENT_REPLACEMENT = "concurrent_replacement"
 #: The provider does not advertise a revocation endpoint at all (RFC 8414 makes it OPTIONAL).
 OUTCOME_UNSUPPORTED = "unsupported"
 #: RFC 7009 §2.2.1 — 503. The token MUST be assumed to still exist.
@@ -186,9 +190,8 @@ def revocation_credential_unreadable(reason_code: str) -> RevocationOutcome:
     This is deliberately NOT :func:`revocation_not_required`. "Absent" and "expired" mean no live
     token exists; "the record is corrupt", "this entry belongs to another controller" and "the
     keystore is locked" mean a live token may exist and simply cannot be reached. Collapsing the
-    second group into the first would make the logout affirmatively report ``token_still_live:
-    false`` while deleting a credential that is still valid at the provider — a false negative on
-    the one fact this module exists to report.
+    second group into the first would make logout affirmatively report ``token_still_live: false``.
+    The caller also lacks a validated generation in this case, so it must not delete the OS record.
     """
     return RevocationOutcome(OUTCOME_UNREADABLE, reason_code=reason_code)
 
@@ -196,16 +199,18 @@ def revocation_credential_unreadable(reason_code: str) -> RevocationOutcome:
 def revocation_not_required() -> RevocationOutcome:
     """The outcome when there is no live credential to revoke.
 
-    An absent credential has nothing to revoke, and an EXPIRED one is already unusable — RFC 7009
-    §2.2 would have the server answer 200 for it anyway. Neither needs a network round trip, and
-    neither is a shortfall: the logout is complete.
+    Only confirmed absence reaches this outcome. A valid, bounded but locally expired OS record is
+    still submitted conservatively because the workstation clock is not issuer truth; a malformed
+    expiry is unreadable, never absence.
     """
     return RevocationOutcome(OUTCOME_NOT_REQUIRED)
 
 
 __all__ = [
     "ERROR_UNSUPPORTED_TOKEN_TYPE",
+    "OUTCOME_CONCURRENT_REPLACEMENT",
     "OUTCOME_NOT_REQUIRED",
+    "OUTCOME_PARTIAL",
     "OUTCOME_REFUSED",
     "OUTCOME_REVOKED",
     "OUTCOME_UNAVAILABLE",

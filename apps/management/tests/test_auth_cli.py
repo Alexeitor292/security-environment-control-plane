@@ -47,7 +47,9 @@ from secp_management.operator_device_auth import (
     ReviewedAuthority,
 )
 from secp_management.operator_token_revoke import (
+    OUTCOME_CONCURRENT_REPLACEMENT,
     OUTCOME_NOT_REQUIRED,
+    OUTCOME_PARTIAL,
     OUTCOME_REVOKED,
     OUTCOME_UNAVAILABLE,
     OUTCOME_UNREADABLE,
@@ -287,6 +289,10 @@ def _working_store(keystore=None, *, now=None):
 def _deps(client=None, store=None, locator=None, **overrides):
     waits: list[float] = []
     prompts: list[dict] = []
+    # Production composition always resolves the token-file probe to true/false/unknown. Most
+    # command tests model the ordinary unset case; tests for an active or broken override pass it
+    # explicitly. The sealed AuthCliDeps default remains unknown and is tested directly below.
+    overrides.setdefault("token_file_active", lambda: False)
     deps = AuthCliDeps(
         credential_store=store if store is not None else _RecordingStore(),
         locator_provider=locator if locator is not None else _FakeLocatorProvider(),
@@ -345,6 +351,30 @@ class _AfterRevokeClient(_FakeDeviceClient):
         return outcome
 
 
+class _SequentialRevocationClient(_FakeDeviceClient):
+    """Return one deterministic outcome per unique token while recording every attempt."""
+
+    def __init__(self, outcomes):
+        super().__init__()
+        self._outcomes = list(outcomes)
+
+    def revoke_token(self, _endpoints, token):
+        self.calls.append("revoke")
+        self.revoked.append(token)
+        assert self._outcomes, "logout attempted more revocations than the test supplied"
+        return self._outcomes.pop(0)
+
+
+class _ExplodingTokenProvider:
+    def access_token(self):
+        raise RuntimeError("C:\\private\\operator.jwt eyJ-provider-secret")
+
+
+class _HostileReasonTokenProvider:
+    def access_token(self):
+        raise ManagementError("C:\\private\\operator.jwt eyJ-provider-secret")
+
+
 def _stored_auth_fixture(*, lifetime=300):
     binding = _FakeKeystore()
     store = _working_store(binding)
@@ -355,6 +385,12 @@ def _stored_auth_fixture(*, lifetime=300):
         subject_fingerprint=subject_fingerprint(SUBJECT),
     )
     return binding, store, raw
+
+
+def _assert_logout_report_secret_free(report, *tokens):
+    rendered = json.dumps(report, sort_keys=True)
+    for secret in (*tokens, ORIGIN, ISSUER, "C:\\private\\operator.jwt", "provider-secret"):
+        assert secret not in rendered
 
 
 def test_refresh_vs_logout_logout_wins_and_the_minted_token_is_compensated():
@@ -482,6 +518,7 @@ def test_logout_vs_login_replacement_never_deletes_or_calls_the_replacement_dead
     assert report["removed"] is False
     assert report["token_still_live"] is True
     assert report["reason_code"] == "secpctl_credential_generation_changed"
+    assert report["revocation_outcome"] == OUTCOME_CONCURRENT_REPLACEMENT
     current = store.for_account(ORIGIN).snapshot()
     assert current is not None
     assert current.token.authorization_header() == f"Bearer {replacement_raw}"
@@ -1016,6 +1053,205 @@ def test_logout_revokes_the_token_at_the_provider_before_deleting_it_locally():
     assert keystore.entries == {}
 
 
+def test_logout_with_token_file_only_revokes_it_and_never_mutates_the_file():
+    raw = _valid_token(lifetime=401)
+    provider = _StaticTokenProvider(OperatorAccessToken(raw))
+    client = _FakeDeviceClient()
+    deps, _waits, _prompts = _deps(
+        client=client,
+        store=_working_store(),
+        token_file_active=lambda: True,
+        token_file_provider=provider,
+    )
+
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert code == EXIT_OK
+    assert client.revoked == [raw]
+    assert report["revocation_outcome"] == OUTCOME_REVOKED
+    assert report["token_still_live"] is False
+    assert report["removed"] is False
+    assert provider.calls == 1
+    assert provider.access_token().authorization_header() == f"Bearer {raw}"
+    _assert_logout_report_secret_free(report, raw)
+
+
+def test_logout_with_the_same_file_and_os_token_revokes_once_and_deletes_only_os():
+    _binding, store, raw = _stored_auth_fixture(lifetime=402)
+    provider = _StaticTokenProvider(OperatorAccessToken(raw))
+    client = _FakeDeviceClient()
+    deps, _waits, _prompts = _deps(
+        client=client,
+        store=store,
+        token_file_active=lambda: True,
+        token_file_provider=provider,
+    )
+
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert code == EXIT_OK
+    assert client.revoked == [raw], "an identical token from two sources must be submitted once"
+    assert report["removed"] is True
+    assert store.for_account(ORIGIN).snapshot() is None
+    assert provider.access_token().authorization_header() == f"Bearer {raw}"
+    _assert_logout_report_secret_free(report, raw)
+
+
+def test_logout_with_different_file_and_os_tokens_revokes_both_in_fixed_order():
+    _binding, store, os_raw = _stored_auth_fixture(lifetime=403)
+    file_raw = _valid_token(lifetime=404)
+    provider = _StaticTokenProvider(OperatorAccessToken(file_raw))
+    client = _SequentialRevocationClient(
+        (RevocationOutcome(OUTCOME_REVOKED), RevocationOutcome(OUTCOME_REVOKED))
+    )
+    deps, _waits, _prompts = _deps(
+        client=client,
+        store=store,
+        token_file_active=lambda: True,
+        token_file_provider=provider,
+    )
+
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert code == EXIT_OK
+    assert client.revoked == [file_raw, os_raw]
+    assert report["revocation_outcome"] == OUTCOME_REVOKED
+    assert report["removed"] is True
+    assert provider.access_token().authorization_header() == f"Bearer {file_raw}"
+    _assert_logout_report_secret_free(report, file_raw, os_raw)
+
+
+@pytest.mark.parametrize("failed_index", (0, 1), ids=("file-fails", "os-fails"))
+def test_logout_attempts_both_tokens_and_reports_partial_when_one_revocation_fails(failed_index):
+    _binding, store, os_raw = _stored_auth_fixture(lifetime=405)
+    file_raw = _valid_token(lifetime=406)
+    unavailable = RevocationOutcome(
+        OUTCOME_UNAVAILABLE, reason_code="secpctl_revocation_provider_unavailable"
+    )
+    revoked = RevocationOutcome(OUTCOME_REVOKED)
+    outcomes = [revoked, revoked]
+    outcomes[failed_index] = unavailable
+    client = _SequentialRevocationClient(outcomes)
+    provider = _StaticTokenProvider(OperatorAccessToken(file_raw))
+    deps, _waits, _prompts = _deps(
+        client=client,
+        store=store,
+        token_file_active=lambda: True,
+        token_file_provider=provider,
+    )
+
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert code == EXIT_CONTROLLER_UNAVAILABLE
+    assert client.revoked == [file_raw, os_raw], "one failure must not suppress the other attempt"
+    assert report["revocation_outcome"] == OUTCOME_PARTIAL
+    assert report["token_still_live"] is True
+    assert report["reason_code"] == "secpctl_revocation_provider_unavailable"
+    assert report["removed"] is True
+    assert provider.access_token().authorization_header() == f"Bearer {file_raw}"
+    _assert_logout_report_secret_free(report, file_raw, os_raw)
+
+
+def test_logout_revokes_a_readable_file_even_when_the_os_record_is_unreadable():
+    file_raw = _valid_token(lifetime=407)
+    provider = _StaticTokenProvider(OperatorAccessToken(file_raw))
+    client = _FakeDeviceClient()
+    deps, _waits, _prompts = _deps(
+        client=client,
+        store=_working_store(_FailingReadKeystore("secpctl_credential_store_locked")),
+        token_file_active=lambda: True,
+        token_file_provider=provider,
+    )
+
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    assert client.revoked == [file_raw]
+    assert report["revocation_outcome"] == OUTCOME_PARTIAL
+    assert report["reason_code"] == "secpctl_credential_store_locked"
+    assert report["token_still_live"] is True
+    assert report["removed"] is False
+    _assert_logout_report_secret_free(report, file_raw)
+
+
+@pytest.mark.parametrize(
+    "unreadable_provider",
+    (_ExplodingTokenProvider(), _HostileReasonTokenProvider()),
+    ids=("raw-exception", "hostile-reason"),
+)
+def test_logout_revokes_and_deletes_os_even_when_the_token_file_is_unreadable(
+    unreadable_provider,
+):
+    _binding, store, os_raw = _stored_auth_fixture(lifetime=408)
+    client = _FakeDeviceClient()
+    deps, _waits, _prompts = _deps(
+        client=client,
+        store=store,
+        token_file_active=lambda: True,
+        token_file_provider=unreadable_provider,
+    )
+
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    assert client.revoked == [os_raw]
+    assert report["revocation_outcome"] == OUTCOME_PARTIAL
+    assert report["reason_code"] == "secpctl_operator_auth_unavailable"
+    assert report["token_still_live"] is True
+    assert report["removed"] is True
+    assert store.for_account(ORIGIN).snapshot() is None
+    _assert_logout_report_secret_free(report, os_raw)
+
+
+def test_logout_without_a_revocation_endpoint_keeps_the_token_file_and_refuses_success():
+    raw = _valid_token(lifetime=409)
+    provider = _StaticTokenProvider(OperatorAccessToken(raw))
+    client = _FakeDeviceClient(
+        revocation=RevocationOutcome(
+            OUTCOME_UNSUPPORTED, reason_code="secpctl_revocation_endpoint_absent"
+        )
+    )
+    deps, _waits, _prompts = _deps(
+        client=client,
+        store=_working_store(),
+        token_file_active=lambda: True,
+        token_file_provider=provider,
+    )
+
+    code, report = auth_logout(deps, gate=WRITE)
+
+    assert code == EXIT_AUTH_UNAVAILABLE
+    assert client.revoked == [raw]
+    assert report["revocation_outcome"] == OUTCOME_UNSUPPORTED
+    assert report["token_still_live"] is True
+    assert report["removed"] is False
+    assert provider.access_token().authorization_header() == f"Bearer {raw}"
+    _assert_logout_report_secret_free(report, raw)
+
+
+def test_logout_with_a_malformed_expiry_neither_revokes_nor_deletes_the_unowned_record():
+    keystore = _FakeKeystore()
+    deps, _waits, _prompts = _deps(store=_working_store(keystore))
+    assert auth_login(deps, gate=WRITE)[0] == EXIT_OK
+    key = ("secp-secpctl-operator", ORIGIN)
+    malformed = json.loads(keystore.entries[key])
+    malformed["e"] = "not-an-expiry"
+    keystore.entries[key] = json.dumps(malformed).encode()
+    client = _FakeDeviceClient()
+    out, _waits2, _prompts2 = _deps(client=client, store=_working_store(keystore))
+
+    code, report = auth_logout(out, gate=WRITE)
+
+    assert code == EXIT_MALFORMED
+    assert client.calls == []
+    assert report["revocation_outcome"] == OUTCOME_UNREADABLE
+    assert report["reason_code"] == "secpctl_credential_record_invalid"
+    assert report["token_still_live"] is True
+    assert report["removed"] is False
+    assert key in keystore.entries
+    _assert_logout_report_secret_free(report, malformed["t"])
+
+
 @pytest.mark.parametrize(
     ("outcome", "still_live"),
     [
@@ -1233,7 +1469,7 @@ def test_logout_dry_run_refuses_a_corrupt_record_instead_of_planning_nothing():
     assert code == EXIT_MALFORMED
     _assert_refusal(report, "auth logout", "secpctl_credential_record_invalid")
     assert "was removed" not in report["remedy"]
-    assert "--write --confirm" in report["remedy"]
+    assert "OS keystore" in report["remedy"]
     assert client.calls == [] and waits == [] and prompts == []
 
 
@@ -1303,7 +1539,7 @@ def test_refresh_preserves_a_corrupt_record_reason_instead_of_calling_it_absent(
     assert code == EXIT_MALFORMED
     _assert_refusal(report, "auth refresh", "secpctl_credential_record_invalid")
     assert "was removed" not in report["remedy"]
-    assert "--write --confirm" in report["remedy"]
+    assert "OS keystore" in report["remedy"]
     assert client.calls == [] and waits == [] and prompts == []
     assert keystore.entries[("secp-secpctl-operator", ORIGIN)] == b"not-json"
 
@@ -1621,7 +1857,8 @@ def test_human_output_warns_when_the_token_is_still_live():
     )
     assert "token_still_live=True" in rendered
     assert "WARNING" in rendered
-    assert "STILL VALID" in rendered
+    assert "INCOMPLETE" in rendered
+    assert "token file is never deleted" in rendered
     assert "exit=3" in rendered
     # the operator is still told the local half succeeded
     assert "removed=True" in rendered
@@ -1736,15 +1973,12 @@ def test_a_rendered_report_still_carries_no_token_or_origin():
 
 # --- an UNREADABLE credential is not "nothing to revoke" ------------------------------------------
 #
-# `_revoke_stored_token` mapped every store refusal to `revocation_not_required()`, whose
-# `token_still_live` is False. That is right only for absent material, and WRONG
-# for a corrupt record or a foreign-account entry, where a perfectly live token can be sitting in
-# the keystore, `delete()` removes it, and the report affirmatively states the token is not live.
-# A false negative on the one fact the revocation path exists to establish.
+# A snapshot refusal is not absence. A corrupt or foreign-account record can hold a live token, and
+# without a validated immutable generation logout neither revokes nor deletes it.
 
 
 class _UnreadableStore(SealedOperatorCredentialStore):
-    """A store whose credential cannot be READ, but which still deletes an entry."""
+    """A store whose credential cannot be read, with a deletion tripwire."""
 
     def __init__(self, reason):
         self._reason = reason
