@@ -4,8 +4,14 @@ The customer-visible controller surface over the durable PR5H-A enrollment found
 vertical slice covers the controller invitation lifecycle:
 
 * ``POST /api/v1/enrollment/invitations`` — create a single-use invitation and open its enrollment
-  at revision 0, returning the **non-secret** invitation the operator hands to the worker.
+  at revision 0, returning the **non-secret** invitation the operator hands to the worker. This is
+  the ONLY response that ever carries invitation material (see the one-shot decision in
+  ``secp_api.schemas_enrollment``).
+* ``GET  /api/v1/enrollment`` — the org-scoped, keyset-paged enrollment inventory: bounded status
+  projections only, filterable by a closed set of states, including revoked and terminal ones.
 * ``GET  /api/v1/enrollment/{enrollment_id}`` — the bounded, secret-free status projection.
+* ``POST /api/v1/enrollment/{enrollment_id}/recover`` — operator-triggered recovery, the complement
+  of the scheduled expiry sweep that ``secp_worker`` drives on the ORDINARY Temporal queue.
 
 Authentication is required (``current_principal``); authorization is the organization boundary,
 enforced by the service against the authoritative persisted row (Charter invariant: organization is
@@ -31,8 +37,9 @@ coordinates are derived server-side and never cross the public boundary.
 from __future__ import annotations
 
 import datetime as _dt
+from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from secp_commissioning.enrollment_attestation import DetachedAttestation
 from sqlalchemy.orm import Session
 
@@ -46,6 +53,7 @@ from secp_api.deps import (
 )
 from secp_api.enrollment_signer_client import EnrollmentOfferSignerClient
 from secp_api.enums import WorkerEnrollmentErrorCode as EC
+from secp_api.enums import WorkerEnrollmentStateName
 from secp_api.errors import WorkerEnrollmentError
 from secp_api.schemas_enrollment import (
     BindExchangeOut,
@@ -53,8 +61,10 @@ from secp_api.schemas_enrollment import (
     BindWorkerRequest,
     CreateEnrollmentInvitation,
     EnrollmentInvitationOut,
+    EnrollmentListOut,
     EnrollmentStatusOut,
     MarkHealthyRequest,
+    MarkRecoveryRequired,
     RecordHandoffRequest,
     ResultExchangeOut,
     ResultExchangeRequest,
@@ -63,9 +73,35 @@ from secp_api.schemas_enrollment import (
     VerifyReleaseRequest,
 )
 from secp_api.services import worker_enrollment as svc
-from secp_api.worker_enrollment_contract import HandoffFacts
+from secp_api.services.worker_enrollment import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
+from secp_api.worker_enrollment_contract import HandoffFacts, WorkerEnrollmentContractError
 
 router = APIRouter(prefix="/api/v1/enrollment", tags=["enrollment"])
+
+
+def _status_out(state: object) -> EnrollmentStatusOut:
+    """Project a state for the wire, converting a bounded CONTRACT refusal into the bounded SERVICE
+    error the HTTP layer knows how to redact.
+
+    ``public_view`` runs the projection scan over its own output and can refuse. That refusal is a
+    ``WorkerEnrollmentContractError`` — a plain ``Exception``, NOT a ``DomainError`` — so calling
+    ``state.public_view()`` straight into ``model_validate`` turns it into an unhandled 500 rather
+    than the closed, redacted refusal every other failure on this path produces. Seven routes
+    project a state; they all go through here so none of them can regrow that hole.
+
+    The mapping is the same one :func:`services.worker_enrollment._surface` applies: a code outside
+    the closed vocabulary fails closed as an internal failure rather than leaking a raw string.
+    """
+    try:
+        view = state.public_view()  # type: ignore[attr-defined]
+    except WorkerEnrollmentContractError as exc:
+        code = exc.reason_code
+        try:
+            EC(code)
+        except ValueError:
+            raise WorkerEnrollmentError(EC.internal_failure) from None
+        raise WorkerEnrollmentError(code) from None
+    return EnrollmentStatusOut.model_validate(view)
 
 
 def _require_progression_enabled(settings: Settings) -> None:
@@ -122,6 +158,45 @@ def create_enrollment_invitation(
     )
 
 
+@router.get("", response_model=EnrollmentListOut)
+def list_enrollments(
+    state: Annotated[list[WorkerEnrollmentStateName] | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)] = DEFAULT_LIST_LIMIT,
+    after: Annotated[str | None, Query(max_length=256)] = None,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentListOut:
+    """The org-scoped enrollment inventory: one bounded, keyset-paged page of status projections.
+
+    Declared BEFORE ``/{enrollment_id}`` so the collection path is matched as a collection.
+    ``state`` is repeatable and closed (anything else is a 422 from the enum, never a free-form
+    string reaching the query); ``limit`` is bounded here AND re-clamped server-side; ``after`` is
+    the opaque cursor from a previous page's ``next_cursor``.
+
+    Returns ONLY :class:`EnrollmentStatusOut` items — no invitation material is reachable from a
+    list, a status read, or a cursor (see the one-shot decision in ``schemas_enrollment``).
+    """
+    try:
+        items, next_cursor = svc.list_public_views(
+            session,
+            principal,
+            states=tuple(entry.value for entry in state) if state else None,
+            limit=limit,
+            after=after,
+        )
+    except WorkerEnrollmentError as exc:
+        # A page-integrity refusal also materializes the audit row naming the failing enrollment —
+        # the only place that id is recorded. Commit it here so it survives the request (db_session
+        # would roll it back), then re-raise so the caller still gets the redacted 409 + cursor.
+        if exc.durable_transition:
+            session.commit()
+        raise
+    return EnrollmentListOut(
+        items=[EnrollmentStatusOut.model_validate(item) for item in items],
+        next_cursor=next_cursor,
+    )
+
+
 @router.get("/{enrollment_id}", response_model=EnrollmentStatusOut)
 def get_enrollment_status(
     enrollment_id: str,
@@ -142,7 +217,28 @@ def revoke_enrollment(
     outcome = svc.revoke_enrollment(
         session, principal, enrollment_id=enrollment_id, expected_revision=body.expected_revision
     )
-    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+    return _status_out(outcome.state)
+
+
+@router.post("/{enrollment_id}/recover", response_model=EnrollmentStatusOut)
+def mark_enrollment_recovery_required(
+    enrollment_id: str,
+    body: MarkRecoveryRequired,
+    session: Session = Depends(db_session),
+    principal: Principal = Depends(current_principal),
+) -> EnrollmentStatusOut:
+    """Operator-triggered recovery — the complement of the scheduled expiry sweep.
+
+    The sweep (``secp_worker`` drives it on the ordinary Temporal queue) reaches enrollments that
+    ran out of time; this reaches one an operator has decided is stuck, without waiting for the TTL.
+    Requires ``enrollment:manage``, enforced in the SERVICE layer so a router bypass cannot evade
+    it. Idempotent on an already-terminal enrollment; a stale ``expected_revision`` on a live one
+    refuses a bounded conflict.
+    """
+    outcome = svc.mark_recovery_required(
+        session, principal, enrollment_id=enrollment_id, expected_revision=body.expected_revision
+    )
+    return _status_out(outcome.state)
 
 
 # --- SUPPORTED evidence-driven exchange (SECP-PR5H-B1 Phase 3, C1) --------------------------------
@@ -239,7 +335,7 @@ def bind_worker(
         now=_iso(_utc_now()),
         expected_revision=body.expected_revision,
     )
-    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+    return _status_out(outcome.state)
 
 
 @router.post("/{enrollment_id}/offer", response_model=EnrollmentStatusOut, include_in_schema=False)
@@ -264,7 +360,7 @@ def record_controller_offer(
         now=_iso(_utc_now()),
         expected_revision=body.expected_revision,
     )
-    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+    return _status_out(outcome.state)
 
 
 @router.post("/{enrollment_id}/result", response_model=EnrollmentStatusOut, include_in_schema=False)
@@ -289,7 +385,7 @@ def record_worker_result(
         now=_iso(_utc_now()),
         expected_revision=body.expected_revision,
     )
-    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+    return _status_out(outcome.state)
 
 
 @router.post("/{enrollment_id}/verify", response_model=EnrollmentStatusOut, include_in_schema=False)
@@ -309,7 +405,7 @@ def verify_release(
         now=_iso(_utc_now()),
         expected_revision=body.expected_revision,
     )
-    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+    return _status_out(outcome.state)
 
 
 @router.post(
@@ -330,4 +426,4 @@ def mark_enrollment_healthy(
         now=_iso(_utc_now()),
         expected_revision=body.expected_revision,
     )
-    return EnrollmentStatusOut.model_validate(outcome.state.public_view())
+    return _status_out(outcome.state)

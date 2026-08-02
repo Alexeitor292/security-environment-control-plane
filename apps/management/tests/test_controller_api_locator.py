@@ -112,6 +112,71 @@ def test_seeded_locator_reads():
     assert loc.canonical_origin == ORIGIN and loc.ca_bundle_path == CA
 
 
+def test_one_shared_provider_pins_one_locator_value_across_all_three_consumers():
+    """Object identity alone is not enough if every consumer re-reads a mutable locator file.
+
+    The CA source, HTTPS destination, and credential account all share one invocation-scoped file
+    provider. Mutating the protected file after the CA read must therefore not split that single
+    operation across controller A and controller B.
+    """
+    from secp_management.enrollment_cli import LocatorControllerCaBundleProvider
+    from secp_management.enrollment_controller_client import HttpsEnrollmentControllerClient
+    from secp_management.operator_auth import OperatorAccessToken
+    from secp_management.operator_credential_store import ControllerScopedCredentialProvider
+
+    ca_pem = (
+        "-----BEGIN CERTIFICATE-----\nMIIBfakeControllerCA000000000==\n-----END CERTIFICATE-----\n"
+    )
+    origin_b = "https://other-controller.example.test"
+    ca_b = "/etc/secp/controller/other-ca.pem"
+    fs = _fs()
+    _seed_locator(fs)
+    fs.seed_file(CA, ca_pem.encode("utf-8"), uid=0, gid=0, mode=0o644)
+
+    shared = FileControllerApiLocatorProvider(fs)
+    ca_provider = LocatorControllerCaBundleProvider(fs, shared)
+
+    class _Store:
+        def __init__(self) -> None:
+            self.accounts: list[str] = []
+
+        def for_account(self, account: str):
+            self.accounts.append(account)
+            return self
+
+        def access_token(self) -> OperatorAccessToken:
+            return OperatorAccessToken("x" * 16)
+
+    store = _Store()
+    credential = ControllerScopedCredentialProvider(store, shared)
+
+    class _Client(HttpsEnrollmentControllerClient):
+        __slots__ = ("seen_locators",)
+
+        def __init__(self) -> None:
+            super().__init__(locator_provider=shared, token_provider=credential)
+            self.seen_locators: list[ControllerApiLocator] = []
+
+        def _send(self, locator, method, path, body, token):
+            self.seen_locators.append(locator)
+            return 200, b"{}"
+
+    client = _Client()
+
+    # The first consumer establishes the invocation snapshot.
+    assert ca_provider.read_pem() == ca_pem
+    snapshot = shared.locate()
+    assert snapshot.canonical_origin == ORIGIN and snapshot.ca_bundle_path == CA
+
+    # A root-controlled replacement may affect the NEXT invocation, but never split this one.
+    _seed_locator(fs, origin=origin_b, ca=ca_b)
+    assert client._request("GET", "/snapshot-control", body=None, expect=200) == {}
+
+    assert store.accounts == [ORIGIN]
+    assert client.seen_locators == [snapshot]
+    assert shared.locate() is snapshot
+
+
 def test_a_group_writable_locator_is_refused():
     fs = _fs()
     _seed_locator(fs, mode=0o664)  # group-writable -> unsafe
@@ -160,3 +225,12 @@ def test_direct_value_object_validates_grammar():
         ControllerApiLocator(canonical_origin="ftp://x", ca_bundle_path=CA)
     with pytest.raises(ControllerApiLocatorError):
         ControllerApiLocator(canonical_origin=ORIGIN, ca_bundle_path="not-absolute")
+
+
+@pytest.mark.parametrize("port", [65536, 99999])
+def test_controller_origin_refuses_an_out_of_range_port(port):
+    with pytest.raises(ControllerApiLocatorError) as ei:
+        ControllerApiLocator(
+            canonical_origin=f"https://controller.example.test:{port}", ca_bundle_path=CA
+        )
+    assert ei.value.reason_code == "secpctl_controller_locator_invalid"

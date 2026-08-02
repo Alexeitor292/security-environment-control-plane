@@ -856,6 +856,16 @@ class AuditAction(str, Enum):
     authorization_denied = "authorization.denied"
     enrollment_invitation_created = "enrollment.invitation_created"
     enrollment_revoked = "enrollment.revoked"
+    # WS-B R3: an operator drove an enrollment to the recovery_required terminal. Distinct from
+    # enrollment.revoked: revocation retires an invitation, recovery marks an enrollment as needing
+    # operator remediation. The scheduled expiry sweep is NOT audited per row — it is unattended
+    # platform work reported as aggregate counts, and a per-row audit would be an unbounded write
+    # amplification with no actor to attribute it to.
+    enrollment_recovery_required = "enrollment.recovery_required"
+    # R1: a row inside an inventory page could not be projected. Audited (not merely logged) because
+    # this is the ONLY place the failing enrollment id is recorded — the HTTP refusal deliberately
+    # carries no id — and an org-scoped durable row is where an operator can actually find it.
+    enrollment_page_integrity_failed = "enrollment.page_integrity_failed"
     enrollment_worker_bound = "enrollment.worker_bound"
     enrollment_offer_recorded = "enrollment.offer_recorded"
     enrollment_result_recorded = "enrollment.result_recorded"
@@ -2047,6 +2057,31 @@ class EnvironmentPublicationErrorCode(str, Enum):
     version_publish_audit_failure = "version_publish_audit_failure"
 
 
+class WorkerEnrollmentStateName(str, Enum):
+    """The closed set of enrollment state names, as a REQUEST-side filter vocabulary.
+
+    These are exactly the eight states of the pure transition contract
+    (``worker_enrollment_contract.ALL_STATES``): the five active ones, the terminal-success state,
+    and the two terminals. The enum exists so a query filter is a closed, self-documenting,
+    automatically-422-on-anything-else vocabulary rather than a free-form string reaching the
+    repository.
+
+    It is deliberately declared with literal values instead of imported from the contract: the
+    contract is the pure, boundary-mirrored authority and must not acquire an ``enums`` dependency.
+    ``apps/api/tests/test_enrollment_list_api.py`` pins this enum against ``ALL_STATES`` (values AND
+    order), so adding a state to one side without the other fails closed in CI.
+    """
+
+    invited = "invited"
+    worker_bound = "worker_bound"
+    offer_transported = "offer_transported"
+    result_transported = "result_transported"
+    verified = "verified"
+    healthy = "healthy"
+    refused = "refused"
+    recovery_required = "recovery_required"
+
+
 class WorkerEnrollmentErrorCode(str, Enum):
     """Closed catalog of durable worker-enrollment persistence/service codes (SECP-PR5H-A, ADR-027).
 
@@ -2062,6 +2097,17 @@ class WorkerEnrollmentErrorCode(str, Enum):
     not_found = "enrollment_not_found"
     forbidden = "enrollment_forbidden"  # authenticated actor org != authoritative row org
     scope_mismatch = "enrollment_scope_mismatch"  # worker-claimed org/site != authoritative binding
+    # The submitted `deployment_site_label` was refused AT CREATION. Deliberately DISTINCT from
+    # `scope_mismatch`, which means "a worker CLAIMED a site that disagrees with the authoritative
+    # binding" — a tenancy question about an existing enrollment. Creation has no binding to
+    # disagree with yet, so reporting `scope_mismatch` there told an operator to go looking at
+    # permissions and org membership when the answer was "rename your site".
+    site_label_invalid = "enrollment_site_label_invalid"  # fails the label grammar
+    # Passes the grammar but resembles credential material, so the status projection's secret scan
+    # would refuse to render it. Split from `site_label_invalid` because these labels LOOK ordinary
+    # — `x-vault-token` is thirteen letters and hyphens — and an operator told only "invalid" would
+    # re-read a label that appears perfectly well-formed. This code says which way to look.
+    site_label_forbidden_shape = "enrollment_site_label_forbidden_shape"
     revision_conflict = "enrollment_revision_conflict"  # lost/stale CAS
     state_corrupt = "enrollment_state_corrupt"  # a rehydration invariant failed
     history_inconsistent = (
@@ -2107,6 +2153,17 @@ class WorkerEnrollmentErrorCode(str, Enum):
     pop_invalid = "enrollment_pop_invalid"
     # Phase 3: a concurrent/duplicate bind lost the write-once signed-offer insert
     signed_offer_conflict = "enrollment_signed_offer_conflict"
+    # R1: the opaque list cursor was malformed, over-long, did not decode to a well-formed
+    # (canonical UTC timestamp, sha256 enrollment id) keyset position, or was minted under a
+    # DIFFERENT state filter than the request presenting it. Bounded and attacker-independent: the
+    # rejected cursor value, and the filter it was minted under, are NEVER echoed.
+    cursor_invalid = "enrollment_cursor_invalid"
+    # R1: a row inside a LIST page could not be projected — it failed the same rehydration or
+    # history-consistency checks a single status read applies. Deliberately DISTINCT from
+    # ``enrollment_state_corrupt`` (which means "this one enrollment is corrupt"): this means "this
+    # PAGE contains a row I cannot render", which is a different thing for a UI to say. The row is
+    # preserved, never repaired, and never silently dropped from the page.
+    page_integrity = "enrollment_page_integrity"
     # Phase 3: the root-gated controller-offer signer/broker is sealed, unreachable, or returned an
     # offer that failed the controller's independent re-verification (signer availability/integrity
     # — never a worker fault; the enrollment private key never enters the non-root API process)

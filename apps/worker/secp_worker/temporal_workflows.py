@@ -31,6 +31,7 @@ from secp_worker.temporal_activity_names import (
     DESTROY_ACTIVITY_NAME,
     DISCOVER_ACTIVITY_NAME,
     ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
+    ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME,
     PLAN_SECRET_READINESS_ACTIVITY_NAME,
     REAL_PLAN_GENERATION_ACTIVITY_NAME,
     REMOTE_STATE_READINESS_ACTIVITY_NAME,
@@ -146,6 +147,53 @@ class PlanSecretReadinessWorkflow:
             arg,
             result_type=str,
             start_to_close_timeout=_activity_timeout(),
+        )
+
+
+@workflow.defn
+class EnrollmentRecoverySweepWorkflow:
+    """The scheduled worker-enrollment expiry sweep (WS-B R3).
+
+    Gives ``recovery_required`` a real producer: without a caller, the state was unreachable in a
+    running deployment and any recovery view would have been a dead view.
+
+    Runs on the ORDINARY task queue. The sweep is a pure database lifecycle transition under the
+    same compare-and-swap as every other enrollment transition — it contacts no provider, opens no
+    outbound connection, runs no OpenTofu, touches no host and reads no credential — so it has no
+    business on the controlled-live operator queue and is never registered there.
+
+    Intended to be started with a Temporal cron schedule under a STABLE workflow id, so a worker
+    restart re-attaches to the existing schedule instead of creating a second one. The activity is
+    idempotent and concurrency-safe regardless: each candidate is locked ``SKIP LOCKED`` and
+    transitioned under CAS, so a duplicate or overlapping run recovers each row exactly once.
+
+    ``now`` is supplied by the activity from the host clock, not by the workflow: a workflow must
+    stay deterministic, and the sweep's due-ness decision is an impure clock read.
+    """
+
+    @workflow.run
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        from datetime import timedelta
+
+        from temporalio.common import RetryPolicy
+
+        return await workflow.execute_activity(
+            ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME,
+            arg,
+            result_type=str,
+            # A longer budget than the shared 10-minute default: the first sweep after this ships
+            # clears whatever backlog accumulated while `recovery_required` had no producer, which
+            # is the single most likely moment to exceed it.
+            start_to_close_timeout=timedelta(minutes=30),
+            # The activity heartbeats per organization, so a stall is visible and a slow run can be
+            # cancelled rather than silently occupying the schedule.
+            heartbeat_timeout=timedelta(minutes=5),
+            # BOUNDED retries. Temporal's default is unlimited, which for a cron job means a
+            # persistently failing sweep retries forever and overlaps its own next scheduled run.
+            # The sweep is self-healing — committed recoveries leave the candidate set, so every
+            # attempt makes forward progress — so a few attempts then waiting for the next cron
+            # tick is strictly better than an unbounded retry storm.
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
 

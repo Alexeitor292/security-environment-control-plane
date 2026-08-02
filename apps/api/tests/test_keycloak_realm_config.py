@@ -113,3 +113,81 @@ def test_secp_web_disables_refresh_token_issuance():
 def test_dev_realm_has_no_production_origins():
     # The dev realm must never carry a production (https) origin in redirect/web-origin config.
     assert "https://" not in json.dumps(_realm())
+
+
+# --- ADR-028 §3: operator CLI client (secp-cli) for the device authorization grant --------------
+
+
+def test_secp_cli_client_exists_and_is_public_with_no_secret():
+    cli = _client(_realm(), "secp-cli")
+    assert cli.get("publicClient") is True
+    # A public client has no secret. `test_only_the_bearer_only_server_client_has_a_secret` already
+    # scans every client; this pins the intent at the CLI client itself.
+    assert "secret" not in cli
+
+
+def test_secp_cli_enables_only_the_device_authorization_grant():
+    cli = _client(_realm(), "secp-cli")
+    assert cli.get("attributes", {}).get("oauth2.device.authorization.grant.enabled") == "true"
+    # Every browser/password/service flow stays off: the CLI has exactly one way in.
+    assert cli.get("standardFlowEnabled") is False
+    assert cli.get("implicitFlowEnabled") is False
+    assert cli.get("directAccessGrantsEnabled") is False  # no password grant, ever
+    assert cli.get("serviceAccountsEnabled") is False
+
+
+def test_secp_cli_issues_no_refresh_token():
+    # ADR-018 eliminated the refresh token for the browser, but `use.refresh.tokens` is a PER-CLIENT
+    # attribute, so secp-cli does not inherit secp-web's setting and must pin it explicitly. The CLI
+    # requests no `offline_access` scope either (see test_operator_device_auth).
+    cli = _client(_realm(), "secp-cli")
+    assert cli.get("attributes", {}).get("use.refresh.tokens") == "false"
+
+
+def test_secp_cli_carries_the_api_audience_mapper():
+    # The device-grant access token must carry the `secp-api` audience or the backend verifier
+    # refuses it. secp-cli needs its OWN mapper; it does not inherit secp-web's.
+    cli = _client(_realm(), "secp-cli")
+    mappers = [
+        m
+        for m in cli.get("protocolMappers", [])
+        if m.get("protocolMapper") == "oidc-audience-mapper"
+    ]
+    assert len(mappers) == 1
+    config = mappers[0]["config"]
+    assert config["included.custom.audience"] == _EXPECTED_AUDIENCE == "secp-api"
+    assert config["access.token.claim"] == "true"
+
+
+def test_secp_cli_declares_no_redirect_uri():
+    # The device grant has no browser redirect. A redirect URI on the CLI client would be an unused
+    # attack surface, and a wildcard one would be a redirect-forgery hazard.
+    cli = _client(_realm(), "secp-cli")
+    assert not cli.get("redirectUris")
+    assert not cli.get("webOrigins")
+
+
+def test_only_the_browser_client_enables_the_standard_flow():
+    # Defence in depth against a future client being added with browser flows switched on by habit.
+    for client in _realm()["clients"]:
+        if client.get("standardFlowEnabled") is True:
+            assert client["clientId"] == "secp-web"
+
+
+def test_the_cli_client_drops_the_roles_scope_so_tokens_fit_an_os_keystore():
+    """A SIZE requirement, not a policy one, and easy to miss because everything works until it
+    does not. The `roles` client scope adds `realm_access`/`resource_access` claims; on a deployment
+    with many roles the issued token can exceed CRED_MAX_CREDENTIAL_BLOB_SIZE (2560 bytes, applied
+    on every platform), and `secpctl auth login` then refuses with `secpctl_credential_too_large`
+    AFTER the operator has already approved interactively.
+
+    secpctl needs no role claims: the database is the sole authority for organization, role and
+    permission, and a token claim never determines them.
+    """
+    client = _client(_realm(), "secp-cli")
+    scopes = client.get("defaultClientScopes")
+    assert scopes is not None, "secp-cli must pin its default client scopes explicitly"
+    assert "roles" not in scopes, (
+        "the `roles` scope inflates the access token past the credential-store record bound"
+    )
+    assert client.get("optionalClientScopes") == []

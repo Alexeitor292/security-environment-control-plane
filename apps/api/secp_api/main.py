@@ -93,9 +93,17 @@ def _install_error_handlers(app: FastAPI) -> None:
         # Redacted errors (e.g. authentication, read-only preflight) serialize ONLY the closed
         # code — no message, details, or rejected input.
         if getattr(exc, "redacted", False):
+            body: dict = {"code": exc.code}
+            # The single code-owned exception to "code only": an opaque keyset cursor that lets a
+            # caller page PAST a row that could not be projected. Without it a corrupt row makes
+            # every enrollment ordered after it permanently unreachable from the list. It carries no
+            # reason, label or free-form text, and is set only by the enrollment list path.
+            recovery_cursor = getattr(exc, "recovery_cursor", None)
+            if isinstance(recovery_cursor, str) and recovery_cursor:
+                body["recovery_cursor"] = recovery_cursor
             return JSONResponse(
                 status_code=exc.http_status,
-                content={"error": {"code": exc.code}},
+                content={"error": body},
                 headers=headers,
             )
         payload: dict = {"error": {"code": exc.code, "message": exc.message}}

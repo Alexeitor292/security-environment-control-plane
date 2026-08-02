@@ -235,7 +235,9 @@ class LocalWorkerHealthObserver:
         return ObservedHealthEvidence(checks=checks)
 
 
-def _sealed_transport_factory(_signer: WorkerEnrollmentSigner) -> _Transport:
+def _sealed_transport_factory(
+    _signer: WorkerEnrollmentSigner, _invitation: EnrollmentInvitationInputs
+) -> _Transport:
     return SealedEnrollmentTransport()
 
 
@@ -266,8 +268,11 @@ class WorkerEnrollmentDriver:
         self,
         *,
         key_seam: WorkerEnrollmentKeySeam | None = None,
+        # The factory takes the INVITATION as well as the signer: the controller origin and CA chain
+        # are per-invitation values (the CA travels in the invitation), so a transport cannot be
+        # built once at construction time. The driver is long-lived; `enroll()` is per-invitation.
         transport_factory: Callable[
-            [WorkerEnrollmentSigner], _Transport
+            [WorkerEnrollmentSigner, EnrollmentInvitationInputs], _Transport
         ] = _sealed_transport_factory,
         state_store: WorkerEnrollmentStateStore | None = None,
         health_observer: WorkerEnrollmentHealthObserver | None = None,
@@ -295,7 +300,9 @@ class WorkerEnrollmentDriver:
         signer = (
             self._key_seam.load_or_create()
         )  # the protected worker enrollment key (never leaks)
-        transport = self._transport_factory(signer)
+        # built per-invitation, never cached across enrollments: the origin + CA chain are the
+        # validated invitation's own, so one driver serving two invitations cannot cross them
+        transport = self._transport_factory(signer, invitation)
 
         _status, bind_body = self._retry(lambda: transport.submit_binding(invitation))
         offer = _require_offer(bind_body)
@@ -413,6 +420,11 @@ def _validate_invitation(invitation: EnrollmentInvitationInputs, *, now: str) ->
         _reject("enrollment_invitation_origin_invalid")
     if not is_sha256_digest(invitation.release_digest):
         _reject("enrollment_invitation_release_invalid")
+    # the CA chain is the worker's ONLY server-TLS trust anchor; an invitation without one cannot
+    # produce a verifying transport, so refuse here rather than at connect time. Checked
+    # independently of the CLI's file validation so a programmatic caller cannot skip it.
+    if not invitation.controller_ca_bundle_pem.strip():
+        _reject("enrollment_invitation_ca_missing")
     if not _before(now, invitation.expires_at):
         _reject("enrollment_invitation_expired")
 
