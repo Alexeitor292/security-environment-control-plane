@@ -6,12 +6,12 @@ created by this module, configured from the COMMITTED ``infra/keycloak/secp-cli-
 driven through a genuine device-authorization grant with a genuine interactive approval, and
 destroyed again. The token that gets stored is one a real provider actually minted.
 
-Only the CONTROLLER half is stubbed (a one-route ``GET /api/v1/auth/config`` responder) and only the
-OS keystore is faked (an in-memory binding behind the real ``OsKeystoreCredentialStore``, so the
-real record encoding and the real ``require_storable`` bound are still in the path). Everything
-between those two edges — discovery, the device-authorization request, the poll schedule, the token
-request, the JWKS fetch, token verification, record encoding, revocation — is shipped code talking
-to a real provider.
+Only the CONTROLLER half is stubbed (bounded ``GET /api/v1/auth/config`` and ``GET /api/v1/me``
+responses) and only the OS keystore is faked (an in-memory binding behind the real
+``OsKeystoreCredentialStore``, so the real record encoding and the real ``require_storable`` bound
+are still in the path). Everything between those two edges — discovery, the device-authorization
+request, the poll schedule, the token request, the JWKS fetch, token verification, record encoding,
+revocation — is shipped code talking to a real provider.
 
 WHAT THIS PROVES THAT A STUBBED TOKEN ENDPOINT CANNOT
 ------------------------------------------------------
@@ -541,14 +541,17 @@ class _StubResponse:
 
 
 class _ControllerStub:
-    """The controller's ``GET /api/v1/auth/config`` and nothing else.
+    """The controller's public auth config and authoritative principal routes, and nothing else.
 
     The controller is CA-pinned in the shipped composition and is not what this module tests, so it
-    is the single seam replaced on that side. The issuer side has no seam replaced at all.
+    is the single seam replaced on that side. Login nevertheless must resolve the database-backed
+    principal before its first credential write, so the double serves that second bounded response
+    and proves the request carried a bearer without retaining its value. The issuer side has no seam
+    replaced at all.
     """
 
     def __init__(self, issuer: str) -> None:
-        self._payload = {
+        self._auth_config = {
             "mode": "oidc",
             "issuer": issuer,
             "client_id": "secp-web",
@@ -557,7 +560,15 @@ class _ControllerStub:
             "redirect_path": "/auth/callback",
             "post_logout_redirect_path": "/login",
         }
+        self._principal = {
+            "user_id": "5ec9ad00-0000-4000-8000-000000000001",
+            "organization_id": "6ec9ad00-0000-4000-8000-000000000001",
+            "email": "operator@example.invalid",
+            "permissions": ["enrollment:manage", "enrollment:read"],
+            "is_dev_fallback": False,
+        }
         self.requested: list[str] = []
+        self.bearer_requests = 0
 
     def __enter__(self):
         return self
@@ -565,9 +576,18 @@ class _ControllerStub:
     def __exit__(self, *exc):
         return False
 
-    def stream(self, _method: str, url: str):
+    def stream(self, method: str, url: str, *, headers: dict[str, str] | None = None):
+        assert method == "GET"
         self.requested.append(url)
-        return _StubResponse(self._payload)
+        if url.endswith("/api/v1/auth/config"):
+            assert headers is None
+            return _StubResponse(self._auth_config)
+        if url.endswith("/api/v1/me"):
+            authorization = "" if headers is None else headers.get("Authorization", "")
+            assert authorization.startswith("Bearer ") and len(authorization) > len("Bearer ")
+            self.bearer_requests += 1
+            return _StubResponse(self._principal)
+        raise AssertionError("the auth client requested an unexpected controller route")
 
 
 class FakeKeystore:
@@ -763,10 +783,10 @@ def test_the_verifier_refuses_the_console_default_realm(provider, console_defaul
             document["revocation_endpoint"], tool.urllib_transport, require_https=False
         ),
     )
-    # Exactly three: the assigned scope set is not the pinned set, `roles` is attached, and
-    # fullScopeAllowed is on. An exact count, so a verifier that started reporting fewer — or
-    # started reporting something unrelated instead — fails here.
-    assert len(problems) == 3, problems
+    # Exactly four: the assigned scope set is not the pinned set, `roles` is attached, and
+    # fullScopeAllowed is detected both as a core-representation difference and by its dedicated
+    # safety check. An exact count means fewer findings — or an unrelated new one — fails here.
+    assert len(problems) == 4, problems
     assert admin.mutations == 0
 
 
@@ -867,6 +887,8 @@ def test_a_real_device_flow_stores_an_operator_credential(provider, artifact_rea
     # The operator really was prompted, and really did approve through the provider's pages.
     assert len(composition.approval.prompts) == 1
     assert composition.approval.submissions >= 2
+    assert composition.controller.requested[-1].endswith("/api/v1/me")
+    assert composition.controller.bearer_requests == 1
 
     assert len(composition.keystore.entries) == 1  # exactly one entry, for exactly this controller
     record = composition.stored_record()
