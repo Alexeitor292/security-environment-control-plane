@@ -168,8 +168,8 @@ def test_the_size_control_has_a_real_measurer_in_both_directions():
     source = (
         REPO / "apps" / "management" / "tests" / "test_keycloak_device_flow_integration.py"
     ).read_text(encoding="utf-8")
-    # The artifact posture FITS, with headroom rather than by a margin of one claim...
-    assert "assert len(encoded) < MAX_SECRET_BYTES // 2" in source
+    # The artifact posture FITS with at least 1 KiB of headroom after the schema-v2 generation...
+    assert "assert MAX_SECRET_BYTES - len(encoded) >= 1024" in source
     # ...and the console-default posture genuinely does NOT, measured on the token alone.
     assert "assert len(token) > MAX_SECRET_BYTES" in source
     # ...and the refusal lands AFTER the operator approved, which is the whole point.

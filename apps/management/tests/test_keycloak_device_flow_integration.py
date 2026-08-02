@@ -632,6 +632,10 @@ class _Composition:
             locator_provider=_FixedLocator(),
             device_client=device_client,
             present=self.approval,
+            # This proof composes the OS store only. Make the absence of the independently
+            # configurable protected token file explicit so multi-source logout does not have to
+            # treat an unknown source as an unreadable, potentially-live credential.
+            token_file_active=lambda: False,
         )
 
     @property
@@ -914,9 +918,9 @@ def test_the_issued_token_carries_no_role_claims_and_fits_the_keystore(provider,
 
     encoded = record.to_bytes()
     assert len(encoded) < MAX_SECRET_BYTES
-    # Headroom, not a coin flip: a credential that only just fits is one claim away from the
-    # after-approval failure this whole control exists to prevent.
-    assert len(encoded) < MAX_SECRET_BYTES // 2
+    # Headroom, not a coin flip: schema v2 deliberately adds an immutable generation, but the
+    # resulting record must still reserve at least 1 KiB for normal provider/key variation.
+    assert MAX_SECRET_BYTES - len(encoded) >= 1024
 
 
 def test_the_console_default_posture_refuses_after_the_operator_approved(
