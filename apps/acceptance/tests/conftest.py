@@ -74,7 +74,8 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     if container_tier_required():
         return
-    keep, drop = [], []
+    keep: list[pytest.Item] = []
+    drop: list[pytest.Item] = []
     for item in items:
         (drop if item.get_closest_marker(CONTAINER_MARKER) else keep).append(item)
     if drop:
