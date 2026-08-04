@@ -26,8 +26,11 @@ import json
 
 import pytest
 from secp_acceptance.lifecycle_driver import (
+    INJECTIONS,
     UNOBSERVED,
     StageRecorder,
+    drive_dry_run_default,
+    drive_failure_injection,
     drive_restart,
     drive_rollback,
     drive_upgrade,
@@ -62,6 +65,25 @@ class _Recorder:
     def violated(self, check: str, *, observation: object) -> None:
         self.calls.append((check, "violated", "acceptance_prohibited_state_observed"))
         self.observations[check] = observation
+
+    def expect_refusal(
+        self, check: str, *, expected: str, actual: str | None, observation: object
+    ) -> bool:
+        """Mirrors the recorder contract: only the EXPECTED code is a pass.
+
+        Deliberately reimplements the branch rather than always appending "refused" — a fake that
+        recorded every refusal as a pass would make every assertion below vacuous, which is the
+        exact defect the real verb exists to prevent.
+        """
+        self.observations[check] = observation
+        if actual is None:
+            self.calls.append((check, "unproven", "acceptance_expected_refusal_absent"))
+            return False
+        if actual != expected:
+            self.calls.append((check, "unproven", "acceptance_unexpected_reason_code"))
+            return False
+        self.calls.append((check, "refused", actual))
+        return True
 
     def outcome(self, check: str) -> str:
         for name, outcome, _reason in self.calls:
@@ -574,3 +596,126 @@ def test_a_dry_run_that_mutated_documents_fails_the_plan_check():
     assert recorder.outcome("rollback_plan_lists_documents") != "observed", (
         "a plan that removed a document while reporting dry_run was accepted"
     )
+
+
+# --------------------------------------------------------------------------- failure injection
+
+
+def _refusing(code: str) -> _Host:
+    return _Host({"bootstrap worker": _json(2, {"reason_code": code})})
+
+
+def test_each_injection_records_refused_with_its_own_bounded_code():
+    recorder = _Recorder()
+    for check, expected, _note in INJECTIONS:
+        drive_failure_injection(recorder, _refusing(expected), bundles={check: "/b"})
+
+    assert [outcome for _c, outcome, _r in recorder.calls if outcome == "refused"] == [
+        "refused"
+    ] * len(INJECTIONS)
+
+
+def test_a_refusal_with_the_WRONG_code_is_not_a_pass():
+    """THE property the whole stage rests on.
+
+    "The product refused" and "the product refused for the reason that makes this test meaningful"
+    are different claims. A bundle rejected for being unreadable rather than wrong-role would
+    otherwise let this stage report that the product validates roles.
+    """
+    recorder = _Recorder()
+    check, _expected, _note = INJECTIONS[0]
+
+    drive_failure_injection(
+        recorder, _refusing("release_artifact_digest_mismatch"), bundles={check: "/b"}
+    )
+
+    assert recorder.outcome(check) == "unproven"
+    assert recorder.reason(check) == "acceptance_unexpected_reason_code"
+
+
+def test_a_product_that_does_not_refuse_at_all_is_the_worst_outcome():
+    """An installer that ACCEPTED a wrong-role bundle. Never a pass, never silently dropped."""
+    recorder = _Recorder()
+    check, _expected, _note = INJECTIONS[0]
+    host = _Host({"bootstrap worker": _json(0, {"mode": "dry_run", "classification": "fresh"})})
+
+    drive_failure_injection(recorder, host, bundles={check: "/b"})
+
+    assert recorder.outcome(check) == "unproven"
+    assert recorder.reason(check) == "acceptance_expected_refusal_absent"
+
+
+def test_an_unreachable_host_is_not_read_as_a_refusal():
+    """A command that never ran must not satisfy an assertion that the product refused — otherwise
+    every injection passes on a broken fleet."""
+    recorder = _Recorder()
+    check, _expected, _note = INJECTIONS[0]
+
+    drive_failure_injection(recorder, _Host({}), bundles={check: "/b"})
+
+    assert recorder.outcome(check) == "unproven"
+    assert recorder.reason(check) == "acceptance_expected_refusal_absent"
+
+
+def test_a_missing_bundle_is_recorded_not_skipped():
+    """The stage contract commits the run to every declared check; a missing fixture is a fact
+    about the run, not a licence to omit."""
+    recorder = _Recorder()
+
+    drive_failure_injection(recorder, _refusing("release_role_mismatch"), bundles={})
+
+    assert len(recorder.calls) == len(INJECTIONS)
+    assert all(outcome == "unproven" for _c, outcome, _r in recorder.calls)
+
+
+def test_every_injection_expects_a_distinct_product_code():
+    """Two rows sharing a code would make one unfalsifiable — it would pass on its sibling's
+    defect being found."""
+    codes = [expected for _c, expected, _n in INJECTIONS]
+    assert len(set(codes)) == len(codes)
+
+
+def test_every_expected_code_is_a_real_product_reason():
+    """A code the product no longer emits turns its row into a branch that can never be taken."""
+    from secp_acceptance.reasons import PRODUCT_REASONS
+
+    for _check, expected, _note in INJECTIONS:
+        assert expected in PRODUCT_REASONS
+
+
+def test_every_injection_names_a_declared_failure_injection_check():
+    from secp_acceptance.reasons import CHECKS_BY_STAGE, STAGE_FAILURE_INJECTION
+
+    declared = set(CHECKS_BY_STAGE[STAGE_FAILURE_INJECTION])
+    for check, _expected, _note in INJECTIONS:
+        assert check in declared
+
+
+# --------------------------------------------------------------------------- the dry-run default
+
+
+def test_a_declared_dry_run_enrollment_is_observed():
+    recorder = _Recorder()
+    host = _Host({"worker enroll": _json(0, {"mode": "dry_run"})})
+
+    drive_dry_run_default(recorder, host, "/inv.json")
+
+    assert recorder.outcome("enroll_without_write_confirm_is_dry_run") == "observed"
+
+
+def test_an_enrollment_that_wrote_without_being_asked_is_a_violation():
+    """The prohibited state, positively observed: the default mutated."""
+    recorder = _Recorder()
+    host = _Host({"worker enroll": _json(0, {"mode": "written"})})
+
+    drive_dry_run_default(recorder, host, "/inv.json")
+
+    assert recorder.outcome("enroll_without_write_confirm_is_dry_run") == "violated"
+
+
+def test_an_unreadable_enrollment_report_proves_nothing_about_the_default():
+    recorder = _Recorder()
+
+    drive_dry_run_default(recorder, _Host({}), "/inv.json")
+
+    assert recorder.outcome("enroll_without_write_confirm_is_dry_run") == "unproven"

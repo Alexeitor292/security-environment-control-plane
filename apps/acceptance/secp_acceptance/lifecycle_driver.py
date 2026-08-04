@@ -68,6 +68,24 @@ class StageRecorder(Protocol):
 
     def violated(self, check: str, *, observation: object) -> None: ...
 
+    def expect_refusal(
+        self, check: str, *, expected: str, actual: str | None, observation: object
+    ) -> bool:
+        """Record a refusal the scenario REQUIRED, and return whether it was the expected one.
+
+        The verb the failure-injection stage is built on. "The product refused" and "the product
+        refused FOR THE REASON THAT MAKES THIS TEST MEANINGFUL" are different claims, and only the
+        second is a pass — a refusal carrying some other bounded code is ``unproven`` with
+        ``acceptance_unexpected_reason_code``, and no refusal at all is the worst outcome available
+        to this stage.
+
+        Without that distinction a failure-injection check is satisfied by ANY refusal, including
+        one caused by the harness handing the product a malformed argument. The stage would then
+        report that the product rejects tampered artifacts on the strength of it having rejected
+        something.
+        """
+        ...
+
 
 def _record(
     recorder: StageRecorder,
@@ -317,10 +335,111 @@ def drive_rollback(recorder: StageRecorder, worker: Host) -> None:
 
 
 __all__ = [
+    "INJECTIONS",
     "STAGE_LIFECYCLE",
     "UNOBSERVED",
     "StageRecorder",
+    "drive_dry_run_default",
+    "drive_failure_injection",
     "drive_restart",
     "drive_rollback",
     "drive_upgrade",
 ]
+
+
+# --------------------------------------------------------------------------- failure injection
+
+
+#: Each injection: the check, the bounded PRODUCT code its refusal must carry, and a short note on
+#: what is being injected. Read as a table because the stage's whole content is "we broke exactly
+#: one thing and the product named it" — and the code it must name is what makes each row a
+#: measurement rather than an assertion that something went wrong.
+INJECTIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "wrong_role_bundle_refused",
+        "release_role_mismatch",
+        "a CONTROLLER bundle offered to the worker",
+    ),
+    ("tampered_artifact_refused", "release_artifact_digest_mismatch", "one artifact byte changed"),
+    (
+        "non_linear_upgrade_refused",
+        "worker_upgrade_not_linear_successor",
+        "parent_sha alone changed",
+    ),
+)
+
+
+def drive_failure_injection(
+    recorder: StageRecorder,
+    worker: Host,
+    *,
+    bundles: dict[str, str],
+) -> None:
+    """The refusal-shaped injections that need only a worker host and a set of broken bundles.
+
+    ``bundles`` maps each check id to the bundle directory prepared for it. A check with no bundle
+    is recorded ``unproven`` rather than skipped: the stage contract commits the run to covering
+    every declared check, and a missing fixture is a fact about the run, not a licence to omit.
+
+    EACH INJECTION BREAKS EXACTLY ONE THING
+    ---------------------------------------
+    That is what makes the refusal attributable. A bundle that was both wrong-role AND tampered
+    would refuse with whichever the engine checked first, and the row that did not fire would be
+    unfalsifiable — passing because its sibling's defect was found. The single-field discipline is
+    the same one that makes ``non_linear_upgrade_refused`` a measurement: it differs from the
+    admitted upgrade in ``parent_sha`` alone.
+    """
+    for check, expected, _note in INJECTIONS:
+        bundle = bundles.get(check)
+        if not bundle:
+            _record(
+                recorder,
+                check,
+                ok=False,
+                observation={"bundle_prepared": False},
+                reason=UNOBSERVED,
+            )
+            continue
+        report = secpctl(worker, ("bootstrap", "worker", "--bundle", bundle))
+        # `actual=None` means the product did not refuse at all — the worst outcome for an
+        # injection, and the recorder records it as such rather than as a pass.
+        recorder.expect_refusal(
+            check,
+            expected=expected,
+            actual=report.reason_code if report.status == REPORT_REFUSED else None,
+            observation={
+                "bundle_prepared": True,
+                "refused": report.status == REPORT_REFUSED,
+                "reason_code": (report.reason_code or "")[:64],
+                "expected": expected,
+            },
+        )
+
+
+def drive_dry_run_default(recorder: StageRecorder, worker: Host, invitation: str) -> None:
+    """``enroll_without_write_confirm_is_dry_run`` — the DEFAULT is proven, not assumed.
+
+    Not refusal-shaped, and that is the point: the claim is that omitting ``--write --confirm``
+    yields a plan rather than a mutation. An installer whose "dry run" wrote anyway would satisfy
+    a refusal-shaped check by not refusing, so this asserts the product's own declared mode.
+    """
+    check = "enroll_without_write_confirm_is_dry_run"
+    report = secpctl(worker, ("worker", "enroll", "--invitation", invitation))
+    mode = report.text("mode") or ""
+    observation: dict[str, object] = {
+        "report_readable": report.readable,
+        "declared_mode": mode[:32],
+        "declared_dry_run": mode == "dry_run",
+    }
+    if not report.readable:
+        _record(recorder, check, ok=False, observation=observation, reason=UNOBSERVED)
+        return
+    # A product that WROTE without being asked is a positive observation of the prohibited state.
+    _record(
+        recorder,
+        check,
+        ok=mode == "dry_run",
+        observation=observation,
+        reason=report.reason_code or UNOBSERVED,
+        violated=mode == "written",
+    )
