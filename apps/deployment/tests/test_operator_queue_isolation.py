@@ -54,6 +54,7 @@ from secp_operator_deployment.queue_check import (
 from secp_operator_deployment.verify import (
     REMEDIATION_CLASSES,
     REMEDIATION_REVIEWED_CODE,
+    build_provenance_report,
     classify_reason_code,
 )
 
@@ -664,19 +665,96 @@ def test_the_queue_command_reads_the_same_context_verify_does_exactly_once(monke
     assert len(calls) == 1
 
 
-def test_the_structural_invariants_are_all_false_and_none_were_reached():
-    """These must not grow a truthy field: a ``True`` here would be an admission."""
-    effects = _report()["effects_of_this_queue_check"]
-    assert set(effects) == {"measured_this_invocation", "structural_invariants"}
-    assert set(effects["structural_invariants"]) == {
+_STRUCTURAL_PROPERTIES = frozenset(
+    {
         "worker_constructed",
         "workflow_submitted",
         "run_plan_generation_called",
         "secret_resolver_constructed",
         "composition_aggregate_built",
-        "host_mutated",
     }
-    assert all(v is False for v in effects["structural_invariants"].values())
+)
+
+
+def test_the_structural_properties_are_all_false_and_none_were_reached():
+    """These must not grow a truthy field: a ``True`` here would be an admission."""
+    effects = _report()["effects_of_this_queue_check"]
+    assert set(effects) == {
+        "measured_this_invocation",
+        "code_structural_properties",
+        "host_mutation",
+    }
+    section = effects["code_structural_properties"]
+    assert set(section) == _STRUCTURAL_PROPERTIES | {"basis", "owning_guards"}
+    assert all(section[name] is False for name in _STRUCTURAL_PROPERTIES)
+
+
+def test_the_asserted_properties_are_not_labelled_or_placed_as_measurements():
+    """The rename is the point, so it is pinned rather than left to reviewer memory.
+
+    ``structural_invariants`` sat beside ``measured_this_invocation`` under a name that read as an
+    observation, while being six hardcoded ``False`` literals that no input to the builder carried.
+    The properties still hold — they are proven by the guards named below — but the report must not
+    borrow the credibility of the measured half for the asserted half. This fails if the section is
+    renamed back, folded into the measured block, or given a name containing "measured".
+    """
+    effects = _report()["effects_of_this_queue_check"]
+    assert "structural_invariants" not in effects
+    assert not any("measured" in key for key in effects["code_structural_properties"])
+    # The measured half stays exactly what it was: counted, and only counted.
+    assert set(effects["measured_this_invocation"]) == {
+        "host_commands_executed",
+        "local_host_contact_performed",
+    }
+    assert effects["code_structural_properties"]["basis"] == (
+        "shipped_source_structure_not_this_invocation"
+    )
+
+
+def test_no_host_mutation_claim_is_made_anywhere_in_either_report():
+    """``host_mutated: False`` was the one actively MISLEADING literal, and it must not return.
+
+    The package spawns subprocesses and one argv tail — ``profile.ordinary_health_command`` — is
+    DEPLOYMENT-SUPPLIED, so whether the host is mutated is not this package's to answer. The
+    expected-identities pin does not close it: it constrains drift from the expected argv, never
+    what that argv does. The absence of a claim is reported explicitly so that "no key" and "we
+    checked and it was fine" can never be confused.
+    """
+    for report, effects_key in (
+        (_report(), "effects_of_this_queue_check"),
+        (build_provenance_report(), "effects_of_this_provenance_check"),
+    ):
+        effects = report[effects_key]
+        assert "host_mutated" not in json.dumps(report, sort_keys=True)
+        assert effects["host_mutation"]["claimed"] is None
+        assert isinstance(effects["host_mutation"]["basis"], str)
+        assert effects["host_mutation"]["basis"]
+
+
+def test_every_named_owning_guard_exists_and_covers_exactly_the_asserted_properties():
+    """A citation to a guard that does not exist is worse than no citation.
+
+    Keyed BY PROPERTY deliberately: a single blanket citation would let one guard's credibility
+    cover properties it never touches. This resolves each named guard to a real test function, so
+    renaming or deleting a guard fails here instead of leaving the report citing a ghost.
+    """
+    import importlib
+
+    for report, effects_key in (
+        (_report(), "effects_of_this_queue_check"),
+        (build_provenance_report(), "effects_of_this_provenance_check"),
+    ):
+        section = report[effects_key]["code_structural_properties"]
+        properties = set(section) - {"basis", "owning_guards"}
+        # Every asserted property carries a guard, and no guard names a property that is not
+        # asserted — so adding a literal without a proof, or vice versa, fails.
+        assert set(section["owning_guards"]) == properties
+
+        for prop, ref in section["owning_guards"].items():
+            module_name, _, func_name = ref.rpartition(".")
+            module = importlib.import_module(module_name)
+            guard = getattr(module, func_name, None)
+            assert callable(guard), f"{prop} cites {ref}, which is not a test function"
 
 
 # --- the contact statement is MEASURED, not declared ---------------------------------------------

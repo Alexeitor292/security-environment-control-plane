@@ -489,12 +489,33 @@ def test_provenance_reports_host_contact_as_an_absence_not_a_measurement():
             "local_host_contact_performed": False,
             "basis": "no_command_runner_is_constructed_on_this_path",
         },
-        "structural_invariants": {
+        "code_structural_properties": {
             "worker_constructed": False,
             "workflow_submitted": False,
             "run_plan_generation_called": False,
             "secret_resolver_constructed": False,
-            "host_mutated": False,
+            "basis": "shipped_source_structure_not_this_invocation",
+            "owning_guards": {
+                "worker_constructed": (
+                    "test_deployment_boundary.test_runner_and_compositions_never_construct_a_worker"
+                ),
+                "workflow_submitted": (
+                    "test_deployment_boundary.test_no_temporalio_imports_anywhere"
+                ),
+                "run_plan_generation_called": (
+                    "test_deployment_r4_regressions."
+                    "test_no_apply_destroy_or_run_plan_generation_in_package"
+                ),
+                "secret_resolver_constructed": (
+                    "test_deployment_boundary.test_all_seals_remain_as_required"
+                ),
+            },
+        },
+        # No ``host_mutated`` key: the health argv is deployment-supplied, so this report makes no
+        # claim rather than asserting a False it cannot stand behind.
+        "host_mutation": {
+            "claimed": None,
+            "basis": "no_host_command_is_executed_on_this_path_so_nothing_was_observed",
         },
     }
 

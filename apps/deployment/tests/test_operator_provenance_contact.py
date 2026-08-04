@@ -149,5 +149,12 @@ def test_the_provenance_section_is_not_labelled_measured():
         source_aggregate="sha256:" + "a" * 64, expected=valid_expected()
     )["effects_of_this_provenance_check"]
 
-    assert set(effects) == {"host_contact", "structural_invariants"}
+    assert set(effects) == {"host_contact", "code_structural_properties", "host_mutation"}
     assert "measured_this_invocation" not in effects
+    # The asserted half must not be labelled as an observation either. It was named
+    # ``structural_invariants`` while being hardcoded literals nothing carried into the builder;
+    # the rename is pinned here so it cannot quietly revert.
+    assert "structural_invariants" not in effects
+    assert effects["code_structural_properties"]["basis"] == (
+        "shipped_source_structure_not_this_invocation"
+    )

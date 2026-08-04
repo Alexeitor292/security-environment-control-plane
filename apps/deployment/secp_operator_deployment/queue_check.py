@@ -360,16 +360,53 @@ def build_queue_report(
                 "host_commands_executed": int(host_commands_executed),
                 "local_host_contact_performed": int(host_commands_executed) > 0,
             },
-            # Structural: no code path in this command constructs, submits or mutates. Backed by
-            # the tripwire suite (no `temporalio` import across a real main() run; the run hook,
-            # composition builder and real command runner each replaced by a raising tripwire).
-            "structural_invariants": {
+            # NOT measured, and no longer LABELLED as though it were. These are properties of the
+            # SHIPPED SOURCE, not observations of this invocation: nothing reaching this builder
+            # carries them, so a literal here can only ever restate the author's belief. They are
+            # kept because they are the properties an operator actually needs — but each one now
+            # names the guard that OWNS its proof, so a reader can go read that proof instead of
+            # trusting this dict. ``owning_guards`` is keyed by property for exactly that reason: a
+            # single blanket citation would let one guard's credibility cover properties it never
+            # touches, which is the substitution this whole module exists to refuse.
+            "code_structural_properties": {
                 "worker_constructed": False,
                 "workflow_submitted": False,
                 "run_plan_generation_called": False,
                 "secret_resolver_constructed": False,
                 "composition_aggregate_built": False,
-                "host_mutated": False,
+                "basis": "shipped_source_structure_not_this_invocation",
+                "owning_guards": {
+                    "worker_constructed": (
+                        "test_deployment_boundary."
+                        "test_runner_and_compositions_never_construct_a_worker"
+                    ),
+                    "workflow_submitted": (
+                        "test_deployment_boundary.test_no_temporalio_imports_anywhere"
+                    ),
+                    "run_plan_generation_called": (
+                        "test_deployment_r4_regressions."
+                        "test_no_apply_destroy_or_run_plan_generation_in_package"
+                    ),
+                    "secret_resolver_constructed": (
+                        "test_deployment_boundary.test_all_seals_remain_as_required"
+                    ),
+                    "composition_aggregate_built": (
+                        "test_operator_queue_isolation."
+                        "test_the_queue_command_submits_nothing_and_starts_no_consumer"
+                    ),
+                },
+            },
+            # ``host_mutated: False`` WAS a sixth literal here and is REMOVED, not relabelled.
+            # It was the one actively MISLEADING value in this report. This package does spawn
+            # subprocesses, and one argv tail — ``profile.ordinary_health_command``, executed as
+            # ``exec <container> <health argv>`` — is DEPLOYMENT-SUPPLIED. Whether that command
+            # mutates the host is outside this package's competence to answer, and the
+            # expected-identities pin does not close it: that pin constrains DRIFT from the expected
+            # argv, never what the expected argv DOES. So no claim is made, and the absence of a
+            # claim is itself reported rather than left as a silently missing key.
+            "host_mutation": {
+                "claimed": None,
+                "basis": "health_argv_is_deployment_supplied_and_not_inspectable_here",
             },
         },
     }

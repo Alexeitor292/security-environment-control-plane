@@ -669,12 +669,40 @@ def build_provenance_report(
                 "local_host_contact_performed": False,
                 "basis": "no_command_runner_is_constructed_on_this_path",
             },
-            "structural_invariants": {
+            # Same correction as ``queue_check``: these are SHIPPED-SOURCE properties, not
+            # observations of this invocation, and the section no longer reads as though they were
+            # measured. Each names the guard that owns its proof; see the longer reasoning at
+            # ``queue_check.build_queue_report``.
+            "code_structural_properties": {
                 "worker_constructed": False,
                 "workflow_submitted": False,
                 "run_plan_generation_called": False,
                 "secret_resolver_constructed": False,
-                "host_mutated": False,
+                "basis": "shipped_source_structure_not_this_invocation",
+                "owning_guards": {
+                    "worker_constructed": (
+                        "test_deployment_boundary."
+                        "test_runner_and_compositions_never_construct_a_worker"
+                    ),
+                    "workflow_submitted": (
+                        "test_deployment_boundary.test_no_temporalio_imports_anywhere"
+                    ),
+                    "run_plan_generation_called": (
+                        "test_deployment_r4_regressions."
+                        "test_no_apply_destroy_or_run_plan_generation_in_package"
+                    ),
+                    "secret_resolver_constructed": (
+                        "test_deployment_boundary.test_all_seals_remain_as_required"
+                    ),
+                },
+            },
+            # ``host_mutated: False`` REMOVED here for the same reason it was removed from the queue
+            # report. This path constructs no command runner at all, so it is even further from
+            # being able to answer the question — but "further from being able to answer" is not an
+            # answer, and the honest form is to make no claim.
+            "host_mutation": {
+                "claimed": None,
+                "basis": "no_host_command_is_executed_on_this_path_so_nothing_was_observed",
             },
         },
     }
