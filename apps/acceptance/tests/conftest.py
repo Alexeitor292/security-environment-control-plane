@@ -187,22 +187,38 @@ def worker_host(fleet):
 
 @pytest.fixture(scope="session")
 def installed_baseline(worker_host) -> dict[str, object]:
-    """The worker's installed release lineage, READ BACK OFF THE HOST.
+    """The worker's installed release LINEAGE, read off the host from the RELEASE RECORD.
 
-    Published for the enrollment, identity and lifecycle stages, which each need a baseline to
-    compare against. The distinction this fixture exists to preserve is the whole point: what the
-    harness BELIEVES it installed and what the host HAS are different facts, and a proof built on
-    the former would still pass if the install had quietly put something else there.
+    READS ``ManagementLocations.release_record_path("worker")`` — i.e.
+    ``worker-installed-release.json``, the signed manifest the bootstrap transaction recorded.
 
-    So it re-reads the record the product itself wrote and re-parses it through the product's own
-    manifest parser. ``{"present": False, ...}`` means no baseline exists — a caller must record
-    that ``unproven``, never as a mismatch, and never as proof of removal: absence established by a
-    failed read would let a rollback that removed nothing read as one that worked.
+    CORRECT FOR: rollback and upgrade lineage — the ``worker_install`` and ``lifecycle`` stages.
+    Those ask "which release is installed here", and the release record is the document that
+    answers it.
+
+    NOT CORRECT FOR the enrollment/identity question "does the enrolled release equal the installed
+    one". That check mirrors the product's own ``exact_release`` probe, and **that probe reads the
+    IDENTITY document** (``ManagementLocations.identity_path("worker")`` —
+    ``worker-identity.json``), which is a different file recording a different fact. Sourcing it
+    from here would produce a check that can disagree with the probe it exists to reflect: passing
+    where the product refuses, or failing where it does not. An earlier version of this docstring
+    offered the fixture to "the enrollment, identity and lifecycle stages" and was wrong to — the
+    phrase "the worker's installed release" names two facts, and only one of them lives here.
+
+    WHAT IT PRESERVES: what the harness BELIEVES it installed and what the host HAS are different
+    facts, and a proof built on the former would still pass if the install had quietly put
+    something else there. So it re-reads the product's own record through the product's own manifest
+    parser.
+
+    ``{"present": False, ...}`` means no release record exists — record that ``unproven``, never as
+    a mismatch and never as proof of removal. Absence established by a failed READ would let a
+    rollback that removed nothing read as one that worked, which is why the read and the existence
+    probe are separate here.
 
     Session-scoped so every consumer sees the same baseline. It is a READ, so it is safe to take
     before or after any stage — but a caller wanting the POST-install baseline must order itself
-    after the worker install, because this fixture will happily report the truthful absence that
-    precedes it.
+    after the worker install, because this fixture will truthfully report the absence that precedes
+    it rather than waiting for one to appear.
     """
     from secp_acceptance.hosts import ROLE_WORKER
     from secp_acceptance.install import observe_installed_release

@@ -144,6 +144,39 @@ class StageRecorder:
         self._outcome.recorded[check] = "violated"
         self._outcome.reasons[check] = "acceptance_prohibited_state_observed"
 
+    def refused(
+        self, check: str, *, expected: str, actual: str | None, observation: object
+    ) -> bool:
+        """Record a refusal the scenario REQUIRED, and report whether it was the expected one.
+
+        For failure-injection style checks, where a bounded PRODUCT refusal is the pass. Delegates
+        to ``AcceptanceRun.expect_refusal``, which owns the distinction that gives such a check its
+        value: "the product refused" and "the product refused for the reason that makes this test
+        meaningful" are different claims.
+
+        ``actual is None`` means the product did not refuse at all — the worst outcome for an
+        injection check, recorded ``unproven`` with ``acceptance_expected_refusal_absent``. A
+        refusal carrying a DIFFERENT code than the scenario predicted is likewise ``unproven``
+        (``acceptance_unexpected_reason_code``), never a pass: the property was not proven, and
+        nothing prohibited was observed either, so it is neither ``refused`` nor ``violated``.
+
+        Returns True only when the expected refusal was the one observed.
+        """
+        matched = self._run.acceptance_run.expect_refusal(
+            check, self._stage, expected=expected, actual=actual, observation=observation
+        )
+        if matched:
+            self._outcome.recorded[check] = "refused"
+            self._outcome.reasons[check] = expected
+        else:
+            self._outcome.recorded[check] = "unproven"
+            self._outcome.reasons[check] = (
+                "acceptance_expected_refusal_absent"
+                if actual is None
+                else "acceptance_unexpected_reason_code"
+            )
+        return matched
+
     def record_verdict_for(self, check: str, verdict: object) -> None:
         """File a shared :class:`~secp_acceptance.queues.QueueVerdict` and mirror the outcome.
 

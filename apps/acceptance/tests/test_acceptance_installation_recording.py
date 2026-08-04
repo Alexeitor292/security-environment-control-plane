@@ -483,3 +483,57 @@ def test_an_UNREADABLE_installed_release_refuses_rather_than_reporting_absent(
             Host(role=ROLE_WORKER, container="c", dns_name="w.secp.test"), ROLE_WORKER
         )
     assert caught.value.reason_code == "acceptance_observation_unavailable"
+
+
+# --------------------------------------------------------------------------- the refusal verb
+#
+# Published for the failure-injection stage, where a bounded PRODUCT refusal IS the pass. Pinned
+# here rather than left to its consumer, because a verb built against and never exercised is the
+# shape D declined to write against: a fake recorder satisfies it happily and the gap surfaces at
+# integration as a false green.
+
+_INJECTION = "worker_bootstrap_written"  # any check of a stage this recorder owns
+
+
+def test_the_expected_refusal_is_recorded_refused():
+    run, stage = _run()
+    matched = stage.refused(
+        _INJECTION,
+        expected="release_role_mismatch",
+        actual="release_role_mismatch",
+        observation={"probe": True},
+    )
+    assert matched is True
+    assert run.outcome_of(_INJECTION) == "refused"
+
+
+def test_a_refusal_for_the_WRONG_reason_is_unproven_not_a_pass():
+    """The entire value of an injection check.
+
+    "The product refused" and "the product refused for the reason that makes this test meaningful"
+    are different claims. A refusal carrying a different code proves neither — so it is `unproven`,
+    and specifically NOT `violated`: nothing prohibited was observed, the property just was not
+    established.
+    """
+    run, stage = _run()
+    matched = stage.refused(
+        _INJECTION,
+        expected="release_role_mismatch",
+        actual="release_artifact_digest_mismatch",
+        observation={"probe": True},
+    )
+    assert matched is False
+    assert run.outcome_of(_INJECTION) == OUTCOME_UNPROVEN
+    assert run.reason_for(_INJECTION) == "acceptance_unexpected_reason_code"
+
+
+def test_NO_refusal_at_all_is_the_worst_outcome_and_is_never_a_pass():
+    """The product accepted something it must reject. Recorded `unproven` with
+    `acceptance_expected_refusal_absent` — never silently dropped, and never a pass."""
+    run, stage = _run()
+    matched = stage.refused(
+        _INJECTION, expected="release_role_mismatch", actual=None, observation={"probe": True}
+    )
+    assert matched is False
+    assert run.outcome_of(_INJECTION) == OUTCOME_UNPROVEN
+    assert run.reason_for(_INJECTION) == "acceptance_expected_refusal_absent"
