@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.errors import WorkerIdentityError
 from secp_api.schemas_worker_identity import (
     RecordWorkerIdentityEvidence,
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api/v1/worker-identity", tags=["worker-identity"])
 @router.post("/registrations", response_model=WorkerIdentityOut, status_code=201)
 def register(
     body: RegisterWorkerIdentity,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkerIdentityOut:
     return WorkerIdentityOut.model_validate(
@@ -48,7 +48,7 @@ def register(
 
 @router.get("/registrations", response_model=list[WorkerIdentityOut])
 def list_registrations(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[WorkerIdentityOut]:
     return [
@@ -60,7 +60,7 @@ def list_registrations(
 @router.get("/registrations/{registration_id}", response_model=WorkerIdentityOut)
 def get_registration(
     registration_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkerIdentityOut:
     return WorkerIdentityOut.model_validate(
@@ -72,7 +72,7 @@ def get_registration(
 def record_evidence(
     registration_id: uuid.UUID,
     body: RecordWorkerIdentityEvidence,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkerIdentityOut:
     worker_identity.record_evidence(
@@ -92,7 +92,7 @@ def record_evidence(
 @router.post("/registrations/{registration_id}/approve", response_model=WorkerIdentityOut)
 def approve(
     registration_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkerIdentityOut:
     try:
@@ -112,7 +112,7 @@ def approve(
 @router.post("/registrations/{registration_id}/revoke", response_model=WorkerIdentityOut)
 def revoke(
     registration_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkerIdentityOut:
     return WorkerIdentityOut.model_validate(

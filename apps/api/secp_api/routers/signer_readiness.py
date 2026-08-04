@@ -36,7 +36,7 @@ from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from secp_api.deps import db_session, get_enrollment_offer_signer
+from secp_api.deps import DB_SESSION, get_enrollment_offer_signer
 from secp_api.enrollment_signer_client import EnrollmentOfferSignerClient
 from secp_api.signer_readiness import (
     SIGNER_READINESS_PREFIX,
@@ -73,7 +73,7 @@ def signer_readiness_method_not_supported() -> Response:
 
 @router.get("/readiness")
 def signer_readiness(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     # the app's REAL signer dependency — the effective object is classified by exact type identity,
     # so this route reports what the enrollment service would actually use, not what a file claims.
     signer: EnrollmentOfferSignerClient = Depends(get_enrollment_offer_signer),

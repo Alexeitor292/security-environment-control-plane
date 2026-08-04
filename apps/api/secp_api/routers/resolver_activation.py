@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.errors import ResolverActivationError
 from secp_api.schemas_resolver_activation import (
     CreateResolverActivation,
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api/v1/resolver-activation", tags=["resolver-activat
 @router.post("/authorizations", response_model=ResolverActivationOut, status_code=201)
 def create_authorization(
     body: CreateResolverActivation,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ResolverActivationOut:
     return ResolverActivationOut.model_validate(
@@ -43,7 +43,7 @@ def create_authorization(
 @router.get("/authorizations", response_model=list[ResolverActivationOut])
 def list_authorizations(
     execution_target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[ResolverActivationOut]:
     return [
@@ -57,7 +57,7 @@ def list_authorizations(
 @router.get("/authorizations/{authorization_id}", response_model=ResolverActivationOut)
 def get_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ResolverActivationOut:
     return ResolverActivationOut.model_validate(
@@ -69,7 +69,7 @@ def get_authorization(
 def record_evidence(
     authorization_id: uuid.UUID,
     body: RecordResolverActivationEvidence,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ResolverActivationOut:
     resolver_activation.record_evidence(
@@ -89,7 +89,7 @@ def record_evidence(
 @router.post("/authorizations/{authorization_id}/approve", response_model=ResolverActivationOut)
 def approve_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ResolverActivationOut:
     try:
@@ -111,7 +111,7 @@ def approve_authorization(
 @router.post("/authorizations/{authorization_id}/revoke", response_model=ResolverActivationOut)
 def revoke_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ResolverActivationOut:
     return ResolverActivationOut.model_validate(

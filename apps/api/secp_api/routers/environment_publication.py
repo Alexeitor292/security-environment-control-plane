@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.db import session_scope
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.enums import AuditAction
 from secp_api.enums import EnvironmentPublicationErrorCode as EC
 from secp_api.errors import EnvironmentPublicationError
@@ -102,7 +102,7 @@ def _record_refusal(principal: Principal, body: EnvironmentPublicationRequest, c
 def publish_environment_version(
     body: EnvironmentPublicationRequest,
     response: Response,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> VersionOut:
     """Publish -> new immutable v1alpha2 EnvironmentVersion. 201 on creation (with one atomic

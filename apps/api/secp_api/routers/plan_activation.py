@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.enums import WorkflowKind
 from secp_api.schemas_plan_activation import (
     ActivationDossierOut,
@@ -47,7 +47,7 @@ _MANIFEST = "/provisioning-manifests/{manifest_id}"
 def create_activation_dossier(
     manifest_id: uuid.UUID,
     body: CreateActivationDossierIn,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ActivationDossierOut:
     """Create a DRAFT activation dossier. Creating it executes nothing and contacts nothing."""
@@ -67,7 +67,7 @@ def create_activation_dossier(
 def record_dossier_evidence(
     dossier_id: uuid.UUID,
     body: RecordDossierEvidenceIn,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ActivationDossierOut:
     plan_activation.record_dossier_evidence(
@@ -86,7 +86,7 @@ def record_dossier_evidence(
 @router.post("/activation-dossiers/{dossier_id}/approve", response_model=ActivationDossierOut)
 def approve_activation_dossier(
     dossier_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ActivationDossierOut:
     """Approve under the DEDICATED ``activation_dossier:approve`` permission. Approving runs
@@ -99,7 +99,7 @@ def approve_activation_dossier(
 def revoke_activation_dossier(
     dossier_id: uuid.UUID,
     body: RevokeDossierIn,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ActivationDossierOut:
     row = plan_activation.revoke_activation_dossier(
@@ -111,7 +111,7 @@ def revoke_activation_dossier(
 @router.get("/activation-dossiers/{dossier_id}", response_model=ActivationDossierOut)
 def get_activation_dossier(
     dossier_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ActivationDossierOut:
     row = plan_activation.get_activation_dossier(session, principal, dossier_id)
@@ -129,7 +129,7 @@ def get_activation_dossier(
 def create_plan_generation_authorization(
     manifest_id: uuid.UUID,
     body: CreatePlanGenerationAuthorizationIn,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanGenerationAuthorizationOut:
     """Create a DRAFT plan-generation authorization. Creating it does NOT enqueue execution."""
@@ -148,7 +148,7 @@ def create_plan_generation_authorization(
 )
 def approve_plan_generation_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanGenerationAuthorizationOut:
     """Approve under the DEDICATED ``plan_generation:approve`` permission. Approving executes
@@ -168,7 +168,7 @@ def approve_plan_generation_authorization(
 def revoke_plan_generation_authorization(
     authorization_id: uuid.UUID,
     body: RevokePlanGenerationAuthorizationIn,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanGenerationAuthorizationOut:
     row = plan_activation.revoke_plan_generation_authorization(
@@ -185,7 +185,7 @@ def revoke_plan_generation_authorization(
 )
 def get_plan_generation_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanGenerationAuthorizationOut:
     row = plan_activation.get_plan_generation_authorization(session, principal, authorization_id)
@@ -200,7 +200,7 @@ def get_plan_generation_authorization(
 @router.get(f"{_MANIFEST}/plan-generation-readiness", response_model=PlanGenerationReadinessOut)
 def get_plan_generation_readiness(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanGenerationReadinessOut:
     """The derived combined plan-readiness view. It is NOT plan approval and launches nothing."""
@@ -216,7 +216,7 @@ def get_plan_generation_readiness(
 )
 def request_plan_generation(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanGenerationRequestAccepted:
     """Explicitly request the worker-owned real-plan-generation operation (enqueue-only).

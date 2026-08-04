@@ -1037,29 +1037,35 @@ def _marks(owner) -> list:
     return list(marks) if isinstance(marks, (list, tuple)) else [marks]
 
 
-def test_socket_gate_expected_failure_is_strict_and_narrowly_typed():
+def test_socket_gate_carries_no_expected_failure_marker():
     """Checked on the LOADED marker object, not on source text.
 
-    Three properties, and each closes a different way for the gate to go quietly useless:
-      * `strict=True` — once the fix lands the test passes, pytest turns that into a failure, and
-        the marker cannot outlive the defect it documents.
-      * `raises=ReadAfterWriteViolation` — only the specific defect is absorbed. A broken harness,
-        an unreachable server or the wrong database surfaces as an ordinary failure.
-      * `LiveGateInconclusive` is NOT a subclass of it — so a run that could not measure what it
-        claims can never be reported as "the known defect, still pending".
+    This test used to require exactly one `strict=True, raises=ReadAfterWriteViolation` marker,
+    because the defect was still present and the marker was how the gate stayed honest about it.
+    The defect is fixed — every session resolution now goes through `secp_api.deps.DB_SESSION` with
+    `scope="function"` — so the marker is gone, and its ABSENCE is now the property under test.
+
+    It is asserted rather than merely deleted because re-adding an expected failure is exactly how
+    a reintroduced defect would be made to look green again. With no marker, a regression fails the
+    gate outright, and the CI job's accounting prints `STATE=FIXED` only when zero expected
+    failures are reported.
     """
     from socket_gate_tests.live_api_server import LiveServerError
 
     gate = _socket_gate_module()
     target = getattr(gate, SOCKET_GATE_TEST)
     xfails = [mark for mark in _marks(target) if mark.name == "xfail"]
-    assert len(xfails) == 1, f"expected exactly one xfail marker, found {len(xfails)}"
-    kwargs = xfails[0].kwargs
-    assert kwargs["strict"] is True
-    assert kwargs["raises"] is gate.ReadAfterWriteViolation
+    assert not xfails, (
+        f"the read-after-write gate carries {len(xfails)} expected-failure marker(s): "
+        f"{[mark.kwargs for mark in xfails]}. The defect is fixed; a marker here can only be "
+        "absorbing a regression."
+    )
+
+    # The gate's ability to REFUSE an unmeasurable run is unchanged by the fix and is still the
+    # thing that keeps a green result meaningful, so it is still asserted here.
     assert issubclass(gate.ReadAfterWriteViolation, AssertionError)
     assert not issubclass(gate.LiveGateInconclusive, gate.ReadAfterWriteViolation)
-    # A harness failure is not even an AssertionError, so no expected-failure marker can take it.
+    # A harness failure is not even an AssertionError, so no expected-failure marker could take it.
     assert not issubclass(LiveServerError, AssertionError)
 
 

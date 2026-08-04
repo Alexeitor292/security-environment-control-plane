@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from sqlalchemy.orm import Session
 
 from secp_api.config import Settings
-from secp_api.deps import db_session, settings_dep
+from secp_api.deps import DB_SESSION, settings_dep
 from secp_api.models import DiscoveryJob, TargetDiscoveryEnrollment
 from secp_api.services import worker_admission
 from secp_api.worker_admission_origin import require_worker_admission_proxy_origin
@@ -100,7 +100,7 @@ def _resolve_enrollment(session: Session, discovery_job_id: uuid.UUID) -> Target
 @router.post("/begin")
 def begin_admission(
     payload: _BeginRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     settings: Settings = Depends(settings_dep),
 ) -> dict:
     _require_internal_enabled(settings)
@@ -130,7 +130,7 @@ def begin_admission(
 @router.post("/complete")
 def complete_admission(
     payload: _CompleteRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     settings: Settings = Depends(settings_dep),
 ) -> dict:
     _require_internal_enabled(settings)
@@ -149,7 +149,7 @@ def complete_admission(
 @router.post("/assert")
 def assert_admission(
     payload: _BindingRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     settings: Settings = Depends(settings_dep),
 ) -> dict:
     """Pre-probe: confirm the admission is admitted, bound to THIS exact job/endpoint, and its
@@ -179,7 +179,7 @@ def assert_admission(
 @router.post("/consume")
 def consume_admission(
     payload: _BindingRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     settings: Settings = Depends(settings_dep),
 ) -> dict:
     """Post-probe: re-assert validity at the server's clock, then atomically consume the one-time

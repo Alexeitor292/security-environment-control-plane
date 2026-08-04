@@ -1,11 +1,16 @@
 """PostgreSQL + real-socket read-after-write gate for the control-plane API.
 
-The defect this gate exists to catch
-------------------------------------
-``secp_api.deps.db_session`` (``apps/api/secp_api/deps.py``) is a plain generator dependency, so the
-``session.commit()`` in ``secp_api.db.get_db`` runs on FastAPI's **request** exit stack — which is
-closed *after* the response has been sent. A client can therefore be handed ``201 Created`` for a
-row that no subsequent request can yet read.
+The defect this gate exists to catch — NOW FIXED; this gate is its standing regression proof
+--------------------------------------------------------------------------------------------
+``secp_api.deps.db_session`` used to be resolved by a plain ``Depends(db_session)``, which FastAPI
+scopes to the **request** exit stack — closed *after* the response has been sent. The
+``session.commit()`` in ``secp_api.db.get_db`` therefore ran once the client already held its
+``201 Created``, for a row no subsequent request could yet read.
+
+Every call site now resolves through ``secp_api.deps.DB_SESSION``, which carries
+``scope="function"``: the teardown runs on the exit stack closed BEFORE
+``await response(scope, receive, send)``. This module is what proves that, over a real socket
+against real PostgreSQL, and what will fail if it is ever undone.
 
 Why nothing caught it
 ---------------------
@@ -34,9 +39,16 @@ on a lock would have shown ~200 ms.
 The module is still scoped to PostgreSQL below, but for a different and much narrower reason — see
 the note on ``pytestmark``.
 
-This module supplies the missing socket. It is deliberately NOT the fix: migrating the
-``Depends(db_session)`` call sites to ``Depends(db_session, scope="function")`` is separate, owned
-work. This is the gate that would have failed before that work was needed.
+This module supplies the missing socket. It was deliberately not the fix; the migration of the
+``Depends(db_session)`` call sites onto the single ``secp_api.deps.DB_SESSION`` seam landed
+separately and is what turned this gate green. This is the gate that would have failed before that
+work was done, and the one that fails if it is reverted.
+
+The static counterpart is ``tests/test_api_commit_boundary.py``, which enforces the same property
+on every route without needing PostgreSQL — necessary because a composition-time "fix" can set the
+declared dependency scope while the SERVED tree keeps the default, which this socket gate would
+catch but only where PostgreSQL is available. The two are complementary: that one proves the scope
+is declared on every served route, this one proves the resulting ordering is real.
 
 How the assertion is made deterministic
 ---------------------------------------
@@ -435,16 +447,18 @@ def test_the_teardown_delay_fires_only_for_the_production_commit_site(
 # --- the gate ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ReadAfterWriteViolation,
-    reason=(
-        "secp_api.deps.db_session is a plain generator dependency, so secp_api.db.get_db's commit "
-        "runs on FastAPI's request exit stack, after the response is sent. Expected to fail until "
-        "Depends(db_session, scope='function') (or an equivalent fix) lands; strict=True then "
-        "turns the unexpected pass into a failure, so this marker cannot outlive the defect."
-    ),
-)
+# The strict expected-failure marker that stood here has been REMOVED, in the same change that
+# fixed the defect it described. ``secp_api.deps.DB_SESSION`` now carries ``scope="function"``, so
+# ``get_db``'s commit runs on FastAPI's function exit stack — before the response reaches the
+# socket — and this gate passes outright. The CI job reads that directly: one expected failure
+# prints ``STATE=PENDING``, zero prints ``STATE=FIXED``.
+#
+# Nothing about the measurement below changed. The hold is still applied to the production teardown
+# commit only (``_inside_production_teardown_commit`` keys on ``secp_api.db.get_db``'s own code
+# object, and the fix deliberately keeps ``get_db`` as the committer), and every non-decisive
+# outcome is still refused as ``LiveGateInconclusive`` rather than reported as a pass. What changed
+# is which branch the ordering now takes: the POST legitimately blocks for the held commit, so
+# ``teardown_preceded_response`` is the arm that decides the run.
 def test_a_created_template_is_readable_by_the_immediately_following_request(
     pg_engine: Engine, live_base_url: str, commit_delay: TeardownCommitDelay
 ) -> None:

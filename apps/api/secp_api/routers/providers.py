@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.dispatch import get_dispatcher
 from secp_api.schemas_provider import (
     AddressSpaceOut,
@@ -35,7 +35,7 @@ PROVISIONING_ENABLED = False
 
 @router.get("/targets", response_model=list[TargetOut])
 def list_targets(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[TargetOut]:
     return [TargetOut.model_validate(t) for t in targets.list_targets(session, principal)]
@@ -44,7 +44,7 @@ def list_targets(
 @router.post("/targets", response_model=TargetOut, status_code=201)
 def register_target(
     body: TargetCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TargetOut:
     target = targets.register_target(
@@ -65,7 +65,7 @@ def register_target(
 @router.get("/targets/{target_id}", response_model=TargetOut)
 def get_target(
     target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TargetOut:
     return TargetOut.model_validate(targets.get_target(session, principal, target_id))
@@ -74,7 +74,7 @@ def get_target(
 @router.get("/targets/{target_id}/address-spaces", response_model=list[AddressSpaceOut])
 def list_address_spaces(
     target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[AddressSpaceOut]:
     return [
@@ -87,7 +87,7 @@ def list_address_spaces(
 def rotate_target_credential(
     target_id: uuid.UUID,
     body: TargetCredentialRotate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TargetOut:
     """The SUPPORTED path for replacing a target's opaque credential reference (B1B-PR4 §2).
@@ -105,7 +105,7 @@ def rotate_target_credential(
 def rotate_target_operation_credential(
     target_id: uuid.UUID,
     body: TargetOperationCredentialRotate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TargetOut:
     """Replace an OPERATION-SPECIFIC opaque credential reference (B1B-PR5A, ADR-022).
@@ -129,7 +129,7 @@ def rotate_target_operation_credential(
 @router.post("/targets/{target_id}/disable", response_model=TargetOut)
 def disable_target(
     target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TargetOut:
     return TargetOut.model_validate(targets.disable_target(session, principal, target_id))
@@ -138,7 +138,7 @@ def disable_target(
 @router.get("/targets/{target_id}/reservations", response_model=list[ReservationOut])
 def list_reservations(
     target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[ReservationOut]:
     return [
@@ -153,7 +153,7 @@ def list_reservations(
 @router.post("/targets/{target_id}/discover", response_model=SnapshotOut, status_code=202)
 def request_discovery(
     target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> SnapshotOut:
     """Queue a READ-ONLY discovery. Refused in inline dev mode (requires Temporal)."""
@@ -164,7 +164,7 @@ def request_discovery(
 @router.get("/targets/{target_id}/snapshots", response_model=list[SnapshotOut])
 def list_snapshots(
     target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[SnapshotOut]:
     return [
@@ -176,7 +176,7 @@ def list_snapshots(
 @router.get("/snapshots/{snapshot_id}", response_model=SnapshotOut)
 def get_snapshot(
     snapshot_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> SnapshotOut:
     return SnapshotOut.model_validate(inventory.get_snapshot(session, principal, snapshot_id))
@@ -185,7 +185,7 @@ def get_snapshot(
 @router.get("/snapshots/{snapshot_id}/resources", response_model=list[ResourceOut])
 def list_snapshot_resources(
     snapshot_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[ResourceOut]:
     return [

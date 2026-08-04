@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.schemas_onboarding import (
     OnboardingCreate,
     OnboardingDecision,
@@ -32,7 +32,7 @@ router = APIRouter(prefix="/api/v1", tags=["onboarding"])
 def create_onboarding(
     target_id: uuid.UUID,
     body: OnboardingCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> OnboardingOut:
     ob = onboarding.create_onboarding(
@@ -49,7 +49,7 @@ def create_onboarding(
 @router.get("/targets/{target_id}/onboarding", response_model=list[OnboardingOut])
 def list_onboardings(
     target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[OnboardingOut]:
     return [
@@ -61,7 +61,7 @@ def list_onboardings(
 @router.get("/onboarding/{onboarding_id}", response_model=OnboardingOut)
 def get_onboarding(
     onboarding_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> OnboardingOut:
     return OnboardingOut.model_validate(
@@ -72,7 +72,7 @@ def get_onboarding(
 @router.post("/onboarding/{onboarding_id}/preflight", response_model=PreflightOut, status_code=201)
 def request_preflight(
     onboarding_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PreflightOut:
     """Request a SIMULATED preflight (derived from the declared boundary).
@@ -89,7 +89,7 @@ def request_preflight(
 @router.get("/onboarding/{onboarding_id}/preflight", response_model=list[PreflightOut])
 def list_preflights(
     onboarding_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[PreflightOut]:
     return [
@@ -101,7 +101,7 @@ def list_preflights(
 @router.get("/onboarding/{onboarding_id}/evidence", response_model=list[TargetEvidenceOut])
 def list_target_evidence(
     onboarding_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[TargetEvidenceOut]:
     return [
@@ -113,7 +113,7 @@ def list_target_evidence(
 @router.post("/onboarding/{onboarding_id}/submit", response_model=OnboardingOut)
 def submit_for_review(
     onboarding_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> OnboardingOut:
     return OnboardingOut.model_validate(
@@ -125,7 +125,7 @@ def submit_for_review(
 def approve_onboarding(
     onboarding_id: uuid.UUID,
     body: OnboardingDecision,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> OnboardingOut:
     """Explicit human approval — required before a target can become active."""
@@ -138,7 +138,7 @@ def approve_onboarding(
 def reject_onboarding(
     onboarding_id: uuid.UUID,
     body: OnboardingDecision,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> OnboardingOut:
     return OnboardingOut.model_validate(
@@ -149,7 +149,7 @@ def reject_onboarding(
 @router.post("/onboarding/{onboarding_id}/activate", response_model=OnboardingOut)
 def activate_onboarding(
     onboarding_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> OnboardingOut:
     """Activate an approved onboarding (refused on config/scope drift since approval)."""
@@ -161,7 +161,7 @@ def activate_onboarding(
 @router.post("/onboarding/{onboarding_id}/retire", response_model=OnboardingOut)
 def retire_onboarding(
     onboarding_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> OnboardingOut:
     return OnboardingOut.model_validate(

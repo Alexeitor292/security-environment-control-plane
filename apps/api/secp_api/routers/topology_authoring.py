@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.errors import TopologyAuthoringError
 from secp_api.schemas_topology_authoring import (
     TopologyDecision,
@@ -69,7 +69,7 @@ def _detail(session: Session, principal: Principal, doc) -> TopologyDocumentDeta
 )
 def create_draft(
     body: TopologyDraftCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyDocumentDetailOut:
     doc = _durable(
@@ -92,7 +92,7 @@ def create_draft(
 )
 def get_document(
     document_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyDocumentDetailOut:
     doc = svc.get_document(session, principal, document_id)
@@ -107,7 +107,7 @@ def list_revisions(
     document_id: uuid.UUID,
     limit: int = Query(default=svc.MAX_HISTORY_PAGE, ge=1, le=svc.MAX_HISTORY_PAGE),
     offset: int = Query(default=0, ge=0),
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[TopologyRevisionOut]:
     revisions = svc.list_revisions(session, principal, document_id, limit=limit, offset=offset)
@@ -121,7 +121,7 @@ def list_revisions(
 def get_revision(
     document_id: uuid.UUID,
     revision_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyRevisionDetailOut:
     revision = svc.get_revision(session, principal, document_id, revision_id)
@@ -136,7 +136,7 @@ def get_revision(
 def create_revision(
     document_id: uuid.UUID,
     body: TopologyRevisionCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyRevisionDetailOut:
     revision = _durable(
@@ -162,7 +162,7 @@ def validate_revision(
     document_id: uuid.UUID,
     revision_id: uuid.UUID,
     body: TopologyHashPin,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyValidationOut:
     result = _durable(
@@ -185,7 +185,7 @@ def validate_revision(
 def get_validation(
     document_id: uuid.UUID,
     revision_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyValidationOut | None:
     result = svc.get_latest_validation(session, principal, document_id, revision_id)
@@ -200,7 +200,7 @@ def submit_revision(
     document_id: uuid.UUID,
     revision_id: uuid.UUID,
     body: TopologyHashPin,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyRevisionOut:
     revision = _durable(
@@ -224,7 +224,7 @@ def approve_revision(
     document_id: uuid.UUID,
     revision_id: uuid.UUID,
     body: TopologyDecision,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyRevisionOut:
     revision = _durable(
@@ -249,7 +249,7 @@ def reject_revision(
     document_id: uuid.UUID,
     revision_id: uuid.UUID,
     body: TopologyDecision,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TopologyRevisionOut:
     revision = _durable(

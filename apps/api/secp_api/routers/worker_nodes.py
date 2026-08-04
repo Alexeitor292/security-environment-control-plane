@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.schemas_worker_nodes import (
     WorkerNodeIdentityApprovalLinkRequest,
     WorkerNodeOut,
@@ -31,7 +31,7 @@ router = APIRouter(
 
 @router.get("", response_model=list[WorkerNodeOut])
 def list_worker_nodes(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[WorkerNodeOut]:
     return [WorkerNodeOut.model_validate(r) for r in svc.list_worker_nodes(session, principal)]
@@ -40,7 +40,7 @@ def list_worker_nodes(
 @router.post("", response_model=WorkerNodeOut, status_code=201)
 def register_worker_node(
     body: WorkerNodeRegisterRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkerNodeOut:
     row = svc.register_worker_node(
@@ -56,7 +56,7 @@ def register_worker_node(
 @router.get("/{node_id}", response_model=WorkerNodeOut)
 def get_worker_node(
     node_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkerNodeOut:
     return WorkerNodeOut.model_validate(svc.get_worker_node(session, principal, node_id))
@@ -66,7 +66,7 @@ def get_worker_node(
 def approve_and_link_worker_identity(
     node_id: uuid.UUID,
     body: WorkerNodeIdentityApprovalLinkRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkerNodeOut:
     """Perform one explicit reviewed registration/evidence/approval/link transaction.

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.schemas import (
     ExerciseCreate,
     ExerciseOut,
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/v1/exercises", tags=["exercises"])
 
 @router.get("", response_model=list[ExerciseOut])
 def list_exercises(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[ExerciseOut]:
     return [ExerciseOut.model_validate(e) for e in exercises.list_exercises(session, principal)]
@@ -31,7 +31,7 @@ def list_exercises(
 @router.post("", response_model=ExerciseOut, status_code=201)
 def create_exercise(
     body: ExerciseCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ExerciseOut:
     exercise = exercises.create_exercise(
@@ -48,7 +48,7 @@ def create_exercise(
 @router.get("/{exercise_id}", response_model=ExerciseOut)
 def get_exercise(
     exercise_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ExerciseOut:
     return ExerciseOut.model_validate(exercises.get_exercise(session, principal, exercise_id))
@@ -57,7 +57,7 @@ def get_exercise(
 @router.get("/{exercise_id}/instances", response_model=list[InstanceOut])
 def list_instances(
     exercise_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[InstanceOut]:
     return [
@@ -69,7 +69,7 @@ def list_instances(
 @router.post("/{exercise_id}/validate", response_model=ExerciseOut)
 def validate_exercise(
     exercise_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ExerciseOut:
     return ExerciseOut.model_validate(exercises.validate_exercise(session, principal, exercise_id))
@@ -78,7 +78,7 @@ def validate_exercise(
 @router.post("/{exercise_id}/deploy", response_model=WorkflowRunOut)
 def deploy_exercise(
     exercise_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkflowRunOut:
     """Approve-gated deploy. Refused unless an approved plan exists (ADR-004)."""
@@ -90,7 +90,7 @@ def deploy_exercise(
 def reset_instance(
     exercise_id: uuid.UUID,
     instance_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkflowRunOut:
     run = exercises.reset_instance(session, principal, exercise_id, instance_id)
@@ -100,7 +100,7 @@ def reset_instance(
 @router.post("/{exercise_id}/destroy", response_model=WorkflowRunOut)
 def destroy_exercise(
     exercise_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> WorkflowRunOut:
     run = exercises.destroy_exercise(session, principal, exercise_id)

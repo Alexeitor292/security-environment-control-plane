@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.registry import get_registry
 from secp_api.schemas import (
     TemplateCreate,
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/v1", tags=["catalog"])
 
 @router.get("/templates", response_model=list[TemplateOut])
 def list_templates(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[TemplateOut]:
     return [TemplateOut.model_validate(t) for t in catalog.list_templates(session, principal)]
@@ -33,7 +33,7 @@ def list_templates(
 @router.post("/templates", response_model=TemplateOut, status_code=201)
 def create_template(
     body: TemplateCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> TemplateOut:
     template = catalog.create_template(
@@ -50,7 +50,7 @@ def create_template(
 @router.get("/templates/{template_id}/versions", response_model=list[VersionOut])
 def list_versions(
     template_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[VersionOut]:
     return [
@@ -62,7 +62,7 @@ def list_versions(
 def create_version(
     template_id: uuid.UUID,
     body: VersionCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> VersionOut:
     version = catalog.create_version(
@@ -74,7 +74,7 @@ def create_version(
 @router.get("/environment-versions/{version_id}", response_model=VersionOut)
 def get_environment_version(
     version_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> VersionOut:
     """Exact, organization-scoped, read-only EnvironmentVersion read (ADR-016 PR E).

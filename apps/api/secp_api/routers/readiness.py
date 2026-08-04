@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.enums import ReadinessOperationKind, WorkflowKind
 from secp_api.errors import ReadinessError
 from secp_api.schemas_readiness import (
@@ -50,7 +50,7 @@ _MANIFEST = "/provisioning-manifests/{manifest_id}"
 )
 def request_toolchain_attestation(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ReadinessRequestAccepted:
     """Explicitly request the worker-owned PR2 toolchain attestation (enqueue-only).
@@ -71,7 +71,7 @@ def request_toolchain_attestation(
 )
 def get_toolchain_attestation(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ToolchainAttestationOut | None:
     view = readiness.get_toolchain_attestation(session, principal, manifest_id)
@@ -85,7 +85,7 @@ def get_toolchain_attestation(
 )
 def request_remote_state_readiness(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ReadinessRequestAccepted:
     """Explicitly request the worker-owned remote-state readiness operation (enqueue-only)."""
@@ -102,7 +102,7 @@ def request_remote_state_readiness(
 )
 def get_remote_state_readiness(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> RemoteStateReadinessOut | None:
     view = readiness.get_remote_state_readiness(session, principal, manifest_id)
@@ -116,7 +116,7 @@ def get_remote_state_readiness(
 )
 def request_plan_secret_readiness(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ReadinessRequestAccepted:
     """Explicitly request the worker-owned plan-secret readiness operation (enqueue-only).
@@ -137,7 +137,7 @@ def request_plan_secret_readiness(
 )
 def get_plan_secret_readiness(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanSecretReadinessOut | None:
     view = readiness.get_plan_secret_readiness(session, principal, manifest_id)
@@ -147,7 +147,7 @@ def get_plan_secret_readiness(
 @router.get(f"{_MANIFEST}/provisioning-readiness", response_model=ProvisioningReadinessOut)
 def get_provisioning_readiness(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ProvisioningReadinessOut:
     """The derived combined current-readiness view. It is NOT plan approval and launches nothing."""
@@ -167,7 +167,7 @@ def get_provisioning_readiness(
 def create_plan_secret_authorization(
     manifest_id: uuid.UUID,
     body: CreatePlanSecretAuthorizationIn,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanSecretAuthorizationOut:
     """Create a DRAFT plan-secret authorization. Creating it does NOT run readiness."""
@@ -189,7 +189,7 @@ def create_plan_secret_authorization(
 def record_plan_secret_evidence(
     authorization_id: uuid.UUID,
     body: RecordPlanSecretEvidenceIn,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanSecretAuthorizationOut:
     plan_secret_authorization.record_plan_secret_evidence(
@@ -213,7 +213,7 @@ def record_plan_secret_evidence(
 )
 def approve_plan_secret_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanSecretAuthorizationOut:
     """Approve under the DEDICATED ``readiness:approve`` permission. Approving runs NO readiness."""
@@ -239,7 +239,7 @@ def approve_plan_secret_authorization(
 def revoke_plan_secret_authorization(
     authorization_id: uuid.UUID,
     body: RevokePlanSecretAuthorizationIn,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanSecretAuthorizationOut:
     """Revoke immediately. All FUTURE use is invalidated; historical evidence is never mutated."""
@@ -255,7 +255,7 @@ def revoke_plan_secret_authorization(
 )
 def get_plan_secret_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanSecretAuthorizationOut:
     row = plan_secret_authorization.get_plan_secret_authorization(

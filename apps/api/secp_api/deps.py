@@ -39,13 +39,47 @@ def db_session() -> Iterator[Session]:
     yield from get_db()
 
 
+# THE COMMIT BOUNDARY. Every route resolves its session through THIS ONE MARKER, never through a
+# bare ``Depends(db_session)``.
+#
+# ``scope="function"`` is what makes the request's transaction commit BEFORE the response is written
+# to the socket. Without it FastAPI defaults a generator dependency to ``computed_scope="request"``
+# (``fastapi/dependencies/models.py``), which puts the teardown on the exit stack that
+# ``fastapi/routing.py`` closes AFTER ``await response(scope, receive, send)`` — so ``get_db``'s
+# ``session.commit()`` ran after the client already held its 2xx. Measured on fastapi 0.138.2: a
+# teardown commit that FAILS at request scope still returns ``200`` with a complete body; the same
+# failure at function scope returns ``500``. That is the whole defect and the whole fix.
+#
+# Why a shared marker rather than a per-site ``Depends(db_session, scope="function")``: one named
+# seam means a new route cannot silently opt back into the defect by writing the obvious thing. The
+# object is a frozen dataclass (``fastapi.params.Depends``), so sharing one instance across every
+# signature is safe. The ``Annotated`` form FastAPI documents was rejected only because it removes
+# the parameter default, which is a SyntaxError at 7 of the call sites here (a defaulted parameter
+# already precedes the session); nothing else about it was unsuitable.
+#
+# THIS CANNOT BE DONE STRUCTURALLY IN THIS FastAPI VERSION — do not "improve" it into a router-level
+# or composition-level seam. Both were built and measured, and both are MIRAGES:
+#   * ``route_class`` does NOT propagate through ``include_router`` (``routing.py``:
+#     ``route_class = route_class_override or self.route_class``), so an app-level route class never
+#     reaches the composed routes.
+#   * Rewriting the composed app's dependant tree DOES set all 349 resolutions to "function" and
+#     changes NOTHING at request time: ``_populate_api_route_state`` rebuilds
+#     ``route.dependant = get_dependant(call=route.endpoint, ...)`` for every served operation, so
+#     0 of 187 served operations use the object a composition-time walk can reach. Driven over a
+#     real socket with that seam applied, the response still preceded the commit.
+# The ``Depends(...)`` marker in the endpoint SIGNATURE is the only thing that survives that
+# rebuild. ``tests/test_api_commit_boundary.py`` walks the SERVED trees and fails on exactly that
+# disagreement, so this comment cannot quietly become false.
+DB_SESSION = Depends(db_session, scope="function")
+
+
 def settings_dep() -> Settings:
     return get_settings()
 
 
 def get_enrollment_offer_signer(
     settings: Settings = Depends(settings_dep),
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
 ) -> EnrollmentOfferSignerClient:
     """The injected controller-enrollment offer signer client (SECP-PR5H-B1 Phase 3). Sealed by
     default (fails closed); the production composition returns the fixed-UDS broker client only when
@@ -120,7 +154,7 @@ def resolve_principal(
 
 def current_principal(
     request: Request,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     settings: Settings = Depends(settings_dep),
     verifier: OidcVerifier = Depends(get_oidc_verifier),
     _scheme: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),

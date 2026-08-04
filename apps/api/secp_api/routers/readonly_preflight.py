@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.schemas_readonly_preflight import (
     CreatePreflightAuthorization,
     PreflightAuthorizationOut,
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/v1/readonly-preflight", tags=["readonly-prefligh
 
 @router.get("/substrates", response_model=list[PreflightSubstrateOut])
 def list_substrates(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[PreflightSubstrateOut]:
     """Eligible Proxmox staging substrates (same-org, active, eligible, onboarded); aliases only."""  # noqa: E501
@@ -42,7 +42,7 @@ def list_substrates(
 @router.post("/authorizations", response_model=PreflightAuthorizationOut, status_code=201)
 def create_authorization(
     body: CreatePreflightAuthorization,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PreflightAuthorizationOut:
     """Create a DRAFT short-lived live-read authorization (hashes derived server-side)."""
@@ -58,7 +58,7 @@ def create_authorization(
 @router.get("/authorizations", response_model=list[PreflightAuthorizationOut])
 def list_authorizations(
     execution_target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[PreflightAuthorizationOut]:
     return [
@@ -72,7 +72,7 @@ def list_authorizations(
 @router.post("/authorizations/{authorization_id}/approve", response_model=PreflightAuthorizationOut)
 def approve_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PreflightAuthorizationOut:
     return PreflightAuthorizationOut.model_validate(
@@ -83,7 +83,7 @@ def approve_authorization(
 @router.post("/authorizations/{authorization_id}/revoke", response_model=PreflightAuthorizationOut)
 def revoke_authorization(
     authorization_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PreflightAuthorizationOut:
     return PreflightAuthorizationOut.model_validate(
@@ -94,7 +94,7 @@ def revoke_authorization(
 @router.post("", response_model=ReadonlyPreflightOut, status_code=201)
 def queue_preflight(
     body: QueuePreflight,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ReadonlyPreflightOut:
     """QUEUE durable read-only preflight intent. The API never executes collection; a worker does.
@@ -109,7 +109,7 @@ def queue_preflight(
 @router.get("", response_model=list[ReadonlyPreflightOut])
 def list_preflights(
     execution_target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[ReadonlyPreflightOut]:
     return [
@@ -121,7 +121,7 @@ def list_preflights(
 @router.get("/{preflight_id}", response_model=ReadonlyPreflightOut)
 def get_preflight(
     preflight_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ReadonlyPreflightOut:
     return ReadonlyPreflightOut.model_validate(
