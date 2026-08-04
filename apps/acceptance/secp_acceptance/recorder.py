@@ -34,6 +34,7 @@ from secp_acceptance.evidence import (
     FleetRecord,
     GapRecord,
     ReleaseRecord,
+    StageProvenance,
     evidence_from_dict,
     observation_digest,
     run_identity,
@@ -51,6 +52,7 @@ from secp_acceptance.reasons import (
     RUN_PASSED,
     STAGES,
 )
+from secp_acceptance.shell import seam_position
 
 
 def utc_now() -> str:
@@ -66,6 +68,11 @@ class AcceptanceRecorder:
         self._checks: list[CheckRecord] = []
         self._gaps: list[GapRecord] = []
         self._seen: set[str] = set()
+        # Seam position when each stage OPENED, and when it last recorded. The difference is how
+        # many commands the stage ran through the one process seam — the only thing in the sealed
+        # document that a literal-only stage cannot produce.
+        self._opened_at: dict[str, tuple[int, str]] = {}
+        self._last_at: dict[str, tuple[int, str]] = {}
 
     # --- stages ---------------------------------------------------------------------------
 
@@ -75,6 +82,7 @@ class AcceptanceRecorder:
             raise AcceptanceError("acceptance_evidence_unknown_stage")
         if stage not in self._stages:
             self._stages.append(stage)
+            self._opened_at[stage] = seam_position()
 
     @property
     def stages(self) -> tuple[str, ...]:
@@ -101,6 +109,7 @@ class AcceptanceRecorder:
         if reason_code is not None and reason_code not in ALL_REASONS:
             raise AcceptanceError("acceptance_evidence_unknown_reason")
         self._seen.add(check)
+        self._last_at[stage] = seam_position()
         self._checks.append(
             CheckRecord(
                 check=check,
@@ -251,6 +260,25 @@ class AcceptanceRecorder:
             expected.update(CHECKS_BY_STAGE[stage])
         return tuple(sorted(expected - self._seen))
 
+    def _provenance(self) -> list[StageProvenance]:
+        """How much execution each attempted stage did, between opening and its last check.
+
+        A stage that never recorded anything reports ``0`` against its opening position — which is
+        the truthful statement, and exactly what a stage represented only by literals looks like.
+        """
+        records: list[StageProvenance] = []
+        for stage in self._stages:
+            opened_calls, _ = self._opened_at.get(stage, (0, ""))
+            last_calls, last_chain = self._last_at.get(stage, self._opened_at.get(stage, (0, "")))
+            records.append(
+                StageProvenance(
+                    stage=stage,
+                    seam_calls=max(0, last_calls - opened_calls),
+                    chain_digest=last_chain or observation_digest({"seam": "no_execution"}),
+                )
+            )
+        return records
+
     def seal(self, *, fleet: FleetRecord, release: ReleaseRecord) -> AcceptanceEvidence:
         """Seal the run. The outcome is DERIVED, never supplied.
 
@@ -289,6 +317,7 @@ class AcceptanceRecorder:
             "release": release.canonical(),
             "checks": [record.canonical() for record in self._checks],
             "gaps": [record.canonical() for record in self._gaps],
+            "provenance": [record.canonical() for record in self._provenance()],
             "proxmox_contacted": False,
             "opentofu_executed": False,
             "ephemeral_material_only": True,

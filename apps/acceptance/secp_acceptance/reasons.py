@@ -239,6 +239,14 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         # Deliberately ONE code for all of them rather than one per check — the check id already
         # says which property was violated, and a per-check code set would grow past review.
         "acceptance_prohibited_state_observed",
+        # --- execution provenance (completion gate, clause C1) ---
+        # A stage recorded its checks without running a single command through the process seam.
+        # Its observations may be perfectly well-formed; they were not derived from a host.
+        "acceptance_stage_not_derived_from_execution",
+        # The document carries no provenance at all, so the question cannot be answered. Distinct
+        # from the code above on purpose: "we could not tell" and "we can tell, and it did nothing"
+        # are the two states this program keeps having to separate.
+        "acceptance_stage_provenance_absent",
         # --- the run ---
         # The recorder accumulates in memory, so a parallelised session would seal one PARTIAL
         # document per worker and every one of them would look like a complete run.

@@ -180,6 +180,30 @@ class GapRecord(_Strict):
         return self.model_dump(mode="json")
 
 
+class StageProvenance(_Strict):
+    """Evidence that ONE stage was derived from execution rather than from literals.
+
+    ``seam_calls`` is how many commands the stage ran through
+    :func:`~secp_acceptance.shell.run` between opening and its last recorded check. A stage that
+    recorded a full set of perfect observations without touching a host has ``0`` here, and that is
+    the ONLY thing in the document that can distinguish it from a real run — every other field
+    would be identical, because ``observation_digest`` faithfully hashes whatever it is handed.
+
+    Structural validation only lives in the loader; the requirement that a stage actually moved the
+    counter is a COMPLETION-GATE rule (see
+    :func:`~secp_acceptance.provenance.assert_stages_derived_from_execution`). That split is
+    deliberate: hermetic contract tests legitimately build documents with no execution behind them,
+    and the gate correctly refuses those — a hermetic document is not an acceptance result.
+    """
+
+    stage: _Str
+    seam_calls: Annotated[int, Field(ge=0, le=1_000_000, strict=True)]
+    chain_digest: _Str
+
+    def canonical(self) -> dict:
+        return self.model_dump(mode="json")
+
+
 class FleetRecord(_Strict):
     """The disposable fleet's identity — shapes and digests only, never an id or an address."""
 
@@ -226,6 +250,10 @@ class AcceptanceEvidence(_Strict):
     release: ReleaseRecord
     checks: tuple[CheckRecord, ...]
     gaps: tuple[GapRecord, ...]
+    #: One entry per attempted stage, recording that the stage actually executed. This is the only
+    #: field a literal-only run cannot forge by being careful: every other field it produces is
+    #: genuinely well-formed.
+    provenance: tuple[StageProvenance, ...] = ()
     # The four prohibitions the harness operates under, recorded as observed facts rather than as
     # prose. They are re-asserted by the loader: a document claiming a run that contacted a provider
     # or ran OpenTofu is refused outright rather than read.
@@ -241,7 +269,7 @@ class AcceptanceEvidence(_Strict):
     ephemeral_material_only: bool
     trust_roots_modified: bool
 
-    @field_validator("stages_attempted", "checks", "gaps", mode="before")
+    @field_validator("stages_attempted", "checks", "gaps", "provenance", mode="before")
     @classmethod
     def _coerce(cls, v: object) -> object:
         return tuple(v) if isinstance(v, list) else v
@@ -408,6 +436,34 @@ def _assert_release_semantics(release: ReleaseRecord) -> None:
             raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
 
 
+def _assert_provenance_semantics(ev: AcceptanceEvidence) -> None:
+    """Structural rules only. "Did the stage actually execute" is a completion-gate question.
+
+    A document may carry no provenance at all — that is what every hermetic contract document looks
+    like, and refusing it here would make the contract untestable. But provenance that IS present
+    must describe the stages this run attempted, one entry each, or a reader could not tell which
+    stage a count belongs to.
+    """
+    if not ev.provenance:
+        return
+    seen: set[str] = set()
+    for record in ev.provenance:
+        _assert_ident(record.stage)
+        if record.stage not in STAGES:
+            raise AcceptanceError("acceptance_evidence_unknown_stage")
+        if record.stage not in ev.stages_attempted:
+            raise AcceptanceError("acceptance_evidence_unknown_stage")
+        if record.stage in seen:
+            raise AcceptanceError("acceptance_evidence_duplicate_check")
+        seen.add(record.stage)
+        if not is_sha256_digest(record.chain_digest):
+            raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
+    if seen != set(ev.stages_attempted):
+        # Partial provenance is worse than none: a reader seeing eight of nine stages covered would
+        # have to notice the absence to avoid reading the ninth as executed.
+        raise AcceptanceError("acceptance_evidence_incomplete")
+
+
 def _assert_gap_semantics(record: GapRecord) -> None:
     _assert_ident(record.gap)
     _assert_ident(record.stage)
@@ -456,6 +512,7 @@ def _assert_evidence_semantics(ev: AcceptanceEvidence) -> None:
             raise AcceptanceError("acceptance_evidence_unknown_stage")
     for gap in ev.gaps:
         _assert_gap_semantics(gap)
+    _assert_provenance_semantics(ev)
     # The four prohibitions are recorded facts, and only ONE value is admissible for each: three
     # must be False (nothing was contacted, executed, or changed) and the fourth must be True (only
     # ephemeral, run-scoped material was used). A document that says otherwise describes a run this
