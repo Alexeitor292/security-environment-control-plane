@@ -41,6 +41,8 @@ to catch.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 import secp_api.db as secp_db
 import secp_api.deps as secp_deps
@@ -285,6 +287,44 @@ def test_the_served_tree_is_not_the_declared_tree(app):
     )
 
 
+def _scope_rule_offenders(contexts):
+    """THE SCOPE RULE. Deliberately does not consult ``ALLOWED_NON_SESSION_GENERATORS``.
+
+    Extracted so the rule and its allow-list independence can be exercised against a purpose-built
+    app, not only against the real one — see the regression pin below.
+    """
+    offenders = []
+    for context in contexts:
+        if getattr(context, "dependant", None) is None:
+            continue
+        for dependant in _generator_dependants(context.dependant):
+            if dependant.scope != REQUIRED_SCOPE:
+                offenders.append(
+                    f"{sorted(context.methods or ())} {context.path} -> "
+                    f"{getattr(dependant.call, '__qualname__', dependant.call)} "
+                    f"(scope={dependant.scope!r}, computed={dependant.computed_scope!r})"
+                )
+    return offenders
+
+
+def _single_seam_rule_offenders(contexts):
+    """THE SINGLE-SEAM RULE. This one DOES honour the allow-list — that is its whole difference."""
+    unknown = []
+    for context in contexts:
+        if getattr(context, "dependant", None) is None:
+            continue
+        for dependant in _generator_dependants(context.dependant):
+            call = dependant.call
+            if call in SESSION_CALLABLES or call in ALLOWED_NON_SESSION_GENERATORS:
+                continue
+            unknown.append(
+                f"{sorted(context.methods or ())} {context.path} -> "
+                f"{getattr(call, '__module__', '?')}."
+                f"{getattr(call, '__qualname__', call)}"
+            )
+    return unknown
+
+
 # --------------------------------------------------------------------------- the boundary itself
 
 
@@ -300,17 +340,7 @@ def test_every_served_generator_dependency_commits_before_the_response(app):
     hands out no Session still holds teardown across the boundary, and "it does not touch the
     database" is a claim about today's implementation rather than about the shape.
     """
-    offenders = []
-    for context in _served_contexts(app.router):
-        if context.dependant is None:
-            continue
-        for dependant in _generator_dependants(context.dependant):
-            if dependant.scope != REQUIRED_SCOPE:
-                offenders.append(
-                    f"{sorted(context.methods or ())} {context.path} -> "
-                    f"{getattr(dependant.call, '__qualname__', dependant.call)} "
-                    f"(scope={dependant.scope!r}, computed={dependant.computed_scope!r})"
-                )
+    offenders = _scope_rule_offenders(_served_contexts(app.router))
     assert not offenders, (
         f"{len(offenders)} SERVED generator dependency(ies) do not declare "
         f"scope={REQUIRED_SCOPE!r}, so their teardown runs after the response is written to the "
@@ -330,19 +360,7 @@ def test_the_session_seam_is_the_only_generator_dependency_served(app):
     Anything genuinely session-free goes in ``ALLOWED_NON_SESSION_GENERATORS`` with a reason. That
     is a reviewed edit in a file called out for review, not a silent default.
     """
-    unknown = []
-    for context in _served_contexts(app.router):
-        if context.dependant is None:
-            continue
-        for dependant in _generator_dependants(context.dependant):
-            call = dependant.call
-            if call in SESSION_CALLABLES or call in ALLOWED_NON_SESSION_GENERATORS:
-                continue
-            unknown.append(
-                f"{sorted(context.methods or ())} {context.path} -> "
-                f"{getattr(call, '__module__', '?')}."
-                f"{getattr(call, '__qualname__', call)}"
-            )
+    unknown = _single_seam_rule_offenders(_served_contexts(app.router))
     assert not unknown, (
         f"{len(unknown)} served generator dependency(ies) are neither the session seam nor "
         f"allow-listed. A wrapper such as `def tenant_session(): yield from get_db()` hands out "
@@ -350,6 +368,55 @@ def test_the_session_seam_is_the_only_generator_dependency_served(app):
         f"this guard was defeated. Route it through secp_api.deps.DB_SESSION, or add it to "
         f"ALLOWED_NON_SESSION_GENERATORS with a reason. First 10: {unknown[:10]}"
     )
+
+
+def test_the_allow_list_never_exempts_anything_from_the_scope_rule(monkeypatch):
+    """Pin the no-escape-hatch split against a real allow-list ENTRY, not against the comment.
+
+    The two rules differ in exactly one way, and it is load-bearing: the single-seam rule honours
+    ``ALLOWED_NON_SESSION_GENERATORS``, the scope rule never does. Read as prose that is a claim;
+    the only way to know it is a fact is to put something in the list and check both rules.
+
+    Driven here against a purpose-built app because the real application has an EMPTY allow-list —
+    so nothing in the corpus can exercise this path, and a future edit that quietly made the
+    allow-list safety-relevant would leave every other test in this module green.
+    """
+    from fastapi import Depends, FastAPI
+
+    def allowed_generator():
+        """Stands in for something genuinely session-free that a future change allow-lists."""
+        yield object()
+
+    probe = FastAPI()
+
+    @probe.get("/at-request-scope")
+    def _request_scoped(_dep=Depends(allowed_generator)) -> dict:  # no scope -> "request"
+        return {}
+
+    @probe.get("/at-function-scope")
+    def _function_scoped(_dep=Depends(allowed_generator, scope=REQUIRED_SCOPE)) -> dict:
+        return {}
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "ALLOWED_NON_SESSION_GENERATORS",
+        frozenset({allowed_generator}),
+    )
+    contexts = _served_contexts(probe.router)
+    assert len(contexts) == 2, f"the probe app was not walked: {contexts}"
+
+    # The allow-list DOES exempt it from the single-seam rule — otherwise this pin proves nothing
+    # about the allow-list, only that an unknown generator is rejected.
+    assert not _single_seam_rule_offenders(contexts), (
+        "the allow-list entry was not honoured by the single-seam rule, so the two rules are no "
+        "longer distinguishable and this pin cannot demonstrate the difference between them"
+    )
+
+    # ...and it does NOT exempt it from the scope rule. Exactly one of the two routes offends.
+    offenders = _scope_rule_offenders(contexts)
+    assert len(offenders) == 1, f"expected exactly the request-scoped route to offend: {offenders}"
+    assert "/at-request-scope" in offenders[0], offenders
+    assert "allowed_generator" in offenders[0], offenders
 
 
 def test_the_declared_and_served_trees_agree_about_scope(app):
