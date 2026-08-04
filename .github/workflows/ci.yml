@@ -36,10 +36,17 @@ jobs:
           cache-dependency-glob: |
             uv.lock
             pyproject.toml
+      - name: Prove uv.lock is in step with pyproject.toml
+        # `uv sync --frozen` installs exactly what the lock records and never re-resolves — that is
+        # the whole point of it. What it does NOT do is notice a lock that has fallen behind
+        # `pyproject.toml`: a dependency added to pyproject but never locked would simply not be
+        # installed, and would surface much later as a confusing ImportError in some unrelated job.
+        # A stale lock is as decorative as an ignored one, so it fails HERE, once, with the cause.
+        run: uv lock --check
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Format check (ruff)
         run: uv run ruff format --check apps contracts plugins scripts tests
       - name: Lint (ruff)
@@ -104,7 +111,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Sharding planner/verifier unit tests
         run: uv run pytest tests/test_pytest_shards.py tests/test_ci_workflow.py -q
       - name: Prove sharded corpus == canonical corpus (node-level)
@@ -145,21 +152,21 @@ jobs:
             pyproject.toml
       - name: Create venv and install project
         # `worker` is installed HERE and only here. `temporalio` lives solely in that extra, and
-        # every install site in this workflow used `.[dev]`, so seven tests across
+        # every install site in this workflow requested only the `dev` extra, so seven tests across
         # test_temporal_sandbox_validation.py (1), test_worker_fail_closed.py (2) and
         # test_worker_readiness_timing.py (4) hit `pytest.importorskip("temporalio")` and SKIPPED in
         # CI while passing on any developer machine — including a fail-closed worker guard and the
         # regression for a startup-fatal import bug. This is the only job that EXECUTES the shared
-        # corpus, so it is the narrowest placement that makes all seven actually run; the eleven
-        # other install sites are deliberately left on `.[dev]`.
+        # corpus, so it is the narrowest placement that makes all seven actually run; every other
+        # install site is deliberately left on `dev` alone.
         # It does not move the corpus: every `importorskip` is inside a test body, so all seven
         # nodes were already COLLECTED either way and `backend-test-inventory`'s canonical-vs-
         # sharded proof is unaffected.
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev,worker]"
+          uv sync --frozen --extra dev --extra worker
       - name: Prove the worker extra is actually present (no silent re-skip)
-        # Without this, reverting the line above to `.[dev]` would silently restore the skip: the
+        # Without this, dropping `--extra worker` above would silently restore the skip: the
         # shard jobs have no no-skip enforcement, so seven tests would go back to reading as
         # passing while ungated and nothing would say so. The import is the whole check.
         run: |
@@ -331,7 +338,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Run the real PostgreSQL PR5F fence transaction proof
         run: >-
           uv run pytest
@@ -416,7 +423,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Run the real PostgreSQL enrollment, recovery and migration proofs
         run: >-
           uv run pytest
@@ -566,7 +573,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Run the live-socket read-after-write gate against real PostgreSQL
         run: >-
           uv run pytest
@@ -703,7 +710,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Dependency/security scan (pip-audit)
         run: uv run pip-audit --skip-editable
 
@@ -780,7 +787,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Attest trusted ancestry (infrastructure_invalid, never a product failure)
         # This module builds its sandbox directly beneath `/` (test_commissioning_realfs.py:26), so
         # `/` IS the complete ancestry the production openat backend will traverse here. Until now
@@ -914,7 +921,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Attest trusted ancestry before the inline preflight (infrastructure_invalid)
         # The inline preflights below exit 1 with a bare message, which is indistinguishable from a
         # product failure -- that is how `/etc: not root:root` came to be answered with blind
@@ -1172,7 +1179,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Prepare a genuinely root-only trusted base directory
         # Build the root test trees under /root/secp-roottest, whose ancestors (/ and /root) are
         # root-owned and NON-group/other-writable on a hosted runner — unlike /opt, an ancestor of
@@ -1360,7 +1367,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Prepare a genuinely root-only trusted base directory
         run: |
           sudo mkdir -p /root/secp-mgmt-roottest
@@ -1505,7 +1512,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Verify real Docker daemon + systemd + pinned binaries are present
         # The runner ships a live Docker daemon and systemd as PID 1; the adapters pin the real
         # root-owned docker/systemctl binaries. Pre-pull the disposable images so the timed adapter
@@ -1630,7 +1637,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Install a standalone docker-compose (global flags before subcommand)
         # The adapter's compose argv is `<compose> --project-name X --file Y up ...` — the v2 CLI
         # plugin (invoked as `docker compose`) does NOT match that shape, so pin a standalone binary.
@@ -1832,7 +1839,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Pre-pull the provider image the dev stack pins
         # The image comes from infra/dev/docker-compose.yml so the test and the deployment can never
         # run different Keycloak versions. Pulling here keeps the pull out of the readiness window.

@@ -785,15 +785,15 @@ WORKER_EXTRA_TESTS = (
 def test_the_shard_job_installs_the_worker_extra(wf):
     """The job that executes the shared corpus must have `temporalio` available."""
     run = _run_text(_jobs(wf)["backend-pytest"])
-    assert '".[dev,worker]"' in run, (
+    assert "--extra worker" in run, (
         "backend-pytest executes the shared corpus, so it must install the worker extra or the "
         "temporalio-gated tests silently skip"
     )
 
 
 def test_the_shard_job_proves_the_worker_extra_is_present(wf):
-    """Installing it is not enough: a revert to `.[dev]` must FAIL the job rather than restore the
-    skip. The import step is what makes that true."""
+    """Installing it is not enough: dropping `--extra worker` must FAIL the job rather than restore
+    the skip. The import step is what makes that true."""
     run = _run_text(_jobs(wf)["backend-pytest"])
     assert "import temporalio" in run, (
         "backend-pytest must prove temporalio is importable, otherwise dropping the extra silently "
@@ -812,10 +812,93 @@ def test_the_worker_extra_is_not_quietly_added_everywhere(wf):
     Recorded as a test so the choice is visible if someone later widens it -- widening is not
     forbidden, but it should be a decision rather than a drift."""
     jobs = _jobs(wf)
-    with_extra = {name for name, job in jobs.items() if '".[dev,worker]"' in _run_text(job)}
+    with_extra = {name for name, job in jobs.items() if "--extra worker" in _run_text(job)}
     assert with_extra == {"backend-pytest"}, (
         f"the worker extra is installed in {sorted(with_extra)}; if that is intended, update this "
         "test deliberately"
+    )
+
+
+# --- every install site must install from uv.lock ---------------------------------------------
+#
+# `uv pip install -e ".[dev]"` is uv's PIP-COMPATIBLE interface and IGNORES uv.lock by design. Every
+# install site in both workflows used it, `uv sync` appeared nowhere, and `pyproject.toml` declares
+# `fastapi>=0.115` — an open floor. So every job re-resolved FastAPI on every run and drifted to
+# whatever was newest, while uv.lock recorded 0.138.2 and nothing consulted it.
+#
+# That is not hypothetical. The resolution reached fastapi 0.141.1, which relocated
+# `Dependant.is_gen_callable` to a module-level function, and `tests/test_api_commit_boundary.py`
+# — the guard that five real commit-ordering defects were found through — failed 4 of its 7 nodes
+# on EVERY branch simultaneously, for a reason no branch had introduced. Measured both ways at the
+# time: `uv sync --frozen --extra dev` -> fastapi 0.138.2, guard 7/7; `uv pip install -e ".[dev]"`
+# -> fastapi 0.141.1, guard 4 failed.
+#
+# These proofs keep the lock load-bearing. They cover `acceptance.yml` as well as `ci.yml`, because
+# a job that ignores the lock is exactly as unreproducible in either file, and the conversion is
+# only worth anything if the next copy-pasted job cannot quietly reintroduce the old form.
+
+ACCEPTANCE_PATH = REPO / ".github" / "workflows" / "acceptance.yml"
+WORKFLOW_PATHS = (CI_PATH, ACCEPTANCE_PATH)
+
+# Floor, not an exact count: 14 jobs in ci.yml and 2 in acceptance.yml build an environment today.
+# It exists only so an empty or collapsed walk cannot pass as "no offenders found".
+MIN_ENVIRONMENT_BUILDING_JOBS = 16
+
+
+def _jobs_by_run_text() -> dict[str, str]:
+    """``"<workflow>:<job>" -> concatenated run: text``, across BOTH workflow files."""
+    out = {}
+    for path in WORKFLOW_PATHS:
+        assert path.is_file(), f"{path} is missing; this walk would silently find nothing"
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        jobs = workflow.get("jobs") or {}
+        assert jobs, f"{path.name} parsed with no jobs; the walk would prove nothing"
+        for name, job in jobs.items():
+            out[f"{path.name}:{name}"] = _run_text(job)
+    return out
+
+
+def test_no_workflow_job_installs_with_uv_pip_install():
+    """The pip-compatible interface ignores the lock, so it may not appear in either workflow."""
+    corpus = _jobs_by_run_text()
+    assert len(corpus) >= MIN_ENVIRONMENT_BUILDING_JOBS, (
+        f"only {len(corpus)} job(s) reached across both workflows; the walk is not engaging"
+    )
+    offenders = sorted(name for name, run in corpus.items() if "uv pip install" in run)
+    assert not offenders, (
+        f"{len(offenders)} job(s) install with `uv pip install`, which ignores uv.lock and "
+        f"re-resolves every open floor in pyproject.toml: {offenders}. Use "
+        "`uv sync --frozen --extra dev` (plus whatever extras the job needs)."
+    )
+
+
+def test_every_environment_building_job_syncs_from_the_frozen_lock():
+    """Absence of `uv pip install` is not enough — the job must positively sync from the lock.
+
+    A job that creates a venv and never syncs it is the same unreproducible install by omission,
+    and would satisfy the check above while installing nothing at all.
+    """
+    corpus = _jobs_by_run_text()
+    building = {name: run for name, run in corpus.items() if "uv venv" in run}
+    assert len(building) >= MIN_ENVIRONMENT_BUILDING_JOBS, (
+        f"only {len(building)} environment-building job(s) found, expected at least "
+        f"{MIN_ENVIRONMENT_BUILDING_JOBS}; this check is not engaging and its silence means nothing"
+    )
+    unsynced = sorted(name for name, run in building.items() if "uv sync --frozen" not in run)
+    assert not unsynced, (
+        f"{len(unsynced)} job(s) create a venv without installing from the lock: {unsynced}"
+    )
+
+
+def test_the_lock_is_proven_in_step_with_pyproject(wf):
+    """`--frozen` uses the lock as-is; it does not notice a lock that fell behind pyproject.toml.
+
+    Checked once, in the fast static job, so a dependency added to `pyproject.toml` but never locked
+    fails there with its actual cause rather than as an ImportError somewhere unrelated.
+    """
+    assert "uv lock --check" in _run_text(_jobs(wf)["backend-static"]), (
+        "nothing verifies uv.lock against pyproject.toml, so a stale lock would be installed "
+        "faithfully and silently"
     )
 
 

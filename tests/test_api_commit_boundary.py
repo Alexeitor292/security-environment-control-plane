@@ -43,12 +43,134 @@ from __future__ import annotations
 
 import sys
 
+import fastapi
+import fastapi.dependencies.utils as fastapi_dependency_utils
 import pytest
 import secp_api.db as secp_db
 import secp_api.deps as secp_deps
 import secp_api.immutability  # noqa: F401  (registers ORM immutability guards)
+from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute, _EffectiveRouteContext, _IncludedRouter
 from secp_api.main import create_app
+
+# --------------------------------------------------------------------------- the shape predicate
+#
+# WHERE FastAPI KEEPS "does this dependency have teardown", and why this is BOUND rather than
+# reimplemented.
+#
+# The gate in this module enumerates generator dependencies by SHAPE, and that is only sound while
+# the shape it enumerates is the same one FastAPI consults when it decides which exit stack a
+# dependency's teardown goes on. That decision is one disjunction, in
+# ``fastapi/dependencies/utils.py``:
+#
+#     elif <is generator> or <is async generator>:
+#         use_astack = request_astack
+#         if <computed scope> == "function":
+#             use_astack = function_astack
+#
+# The disjunction itself has not changed. WHERE IT LIVES has, and that broke this module once:
+#
+#   <= 0.138  ``Dependant.is_gen_callable`` / ``.is_async_gen_callable`` / ``.computed_scope``,
+#             as ``functools.cached_property`` on the dataclass.
+#   >= 0.141  ``Dependant`` became ``@dataclass(slots=True)``. A slotted class has no ``__dict__``
+#             for a ``cached_property`` to cache into, so every one of them moved OUT to
+#             module-level ``lru_cache``d functions in ``fastapi.dependencies.models``:
+#             ``_is_gen_callable(call)``, ``_is_async_gen_callable(call)``,
+#             ``_get_computed_scope(dependant=...)`` — re-exported into
+#             ``fastapi.dependencies.utils``, which is the module that schedules the teardown.
+#             The bodies are the same logic; only the binding site moved.
+#
+# On 0.141.1 the attribute spelling raises ``AttributeError`` and this module failed 4 of its 7
+# nodes. That was the right OUTCOME — the gate refused rather than reporting a green it had not
+# earned — but it left the gate unrunnable, which is why the binding below exists.
+#
+# IT IS A BINDING, NEVER A REIMPLEMENTATION, and that is the load-bearing decision here. It would
+# be one line to write ``inspect.isgeneratorfunction(call) or inspect.isasyncgenfunction(call)``
+# and have both versions pass. That line is wrong in the dangerous direction. MEASURED against that
+# exact substitute, on the shapes FastAPI's own predicate accepts:
+#
+#     functools.partial of a generator   substitute True   (the stdlib unwraps partials itself)
+#     @wraps-decorated generator         substitute FALSE  (FastAPI walks ``inspect.unwrap``)
+#     instance with generator __call__   substitute FALSE  (FastAPI looks through ``__call__``)
+#     instance with async gen __call__   substitute FALSE
+#
+# Three of the four are missed. A dependency of any of those shapes would be INVISIBLE to the gate
+# while FastAPI still scheduled its teardown after the response — a silent green, which is the exact
+# failure mode this whole module exists to catch. (The partial is stated as a pass on purpose: an
+# argument for this binding that overclaimed what the substitute gets wrong would be the same kind
+# of unearned claim.)
+#
+# So the lookup resolves FastAPI's own object and RAISES if it can find neither spelling. A future
+# version that genuinely removed the concept must STOP this gate and force a decision, not be
+# papered over by a local approximation of it.
+
+_BINDING_MODULE_LEVEL = "fastapi.dependencies.utils module-level functions (>= 0.141)"
+_BINDING_DEPENDANT_ATTRIBUTE = "Dependant cached properties (<= 0.138)"
+
+_MODULE_LEVEL_NAMES = ("_is_gen_callable", "_is_async_gen_callable", "_get_computed_scope")
+_ATTRIBUTE_NAMES = ("is_gen_callable", "is_async_gen_callable", "computed_scope")
+
+
+def _bind_to_fastapis_teardown_disjunction():
+    """Resolve the predicate out of FastAPI itself, preferring the module that schedules teardown.
+
+    Returns ``(is_generator_dependency, computed_scope, binding_label, bound_fastapi_objects)``.
+    The last element exists so the provenance can be ASSERTED below rather than assumed: a binding
+    that silently fell back to something not owned by FastAPI is the one failure this indirection
+    could introduce, so it is pinned.
+    """
+    module_level = [getattr(fastapi_dependency_utils, name, None) for name in _MODULE_LEVEL_NAMES]
+    if all(callable(obj) for obj in module_level):
+        is_gen, is_async_gen, get_scope = module_level
+
+        def _module_level_is_generator(dependant):
+            return is_gen(dependant.call) or is_async_gen(dependant.call)
+
+        def _module_level_scope(dependant):
+            return get_scope(dependant=dependant)
+
+        return (
+            _module_level_is_generator,
+            _module_level_scope,
+            _BINDING_MODULE_LEVEL,
+            (is_gen, is_async_gen, get_scope),
+        )
+
+    attributes = [getattr(Dependant, name, None) for name in _ATTRIBUTE_NAMES]
+    if all(obj is not None for obj in attributes):
+
+        def _attribute_is_generator(dependant):
+            return dependant.is_gen_callable or dependant.is_async_gen_callable
+
+        def _attribute_scope(dependant):
+            return dependant.computed_scope
+
+        # ``cached_property`` wraps the real function in ``.func``; unwrap so the provenance pin
+        # below sees a ``__module__`` in both spellings.
+        return (
+            _attribute_is_generator,
+            _attribute_scope,
+            _BINDING_DEPENDANT_ATTRIBUTE,
+            tuple(getattr(obj, "func", obj) for obj in attributes),
+        )
+
+    raise RuntimeError(
+        f"fastapi {fastapi.__version__} exposes NEITHER spelling of the generator-dependency "
+        f"predicate: no {_MODULE_LEVEL_NAMES} on fastapi.dependencies.utils and no "
+        f"{_ATTRIBUTE_NAMES} on Dependant. This gate enumerates teardown-carrying dependencies by "
+        "shape, and it is only sound while it asks FastAPI the same question FastAPI's scheduler "
+        "asks. Re-derive the disjunction in fastapi/dependencies/utils.py and bind to it; do NOT "
+        "substitute a local inspect.isgeneratorfunction check, which misses partials, wrapped "
+        "callables and generator __call__ and would make this gate silently vacuous."
+    )
+
+
+(
+    _is_generator_dependency,
+    _computed_scope,
+    SHAPE_PREDICATE_BINDING,
+    _BOUND_FASTAPI_OBJECTS,
+) = _bind_to_fastapis_teardown_disjunction()
 
 # Identity on the loaded objects, never a name or a source string: a rename, a copy, or a
 # same-named helper in another module cannot satisfy these.
@@ -211,11 +333,126 @@ def _generator_dependants(dependant):
     response boundary, because only a generator has teardown that FastAPI schedules. So the checks
     below enumerate generator dependencies and require each one to be accounted for, which is
     closed over the property that actually matters rather than over a list of names.
+
+    The predicate is FastAPI's own — see ``_bind_to_fastapis_teardown_disjunction`` for which
+    spelling of it is in use and why it is never reimplemented here.
     """
-    return [d for d in _walk(dependant) if d.is_gen_callable or d.is_async_gen_callable]
+    return [d for d in _walk(dependant) if _is_generator_dependency(d)]
 
 
 # --------------------------------------------------------------------------- non-vacuity first
+
+
+def test_the_shape_predicate_is_bound_to_fastapis_own_definition():
+    """The indirection above must resolve to FASTAPI's object, never to a local stand-in.
+
+    Every other check in this module inherits its meaning from that one predicate. The floors below
+    would catch a predicate that answered False for everything, and the single-seam rule would catch
+    one that answered True for everything — but neither would catch a predicate that was a
+    *plausible local approximation*, which is the failure the binding exists to prevent. So the
+    provenance is asserted rather than trusted: the bound objects must come out of the ``fastapi``
+    package, and where the module-level spelling exists they must be the very objects
+    ``fastapi.dependencies.utils`` consults when it chooses the exit stack.
+    """
+    assert SHAPE_PREDICATE_BINDING in (_BINDING_MODULE_LEVEL, _BINDING_DEPENDANT_ATTRIBUTE), (
+        f"unrecognised binding {SHAPE_PREDICATE_BINDING!r}"
+    )
+    assert len(_BOUND_FASTAPI_OBJECTS) == 3, _BOUND_FASTAPI_OBJECTS
+    for bound in _BOUND_FASTAPI_OBJECTS:
+        owner = getattr(bound, "__module__", "") or ""
+        assert owner.split(".")[0] == "fastapi", (
+            f"{bound!r} is owned by {owner!r}, not by fastapi. The shape predicate has fallen back "
+            "to a local reimplementation, which cannot stay in step with FastAPI's scheduler and "
+            "would miss partials, wrapped callables and generator __call__."
+        )
+
+    if SHAPE_PREDICATE_BINDING == _BINDING_MODULE_LEVEL:
+        assert _BOUND_FASTAPI_OBJECTS == (
+            fastapi_dependency_utils._is_gen_callable,
+            fastapi_dependency_utils._is_async_gen_callable,
+            fastapi_dependency_utils._get_computed_scope,
+        ), (
+            "the bound objects are not the ones fastapi.dependencies.utils itself calls, so this "
+            "gate and FastAPI's teardown scheduling could disagree"
+        )
+    else:
+        assert not any(hasattr(fastapi_dependency_utils, name) for name in _MODULE_LEVEL_NAMES), (
+            "the module-level spelling IS available but the attribute spelling was bound; the "
+            "binding order no longer prefers the module that schedules teardown"
+        )
+
+
+def test_the_shape_predicate_still_discriminates_across_every_teardown_shape():
+    """A constant, or a predicate bound to the wrong concept, must not survive this.
+
+    Nine shapes, chosen so the naive substitute this module refuses —
+    ``inspect.isgeneratorfunction(call) or inspect.isasyncgenfunction(call)`` — fails three of
+    them: the ``@wraps``-wrapped generator and both generator ``__call__`` instances are
+    dependencies FastAPI DOES schedule teardown for and a local copy does not see. (It gets the
+    ``functools.partial`` right; the stdlib unwraps partials itself. Kept in the corpus anyway,
+    since FastAPI's own predicate handles it explicitly.)
+
+    Each shape is then cross-checked against FastAPI's ``computed_scope``, which derives "request"
+    from the same disjunction through a DIFFERENT bound object. That is not independent of
+    FastAPI's logic — nothing here could be — but it is independent of which object this module
+    bound, which is the mistake the indirection could actually make.
+    """
+    import functools
+
+    def plain():  # pragma: no cover - never executed, only classified
+        return None
+
+    async def coroutine():  # pragma: no cover
+        return None
+
+    def sync_generator():  # pragma: no cover
+        yield None
+
+    async def async_generator():  # pragma: no cover
+        yield None
+
+    @functools.wraps(sync_generator)
+    def wrapped_generator(*args, **kwargs):  # pragma: no cover
+        return sync_generator(*args, **kwargs)
+
+    class GeneratorCall:
+        def __call__(self):  # pragma: no cover
+            yield None
+
+    class AsyncGeneratorCall:
+        async def __call__(self):  # pragma: no cover
+            yield None
+
+    class PlainClass:
+        def __init__(self):  # pragma: no cover
+            pass
+
+    cases = (
+        ("plain function", plain, False),
+        ("coroutine function", coroutine, False),
+        ("class (constructed, never torn down)", PlainClass, False),
+        ("sync generator", sync_generator, True),
+        ("async generator", async_generator, True),
+        ("functools.partial of a sync generator", functools.partial(sync_generator), True),
+        ("@wraps-wrapped sync generator", wrapped_generator, True),
+        ("instance with generator __call__", GeneratorCall(), True),
+        ("instance with async generator __call__", AsyncGeneratorCall(), True),
+    )
+
+    wrong = []
+    for label, call, expected in cases:
+        observed = _is_generator_dependency(Dependant(call=call))
+        if observed is not expected:
+            wrong.append(f"{label}: predicate said {observed!r}, expected {expected!r}")
+        # ``scope`` is left unset, so FastAPI computes "request" for exactly the shapes that carry
+        # teardown and None for the rest.
+        scope_says = _computed_scope(Dependant(call=call)) == "request"
+        if scope_says is not expected:
+            wrong.append(f"{label}: computed_scope implied {scope_says!r}, expected {expected!r}")
+    assert not wrong, (
+        f"the shape predicate ({SHAPE_PREDICATE_BINDING}) no longer classifies teardown-carrying "
+        f"dependencies correctly, so every verdict in this module is unsound: {wrong}"
+    )
 
 
 def test_the_guard_has_a_population_to_judge(app):
@@ -238,16 +475,16 @@ def test_the_guard_has_a_population_to_judge(app):
         "engaging, so this module would pass whatever the application did"
     )
 
-    # The SHAPE enumeration needs its own floor. It is what the gate now runs on, and an
-    # ``is_gen_callable`` that stopped reporting True would make the gate silently vacuous while
-    # every identity-based count above stayed healthy.
+    # The SHAPE enumeration needs its own floor. It is what the gate now runs on, and a shape
+    # predicate that stopped reporting True would make the gate silently vacuous while every
+    # identity-based count above stayed healthy.
     served_gens = [
         d for c in served if c.dependant is not None for d in _generator_dependants(c.dependant)
     ]
     assert len(served_gens) >= MIN_SESSION_RESOLUTIONS, (
-        f"only {len(served_gens)} SERVED generator dependency(ies) found; "
-        "Dependant.is_gen_callable is not engaging, so the gate that enumerates by shape would "
-        "pass whatever the application did"
+        f"only {len(served_gens)} SERVED generator dependency(ies) found; FastAPI's "
+        f"generator-dependency predicate ({SHAPE_PREDICATE_BINDING}) is not engaging, so the gate "
+        "that enumerates by shape would pass whatever the application did"
     )
     # ...and the shape enumeration must be a SUPERSET of the identity one. If it ever is not, the
     # shape predicate has stopped seeing the session dependency itself.
@@ -315,7 +552,7 @@ def _scope_rule_offenders(contexts):
                 offenders.append(
                     f"{sorted(context.methods or ())} {context.path} -> "
                     f"{getattr(dependant.call, '__qualname__', dependant.call)} "
-                    f"(scope={dependant.scope!r}, computed={dependant.computed_scope!r})"
+                    f"(scope={dependant.scope!r}, computed={_computed_scope(dependant)!r})"
                 )
     return offenders
 
