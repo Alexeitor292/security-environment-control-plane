@@ -279,6 +279,15 @@ PRODUCT_REASONS: frozenset[str] = frozenset(
         "worker_ordinary_config_mismatch",
         "worker_operator_not_disabled_stopped",
         "worker_ordinary_polls_operator_queue",
+        # The two CAUSES behind a three-valued containment verdict of ``unprovable``. They are here
+        # rather than in HARNESS_REASONS because they are the product's own codes, emitted by
+        # ``real_adapters._observe_queue_containment``, and they must stay distinguishable: a probe
+        # that RAN and exited non-zero (the container is gone, the interpreter path does not resolve
+        # inside the image, the health module errored) has a different remediation from a container
+        # runtime that could not be invoked at all. Collapsing them would leave the queues stage
+        # reporting "could not prove containment" with no way to say why.
+        "queue_probe_command_failed",
+        "queue_probe_runtime_unavailable",
         # enrollment
         "enrollment_invitation_revoked",
         "enrollment_invitation_consumed",
