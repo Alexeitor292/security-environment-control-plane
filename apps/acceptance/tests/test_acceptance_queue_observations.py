@@ -25,7 +25,10 @@ import pytest
 from secp_acceptance import AcceptanceError
 from secp_acceptance.queues import (
     MAX_POLLERS,
-    PROFILE_NOT_INSTALLED,
+    PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT,
+    PROFILE_DECLARED,
+    PROFILE_STATES,
+    PROFILE_UNREADABLE,
     ROLE_OPERATOR_MANAGEMENT,
     ROLE_OPERATOR_PROFILE,
     ROLE_ORDINARY,
@@ -179,48 +182,69 @@ class _Profile:
         return self._value  # type: ignore[return-value]
 
 
-def test_the_operator_queue_union_covers_both_owning_planes():
-    queues, degradation = resolve_operator_queues(
+def test_a_declared_operator_deployment_widens_the_union():
+    queues, state = resolve_operator_queues(
         ordinary=ordinary_queue_name(), profile_reader=_Profile("secp-operator-acc")
     )
     assert set(queues) == {ROLE_OPERATOR_MANAGEMENT, ROLE_OPERATOR_PROFILE}
     assert queues[ROLE_OPERATOR_PROFILE] == "secp-operator-acc"
-    assert degradation is None
+    assert state == PROFILE_DECLARED
 
 
-def test_an_unreadable_profile_narrows_the_union_and_SAYS_so():
-    """The degradation must be reported, not absorbed. A narrower proof wearing the same green as a
-    complete one is the substitution this whole harness exists to refuse."""
-    queues, degradation = resolve_operator_queues(
-        ordinary=ordinary_queue_name(),
-        profile_reader=_Profile(AcceptanceError("acceptance_observation_unavailable")),
-    )
-    assert set(queues) == {ROLE_OPERATOR_MANAGEMENT}
-    assert degradation == "acceptance_observation_unavailable"
+def test_a_host_with_no_operator_deployment_reports_a_STATE_not_a_failure():
+    """A union of one is the CORRECT observation here, not a degraded one.
 
-
-def test_an_absent_profile_reader_is_a_degradation_not_a_silent_narrowing():
-    queues, degradation = resolve_operator_queues(
-        ordinary=ordinary_queue_name(), profile_reader=None
-    )
-    assert degradation == PROFILE_NOT_INSTALLED
-    # ...and the union is still non-empty, so isolation remains provable against the constant
-    assert set(queues) == {ROLE_OPERATOR_MANAGEMENT}
-
-
-def test_a_structurally_absent_profile_is_told_apart_from_a_broken_one():
-    """Opposite remediations, so they must not share a cause.
-
-    ``PROFILE_NOT_INSTALLED`` says the harness is looking at a correctly-installed host and the
-    value genuinely does not exist there. A read failure says the host is not what it should be. A
-    reader who cannot tell them apart goes hunting a host defect that is not there.
+    The profile is deployment-local material for a controlled-live operator deployment, and none has
+    been performed because operator activation is sealed — so an acceptance host having no
+    deployment-local operator queue is the accurate state of that host, and there is exactly one
+    operator queue to speak of. This used to report ``acceptance_proof_would_be_vacuous``, a
+    HARNESS-FAILURE reason, which framed a true observation as an inability to observe and would
+    have sent a reader looking for an outage that does not exist.
     """
-    _, structural = resolve_operator_queues(ordinary=ordinary_queue_name(), profile_reader=None)
+    queues, state = resolve_operator_queues(ordinary=ordinary_queue_name(), profile_reader=None)
+    assert state == PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT
+    assert set(queues) == {ROLE_OPERATOR_MANAGEMENT}
+    # ...and isolation is still provable against that one queue — the union is never empty here
+    assert queues[ROLE_OPERATOR_MANAGEMENT] == management_operator_queue_name()
+
+
+def test_the_absent_state_is_not_a_harness_failure_reason():
+    """The distinction the reframing exists for: this value must NOT be borrowable as an
+    observation-failure code, or the framing collapses back to "we could not look"."""
+    from secp_acceptance.reasons import ALL_REASONS
+
+    assert PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT not in ALL_REASONS
+    assert PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT in PROFILE_STATES
+
+
+def test_no_operator_deployment_is_told_apart_from_a_broken_profile():
+    """Opposite remediations, so they must never share a value.
+
+    "This host has no operator deployment" says the host is correct and the value genuinely does not
+    exist. "The profile could not be read" says the host is not what it should be.
+    """
+    _, absent = resolve_operator_queues(ordinary=ordinary_queue_name(), profile_reader=None)
     _, broken = resolve_operator_queues(
         ordinary=ordinary_queue_name(),
         profile_reader=_Profile(AcceptanceError("acceptance_observation_unavailable")),
     )
-    assert structural != broken
+    assert absent == PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT
+    assert broken == PROFILE_UNREADABLE
+    assert absent != broken
+
+
+def test_every_answer_is_a_member_of_the_closed_state_set():
+    """NON-VACUITY for the closed set: all three states must be reachable, or the set is decoration
+    and one of the three branches is dead."""
+    reached = {
+        resolve_operator_queues(ordinary=ordinary_queue_name(), profile_reader=reader)[1]
+        for reader in (
+            None,
+            _Profile("secp-operator-acc"),
+            _Profile(AcceptanceError("acceptance_observation_unavailable")),
+        )
+    }
+    assert reached == set(PROFILE_STATES)
 
 
 def test_the_product_still_installs_no_deployment_profile():
@@ -269,11 +293,17 @@ def test_the_product_still_installs_no_deployment_profile():
 
 
 @pytest.mark.parametrize("value", ["", None, 7])
-def test_a_malformed_profile_queue_is_a_degradation(value: object):
-    _, degradation = resolve_operator_queues(
+def test_a_profile_that_declares_no_usable_queue_is_an_anomaly_not_an_absence(value: object):
+    """A profile that EXISTS but yields nothing usable means the host is not what it should be.
+
+    Deliberately not folded into ``PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT``: a host with no operator
+    deployment is correct, whereas a host whose profile declares an empty or mistyped queue is
+    broken, and the two call for opposite responses.
+    """
+    _, state = resolve_operator_queues(
         ordinary=ordinary_queue_name(), profile_reader=_Profile(value)
     )
-    assert degradation == "acceptance_observation_malformed"
+    assert state == PROFILE_UNREADABLE
 
 
 def test_an_operator_queue_equal_to_the_ordinary_queue_is_dropped_not_probed():

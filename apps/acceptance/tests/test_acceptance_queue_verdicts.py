@@ -203,6 +203,33 @@ def test_the_producers_specific_cause_survives_into_the_observation():
     assert captured["observation"]["observed_cause"] == "worker_operator_not_disabled_stopped"
 
 
+def test_two_violations_with_different_causes_get_different_digests():
+    """THE benefit that `observed_cause` actually delivers, asserted rather than claimed.
+
+    It is tempting to say this "keeps the cause visible in the document". It does not — only the
+    observation's DIGEST is stored, so a reader triaging the evidence still cannot tell one cause
+    from another. What it genuinely buys is that two runs violating for DIFFERENT reasons do not
+    collapse to the SAME content address, which is what would otherwise make them indistinguishable
+    even in principle.
+    """
+    recorders = {}
+    for cause in ("worker_operator_not_disabled_stopped", "worker_ordinary_polls_operator_queue"):
+        rec = AcceptanceRecorder()
+        rec.open_stage(STAGE_QUEUES)
+        record_verdict(
+            rec, "operator_unit_never_activated", QueueVerdict(VERDICT_VIOLATED, cause=cause)
+        )
+        recorders[cause] = rec._checks[0]
+
+    digests = {cause: record.observation_digest for cause, record in recorders.items()}
+    assert len(set(digests.values())) == 2, (
+        "two different causes produced the same observation digest, so the distinction is lost "
+        "even as a content address"
+    )
+    # ...and the reason_code is identical for both, which is exactly why the digest has to differ
+    assert len({record.reason_code for record in recorders.values()}) == 1
+
+
 def test_an_outage_carries_the_cause_the_producer_observed_not_a_fixed_code():
     """The two containment causes have different remediations, so the encoding must not flatten
     them into one generic code."""
@@ -219,27 +246,48 @@ def test_an_outage_carries_the_cause_the_producer_observed_not_a_fixed_code():
 # --------------------------------------------------------------------------- verdict coherence
 
 
+# EACH GUARD BELOW IS PINNED TO ITS OWN REASON CODE, AND THAT IS NOT PEDANTRY.
+#
+# These were bare ``pytest.raises(AcceptanceError)``. Mutation found the consequence: deleting the
+# missing-cause guard entirely left `test_a_non_held_verdict_must_carry_a_cause` still PASSING,
+# because the NEXT guard catches `None not in ALL_REASONS` and raises a different code — which a
+# bare `raises` cannot see. The test was pinned to "something refuses" when its subject is "THIS
+# refuses", so it covered a guard it did not name while its own guard could be deleted freely.
+#
+# Third instance of the same shape in this stage: an assertion satisfied by a neighbouring
+# mechanism. The others were across a module boundary and across a stage rule; this one is two
+# adjacent lines in one function, which is the hardest version to see by reading.
+
+
 def test_a_held_verdict_may_not_carry_a_cause():
     """A positive observation that also carries a refusal reason is incoherent — the same rule
     ``CheckRecord`` applies, enforced early so it cannot travel as far as the recorder."""
-    with pytest.raises(AcceptanceError):
+    with pytest.raises(AcceptanceError) as caught:
         QueueVerdict(VERDICT_HELD, cause=_CAUSE)
+    assert caught.value.reason_code == "acceptance_evidence_invalid"
 
 
 @pytest.mark.parametrize("verdict", [VERDICT_VIOLATED, VERDICT_UNPROVABLE])
 def test_a_non_held_verdict_must_carry_a_cause(verdict: str):
-    with pytest.raises(AcceptanceError):
+    """Pinned to ``acceptance_evidence_invalid`` specifically. With a bare ``raises`` this passed
+    even with the guard deleted, because the vocabulary check below refuses ``None`` too."""
+    with pytest.raises(AcceptanceError) as caught:
         QueueVerdict(verdict)
+    assert caught.value.reason_code == "acceptance_evidence_invalid"
 
 
 def test_a_cause_outside_the_closed_vocabulary_is_refused():
-    with pytest.raises(AcceptanceError):
+    """The DIFFERENT code, which is what makes the pin above meaningful: these two guards are
+    adjacent and reject overlapping inputs, so only the code tells them apart."""
+    with pytest.raises(AcceptanceError) as caught:
         QueueVerdict(VERDICT_UNPROVABLE, cause="something_i_just_made_up")
+    assert caught.value.reason_code == "acceptance_evidence_unknown_reason"
 
 
 def test_an_unknown_verdict_is_refused():
-    with pytest.raises(AcceptanceError):
+    with pytest.raises(AcceptanceError) as caught:
         QueueVerdict("probably_fine")
+    assert caught.value.reason_code == "acceptance_evidence_invalid"
 
 
 # --------------------------------------------------------------------------- the recorder funnel
@@ -274,6 +322,82 @@ def test_recording_a_non_held_verdict_is_never_a_pass(verdict: str, expected_out
     assert sealed.outcome == expected_outcome
     assert sealed.outcome not in PASSING_OUTCOMES
     assert sealed.reason_code is not None
+
+
+# --------------------------------------------------------------------------- the scope gap
+#
+# These were missing entirely until the gap semantics were tightened: the declarator existed and
+# nothing exercised it, so nothing proved the gap it emits survives the loader. A gap that the
+# document refuses would fail the run at seal time, in the last second of a twenty-minute
+# container-tier run, for a reason authored twenty minutes earlier.
+
+
+def test_the_scope_gap_survives_the_loader():
+    """The gap this stage declares on EVERY run must be a gap the document accepts."""
+    from secp_acceptance.queues import (
+        OPERATOR_QUEUE_SCOPE_GAP,
+        declare_operator_queue_scope_gap,
+    )
+
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_QUEUES)
+    for check in CHECKS_BY_STAGE[STAGE_QUEUES]:
+        record_verdict(recorder, check, QueueVerdict(VERDICT_HELD))
+    declare_operator_queue_scope_gap(recorder, weakens=("operator_queue_has_zero_pollers",))
+    evidence = _seal(recorder)
+    gaps = [g for g in evidence.gaps if g.gap == OPERATOR_QUEUE_SCOPE_GAP]
+    assert len(gaps) == 1
+    assert gaps[0].stage == STAGE_QUEUES
+    assert gaps[0].weakens == ("operator_queue_has_zero_pollers",)
+
+
+def test_the_scope_gap_names_real_checks_and_refuses_invented_ones():
+    """``weakens`` is what connects a gap to the claims a reader should discount. A gap that
+    weakened a check id nobody declares would be a footnote on nothing."""
+    from secp_acceptance.queues import declare_operator_queue_scope_gap
+
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_QUEUES)
+    with pytest.raises(AcceptanceError):
+        declare_operator_queue_scope_gap(recorder, weakens=("no_such_check",))
+    with pytest.raises(AcceptanceError):
+        declare_operator_queue_scope_gap(recorder, weakens=())
+
+
+def test_the_scope_gap_is_a_substitution_not_a_smuggled_failure():
+    """A gap must not carry a finding that belongs in ``checks``.
+
+    The contract's rule is that a gap says "proven against a stand-in", never "could not be proven"
+    — filing the latter as a gap moves a real finding out of ``checks``, where the verdict is
+    derived from it, into ``gaps``, where nothing computes on it. So the gap's own text must not
+    read as a refusal, and declaring it must not change the run's verdict.
+    """
+    from secp_acceptance.queues import (
+        OPERATOR_QUEUE_SCOPE_SUBSTITUTE,
+        OPERATOR_QUEUE_SCOPE_WHY,
+        declare_operator_queue_scope_gap,
+    )
+
+    def _covered() -> AcceptanceRecorder:
+        rec = AcceptanceRecorder()
+        rec.open_stage(STAGE_QUEUES)
+        for check in CHECKS_BY_STAGE[STAGE_QUEUES]:
+            record_verdict(rec, check, QueueVerdict(VERDICT_HELD))
+        return rec
+
+    without = _seal(_covered())
+    with_gap = _covered()
+    declare_operator_queue_scope_gap(with_gap, weakens=("operator_queue_has_zero_pollers",))
+    sealed = _seal(with_gap)
+
+    # the gap annotates; it does not move a check out of the passing set
+    assert sealed.not_passing() == without.not_passing() == ()
+    assert sealed.violated() == () and sealed.unproven() == ()
+    # ...and its prose describes what WAS proven, not something that was not
+    for text in (OPERATOR_QUEUE_SCOPE_SUBSTITUTE, OPERATOR_QUEUE_SCOPE_WHY):
+        assert "could not" not in text.lower()
+        assert "failed" not in text.lower()
+    assert "proven against" in OPERATOR_QUEUE_SCOPE_SUBSTITUTE
 
 
 def test_the_funnel_records_the_dormancy_check_under_the_worker_install_stage():
@@ -396,7 +520,13 @@ def _seal(recorder: AcceptanceRecorder):
             role="worker",
             baseline_aggregate="sha256:" + "4" * 64,
             baseline_source_sha="a" * 40,
-            signing_anchor_id="test-anchor",
+            # A DIGEST, not a label. `signing_anchor_id` is validated as a sha256 digest by the
+            # evidence loader's release-record semantics; a readable placeholder like
+            # "test-anchor" is refused with `acceptance_evidence_public_value_not_permitted`.
+            # Found by simulating the integration order rather than by any test on this branch:
+            # the validation lands in a peer's later commit, so this fixture is green here and
+            # fails the moment the two are merged.
+            signing_anchor_id="sha256:" + "5" * 64,
             test_only_anchor=True,
         ),
     )
