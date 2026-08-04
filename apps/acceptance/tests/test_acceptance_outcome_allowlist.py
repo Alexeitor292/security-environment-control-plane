@@ -19,6 +19,7 @@ remembers to come back here.
 from __future__ import annotations
 
 import pytest
+from _contract_patch import binders_of, patch_contract_constant
 from secp_acceptance import AcceptanceError
 from secp_acceptance.evidence import FleetRecord, ReleaseRecord, evidence_from_dict
 from secp_acceptance.reasons import (
@@ -75,6 +76,23 @@ def _fully_covered(*, skip: str | None = None) -> AcceptanceRecorder:
 
 
 # --------------------------------------------------------------------------- the vocabulary
+
+
+def test_the_binder_sweep_finds_every_module_that_binds_the_allowlist():
+    """The sweep must find the binders, and must be capable of finding nothing.
+
+    ``patch_contract_constant`` is NEGATIVE-form: it succeeds by finding a set. A sweep that
+    silently matched nothing would leave every caller running against a completely unpatched world
+    and passing, because the unpatched values are the real ones. Enumerating the binders by name was
+    the previous approach and it broke silently the moment a third module bound the constant —
+    found by acc-B-enrollment.
+    """
+    binders = binders_of("PASSING_OUTCOMES")
+    assert set(binders) >= {"secp_acceptance.recorder", "secp_acceptance.evidence"}, (
+        f"the sweep lost a known binder: {binders}"
+    )
+    # ...and it must not match a name nothing imports, or it would "find" binders for anything
+    assert binders_of("A_CONSTANT_NOBODY_IMPORTS") == ()
 
 
 def test_the_passing_outcomes_are_a_strict_subset_of_the_vocabulary():
@@ -281,9 +299,6 @@ def test_the_recorder_verdict_uses_the_same_allowlist(monkeypatch):
     Both arms now use the SAME nine-stage recorder, so the allowlist is the only variable and the
     verdict genuinely flips on it.
     """
-    import secp_acceptance.evidence as evidence_module
-    import secp_acceptance.recorder as recorder_module
-
     # Baseline: `refused` IS a passing outcome, so a complete run carrying refusals PASSES.
     baseline = _fully_covered_with_real_refusals().seal(fleet=_FLEET, release=_RELEASE)
     assert baseline.outcome == RUN_PASSED
@@ -291,12 +306,7 @@ def test_the_recorder_verdict_uses_the_same_allowlist(monkeypatch):
     assert baseline.not_passing() == ()
 
     # Narrow the allowlist to `observed` alone. NOTHING else changes — same stages, same checks.
-    # BOTH modules are patched because each binds the name at import, and the whole subject of this
-    # test is that the two must not disagree; patching one would leave the loader answering from the
-    # real allowlist while the recorder used the narrowed one.
-    narrowed_allowlist = frozenset({OUTCOME_OBSERVED})
-    monkeypatch.setattr(recorder_module, "PASSING_OUTCOMES", narrowed_allowlist, raising=True)
-    monkeypatch.setattr(evidence_module, "PASSING_OUTCOMES", narrowed_allowlist, raising=True)
+    patch_contract_constant(monkeypatch, "PASSING_OUTCOMES", frozenset({OUTCOME_OBSERVED}))
 
     narrowed = _fully_covered_with_real_refusals().seal(fleet=_FLEET, release=_RELEASE)
     assert narrowed.outcome == RUN_FAILED, (

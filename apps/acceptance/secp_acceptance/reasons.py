@@ -17,6 +17,23 @@ Three separate closed sets, kept apart on purpose:
     check that is not on this list cannot be recorded, so the evidence document can never grow an
     unreviewed claim.
 
+WHICH CODES BELONG IN ``HARNESS_REASONS``
+-----------------------------------------
+**Every bounded code this harness can EMIT, whether or not it can ever reach a document.** That
+includes loader refusals, which by construction never appear in a ``reason_code`` — the document
+carrying them is refused rather than read.
+
+The rule was previously ambiguous and the file answered both ways: seven ``acceptance_evidence_*``
+loader refusals were declared while an eighth, raised four times, was not. Ambiguity in this
+particular set is expensive, because the code is what an operator sees when a run refuses, and an
+undeclared one has been reviewed by nobody.
+
+The narrower rule — "only codes a stage can record" — was rejected: it would delete seven codes that
+are already the most useful thing a refused run prints, and it draws the line at the wrong place.
+What matters about a reason code is that a human agreed to its wording, not where it surfaces.
+
+``test_acceptance_reason_closure.py`` enforces this over the AST, so the set cannot drift again.
+
 Everything here is a plain ASCII identifier. No path, endpoint, credential, container id, or host
 name is ever a member of any of these sets, and the evidence loader re-checks membership.
 """
@@ -239,6 +256,13 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         # Deliberately ONE code for all of them rather than one per check — the check id already
         # says which property was violated, and a per-check code set would grow past review.
         "acceptance_prohibited_state_observed",
+        # --- negative controls (completion gate, clause C4) ---
+        # A control that was supposed to fail did not. The gate demonstrated by that control is now
+        # unverified, and nothing in a passing CI report would say so.
+        "acceptance_negative_control_did_not_fail",
+        # A declared control produced no result at all. Distinct from the above: "it passed when it
+        # should have failed" and "it never ran" call for different investigations.
+        "acceptance_negative_control_missing",
         # --- execution provenance (completion gate, clause C1) ---
         # A stage recorded its checks without running a single command through the process seam.
         # Its observations may be perfectly well-formed; they were not derived from a host.
@@ -267,6 +291,11 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         "acceptance_evidence_unknown_reason",
         "acceptance_evidence_duplicate_check",
         "acceptance_evidence_incomplete",
+        # A value that is not on the reviewed allowlist for PUBLIC evidence — a host path, an
+        # origin, a queue name, a raw container or network name where a digest belongs. Kept
+        # distinct from `acceptance_evidence_forbidden_value`, which means the credential scan
+        # fired: "a secret leaked" and "a value nobody reviewed" are different findings.
+        "acceptance_evidence_public_value_not_permitted",
     }
 )
 
