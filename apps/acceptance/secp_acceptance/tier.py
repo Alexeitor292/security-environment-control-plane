@@ -65,12 +65,70 @@ TIERS: frozenset[str] = frozenset({TIER_HERMETIC, TIER_CONTAINER})
 #: fleet. It is listed because a declared tier that built hosts and never probed the image would
 #: otherwise be indistinguishable from a complete one, and that probe is the only place the pinned
 #: worker health interpreter is checked against a real image rather than against another constant.
+#:
+#: ``fleet_torn_down`` was called ``fleet_destroyed`` and was renamed to break a COLLISION: that
+#: string is also a check id under the ``fleet`` evidence stage
+#: (:data:`~secp_acceptance.reasons.CHECKS_BY_STAGE`). One string meant two unrelated things — the
+#: witness is recorded by the fleet fixture's teardown, while the CHECK of the same name is not
+#: recorded at all — so "fleet_destroyed was witnessed" could be misread as "the fleet stage proved
+#: teardown". :func:`assert_witness_vocabulary_disjoint` now makes that class of collision
+#: impossible rather than merely absent.
 CONTAINER_TIER_STAGES: tuple[str, ...] = (
     "fleet_created",
     "fleet_proved",
-    "fleet_destroyed",
+    "fleet_torn_down",
     "worker_image_probed",
 )
+
+#: The exact number of ``container_tier``-marked nodes each container-tier MODULE contributes.
+#:
+#: WHY A PER-MODULE MAPPING AND NOT ONE TOTAL
+#: ------------------------------------------
+#: This pin exists because the JUnit report CANNOT express deselection: a run with the tier
+#: undeclared is simply missing those nodes, with no attribute recording their absence, so a gate
+#: that only refused skips would pass a run where a whole tier vanished. It has to be a
+#: hand-maintained literal — deriving it from collection would shrink the expectation in step with
+#: any collapse, which is the "derived by calling the function under test" trap.
+#:
+#: Keyed by module for two reasons, both of which a single integer gets wrong:
+#:
+#: 1. Four streams are adding container-tier modules concurrently. One integer is a guaranteed
+#:    four-way merge conflict on the same line; a mapping conflicts only when two streams touch the
+#:    same module, which they do not.
+#: 2. A single total is satisfied by COMPENSATING changes — a node silently lost from the fleet
+#:    module while a new one appears in the queues module leaves the total unchanged and the loss
+#:    invisible. Per-module counts cannot cancel out.
+#:
+#: A stream adding a module adds its own row. The required gate tells it the right number.
+EXPECTED_CONTAINER_NODES_BY_MODULE: dict[str, int] = {
+    "test_acceptance_container_fleet.py": 9,
+    "test_acceptance_container_worker_image.py": 4,
+}
+
+#: The total the acceptance workflow pins. DERIVED from the mapping so the two can never disagree.
+EXPECTED_CONTAINER_NODES: int = sum(EXPECTED_CONTAINER_NODES_BY_MODULE.values())
+
+
+def assert_witness_vocabulary_disjoint() -> None:
+    """A witness name must never also be a CHECK id.
+
+    The two vocabularies answer different questions — "did this body execute?" versus "was this
+    property observed?" — and a shared string makes the answer to one readable as the answer to the
+    other. ``fleet_destroyed`` was exactly that: witnessed on every run, recorded as a check on
+    none.
+
+    Mirrors :func:`~secp_acceptance.reasons.assert_disjoint` for the reason vocabularies, and runs
+    at import for the same reason: a collision must break the harness BUILD rather than wait to
+    mislead a reader of an evidence document.
+    """
+    from secp_acceptance.reasons import CHECKS
+
+    overlap = set(CONTAINER_TIER_STAGES) & CHECKS
+    if overlap:
+        raise AcceptanceError("acceptance_tier_unknown_witness")
+
+
+assert_witness_vocabulary_disjoint()
 
 _witnessed: set[str] = set()
 
@@ -147,7 +205,10 @@ def assert_tier_witnessed() -> None:
 
 __all__ = [
     "CONTAINER_TIER_STAGES",
+    "EXPECTED_CONTAINER_NODES",
+    "EXPECTED_CONTAINER_NODES_BY_MODULE",
     "ENV_TIER",
+    "assert_witness_vocabulary_disjoint",
     "TIERS",
     "TIER_CONTAINER",
     "TIER_HERMETIC",

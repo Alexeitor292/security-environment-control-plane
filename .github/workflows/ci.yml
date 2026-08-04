@@ -45,6 +45,11 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check apps contracts plugins scripts tests
       - name: Type check (mypy)
+        # Every product entry below is a PACKAGE directory; `apps/acceptance` is the whole tree, on
+        # purpose. The acceptance harness inverts the usual layout — its stage scenarios live in
+        # `apps/acceptance/tests/`, not in `secp_acceptance/` — so checking only the package would
+        # leave every stage producer untyped, which is most of the code the harness will ever have.
+        # It was absent from this list entirely and carried two unnoticed `var-annotated` errors.
         run: >-
           uv run mypy
           apps/api/secp_api
@@ -53,6 +58,7 @@ jobs:
           apps/deployment/secp_operator_deployment
           apps/deployment/secp_discovery_activation
           apps/management/secp_management
+          apps/acceptance
           contracts
           plugins
       - name: Schema validation (web-breach-101)
