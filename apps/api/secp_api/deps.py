@@ -70,6 +70,22 @@ def db_session() -> Iterator[Session]:
 # The ``Depends(...)`` marker in the endpoint SIGNATURE is the only thing that survives that
 # rebuild. ``tests/test_api_commit_boundary.py`` walks the SERVED trees and fails on exactly that
 # disagreement, so this comment cannot quietly become false.
+#
+# THE ONE REAL CONSTRAINT THIS IMPOSES: DO NOT STREAM ORM INSTANCES.
+# Function scope closes the session after the endpoint returns and after the response model is
+# serialized, but BEFORE ``await response(scope, receive, send)``. An ordinary JSON response is
+# therefore unaffected — serialization has already finished, so ``expire_on_commit`` cannot bite. A
+# ``StreamingResponse`` is different: its body is produced DURING the send, by which point the
+# session is closed, so touching an ORM attribute inside the generator raises
+# ``DetachedInstanceError``. Measured on fastapi 0.138.2:
+#     streaming ORM instances @ scope="request"   -> 200, complete body
+#     streaming ORM instances @ scope="function"  -> headers already sent, then the connection
+#                                                    closes mid-body (truncated chunked read)
+#     streaming plain data / raw SQL @ "function" -> 200, complete body
+# The truncation is the nasty part: the status line is already on the wire, so the client sees a
+# 200 with a short body rather than an error. Materialise rows into plain data BEFORE returning a
+# StreamingResponse. There is no streaming route in this application today, and the commit-boundary
+# guard does NOT detect this — it has no notion of response classes.
 DB_SESSION = Depends(db_session, scope="function")
 
 
