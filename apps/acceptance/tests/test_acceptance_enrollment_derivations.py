@@ -1161,6 +1161,17 @@ def test_every_module_that_binds_the_pass_allowlist_is_known_to_the_guards():
     So the binders are DISCOVERED from the package source rather than listed from memory. A fourth
     binder fails here, which is the moment to extend the patch set — not the moment someone notices
     a narrowing test that no longer narrows everything.
+
+    TWO SYNTAXES BIND, NOT ONE. ``from secp_acceptance.reasons import PASSING_OUTCOMES`` is the
+    obvious one. A module-level ``PASSING_OUTCOMES = reasons.PASSING_OUTCOMES`` binds the value at
+    import exactly as hard, is invisible to an ``ImportFrom`` walk, and is what someone writes when
+    they are avoiding a long import line. The first version of this guard saw only the first form —
+    which would have made it a discovery that cannot discover the case most likely to be written by
+    someone working around it. Both are detected.
+
+    (Deliberately AST, not text. A ``grep`` for the name matches docstrings: the lifecycle stream
+    ran exactly that search, got a hit in a module that only MENTIONS the constant in prose, and
+    nearly reported a fourth binder that does not exist.)
     """
     import ast
 
@@ -1170,6 +1181,20 @@ def test_every_module_that_binds_the_pass_allowlist_is_known_to_the_guards():
     binders = set()
     for path in sorted(package.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        # form two: a module-level assignment to the name, whatever the right-hand side
+        for node in tree.body:
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+                if isinstance(node, ast.AnnAssign)
+                else []
+            )
+            if (
+                any(isinstance(t, ast.Name) and t.id == "PASSING_OUTCOMES" for t in targets)
+                and path.name != "reasons.py"
+            ):
+                binders.add(path.name)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == "secp_acceptance.reasons":
                 if any(alias.name == "PASSING_OUTCOMES" for alias in node.names):
@@ -1229,3 +1254,62 @@ def test_management_worker_status_is_independent_of_enrollment():
             "enrollment health are no longer independent, and observe_controller_state's docstring "
             "is wrong"
         )
+
+
+def test_the_binder_discovery_sees_an_alias_binding_not_only_an_import():
+    """The second form, proven on a synthetic module rather than trusted.
+
+    A discovery that only understood ``from ... import`` would be blind to exactly the shape someone
+    writes when they want the constant without the long import — and blindness in a guard whose
+    whole job is enumeration is worse than not having the guard, because the empty result reads as
+    "no new binders".
+    """
+    import ast
+    import textwrap
+
+    def binders_in(source: str) -> set[str]:
+        tree = ast.parse(textwrap.dedent(source))
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "secp_acceptance.reasons":
+                if any(a.name == "PASSING_OUTCOMES" for a in node.names):
+                    found.add("import-form")
+        for node in tree.body:
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+                if isinstance(node, ast.AnnAssign)
+                else []
+            )
+            if any(isinstance(t, ast.Name) and t.id == "PASSING_OUTCOMES" for t in targets):
+                found.add("assign-form")
+        return found
+
+    assert binders_in("from secp_acceptance.reasons import PASSING_OUTCOMES") == {"import-form"}
+    assert binders_in(
+        """
+        from secp_acceptance import reasons
+        PASSING_OUTCOMES = reasons.PASSING_OUTCOMES
+        """
+    ) == {"assign-form"}
+    assert binders_in(
+        """
+        from secp_acceptance import reasons
+        PASSING_OUTCOMES: frozenset[str] = reasons.PASSING_OUTCOMES
+        """
+    ) == {"assign-form"}
+    # late attribute access is NOT a binding and must not be reported as one
+    assert (
+        binders_in(
+            """
+        from secp_acceptance import reasons
+
+        def is_pass(outcome):
+            return outcome in reasons.PASSING_OUTCOMES
+        """
+        )
+        == set()
+    )
+    # a docstring mention is not a binding either — the text-search false positive
+    assert binders_in('"""PASSING_OUTCOMES is discussed here."""') == set()
