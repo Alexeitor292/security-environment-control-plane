@@ -148,9 +148,9 @@ class QueueVerdict:
 # Why the ``violated`` reason is FIXED rather than the producer's own code: the contract carries a
 # single ``acceptance_prohibited_state_observed`` for every violated check, on the reasoning that
 # the CHECK ID already names the property that was violated and a per-check code set would grow
-# past review. The producer's more specific cause is not discarded, though — ``record_verdict``
-# puts it in the bounded observation, so it survives into what the check asserted on rather than
-# being silently dropped on the way to the document.
+# past review. The producer's more specific cause still goes into the bounded observation via
+# ``record_verdict`` — see there for what that does and does not buy, because the obvious answer
+# is wrong.
 
 #: verdict -> (evidence outcome, fixed reason code, or None meaning "the producer supplies it").
 VERDICT_ENCODING: dict[str, tuple[str, str | None]] = {
@@ -212,8 +212,19 @@ def record_verdict(
     outcome, reason = encode_verdict(verdict)
     observation = dict(verdict.observation)
     if verdict.verdict == VERDICT_VIOLATED and verdict.cause is not None:
-        # The specific tell, kept where a reader of the projection can still see it. The document's
-        # reason_code is the contract's single violated code; this is what was actually observed.
+        # The producer's specific tell, alongside the contract's single violated reason code.
+        #
+        # BE PRECISE ABOUT WHAT THIS BUYS, because the intuitive answer is wrong: only the DIGEST
+        # of the observation reaches the evidence document, so this does NOT make the cause visible
+        # to a reader of that document. A reader triaging a `violated` check still cannot tell
+        # `NRestarts != 0` from `enabled` — closing that needs an ident-constrained field on
+        # CheckRecord, which is a schema change and is not this.
+        #
+        # What it does buy, and it is worth the one line: the cause is present at ASSERTION time,
+        # in memory, where the check is decided; and two runs that violate for DIFFERENT causes
+        # produce DIFFERENT observation digests, so they stay distinguishable as content addresses
+        # instead of collapsing to one. Values are a small per-producer set of idents — never free
+        # text, never a path, id, or host string.
         observation["observed_cause"] = verdict.cause
     verb = getattr(run, VERDICT_VERB[verdict.verdict])
     if outcome == OUTCOME_OBSERVED:
@@ -272,20 +283,25 @@ def management_operator_queue_name() -> str:
 
 def resolve_operator_queues(
     *, ordinary: str, profile_reader: ProfileReader | None
-) -> tuple[dict[str, str], str | None]:
+) -> tuple[dict[str, str], str]:
     """The operator queue names to probe, keyed by the ROLE that owns each.
 
-    Returns ``(role -> queue, degradation_cause)``. ``degradation_cause`` is not None whenever the
-    deployment-local name is unavailable: the union then covers the management constant only, the
-    isolation claim is genuinely narrower, and the caller MUST declare that as a gap rather than
-    letting a narrower proof wear the same green as a complete one.
+    Returns ``(role -> queue, profile_state)`` where ``profile_state`` is one of
+    :data:`PROFILE_STATES`. It is a bounded STATE rather than a failure code because two of the
+    three answers are not failures:
 
-    On a host installed by the supported path that is ALWAYS — no product code writes a deployment
-    profile (see :data:`PROFILE_UNREADABLE_WHY`). Passing ``profile_reader=None`` is therefore the
-    accurate call for a real run today, not a degraded one, and it reports
-    :data:`PROFILE_NOT_INSTALLED` rather than an observation failure. The seam is kept because the
-    check is written for the product as it should be: if a profile ever ships, the union widens with
-    no change here.
+    * :data:`PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT` — the accurate state of an acceptance host. No
+      operator deployment has been performed, so there is no deployment-local operator queue and
+      the union is legitimately a union of one. The caller declares
+      :data:`OPERATOR_QUEUE_SCOPE_GAP` to BOUND the claim, not to apologise for it.
+    * :data:`PROFILE_DECLARED` — a deployment-local queue exists and is probed alongside the
+      management constant.
+    * :data:`PROFILE_UNREADABLE` — the only genuine anomaly: a profile that exists but cannot be
+      read means the host is not what it should be.
+
+    Passing ``profile_reader=None`` is therefore the ACCURATE call for a real run today, not a
+    degraded one. The seam is kept because the check is written for the product as it should be: if
+    an operator deployment ever writes a profile, the union widens with no change here.
 
     A name equal to the ordinary queue is DROPPED rather than probed. "Zero pollers on the operator
     queue" is not a well-posed question when that queue IS the queue the worker polls, and a
@@ -297,67 +313,94 @@ def resolve_operator_queues(
     management = management_operator_queue_name()
     if management and management != ordinary:
         queues[ROLE_OPERATOR_MANAGEMENT] = management
-    degradation: str | None = None
+    state = PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT
     if profile_reader is None:
-        # No reader supplied: the caller is stating that this host has no deployment profile, which
-        # is the truthful state of every supported installation today.
-        degradation = PROFILE_NOT_INSTALLED
+        # No reader supplied: the caller is stating this host has no operator deployment, which is
+        # the truthful state of every acceptance host — not an input the harness failed to obtain.
+        state = PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT
     else:
         try:
             declared = profile_reader.operator_task_queue()
-        except AcceptanceError as exc:
-            degradation = exc.reason_code
-        except Exception:  # noqa: BLE001 - a foreign reader failure is still an unread profile
-            degradation = "acceptance_observation_unavailable"
+        except Exception:  # noqa: BLE001 - a profile that exists but cannot be read is an anomaly
+            state = PROFILE_UNREADABLE
         else:
             if isinstance(declared, str) and declared and declared != ordinary:
                 queues[ROLE_OPERATOR_PROFILE] = declared
+                state = PROFILE_DECLARED
             else:
-                degradation = "acceptance_observation_malformed"
-    return queues, degradation
+                state = PROFILE_UNREADABLE
+    return queues, state
 
 
-#: The gap a run declares when the deployment-local operator queue name is unavailable. Named here
-#: so the caller cannot invent a softer wording for the same substitution.
+#: The gap a run declares to bound what its isolation proof covers. Named here so the caller cannot
+#: invent a softer wording for the same statement.
 #:
-#: THE WHY IS STRUCTURAL, NOT A READ FAILURE, and the wording matters. ``FIXED_PROFILE_PATH`` and
-#: ``read_deployment_profile`` are real product code with a real ``operator_task_queue`` field — but
-#: NOTHING IN THE PRODUCT EVER WRITES THAT FILE. Verified: the only non-test references are the
-#: constant's definition (``profile.py:34``), the reader's default argument (``profile.py:309``),
-#: and test fixtures that seed it. What ``secpctl bootstrap worker`` actually installs into
-#: ``/etc/secp/operator-deployment`` is the deployment package zip (``layout.py:50``).
+#: THIS IS A SCOPE STATEMENT, NOT AN APOLOGY. ``FIXED_PROFILE_PATH`` and ``read_deployment_profile``
+#: are real product code with a real ``operator_task_queue`` field, and NOTHING IN THE PRODUCT EVER
+#: WRITES THAT FILE — the only non-test references are the constant's definition (``profile.py:34``)
+#: and the reader's default argument (``profile.py:309``); ``secpctl bootstrap worker`` installs the
+#: deployment package zip there (``layout.py:50``) and no profile. The same is true of
+#: ``FIXED_EXPECTED_IDENTITIES_PATH``.
 #:
-#: So this gap fires on EVERY run against a host installed by the supported path, and it is a
-#: permanent property of the product rather than an incident on one host. An earlier wording here
-#: said the profile "could not be read", which describes a transient failure that in fact never
-#: happens — a gap that misdescribes its own cause is worse than no gap, because the next reader
-#: goes looking for a broken host instead of a missing writer.
-PROFILE_UNREADABLE_GAP = "operator_queue_union_incomplete"
-PROFILE_UNREADABLE_SUBSTITUTE = (
+#: That is not a hole in the install path. The profile is deployment-local material for a
+#: controlled-live OPERATOR DEPLOYMENT, and none has been performed because operator activation is
+#: sealed — so an acceptance host correctly has no deployment-local operator queue, and the union of
+#: one is the right observation rather than a degraded one.
+#:
+#: What the gap exists for is the distinction a reader could otherwise miss: this run proves no
+#: consumer polls the MANAGEMENT-PLANE operator queue on a host with no operator deployment. It does
+#: NOT prove isolation for a deployment-local queue, because there is none to prove it for. Those
+#: two sentences are close enough in shape that the second could be read as the first, and a
+#: ``GapRecord`` is the contract's device for stopping exactly that.
+OPERATOR_QUEUE_SCOPE_GAP = "operator_queue_union_is_management_only"
+OPERATOR_QUEUE_SCOPE_SUBSTITUTE = (
     "operator-queue isolation was proven against the management plane's code-owned operator queue "
-    "name only, not against a deployment-declared name"
+    "name only, on a host that has no operator deployment and therefore no deployment-local queue"
 )
-PROFILE_UNREADABLE_WHY = (
-    "no supported installation path writes a deployment profile, so there is no deployment-local "
-    "operator queue name on the host to probe; the product defines the file and a reader for it "
-    "but never writes it"
+OPERATOR_QUEUE_SCOPE_WHY = (
+    "the deployment profile is material for a controlled-live operator deployment, no operator "
+    "deployment has been performed because operator activation is sealed, and no supported "
+    "installation path writes that profile in any case"
 )
 
-#: The bounded cause meaning "the profile is absent because the product installs none". Distinct
-#: from a read/parse failure: the remediations are opposite. This one says the harness is looking at
-#: a correctly-installed host and the value genuinely does not exist there; a read failure says the
-#: host is not what it should be. Collapsing them would send a reader hunting a host defect that is
-#: not there — the same observed-false/could-not-look confusion this stage refuses everywhere else.
-PROFILE_NOT_INSTALLED = "acceptance_proof_would_be_vacuous"
+#: What the harness found when it looked for a deployment-local operator queue. A bounded STATE,
+#: not a failure code — which is the whole point.
+#:
+#: The profile is deployment-local material for a controlled-live OPERATOR DEPLOYMENT, and no
+#: operator deployment has been performed, because operator activation is sealed. So its absence is
+#: not a missing input the harness failed to obtain: it is the accurate state of a host that has no
+#: operator deployment, and the correct thing to record about such a host. An earlier version here
+#: reported it as ``acceptance_proof_would_be_vacuous`` — a HARNESS-failure reason — which framed a
+#: true observation as an inability to observe, and would have had a reader looking for the outage
+#: that made the proof incomplete. There is no outage. The union is a union of one because there is
+#: exactly one operator queue to speak of.
+#:
+#: ``PROFILE_UNREADABLE`` is kept separate and genuinely IS an anomaly: a profile that exists but
+#: cannot be read means the host is not what it should be. Opposite remediations, so never one code.
+PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT = "no_operator_deployment"
+PROFILE_UNREADABLE = "profile_unreadable"
+PROFILE_DECLARED = "operator_deployment_declared"
+
+#: The closed set of answers :func:`resolve_operator_queues` may give about the profile.
+PROFILE_STATES: tuple[str, ...] = (
+    PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT,
+    PROFILE_UNREADABLE,
+    PROFILE_DECLARED,
+)
 
 
-def declare_profile_gap(recorder: object, *, weakens: tuple[str, ...]) -> None:
-    """Declare the narrowed-isolation gap on the recorder that will seal the run."""
-    recorder.declare_gap(  # type: ignore[attr-defined]
-        gap=PROFILE_UNREADABLE_GAP,
+def declare_operator_queue_scope_gap(run: object, *, weakens: tuple[str, ...]) -> None:
+    """Bound what the operator-queue isolation proof covers, on the run that will seal.
+
+    Declared whenever the union is management-only — which today is every run. A gap that fires
+    every time is not a defect in the gap: it is a permanent property of the product being stated
+    once per document, which is exactly what ``gaps`` is for.
+    """
+    run.declare_gap(  # type: ignore[attr-defined]
+        gap=OPERATOR_QUEUE_SCOPE_GAP,
         stage=STAGE_QUEUES,
-        substitute=PROFILE_UNREADABLE_SUBSTITUTE,
-        why=PROFILE_UNREADABLE_WHY,
+        substitute=OPERATOR_QUEUE_SCOPE_SUBSTITUTE,
+        why=OPERATOR_QUEUE_SCOPE_WHY,
         weakens=weakens,
     )
 
@@ -837,9 +880,13 @@ __all__ = [
     "MAX_IDENTITY_CHARS",
     "MAX_POLLERS",
     "OPERATOR_UNIT_PROPERTIES",
-    "PROFILE_UNREADABLE_GAP",
-    "PROFILE_UNREADABLE_SUBSTITUTE",
-    "PROFILE_UNREADABLE_WHY",
+    "OPERATOR_QUEUE_SCOPE_GAP",
+    "OPERATOR_QUEUE_SCOPE_SUBSTITUTE",
+    "OPERATOR_QUEUE_SCOPE_WHY",
+    "PROFILE_ABSENT_NO_OPERATOR_DEPLOYMENT",
+    "PROFILE_DECLARED",
+    "PROFILE_STATES",
+    "PROFILE_UNREADABLE",
     "ROLE_OPERATOR_MANAGEMENT",
     "ROLE_OPERATOR_PROFILE",
     "ROLE_ORDINARY",
@@ -853,7 +900,7 @@ __all__ = [
     "PollerObservation",
     "ProfileReader",
     "QueueVerdict",
-    "declare_profile_gap",
+    "declare_operator_queue_scope_gap",
     "encode_verdict",
     "management_operator_queue_name",
     "observe_pollers",

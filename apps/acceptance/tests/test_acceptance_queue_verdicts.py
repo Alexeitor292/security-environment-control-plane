@@ -203,6 +203,33 @@ def test_the_producers_specific_cause_survives_into_the_observation():
     assert captured["observation"]["observed_cause"] == "worker_operator_not_disabled_stopped"
 
 
+def test_two_violations_with_different_causes_get_different_digests():
+    """THE benefit that `observed_cause` actually delivers, asserted rather than claimed.
+
+    It is tempting to say this "keeps the cause visible in the document". It does not — only the
+    observation's DIGEST is stored, so a reader triaging the evidence still cannot tell one cause
+    from another. What it genuinely buys is that two runs violating for DIFFERENT reasons do not
+    collapse to the SAME content address, which is what would otherwise make them indistinguishable
+    even in principle.
+    """
+    recorders = {}
+    for cause in ("worker_operator_not_disabled_stopped", "worker_ordinary_polls_operator_queue"):
+        rec = AcceptanceRecorder()
+        rec.open_stage(STAGE_QUEUES)
+        record_verdict(
+            rec, "operator_unit_never_activated", QueueVerdict(VERDICT_VIOLATED, cause=cause)
+        )
+        recorders[cause] = rec._checks[0]
+
+    digests = {cause: record.observation_digest for cause, record in recorders.items()}
+    assert len(set(digests.values())) == 2, (
+        "two different causes produced the same observation digest, so the distinction is lost "
+        "even as a content address"
+    )
+    # ...and the reason_code is identical for both, which is exactly why the digest has to differ
+    assert len({record.reason_code for record in recorders.values()}) == 1
+
+
 def test_an_outage_carries_the_cause_the_producer_observed_not_a_fixed_code():
     """The two containment causes have different remediations, so the encoding must not flatten
     them into one generic code."""
