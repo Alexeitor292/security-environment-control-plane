@@ -177,6 +177,11 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         "acceptance_host_command_timeout",
         "acceptance_host_output_too_large",
         "acceptance_fleet_teardown_incomplete",
+        # The residue sweep reached a LIVE daemon that is not the one the fleet was built on. Kept
+        # distinct from `acceptance_container_runtime_unavailable` because the runtime is perfectly
+        # available — it is the wrong computer, which needs a different fix and would otherwise be
+        # indistinguishable from an outage in the one report a reader has.
+        "acceptance_residue_daemon_mismatch",
         # --- provisioning ---
         "acceptance_package_install_failed",
         "acceptance_entrypoint_absent",
