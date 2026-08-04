@@ -520,7 +520,13 @@ def _seal(recorder: AcceptanceRecorder):
             role="worker",
             baseline_aggregate="sha256:" + "4" * 64,
             baseline_source_sha="a" * 40,
-            signing_anchor_id="test-anchor",
+            # A DIGEST, not a label. `signing_anchor_id` is validated as a sha256 digest by the
+            # evidence loader's release-record semantics; a readable placeholder like
+            # "test-anchor" is refused with `acceptance_evidence_public_value_not_permitted`.
+            # Found by simulating the integration order rather than by any test on this branch:
+            # the validation lands in a peer's later commit, so this fixture is green here and
+            # fails the moment the two are merged.
+            signing_anchor_id="sha256:" + "5" * 64,
             test_only_anchor=True,
         ),
     )
