@@ -45,19 +45,29 @@ THREE RULES, AND EVERY PROPERTY BELOW FOLLOWS FROM THEM
    An empty answer and a failed answer are different values here, where under ``inspect`` they were
    the same one.
 
-PARTIAL SWEEPS ARE UNOBSERVABLE, NOT CLEAN
-------------------------------------------
+A PARTIAL SWEEP IS NEVER CLEAN — BUT IT MAY STILL BE RESIDUAL
+--------------------------------------------------------------
 Three object kinds are swept (containers, volumes, networks). If ANY of the three cannot be
-enumerated the whole verdict is ``unobservable``, even when the other two came back empty. A run
-that leaked a volume but could only read containers has not been shown to be clean of anything that
-matters, and reporting the two-thirds it managed to read as a pass would be the same false green in
-a smaller box.
+enumerated, the sweep did not finish looking and can never conclude ``clean``: a run that leaked a
+volume but could only read containers has not been shown to be clean of anything that matters.
+
+What the partial sweep DID establish still decides the verdict, though. If it already saw an object
+of ours, the property "this run leaked nothing" is settled FALSE, and the incompleteness only bounds
+how much more there might be — so the verdict is ``residual`` and ``kinds_observed`` carries the
+incompleteness. Only a partial sweep that found nothing is ``unobservable``.
+
+Both halves of that are the same rule: report what was established. Calling a seen leak
+``unobservable`` would understate known information, which is the exact mirror of the defect this
+module exists for — that one reported clean when it did not know; this would report ignorance when
+it did.
 
 WHAT A CALLER MAY DO WITH THE VERDICT
 -------------------------------------
-:func:`outcome_for` is the ONLY mapping from a verdict to an acceptance outcome, and it is
-deliberately one-way: ``clean`` observes, and ``residual`` and ``unobservable`` are both
-``unproven``. There is no path from ``unobservable`` to ``observed``.
+:func:`outcome_for` is the ONLY mapping from a verdict to an acceptance outcome:
+``clean`` -> ``observed``, ``residual`` -> ``violated``, ``unobservable`` -> ``unproven``.
+
+``unproven`` and ``violated`` are opposites — could-not-look versus looked-and-saw-the-bad-thing —
+and neither is in ``PASSING_OUTCOMES``. There is no path from ``unobservable`` to ``observed``.
 
 ``refused`` is never produced here. That outcome means THE PRODUCT refused and the refusal was the
 point of the check; nothing about a teardown sweep is a product refusal, so keeping it unreachable
@@ -70,7 +80,7 @@ from dataclasses import dataclass
 
 from secp_acceptance import AcceptanceError
 from secp_acceptance.evidence import observation_digest
-from secp_acceptance.reasons import OUTCOME_OBSERVED, OUTCOME_UNPROVEN
+from secp_acceptance.reasons import OUTCOME_OBSERVED, OUTCOME_UNPROVEN, OUTCOME_VIOLATED
 from secp_acceptance.shell import Result, docker
 
 #: We looked at every kind, and this run owns nothing that is still there.
@@ -233,12 +243,25 @@ def sweep(prefix: str, *, expected_daemon: str = "") -> ResidueReport:
     for kind, argv in SWEEP_ARGV:
         listing = _listing(argv)
         if listing is None:
-            # A partial sweep proves nothing about the kinds it did reach: whatever it found, it has
-            # not established that this run left the machine clean. Anything already found is
-            # carried anyway — an incomplete answer is still allowed to name what it saw.
+            # A partial sweep can never establish CLEAN — it did not finish looking. But if it
+            # already SAW something of ours, the property "this run leaked nothing" is settled
+            # false, and the incompleteness only bounds how much more there might be. So what was
+            # established decides the verdict, and ``kinds_observed`` carries the incompleteness.
+            #
+            # Calling this ``unobservable`` would understate known information — the exact mirror
+            # of the defect this module exists for. That one reported clean when it did not know;
+            # this would report ignorance when it did.
+            if residual:
+                return ResidueReport(
+                    VERDICT_RESIDUAL,
+                    tuple(sorted(residual)),
+                    tuple(observed),
+                    "acceptance_fleet_teardown_incomplete",
+                    daemon_bound=bound,
+                )
             return ResidueReport(
                 VERDICT_UNOBSERVABLE,
-                tuple(sorted(residual)),
+                (),
                 tuple(observed),
                 "acceptance_observation_unavailable",
                 daemon_bound=bound,
@@ -268,16 +291,26 @@ def outcome_for(report: ResidueReport) -> tuple[str, str | None]:
     once already. Kept separate from the recorder so the stage that records it supplies the shared
     run, and this stays a pure function that the hermetic tests can pin exhaustively.
 
-    * ``clean``        -> ``observed``, no reason code (a positive observation was made)
-    * ``residual``     -> ``unproven`` (a leak is a failed proof, not a product refusal)
-    * ``unobservable`` -> ``unproven`` (we do not know, and that is never a pass)
+    * ``clean``        -> ``observed``  (we looked, and there is nothing of ours here)
+    * ``residual``     -> ``violated``  (we looked, and here is the leaked privileged container)
+    * ``unobservable`` -> ``unproven``  (we could not look, and that is never a pass)
 
-    ``refused`` is unreachable BY CONSTRUCTION, and an unrecognised verdict raises rather than
-    falling through to a default — a default here would be a silent third path to a pass.
+    ``residual`` is ``violated`` rather than ``unproven`` under the eligibility rule this program
+    settled on: can the producer tell observed-false from could-not-look? This one can — telling
+    them apart is the whole reason the module exists — so an enumerated, named leak is maximal
+    knowledge of a prohibited state, not ignorance. Recording it as ``unproven`` would file the
+    single most expensive thing this harness can leave behind under "we are not sure".
+
+    Neither ``violated`` nor ``unproven`` is in ``PASSING_OUTCOMES``, so this changes how a leak
+    READS, never whether it passes. ``refused`` stays unreachable BY CONSTRUCTION — nothing here is
+    a product refusal — and an unrecognised verdict raises rather than falling through to a default,
+    which would be a silent extra path to a pass.
     """
     if report.verdict == VERDICT_CLEAN:
         return OUTCOME_OBSERVED, None
-    if report.verdict in (VERDICT_RESIDUAL, VERDICT_UNOBSERVABLE):
+    if report.verdict == VERDICT_RESIDUAL:
+        return OUTCOME_VIOLATED, report.reason_code or "acceptance_fleet_teardown_incomplete"
+    if report.verdict == VERDICT_UNOBSERVABLE:
         return OUTCOME_UNPROVEN, report.reason_code or "acceptance_observation_unavailable"
     raise AcceptanceError("acceptance_observation_malformed")
 

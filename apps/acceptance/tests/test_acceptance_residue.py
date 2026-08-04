@@ -1,7 +1,8 @@
 """A residue sweep that could not look must never report a clean machine.
 
-The hermetic contract of :mod:`secp_acceptance.residue`, pinned in ALL THREE directions. Two of them
-are the reason the module exists; the third is the half a naive fix breaks.
+The hermetic contract of :mod:`secp_acceptance.residue`, pinned in ALL THREE directions —
+``clean`` / ``residual`` / ``unobservable``. Two of them are the reason the module exists; the third
+(an honest clean answer staying reachable) is the half a naive fix breaks.
 
 WHY THIS FILE IS NOT A COPY OF ``test_acceptance_teardown_honesty.py``
 ---------------------------------------------------------------------
@@ -17,17 +18,20 @@ Rewriting ``sweep`` to ask ``docker inspect NAME`` instead of enumerating restor
 defect: ``inspect`` fails identically for "the object is gone" and "the daemon is not there", so the
 unreachable case silently reports clean again.
 
-That rewrite was applied and measured rather than argued about. Against ``_Daemon`` as written it
-fails 15 of 27 — but almost all of that is the fake REFUSING an unrecognised call, which is a
-property of this file rather than of the module. Relax that one line to answer unknown calls the way
-a live daemon answers a miss (a plausible future edit, and the state this file would be in if the
-fake were ever made permissive) and 24 of 27 pass, with only three failures left:
-:func:`test_the_sweep_never_asks_whether_a_named_object_exists`,
+That rewrite was applied and measured rather than argued about, and RE-measured after this file
+grew. Against ``_Daemon`` as written it fails 19 of 37 — but almost all of that is the fake
+REFUSING an unrecognised call, which is a property of this file rather than of the module. Relax
+that one line to answer unknown calls the way a live daemon answers a miss (a plausible future edit,
+and the state this file would be in if the fake were ever made permissive) and 34 of 37 pass, with
+only three failures left: :func:`test_the_sweep_never_asks_whether_a_named_object_exists`,
 :func:`test_a_listing_that_times_out_is_not_an_empty_listing`, and the call-count assertion in
 :func:`test_an_empty_listing_from_a_live_daemon_is_clean`.
 
 So the structural guard is load-bearing in the way that matters: it asserts on the CALLS rather than
 on the verdict, which is why it does not depend on the strictness of the fake to keep working.
+
+(If you change this file, re-run that measurement rather than editing the counts to match a guess.
+They are here because they were taken, and a stale number is worse than no number.)
 """
 
 from __future__ import annotations
@@ -42,6 +46,9 @@ from secp_acceptance.reasons import (
     OUTCOME_OBSERVED,
     OUTCOME_REFUSED,
     OUTCOME_UNPROVEN,
+    OUTCOME_VIOLATED,
+    OUTCOMES,
+    PASSING_OUTCOMES,
 )
 from secp_acceptance.residue import (
     KINDS,
@@ -252,12 +259,13 @@ def test_a_kind_that_cannot_be_enumerated_makes_the_whole_sweep_unobservable(
     assert broken not in report.kinds_observed
 
 
-def test_a_partial_sweep_still_names_what_it_managed_to_see(monkeypatch):
-    """An incomplete answer may still name what it saw.
+def test_a_partial_sweep_that_saw_a_leak_reports_the_leak(monkeypatch):
+    """What was ESTABLISHED decides the verdict, even when the sweep did not finish.
 
-    The verdict stays ``unobservable`` — the residue was not enumerated completely, so "clean" was
-    never established — but discarding the container it did find would hide a known leak behind
-    "we do not know", which helps nobody.
+    Seeing one of our containers settles "this run leaked nothing" as false. Not finishing only
+    bounds how much MORE there might be, and ``kinds_observed`` carries that. Calling this
+    ``unobservable`` would report ignorance about something we had just observed — the mirror image
+    of reporting clean about something we could not see.
     """
     _install(
         monkeypatch,
@@ -266,9 +274,28 @@ def test_a_partial_sweep_still_names_what_it_managed_to_see(monkeypatch):
 
     report = sweep(PREFIX)
 
-    assert report.verdict == VERDICT_UNOBSERVABLE
+    assert report.verdict == VERDICT_RESIDUAL
     assert report.residual == (f"container:{PREFIX}-worker",)
+    assert report.clean is False
+    # ...and the incompleteness is still on the record: it stopped at the broken kind
     assert report.kinds_observed == ("container",)
+    assert report.kinds_observed != KINDS
+
+
+def test_a_partial_sweep_that_saw_nothing_stays_unobservable(monkeypatch):
+    """The other half of the same rule, and the one that must not drift.
+
+    Nothing was established here: two thirds of a machine read empty proves nothing about the third.
+    This is the case that would become a false clean if "partial" were ever treated as conclusive.
+    """
+    _install(monkeypatch, _Daemon(fails=frozenset({"volume"})))
+
+    report = sweep(PREFIX)
+
+    assert report.verdict == VERDICT_UNOBSERVABLE
+    assert report.clean is False
+    assert report.residual == ()
+    assert report.reason_code == "acceptance_observation_unavailable"
 
 
 def test_a_listing_that_times_out_is_not_an_empty_listing(monkeypatch):
@@ -518,30 +545,60 @@ def test_only_a_clean_sweep_maps_to_a_positive_observation():
     assert outcome_for(ResidueReport(VERDICT_CLEAN, (), KINDS, None)) == (OUTCOME_OBSERVED, None)
 
 
-@pytest.mark.parametrize(
-    ("verdict", "reason"),
-    [
-        (VERDICT_RESIDUAL, "acceptance_fleet_teardown_incomplete"),
-        (VERDICT_UNOBSERVABLE, "acceptance_container_runtime_unavailable"),
-    ],
-)
-def test_residual_and_unobservable_both_map_to_unproven(verdict: str, reason: str):
-    """THE one-way property. There is no path from "we could not look" to a pass, and a leak is a
-    failed proof rather than a product refusal."""
-    outcome, code = outcome_for(ResidueReport(verdict, (), KINDS, reason))
+def test_an_enumerated_leak_is_a_violation_not_an_absence_of_proof():
+    """The eligibility rule: can the producer tell observed-false from could-not-look?
+
+    This one can — telling them apart is the entire module. So a named, enumerated leaked
+    privileged container is maximal knowledge of a prohibited state, and filing the most expensive
+    thing this harness can leave behind under "we are not sure" would understate it.
+    """
+    outcome, code = outcome_for(
+        ResidueReport(
+            VERDICT_RESIDUAL,
+            (f"container:{PREFIX}-worker",),
+            KINDS,
+            "acceptance_fleet_teardown_incomplete",
+        )
+    )
+    assert outcome == OUTCOME_VIOLATED
+    assert code == "acceptance_fleet_teardown_incomplete"
+
+
+def test_an_unobservable_sweep_maps_to_unproven():
+    """THE one-way property. There is no path from "we could not look" to a pass."""
+    outcome, code = outcome_for(
+        ResidueReport(VERDICT_UNOBSERVABLE, (), (), "acceptance_container_runtime_unavailable")
+    )
     assert outcome == OUTCOME_UNPROVEN
-    assert code == reason
+    assert code == "acceptance_container_runtime_unavailable"
 
 
-def test_no_verdict_can_ever_map_to_refused():
+def test_the_two_failing_outcomes_stay_distinguishable():
+    """``unproven`` and ``violated`` are opposites — maximal ignorance versus maximal knowledge.
+
+    Both fail, so this is not about the verdict; it is about a reader of the evidence being able to
+    tell "we could not look" from "we looked and found a leaked privileged container", which are
+    completely different things to be told.
+    """
+    blind, _ = outcome_for(ResidueReport(VERDICT_UNOBSERVABLE, (), (), "x_unavailable"))
+    leaked, _ = outcome_for(ResidueReport(VERDICT_RESIDUAL, ("container:x",), KINDS, "x_leak"))
+    assert blind != leaked
+    assert {blind, leaked} & PASSING_OUTCOMES == set()
+
+
+def test_no_verdict_can_ever_map_to_refused_or_to_a_pass_it_did_not_earn():
     """``refused`` means THE PRODUCT refused and the refusal was the point of the check. Nothing
     about a teardown sweep is a product refusal, so keeping it unreachable is what stops ``refused``
-    and ``unproven`` blurring in the stages that consume this."""
+    and ``unproven`` blurring in the stages that consume this.
+
+    The second half is the stronger claim: only ``clean`` may reach a passing outcome at all.
+    """
     for verdict in sorted(VERDICTS):
         outcome, _code = outcome_for(
-            ResidueReport(verdict, (), KINDS, "acceptance_evidence_invalid")
+            ResidueReport(verdict, ("container:x",), KINDS, "acceptance_evidence_invalid")
         )
         assert outcome != OUTCOME_REFUSED
+        assert (outcome in PASSING_OUTCOMES) is (verdict == VERDICT_CLEAN)
 
 
 def test_the_mapping_is_exhaustive_over_the_declared_verdicts():
@@ -554,7 +611,7 @@ def test_the_mapping_is_exhaustive_over_the_declared_verdicts():
         outcome, _code = outcome_for(
             ResidueReport(verdict, (), KINDS, "acceptance_evidence_invalid")
         )
-        assert outcome in (OUTCOME_OBSERVED, OUTCOME_UNPROVEN)
+        assert outcome in OUTCOMES
 
 
 def test_an_unrecognised_verdict_raises_rather_than_defaulting():
@@ -564,13 +621,23 @@ def test_an_unrecognised_verdict_raises_rather_than_defaulting():
     assert caught.value.reason_code == "acceptance_observation_malformed"
 
 
-def test_a_non_clean_report_missing_its_reason_still_cannot_become_a_pass():
+@pytest.mark.parametrize(
+    ("verdict", "fallback"),
+    [
+        (VERDICT_UNOBSERVABLE, "acceptance_observation_unavailable"),
+        (VERDICT_RESIDUAL, "acceptance_fleet_teardown_incomplete"),
+    ],
+)
+def test_a_non_clean_report_missing_its_reason_still_cannot_become_a_pass(
+    verdict: str, fallback: str
+):
     """Defence in depth. ``reason_code`` is ``None`` only on a clean verdict by construction, but a
-    future caller building a report by hand must not be able to launder an unobservable one into a
-    pass by omitting the reason."""
-    outcome, code = outcome_for(ResidueReport(VERDICT_UNOBSERVABLE, (), (), None))
-    assert outcome == OUTCOME_UNPROVEN
-    assert code == "acceptance_observation_unavailable"
+    future caller building a report by hand must not be able to launder a non-clean one into a pass
+    by omitting the reason — and the substituted code must still be a real vocabulary member."""
+    outcome, code = outcome_for(ResidueReport(verdict, (), (), None))
+    assert outcome not in PASSING_OUTCOMES
+    assert code == fallback
+    assert code in HARNESS_REASONS
 
 
 # --------------------------------------------------------------------------- evidence projection
