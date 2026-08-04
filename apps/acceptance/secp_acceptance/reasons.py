@@ -239,6 +239,13 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         # Deliberately ONE code for all of them rather than one per check — the check id already
         # says which property was violated, and a per-check code set would grow past review.
         "acceptance_prohibited_state_observed",
+        # --- negative controls (completion gate, clause C4) ---
+        # A control that was supposed to fail did not. The gate demonstrated by that control is now
+        # unverified, and nothing in a passing CI report would say so.
+        "acceptance_negative_control_did_not_fail",
+        # A declared control produced no result at all. Distinct from the above: "it passed when it
+        # should have failed" and "it never ran" call for different investigations.
+        "acceptance_negative_control_missing",
         # --- execution provenance (completion gate, clause C1) ---
         # A stage recorded its checks without running a single command through the process seam.
         # Its observations may be perfectly well-formed; they were not derived from a host.
