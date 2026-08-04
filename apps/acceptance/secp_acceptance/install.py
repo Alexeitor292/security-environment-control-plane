@@ -405,7 +405,29 @@ ACCEPTANCE_OPERATOR_EMAIL = "acceptance-operator@disposable.invalid"
 ACCEPTANCE_OPERATOR_ROLE = "acceptance-operator"
 
 
-def write_controller_deploy_env(host: Host, *, issuer: str, audience: str) -> dict[str, object]:
+def generate_bootstrap_admin_password() -> str:
+    """A fresh, run-scoped Keycloak bootstrap-admin password.
+
+    GENERATED, never committed and never defaulted. The enrollment stage deliberately declined to
+    invent one — a credential a module made up is a value nobody can trace to a source — and it was
+    right: the credential belongs to whoever composes the controller stack, which is this stage.
+
+    It is written only into the deploy-time ``.env`` on the controller host, so it never enters the
+    signed release artifact, never enters the repository, and dies with the fleet. It is not a
+    production credential and cannot become one: it exists for the lifetime of one disposable
+    Keycloak in one disposable container.
+    """
+    return secrets.token_urlsafe(32)
+
+
+def write_controller_deploy_env(
+    host: Host,
+    *,
+    issuer: str,
+    audience: str,
+    keycloak_admin: str = "admin",
+    keycloak_password: str = "",
+) -> dict[str, object]:
     """Supply the controller stack's DEPLOY-TIME values, beside the signed Compose file.
 
     The signed controller template names ``${SECP_OIDC_ISSUER}`` / ``${SECP_OIDC_AUDIENCE}`` rather
@@ -421,9 +443,25 @@ def write_controller_deploy_env(host: Host, *, issuer: str, audience: str) -> di
 
     compose_path = ManagementLocations().controller_compose_path()
     directory = compose_path.rsplit("/", 1)[0]
-    body = f"SECP_OIDC_ISSUER={issuer}\nSECP_OIDC_AUDIENCE={audience}\n".encode("ascii")
-    host.write_file(f"{directory}/.env", body)
-    return {"deploy_env_written": True, "issuer_is_https": issuer.startswith("https://")}
+    entries = [
+        f"SECP_OIDC_ISSUER={issuer}",
+        f"SECP_OIDC_AUDIENCE={audience}",
+        f"KEYCLOAK_ADMIN={keycloak_admin}",
+        f"KEYCLOAK_ADMIN_PASSWORD={keycloak_password}",
+    ]
+    # 0600: this file carries the run's Keycloak bootstrap-admin password. World-readable would be
+    # an exposure that surfaces later as an authentication failure rather than as what it is — the
+    # same shape the enrollment stage found in its own token file, where a mutation flipping 0600
+    # to 0644 survived every test it had. Pinned here before one was needed.
+    host.write_file(f"{directory}/.env", ("\n".join(entries) + "\n").encode("ascii"), mode="0600")
+    return {
+        "deploy_env_written": True,
+        "issuer_is_https": issuer.startswith("https://"),
+        "admin_password_supplied": bool(keycloak_password),
+        # The NAMES only. A projection that carried a value would put the run's credential into an
+        # evidence document.
+        "variables": sorted(entry.split("=", 1)[0] for entry in entries),
+    }
 
 
 def provision_operator_principal(

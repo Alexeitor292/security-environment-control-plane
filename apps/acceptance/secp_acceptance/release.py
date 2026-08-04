@@ -333,6 +333,27 @@ def controller_compose_template(image_map: dict[str, str]) -> bytes:
             lines.append("    environment:")
             lines.append("      SECP_OIDC_ISSUER: ${SECP_OIDC_ISSUER}")
             lines.append("      SECP_OIDC_AUDIENCE: ${SECP_OIDC_AUDIENCE}")
+        if component == "keycloak":
+            # The identity provider the acceptance operator authenticates against, configured the
+            # same deploy-time way and for the same reason: the signed artifact names the variables
+            # and carries NEITHER credential. The bootstrap admin password is generated per run and
+            # supplied through the `.env`, so nothing here is a committed secret and nothing
+            # survives the fleet.
+            #
+            # Shape taken from the reviewed ``infra/dev/docker-compose.yml`` rather than invented:
+            # the same image, the same ``start-dev`` command, the same health-enabled flag, and the
+            # same ``KEYCLOAK_ADMIN`` / ``KEYCLOAK_ADMIN_PASSWORD`` variable names.
+            lines.append('    command: ["start-dev", "--health-enabled=true"]')
+            lines.append("    environment:")
+            lines.append("      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}")
+            lines.append("      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}")
+            lines.append('      KC_HTTP_PORT: "8080"')
+            # Published on the host loopback so the admin API is reachable at
+            # http://localhost:8080 from inside the controller host, which is where the enrollment
+            # stage's provisioner runs. Bound to 127.0.0.1 so it is not reachable from the worker
+            # host or anywhere else on the fleet network.
+            lines.append("    ports:")
+            lines.append('      - "127.0.0.1:8080:8080"')
             # The two reviewed read-only binds, emitted in the long form the contract requires.
             lines.append("    volumes:")
             for source, target in (

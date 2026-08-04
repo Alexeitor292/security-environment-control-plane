@@ -205,6 +205,15 @@ ACCEPTANCE_REALM = "secp-acceptance"
 #: The audience the acceptance token carries. Supplied the same deploy-time way as the issuer.
 ACCEPTANCE_AUDIENCE = "secp-api"
 
+#: The bootstrap-admin USERNAME. A name, not a credential — the password is generated per run and
+#: never appears here, in the repository, or in the signed release artifact.
+ACCEPTANCE_KEYCLOAK_ADMIN = "admin"
+
+#: Where the provisioner reaches Keycloak's admin API. The controller Compose template publishes
+#: the container's 8080 on the controller host's LOOPBACK only, so this address exists inside that
+#: host and nowhere else on the fleet network — the worker host cannot reach it.
+ACCEPTANCE_KEYCLOAK_BASE = "http://localhost:8080"
+
 
 @pytest.fixture(scope="session")
 def operator_token_path(controller_host, fleet):
@@ -234,6 +243,7 @@ def operator_token_path(controller_host, fleet):
     inside the controller host and are destroyed with it. Nothing here outlives the run.
     """
     from secp_acceptance.install import (
+        generate_bootstrap_admin_password,
         provision_operator_principal,
         write_controller_deploy_env,
     )
@@ -247,17 +257,30 @@ def operator_token_path(controller_host, fleet):
     try:
         # The issuer is supplied HERE, at deploy time, into the `.env` beside the signed compose
         # file — the signed artifact names the variable and never carries the value.
+        # Generated per run, written only into the 0600 `.env` on the controller host, and handed
+        # to the provisioner in memory. The enrollment stage deliberately refused to invent this —
+        # a credential a module made up is one nobody can trace to a source — and it belongs to
+        # whoever composes the stack, which is this fixture.
+        admin_password = generate_bootstrap_admin_password()
         write_controller_deploy_env(
             controller_host,
             issuer=f"https://{controller_host.dns_name}:8443/realms/{ACCEPTANCE_REALM}",
             audience=ACCEPTANCE_AUDIENCE,
+            keycloak_admin=ACCEPTANCE_KEYCLOAK_ADMIN,
+            keycloak_password=admin_password,
         )
         # EXACTLY `enrollment:manage`, never the seeded platform-admin. `seed.bootstrap_dev` grants
         # a role holding every Permission, and a stage driving the enrollment API as god-mode
         # cannot detect a permission-scoping defect: anything that ought to fail for want of this
         # one permission would pass, and no check in that stage could tell.
         provision_operator_principal(controller_host, permissions=("enrollment:manage",))
-        return provision_operator_realm(controller_host, realm=ACCEPTANCE_REALM)
+        return provision_operator_realm(
+            controller_host,
+            realm=ACCEPTANCE_REALM,
+            keycloak_base=ACCEPTANCE_KEYCLOAK_BASE,
+            admin_user=ACCEPTANCE_KEYCLOAK_ADMIN,
+            admin_password=admin_password,
+        )
     except Exception:  # noqa: BLE001 - bounded; the consumer records unproven rather than aborting
         return None
 

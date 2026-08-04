@@ -537,3 +537,132 @@ def test_NO_refusal_at_all_is_the_worst_outcome_and_is_never_a_pass():
     assert matched is False
     assert run.outcome_of(_INJECTION) == OUTCOME_UNPROVEN
     assert run.reason_for(_INJECTION) == "acceptance_expected_refusal_absent"
+
+
+# --------------------------------------------------------------------------- privilege pins
+#
+# Prompted by acc-B, which found that a mutation flipping its token file from 0600 to 0644 survived
+# every test it had written: every functional property was pinned and the one property that made
+# the file PROTECTED was not. The symmetric question here is "which property, if wrong, is a
+# privilege issue rather than a functional one" — and the answer is the width of the grant.
+#
+# `provision_operator_principal` executes inside the api container, so the grant cannot be observed
+# hermetically. What CAN be pinned hermetically is the call site, from the source, which is where a
+# widening would be written.
+
+
+def _conftest_source() -> str:
+    import pathlib
+
+    return (pathlib.Path(__file__).parent / "conftest.py").read_text(encoding="utf-8")
+
+
+def test_the_operator_grant_is_exactly_enrollment_manage():
+    """A widening here is a PRIVILEGE defect, not a functional one — nothing would fail.
+
+    If the acceptance operator held every permission, no check in the enrollment stage could detect
+    a permission-scoping defect: anything that ought to fail for want of `enrollment:manage` would
+    pass, and the stage could not tell. So the grant is pinned by its exact tuple, and any widening
+    — including adding a second permission — fails here.
+    """
+    import ast
+
+    tree = ast.parse(_conftest_source())
+    grants: list[tuple[str, ...]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name != "provision_operator_principal":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "permissions":
+                grants.append(
+                    tuple(
+                        str(element.value)
+                        for element in getattr(keyword.value, "elts", [])
+                        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+                    )
+                )
+    assert grants, "no provision_operator_principal call found; this guard would be vacuous"
+    for grant in grants:
+        assert grant == ("enrollment:manage",), (
+            f"the acceptance operator is granted {grant!r}. Exactly ('enrollment:manage',) is "
+            f"required: a wider grant makes every permission-scoping defect undetectable by the "
+            f"stage that drives the enrollment API."
+        )
+
+
+def test_the_seeded_platform_admin_is_never_reached():
+    """The negative control, which is the half that makes the pin evidence.
+
+    `seed.bootstrap_dev` provisions a role holding EVERY permission. The test above says what the
+    code grants; this says the all-permissions path is not REACHABLE, which is the claim someone
+    would otherwise have to infer from the positive path alone.
+
+    Keyed on the AST rather than on text. A text scan matched this file's own prose and the tuple
+    below — the guard reporting on itself — which is the same defect as keying on a name instead of
+    on content: it cannot tell a reference from a mention. Only real identifiers count: an imported
+    name, a bare `bootstrap_dev(...)`, or an attribute access `seed.bootstrap_dev`.
+    """
+    import ast
+    import pathlib
+
+    forbidden = {
+        "bootstrap_dev",
+        "PLATFORM_ADMIN",
+        "DEV_PRINCIPAL_SUBJECT",
+        "LEGACY_DEV_PRINCIPAL_SUBJECT",
+    }
+    root = pathlib.Path(__file__).parent.parent
+    offenders: list[str] = []
+    scanned = 0
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in str(path):
+            continue
+        scanned += 1
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            found = None
+            if isinstance(node, ast.Name) and node.id in forbidden:
+                found = node.id
+            elif isinstance(node, ast.Attribute) and node.attr in forbidden:
+                found = node.attr
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name in forbidden:
+                        found = alias.name
+            if found:
+                line = getattr(node, "lineno", 0)
+                offenders.append(f"{path.name}:{line} {found}")
+    assert scanned > 5, "the sweep found almost no modules; it would be vacuous"
+    assert not offenders, (
+        f"the acceptance harness REFERENCES the seeded all-permissions admin: {offenders}. "
+        f"Its principal holds every Permission, which would make every permission-scoping defect "
+        f"undetectable by the stage driving the enrollment API."
+    )
+
+
+def test_the_signed_controller_template_carries_no_credential():
+    """The release artifact names its deploy-time variables and carries neither value.
+
+    A signed template holding a password would put a credential in an artifact that gets copied,
+    digested and archived — and would make the release environment-specific, which is the same
+    mistake as baking the issuer.
+    """
+    import hashlib
+
+    from secp_acceptance.release import controller_compose_template
+    from secp_management.topology import EXPECTED_CONTROLLER_COMPONENTS
+
+    image_map = {
+        component: "sha256:" + hashlib.sha256(component.encode()).hexdigest()
+        for component in EXPECTED_CONTROLLER_COMPONENTS
+    }
+    body = controller_compose_template(image_map).decode("utf-8")
+    assert "${KEYCLOAK_ADMIN_PASSWORD}" in body, "the template must NAME the variable"
+    for line in body.splitlines():
+        if "KEYCLOAK_ADMIN_PASSWORD" in line:
+            assert line.strip().endswith("${KEYCLOAK_ADMIN_PASSWORD}"), (
+                f"a value appears where only a variable reference belongs: {line.strip()!r}"
+            )
