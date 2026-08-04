@@ -128,6 +128,18 @@ class GapRecord(_Strict):
     ``substitute`` says what actually ran; ``why`` says what local disposable infrastructure could
     not reach. Both are required, because a gap whose reason is not written down cannot be told
     apart from an oversight the next reader will assume was deliberate.
+
+    A GAP IS A SUBSTITUTION, NOT A FAILURE
+    --------------------------------------
+    This is the distinction to hold on to, because the wrong choice here is quiet. A gap says "this
+    was proven against a stand-in"; it does NOT say "this could not be proven". If the product
+    REFUSED, or the harness could not make an observation, that belongs in a :class:`CheckRecord` as
+    ``refused`` / ``unproven`` / ``violated`` with a bounded reason code — never in a gap.
+
+    Filing a refusal as a gap would move a real finding out of ``checks``, where the verdict is
+    derived from it, into ``gaps``, where nothing computes on it. The run would still pass. That is
+    the whole failure mode, and it is why ``weakens`` must name real check ids: a gap is a footnote
+    ON a claim, not a replacement FOR one.
     """
 
     gap: _Str

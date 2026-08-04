@@ -246,6 +246,11 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         # Sealing without a fleet record: every stage's claims are claims about a fleet, so a
         # document whose fleet was invented rather than observed misdescribes its own premise.
         "acceptance_run_fleet_not_recorded",
+        # TWO fleets in one session. The document carries exactly one FleetRecord, so this would
+        # describe one machine pair while carrying claims gathered against two, with nothing in the
+        # evidence to say which check belongs to which. Refused where it happens, because it is not
+        # detectable afterwards.
+        "acceptance_run_fleet_conflict",
         # --- evidence ---
         "acceptance_evidence_invalid",
         "acceptance_evidence_forbidden_value",
@@ -271,6 +276,10 @@ PRODUCT_REASONS: frozenset[str] = frozenset(
         "confirm_requires_write",
         "root_required_for_write",
         "preexisting_partial_install",
+        # The reviewed bundle path refused to install the product's own image at its real size.
+        # Carried here so a cap-blocked run is DISTINGUISHABLE from "the controller stack failed to
+        # come up": they are different findings, and this is the one that goes to the operator.
+        "bootstrap_image_too_large",
         "worker_upgrade_not_linear_successor",
         "worker_ordinary_config_mismatch",
         "worker_operator_not_disabled_stopped",

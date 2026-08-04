@@ -158,7 +158,15 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     Sealing happens FIRST, so the document survives even when the witness check is about to fail the
     session — those are the runs whose evidence a reader most needs.
+
+    A ``--collect-only`` session is exempt from BOTH halves. It executed no body, so it neither
+    witnessed a tier nor produced an observation, and reporting on either would be describing a run
+    that did not happen. This is not a loophole: a collection runs no test, so there is no result to
+    falsely green, and the pin guard in ``test_acceptance_node_pin.py`` depends on collection being
+    a clean read.
     """
+    if getattr(session.config.option, "collectonly", False):
+        return
     _seal_the_run(session)
     if not container_tier_required():
         return
