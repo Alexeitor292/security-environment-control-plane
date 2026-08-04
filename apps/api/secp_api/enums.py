@@ -2097,6 +2097,17 @@ class WorkerEnrollmentErrorCode(str, Enum):
     not_found = "enrollment_not_found"
     forbidden = "enrollment_forbidden"  # authenticated actor org != authoritative row org
     scope_mismatch = "enrollment_scope_mismatch"  # worker-claimed org/site != authoritative binding
+    # The submitted `deployment_site_label` was refused AT CREATION. Deliberately DISTINCT from
+    # `scope_mismatch`, which means "a worker CLAIMED a site that disagrees with the authoritative
+    # binding" — a tenancy question about an existing enrollment. Creation has no binding to
+    # disagree with yet, so reporting `scope_mismatch` there told an operator to go looking at
+    # permissions and org membership when the answer was "rename your site".
+    site_label_invalid = "enrollment_site_label_invalid"  # fails the label grammar
+    # Passes the grammar but resembles credential material, so the status projection's secret scan
+    # would refuse to render it. Split from `site_label_invalid` because these labels LOOK ordinary
+    # — `x-vault-token` is thirteen letters and hyphens — and an operator told only "invalid" would
+    # re-read a label that appears perfectly well-formed. This code says which way to look.
+    site_label_forbidden_shape = "enrollment_site_label_forbidden_shape"
     revision_conflict = "enrollment_revision_conflict"  # lost/stale CAS
     state_corrupt = "enrollment_state_corrupt"  # a rehydration invariant failed
     history_inconsistent = (

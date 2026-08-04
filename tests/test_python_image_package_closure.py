@@ -30,6 +30,7 @@ _EXPECTED_PACKAGE_ROOTS = {
     "apps/management",
     "contracts/scenario-schema",
     "contracts/plugin-api",
+    "contracts/reconciliation",
     "plugins/simulator",
     "plugins/proxmox",
 }

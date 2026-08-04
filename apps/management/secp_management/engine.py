@@ -41,6 +41,8 @@ from secp_commissioning.runtime import FileStat
 
 from secp_management import BOOTSTRAP_CONTRACT_VERSION, ManagementError
 from secp_management.adapters import (
+    CONTAINMENT_BREACHED,
+    CONTAINMENT_UNPROVABLE,
     BootstrapReceipt,
     CompensationResult,
     ControllerBootstrapAdapter,
@@ -63,6 +65,7 @@ from secp_management.adapters import (
     WorkerObservation,
     controller_generation_marker,
     is_generation_marker,
+    resolve_queue_containment,
     worker_generation_marker,
 )
 from secp_management.controller_compose_validation import (
@@ -147,6 +150,7 @@ from secp_management.topology import (
     read_seals,
 )
 from secp_management.transaction import (
+    EXIT_CONTAINMENT_UNPROVABLE,
     EXIT_OK,
     EXIT_REFUSED,
     MODE_DRY_RUN,
@@ -818,6 +822,7 @@ def _worker_generation(obs: WorkerObservation) -> str:
         restart_count=obs.ordinary_restart_count,
         started_at=obs.ordinary_started_at,
         operator_invocation_id=obs.operator_invocation_id,
+        operator_state_change_monotonic=obs.operator_state_change_monotonic,
     )
 
 
@@ -851,8 +856,8 @@ def _worker_generation_complete(obs: WorkerObservation) -> bool:
     generation tuple. Validate the RAW facts BEFORE deriving/comparing the marker: a nonempty
     ordinary container
     id, a nonnegative-integer restart count, a nonempty valid start timestamp, a nonzero numeric PID
-    while running, and — the reviewed rule for a present (disabled+stopped) operator — a defined
-    (nonempty) operator InvocationID. No generation component may be missing."""
+    while running, and — for a present operator — the generation facts that unit actually exposes.
+    No generation component may be missing."""
     if not obs.ordinary_container_id:
         return False
     if not _is_nonneg_int(obs.ordinary_restart_count):
@@ -861,10 +866,24 @@ def _worker_generation_complete(obs: WorkerObservation) -> bool:
         return False
     if obs.ordinary_running and not _is_positive_int(obs.ordinary_pid):
         return False
-    # a present operator (the canonical prepared posture is present + disabled + STOPPED) still
-    # exposes a defined InvocationID generation fact; its absence is a missing generation component.
-    if obs.operator_present and not obs.operator_invocation_id:
-        return False
+    if obs.operator_present:
+        # The canonical prepared operator is present + disabled + STOPPED and is NEVER started, so
+        # systemd reports an EMPTY InvocationID for it — the deployment observer documents exactly
+        # this ("Values may be empty (e.g. InvocationID of a never-started unit)") and accepts it.
+        # Requiring a nonempty InvocationID therefore refused the very end state a correct install
+        # produces: it demanded a fact that only exists once the operator has run, which is the one
+        # thing this posture forbids.
+        #
+        # The generation component that IS always present is StateChangeTimestampMonotonic. It is
+        # required nonempty and numeric here, so nothing is weakened: an observer that drops the
+        # operator's generation facts still fails, and the operator still contributes to ABA
+        # detection before it has ever been started.
+        if not _is_nonneg_int(obs.operator_state_change_monotonic):
+            return False
+        # A RUNNING unit always has an InvocationID. Empty is only legitimate for one that has not
+        # run, so an empty ID while running is a genuinely incomplete observation.
+        if obs.operator_running and not obs.operator_invocation_id:
+            return False
     return True
 
 
@@ -923,14 +942,30 @@ def _worker_end_state_reason(obs: WorkerObservation, exp: _ExpectedWorker) -> st
         return "worker_health_command_mismatch"
     if not (obs.operator_present and not obs.operator_enabled and not obs.operator_running):
         return "worker_operator_not_disabled_stopped"
+    # The operator image must be OBSERVED, never assumed. An empty observation means the observer
+    # could not prove the signed operator image is loaded on this host (unreadable/malformed release
+    # record, image absent, or a runtime that could not answer) — it is not evidence of a match, and
+    # it must not be able to reach the comparison below. Checked separately from the comparison so
+    # that an expectation which is itself empty can never be "equal" to an unproven observation.
+    if not obs.operator_image_digest:
+        return "worker_operator_image_unobserved"
+    if not exp.operator_image:
+        return "worker_operator_image_unobserved"
     if obs.operator_image_digest != exp.operator_image:
         return "worker_operator_image_mismatch"
     if obs.operator_unit_identity != exp.operator_unit_identity:
         return "worker_operator_unit_mismatch"
     if obs.deployment_package_aggregate != exp.deployment_aggregate:
         return "worker_deployment_package_mismatch"
-    if obs.ordinary_polls_operator_queue:
+    # Containment is THREE-valued. Both non-contained verdicts refuse (fail closed, unchanged), but
+    # they are different facts and an operator must be able to act on the difference: one says the
+    # worker was observed polling the controlled-live queue, the other says the probe never
+    # completed and NOTHING was observed either way.
+    containment = resolve_queue_containment(obs)
+    if containment == CONTAINMENT_BREACHED:
         return "worker_ordinary_polls_operator_queue"
+    if containment == CONTAINMENT_UNPROVABLE:
+        return "worker_ordinary_queue_containment_unprovable"
     if not obs.package_trusted:
         return "worker_operator_package_untrusted"
     if obs.commissioning_status != "prepared":
@@ -3199,6 +3234,18 @@ def _verify_installed_documents(
     return None
 
 
+#: Refusal reason -> its own stable exit code. ADDITIVE: any reason not listed keeps EXIT_REFUSED,
+#: so no existing refusal changes what it exits with.
+_REFUSAL_EXIT_CODES: dict[str, int] = {
+    "worker_ordinary_queue_containment_unprovable": EXIT_CONTAINMENT_UNPROVABLE,
+}
+
+
+def _refusal_exit_code(reason: str | None) -> int:
+    """The exit code for a refusal. Never ``EXIT_OK`` — every branch here is a refusal."""
+    return _REFUSAL_EXIT_CODES.get(reason or "", EXIT_REFUSED)
+
+
 def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
     role = Role.WORKER
     seals = read_seals()
@@ -3268,7 +3315,16 @@ def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
             and obs.deployment_package_aggregate == exp.deployment_aggregate
         ),
         "ordinary_queue": ORDINARY_TASK_QUEUE,
+        # Kept, fail-closed and unchanged: True ONLY on a positive proof of containment. It stays
+        # False for an unfinished probe, so no existing consumer becomes more permissive.
         "no_operator_queue_polling": bool(obs and not obs.ordinary_polls_operator_queue),
+        # The honest verdict alongside it. "unprovable" means the probe did not complete and
+        # nothing was observed about the queues — NOT that a breach was seen.
+        "queue_containment": resolve_queue_containment(obs) if obs else CONTAINMENT_UNPROVABLE,
+        # Bounded reason naming WHY containment could not be established; None otherwise.
+        "queue_containment_reason": (
+            obs.ordinary_queue_containment_reason if obs else "worker_not_observed"
+        ),
         "operator_package_trust": bool(obs and obs.package_trusted),
         "operator_service_present": bool(obs and obs.operator_present),
         "operator_disabled": obs is not None and not obs.operator_enabled,
@@ -3287,7 +3343,7 @@ def _worker_status(deps: EngineDeps) -> tuple[int, dict]:
         and record is not None
         and obs is not None
     )
-    return (EXIT_OK if ok else EXIT_REFUSED), {
+    return (EXIT_OK if ok else _refusal_exit_code(drift)), {
         "command": "status",
         "role": "worker",
         "ok": ok,

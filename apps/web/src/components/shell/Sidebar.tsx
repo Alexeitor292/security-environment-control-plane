@@ -15,6 +15,8 @@ import {
   Rocket,
   ScrollText,
   Search,
+  Server,
+  ServerCog,
   Settings,
   ShieldCheck,
   Target,
@@ -26,7 +28,7 @@ import { NavLink } from "react-router-dom";
 
 import type { Principal } from "../../api/types";
 import { principalDisplay } from "./identity";
-import { NAV_GROUPS, type NavItem } from "./nav";
+import { NAV_GROUPS, resolveNavItem, type NavItem } from "./nav";
 import { SecpMark } from "./SecpMark";
 
 const ICONS: Record<string, LucideIcon> = {
@@ -39,6 +41,8 @@ const ICONS: Record<string, LucideIcon> = {
   discovery: Search,
   "staging-labs": Boxes,
   "staging-deployments": Rocket,
+  "worker-enrollment": ServerCog,
+  "enrollment-inventory": Server,
   approvals: ShieldCheck,
   "readonly-preflight": KeyRound,
   "resolver-activation": Lock,
@@ -127,7 +131,10 @@ export function Sidebar({ principal, collapsed, onNavigate, onLogout }: SidebarP
             {group.items.map((item) => (
               <NavEntry
                 key={item.id}
-                item={item}
+                // Gating happens here rather than in the model so the model stays pure data and
+                // the permission rule stays one tested function. An item the principal cannot use
+                // renders disabled with the reason, never hidden.
+                item={resolveNavItem(item, principal?.permissions)}
                 collapsed={collapsed}
                 onNavigate={onNavigate}
               />

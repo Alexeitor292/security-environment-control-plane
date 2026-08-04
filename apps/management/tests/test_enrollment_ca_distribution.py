@@ -388,24 +388,21 @@ def test_the_dry_run_shows_the_fingerprint_before_the_worker_commits(tmp_path):
     )
 
 
-# --- TRIPWIRE: the production CLI wiring this feature needs is NOT on this branch -----------------
-# `_production_enrollment_deps` lives in `apps/management/secp_management/cli.py`, which Stream C
-# owns. WS-B must not edit it, so the CA provider is composed there by Stream C, not here.
-#
-# Until that lands, `EnrollmentCliDeps.ca_bundle` falls to `SealedControllerCaBundleProvider` in
-# production, and EVERY `secpctl enrollment invite create` then refuses
-# `secpctl_controller_ca_unavailable`
-# — the CA distribution feature ships INERT.
-#
-# These tests make that loud. The xfail FLIPS TO A FAILURE the moment the wiring lands (strict), so
-# nobody has to remember to come back and delete it; the companion test states the exact required
-# shape so the requirement is readable in the codebase, not only in a hand-off message.
+# --- fail-closed default and CA-provider composition controls -------------------------------------
+# `EnrollmentCliDeps.ca_bundle`, `LocatorControllerCaBundleProvider`, and the `invite create` path
+# are contract-tested here, executable and unconditional. The live production composition is
+# tested in `test_cli_production_engine_deps.py`, including three-way object identity across the
+# HTTPS client, credential provider, and CA provider. These tests isolate the permanent sealed
+# default and the CA-bearing invitation behavior behind that composition.
 
 
-def test_the_production_cli_does_not_yet_compose_the_ca_provider():
-    """States the gap explicitly: today production gets the SEALED provider.
+def test_the_shipped_default_ca_provider_is_sealed():
+    """The DEFAULT must stay sealed — a permanent fail-closed invariant, not a temporary gap.
 
-    This is the honest status of the feature on this branch, not an assertion that it is correct.
+    A composition root that forgets `ca_bundle=` must land on a provider that refuses, never on one
+    that reads some ambient path. This is what makes the missing wiring a bounded refusal instead of
+    a silently wrong CA, and it is the anti-vacuity control for the refusal test above: that test
+    can only fail if the sealed provider really is what an unconfigured deps object gets.
     """
     from secp_management.enrollment_cli import (
         EnrollmentCliDeps,
@@ -415,21 +412,93 @@ def test_the_production_cli_does_not_yet_compose_the_ca_provider():
     assert isinstance(EnrollmentCliDeps().ca_bundle, SealedControllerCaBundleProvider)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PENDING Stream C: cli.py:_production_enrollment_deps must pass "
-        "ca_bundle=LocatorControllerCaBundleProvider(fs, locator_provider), sharing ONE "
-        "FileControllerApiLocatorProvider with HttpsEnrollmentControllerClient. Strict xfail, so "
-        "this FAILS (and must be deleted) the moment the wiring lands."
-    ),
-)
-def test_production_enrollment_deps_composes_the_real_ca_provider(monkeypatch, tmp_path):
-    from secp_management import cli
-    from secp_management.enrollment_cli import LocatorControllerCaBundleProvider
+class _StubControllerClient:
+    """Returns a fixed invitation and records the call, standing in for the real HTTPS client."""
 
-    deps = cli._production_enrollment_deps()
-    assert isinstance(deps.ca_bundle, LocatorControllerCaBundleProvider)
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def create_invitation(self, **kwargs):
+        from secp_management.enrollment_controller_client import ControllerInvitation
+
+        self.calls.append(kwargs)
+        return ControllerInvitation(
+            enrollment_id=_INVITATION["enrollment_id"],
+            invitation_id=_INVITATION["invitation_id"],
+            controller_installation_id=_INVITATION["controller_installation_id"],
+            controller_key_id=_INVITATION["controller_key_id"],
+            controller_trust_anchor_hex="e" * 64,
+            controller_origin=_INVITATION["controller_origin"],
+            release_digest=_INVITATION["release_digest"],
+            transaction_id=_INVITATION["transaction_id"],
+            deployment_site_label="rack-01.eu_a",
+            created_at="2026-07-27T00:00:00+00:00",
+            expires_at=_INVITATION["expires_at"],
+            state="issued",
+            revision=1,
+        )
+
+
+def test_the_reference_production_composition_issues_a_usable_invitation():
+    """Execute the CA-bearing invitation path end to end with a stub controller client.
+
+    The live production graph and its shared locator identity are asserted separately in
+    `test_cli_production_engine_deps.py`; this test proves the invitation carries the CA read
+    through the configured locator rather than a controller assertion or ambient default.
+    """
+    fs = _FakeFs(content=CA_PEM.encode("utf-8"))
+    locator_provider = _FakeLocatorProvider()  # the ONE shared instance
+    client = _StubControllerClient()
+
+    deps = EnrollmentCliDeps(
+        controller_client=client,
+        ca_bundle=LocatorControllerCaBundleProvider(fs, locator_provider),
+    )
+
+    code, report = invite_create(
+        deps,
+        deployment_site_label="rack-01.eu_a",
+        ttl_seconds=3600,
+        gate=WriteGate(write=True, confirm=True),
+    )
+
+    # CONTROL, first: the composition really did reach the controller. Every assertion below is
+    # about the CONTENT of a successful issue, and would be vacuous against a refusal.
+    assert client.calls, "the composed deps never contacted the controller"
+    assert code == 0, report
+    assert report["mode"] == "written"
+
+    # The CA in the invitation came from the operator's locator-resolved path — not from anything
+    # the controller asserted about itself, and not from an ambient default.
+    assert report["controller_ca_bundle_pem"] == CA_PEM
+    assert fs.reads == ["/etc/secp/controller/tls/ca-bundle.pem"]
+
+
+def test_the_reference_composition_shares_one_locator_between_client_and_ca_provider():
+    """Isolate the client-to-CA identity edge with real adapter types.
+
+    Two `FileControllerApiLocatorProvider` instances could resolve two DIFFERENT locators: the
+    client would pin its TLS to one controller's CA while the invitation handed the worker another.
+    The live composition's additional credential-provider edge is asserted at its composition root.
+    """
+    from secp_management.enrollment_controller_client import HttpsEnrollmentControllerClient
+
+    fs = _FakeFs(content=CA_PEM.encode("utf-8"))
+    locator_provider = _FakeLocatorProvider()
+
+    client = HttpsEnrollmentControllerClient(
+        locator_provider=locator_provider,
+        token_provider=_FakeTokenProvider(),
+    )
+    ca_provider = LocatorControllerCaBundleProvider(fs, locator_provider)
+
+    # the same object, not merely an equal one
+    assert client._locator_provider is ca_provider._locator_provider is locator_provider
+
+
+class _FakeTokenProvider:
+    def read_token(self) -> str:
+        return "operator-token"
 
 
 def test_the_ca_provider_resolves_through_the_locator_it_was_given():

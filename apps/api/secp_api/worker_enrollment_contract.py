@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass, replace
 
 from secp_commissioning.canonical import is_sha256_digest, sha256_digest
-from secp_commissioning.descriptor import scan_forbidden
+from secp_commissioning.descriptor import DescriptorError, scan_forbidden
 
 ENROLLMENT_CONTRACT_VERSION = "secp.management-enrollment/v1alpha1"
 INVITATION_SCHEMA = "secp.management.worker-enrollment-invitation/v1"
@@ -182,6 +182,43 @@ def _is_ip_literal(value: str) -> bool:
     return True
 
 
+def _survives_projection_scan(value: str) -> bool:
+    """Whether :func:`scan_forbidden` — the scan :meth:`EnrollmentState.public_view` runs over its
+    own output — accepts this value.
+
+    This is the clause that stops the ADMITTING validator from being weaker than the RENDERING one.
+    The grammar alone permits secret-SHAPED strings: ``AKIAIOSFODNN7EXAMPLE`` and a JWT-shaped
+    ``eyJ....`` both match ``^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$`` and are both refused by the
+    projection scan. Without this clause the API accepts a label it can never render, and the row
+    becomes unlistable AFTER it is persisted.
+
+    .. warning::
+
+       **Tightening ``scan_forbidden`` is a MIGRATION EVENT for stored labels, not a local change.**
+
+       Because this helper runs on the load path as well as the write path
+       (``worker_enrollment_repository._validate_rehydrated``), adding a pattern to the secret scan
+       in ``secp_commissioning.descriptor`` RETROACTIVELY narrows the label grammar: labels that
+       were legal when they were persisted can begin refusing on load.
+
+       That is survivable BY DESIGN and not by accident — such a row fails
+       ``_validate_rehydrated``, ``load_page`` wraps the refusal with the failing row's keyset
+       position, and the caller pages past it on the ``enrollment_page_integrity``
+       ``recovery_cursor``. The inventory degrades to "one row unreadable, the rest reachable"
+       rather than "the organization's list is dead", which is exactly the landing zone this
+       recovery path exists to provide. ``test_enrollment_site_label_projection_agreement.py``
+       pins that behaviour by simulating a scan that narrows after the fact.
+
+       So: a change in ``secp_commissioning`` touches worker enrollment. Expect existing rows to
+       need remediation, and check that test before assuming a new pattern is free.
+    """
+    try:
+        scan_forbidden(value)
+    except DescriptorError:
+        return False
+    return True
+
+
 def is_deployment_site_label(value: object) -> bool:
     """The single shared grammar helper for the opaque deployment-site label (ADR-027).
 
@@ -190,10 +227,45 @@ def is_deployment_site_label(value: object) -> bool:
     looks like one is permitted but confers no such meaning.  Every IP-address literal (IPv4/IPv6 of
     any scope: private, loopback, link-local, multicast, unspecified or public) is rejected by
     deterministic parsing, so no address can ride a grouping label into persisted produced output.
+
+    It must ALSO survive the projection scan. The label is deliberately non-canonical, so it never
+    reaches ``scan_forbidden(self.canonical())`` at creation — and that is exactly what let a
+    secret-SHAPED but grammatically legal label be accepted by the write path and then refused by
+    ``scan_forbidden(view)`` at render time, leaving the row permanently unprojectable. Reconciling
+    the two validators HERE, in the one helper both the write path
+    (``services.worker_enrollment``) and the load path (``worker_enrollment_repository``) already
+    call, is what keeps them from drifting apart again.
+    """
+    return deployment_site_label_refusal(value) is None
+
+
+#: Bounded reason codes for a refused label. Mirrored in ``secp_api.enums`` — this module must not
+#: import the enum (it is the pure API-side contract mirror), so the literals are stated twice and
+#: pinned by a test, the same documented non-import pair pattern used elsewhere in this file.
+SITE_LABEL_INVALID = "enrollment_site_label_invalid"
+SITE_LABEL_FORBIDDEN_SHAPE = "enrollment_site_label_forbidden_shape"
+
+
+def deployment_site_label_refusal(value: object) -> str | None:
+    """``None`` if the label is acceptable, else the bounded code saying WHICH clause refused.
+
+    Two codes rather than one because the two failures need different operator actions, and the
+    second is the one nobody guesses. A label failing the grammar is visibly wrong — it has a colon
+    or a slash in it, or it is an IP address. A label failing the projection scan looks *completely
+    ordinary*: ``x-vault-token`` is thirteen lowercase letters and hyphens, and an operator naming a
+    site after a header convention reaches it with no adversarial intent whatsoever. Told only
+    "invalid", they would re-read a well-formed string and conclude the API is broken.
+
+    The refusal is a bounded CODE and never echoes the value: the label is caller-controlled, so
+    quoting it back would put a caller-shaped string into logs and error bodies.
     """
     if not isinstance(value, str) or _DEPLOYMENT_SITE_LABEL.fullmatch(value) is None:
-        return False
-    return not _is_ip_literal(value)
+        return SITE_LABEL_INVALID
+    if _is_ip_literal(value):
+        return SITE_LABEL_INVALID
+    if not _survives_projection_scan(value):
+        return SITE_LABEL_FORBIDDEN_SHAPE
+    return None
 
 
 # --------------------------------------------------------------------------- invitation contract
@@ -420,7 +492,14 @@ class EnrollmentState:
             "updated_at": self.updated_at,
             "refusal_reason": self.refusal_reason,
         }
-        scan_forbidden(view)
+        # A refusal here must be BOUNDED. `scan_forbidden` raises `DescriptorError`, which is not a
+        # domain error: seven routers project a state directly, so a raw one escapes as an
+        # unhandled 500 rather than the closed, redacted refusal every other failure on this path
+        # produces. Converting it here — at the single place the scan runs — bounds all of them.
+        try:
+            scan_forbidden(view)
+        except DescriptorError:
+            raise _closed("enrollment_state_corrupt") from None
         return view
 
 
@@ -648,6 +727,7 @@ __all__ = [
     "WorkerEnrollmentInvitation",
     "bind_worker_identity",
     "create_invitation",
+    "deployment_site_label_refusal",
     "is_deployment_site_label",
     "mark_healthy",
     "mark_verified",

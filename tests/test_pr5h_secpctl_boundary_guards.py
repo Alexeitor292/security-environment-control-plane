@@ -16,7 +16,10 @@ REPO = Path(__file__).resolve().parents[1]
 MGMT_PKG = REPO / "apps" / "management" / "secp_management"
 API_PKG = REPO / "apps" / "api" / "secp_api"
 
-#: The Phase 4 secpctl enrollment surface (management plane).
+#: The secpctl enrollment surface (PR5H-B1 Phase 4) plus the operator-authentication surface
+#: (PR5H-B2 / ADR-028 §3-§4), both management plane. This tuple enumerates modules BY PATH, so a new
+#: secpctl module is NOT covered until it is listed here — every addition to the CLI surface must
+#: extend it.
 SECPCTL_ENROLLMENT_MODULES = (
     MGMT_PKG / "cli.py",
     MGMT_PKG / "enrollment_cli.py",
@@ -24,7 +27,24 @@ SECPCTL_ENROLLMENT_MODULES = (
     MGMT_PKG / "controller_api_locator.py",
     MGMT_PKG / "operator_auth.py",
     MGMT_PKG / "worker_enroller.py",
+    MGMT_PKG / "auth_cli.py",
+    MGMT_PKG / "device_grant.py",
+    MGMT_PKG / "operator_device_auth.py",
+    MGMT_PKG / "operator_token_verify.py",
+    MGMT_PKG / "operator_token_revoke.py",
+    MGMT_PKG / "operator_credential_lock.py",
+    MGMT_PKG / "operator_credential_store.py",
+    MGMT_PKG / "operator_credential_backends.py",
 )
+
+
+#: Module-name prefixes that belong EXCLUSIVELY to the secpctl operator-auth / controller-client
+#: surface. Every ``secp_management`` module matching one of these must appear above. This turns the
+#: enumeration from a manual list that silently stops covering new modules into a seeded one that
+#: a new ``operator_*`` / ``device_*`` / ``auth_*`` module cannot slip past. The engine,
+#: transaction, layout and enrollment-signer modules are deliberately NOT matched: they are general
+#: management-plane code already governed by ``test_management_plane_boundary``.
+SECPCTL_SURFACE_PREFIXES = ("auth_", "controller_api_", "device_", "operator_")
 
 
 def _tree(path: Path) -> ast.Module:
@@ -52,6 +72,19 @@ def _imports(path: Path) -> tuple[set[str], set[str]]:
                 if isinstance(node.args[0].value, str):
                     modules.add(node.args[0].value)
     return modules, symbols
+
+
+def test_every_module_named_for_the_secpctl_auth_surface_is_enumerated() -> None:
+    """``SECPCTL_ENROLLMENT_MODULES`` enumerates by PATH, so a module added to this surface is
+    uncovered until someone remembers to list it. Remembering is not a control; this is."""
+    listed = {path.name for path in SECPCTL_ENROLLMENT_MODULES}
+    for path in sorted(MGMT_PKG.glob("*.py")):
+        if not path.name.startswith(SECPCTL_SURFACE_PREFIXES):
+            continue
+        assert path.name in listed, (
+            f"{path.name} is part of the secpctl auth/controller-client surface but is not in "
+            "SECPCTL_ENROLLMENT_MODULES, so none of the plane-boundary guards below cover it"
+        )
 
 
 def test_secpctl_enrollment_modules_do_not_import_the_api_plane() -> None:

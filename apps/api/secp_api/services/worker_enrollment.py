@@ -78,7 +78,7 @@ from secp_api.worker_enrollment_contract import (
     WorkerEnrollmentInvitation,
     bind_worker_identity,
     create_invitation,
-    is_deployment_site_label,
+    deployment_site_label_refusal,
     mark_healthy,
     mark_verified,
     open_enrollment,
@@ -418,8 +418,12 @@ def create_invitation_and_open(
     """
     actor.require(Permission.enrollment_manage)
     _assert_schema_ready(session)
-    if not is_deployment_site_label(deployment_site_label):
-        raise WorkerEnrollmentError(EC.scope_mismatch)
+    # A SPECIFIC code: `scope_mismatch` means "a worker claimed a site that disagrees with the
+    # authoritative binding", and creation has no binding to disagree with yet. Reporting it here
+    # sent an operator to look at permissions when the answer was "rename your site".
+    label_refusal = deployment_site_label_refusal(deployment_site_label)
+    if label_refusal is not None:
+        raise WorkerEnrollmentError(label_refusal)
     try:
         loaded = repo.create_invitation_and_open(
             session,
@@ -513,8 +517,12 @@ def create_supported_invitation(
     """
     actor.require(Permission.enrollment_manage)
     _assert_schema_ready(session)
-    if not is_deployment_site_label(deployment_site_label):
-        raise WorkerEnrollmentError(EC.scope_mismatch)
+    # A SPECIFIC code: `scope_mismatch` means "a worker claimed a site that disagrees with the
+    # authoritative binding", and creation has no binding to disagree with yet. Reporting it here
+    # sent an operator to look at permissions when the answer was "rename your site".
+    label_refusal = deployment_site_label_refusal(deployment_site_label)
+    if label_refusal is not None:
+        raise WorkerEnrollmentError(label_refusal)
     identity = controller_identity.load_active_controller_identity(session)
     nonce = _idempotency_nonce(actor.organization_id, idempotency_key)
     invitation = build_invitation(

@@ -78,10 +78,32 @@ effects it made. See §8 for the reason codes.
 Installation and enrollment are separate steps. Enrollment is driven from the **non-secret
 invitation file** the controller operator gives you.
 
+Run the authenticated controller-side commands from the **trusted POSIX controller-local management
+host**. Its bootstrap-created, fixed root-owned locator supplies both the canonical controller origin
+and the reviewed CA-bundle path; there is no supported `--url`, `--ca`, issuer or trust override.
+Before creating an invitation, establish and inspect the operator session:
+
+```
+secpctl auth login --write --confirm
+secpctl auth status
+```
+
+The OS credential backend and controller trust source are separate assurances:
+
+| Host/backend | What is assured | Production posture for authenticated controller commands |
+|---|---|---|
+| Windows Credential Manager | Implemented and genuinely round-tripped against the real Credential Manager on the Windows developer host | **Not production-supported for end-to-end controller access.** A separate reviewed workflow must provision and protect the Windows locator and CA bundle first. |
+| macOS Keychain | Binding logic exercised against a stand-in only, not the real framework; read-only status may prompt on a locked Keychain | No live-host claim. Only a host satisfying the trusted POSIX/controller-local posture is in scope. |
+| Linux Secret Service | Binding logic exercised against a stand-in only, not the real library; headless Ubuntu CI has no session D-Bus and exercises no live keystore | Supported on the trusted controller-local POSIX host only when bootstrap locator/CA state and a reachable OS keystore are present. |
+
+Do not interpret `auth status` reporting `windows_credential_manager` as proof that Windows
+controller trust is provisioned. The credential backend remains available for development and
+future reviewed provisioning, but locator-dependent commands refuse closed today.
+
 On the controller:
 
 ```
-secpctl enrollment invitation create --site <site-label> --write --confirm
+secpctl enrollment invite create --site <site-label> --write --confirm
 ```
 
 The invitation is displayed **once**. This is deliberate and is not a defect: the invitation is
@@ -258,7 +280,8 @@ material.
 |---|---|
 | `worker_ordinary_not_ready` | The ordinary worker did not come up healthy |
 | `worker_ordinary_image_mismatch` | The running image is not the signed ordinary image |
-| `worker_operator_image_mismatch` | The operator unit is not on the signed operator image |
+| `worker_operator_image_mismatch` | The host's installed release names a different operator image than the signed one |
+| `worker_operator_image_unobserved` | The signed operator image could not be proven loaded on this host — a different fact from a mismatch: nothing was observed either way. Check that the release record is readable and that the operator image was really loaded |
 | `worker_operator_not_disabled_stopped` | **The operator was enabled or running — investigate** |
 | `worker_ordinary_polls_operator_queue` | **The worker was on the operator queue — investigate** |
 | `worker_operator_package_untrusted` | The deployment package is not trusted |

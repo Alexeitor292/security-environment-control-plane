@@ -420,11 +420,24 @@ class FakeWorld:
         operator_image_digest: str = "",
         deployment_package_aggregate: str = "",
         ordinary_polls_operator_queue: bool = False,
+        # Three-valued containment verdict + bounded why. Default "" so every existing caller keeps
+        # its exact semantics (resolve_queue_containment derives from the boolean when unset).
+        ordinary_queue_containment: str = "",
+        ordinary_queue_containment_reason: str | None = None,
         package_trusted: bool = False,
         coherent: bool = True,
         restart_count: str = "0",
         pid: str = "4242",
-        invocation_id: str = "a" * 32,
+        # None = DERIVE from the operator's state, matching the production leaf: systemd reports no
+        # InvocationID for a unit that has never run, and always reports one for a running unit. The
+        # canonical prepared operator is present + disabled + never started, so it derives to "".
+        # This fake used to default to a nonempty id unconditionally, which is precisely why the
+        # engine suites stayed green while the real observer refused a correct host. Pass an
+        # explicit value (including "") to force a specific — possibly incoherent — observation.
+        invocation_id: str | None = None,
+        # Always reported by systemd, including for a never-started unit — the operator's ABA
+        # generation fact in the prepared posture.
+        operator_state_change_monotonic: str = "123",
         commissioning_override: str | None = None,
         deployment_override: str | None = None,
         # observed controller state
@@ -491,11 +504,14 @@ class FakeWorld:
         self.operator_image_digest = operator_image_digest
         self.deployment_package_aggregate = deployment_package_aggregate
         self.ordinary_polls_operator_queue = ordinary_polls_operator_queue
+        self.ordinary_queue_containment = ordinary_queue_containment
+        self.ordinary_queue_containment_reason = ordinary_queue_containment_reason
         self.package_trusted = package_trusted
         self.coherent = coherent
         self.restart_count = restart_count
         self.pid = pid
         self.invocation_id = invocation_id
+        self.operator_state_change_monotonic = operator_state_change_monotonic
         self.commissioning_override = commissioning_override
         self.deployment_override = deployment_override
         self.controller_containers = controller_containers or {}
@@ -548,6 +564,11 @@ class FakeWorld:
         if self.operator_start_before_final:
             self.operator_running = True
             self.invocation_id = "f" * 32  # a started operator gets a new InvocationID
+            # ...and systemd advances the unit's monotonic state-change stamp. Bumped too so the
+            # generation marker still changes even for an operator whose InvocationID was empty.
+            self.operator_state_change_monotonic = str(
+                int(self.operator_state_change_monotonic) + 1
+            )
         if self.unhealthy_before_final:
             self.ordinary_healthy = False  # degrade WITHOUT a restart (generation unchanged)
 
@@ -734,18 +755,26 @@ class FakeObserver:
             if w.worker_pid_override is not None
             else (w.pid if w.ordinary_running else "0")
         )
-        op_inv = w.invocation_id if w.operator_present else ""
+        if not w.operator_present:
+            op_inv = ""
+        elif w.invocation_id is not None:
+            op_inv = w.invocation_id  # explicitly forced by the test, including ""
+        else:
+            # derived: a running unit always has an InvocationID; a never-started one has none
+            op_inv = ("b" * 32) if w.operator_running else ""
         started = (
             w.worker_started_override
             if w.worker_started_override is not None
             else "2026-01-02T03:04:05.000000000Z"
         )
+        op_mono = w.operator_state_change_monotonic if w.operator_present else ""
         marker = worker_generation_marker(
             container_id=container_id,
             running_pid=running_pid,
             restart_count=w.restart_count,
             started_at=started,
             operator_invocation_id=op_inv,
+            operator_state_change_monotonic=op_mono,
         )
         if w.generation_marker_override is not None:
             marker = w.generation_marker_override
@@ -765,6 +794,7 @@ class FakeObserver:
             operator_enabled=w.operator_enabled,
             operator_running=w.operator_running,
             operator_invocation_id=op_inv,
+            operator_state_change_monotonic=op_mono,
             operator_unit_identity=w.operator_unit_identity,
             operator_image_digest=w.operator_image_digest,
             deployment_package_aggregate=w.deployment_package_aggregate,
@@ -773,6 +803,8 @@ class FakeObserver:
             commissioning_status=commissioning,
             deployment_status=deployment,
             generation_marker=marker,
+            ordinary_queue_containment=w.ordinary_queue_containment,
+            ordinary_queue_containment_reason=w.ordinary_queue_containment_reason,
         )
 
 
