@@ -1313,3 +1313,35 @@ def test_the_binder_discovery_sees_an_alias_binding_not_only_an_import():
     )
     # a docstring mention is not a binding either — the text-search false positive
     assert binders_in('"""PASSING_OUTCOMES is discussed here."""') == set()
+
+
+def test_the_release_source_is_the_document_the_product_probe_reads():
+    """The identity document, NOT the installed-release record. They are two different files.
+
+    The release-installation stage publishes an ``installed_baseline`` fixture "for the enrollment,
+    identity and lifecycle stages", and it reads
+    ``ManagementLocations().release_record_path("worker")``. That is the right source for rollback
+    and upgrade lineage. It is the WRONG source for this stage.
+
+    ``enrolled_release_equals_installed_release`` exists to mirror what the product's own
+    ``exact_release`` probe compares, and that probe reads the IDENTITY document. Sourcing this
+    stage's side from the release record instead would produce a check that can disagree with the
+    probe it is meant to reflect — passing where the product refuses, or failing where it does not.
+    Either way the acceptance would be describing something other than the behaviour under test.
+
+    So the two paths are pinned as DISTINCT, and this stage's source is pinned to the probe's. A
+    future reader consolidating "two readers of the worker's release" into one would be merging two
+    facts that only look alike.
+    """
+    from secp_management.layout import ManagementLocations
+    from secp_worker.enrollment_health_probes import MANAGEMENT_WORKER_IDENTITY_PATH as probe_path
+
+    locations = ManagementLocations()
+    identity = locations.identity_path("worker")
+    release_record = locations.release_record_path("worker")
+
+    assert identity != release_record, "the two documents have become one; re-read this test"
+    assert MANAGEMENT_WORKER_IDENTITY_PATH == identity
+    assert MANAGEMENT_WORKER_IDENTITY_PATH == probe_path, (
+        "this stage must read the same document the product's exact_release probe reads"
+    )
