@@ -293,13 +293,13 @@ def installation(
         ),
         weakens=("controller_packages_installed", "worker_packages_installed"),
     )
-    witness("packages_installed")
+    witness("packages_stage_driven")
 
     for role in (ROLE_CONTROLLER, ROLE_WORKER):
         run.installations[role].seed_production_inputs(anchor=release.anchor)
 
     drive_controller(run, fleet)
-    witness("controller_attempted")
+    witness("controller_stage_driven")
 
     ordinary = next(
         a.image_digest
@@ -307,7 +307,7 @@ def installation(
         if a.purpose == "worker/ordinary" and a.image_digest
     )
     drive_worker(run, fleet, ordinary)
-    witness("worker_install_attempted")
+    witness("worker_install_stage_driven")
     return run
 
 

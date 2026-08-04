@@ -271,6 +271,10 @@ PRODUCT_REASONS: frozenset[str] = frozenset(
         "confirm_requires_write",
         "root_required_for_write",
         "preexisting_partial_install",
+        # The reviewed bundle path refused to install the product's own image at its real size.
+        # Carried here so a cap-blocked run is DISTINGUISHABLE from "the controller stack failed to
+        # come up": they are different findings, and this is the one that goes to the operator.
+        "bootstrap_image_too_large",
         "worker_upgrade_not_linear_successor",
         "worker_ordinary_config_mismatch",
         "worker_operator_not_disabled_stopped",
