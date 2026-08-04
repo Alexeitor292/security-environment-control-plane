@@ -365,13 +365,45 @@ def test_the_single_seam_is_the_only_way_a_route_gets_a_session(app):
 
     import ast
     import pathlib
+    import sys
 
     package = pathlib.Path(secp_deps.__file__).parent
-    # The exemption below is keyed on THIS EXACT FILE, resolved from the loaded module — not on the
-    # basename. An earlier version tested ``path.name == "deps.py"``, so a second module named
-    # ``deps.py`` anywhere under the package (``routers/deps.py``, say) could define its own session
-    # marker and be waved through, defeating the single-seam property this test exists to assert.
-    seam_module = pathlib.Path(secp_deps.__file__).resolve()
+
+    # HOW THE ONE LEGITIMATE SITE IS RECOGNISED, and why it is not keyed on a location.
+    #
+    # v1 tested ``path.name == "deps.py"`` — defeated by a second ``routers/deps.py``.
+    # v2 tested the resolved path of ``secp_api.deps`` — which fixes that, but only by swapping one
+    # N=1 assumption ("the seam lives in a file with this basename") for another ("the seam lives at
+    # this path"). Moving the seam to ``secp_api/session.py`` would then fail a correct refactor,
+    # and the check would be asserting a filesystem fact rather than the property it cares about.
+    #
+    # So the exemption is keyed on OBJECT IDENTITY: a site is legitimate exactly when it is the
+    # module-level assignment whose bound name IS ``secp_deps.DB_SESSION`` — the one canonical seam
+    # object, wherever it happens to live. A second seam is a different object and is never ``is``
+    # the canonical one, so it is still caught; and relocating the real seam needs no edit here.
+    modules_by_file = {}
+    for module in list(sys.modules.values()):
+        file = getattr(module, "__file__", None)
+        if file:
+            try:
+                modules_by_file[pathlib.Path(file).resolve()] = module
+            except (OSError, ValueError):  # pragma: no cover - defensive
+                continue
+
+    def _is_the_canonical_seam_assignment(path, node, tree):
+        """True only for the module-level assignment that binds the canonical seam object."""
+        module = modules_by_file.get(path.resolve())
+        if module is None:
+            return False  # not imported: cannot be the seam the application actually uses
+        for stmt in tree.body:  # module level only, deliberately
+            if not isinstance(stmt, ast.Assign) or stmt.value is not node:
+                continue
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    if getattr(module, target.id, None) is secp_deps.DB_SESSION:
+                        return True
+        return False
+
     bare = []
     for path in sorted(package.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -396,8 +428,8 @@ def test_the_single_seam_is_the_only_way_a_route_gets_a_session(app):
             elif isinstance(first, ast.Attribute):
                 target = first.attr
             if target in {"db_session", "get_db"}:
-                # The seam's own definition, in the seam's own file, is the one legitimate site.
-                if path.resolve() == seam_module and any(kw.arg == "scope" for kw in node.keywords):
+                # The one legitimate site: the assignment that binds the canonical seam object.
+                if _is_the_canonical_seam_assignment(path, node, tree):
                     continue
                 bare.append(f"{path.relative_to(package.parent)}:{node.lineno}")
     assert not bare, (
