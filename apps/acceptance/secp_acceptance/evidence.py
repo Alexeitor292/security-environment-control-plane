@@ -75,6 +75,15 @@ _Text = Annotated[str, Field(min_length=1, max_length=1000, strict=True)]
 #: document from a future vocabulary still cannot carry punctuation, a path separator, or a space.
 _IDENT = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
+#: A git commit identity. The release lineage carries source shas, and they are the one place a
+#: 40-hex string is legitimate.
+_SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
+
+#: The roles a release bundle may carry. Closed, because ``role`` decides which host a bundle is
+#: allowed to install onto, and a run that installed a controller bundle on the worker is a
+#: different run from the one the document claims.
+_RELEASE_ROLES: frozenset[str] = frozenset({"worker", "controller"})
+
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -107,15 +116,29 @@ def run_identity(*, harness_version: str, fleet_identity: str, release_identity:
 class CheckRecord(_Strict):
     """One recorded acceptance check.
 
-    ``reason_code`` is REQUIRED for ``refused`` and ``unproven`` and FORBIDDEN for ``observed``: a
+    ``reason_code`` is REQUIRED for every non-``observed`` outcome and FORBIDDEN for ``observed``: a
     positive observation that also carries a refusal reason is incoherent, and a refusal without a
     bounded code is exactly the unreadable outcome the closed vocabulary exists to prevent.
+
+    ``observed_cause`` is the OPTIONAL specific tell, and it exists because the reason-code
+    vocabulary is deliberately coarse. One code — ``acceptance_prohibited_state_observed`` — covers
+    every "the harness saw the ruled-out state" case across all nine stages, because a code per
+    check would grow past review and the check id already names the property. But WITHIN a check the
+    tell varies: ``operator_unit_never_activated`` fires on an enabled unit, a running unit, a
+    populated ``InvocationID``, or a non-zero restart count. Those are four different findings with
+    four different remediations.
+
+    Only the observation's DIGEST reaches this document, so without this field the distinction is
+    unrecoverable by a reader — which matters most for exactly the outcome where it matters most,
+    ``violated``. Constrained to a bounded identifier: it is a closed per-producer vocabulary, never
+    free text, so it can never carry a path, an id, a queue name or an origin.
     """
 
     check: _Str
     stage: _Str
     outcome: _Str
     reason_code: _Str | None = None
+    observed_cause: _Str | None = None
     observation_digest: _Str
 
     def canonical(self) -> dict:
@@ -312,13 +335,77 @@ def _assert_check_semantics(record: CheckRecord) -> None:
     if record.outcome == OUTCOME_OBSERVED:
         if record.reason_code is not None:
             raise AcceptanceError("acceptance_evidence_invalid")
+        # A positive observation has no "cause of the bad thing" to name. Forbidden for the same
+        # reason as `reason_code`: a passing check carrying a cause is incoherent, and permitting it
+        # would let a producer file a finding somewhere the verdict never looks.
+        if record.observed_cause is not None:
+            raise AcceptanceError("acceptance_evidence_invalid")
     else:
         if record.reason_code is None:
             raise AcceptanceError("acceptance_evidence_invalid")
         if record.reason_code not in ALL_REASONS:
             raise AcceptanceError("acceptance_evidence_unknown_reason")
+    if record.observed_cause is not None:
+        # A bounded identifier from a closed per-producer vocabulary — never free text, so it cannot
+        # become the place a path, a container id, a queue name or an origin reaches public evidence
+        # by the back door.
+        _assert_ident(record.observed_cause)
     if not is_sha256_digest(record.observation_digest):
         raise AcceptanceError("acceptance_evidence_invalid")
+
+
+def _assert_digest(value: str) -> None:
+    if not is_sha256_digest(value):
+        raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
+
+
+def _assert_fleet_semantics(fleet: FleetRecord) -> None:
+    """The fleet record carries DIGESTS and COUNTS. Nothing else is admissible.
+
+    Nothing inspected this record at all until now — it was reachable only through pydantic's
+    ``_Str`` (any string, 1..200 chars). Measured on the unmodified parent: a ``passed`` document
+    was accepted carrying ``network_identity`` as a raw docker network name, ``controller_host_
+    identity`` as an absolute host path, and ``host_image_identity`` as an internal registry origin.
+
+    Each identity is a content address by construction (:func:`observation_digest`), so requiring
+    the digest SHAPE is an allowlist rather than a denylist: a path, an origin, a container id, a
+    queue name or a hostname all fail it without anyone having to enumerate them.
+    """
+    for value in (
+        fleet.host_image_identity,
+        fleet.controller_host_identity,
+        fleet.worker_host_identity,
+        fleet.network_identity,
+    ):
+        _assert_digest(value)
+    if fleet.hosts_destroyed > fleet.hosts_created:
+        # More destroyed than created describes a run that tore down something it did not build.
+        raise AcceptanceError("acceptance_evidence_invalid")
+
+
+def _assert_release_semantics(release: ReleaseRecord) -> None:
+    """The release lineage: a closed role, digests for aggregates, git shas for sources.
+
+    ``test_only_anchor`` is NOT checked here — it is a PROHIBITION, handled with the other four in
+    :func:`_assert_evidence_semantics`, because it says what the harness was permitted to do rather
+    than what it observed.
+    """
+    if release.role not in _RELEASE_ROLES:
+        raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
+    for value in (
+        release.baseline_aggregate,
+        release.successor_aggregate,
+        release.signing_anchor_id,
+    ):
+        if value is not None:
+            _assert_digest(value)
+    for value in (
+        release.baseline_source_sha,
+        release.successor_source_sha,
+        release.successor_parent_sha,
+    ):
+        if value is not None and not _SOURCE_SHA.fullmatch(value):
+            raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
 
 
 def _assert_gap_semantics(record: GapRecord) -> None:
@@ -378,6 +465,15 @@ def _assert_evidence_semantics(ev: AcceptanceEvidence) -> None:
             raise AcceptanceError("acceptance_evidence_forbidden_value")
     if ev.ephemeral_material_only is not True:
         raise AcceptanceError("acceptance_evidence_forbidden_value")
+    # ``test_only_anchor`` is a FIFTH prohibition, not an observation. The harness is never
+    # permitted to use a production signing anchor, so a document asserting it did describes a run
+    # this harness may not have made — refused outright rather than read, exactly like the four
+    # above. It sat outside this block until now: a document claiming a PRODUCTION trust anchor
+    # loaded clean and reported ``passed``.
+    if ev.release.test_only_anchor is not True:
+        raise AcceptanceError("acceptance_evidence_forbidden_value")
+    _assert_fleet_semantics(ev.fleet)
+    _assert_release_semantics(ev.release)
     # A ``passed`` run must be complete and must contain ONLY passing outcomes. ``failed`` carries
     # no such requirement — a failed run is expected to be partial, and forcing it to be complete
     # would push the harness toward not recording the failure at all.
@@ -396,6 +492,18 @@ def _assert_evidence_semantics(ev: AcceptanceEvidence) -> None:
         if ev.missing_checks():
             raise AcceptanceError("acceptance_evidence_incomplete")
         if ev.not_passing():
+            raise AcceptanceError("acceptance_evidence_incomplete")
+        # The fleet PREMISE, required only of a passing run. A failed run may legitimately report
+        # both False — that is what a fleet which never built looks like, and forcing it to claim
+        # otherwise would be the lie. But a run cannot pass a TWO-HOST acceptance while recording
+        # that it had neither two real machines nor a real service manager: every isolation claim
+        # in the document is a claim about one machine unless these hold.
+        if not (ev.fleet.nested_container_runtime and ev.fleet.real_service_manager):
+            raise AcceptanceError("acceptance_evidence_incomplete")
+        # Nothing leaked. `hosts_destroyed == hosts_created` was measured to be violable while
+        # still reporting `passed`: a document saying it created two privileged hosts and destroyed
+        # none is the most expensive thing this harness can leave behind, and it read as green.
+        if ev.fleet.hosts_destroyed != ev.fleet.hosts_created:
             raise AcceptanceError("acceptance_evidence_incomplete")
 
 

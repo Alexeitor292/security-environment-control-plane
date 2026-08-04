@@ -56,12 +56,21 @@ _RELEASE = ReleaseRecord(
 )
 
 
-def _fully_covered() -> AcceptanceRecorder:
+def _fully_covered(*, skip: str | None = None) -> AcceptanceRecorder:
+    """A recorder covering ALL NINE stages as ``observed``, optionally leaving one check unrecorded.
+
+    Every run-level outcome assertion in this file builds on this rather than on a single stage, and
+    that is load-bearing rather than tidiness. ``seal`` requires all nine stages, so a single-stage
+    recorder ALWAYS seals ``failed`` no matter what its checks say — which makes
+    ``assert outcome == RUN_FAILED`` on a partial recorder vacuously true and unable to fail. See
+    :func:`test_a_partial_recorder_always_fails_so_its_outcome_proves_nothing`.
+    """
     rec = AcceptanceRecorder()
     for stage in sorted(STAGES):
         rec.open_stage(stage)
         for check in CHECKS_BY_STAGE[stage]:
-            rec.observe(check, stage, {"check": check})
+            if check != skip:
+                rec.observe(check, stage, {"check": check})
     return rec
 
 
@@ -85,22 +94,51 @@ def test_the_two_failing_outcomes_are_both_outside_the_allowlist():
 # --------------------------------------------------------------------------- the verdict
 
 
-def test_a_violated_check_fails_the_run_at_seal():
-    rec = AcceptanceRecorder()
-    rec.open_stage(STAGE_QUEUES)
+def test_a_partial_recorder_always_fails_so_its_outcome_proves_nothing():
+    """THE TRAP, pinned so nobody falls into it again.
+
+    ``seal`` requires all nine stages, so a recorder that opened one stage seals ``failed`` even
+    when every check it holds is ``observed``. An ``assert outcome == RUN_FAILED`` written against
+    such a recorder therefore passes for a reason unrelated to whatever it meant to watch, and would
+    keep passing if the thing it watches regressed entirely.
+
+    This bit a canary in the queues stage — a test built specifically to catch a false green, which
+    had itself quietly become one. Any run-level outcome assertion must be built on a NINE-stage
+    recorder (see :func:`_fully_covered`) or replaced by a check-level assertion.
+    """
+    partial = AcceptanceRecorder()
+    partial.open_stage(STAGE_QUEUES)
     for check in CHECKS_BY_STAGE[STAGE_QUEUES]:
-        if check == "operator_queue_has_zero_pollers":
-            rec.violated(
-                check,
-                STAGE_QUEUES,
-                reason_code="acceptance_prohibited_state_observed",
-                observation={"pollers": 1},
-            )
-        else:
-            rec.observe(check, STAGE_QUEUES, {})
+        partial.observe(check, STAGE_QUEUES, {})
+    sealed = partial.seal(fleet=_FLEET, release=_RELEASE)
+
+    assert sealed.outcome == RUN_FAILED
+    # ...but for the STAGE COUNT, not for anything about the checks: nothing is missing and nothing
+    # failed. That is precisely what makes the outcome unusable as evidence about the checks.
+    assert sealed.coverage_complete()
+    assert sealed.not_passing() == ()
+
+
+def test_a_violated_check_fails_the_run_at_seal():
+    """Built on all nine stages, so the ``failed`` verdict is caused by the VIOLATION.
+
+    On a single-stage recorder this assertion would hold even if ``violated`` were recorded as
+    ``observed``, because the stage count alone would fail the run.
+    """
+    rec = _fully_covered(skip="operator_queue_has_zero_pollers")
+    rec.violated(
+        "operator_queue_has_zero_pollers",
+        STAGE_QUEUES,
+        reason_code="acceptance_prohibited_state_observed",
+        observation={"pollers": 1},
+    )
     ev = rec.seal(fleet=_FLEET, release=_RELEASE)
     assert ev.outcome == RUN_FAILED
     assert ev.violated() == ("operator_queue_has_zero_pollers",)
+    # every stage present and every other check passing — the violation is the ONLY cause
+    assert set(ev.stages_attempted) == STAGES
+    assert ev.coverage_complete()
+    assert ev.not_passing() == ("operator_queue_has_zero_pollers",)
     # and it is NOT reported as a failure to look
     assert ev.unproven() == ()
 
@@ -120,21 +158,28 @@ def test_a_violated_check_cannot_be_hand_written_into_a_passed_document():
 
 def test_violated_and_unproven_are_reported_separately_on_the_document():
     """The two failure modes must be distinguishable by a reader without decoding reason codes."""
-    rec = AcceptanceRecorder()
-    rec.open_stage(STAGE_QUEUES)
     checks = list(CHECKS_BY_STAGE[STAGE_QUEUES])
+    rec = _fully_covered(skip=checks[0])
     rec.violated(
         checks[0], STAGE_QUEUES, reason_code="acceptance_prohibited_state_observed", observation={}
     )
-    rec.unproven(
-        checks[1], STAGE_QUEUES, reason_code="acceptance_observation_unavailable", observation={}
-    )
-    for check in checks[2:]:
-        rec.observe(check, STAGE_QUEUES, {})
     ev = rec.seal(fleet=_FLEET, release=_RELEASE)
     assert ev.violated() == (checks[0],)
-    assert ev.unproven() == (checks[1],)
-    assert set(ev.not_passing()) == {checks[0], checks[1]}
+    assert ev.unproven() == ()
+
+    other = _fully_covered(skip=checks[1])
+    other.unproven(
+        checks[1], STAGE_QUEUES, reason_code="acceptance_observation_unavailable", observation={}
+    )
+    document = other.seal(fleet=_FLEET, release=_RELEASE)
+    assert document.unproven() == (checks[1],)
+    assert document.violated() == ()
+
+    # Recorded identically apart from the verb, and the document still tells them apart. Built as
+    # two complete nine-stage runs so each accessor is answering about a run that is otherwise
+    # entirely passing — on a partial recorder both would be swamped by missing checks.
+    assert ev.not_passing() == (checks[0],)
+    assert document.not_passing() == (checks[1],)
 
 
 # --------------------------------------------------------------------------- the real property
@@ -194,31 +239,73 @@ def test_the_fifth_outcome_probe_is_not_vacuous(monkeypatch):
     assert payload["checks"][0]["check"] in loaded.not_passing()
 
 
+def _fully_covered_with_real_refusals() -> AcceptanceRecorder:
+    """All nine stages covered, with the failure-injection stage carrying REAL ``refused`` checks.
+
+    :func:`_fully_covered` records everything as ``observed``, which cannot exercise the ``refused``
+    half of the allowlist at all. This recorder holds both passing outcomes, so narrowing
+    ``PASSING_OUTCOMES`` to ``{observed}`` is the ONLY thing that can change the verdict — the
+    nine-stage requirement is satisfied either way.
+    """
+    rec = AcceptanceRecorder()
+    for stage in sorted(STAGES):
+        rec.open_stage(stage)
+        for check in CHECKS_BY_STAGE[stage]:
+            if stage == STAGE_FAILURE_INJECTION:
+                rec.expect_refusal(
+                    check,
+                    stage,
+                    expected="release_role_mismatch",
+                    actual="release_role_mismatch",
+                    observation={"check": check},
+                )
+            else:
+                rec.observe(check, stage, {"check": check})
+    return rec
+
+
 def test_the_recorder_verdict_uses_the_same_allowlist(monkeypatch):
     """The recorder and the loader must not disagree about what passes.
 
     ``seal`` sealing a ``passed`` document the loader then refuses would make the loader's guarantee
     decorative — and the recorder is where the verdict is DERIVED, so a denylist left behind here
     would reintroduce the whole defect one layer up.
+
+    SENSITIVITY, WHICH THIS TEST PREVIOUSLY LACKED
+    ----------------------------------------------
+    The second arm used to build a ONE-stage recorder of ``refused`` checks and assert ``failed``.
+    That assertion held identically with and without the narrowing — the nine-stage rule failed the
+    run either way — so it could not detect whether narrowing ``PASSING_OUTCOMES`` did anything at
+    all, inside the guard protecting the allowlist. Found by acc-C-queues.
+
+    Both arms now use the SAME nine-stage recorder, so the allowlist is the only variable and the
+    verdict genuinely flips on it.
     """
+    import secp_acceptance.evidence as evidence_module
     import secp_acceptance.recorder as recorder_module
 
-    rec = _fully_covered()
-    monkeypatch.setattr(
-        recorder_module, "PASSING_OUTCOMES", frozenset({OUTCOME_OBSERVED}), raising=True
-    )
-    # every check is `observed`, so narrowing the allowlist to exactly that must still pass...
-    assert rec.seal(fleet=_FLEET, release=_RELEASE).outcome == RUN_PASSED
+    # Baseline: `refused` IS a passing outcome, so a complete run carrying refusals PASSES.
+    baseline = _fully_covered_with_real_refusals().seal(fleet=_FLEET, release=_RELEASE)
+    assert baseline.outcome == RUN_PASSED
+    assert {record.outcome for record in baseline.checks} == {OUTCOME_OBSERVED, OUTCOME_REFUSED}
+    assert baseline.not_passing() == ()
 
-    # ...and widening the recorded set beyond it must not
-    rec2 = AcceptanceRecorder()
-    rec2.open_stage(STAGE_FAILURE_INJECTION)
-    for check in CHECKS_BY_STAGE[STAGE_FAILURE_INJECTION]:
-        rec2.expect_refusal(
-            check,
-            STAGE_FAILURE_INJECTION,
-            expected="release_role_mismatch",
-            actual="release_role_mismatch",
-            observation={},
-        )
-    assert rec2.seal(fleet=_FLEET, release=_RELEASE).outcome == RUN_FAILED
+    # Narrow the allowlist to `observed` alone. NOTHING else changes — same stages, same checks.
+    # BOTH modules are patched because each binds the name at import, and the whole subject of this
+    # test is that the two must not disagree; patching one would leave the loader answering from the
+    # real allowlist while the recorder used the narrowed one.
+    narrowed_allowlist = frozenset({OUTCOME_OBSERVED})
+    monkeypatch.setattr(recorder_module, "PASSING_OUTCOMES", narrowed_allowlist, raising=True)
+    monkeypatch.setattr(evidence_module, "PASSING_OUTCOMES", narrowed_allowlist, raising=True)
+
+    narrowed = _fully_covered_with_real_refusals().seal(fleet=_FLEET, release=_RELEASE)
+    assert narrowed.outcome == RUN_FAILED, (
+        "narrowing PASSING_OUTCOMES did not change the verdict, so this test is not measuring the "
+        "allowlist"
+    )
+    # the LOADER's view moved with the recorder's — that agreement is the property under test
+    assert set(narrowed.not_passing()) == set(CHECKS_BY_STAGE[STAGE_FAILURE_INJECTION])
+
+    # A run of purely `observed` checks is unaffected by the narrowing — the control that shows the
+    # flip above came from the refusals and not from the patch breaking sealing outright.
+    assert _fully_covered().seal(fleet=_FLEET, release=_RELEASE).outcome == RUN_PASSED

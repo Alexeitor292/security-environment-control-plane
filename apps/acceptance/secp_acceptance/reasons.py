@@ -246,6 +246,11 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         # Sealing without a fleet record: every stage's claims are claims about a fleet, so a
         # document whose fleet was invented rather than observed misdescribes its own premise.
         "acceptance_run_fleet_not_recorded",
+        # TWO fleets in one session. The document carries exactly one FleetRecord, so this would
+        # describe one machine pair while carrying claims gathered against two, with nothing in the
+        # evidence to say which check belongs to which. Refused where it happens, because it is not
+        # detectable afterwards.
+        "acceptance_run_fleet_conflict",
         # --- evidence ---
         "acceptance_evidence_invalid",
         "acceptance_evidence_forbidden_value",

@@ -83,7 +83,14 @@ class AcceptanceRecorder:
     # --- checks ---------------------------------------------------------------------------
 
     def _record(
-        self, *, check: str, stage: str, outcome: str, reason_code: str | None, observation: object
+        self,
+        *,
+        check: str,
+        stage: str,
+        outcome: str,
+        reason_code: str | None,
+        observation: object,
+        observed_cause: str | None = None,
     ) -> None:
         if stage not in self._stages:
             raise AcceptanceError("acceptance_evidence_unknown_stage")
@@ -100,6 +107,7 @@ class AcceptanceRecorder:
                 stage=stage,
                 outcome=outcome,
                 reason_code=reason_code,
+                observed_cause=observed_cause,
                 observation_digest=observation_digest(observation),
             )
         )
@@ -160,7 +168,15 @@ class AcceptanceRecorder:
         )
         return True
 
-    def unproven(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
+    def unproven(
+        self,
+        check: str,
+        stage: str,
+        *,
+        reason_code: str,
+        observation: object,
+        observed_cause: str | None = None,
+    ) -> None:
         """Record a proof the harness could NOT make. Never a pass.
 
         Use this when the harness FAILED TO LOOK — the probe did not complete, the runtime was
@@ -173,15 +189,29 @@ class AcceptanceRecorder:
             outcome=OUTCOME_UNPROVEN,
             reason_code=reason_code,
             observation=observation,
+            observed_cause=observed_cause,
         )
 
-    def violated(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
+    def violated(
+        self,
+        check: str,
+        stage: str,
+        *,
+        reason_code: str,
+        observation: object,
+        observed_cause: str | None = None,
+    ) -> None:
         """Record that the harness POSITIVELY OBSERVED the state this check exists to rule out.
 
         The operator queue had a live poller; the private key left the worker; the operator unit was
         activated. Never a pass, and never the same value as :meth:`unproven` — a proven breach and
         a probe that could not run are opposite findings that call for opposite responses, and the
         management plane's containment probe already keeps them apart for exactly this reason.
+
+        ``observed_cause`` names the SPECIFIC tell, from the producer's own closed vocabulary. Pass
+        it whenever the check can be violated in more than one way: ``reason_code`` is deliberately
+        one coarse code for every violation in the harness, so without a cause a reader of the
+        document cannot tell which of several findings this was.
         """
         self._record(
             check=check,
@@ -189,6 +219,7 @@ class AcceptanceRecorder:
             outcome=OUTCOME_VIOLATED,
             reason_code=reason_code,
             observation=observation,
+            observed_cause=observed_cause,
         )
 
     # --- gaps -----------------------------------------------------------------------------

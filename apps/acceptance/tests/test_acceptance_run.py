@@ -86,6 +86,32 @@ def test_a_run_that_never_recorded_a_fleet_cannot_seal():
     assert exc.value.reason_code == "acceptance_run_fleet_not_recorded"
 
 
+def test_a_second_DIFFERENT_fleet_in_one_session_is_refused():
+    """Two fleets, one document. The evidence carries exactly one ``FleetRecord``, so a session that
+    built two would describe one machine pair while carrying claims gathered against both — and
+    nothing in the document would say which check belonged to which.
+
+    This is the failure mode a MODULE-scoped fleet fixture produces as soon as a second stage module
+    exists, which is why the fleet fixture must be session-scoped.
+    """
+    run = AcceptanceRun()
+    run.set_fleet(_FLEET)
+    second = _FLEET.model_copy(update={"controller_host_identity": "sha256:" + "9" * 64})
+    with pytest.raises(AcceptanceError) as exc:
+        run.set_fleet(second)
+    assert exc.value.reason_code == "acceptance_run_fleet_conflict"
+
+
+def test_recording_the_SAME_fleet_twice_is_allowed():
+    """The control. A session-scoped fixture may legitimately hand over the same record more than
+    once, and refusing that would push streams toward not recording it at all."""
+    run = AcceptanceRun()
+    run.set_fleet(_FLEET)
+    run.set_fleet(_FLEET)  # does not raise
+    _cover(run, STAGE_FLEET)
+    assert run.seal().fleet == _FLEET
+
+
 def test_a_fully_covered_run_seals_passed():
     run = AcceptanceRun()
     run.set_fleet(_FLEET)
@@ -117,7 +143,9 @@ def test_a_run_missing_a_release_says_so_rather_than_inventing_a_lineage():
     run.set_fleet(_FLEET)
     _cover(run, STAGE_FLEET)
     document = run.seal()
-    assert document.outcome == RUN_FAILED
+    # NOTE: the outcome is deliberately NOT asserted here. A one-stage run always seals `failed`
+    # because of the nine-stage rule, so `outcome == RUN_FAILED` would be true regardless of the
+    # release record and would prove nothing about this test's actual subject.
     assert document.stages_attempted == (STAGE_FLEET,)
     # honest about the anchor: none was used, so the "test only" assertion is TRUE, not False
     assert document.release.test_only_anchor is True
@@ -150,7 +178,14 @@ def test_a_FAILED_run_is_written_too(tmp_path: pathlib.Path):
     needs to consult it."""
     run = AcceptanceRun()
     run.set_fleet(_FLEET)
-    run.open_stage(STAGE_QUEUES)
+    run.set_release(_RELEASE)
+    # All nine stages, one violated — so `failed` is caused by the VIOLATION rather than by the
+    # stage count, and this test would go red if `violated` ever stopped failing a run.
+    for stage in sorted(STAGES):
+        run.open_stage(stage)
+        for check in CHECKS_BY_STAGE[stage]:
+            if check != "operator_queue_has_zero_pollers":
+                run.observe(check, stage, {"check": check})
     run.violated(
         "operator_queue_has_zero_pollers",
         STAGE_QUEUES,
@@ -162,6 +197,7 @@ def test_a_FAILED_run_is_written_too(tmp_path: pathlib.Path):
     reloaded = evidence_from_bytes(path.read_bytes())
     assert reloaded.outcome == RUN_FAILED
     assert reloaded.violated() == ("operator_queue_has_zero_pollers",)
+    assert reloaded.not_passing() == ("operator_queue_has_zero_pollers",)
 
 
 def test_the_written_bytes_are_canonical_json(tmp_path: pathlib.Path):
