@@ -69,6 +69,12 @@ from secp_commissioning.descriptor import scan_forbidden
 
 from secp_acceptance import AcceptanceError
 from secp_acceptance.hosts import Host, HostFleet
+from secp_acceptance.reasons import (
+    OUTCOME_OBSERVED,
+    OUTCOME_UNPROVEN,
+    OUTCOME_VIOLATED,
+    PASSING_OUTCOMES,
+)
 from secp_acceptance.shell import Result, run
 
 # --------------------------------------------------------------------------- reviewed literals
@@ -293,43 +299,23 @@ def secpctl_json(
 # The rule, applied uniformly: if the producer can distinguish observed-false from could-not-look,
 # then observed-false is VIOLATED. Severity lives in the reason code, never in the outcome.
 #
-# WHY THE OUTCOME STRING IS A LOCAL CONSTANT
-# ------------------------------------------
-# ``violated`` is not yet in this tree's ``secp_acceptance.reasons`` vocabulary — it arrives
-# with the evidence stream's contract. Rather than guess at an import that does not resolve, the
-# value is held here, and a guard test pins it against the real vocabulary the moment that
-# vocabulary carries it while still asserting something true about the vocabulary as it stands.
+# THE OUTCOMES COME FROM THE SHARED VOCABULARY, NEVER FROM A LOCAL STRING
+# -----------------------------------------------------------------------
+# Imported, not redeclared. A local ``"violated"`` that drifted from the vocabulary would
+# type-check, read correctly, and be refused by the evidence loader at the END of a privileged run.
+#
+# The reason code is ``acceptance_prohibited_state_observed`` for EVERY violation this stage can
+# record. That is the evidence contract's deliberate design and it is right: the CHECK ID already
+# says which property was violated, so a per-check code set would duplicate that and grow past
+# review. An earlier draft of this module proposed four bespoke codes; they are gone.
+#
+# A ``violated`` reason must be a HARNESS reason — the harness is reporting what it SAW. A product
+# code here would say the product refused when it did not.
 
-OUTCOME_OBSERVED = "observed"
-OUTCOME_UNPROVEN = "unproven"
-OUTCOME_VIOLATED = "violated"
-
-#: Reason codes for the two non-positive outcomes. A ``violated`` reason MUST be a HARNESS reason:
-#: the harness is reporting what it saw, and attributing that observation to a PRODUCT refusal code
-#: would say the product refused when it did not.
-#:
-#: This tree has no harness code meaning "the harness observed the condition this check rules out" —
-#: the closest, ``acceptance_observation_malformed``, describes a broken observation rather than a
-#: sound observation of a broken thing. So the intended codes are named here and listed as PENDING;
-#: a guard test asserts exactly which are still missing, and will fail when they land under other
-#: names rather than letting a wrong code ship quietly.
+#: The harness observed the exact state a check exists to rule out.
+REASON_PROHIBITED_STATE = "acceptance_prohibited_state_observed"
+#: The harness could not make the observation at all. Never used for a state that WAS observed.
 REASON_COULD_NOT_LOOK = "acceptance_observation_unavailable"
-REASON_OBSERVATION_MALFORMED = "acceptance_observation_malformed"
-REASON_IDENTITY_DISAGREES = "acceptance_cross_host_identity_disagrees"
-REASON_PRIVATE_KEY_ESCAPED = "acceptance_worker_private_key_escaped"
-REASON_INVITATION_REFETCHABLE = "acceptance_invitation_refetchable"
-REASON_RELEASE_DISAGREES = "acceptance_enrolled_release_disagrees"
-
-#: The codes above that this tree's ``HARNESS_REASONS`` does not yet carry. Not a wish list — the
-#: guard test recomputes it, so it shrinks on its own as the vocabulary grows and cannot drift.
-PENDING_HARNESS_REASONS: frozenset[str] = frozenset(
-    {
-        REASON_IDENTITY_DISAGREES,
-        REASON_PRIVATE_KEY_ESCAPED,
-        REASON_INVITATION_REFETCHABLE,
-        REASON_RELEASE_DISAGREES,
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -352,9 +338,13 @@ class CheckVerdict:
 
     @property
     def is_pass(self) -> bool:
-        """Only a positive observation passes. ``violated`` and ``unproven`` are both failures, for
-        different reasons, and neither is ever a pass."""
-        return self.outcome == OUTCOME_OBSERVED
+        """Delegated to the contract's ALLOWLIST, never restated here.
+
+        The predicate was once "pass unless unproven" — a denylist, which silently promoted every
+        outcome added later into a passing one. ``violated`` is exactly such an outcome. Deferring
+        to ``PASSING_OUTCOMES`` means a fifth outcome cannot become a pass by default here either.
+        """
+        return self.outcome in PASSING_OUTCOMES
 
 
 def classify_private_key_containment(observed: Mapping[str, object]) -> CheckVerdict:
@@ -372,7 +362,7 @@ def classify_private_key_containment(observed: Mapping[str, object]) -> CheckVer
         return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
     if observed.get("contained"):
         return CheckVerdict(OUTCOME_OBSERVED)
-    return CheckVerdict(OUTCOME_VIOLATED, REASON_PRIVATE_KEY_ESCAPED)
+    return CheckVerdict(OUTCOME_VIOLATED, REASON_PROHIBITED_STATE)
 
 
 def classify_invitation_one_shot(
@@ -387,7 +377,7 @@ def classify_invitation_one_shot(
         return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
     if observed.get("not_refetchable"):
         return CheckVerdict(OUTCOME_OBSERVED)
-    return CheckVerdict(OUTCOME_VIOLATED, REASON_INVITATION_REFETCHABLE)
+    return CheckVerdict(OUTCOME_VIOLATED, REASON_PROHIBITED_STATE)
 
 
 def classify_identity_agreement(observed: Mapping[str, object]) -> CheckVerdict:
@@ -404,7 +394,7 @@ def classify_identity_agreement(observed: Mapping[str, object]) -> CheckVerdict:
         return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
     if observed.get("agree"):
         return CheckVerdict(OUTCOME_OBSERVED)
-    return CheckVerdict(OUTCOME_VIOLATED, REASON_IDENTITY_DISAGREES)
+    return CheckVerdict(OUTCOME_VIOLATED, REASON_PROHIBITED_STATE)
 
 
 def classify_release_agreement(observed: Mapping[str, object]) -> CheckVerdict:
@@ -426,7 +416,7 @@ def classify_release_agreement(observed: Mapping[str, object]) -> CheckVerdict:
         return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
     if observed.get("agree"):
         return CheckVerdict(OUTCOME_OBSERVED)
-    return CheckVerdict(OUTCOME_VIOLATED, REASON_RELEASE_DISAGREES)
+    return CheckVerdict(OUTCOME_VIOLATED, REASON_PROHIBITED_STATE)
 
 
 # --------------------------------------------------------------------------- the invitation
@@ -619,6 +609,57 @@ def controller_enrollment_status(
     return secpctl_json(
         controller,
         ("enrollment", "status", "--enrollment-id", enrollment_id),
+        token_path=token_path,
+    )
+
+
+def revoke_enrollment(
+    controller: Host, *, enrollment_id: str, expected_revision: int, token_path: str
+) -> tuple[int, dict]:
+    """``secpctl enrollment revoke`` — the operator-authenticated destructive transition.
+
+    Shared with the lifecycle stream, which needs an enrollment it can drive into a terminal state.
+    ``expected_revision`` is the caller's LAST OBSERVED public revision and is deliberately required
+    by the product: revoking without it would be a blind write, and a stale value is refused as a
+    revision conflict rather than silently applied to whatever the row now says.
+    """
+    if not _ENROLLMENT_ID.fullmatch(enrollment_id):
+        raise AcceptanceError("acceptance_observation_malformed")
+    return secpctl_json(
+        controller,
+        (
+            "enrollment",
+            "revoke",
+            "--enrollment-id",
+            enrollment_id,
+            "--expected-revision",
+            str(int(expected_revision)),
+            "--write",
+            "--confirm",
+        ),
+        token_path=token_path,
+    )
+
+
+def create_sacrificial_invitation(
+    controller: Host, *, site_label: str, token_path: str, ttl_seconds: int = 300
+) -> tuple[int, InvitationArtifact | dict]:
+    """A SECOND, disposable enrollment for destructive lifecycle work.
+
+    READ THIS BEFORE REUSING THE MAIN ENROLLMENT INSTEAD. The identity stage's checks are all
+    assertions about ONE enrollment: its key fingerprint, its installation id, its durable marker.
+    Revoking that enrollment to exercise a terminal transition would invalidate every one of them,
+    and the identity stage would fail for a reason that has nothing to do with identity — the
+    expensive kind of failure, because it looks like a real defect.
+
+    So destructive work gets its own invitation, created through the same supported command and
+    distinguishable by its site label. A short TTL is the default because nothing is expected to
+    redeem it.
+    """
+    return create_invitation(
+        controller,
+        site_label=site_label,
+        ttl_seconds=ttl_seconds,
         token_path=token_path,
     )
 
@@ -1163,16 +1204,8 @@ __all__ = [
     "INVITATION_HOST_PATH",
     "MANAGEMENT_WORKER_IDENTITY_PATH",
     "OPERATOR_TOKEN_FILE_ENV",
-    "OUTCOME_OBSERVED",
-    "OUTCOME_UNPROVEN",
-    "OUTCOME_VIOLATED",
-    "PENDING_HARNESS_REASONS",
     "REASON_COULD_NOT_LOOK",
-    "REASON_IDENTITY_DISAGREES",
-    "REASON_INVITATION_REFETCHABLE",
-    "REASON_OBSERVATION_MALFORMED",
-    "REASON_PRIVATE_KEY_ESCAPED",
-    "REASON_RELEASE_DISAGREES",
+    "REASON_PROHIBITED_STATE",
     "REDEEMABLE_INVITATION_KEYS",
     "REQUIRED_INVITATION_KEYS",
     "SECPCTL",
@@ -1189,6 +1222,7 @@ __all__ = [
     "InvitationArtifact",
     "containment_verdict",
     "controller_enrollment_status",
+    "create_sacrificial_invitation",
     "controller_key_fingerprint",
     "create_invitation",
     "deliver_invitation",
@@ -1208,6 +1242,7 @@ __all__ = [
     "observe_worker_enrollment_key",
     "observe_worker_key_identity",
     "restart_worker_host",
+    "revoke_enrollment",
     "secpctl_json",
     "status_fingerprint",
     "worker_enroll",

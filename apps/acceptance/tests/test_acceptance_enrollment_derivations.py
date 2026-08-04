@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
 
@@ -593,11 +594,11 @@ def test_neither_violated_nor_unproven_is_ever_a_pass():
         OUTCOME_UNPROVEN,
         OUTCOME_VIOLATED,
         REASON_COULD_NOT_LOOK,
-        REASON_PRIVATE_KEY_ESCAPED,
+        REASON_PROHIBITED_STATE,
         CheckVerdict,
     )
 
-    assert CheckVerdict(OUTCOME_VIOLATED, REASON_PRIVATE_KEY_ESCAPED).is_pass is False
+    assert CheckVerdict(OUTCOME_VIOLATED, REASON_PROHIBITED_STATE).is_pass is False
     assert CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK).is_pass is False
 
 
@@ -757,55 +758,128 @@ def test_a_measured_release_divergence_is_violated_not_unproven():
 
 def test_every_violated_reason_is_a_harness_reason_never_a_product_one():
     """``violated`` is the HARNESS reporting what it saw. A product code here would attribute the
-    harness's own observation to a product refusal that never happened."""
-    from secp_acceptance.enrollment import (
-        PENDING_HARNESS_REASONS,
-        REASON_IDENTITY_DISAGREES,
-        REASON_INVITATION_REFETCHABLE,
-        REASON_PRIVATE_KEY_ESCAPED,
-        REASON_RELEASE_DISAGREES,
-    )
+    harness's own observation to a product refusal that never happened.
+
+    The contract ships ONE code for every violation rather than one per check, because the check id
+    already names the property. An earlier draft of this module proposed four bespoke codes; this
+    guard is what would have caught them never landing.
+    """
+    from secp_acceptance.enrollment import REASON_COULD_NOT_LOOK, REASON_PROHIBITED_STATE
     from secp_acceptance.reasons import HARNESS_REASONS, PRODUCT_REASONS
 
-    proposed = {
-        REASON_IDENTITY_DISAGREES,
-        REASON_INVITATION_REFETCHABLE,
-        REASON_PRIVATE_KEY_ESCAPED,
-        REASON_RELEASE_DISAGREES,
-    }
-    assert not (proposed & PRODUCT_REASONS), "a violated reason must never be a product code"
-    # Recomputed, not asserted from a literal: the pending set shrinks on its own as the vocabulary
-    # grows, and a code that lands under a DIFFERENT name fails here instead of shipping wrong.
-    assert PENDING_HARNESS_REASONS == proposed - HARNESS_REASONS
+    for code in (REASON_PROHIBITED_STATE, REASON_COULD_NOT_LOOK):
+        assert code in HARNESS_REASONS, "a harness outcome needs a harness reason"
+        assert code not in PRODUCT_REASONS
 
 
-def test_the_outcome_vocabulary_is_pinned_in_whichever_state_this_tree_is_in():
-    """Non-vacuous both before and after the evidence stream's contract lands.
-
-    Today ``violated`` is not in ``reasons.OUTCOMES``, so this pins the three that ARE there — a
-    silent change to them fails here. Once ``violated`` lands, the first branch pins that this
-    module's string is the same one the vocabulary uses, rather than a near-miss that would be
-    rejected by the loader at the end of a long run.
-    """
-    from secp_acceptance import reasons
+def test_every_classifier_emits_only_contract_reasons():
+    """Swept across all four classifiers and all three branches, so a bespoke code cannot survive in
+    one seldom-exercised path."""
     from secp_acceptance.enrollment import (
+        classify_identity_agreement,
+        classify_invitation_one_shot,
+        classify_private_key_containment,
+        classify_release_agreement,
+    )
+    from secp_acceptance.reasons import ALL_REASONS, HARNESS_REASONS
+
+    verdicts = [
+        classify_private_key_containment({"key_digest_observed": False}),
+        classify_private_key_containment(
+            {"key_digest_observed": True, "controller_scan_complete": False}
+        ),
+        classify_private_key_containment(
+            {"key_digest_observed": True, "controller_scan_complete": True, "contained": False}
+        ),
+        classify_invitation_one_shot({}, status_readable=False),
+        classify_invitation_one_shot({"not_refetchable": False}, status_readable=True),
+        classify_identity_agreement({"derived_present": False, "recorded_present": False}),
+        classify_identity_agreement(
+            {"derived_present": True, "recorded_present": True, "agree": False}
+        ),
+        classify_release_agreement({"installed_present": False, "enrolled_present": True}),
+        classify_release_agreement(
+            {"installed_present": True, "enrolled_present": True, "agree": False}
+        ),
+    ]
+    assert verdicts, "the sweep must actually produce verdicts"
+    for verdict in verdicts:
+        assert verdict.reason_code in ALL_REASONS
+        assert verdict.reason_code in HARNESS_REASONS
+        assert verdict.is_pass is False
+
+
+def test_the_module_imports_the_outcome_vocabulary_and_never_redeclares_it():
+    """Structural, because the obvious runtime check cannot fail.
+
+    ``enrollment.OUTCOME_OBSERVED is reasons.OUTCOME_OBSERVED`` looks like an identity assertion and
+    is not one: CPython interns short string literals, so a local ``OUTCOME_OBSERVED = "observed"``
+    shadowing the import satisfies it. That version of this test was written, and a mutant that
+    replaced the import with local literals survived it.
+
+    So the property is asserted where it is actually decidable — in the module's own syntax. The
+    names must arrive by ``from secp_acceptance.reasons import ...`` and must never be assigned at
+    module level. A drifted local copy would type-check, read correctly, and be refused by the
+    evidence loader at the end of a privileged run.
+    """
+    import ast
+
+    from secp_acceptance import enrollment, reasons
+
+    pinned = {"OUTCOME_OBSERVED", "OUTCOME_UNPROVEN", "OUTCOME_VIOLATED", "PASSING_OUTCOMES"}
+    tree = ast.parse(pathlib.Path(enrollment.__file__).read_text(encoding="utf-8"))
+
+    imported = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "secp_acceptance.reasons"
+        for alias in node.names
+    }
+    assert pinned <= imported, f"not imported from the contract: {sorted(pinned - imported)}"
+
+    assigned = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    } | {
+        node.target.id
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    assert not (pinned & assigned), f"redeclared locally: {sorted(pinned & assigned)}"
+
+    # and the values really are the vocabulary's members
+    for outcome in (
+        enrollment.OUTCOME_OBSERVED,
+        enrollment.OUTCOME_UNPROVEN,
+        enrollment.OUTCOME_VIOLATED,
+    ):
+        assert outcome in reasons.OUTCOMES
+
+
+def test_the_pass_predicate_is_the_contract_allowlist_not_a_local_denylist():
+    """``violated`` must not pass, and neither must a fifth outcome added later.
+
+    The predicate defers to ``PASSING_OUTCOMES``. A denylist ("pass unless unproven") would have
+    admitted ``violated`` the moment it was introduced — which is precisely what happened to the
+    contract's own predicate before it was repaired.
+    """
+    from secp_acceptance.enrollment import CheckVerdict
+    from secp_acceptance.reasons import (
         OUTCOME_OBSERVED,
         OUTCOME_UNPROVEN,
         OUTCOME_VIOLATED,
+        PASSING_OUTCOMES,
     )
 
-    assert OUTCOME_OBSERVED == reasons.OUTCOME_OBSERVED
-    assert OUTCOME_UNPROVEN == reasons.OUTCOME_UNPROVEN
-    if hasattr(reasons, "OUTCOME_VIOLATED"):
-        assert OUTCOME_VIOLATED == reasons.OUTCOME_VIOLATED
-        assert OUTCOME_VIOLATED in reasons.OUTCOMES
-    else:
-        assert reasons.OUTCOMES == frozenset({"observed", "refused", "unproven"})
-        assert OUTCOME_VIOLATED not in reasons.OUTCOMES
-        # Pin the literal while there is nothing to compare it against. Without this the branch
-        # would accept any string absent from the vocabulary — including a typo — and the mistake
-        # would surface only when the loader rejected it at the end of a long run.
-        assert OUTCOME_VIOLATED == "violated"
+    assert OUTCOME_VIOLATED not in PASSING_OUTCOMES
+    assert OUTCOME_UNPROVEN not in PASSING_OUTCOMES
+    assert OUTCOME_OBSERVED in PASSING_OUTCOMES
+    assert CheckVerdict(OUTCOME_OBSERVED).is_pass is True
+    assert CheckVerdict(OUTCOME_VIOLATED, "acceptance_prohibited_state_observed").is_pass is False
+    assert CheckVerdict(OUTCOME_UNPROVEN, "acceptance_observation_unavailable").is_pass is False
 
 
 # --------------------------------------------------------------------------- the embedded programs
@@ -1028,3 +1102,40 @@ def test_the_inventory_program_installs_the_redirect_refusing_handler_it_defines
     compile(_INVENTORY_SCRIPT, "<inventory>", "exec")
     # TLS must pin the locator's CA — never system trust, never disabled
     assert "cafile=locator" in _INVENTORY_SCRIPT
+
+
+# --------------------------------------------------------------------------- the lifecycle seam
+#
+# Handed to the lifecycle stream. The guards below are about the two things that stream can get
+# wrong from outside this module: revoking with an unvalidated id, and revoking the WRONG
+# enrollment.
+
+
+def test_revoke_refuses_an_id_that_does_not_match_the_product_grammar():
+    """The id reaches an argv, so it is validated against the same grammar the product's own client
+    enforces rather than handed through and rejected downstream."""
+    from secp_acceptance import AcceptanceError
+    from secp_acceptance.enrollment import revoke_enrollment
+
+    for bad in ("", "not-an-id", "sha256:short", "sha256:" + "Z" * 64, "sha256:" + "0" * 63):
+        with pytest.raises(AcceptanceError):
+            revoke_enrollment(None, enrollment_id=bad, expected_revision=0, token_path="/run/t")
+
+
+def test_the_sacrificial_invitation_is_a_separate_enrollment_from_the_identity_one():
+    """The lifecycle stream needs something it can destroy, and it must not be the enrollment the
+    identity stage is asserting about.
+
+    Pinned as a signature property: the helper takes its OWN site label, so a caller cannot reach
+    for it without naming which enrollment it means. If this ever gained a default that matched the
+    main run's label, destructive lifecycle work would land on the identity stage's enrollment and
+    the identity stage would fail for a reason unrelated to identity.
+    """
+    import inspect
+
+    from secp_acceptance.enrollment import create_sacrificial_invitation
+
+    signature = inspect.signature(create_sacrificial_invitation)
+    assert "site_label" in signature.parameters
+    assert signature.parameters["site_label"].default is inspect.Parameter.empty
+    assert signature.parameters["ttl_seconds"].default == 300
