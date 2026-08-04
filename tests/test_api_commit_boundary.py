@@ -132,17 +132,40 @@ def _served_contexts(router, out=None, seen=None):
       someone to write than any of the exotic cases this module guards against.
     """
     out = [] if out is None else out
-    seen = set() if seen is None else seen
-    if id(router) in seen:
+    seen = [] if seen is None else seen
+    if any(node is router for node in seen):
         return out
-    seen.add(id(router))
+    # Held by strong reference, NOT by id(): the nested ``_IncludedRouter`` objects below are
+    # constructed fresh by ``effective_candidates()``, so an id()-keyed set could match a recycled
+    # address and skip a subtree that was never visited.
+    seen.append(router)
+
+    # An ``_IncludedRouter`` is expanded through its OWN ``effective_candidates()``. It does not
+    # have a ``.routes`` attribute at all, so the earlier code — which recursed into this function
+    # and fell through to ``getattr(router, "routes", [])`` — silently dropped the ENTIRE subtree
+    # for any router included into another router.
+    #
+    # That was not theoretical. A route under a nested router carrying a router-level
+    # ``dependencies=[Depends(...)]`` was served (present in the OpenAPI schema, answering 200 over
+    # a real socket, its dependency demonstrably running) while this walk reported the corpus
+    # completely unchanged — 182 contexts, 349 generator dependencies — and every check passed.
+    # ``dependencies=[...]`` on a router is a mainstream FastAPI idiom for auth, and nesting
+    # routers is ordinary, so this was a live hole rather than an exotic one.
+    #
+    # The ``getattr(..., [])`` that caused it is precisely the absence-of-input/absence-of-match
+    # confusion this whole module exists to prevent: the walk answered "nothing here" for a subtree
+    # it had failed to open.
+    if isinstance(router, _IncludedRouter):
+        for candidate in router.effective_candidates():
+            if isinstance(candidate, _EffectiveRouteContext):
+                out.append(candidate)
+            else:
+                _served_contexts(candidate, out, seen)
+        return out
+
     for route in getattr(router, "routes", []):
         if isinstance(route, _IncludedRouter):
-            for candidate in route.effective_candidates():
-                if isinstance(candidate, _EffectiveRouteContext):
-                    out.append(candidate)
-                else:
-                    _served_contexts(candidate, out, seen)
+            _served_contexts(route, out, seen)
         elif isinstance(route, APIRoute):
             # Serves directly off its own ``dependant``; there is no rebuilt context to consult.
             out.append(route)

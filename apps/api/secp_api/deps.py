@@ -86,6 +86,14 @@ def db_session() -> Iterator[Session]:
 # 200 with a short body rather than an error. Materialise rows into plain data BEFORE returning a
 # StreamingResponse. There is no streaming route in this application today, and the commit-boundary
 # guard does NOT detect this — it has no notion of response classes.
+#
+# WEBSOCKET ROUTES ARE ALSO NOT COVERED. ``@router.websocket(...)`` produces an
+# ``APIWebSocketRoute``, which is neither an ``_IncludedRouter`` nor an ``APIRoute``, so the
+# commit-boundary guard's walk does not reach it and a request-scoped session generator behind one
+# would go unreported. Left as documentation rather than detection on purpose: none exist in this
+# application, and "commit before the response" does not map cleanly onto a socket that has no
+# single response to be ordered against. If a WebSocket route is ever added, its session lifetime
+# needs deciding on its own terms — not by assuming this guard covered it.
 DB_SESSION = Depends(db_session, scope="function")
 
 
