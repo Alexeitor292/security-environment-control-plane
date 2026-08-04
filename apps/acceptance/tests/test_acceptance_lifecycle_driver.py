@@ -66,7 +66,7 @@ class _Recorder:
         self.calls.append((check, "violated", "acceptance_prohibited_state_observed"))
         self.observations[check] = observation
 
-    def expect_refusal(
+    def refused(
         self, check: str, *, expected: str, actual: str | None, observation: object
     ) -> bool:
         """Mirrors the recorder contract: only the EXPECTED code is a pass.
@@ -719,3 +719,17 @@ def test_an_unreadable_enrollment_report_proves_nothing_about_the_default():
     drive_dry_run_default(recorder, _Host({}), "/inv.json")
 
     assert recorder.outcome("enroll_without_write_confirm_is_dry_run") == "unproven"
+
+
+def test_the_protocol_declares_the_verb_by_the_name_the_recorder_publishes():
+    """A structural Protocol binds by NAME, so agreeing on every keyword and still using a
+    different name fails at integration and nowhere earlier.
+
+    This was a live mismatch: the installation stream published `refused`, and this driver was
+    written against `expect_refusal` — which is the RUN method that one delegates to. Pinned here
+    so the next rename is caught by a test rather than by a merge.
+    """
+    from secp_acceptance.lifecycle_driver import StageRecorder
+
+    assert hasattr(StageRecorder, "refused")
+    assert not hasattr(StageRecorder, "expect_refusal")

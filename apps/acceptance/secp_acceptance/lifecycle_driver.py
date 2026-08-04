@@ -68,10 +68,16 @@ class StageRecorder(Protocol):
 
     def violated(self, check: str, *, observation: object) -> None: ...
 
-    def expect_refusal(
+    def refused(
         self, check: str, *, expected: str, actual: str | None, observation: object
     ) -> bool:
         """Record a refusal the scenario REQUIRED, and return whether it was the expected one.
+
+        NAMED `refused`, not `expect_refusal`. The latter is the RUN method this delegates to, and
+        writing the Protocol against it was a real mismatch: a structural Protocol binds by NAME,
+        so the two would have agreed on every keyword, type and return value and still failed at
+        integration. Found by checking the published signature instead of assuming it matched the
+        one I wrote against.
 
         The verb the failure-injection stage is built on. "The product refused" and "the product
         refused FOR THE REASON THAT MAKES THIS TEST MEANINGFUL" are different claims, and only the
@@ -403,7 +409,7 @@ def drive_failure_injection(
         report = secpctl(worker, ("bootstrap", "worker", "--bundle", bundle))
         # `actual=None` means the product did not refuse at all — the worst outcome for an
         # injection, and the recorder records it as such rather than as a pass.
-        recorder.expect_refusal(
+        recorder.refused(
             check,
             expected=expected,
             actual=report.reason_code if report.status == REPORT_REFUSED else None,
