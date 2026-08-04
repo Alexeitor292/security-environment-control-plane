@@ -4,9 +4,9 @@
 This module answers the narrower question an operator actually has to answer before a
 controlled-live milestone, and has to be able to answer WITHOUT submitting anything:
 
-    *Is the controlled-live operator queue isolated from the ordinary queue, is anything
-    consuming it, and if a controlled-live workflow were submitted right now, what would stop
-    it?*
+    *Is the controlled-live operator queue isolated from the queue the shipped worker polls, is
+    the packaged operator unit dormant, and if a controlled-live workflow were submitted right
+    now, what would stop it?*
 
 The last part is the only honest form of a dry run for this package. A submission cannot be
 "tried" — trying it is the thing that must never happen — so the answer is derived by OBSERVING
@@ -17,40 +17,40 @@ credential, or contacts Temporal. Every ``closed`` boolean in the report is a va
 not a value that was asserted in a docstring — and a stop that cannot be read at all is reported
 ``closed: False``, because an unobservable stop is not a stop.
 
-THREE INDEPENDENT FACTS, NEVER MERGED. The report keeps apart what a single "the operator side is
+FOUR INDEPENDENT FACTS, NEVER MERGED. The report keeps apart what a single "the operator side is
 safe" boolean would hide:
 
-* **isolation** (dimension B) — are both queues configured, and are they DISTINCT? A shared queue
-  would let the shipped sealed ordinary worker pick up controlled-live work. Built by the SAME
+* **isolation** (dimension B) — are both profile queues configured, and are they DISTINCT? A shared
+  queue would let the shipped sealed ordinary worker pick up controlled-live work. Built by the SAME
   :func:`~secp_operator_deployment.verify._queue_section` ``verify`` uses, deliberately, so the two
   commands can never disagree about the same fact. It reads the **deployment profile** pair, and
   the report says so in ``isolation.authority`` — see below for why that distinction matters.
-* **consumer dormancy** (dimension C) — is anything actually polling the operator queue? Observed
-  from the host, not from configuration.
+* **queue authority** (dimension B) — does the profile match the independent root-controlled pins,
+  and do those pins name the queue the shipped worker is constructed to poll?
+* **consumer dormancy** (dimension C) — is the packaged operator unit enabled or running? Observed
+  from the host, not from configuration. This does not claim to discover arbitrary consumers.
 * **submission stops** (dimensions D/E/F) — the reviewed code constants that would refuse.
 
 Note that consumer dormancy here is NOT ``verify``'s ``operator_prepared_and_disabled`` rung. That
 rung requires the operator unit to be PRESENT (a prepared host has it installed-but-disabled); this
-check asks only whether anything CONSUMES the queue, and an absent unit consumes nothing. The two
+check asks only whether that packaged unit is dormant, and an absent unit is dormant. The two
 answers differ on exactly one host state — unit absent — and they differ correctly.
 
-THE SAME TWO NAMES APPEAR IN THREE ARTEFACTS, AND ISOLATION READS ONE. This package's deployment
+THE SAME TWO NAMES APPEAR IN THREE ARTEFACTS. This package's deployment
 profile carries ``ordinary_task_queue`` / ``operator_task_queue``; the management plane's worker
 EVIDENCE DOCUMENT carries the same two names for a different component; and a RUNNING worker
 process polls ``Settings.temporal_task_queue`` / ``Settings.temporal_operator_task_queue``. This
-check reads only the first, and ``isolation.authority`` says so — which is what matching names
-across three artefacts make necessary.
+check reports the profile-only fact in ``isolation`` and independently gates overall success on
+``queue_authority``: profile == trusted pins, and trusted ordinary pin == shipped worker setting.
 
-A green isolation result therefore describes the deployment MATERIAL, not the process. The runtime
+A green ``isolation`` section therefore describes the deployment MATERIAL, not the process. A green
+overall status additionally requires the queue-authority binding above. The runtime
 pair also differs IN KIND: this package requires a non-empty operator queue, while the runtime one
 is empty by default AND the shipped worker entrypoint never reads it on any path — there, the
 operator queue is disabled by STRUCTURAL ABSENCE rather than by configuration. So "operator queue
 not configured" is a fault in this artefact and the correct, safe state in that one.
 
-This is exactly why isolation and dormancy are separate facts here. Dormancy is observed from the
-HOST, so it is the independent check on the running side that isolation cannot make. Merging them
-into one "the queue is safe" boolean would let a configuration read stand in for an observation of
-what is actually running — which is the substitution this whole module exists to refuse.
+This is exactly why isolation, authority, and packaged-unit dormancy are separate facts here.
 
 PURE, like :mod:`~secp_operator_deployment.verify`: the builders take already-resolved, exact-typed
 inputs and do no filesystem I/O. The CLI resolves those inputs from the SAME fixed root-controlled
@@ -234,6 +234,9 @@ QUEUE_LADDER: tuple[QueueRung, ...] = (
     QueueRung("submission_stops_closed", "F", "queue_stops_open", REMEDIATION_REVIEWED_CODE),
     QueueRung("isolation_observable", "B", "queue_unverified", REMEDIATION_REVIEWED_DEPLOYMENT),
     QueueRung("queues_isolated", "B", "queue_not_isolated", REMEDIATION_REVIEWED_DEPLOYMENT),
+    QueueRung(
+        "queue_authority_validated", "B", "queue_unverified", REMEDIATION_REVIEWED_DEPLOYMENT
+    ),
     QueueRung("consumer_observable", "C", "queue_unverified", REMEDIATION_OPERATOR),
     QueueRung("operator_consumer_dormant", "C", "queue_operator_consuming", REMEDIATION_OPERATOR),
 )
@@ -244,17 +247,20 @@ def _resolve_queue_status(
     stops_closed: bool,
     isolation_observable: bool,
     queues_isolated: bool,
+    queue_authority_validated: bool,
     consumer_observable: bool,
     consumer_dormant: bool,
 ) -> str:
     """Resolve the queue status. The guard ORDER is the contract, and is proven against
-    :data:`QUEUE_LADDER` over every combination of the five facts."""
+    :data:`QUEUE_LADDER` over every combination of the six facts."""
     if not stops_closed:
         return "queue_stops_open"  # a reviewed stop is open or unreadable — escalate
     if not isolation_observable:
         return "queue_unverified"  # no parsed profile: isolation cannot be judged at all
     if not queues_isolated:
         return "queue_not_isolated"  # the configuration itself is unsafe
+    if not queue_authority_validated:
+        return "queue_unverified"  # profile/pins/worker binding was not established
     if not consumer_observable:
         return "queue_unverified"  # the host could not be observed coherently
     if not consumer_dormant:
@@ -265,16 +271,17 @@ def _resolve_queue_status(
 def build_queue_report(
     *,
     profile: object | None = None,
+    expected: object | None = None,
     host_observation: object | None = None,
     stops: list[dict] | None = None,
     host_commands_executed: int = 0,
 ) -> dict:
     """Build the deterministic, secret-free CONTROLLED-LIVE QUEUE report.
 
-    PURE + exact-typed: ``profile`` and ``host_observation`` are pre-resolved exact types (or
-    ``None``) and a foreign object is refused without attribute access. ``stops`` is injectable so
-    a test can drive an OPEN stop without touching a reviewed constant; the production CLI never
-    passes it, so the real command always observes.
+    PURE + exact-typed: ``profile``, ``expected`` and ``host_observation`` are pre-resolved exact
+    types (or ``None``), and foreign objects are refused without attribute access. ``stops`` is
+    injectable so a test can drive an OPEN stop without touching a reviewed constant; the
+    production CLI never passes it, so the real command always observes.
     """
     from secp_operator_deployment.profile import DeploymentProfile
 
@@ -283,6 +290,7 @@ def build_queue_report(
     profile_parsed = profile is not None
 
     isolation = _queue_section(profile_parsed, profile)
+    authority = _queue_authority_section(profile_parsed, profile, expected)
     host = _host_section(host_observation)
     stop_rows = observe_submission_stops() if stops is None else [dict(r) for r in stops]
 
@@ -312,6 +320,7 @@ def build_queue_report(
         stops_closed=stops_closed,
         isolation_observable=profile_parsed,
         queues_isolated=bool(isolation["ok"]),
+        queue_authority_validated=bool(authority["validated"]),
         consumer_observable=consumer_observable,
         consumer_dormant=consumer_dormant,
     )
@@ -321,6 +330,7 @@ def build_queue_report(
         "status": status,
         "exit_code": QUEUE_EXIT_CODES[status],
         "isolation": isolation,
+        "queue_authority": authority,
         "operator_consumer": consumer,
         "submission_stops": {
             "ladder": stop_rows,
@@ -362,6 +372,37 @@ def build_queue_report(
                 "host_mutated": False,
             },
         },
+    }
+
+
+def _queue_authority_section(
+    profile_parsed: bool, profile: object | None, expected: object | None
+) -> dict:
+    """Prove profile == independent pins == the ordinary queue the shipped worker polls."""
+    from secp_operator_deployment.identities import (
+        ExpectedDeploymentIdentities,
+        require_queue_authority,
+    )
+
+    expected_provided = type(expected) is ExpectedDeploymentIdentities
+    validated = False
+    reason: str | None = None
+    if not profile_parsed:
+        reason = "queue_separation_unavailable"
+    elif not expected_provided:
+        reason = "expected_identities_not_provisioned"
+    else:
+        try:
+            require_queue_authority(profile, expected)  # type: ignore[arg-type]
+            validated = True
+        except Exception as exc:
+            reason = getattr(exc, "reason_code", "identity_mismatch")
+
+    return {
+        "validated": validated,
+        "expected_provided": expected_provided,
+        "authority": "deployment_profile_expected_pins_and_worker_setting",
+        "reason_code": reason,
     }
 
 

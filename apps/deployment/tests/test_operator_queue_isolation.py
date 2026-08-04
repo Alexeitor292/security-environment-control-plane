@@ -15,7 +15,7 @@ properties pinned here are, in order of what they protect:
   imported-module snapshot catches none, since the extra is installed in no environment this suite
   runs in. The reasoning is at the tripwire itself.
 * :func:`test_the_guard_order_is_exactly_the_ladder_order_on_every_fact_combination` — the ordering
-  proof, exhaustive over all 32 combinations of the five facts rather than sampled. ``QUEUE_LADDER``
+  proof, exhaustive over all 64 combinations of the six facts rather than sampled. ``QUEUE_LADDER``
   and ``_resolve_queue_status`` are independent derivations of the same order; if either moves, or
   gains or loses a guard, this fails. That makes the order self-enforcing rather than a docstring
   claim, which is the same standard the prerequisite ladder is held to.
@@ -34,7 +34,13 @@ import itertools
 import json
 
 import pytest
-from _deploy_support import OPERATOR_QUEUE, ORDINARY_QUEUE, host_evidence, valid_profile
+from _deploy_support import (
+    OPERATOR_QUEUE,
+    ORDINARY_QUEUE,
+    host_evidence,
+    valid_expected,
+    valid_profile,
+)
 from secp_operator_deployment.cli import build_parser, main, run
 from secp_operator_deployment.queue_check import (
     QUEUE_EXIT_CODES,
@@ -56,7 +62,9 @@ _QUEUE_NAMES = (ORDINARY_QUEUE, OPERATOR_QUEUE)
 
 def _report(**over):  # noqa: ANN003, ANN201
     """A queue report over a prepared, isolated, dormant deployment unless overridden."""
-    kwargs = dict(profile=valid_profile(), host_observation=host_evidence())
+    kwargs = dict(
+        profile=valid_profile(), expected=valid_expected(), host_observation=host_evidence()
+    )
     kwargs.update(over)
     return build_queue_report(**kwargs)
 
@@ -67,7 +75,7 @@ def _prepared_context(**over):  # noqa: ANN003, ANN201
     kwargs = dict(
         profile=valid_profile(),
         profile_load_reason=None,
-        expected=None,
+        expected=valid_expected(),
         installed_trust_ok=True,
         installed_trust_reason=None,
         attestation=None,
@@ -84,6 +92,7 @@ _FACTS = (
     "stops_closed",
     "isolation_observable",
     "queues_isolated",
+    "queue_authority_validated",
     "consumer_observable",
     "consumer_dormant",
 )
@@ -95,6 +104,7 @@ def test_the_ladder_names_exactly_the_facts_the_resolver_takes():
         "submission_stops_closed",
         "isolation_observable",
         "queues_isolated",
+        "queue_authority_validated",
         "consumer_observable",
         "operator_consumer_dormant",
     )
@@ -103,7 +113,7 @@ def test_the_ladder_names_exactly_the_facts_the_resolver_takes():
 
 @pytest.mark.parametrize("combo", list(itertools.product((True, False), repeat=len(_FACTS))))
 def test_the_guard_order_is_exactly_the_ladder_order_on_every_fact_combination(combo):
-    """Exhaustive, not sampled: 2**5 = 32 combinations.
+    """Exhaustive, not sampled: 2**6 = 64 combinations.
 
     Relative order can only be observed when two facts are unmet at once, which is exactly what a
     single-fault matrix cannot see — so the whole lattice is walked. The expected status is derived
@@ -273,6 +283,27 @@ def test_a_prepared_isolated_deployment_is_clean():
         "authority": "deployment_profile",
         "reason_code": None,
     }
+    assert report["queue_authority"] == {
+        "validated": True,
+        "expected_provided": True,
+        "authority": "deployment_profile_expected_pins_and_worker_setting",
+        "reason_code": None,
+    }
+
+
+def test_missing_or_drifted_queue_authority_cannot_report_success():
+    missing = _report(expected=None)
+    assert missing["status"] == "queue_unverified"
+    assert missing["queue_authority"]["reason_code"] == "expected_identities_not_provisioned"
+
+    drifted = _report(
+        profile=valid_profile(ordinary_task_queue="drifted-ordinary"),
+        expected=valid_expected(ordinary_task_queue="drifted-ordinary"),
+    )
+    assert drifted["isolation"]["ok"] is True
+    assert drifted["queue_authority"]["validated"] is False
+    assert drifted["queue_authority"]["reason_code"] == "expected_ordinary_queue_not_worker_queue"
+    assert drifted["status"] == "queue_unverified"
 
 
 def test_isolation_names_the_artefact_it_read_on_every_path():
@@ -439,8 +470,8 @@ def prepared_context(monkeypatch):
 
     ctx = production_context.VerifyContext(
         profile=valid_profile(),
+        expected=valid_expected(),
         profile_load_reason=None,
-        expected=None,
         installed_trust_ok=True,
         installed_trust_reason=None,
         attestation=None,
@@ -494,6 +525,41 @@ def test_main_queue_output_is_byte_identical_across_runs(prepared_context, capsy
     first = capsys.readouterr().out
     main(["queue", "--json"])
     assert capsys.readouterr().out == first
+
+
+def test_main_queue_refuses_when_the_context_carries_no_expected_pins(monkeypatch, capsys):
+    """The CLI-level half of the authority rung, kept separate from the report-level half.
+
+    ``_queue_kwargs`` threading ``expected`` out of the resolved context is the seam that decides
+    whether the rung sees pins at all. Were that key dropped, every report-level authority test
+    would stay green while the real command silently fell back to the unprovisioned path — so this
+    drives the actual CLI and asserts the REFUSAL, not a report built with explicit inputs.
+    """
+    from secp_operator_deployment import production_context
+
+    ctx = production_context.VerifyContext(
+        profile=valid_profile(),
+        expected=None,
+        profile_load_reason=None,
+        installed_trust_ok=True,
+        installed_trust_reason=None,
+        attestation=None,
+        host_observation=host_evidence(),
+    )
+    monkeypatch.setattr(production_context, "load_verify_context", lambda: ctx)
+
+    code = main(["queue", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "queue_unverified"
+    assert code == payload["exit_code"] == QUEUE_EXIT_CODES["queue_unverified"] == 10
+    assert payload["queue_authority"] == {
+        "validated": False,
+        "expected_provided": False,
+        "authority": "deployment_profile_expected_pins_and_worker_setting",
+        "reason_code": "expected_identities_not_provisioned",
+    }
+    # The unsafe near-miss: isolation alone was green, and on its own would have reported success.
+    assert payload["isolation"]["ok"] is True
 
 
 # --------------------------------------------------------------------------- the tripwires
@@ -581,8 +647,8 @@ def test_the_queue_command_reads_the_same_context_verify_does_exactly_once(monke
     calls = []
     ctx = production_context.VerifyContext(
         profile=valid_profile(),
+        expected=valid_expected(),
         profile_load_reason=None,
-        expected=None,
         installed_trust_ok=True,
         installed_trust_reason=None,
         attestation=None,

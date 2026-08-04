@@ -19,8 +19,9 @@ argument — the directory inspected is the installed module's own, resolved in 
 mutates nothing.
 
 ``python -m secp_operator_deployment queue --json`` is the third: the controlled-live QUEUE
-isolation check (:mod:`secp_operator_deployment.queue_check`) — are the two queues distinct, is
-anything consuming the operator queue, and what would refuse an attempted controlled-live start.
+isolation check (:mod:`secp_operator_deployment.queue_check`) — does the profile-to-pins-to-worker
+queue authority hold, is the packaged operator unit dormant, and what would refuse an attempted
+controlled-live start.
 It resolves its inputs through the SAME context loader ``verify`` uses, so it adds no contact
 surface, and it takes no queue argument for the same reason the others take no path argument.
 
@@ -211,6 +212,7 @@ def _queue_kwargs(deps: VerifyDeps | None) -> dict:
     if ctx is not None:
         return {
             "profile": ctx.profile,  # type: ignore[attr-defined]
+            "expected": ctx.expected,  # type: ignore[attr-defined]
             "host_observation": ctx.host_observation,  # type: ignore[attr-defined]
             "host_commands_executed": ctx.host_commands_executed,  # type: ignore[attr-defined]
         }
@@ -218,6 +220,7 @@ def _queue_kwargs(deps: VerifyDeps | None) -> dict:
     # host command could have been executed through it.
     return {
         "profile": None if deps is None else deps.profile,
+        "expected": None if deps is None else deps.expected,
         "host_observation": None if deps is None else deps.host_observation,
         "host_commands_executed": 0,
     }
@@ -255,7 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     prov.add_argument("--json", action="store_true", help="deterministic machine-readable output")
     queue = sub.add_parser(
         "queue",
-        help="read-only controlled-live queue isolation, consumer dormancy, and submission stops",
+        help="read-only queue authority, packaged-unit dormancy, and submission stops",
     )
     queue.add_argument("--json", action="store_true", help="deterministic machine-readable output")
     return parser

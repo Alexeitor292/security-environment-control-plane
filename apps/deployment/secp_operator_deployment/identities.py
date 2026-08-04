@@ -226,6 +226,40 @@ def require_profile_agreement(profile: object, expected: ExpectedDeploymentIdent
         _require(getattr(profile, "parent_sha", None) == expected.parent_sha, "parent_sha_mismatch")
 
 
+# The queue-only subset of _AGREEMENT_FIELDS, kept as its own table so the focused ``queue``
+# command checks exactly these two and a field added to one table is never silently assumed by the
+# other. Same attribute name on both sides, unlike the general table.
+_QUEUE_AGREEMENT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("ordinary_task_queue", "ordinary_queue_mismatch"),
+    ("operator_task_queue", "operator_queue_mismatch"),
+)
+
+
+def assert_expected_queue_authority(expected: ExpectedDeploymentIdentities) -> None:
+    """Bind the independent queue pins to the queue authority owned by shipped worker code."""
+    _require(
+        expected.ordinary_task_queue == worker_ordinary_task_queue(),
+        "expected_ordinary_queue_not_worker_queue",
+    )
+    _require(
+        expected.operator_task_queue != expected.ordinary_task_queue,
+        "expected_operator_queue_not_distinct",
+    )
+
+
+def require_queue_authority(profile: object, expected: ExpectedDeploymentIdentities) -> None:
+    """Bind the deployment queue pair to its independent pins and the shipped worker authority.
+
+    This is the queue-only subset needed by the standalone ``queue`` command. Keeping it separate
+    from :func:`require_profile_agreement` prevents that focused command from claiming queue
+    authority merely because the profile is internally distinct, while also avoiding unrelated
+    package-identity fields becoming prerequisites for a queue observation.
+    """
+    assert_expected_queue_authority(expected)
+    for attr, reason in _QUEUE_AGREEMENT_FIELDS:
+        _require(getattr(profile, attr) == getattr(expected, attr), reason)
+
+
 def assert_reviewed_provider(provider: object, expected_type: type, *, reason: str) -> None:
     """Bind a constructed controlled-live provider to its EXACT authoritative TYPE OBJECT via
     ``type(provider) is expected_type`` — NOT a forgeable ``module``/``qualname`` string. A foreign
@@ -300,21 +334,12 @@ def assert_expected_package_identity(expected: ExpectedDeploymentIdentities) -> 
     # nothing: profile and pins could agree with each other on a name the shipped worker does not
     # poll, and every operator-side check stayed green — correctly, since each was reporting about
     # the artefact it reads. This is the edge that closes the triangle profile == pins == code.
-    _require(
-        expected.ordinary_task_queue == worker_ordinary_task_queue(),
-        "expected_ordinary_queue_not_worker_queue",
-    )
-    # The pins must not be able to authorize a SHARED queue on their own. The profile validator
-    # already refuses ordinary == operator at parse time, but this function is also called with the
-    # pins ALONE (``verify`` runs it before ``require_profile_agreement``; ``compositions`` before
-    # the profile is resolved), and a shared queue is what would let the sealed ordinary worker pick
-    # up controlled-live work (ADR-022 §12). Deliberately NOT pinned to a code-owned operator NAME:
-    # the operator queue is deployment-local by design and its runtime setting is empty by default,
-    # so its identity constraint is distinctness, not equality.
-    _require(
-        expected.operator_task_queue != expected.ordinary_task_queue,
-        "expected_operator_queue_not_distinct",
-    )
+    # The pins must not be able to authorize a queue the shipped worker does not poll, or a SHARED
+    # queue. The profile validator already refuses ordinary == operator at parse time, but this
+    # function is also called with the pins ALONE (``verify`` before profile agreement;
+    # ``compositions`` before the profile is resolved). Deliberately NOT pinned to a code-owned
+    # operator NAME: that queue is deployment-local and the shipped worker never reads it.
+    assert_expected_queue_authority(expected)
 
 
 # --------------------------------------------------------------------------- independent loader
