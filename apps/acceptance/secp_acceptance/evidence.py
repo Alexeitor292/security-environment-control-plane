@@ -43,7 +43,9 @@ from secp_acceptance.reasons import (
     OUTCOME_OBSERVED,
     OUTCOME_REFUSED,
     OUTCOME_UNPROVEN,
+    OUTCOME_VIOLATED,
     OUTCOMES,
+    PASSING_OUTCOMES,
     RUN_FAILED,
     RUN_OUTCOMES,
     RUN_PASSED,
@@ -247,6 +249,24 @@ class AcceptanceEvidence(_Strict):
     def unproven(self) -> tuple[str, ...]:
         return tuple(sorted(r.check for r in self.checks if r.outcome == OUTCOME_UNPROVEN))
 
+    def violated(self) -> tuple[str, ...]:
+        """Checks where the harness POSITIVELY OBSERVED the state the check rules out.
+
+        Read this before :meth:`unproven` when triaging a failed run: these are proven product
+        defects, whereas ``unproven`` is the harness failing to look. They are the two opposite
+        reasons a run can fail and they call for opposite responses.
+        """
+        return tuple(sorted(r.check for r in self.checks if r.outcome == OUTCOME_VIOLATED))
+
+    def not_passing(self) -> tuple[str, ...]:
+        """Every recorded check whose outcome is not an admissible PASSING outcome.
+
+        The predicate a passing run is judged against. Stated over the allowlist
+        :data:`~secp_acceptance.reasons.PASSING_OUTCOMES` rather than by naming the bad outcomes, so
+        an outcome added to the vocabulary later cannot become a passing one by default.
+        """
+        return tuple(sorted(r.check for r in self.checks if r.outcome not in PASSING_OUTCOMES))
+
 
 # --------------------------------------------------------------------------- semantics
 
@@ -346,13 +366,24 @@ def _assert_evidence_semantics(ev: AcceptanceEvidence) -> None:
             raise AcceptanceError("acceptance_evidence_forbidden_value")
     if ev.ephemeral_material_only is not True:
         raise AcceptanceError("acceptance_evidence_forbidden_value")
-    # A ``passed`` run must be complete and free of unproven checks. ``failed`` carries no such
-    # requirement — a failed run is expected to be partial, and forcing it to be complete would
-    # push the harness toward not recording the failure at all.
+    # A ``passed`` run must be complete and must contain ONLY passing outcomes. ``failed`` carries
+    # no such requirement — a failed run is expected to be partial, and forcing it to be complete
+    # would push the harness toward not recording the failure at all.
+    #
+    # Stated as an ALLOWLIST (`not_passing`), never as "no unproven". The denylist form silently
+    # promotes every newly-added outcome to a passing one: with it, marking a check ``violated``
+    # produced a document carrying a proven violation that still loaded as ``passed``.
     if ev.outcome == RUN_PASSED:
+        # ALL NINE stages, not merely "the ones this run chose to attempt". `missing_checks` is
+        # computed over `stages_attempted`, so without this a run that opened ONE stage and covered
+        # it seals `passed` — a single-stage run wearing the word this whole document exists to
+        # earn. The docstring above already warns a reader that `passed` says nothing about
+        # unattempted stages; this makes the document refuse to say it at all.
+        if set(ev.stages_attempted) != STAGES:
+            raise AcceptanceError("acceptance_evidence_incomplete")
         if ev.missing_checks():
             raise AcceptanceError("acceptance_evidence_incomplete")
-        if ev.unproven():
+        if ev.not_passing():
             raise AcceptanceError("acceptance_evidence_incomplete")
 
 
@@ -424,4 +455,5 @@ __all__ = [
     "OUTCOME_OBSERVED",
     "OUTCOME_REFUSED",
     "OUTCOME_UNPROVEN",
+    "OUTCOME_VIOLATED",
 ]

@@ -449,13 +449,63 @@ def test_pr5f_root_transaction_job_is_required_additive_and_cached(wf, suite):
     assert jobs["backend-pytest"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
 
 
+#: EVERY root the required `mypy` step must check. Reviewed as a complete set, not a sample.
+#:
+#: `apps/acceptance` is the whole TREE while the product entries are package directories, and that
+#: asymmetry is deliberate: the acceptance harness keeps its stage scenarios in
+#: `apps/acceptance/tests/`, so checking only `secp_acceptance/` would leave the majority of the
+#: harness untyped. It was absent from the step entirely and had accumulated two unnoticed errors.
+MYPY_ROOTS: tuple[str, ...] = (
+    "apps/api/secp_api",
+    "apps/worker/secp_worker",
+    "apps/commissioning/secp_commissioning",
+    "apps/deployment/secp_operator_deployment",
+    "apps/deployment/secp_discovery_activation",
+    "apps/management/secp_management",
+    "apps/acceptance",
+    "contracts",
+    "plugins",
+)
+
+
+def _mypy_roots(wf: dict) -> tuple[str, ...]:
+    """The roots the workflow's mypy invocation actually names, read off the step."""
+    step = next(
+        s
+        for s in _steps(_jobs(wf)["backend-static"])
+        if "mypy" in str(s.get("run", "")) and str(s.get("run", "")).strip().startswith("uv run")
+    )
+    tokens = str(step["run"]).split()
+    return tuple(t for t in tokens[tokens.index("mypy") + 1 :] if not t.startswith("-"))
+
+
 def test_static_gate_checks_pr5f_boundary_and_complete_mypy_scope(wf):
     run = _run_text(_jobs(wf)["backend-static"])
     assert "tests/test_pr5f_discovery_activation_boundary.py" in run
-    assert "apps/commissioning/secp_commissioning" in run
-    assert "apps/deployment/secp_discovery_activation" in run
-    assert "apps/deployment/secp_operator_deployment" in run
-    assert "apps/management/secp_management" in run
+
+
+def test_the_mypy_step_checks_EXACTLY_the_reviewed_roots(wf):
+    """The scope is pinned as a SET, not sampled.
+
+    This replaced four ``in`` assertions under a test whose name already promised a "complete mypy
+    scope". Four of the nine roots were named, so `apps/api/secp_api`, `apps/worker/secp_worker`,
+    `contracts` and `plugins` could each have been dropped from the required type gate without a
+    single test noticing — and `apps/acceptance` was in fact missing the whole time, which is how
+    two errors sat in the harness unnoticed.
+
+    Equality in BOTH directions: a root removed fails, and a root added fails until someone comes
+    here and states that they reviewed it.
+    """
+    assert _mypy_roots(wf) == MYPY_ROOTS
+
+
+def test_the_mypy_root_reader_is_not_vacuous(wf):
+    """CONTROL. A reader that returned nothing — or that silently matched the wrong step — would
+    make the pin above pass against an empty invocation."""
+    roots = _mypy_roots(wf)
+    assert len(roots) >= 5
+    assert all("/" in root or root.isidentifier() for root in roots)
+    assert "mypy" not in roots and "uv" not in roots
 
 
 # --- deployment package root-security job (trusted dir-fd manifest + pinned exec) --------------
