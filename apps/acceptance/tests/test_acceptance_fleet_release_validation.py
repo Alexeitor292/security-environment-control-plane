@@ -27,6 +27,8 @@ satisfied by anything except the thing it is supposed to be.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from secp_acceptance import AcceptanceError
 from secp_acceptance.evidence import FleetRecord, ReleaseRecord, evidence_from_dict
@@ -129,6 +131,100 @@ def test_the_eleven_accepted_mutations_are_all_refused(
     with pytest.raises(AcceptanceError) as exc:
         evidence_from_dict(_mutated(section, field, value))
     assert exc.value.reason_code == expected
+
+
+# ------------------------------------------------- the CONSTRUCTOR is the enforcement point
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("baseline_aggregate", "test-anchor"),
+        ("signing_anchor_id", "secp-production-root-ca"),
+        ("baseline_source_sha", "sha256:" + "5" * 64),
+        ("role", "operator"),
+        ("successor_aggregate", "not-a-digest"),
+    ],
+    ids=[
+        "placeholder-aggregate",
+        "anchor-name",
+        "digest-where-git-sha-belongs",
+        "role",
+        "successor",
+    ],
+)
+def test_constructing_a_ReleaseRecord_with_a_bad_shape_REFUSES(field: str, value: str):
+    """THE control nobody ran, and the reason this was worth changing.
+
+    ``ReleaseRecord(...)`` used to accept every one of these. The rules lived in a separate
+    ``_assert_release_semantics`` that only the document loader called, so a consumer told to "run
+    the real validator over your fixture values" would construct the record, get a confident pass,
+    and have validated nothing.
+
+    ``digest-where-git-sha-belongs`` is the inverse mistake and is here deliberately: a
+    ``sha256:``-prefixed value in a SOURCE SHA field looks more correct than a placeholder, so it is
+    the one a careful author is most likely to get wrong.
+    """
+    fields: dict[str, Any] = {
+        "role": "worker",
+        "baseline_aggregate": "sha256:" + "5" * 64,
+        "baseline_source_sha": "a" * 40,
+        "signing_anchor_id": "sha256:" + "7" * 64,
+        "test_only_anchor": True,
+    }
+    fields[field] = value
+    with pytest.raises(AcceptanceError) as exc:
+        ReleaseRecord(**fields)
+    assert exc.value.reason_code == "acceptance_evidence_public_value_not_permitted"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("network_identity", "secp-acc-9f3a-net"),
+        ("controller_host_identity", "/var/lib/secp/controller.sock"),
+        ("host_image_identity", "https://registry.internal.corp/secp/host:v1"),
+    ],
+    ids=["network-name", "host-path", "origin"],
+)
+def test_constructing_a_FleetRecord_with_a_bad_shape_REFUSES(field: str, value: str):
+    fields: dict[str, Any] = {
+        "host_image_identity": "sha256:" + "1" * 64,
+        "controller_host_identity": "sha256:" + "2" * 64,
+        "worker_host_identity": "sha256:" + "3" * 64,
+        "network_identity": "sha256:" + "4" * 64,
+        "hosts_created": 2,
+        "hosts_destroyed": 2,
+        "nested_container_runtime": True,
+        "real_service_manager": True,
+    }
+    fields[field] = value
+    with pytest.raises(AcceptanceError) as exc:
+        FleetRecord(**fields)
+    assert exc.value.reason_code == "acceptance_evidence_public_value_not_permitted"
+
+
+def test_constructing_a_fleet_that_destroyed_more_than_it_built_REFUSES():
+    with pytest.raises(AcceptanceError) as exc:
+        FleetRecord(
+            host_image_identity="sha256:" + "1" * 64,
+            controller_host_identity="sha256:" + "2" * 64,
+            worker_host_identity="sha256:" + "3" * 64,
+            network_identity="sha256:" + "4" * 64,
+            hosts_created=1,
+            hosts_destroyed=2,
+            nested_container_runtime=True,
+            real_service_manager=True,
+        )
+    assert exc.value.reason_code == "acceptance_evidence_invalid"
+
+
+def test_the_valid_records_still_construct():
+    """CONTROL. Without this, a constructor that refused everything would satisfy every case
+    above — and the fixtures the whole file depends on would be unbuildable."""
+    assert _FLEET.hosts_created == 2
+    assert _RELEASE.role == "worker"
+    assert _RELEASE.successor_aggregate is None
 
 
 def test_the_baseline_document_really_does_pass():

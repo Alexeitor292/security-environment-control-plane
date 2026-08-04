@@ -31,7 +31,7 @@ import json
 import re
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from secp_commissioning.canonical import canonical_json, is_sha256_digest, sha256_digest
 from secp_commissioning.descriptor import scan_forbidden
 
@@ -87,6 +87,17 @@ _RELEASE_ROLES: frozenset[str] = frozenset({"worker", "controller"})
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+def _assert_digest(value: str) -> None:
+    """Every identity in the fleet and release records is a content address by construction.
+
+    Requiring the DIGEST SHAPE is an allowlist: a host path, an origin, a container id, a queue name
+    and a hostname all fail it without anyone having to enumerate them. A denylist of forbidden
+    substrings would have to predict what leaks.
+    """
+    if not is_sha256_digest(value):
+        raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
 
 
 def observation_digest(payload: object) -> str:
@@ -205,7 +216,23 @@ class StageProvenance(_Strict):
 
 
 class FleetRecord(_Strict):
-    """The disposable fleet's identity — shapes and digests only, never an id or an address."""
+    """The disposable fleet's identity — shapes and digests only, never an id or an address.
+
+    ENFORCED AT CONSTRUCTION, NOT BESIDE IT
+    ---------------------------------------
+    The shape rules used to live in a separate ``_assert_fleet_semantics`` that only the document
+    loader called, so ``FleetRecord(...)`` accepted a host path, an origin or a raw network name
+    without complaint. A consumer told to "run the real validator over your fixture values" would
+    reasonably construct the record, get a confident pass, and have validated nothing — the
+    constructor is exactly what a reader assumes enforces a type's own invariants.
+
+    That is a split between where an invariant is STATED and where it is ENFORCED, and this program
+    has been bitten by that shape before. The rules here are intra-record — they need no knowledge
+    of the run's outcome — so there is no reason for them to live anywhere else. Rules that DO need
+    document context (the fleet premise, the leak equality) stay in
+    :func:`_assert_evidence_semantics`, because a failed run is allowed to report a fleet that never
+    built and a leak it could not clean up.
+    """
 
     host_image_identity: _Str
     controller_host_identity: _Str
@@ -216,12 +243,32 @@ class FleetRecord(_Strict):
     nested_container_runtime: bool
     real_service_manager: bool
 
+    @model_validator(mode="after")
+    def _shapes_are_admissible(self) -> FleetRecord:
+        for value in (
+            self.host_image_identity,
+            self.controller_host_identity,
+            self.worker_host_identity,
+            self.network_identity,
+        ):
+            _assert_digest(value)
+        if self.hosts_destroyed > self.hosts_created:
+            # A run cannot tear down what it never built.
+            raise AcceptanceError("acceptance_evidence_invalid")
+        return self
+
     def canonical(self) -> dict:
         return self.model_dump(mode="json")
 
 
 class ReleaseRecord(_Strict):
-    """The signed worker release lineage the run installed and upgraded across."""
+    """The signed worker release lineage the run installed and upgraded across.
+
+    Shape rules enforced at CONSTRUCTION — see :class:`FleetRecord` for why. ``test_only_anchor`` is
+    deliberately NOT checked here: it is a prohibition about what the harness was permitted to do,
+    which is a document-level fact, and it is re-asserted in :func:`_assert_evidence_semantics`
+    alongside the other four.
+    """
 
     role: _Str
     baseline_aggregate: _Str
@@ -231,6 +278,22 @@ class ReleaseRecord(_Strict):
     successor_parent_sha: _Str | None = None
     signing_anchor_id: _Str
     test_only_anchor: bool
+
+    @model_validator(mode="after")
+    def _shapes_are_admissible(self) -> ReleaseRecord:
+        if self.role not in _RELEASE_ROLES:
+            raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
+        for value in (self.baseline_aggregate, self.successor_aggregate, self.signing_anchor_id):
+            if value is not None:
+                _assert_digest(value)
+        for value in (
+            self.baseline_source_sha,
+            self.successor_source_sha,
+            self.successor_parent_sha,
+        ):
+            if value is not None and not _SOURCE_SHA.fullmatch(value):
+                raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
+        return self
 
     def canonical(self) -> dict:
         return self.model_dump(mode="json")
@@ -382,60 +445,6 @@ def _assert_check_semantics(record: CheckRecord) -> None:
         raise AcceptanceError("acceptance_evidence_invalid")
 
 
-def _assert_digest(value: str) -> None:
-    if not is_sha256_digest(value):
-        raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
-
-
-def _assert_fleet_semantics(fleet: FleetRecord) -> None:
-    """The fleet record carries DIGESTS and COUNTS. Nothing else is admissible.
-
-    Nothing inspected this record at all until now — it was reachable only through pydantic's
-    ``_Str`` (any string, 1..200 chars). Measured on the unmodified parent: a ``passed`` document
-    was accepted carrying ``network_identity`` as a raw docker network name, ``controller_host_
-    identity`` as an absolute host path, and ``host_image_identity`` as an internal registry origin.
-
-    Each identity is a content address by construction (:func:`observation_digest`), so requiring
-    the digest SHAPE is an allowlist rather than a denylist: a path, an origin, a container id, a
-    queue name or a hostname all fail it without anyone having to enumerate them.
-    """
-    for value in (
-        fleet.host_image_identity,
-        fleet.controller_host_identity,
-        fleet.worker_host_identity,
-        fleet.network_identity,
-    ):
-        _assert_digest(value)
-    if fleet.hosts_destroyed > fleet.hosts_created:
-        # More destroyed than created describes a run that tore down something it did not build.
-        raise AcceptanceError("acceptance_evidence_invalid")
-
-
-def _assert_release_semantics(release: ReleaseRecord) -> None:
-    """The release lineage: a closed role, digests for aggregates, git shas for sources.
-
-    ``test_only_anchor`` is NOT checked here — it is a PROHIBITION, handled with the other four in
-    :func:`_assert_evidence_semantics`, because it says what the harness was permitted to do rather
-    than what it observed.
-    """
-    if release.role not in _RELEASE_ROLES:
-        raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
-    for value in (
-        release.baseline_aggregate,
-        release.successor_aggregate,
-        release.signing_anchor_id,
-    ):
-        if value is not None:
-            _assert_digest(value)
-    for value in (
-        release.baseline_source_sha,
-        release.successor_source_sha,
-        release.successor_parent_sha,
-    ):
-        if value is not None and not _SOURCE_SHA.fullmatch(value):
-            raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
-
-
 def _assert_provenance_semantics(ev: AcceptanceEvidence) -> None:
     """Structural rules only. "Did the stage actually execute" is a completion-gate question.
 
@@ -529,8 +538,6 @@ def _assert_evidence_semantics(ev: AcceptanceEvidence) -> None:
     # loaded clean and reported ``passed``.
     if ev.release.test_only_anchor is not True:
         raise AcceptanceError("acceptance_evidence_forbidden_value")
-    _assert_fleet_semantics(ev.fleet)
-    _assert_release_semantics(ev.release)
     # A ``passed`` run must be complete and must contain ONLY passing outcomes. ``failed`` carries
     # no such requirement — a failed run is expected to be partial, and forcing it to be complete
     # would push the harness toward not recording the failure at all.
