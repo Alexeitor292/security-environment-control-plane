@@ -246,27 +246,48 @@ def test_an_outage_carries_the_cause_the_producer_observed_not_a_fixed_code():
 # --------------------------------------------------------------------------- verdict coherence
 
 
+# EACH GUARD BELOW IS PINNED TO ITS OWN REASON CODE, AND THAT IS NOT PEDANTRY.
+#
+# These were bare ``pytest.raises(AcceptanceError)``. Mutation found the consequence: deleting the
+# missing-cause guard entirely left `test_a_non_held_verdict_must_carry_a_cause` still PASSING,
+# because the NEXT guard catches `None not in ALL_REASONS` and raises a different code — which a
+# bare `raises` cannot see. The test was pinned to "something refuses" when its subject is "THIS
+# refuses", so it covered a guard it did not name while its own guard could be deleted freely.
+#
+# Third instance of the same shape in this stage: an assertion satisfied by a neighbouring
+# mechanism. The others were across a module boundary and across a stage rule; this one is two
+# adjacent lines in one function, which is the hardest version to see by reading.
+
+
 def test_a_held_verdict_may_not_carry_a_cause():
     """A positive observation that also carries a refusal reason is incoherent — the same rule
     ``CheckRecord`` applies, enforced early so it cannot travel as far as the recorder."""
-    with pytest.raises(AcceptanceError):
+    with pytest.raises(AcceptanceError) as caught:
         QueueVerdict(VERDICT_HELD, cause=_CAUSE)
+    assert caught.value.reason_code == "acceptance_evidence_invalid"
 
 
 @pytest.mark.parametrize("verdict", [VERDICT_VIOLATED, VERDICT_UNPROVABLE])
 def test_a_non_held_verdict_must_carry_a_cause(verdict: str):
-    with pytest.raises(AcceptanceError):
+    """Pinned to ``acceptance_evidence_invalid`` specifically. With a bare ``raises`` this passed
+    even with the guard deleted, because the vocabulary check below refuses ``None`` too."""
+    with pytest.raises(AcceptanceError) as caught:
         QueueVerdict(verdict)
+    assert caught.value.reason_code == "acceptance_evidence_invalid"
 
 
 def test_a_cause_outside_the_closed_vocabulary_is_refused():
-    with pytest.raises(AcceptanceError):
+    """The DIFFERENT code, which is what makes the pin above meaningful: these two guards are
+    adjacent and reject overlapping inputs, so only the code tells them apart."""
+    with pytest.raises(AcceptanceError) as caught:
         QueueVerdict(VERDICT_UNPROVABLE, cause="something_i_just_made_up")
+    assert caught.value.reason_code == "acceptance_evidence_unknown_reason"
 
 
 def test_an_unknown_verdict_is_refused():
-    with pytest.raises(AcceptanceError):
+    with pytest.raises(AcceptanceError) as caught:
         QueueVerdict("probably_fine")
+    assert caught.value.reason_code == "acceptance_evidence_invalid"
 
 
 # --------------------------------------------------------------------------- the recorder funnel
