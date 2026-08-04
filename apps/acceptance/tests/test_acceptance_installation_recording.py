@@ -48,6 +48,34 @@ from secp_acceptance.release import ReleaseMaterial
 from secp_acceptance.run import AcceptanceRun
 from secp_acceptance.shell import Result
 
+
+def _stub_daemon(monkeypatch: pytest.MonkeyPatch, *, exit_code: int, stdout: str) -> None:
+    """Stub the container DAEMON — patched INSIDE the process seam, never over it.
+
+    ``secp_acceptance.shell.run`` is the single seam every host effect passes through, and the
+    completion gate's C1 clause counts how many times each stage advanced it. Patching ``shell.run``
+    itself — or the ``docker`` helper above it — would bypass the very thing under test: a stage
+    would look identical while moving the counter zero times, which is exactly the "represented only
+    by a literal" shape C1 exists to catch.
+
+    Patching ``subprocess.run`` UNDER the seam leaves the seam running, so these tests additionally
+    exercise its argv validation, output cap and result construction — all of which the earlier
+    stub skipped by replacing the layer above.
+    """
+
+    class _Completed:
+        def __init__(self) -> None:
+            self.returncode = exit_code
+            self.stdout = stdout.encode("utf-8")
+            self.stderr = b""
+
+    def fake_subprocess_run(argv, **kwargs):  # noqa: ANN001, ANN202 - mirrors subprocess.run
+        assert isinstance(argv, list), "the seam must always pass an argv LIST, never a string"
+        return _Completed()
+
+    monkeypatch.setattr("secp_acceptance.shell.subprocess.run", fake_subprocess_run)
+
+
 _CHECK = "worker_operator_unit_present_disabled_stopped"
 
 
@@ -185,11 +213,7 @@ def _systemd(monkeypatch: pytest.MonkeyPatch, properties: dict[str, str]) -> Hos
     over a real ``Host`` — only the daemon is replaced.
     """
     body = "\n".join(f"{k}={v}" for k, v in properties.items()) + "\n"
-
-    def fake_docker(*args: str, timeout: int = 300, check: bool = False) -> Result:
-        return Result(exit_code=0, stdout=body, stderr="")
-
-    monkeypatch.setattr("secp_acceptance.hosts.docker", fake_docker)
+    _stub_daemon(monkeypatch, exit_code=0, stdout=body)
     return Host(role=ROLE_WORKER, container="c", dns_name="worker.secp.test")
 
 
@@ -302,10 +326,7 @@ def test_an_unrecognised_systemd_state_is_not_dormant(monkeypatch: pytest.Monkey
 
 
 def _probe_host(monkeypatch: pytest.MonkeyPatch, result: Result) -> Host:
-    def fake_docker(*args: str, timeout: int = 300, check: bool = False) -> Result:
-        return result
-
-    monkeypatch.setattr("secp_acceptance.hosts.docker", fake_docker)
+    _stub_daemon(monkeypatch, exit_code=result.exit_code, stdout=result.stdout)
     return Host(role=ROLE_WORKER, container="c", dns_name="worker.secp.test")
 
 
@@ -370,4 +391,95 @@ def test_output_without_the_completion_sentinel_refuses(monkeypatch: pytest.Monk
     host = _probe_host(monkeypatch, Result(exit_code=0, stdout=body, stderr=""))
     with pytest.raises(AcceptanceError) as caught:
         probe_paths(host, _PATHS)
+    assert caught.value.reason_code == "acceptance_observation_unavailable"
+
+
+# --------------------------------------------------------------------------- audit-driven gaps
+#
+# Added after a DUAL mutation audit: three mutations survived, meaning nothing here could fail if
+# the corresponding guard were removed. Each of the three is closed below. The audit's forward
+# number ("N caught") could not have found these — it measures the mutation set, not the suite.
+
+
+def _stub_sequence(monkeypatch: pytest.MonkeyPatch, replies: list[tuple[int, str]]) -> None:
+    """Stub consecutive seam calls with different answers, under the seam as always."""
+    remaining = list(replies)
+
+    class _Completed:
+        def __init__(self, code: int, out: str) -> None:
+            self.returncode = code
+            self.stdout = out.encode("utf-8")
+            self.stderr = b""
+
+    def fake_subprocess_run(argv, **kwargs):  # noqa: ANN001, ANN202
+        code, out = remaining.pop(0) if remaining else (1, "")
+        return _Completed(code, out)
+
+    monkeypatch.setattr("secp_acceptance.shell.subprocess.run", fake_subprocess_run)
+
+
+def test_probing_no_paths_refuses_as_vacuous(monkeypatch: pytest.MonkeyPatch):
+    """A probe over an empty path set proves nothing and must not answer "all absent".
+
+    `host_untouched`'s pass condition is `absent == probed`, and with zero paths that is `0 == 0` —
+    trivially true. An empty probe would hand the dry-run check a free pass.
+    """
+    host = _probe_host(monkeypatch, Result(exit_code=0, stdout="", stderr=""))
+    with pytest.raises(AcceptanceError) as caught:
+        probe_paths(host, ())
+    assert caught.value.reason_code == "acceptance_proof_would_be_vacuous"
+
+
+def test_a_property_systemd_did_not_report_comes_back_EMPTY(monkeypatch: pytest.MonkeyPatch):
+    """A missing property must not be defaulted to a plausible value.
+
+    Defaulting `ActiveState` to "inactive" would turn an ABSENT observation into a fabricated one
+    that happens to read as safe — the resolver would classify it as not-running and never know it
+    was never told. Empty is what the resolver refuses on, which is the correct outcome.
+    """
+    host = _systemd(monkeypatch, {"LoadState": "loaded"})
+    reading = read_operator_unit_properties(host)
+    assert reading["LoadState"] == "loaded"
+    assert reading["ActiveState"] == ""
+    assert reading["InvocationID"] == ""
+
+
+def _release_record_path() -> str:
+    """The worker's installed-release path, from the product's own layout — never restated."""
+    from secp_management.layout import ManagementLocations
+
+    return ManagementLocations().release_record_path(ROLE_WORKER)
+
+
+def test_an_absent_installed_release_reports_absent(monkeypatch: pytest.MonkeyPatch):
+    """No record on the host is a real, positively established absence."""
+    from secp_acceptance.install import observe_installed_release
+
+    record = _release_record_path()
+    _stub_sequence(monkeypatch, [(0, f"ABSENT {record}\n__secp_probe_complete__\n")])
+    observed = observe_installed_release(
+        Host(role=ROLE_WORKER, container="c", dns_name="w.secp.test"), ROLE_WORKER
+    )
+    assert observed["present"] is False
+
+
+def test_an_UNREADABLE_installed_release_refuses_rather_than_reporting_absent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The distinction three streams depend on.
+
+    The record EXISTS but could not be read — permission, a dead container, a missing binary. That
+    is an outage, not a baseline. `rollback_removed_documents` needs proof of REMOVAL and this
+    record is one of the documents rollback removes, so "could not read it" answering as "it is
+    gone" would let a rollback that removed nothing read as one that worked.
+    """
+    from secp_acceptance.install import observe_installed_release
+
+    # probe says PRESENT, then the read fails.
+    record = _release_record_path()
+    _stub_sequence(monkeypatch, [(0, f"PRESENT {record}\n__secp_probe_complete__\n"), (1, "")])
+    with pytest.raises(AcceptanceError) as caught:
+        observe_installed_release(
+            Host(role=ROLE_WORKER, container="c", dns_name="w.secp.test"), ROLE_WORKER
+        )
     assert caught.value.reason_code == "acceptance_observation_unavailable"
