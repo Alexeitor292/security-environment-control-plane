@@ -1,0 +1,221 @@
+name: Acceptance (two-host container tier)
+
+# The two-host acceptance harness's REAL execution venue.
+#
+# WHY THIS IS NOT IN ci.yml AND NOT IN THE REQUIRED GATE
+# ------------------------------------------------------
+# It builds an Ubuntu host image carrying a full Docker Engine and then boots TWO privileged
+# containers running systemd as PID 1 with their own nested daemons. That is minutes of work per
+# run and it needs privileges the required gate has no reason to hand every unrelated PR.
+# `.ci/pytest-suite.json` already declares exactly this arrangement ("The harness's own end-to-end
+# run is a separate, manually dispatched workflow — it needs privileged nested containers and is
+# not part of the required gate"), so this file makes the code agree with the declared rationale
+# rather than inventing a new one.
+#
+# READ THIS BEFORE CALLING A GREEN RUN "ACCEPTANCE"
+# -------------------------------------------------
+# A green run here proves the FLEET PREMISE and one image observation: two hosts that are genuinely
+# two machines (real systemd, a nested Docker daemon each, distinct from each other and from the
+# outer one), DNS between them, honest teardown, and that the pinned worker health interpreter
+# exists in the real worker base image. That is FOUR witness stages out of the nine evidence stages
+# `secp_acceptance.reasons` declares. Package installation, controller bring-up, enrollment,
+# identity verification, live queue execution, lifecycle (restart/upgrade/rollback/recovery) and
+# failure injection have NO producing code yet. This workflow therefore cannot, and must not, be
+# reported as a two-host acceptance result.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The exact number of `container_tier`-marked nodes. Pinned, because the JUnit report CANNOT
+  # express deselection: a run with the tier undeclared emits `tests=130 skipped=0` and is missing
+  # the 13 nodes entirely, with no attribute recording their absence. A gate that only refused
+  # skips would pass that run. Measured, not assumed — see the "prove the tier can fail" job.
+  EXPECTED_CONTAINER_NODES: "13"
+
+jobs:
+  # --- the real thing ---------------------------------------------------------------------------
+  container-tier:
+    name: Two-host container tier (privileged systemd + nested Docker)
+    # Same pin as ci.yml's two real-Docker jobs, which demonstrate a live daemon and real systemd
+    # are present on this image. The fleet additionally needs `--privileged --cgroupns=host` with
+    # /sys/fs/cgroup mounted rw, which a hosted runner supports and a `container:` job does not.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+
+      - name: Create venv and install project
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[dev]"
+
+      - name: Verify the outer runtime can actually host the fleet
+        # Fail here, with a readable cause, rather than forty confusing lines into an image build.
+        # cgroup v2 is required: the hosts mount /sys/fs/cgroup rw and run systemd as PID 1.
+        run: |
+          docker version
+          docker info --format '{{.ID}}'
+          test "$(stat -fc %T /sys/fs/cgroup)" = "cgroup2fs" \
+            || { echo "::error::/sys/fs/cgroup is not cgroup2fs; systemd-as-PID-1 hosts need it"; exit 1; }
+
+      - name: Run the container tier (declared, never deselected, never skipped)
+        env:
+          SECP_ACCEPTANCE_TIER: container
+        run: |
+          uv run pytest apps/acceptance/tests \
+            -m container_tier \
+            --junitxml=acceptance-container-tier.xml \
+            -rA -q
+
+      - name: Enforce that the tier actually executed
+        # The pytest exit code alone is NOT trusted. Three independent ways a run can exit 0 while
+        # measuring nothing, each checked here:
+        #   1. every node skipped               -> refused (skipped/errors/failures must be 0)
+        #   2. the tier silently deselected     -> refused (tests must EQUAL the pinned count;
+        #      deselection is invisible in JUnit, so a "no skips" rule cannot see it)
+        #   3. the file collected nothing at all -> refused by the same equality
+        # The harness's own `pytest_sessionfinish` witness hook covers a fourth case — a declared
+        # tier whose bodies did not run — and fails the session itself.
+        if: always()
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET, os, pathlib
+          report = pathlib.Path("acceptance-container-tier.xml")
+          if not report.is_file():
+              sys.exit("::error::no JUnit report was produced; the tier did not run")
+          suite = ET.parse(report).getroot()[0]
+          got = {k: int(suite.get(k, 0)) for k in ("tests", "errors", "failures", "skipped")}
+          expected = int(os.environ["EXPECTED_CONTAINER_NODES"])
+          print(f"container tier JUnit: {got} (expected tests={expected})")
+          problems = []
+          if got["tests"] != expected:
+              problems.append(
+                  f"collected {got['tests']} nodes, expected exactly {expected}. Deselection is "
+                  f"INVISIBLE in JUnit, so a lower count is how a silently-undeclared tier looks. "
+                  f"If the tier legitimately gained or lost a node, update EXPECTED_CONTAINER_NODES "
+                  f"in this workflow in the same commit."
+              )
+          for key in ("skipped", "failures", "errors"):
+              if got[key]:
+                  problems.append(f"{got[key]} {key}: a container-tier node must never {key[:-1]}")
+          if problems:
+              sys.exit("::error::" + " | ".join(problems))
+          print("container tier executed in full: no skip, no deselect, no failure")
+          PY
+
+      - name: Upload the container-tier JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-acceptance-container-tier
+          path: acceptance-container-tier.xml
+          if-no-files-found: error
+
+      - name: Refuse to finish having leaked a privileged host
+        # A leaked privileged container with a nested Docker daemon is the most expensive thing this
+        # harness can leave behind, and it must not be discoverable only by noticing a slow disk.
+        # `always()`, because the failure paths are exactly when a leak is likely. This is the OUTER
+        # check; `HostFleet.destroy` reports residue from the inside and the fixture asserts on it.
+        if: always()
+        run: |
+          leaked=0
+          for kind in "ps -a --format {{.Names}}" "volume ls --format {{.Name}}" "network ls --format {{.Name}}"; do
+            found="$(docker $kind | { grep '^secp-acc-' || true; })"
+            if [ -n "$found" ]; then
+              echo "::error::leaked docker objects ($kind):"
+              echo "$found"
+              leaked=1
+            fi
+          done
+          [ "$leaked" -eq 0 ] || exit 1
+          echo "no secp-acc-* containers, volumes or networks survived"
+
+  # --- the negative control ----------------------------------------------------------------------
+  prove-the-tier-can-fail:
+    name: Negative control (unreachable daemon must REFUSE, never report clean)
+    # A gate nobody has ever seen fail is not a gate. This job makes the container runtime
+    # unreachable and asserts the tier REFUSES loudly — the exact false-green the harness was built
+    # to catch, and the one it already found once in its own teardown: `HostFleet.destroy` removed
+    # each object then asked whether it still existed, and with the daemon down every removal failed
+    # AND every existence probe answered "no", so it reported a clean teardown having done nothing.
+    #
+    # SCOPE, STATED HONESTLY: this exercises an unreachable daemon at TIER ENTRY. It does not kill a
+    # live daemon mid-flight while a fleet is up — doing that would risk stranding two privileged
+    # containers with nested daemons, which is the precise outcome this harness exists to prevent.
+    # The teardown-side behaviour is pinned in both directions hermetically by
+    # apps/acceptance/tests/test_acceptance_teardown_honesty.py (unreachable -> residual
+    # `runtime_unreachable`; reachable and idempotent -> genuinely clean), which runs in the
+    # required gate on every PR.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+
+      - name: Create venv and install project
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[dev]"
+
+      - name: A declared tier with an unreachable daemon must FAIL, with zero skips
+        # DOCKER_HOST points at a closed port, so every docker invocation fails while the runner's
+        # own daemon is left untouched and no state is destroyed.
+        env:
+          SECP_ACCEPTANCE_TIER: container
+          DOCKER_HOST: tcp://127.0.0.1:1
+        run: |
+          set +e
+          uv run pytest apps/acceptance/tests -m container_tier \
+            --junitxml=acceptance-negative-control.xml -q > out.txt 2>&1
+          status=$?
+          set -e
+          cat out.txt
+          [ "$status" -ne 0 ] || { echo "::error::the tier reported success with no reachable daemon"; exit 1; }
+          grep -q 'acceptance_container_runtime_unavailable' out.txt \
+            || { echo "::error::refused, but not with the bounded runtime-unavailable reason"; exit 1; }
+          grep -q 'ACCEPTANCE TIER NOT EXECUTED' out.txt \
+            || { echo "::error::the session-final witness hook did not fire"; exit 1; }
+          python - <<'PY'
+          import sys, os, xml.etree.ElementTree as ET
+          suite = ET.parse("acceptance-negative-control.xml").getroot()[0]
+          got = {k: int(suite.get(k, 0)) for k in ("tests", "errors", "failures", "skipped")}
+          print("negative control JUnit:", got)
+          if got["skipped"]:
+              sys.exit("::error::an absent runtime produced SKIPS; it must produce hard refusals")
+          if got["errors"] + got["failures"] != int(os.environ["EXPECTED_CONTAINER_NODES"]):
+              sys.exit("::error::every container-tier node must refuse when the runtime is absent")
+          print("unreachable daemon refuses loudly: no skip, no false green")
+          PY
+
+      - name: Upload the negative-control JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-acceptance-negative-control
+          path: acceptance-negative-control.xml
+          if-no-files-found: error
