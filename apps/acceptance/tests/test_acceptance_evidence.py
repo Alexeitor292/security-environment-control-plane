@@ -118,7 +118,13 @@ def test_a_check_cannot_be_recorded_twice():
     assert exc.value.reason_code == "acceptance_evidence_duplicate_check"
 
 
-def test_an_absent_refusal_is_unproven_not_a_pass():
+def test_an_absent_refusal_is_a_VIOLATION_not_a_pass_and_not_merely_unproven():
+    """The product accepted a wrong-role bundle. That is a proven defect, not a failure to look.
+
+    Recorded ``violated``, deliberately NOT ``unproven``: filing it as "could not prove" would put
+    the most serious result a failure-injection check can produce under the same heading as a
+    transport error, and a reader triaging the document could not tell them apart.
+    """
     rec = AcceptanceRecorder()
     rec.open_stage("failure_injection")
     ok = rec.expect_refusal(
@@ -130,7 +136,7 @@ def test_an_absent_refusal_is_unproven_not_a_pass():
     )
     assert ok is False
     record = rec._checks[0]
-    assert record.outcome == "unproven"
+    assert record.outcome == "violated"
     assert record.reason_code == "acceptance_expected_refusal_absent"
 
 
@@ -205,12 +211,42 @@ def test_one_unproven_check_fails_the_whole_run():
 
 def test_a_passed_document_cannot_be_hand_written_with_missing_checks():
     """The loader is the authority, not the recorder — a hand-built ``passed`` document that omits
-    a declared check is refused on load."""
+    a declared check is refused on load.
+
+    Built over all nine stages so the document genuinely IS ``passed`` before the edit. A
+    single-stage document would seal ``failed`` (see
+    :func:`test_a_partial_run_can_never_claim_passed`), and a ``failed`` document is allowed to be
+    partial — so truncating one would prove nothing about this rule.
+    """
     rec = AcceptanceRecorder()
-    _cover(rec, STAGE_QUEUES)
+    for stage in STAGES:
+        _cover(rec, stage)
     ev = rec.seal(fleet=_FLEET, release=_RELEASE)
+    assert ev.outcome == RUN_PASSED  # the premise of the edit below
     payload = ev.canonical()
     payload["checks"] = payload["checks"][:-1]
+    with pytest.raises(AcceptanceError) as exc:
+        evidence_from_dict(payload)
+    assert exc.value.reason_code == "acceptance_evidence_incomplete"
+
+
+def test_a_partial_run_can_never_claim_passed():
+    """A run that opened ONE stage and covered it completely is not an acceptance pass.
+
+    ``missing_checks`` is computed over ``stages_attempted``, so by that measure alone a
+    single-stage run is "complete" — which is how a fleet-only run came to seal ``passed`` while
+    establishing no release lineage at all. ``passed`` requires all nine stages.
+    """
+    rec = AcceptanceRecorder()
+    _cover(rec, STAGE_FLEET)
+    ev = rec.seal(fleet=_FLEET, release=_RELEASE)
+    assert ev.outcome == RUN_FAILED
+    assert ev.coverage_complete(), "every check of the attempted stage WAS covered..."
+    assert ev.not_passing() == (), "...and none of them failed; the run is partial, not broken"
+
+    # and the loader refuses the hand-written version just as hard
+    payload = ev.canonical()
+    payload["outcome"] = RUN_PASSED
     with pytest.raises(AcceptanceError) as exc:
         evidence_from_dict(payload)
     assert exc.value.reason_code == "acceptance_evidence_incomplete"

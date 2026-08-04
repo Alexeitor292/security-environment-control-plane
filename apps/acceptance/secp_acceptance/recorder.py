@@ -2,8 +2,13 @@
 
 The recorder is the ONLY way a check enters the evidence. It exists so that recording a check and
 asserting it are the same act: :meth:`AcceptanceRecorder.observe` records a positive observation,
-:meth:`expect_refusal` records a refusal the scenario required, and :meth:`unproven` records a
-proof the harness could not make. There is no "record a pass without observing anything" verb.
+:meth:`expect_refusal` records a refusal the scenario required, :meth:`unproven` records a proof the
+harness could not make, and :meth:`violated` records that the harness positively observed the state
+the check exists to rule out. There is no "record a pass without observing anything" verb.
+
+``unproven`` and ``violated`` are the two ways a check fails and they are opposites — the harness
+could not look, versus the harness looked and saw the bad thing. Keeping them apart is why a proven
+operator-queue breach cannot be read later as a transport error.
 
 Two properties are enforced here rather than left to caller discipline:
 
@@ -40,6 +45,8 @@ from secp_acceptance.reasons import (
     OUTCOME_OBSERVED,
     OUTCOME_REFUSED,
     OUTCOME_UNPROVEN,
+    OUTCOME_VIOLATED,
+    PASSING_OUTCOMES,
     RUN_FAILED,
     RUN_PASSED,
     STAGES,
@@ -113,9 +120,16 @@ class AcceptanceRecorder:
     ) -> bool:
         """Record a refusal the scenario REQUIRED, and return whether it was the expected one.
 
-        ``actual is None`` means the product did not refuse at all, which is the worst outcome for
-        a failure-injection check and is recorded as ``acceptance_expected_refusal_absent`` — never
-        as a pass, and never silently dropped.
+        The two failure directions are deliberately NOT the same outcome:
+
+        * ``actual is None`` — the product did not refuse AT ALL. It accepted a tampered artifact, a
+          wrong-role bundle, a revoked invitation. That is a proven product defect the harness
+          positively observed, so it is ``violated``, not ``unproven``. Recording it as "could not
+          prove" would file the most serious result a failure-injection check can produce under the
+          same heading as a transport error.
+        * ``actual != expected`` — the product DID refuse, just not for the reason that makes this
+          check meaningful. Nothing bad was observed and the property was not proven, so this stays
+          ``unproven``.
         """
         if expected not in ALL_REASONS:
             raise AcceptanceError("acceptance_evidence_unknown_reason")
@@ -123,7 +137,7 @@ class AcceptanceRecorder:
             self._record(
                 check=check,
                 stage=stage,
-                outcome=OUTCOME_UNPROVEN,
+                outcome=OUTCOME_VIOLATED,
                 reason_code="acceptance_expected_refusal_absent",
                 observation=observation,
             )
@@ -147,11 +161,32 @@ class AcceptanceRecorder:
         return True
 
     def unproven(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
-        """Record a proof the harness could NOT make. Never a pass."""
+        """Record a proof the harness could NOT make. Never a pass.
+
+        Use this when the harness FAILED TO LOOK — the probe did not complete, the runtime was
+        unreachable, the report was malformed. If the harness looked and SAW the bad thing, that is
+        :meth:`violated`, and the two must not be conflated.
+        """
         self._record(
             check=check,
             stage=stage,
             outcome=OUTCOME_UNPROVEN,
+            reason_code=reason_code,
+            observation=observation,
+        )
+
+    def violated(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
+        """Record that the harness POSITIVELY OBSERVED the state this check exists to rule out.
+
+        The operator queue had a live poller; the private key left the worker; the operator unit was
+        activated. Never a pass, and never the same value as :meth:`unproven` — a proven breach and
+        a probe that could not run are opposite findings that call for opposite responses, and the
+        management plane's containment probe already keeps them apart for exactly this reason.
+        """
+        self._record(
+            check=check,
+            stage=stage,
+            outcome=OUTCOME_VIOLATED,
             reason_code=reason_code,
             observation=observation,
         )
@@ -188,12 +223,23 @@ class AcceptanceRecorder:
     def seal(self, *, fleet: FleetRecord, release: ReleaseRecord) -> AcceptanceEvidence:
         """Seal the run. The outcome is DERIVED, never supplied.
 
-        A run passes only when every attempted stage is completely covered and no check is
-        ``unproven``. There is deliberately no way for a caller to assert ``passed``: the whole
-        point of the recorder is that the verdict is a function of what was recorded.
+        A run passes only when every attempted stage is completely covered and every recorded check
+        holds a PASSING outcome. There is deliberately no way for a caller to assert ``passed``: the
+        whole point of the recorder is that the verdict is a function of what was recorded.
+
+        The predicate is an allowlist over :data:`~secp_acceptance.reasons.PASSING_OUTCOMES`, not a
+        denylist over the bad ones. Written the other way round, every outcome added to the
+        vocabulary becomes a passing outcome by default — which is measurably what happened when
+        ``violated`` was introduced as a bare vocabulary edit.
         """
-        unproven = [r.check for r in self._checks if r.outcome == OUTCOME_UNPROVEN]
-        outcome = RUN_PASSED if (not self.missing() and not unproven) else RUN_FAILED
+        not_passing = [r.check for r in self._checks if r.outcome not in PASSING_OUTCOMES]
+        # All nine stages, every check covered, every outcome a passing one. The stage requirement
+        # is what stops a partial run from claiming the word: `missing()` is computed over the
+        # stages this run OPENED, so a run that opened one stage and covered it is "complete" by
+        # that measure alone. Kept identical to the loader's rule — a recorder that sealed `passed`
+        # where the loader refuses would make the loader's guarantees decorative.
+        complete = set(self._stages) == STAGES and not self.missing() and not not_passing
+        outcome = RUN_PASSED if complete else RUN_FAILED
         fleet_identity = observation_digest(fleet.canonical())
         release_identity = observation_digest(release.canonical())
         document = {
