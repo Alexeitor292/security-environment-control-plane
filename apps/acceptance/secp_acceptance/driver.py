@@ -42,10 +42,11 @@ from secp_acceptance.install import (
     HostInstallation,
     host_untouched,
     observe_health_command_in_worker_image,
-    observe_operator_unit,
     plan_is_dry_run,
+    read_operator_unit_properties,
     shipped_packages,
 )
+from secp_acceptance.queues import record_verdict, resolve_operator_unit_dormant
 from secp_acceptance.reasons import (
     STAGE_CONTROLLER,
     STAGE_PACKAGES,
@@ -136,6 +137,20 @@ class _StageRecorder:
         )
         self._outcome.recorded[check] = "violated"
         self._outcome.reasons[check] = "acceptance_prohibited_state_observed"
+
+    def record_verdict_for(self, check: str, verdict: object) -> None:
+        """File a shared :class:`~secp_acceptance.queues.QueueVerdict` and mirror the outcome.
+
+        Routes through ``queues.record_verdict`` so the three-way verdict encoding lives in exactly
+        one place; the local mirror exists only so the container-tier nodes can assert per check.
+        """
+        from secp_acceptance.queues import encode_verdict
+
+        record_verdict(self._run.acceptance_run, check, verdict, stage=self._stage)  # type: ignore[arg-type]
+        outcome, reason = encode_verdict(verdict)  # type: ignore[arg-type]
+        self._outcome.recorded[check] = outcome
+        if reason:
+            self._outcome.reasons[check] = reason
 
     def attempt(self, check: str, *, reason: str, produce, violation=None) -> object | None:
         """Run ``produce`` and record its result, or record ``unproven`` with ``reason``.
@@ -379,6 +394,14 @@ def drive_worker(run: InstallationRun, fleet: HostFleet, ordinary_image: str) ->
     written = _bootstrap(install, "worker")
     run.worker.notes["bootstrap"] = written
 
+    # The FIRST operator-unit reading, taken as soon as the install has done its writing. The
+    # second is taken at the end of the stage, so the pair spans the status and evidence work and
+    # the resolver's generation check covers a real interval.
+    try:
+        operator_before = read_operator_unit_properties(host)
+    except AcceptanceError:
+        operator_before = {}
+
     def committed():
         return bool(written["committed"]), {
             "exit_code": written["exit_code"],
@@ -415,18 +438,15 @@ def drive_worker(run: InstallationRun, fleet: HostFleet, ordinary_image: str) ->
         "worker_status_ok", reason="acceptance_observation_unavailable", produce=status_ok
     )
 
-    def operator_unit():
-        observation = observe_operator_unit(host)
-        return bool(observation["present_disabled_stopped"]), observation
-
-    stage.attempt(
+    # The operator unit is resolved through the QUEUES stage's dormancy funnel rather than a second
+    # implementation of the same predicate. `operator_before` was taken right after the bootstrap
+    # committed; this reading closes a real window over the status and evidence work above, so the
+    # generation stamp agreeing across the two is a statement about an interval rather than a
+    # restatement of one snapshot. Passing the same reading twice would have satisfied the resolver
+    # and proven strictly less.
+    stage.record_verdict_for(
         "worker_operator_unit_present_disabled_stopped",
-        reason="acceptance_observation_unavailable",
-        produce=operator_unit,
-        # An operator unit that is really there and is enabled or running is the exact state this
-        # check exists to rule out. Recording that as `unproven` would file the program's headline
-        # safety breach as a failure to look.
-        violation=lambda obs: bool(obs.get("prohibited_state_observed")),
+        resolve_operator_unit_dormant(operator_before, read_operator_unit_properties(host)),
     )
 
     def attested():

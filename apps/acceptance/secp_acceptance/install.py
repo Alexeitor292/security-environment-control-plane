@@ -336,85 +336,47 @@ def _ed25519_public(private: bytes) -> str:
 # --------------------------------------------------------------------------- worker observations
 
 
-def observe_operator_unit(host: Host) -> dict[str, object]:
-    """The headline safety observation: the operator unit is PRESENT, NOT-ENABLED and STOPPED.
+def read_operator_unit_properties(host: Host) -> dict[str, str]:
+    """ONE reading of the operator unit's systemd properties, verbatim.
 
-    Asked of real systemd on a host where systemd is PID 1, so the answers are systemd's own. All
-    properties are read in ONE ``systemctl show`` call: reading them separately would let the unit
-    change between questions and produce a combination that never actually existed.
+    Deliberately does no classification. Dormancy is resolved by
+    :func:`secp_acceptance.queues.resolve_operator_unit_dormant`, which the queues stage owns and
+    which this stage reuses rather than reimplementing — the same observation asked at a different
+    point in the run. A second dormancy implementation is exactly the duplicate this program
+    refuses: two versions drift, and the drift lands on the operator-dormancy claim.
 
-    THE STATE TABLE IS THE PRODUCT'S, NOT OURS — this is the whole point of the function.
-    Written the obvious way (``UnitFileState == "disabled"``) this check FAILS A CORRECTLY PREPARED
-    HOST. The reviewed operator unit is rendered with no ``[Install]`` section
-    (``systemd.py`` emits one only when ``wanted_by is not None``, which defaults to ``None``), and
-    systemd reports a unit with no ``[Install]`` as ``static`` — not ``disabled``. So the three
-    classifiers are IMPORTED from ``secp_operator_deployment.host_adapters``, which already carries
-    that knowledge and says so at its definition. Restating any systemd state table here would be
-    the same shape of defect as the health-interpreter constant that once both blocked the install
-    and manufactured a false operator-queue containment breach: a harness constant that agrees with
-    itself and disagrees with the host.
+    The property list comes from ``queues.OPERATOR_UNIT_PROPERTIES``, not from a list restated here,
+    so a property the resolver starts requiring cannot go unread by this caller.
 
-    THREE-VALUED ON PURPOSE. Each classifier returns ``None`` for a value it does not recognise,
-    and that is neither "fine" nor "prohibited" — it is "could not settle". The caller maps the
-    three cases to ``observed`` / ``violated`` / ``unproven`` rather than collapsing them, because
-    an operator unit observed ENABLED OR RUNNING is a proven prohibited state, while an
-    unclassifiable one means the harness could not look.
-
-    ``LoadState`` is load-bearing beyond presence: ``not-found`` classifies as NOT-enabled and
-    reports ``ActiveState=inactive``, so without the load check an ABSENT unit would satisfy both
-    of the other two conditions and read as correctly prepared.
+    All properties are read in ONE ``systemctl show`` call: asking separately would let the unit
+    change between questions and produce a combination that never actually existed. A property
+    systemd does not report comes back as the empty string, which the resolver treats as an absent
+    observation rather than guessing — except ``InvocationID``, where empty is a POSITIVE statement
+    that the unit has never started.
     """
     from secp_management.topology import OPERATOR_SERVICE_NAME
-    from secp_operator_deployment.host_adapters import (
-        _classify_active,
-        _classify_load,
-        _classify_unit_file_state,
-    )
+
+    from secp_acceptance.queues import OPERATOR_UNIT_PROPERTIES
 
     shown = host.exec(
         (
             "systemctl",
             "show",
             OPERATOR_SERVICE_NAME,
-            "--property=LoadState",
-            "--property=UnitFileState",
-            "--property=ActiveState",
-            "--property=SubState",
+            *(f"--property={name}" for name in OPERATOR_UNIT_PROPERTIES),
         ),
         timeout=120,
     )
     if not shown.ok:
         raise AcceptanceError("acceptance_observation_unavailable")
-    properties: dict[str, str] = {}
+    parsed: dict[str, str] = {}
     for line in shown.stdout.splitlines():
         if "=" in line:
             key, _, value = line.partition("=")
-            properties[key.strip()] = value.strip()[:32]
-
-    present = _classify_load(properties.get("LoadState", ""))
-    enabled = _classify_unit_file_state(properties.get("UnitFileState", ""))
-    running = _classify_active(properties.get("ActiveState", ""))
-    unclassifiable = None in (present, enabled, running)
-    return {
-        "unit_file_state": properties.get("UnitFileState", ""),
-        "active_state": properties.get("ActiveState", ""),
-        "sub_state": properties.get("SubState", ""),
-        "present": present,
-        "enabled": enabled,
-        "running": running,
-        # Could not settle: at least one value the product's own classifiers do not recognise.
-        "unclassifiable": unclassifiable,
-        # The prepared end state.
-        "present_disabled_stopped": (
-            not unclassifiable and bool(present) and not enabled and not running
-        ),
-        # The PROHIBITED state, observed rather than merely not-proven: the unit is really there and
-        # it is enabled or running. Distinguished from the case above so the caller can record a
-        # violation instead of an absence of proof.
-        "prohibited_state_observed": (
-            not unclassifiable and bool(present) and (bool(enabled) or bool(running))
-        ),
-    }
+            parsed[key.strip()] = value.strip()[:64]
+    # Every required property must be present as a string; the resolver refuses a missing one, and
+    # defaulting here would hand it a value systemd never gave.
+    return {name: parsed.get(name, "") for name in OPERATOR_UNIT_PROPERTIES}
 
 
 def observe_installed_release(host: Host, role: str) -> dict[str, object]:
@@ -526,7 +488,7 @@ __all__ = [
     "observe_installed_release",
     "host_untouched",
     "observe_health_command_in_worker_image",
-    "observe_operator_unit",
+    "read_operator_unit_properties",
     "plan_is_dry_run",
     "shipped_packages",
 ]

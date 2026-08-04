@@ -32,7 +32,12 @@ import pytest
 from secp_acceptance import AcceptanceError
 from secp_acceptance.driver import InstallationRun, _StageRecorder
 from secp_acceptance.hosts import ROLE_WORKER, Host
-from secp_acceptance.install import observe_operator_unit
+from secp_acceptance.install import read_operator_unit_properties
+from secp_acceptance.queues import (
+    OPERATOR_UNIT_PROPERTIES,
+    encode_verdict,
+    resolve_operator_unit_dormant,
+)
 from secp_acceptance.reasons import (
     OUTCOME_OBSERVED,
     OUTCOME_UNPROVEN,
@@ -164,13 +169,20 @@ def test_every_path_records_exactly_one_result():
 
 
 # --------------------------------------------------------------------------- the operator unit
+#
+# Dormancy itself is resolved by ``queues.resolve_operator_unit_dormant``, which the queues stage
+# owns and this stage reuses; C tests the resolver. What is tested HERE is the INTEGRATION — that
+# the reader this stage actually calls produces the shape that resolver requires, and that the two
+# traps survive end to end through the seam worker_install really uses. A reader that dropped a
+# property, or truncated one, would make every dormancy verdict `unprovable` while both sides
+# looked correct in isolation.
 
 
 def _systemd(monkeypatch: pytest.MonkeyPatch, properties: dict[str, str]) -> Host:
     """A host whose ``systemctl show`` answers exactly these properties.
 
-    Patches the process seam the real ``Host.exec`` uses, so the code under test is the real
-    observation function over a real ``Host`` — only the daemon is replaced.
+    Patches the process seam the real ``Host.exec`` uses, so the code under test is the real reader
+    over a real ``Host`` — only the daemon is replaced.
     """
     body = "\n".join(f"{k}={v}" for k, v in properties.items()) + "\n"
 
@@ -181,114 +193,101 @@ def _systemd(monkeypatch: pytest.MonkeyPatch, properties: dict[str, str]) -> Hos
     return Host(role=ROLE_WORKER, container="c", dns_name="worker.secp.test")
 
 
-def test_a_static_unit_is_the_prepared_dormant_state(monkeypatch: pytest.MonkeyPatch):
+def _prepared() -> dict[str, str]:
+    """What a correctly prepared host reports: static, loaded, never started."""
+    return {
+        "LoadState": "loaded",
+        "ActiveState": "inactive",
+        "UnitFileState": "static",
+        "InvocationID": "",
+        "StateChangeTimestampMonotonic": "123456",
+        "NRestarts": "0",
+    }
+
+
+def test_the_reader_supplies_every_property_the_resolver_requires(monkeypatch: pytest.MonkeyPatch):
+    """The contract between this stage's reader and the shared resolver.
+
+    The property list is taken from ``queues.OPERATOR_UNIT_PROPERTIES`` rather than restated, so a
+    property the resolver starts requiring cannot go unread. This asserts that actually holds.
+    """
+    host = _systemd(monkeypatch, _prepared())
+    reading = read_operator_unit_properties(host)
+    assert set(reading) == set(OPERATOR_UNIT_PROPERTIES)
+    assert all(isinstance(v, str) for v in reading.values())
+
+
+def test_a_static_never_started_unit_resolves_as_dormant(monkeypatch: pytest.MonkeyPatch):
     """``static`` — NOT ``disabled`` — is what a correctly prepared host reports.
 
     The reviewed operator unit is rendered with no ``[Install]`` section, so systemd reports it
-    ``static``. A check written against the literal ``"disabled"`` fails a correct host, which is
-    exactly why the classifiers are imported from the product instead of restated.
+    ``static``. A check written against the literal ``"disabled"`` would fail a correct host, which
+    is why the classifiers live in the product and the resolver is shared.
     """
-    host = _systemd(
-        monkeypatch,
-        {
-            "LoadState": "loaded",
-            "UnitFileState": "static",
-            "ActiveState": "inactive",
-            "SubState": "dead",
-        },
-    )
-    observed = observe_operator_unit(host)
-    assert observed["present_disabled_stopped"] is True
-    assert observed["prohibited_state_observed"] is False
+    host = _systemd(monkeypatch, _prepared())
+    reading = read_operator_unit_properties(host)
+    verdict = resolve_operator_unit_dormant(reading, reading)
+    assert encode_verdict(verdict)[0] == OUTCOME_OBSERVED
 
 
-def test_an_absent_unit_is_NOT_the_prepared_state(monkeypatch: pytest.MonkeyPatch):
-    """The second trap, and the one a `LoadState` check exists for.
+def test_an_absent_unit_does_NOT_resolve_as_dormant(monkeypatch: pytest.MonkeyPatch):
+    """The second trap, reached from the opposite direction to the ``static`` one.
 
     ``not-found`` classifies as NOT-enabled and reports ``ActiveState=inactive``, so an operator
-    unit that was never installed satisfies both "not enabled" and "not running". Without proven
-    presence, a check named ``present_disabled_stopped`` would prove only its last two words — and
-    would prove them most easily when the first is false.
+    unit that was never installed satisfies both "not enabled" and "not running". A check named
+    ``present_disabled_stopped`` would then prove only its last two words — and would prove them
+    most easily when the first is false.
     """
-    host = _systemd(
-        monkeypatch,
-        {
-            "LoadState": "not-found",
-            "UnitFileState": "not-found",
-            "ActiveState": "inactive",
-            "SubState": "dead",
-        },
-    )
-    observed = observe_operator_unit(host)
-    assert observed["present"] is False
-    assert observed["present_disabled_stopped"] is False, (
+    absent = _prepared() | {"LoadState": "not-found", "UnitFileState": "not-found"}
+    host = _systemd(monkeypatch, absent)
+    reading = read_operator_unit_properties(host)
+    verdict = resolve_operator_unit_dormant(reading, reading)
+    assert encode_verdict(verdict)[0] != OUTCOME_OBSERVED, (
         "an operator unit that is not installed at all must never read as correctly prepared"
     )
-    assert observed["prohibited_state_observed"] is False
 
 
 @pytest.mark.parametrize(
-    ("unit_file_state", "active_state"),
-    [("enabled", "inactive"), ("static", "active"), ("enabled", "active")],
+    "prohibited",
+    [
+        {"UnitFileState": "enabled"},
+        {"ActiveState": "active"},
+        {"InvocationID": "9f3a2b1c"},
+        {"NRestarts": "2"},
+    ],
 )
-def test_an_enabled_or_running_operator_is_a_prohibited_state(
-    monkeypatch: pytest.MonkeyPatch, unit_file_state: str, active_state: str
+def test_an_activated_operator_unit_is_a_violation_not_an_absence(
+    monkeypatch: pytest.MonkeyPatch, prohibited: dict[str, str]
 ):
-    """Enabled, running, or both — each is the state the check exists to rule out."""
-    host = _systemd(
-        monkeypatch,
-        {
-            "LoadState": "loaded",
-            "UnitFileState": unit_file_state,
-            "ActiveState": active_state,
-            "SubState": "running",
-        },
-    )
-    observed = observe_operator_unit(host)
-    assert observed["prohibited_state_observed"] is True
-    assert observed["present_disabled_stopped"] is False
+    """Enabled, running, or evidence of having ever run — each is a positive finding.
 
-
-def test_an_unrecognised_systemd_state_is_neither_dormant_nor_prohibited(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """The binding three-valued rule: ``None`` means "could not settle", never "fine".
-
-    The product's classifiers return ``None`` for a value they do not recognise. Treated as falsy —
-    the natural thing to write — an unknown state reads as a dormant operator, which is a false
-    safety claim about the most safety-sensitive thing in the program.
+    ``InvocationID`` is the sharpest of them: systemd leaves it EMPTY until the first start, so a
+    non-empty value is a positive statement that the unit HAS run, not a missing observation.
     """
-    host = _systemd(
-        monkeypatch,
-        {
-            "LoadState": "loaded",
-            "UnitFileState": "some-future-systemd-state",
-            "ActiveState": "inactive",
-            "SubState": "dead",
-        },
-    )
-    observed = observe_operator_unit(host)
-    assert observed["unclassifiable"] is True
-    assert observed["present_disabled_stopped"] is False
-    assert observed["prohibited_state_observed"] is False
+    host = _systemd(monkeypatch, _prepared() | prohibited)
+    reading = read_operator_unit_properties(host)
+    verdict = resolve_operator_unit_dormant(reading, reading)
+    outcome, _ = encode_verdict(verdict)
+    assert outcome == OUTCOME_VIOLATED
 
 
-def test_indirect_is_treated_as_enabled(monkeypatch: pytest.MonkeyPatch):
-    """The product errs toward safety here and the harness must not undo it.
+def test_a_unit_that_moved_between_readings_is_not_dormant(monkeypatch: pytest.MonkeyPatch):
+    """Why this stage takes TWO readings rather than one.
 
-    ``indirect`` is conservative-True in the product: such a unit can be pulled in via another
-    unit's ``Also=``, so a possibly-auto-starting operator never reads as not-enabled.
+    A single snapshot is satisfied by a unit started and stopped again inside the window. The
+    generation stamp changing between the two readings is what refuses that, and it is the reason
+    worker_install reads once after the bootstrap commits and again at the end of the stage rather
+    than passing one reading twice.
     """
-    host = _systemd(
-        monkeypatch,
-        {
-            "LoadState": "loaded",
-            "UnitFileState": "indirect",
-            "ActiveState": "inactive",
-            "SubState": "dead",
-        },
-    )
-    observed = observe_operator_unit(host)
-    assert observed["enabled"] is True
-    assert observed["present_disabled_stopped"] is False
-    assert observed["prohibited_state_observed"] is True
+    before = _prepared()
+    after = _prepared() | {"StateChangeTimestampMonotonic": "999999"}
+    verdict = resolve_operator_unit_dormant(before, after)
+    assert encode_verdict(verdict)[0] != OUTCOME_OBSERVED
+
+
+def test_an_unrecognised_systemd_state_is_not_dormant(monkeypatch: pytest.MonkeyPatch):
+    """The binding three-valued rule: ``None`` means "could not settle", never "fine"."""
+    host = _systemd(monkeypatch, _prepared() | {"UnitFileState": "some-future-systemd-state"})
+    reading = read_operator_unit_properties(host)
+    verdict = resolve_operator_unit_dormant(reading, reading)
+    assert encode_verdict(verdict)[0] != OUTCOME_OBSERVED
