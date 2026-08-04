@@ -117,7 +117,9 @@ def test_a_run_missing_a_release_says_so_rather_than_inventing_a_lineage():
     run.set_fleet(_FLEET)
     _cover(run, STAGE_FLEET)
     document = run.seal()
-    assert document.outcome == RUN_FAILED
+    # NOTE: the outcome is deliberately NOT asserted here. A one-stage run always seals `failed`
+    # because of the nine-stage rule, so `outcome == RUN_FAILED` would be true regardless of the
+    # release record and would prove nothing about this test's actual subject.
     assert document.stages_attempted == (STAGE_FLEET,)
     # honest about the anchor: none was used, so the "test only" assertion is TRUE, not False
     assert document.release.test_only_anchor is True
@@ -150,7 +152,14 @@ def test_a_FAILED_run_is_written_too(tmp_path: pathlib.Path):
     needs to consult it."""
     run = AcceptanceRun()
     run.set_fleet(_FLEET)
-    run.open_stage(STAGE_QUEUES)
+    run.set_release(_RELEASE)
+    # All nine stages, one violated — so `failed` is caused by the VIOLATION rather than by the
+    # stage count, and this test would go red if `violated` ever stopped failing a run.
+    for stage in sorted(STAGES):
+        run.open_stage(stage)
+        for check in CHECKS_BY_STAGE[stage]:
+            if check != "operator_queue_has_zero_pollers":
+                run.observe(check, stage, {"check": check})
     run.violated(
         "operator_queue_has_zero_pollers",
         STAGE_QUEUES,
@@ -162,6 +171,7 @@ def test_a_FAILED_run_is_written_too(tmp_path: pathlib.Path):
     reloaded = evidence_from_bytes(path.read_bytes())
     assert reloaded.outcome == RUN_FAILED
     assert reloaded.violated() == ("operator_queue_has_zero_pollers",)
+    assert reloaded.not_passing() == ("operator_queue_has_zero_pollers",)
 
 
 def test_the_written_bytes_are_canonical_json(tmp_path: pathlib.Path):

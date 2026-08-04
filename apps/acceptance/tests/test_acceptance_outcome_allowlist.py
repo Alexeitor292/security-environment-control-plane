@@ -56,12 +56,21 @@ _RELEASE = ReleaseRecord(
 )
 
 
-def _fully_covered() -> AcceptanceRecorder:
+def _fully_covered(*, skip: str | None = None) -> AcceptanceRecorder:
+    """A recorder covering ALL NINE stages as ``observed``, optionally leaving one check unrecorded.
+
+    Every run-level outcome assertion in this file builds on this rather than on a single stage, and
+    that is load-bearing rather than tidiness. ``seal`` requires all nine stages, so a single-stage
+    recorder ALWAYS seals ``failed`` no matter what its checks say — which makes
+    ``assert outcome == RUN_FAILED`` on a partial recorder vacuously true and unable to fail. See
+    :func:`test_a_partial_recorder_always_fails_so_its_outcome_proves_nothing`.
+    """
     rec = AcceptanceRecorder()
     for stage in sorted(STAGES):
         rec.open_stage(stage)
         for check in CHECKS_BY_STAGE[stage]:
-            rec.observe(check, stage, {"check": check})
+            if check != skip:
+                rec.observe(check, stage, {"check": check})
     return rec
 
 
@@ -85,22 +94,51 @@ def test_the_two_failing_outcomes_are_both_outside_the_allowlist():
 # --------------------------------------------------------------------------- the verdict
 
 
-def test_a_violated_check_fails_the_run_at_seal():
-    rec = AcceptanceRecorder()
-    rec.open_stage(STAGE_QUEUES)
+def test_a_partial_recorder_always_fails_so_its_outcome_proves_nothing():
+    """THE TRAP, pinned so nobody falls into it again.
+
+    ``seal`` requires all nine stages, so a recorder that opened one stage seals ``failed`` even
+    when every check it holds is ``observed``. An ``assert outcome == RUN_FAILED`` written against
+    such a recorder therefore passes for a reason unrelated to whatever it meant to watch, and would
+    keep passing if the thing it watches regressed entirely.
+
+    This bit a canary in the queues stage — a test built specifically to catch a false green, which
+    had itself quietly become one. Any run-level outcome assertion must be built on a NINE-stage
+    recorder (see :func:`_fully_covered`) or replaced by a check-level assertion.
+    """
+    partial = AcceptanceRecorder()
+    partial.open_stage(STAGE_QUEUES)
     for check in CHECKS_BY_STAGE[STAGE_QUEUES]:
-        if check == "operator_queue_has_zero_pollers":
-            rec.violated(
-                check,
-                STAGE_QUEUES,
-                reason_code="acceptance_prohibited_state_observed",
-                observation={"pollers": 1},
-            )
-        else:
-            rec.observe(check, STAGE_QUEUES, {})
+        partial.observe(check, STAGE_QUEUES, {})
+    sealed = partial.seal(fleet=_FLEET, release=_RELEASE)
+
+    assert sealed.outcome == RUN_FAILED
+    # ...but for the STAGE COUNT, not for anything about the checks: nothing is missing and nothing
+    # failed. That is precisely what makes the outcome unusable as evidence about the checks.
+    assert sealed.coverage_complete()
+    assert sealed.not_passing() == ()
+
+
+def test_a_violated_check_fails_the_run_at_seal():
+    """Built on all nine stages, so the ``failed`` verdict is caused by the VIOLATION.
+
+    On a single-stage recorder this assertion would hold even if ``violated`` were recorded as
+    ``observed``, because the stage count alone would fail the run.
+    """
+    rec = _fully_covered(skip="operator_queue_has_zero_pollers")
+    rec.violated(
+        "operator_queue_has_zero_pollers",
+        STAGE_QUEUES,
+        reason_code="acceptance_prohibited_state_observed",
+        observation={"pollers": 1},
+    )
     ev = rec.seal(fleet=_FLEET, release=_RELEASE)
     assert ev.outcome == RUN_FAILED
     assert ev.violated() == ("operator_queue_has_zero_pollers",)
+    # every stage present and every other check passing — the violation is the ONLY cause
+    assert set(ev.stages_attempted) == STAGES
+    assert ev.coverage_complete()
+    assert ev.not_passing() == ("operator_queue_has_zero_pollers",)
     # and it is NOT reported as a failure to look
     assert ev.unproven() == ()
 
@@ -120,21 +158,28 @@ def test_a_violated_check_cannot_be_hand_written_into_a_passed_document():
 
 def test_violated_and_unproven_are_reported_separately_on_the_document():
     """The two failure modes must be distinguishable by a reader without decoding reason codes."""
-    rec = AcceptanceRecorder()
-    rec.open_stage(STAGE_QUEUES)
     checks = list(CHECKS_BY_STAGE[STAGE_QUEUES])
+    rec = _fully_covered(skip=checks[0])
     rec.violated(
         checks[0], STAGE_QUEUES, reason_code="acceptance_prohibited_state_observed", observation={}
     )
-    rec.unproven(
-        checks[1], STAGE_QUEUES, reason_code="acceptance_observation_unavailable", observation={}
-    )
-    for check in checks[2:]:
-        rec.observe(check, STAGE_QUEUES, {})
     ev = rec.seal(fleet=_FLEET, release=_RELEASE)
     assert ev.violated() == (checks[0],)
-    assert ev.unproven() == (checks[1],)
-    assert set(ev.not_passing()) == {checks[0], checks[1]}
+    assert ev.unproven() == ()
+
+    other = _fully_covered(skip=checks[1])
+    other.unproven(
+        checks[1], STAGE_QUEUES, reason_code="acceptance_observation_unavailable", observation={}
+    )
+    document = other.seal(fleet=_FLEET, release=_RELEASE)
+    assert document.unproven() == (checks[1],)
+    assert document.violated() == ()
+
+    # Recorded identically apart from the verb, and the document still tells them apart. Built as
+    # two complete nine-stage runs so each accessor is answering about a run that is otherwise
+    # entirely passing — on a partial recorder both would be swamped by missing checks.
+    assert ev.not_passing() == (checks[0],)
+    assert document.not_passing() == (checks[1],)
 
 
 # --------------------------------------------------------------------------- the real property
