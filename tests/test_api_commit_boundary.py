@@ -137,9 +137,22 @@ def _served_contexts(router, out=None, seen=None):
     seen = [] if seen is None else seen
     if any(node is router for node in seen):
         return out
-    # Held by strong reference, NOT by id(): the nested ``_IncludedRouter`` objects below are
-    # constructed fresh by ``effective_candidates()``, so an id()-keyed set could match a recycled
-    # address and skip a subtree that was never visited.
+    # Held by strong reference rather than by ``id()``. DEFENSIVE HARDENING, NOT A FIX FOR A
+    # DEMONSTRATED DEFECT — an earlier version of this comment claimed the nested
+    # ``_IncludedRouter`` objects are "constructed fresh by ``effective_candidates()``", so an
+    # id()-keyed set could match a recycled address. That is wider than what is true.
+    #
+    # Measured in fastapi 0.138.2: ``effective_candidates()`` MEMOISES. It caches into
+    # ``self._effective_candidates``, keyed on ``_effective_candidates_version``, and returns the
+    # same list object while the routes version is unchanged. So the children are built once and
+    # then retained by a strong reference on the parent for the lifetime of the app — there is no
+    # window in which an address could be freed and reused mid-walk, and the ``id()`` guard was not
+    # exploitable here.
+    #
+    # Strong references are kept anyway: they cost nothing, and they are belt-and-braces against a
+    # future FastAPI that stops memoising. Stated this way because a comment claiming a hazard
+    # wider than the one measured is the same failure this module exists to catch — including when
+    # it is a comment about one's own defensive change.
     seen.append(router)
 
     # An ``_IncludedRouter`` is expanded through its OWN ``effective_candidates()``. It does not

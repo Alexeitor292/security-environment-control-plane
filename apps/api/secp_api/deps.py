@@ -71,6 +71,16 @@ def db_session() -> Iterator[Session]:
 # rebuild. ``tests/test_api_commit_boundary.py`` walks the SERVED trees and fails on exactly that
 # disagreement, so this comment cannot quietly become false.
 #
+# BUILD THIS SEAM RIGHT HERE, INLINE. Do not construct it indirectly — ``DB_SESSION =
+# _make_seam()`` fails the guard (measured: 1 failed), even though the result is semantically
+# correct: one shared frozen ``Depends`` at function scope. That is a deliberate, declared
+# boundary rather than an oversight. The guard recognises the seam as the module-level statement
+# whose value IS the ``Depends(...)`` call, because a helper could return a different object per
+# call and no static check can rule that out — and a per-call object would reinstate exactly the
+# per-site decision this seam exists to remove. The failure is loud and names this line, so a
+# refactor cannot slip past it; this note exists so you meet the constraint here, where the seam is
+# written, rather than from a test failure afterwards.
+#
 # THE ONE REAL CONSTRAINT THIS IMPOSES: DO NOT STREAM ORM INSTANCES.
 # Function scope closes the session after the endpoint returns and after the response model is
 # serialized, but BEFORE ``await response(scope, receive, send)``. An ordinary JSON response is
