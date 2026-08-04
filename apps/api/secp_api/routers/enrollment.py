@@ -46,8 +46,8 @@ from sqlalchemy.orm import Session
 from secp_api.auth import Principal
 from secp_api.config import Settings
 from secp_api.deps import (
+    DB_SESSION,
     current_principal,
-    db_session,
     get_enrollment_offer_signer,
     settings_dep,
 )
@@ -126,7 +126,7 @@ def _iso(moment: _dt.datetime) -> str:
 @router.post("/invitations", response_model=EnrollmentInvitationOut, status_code=201)
 def create_enrollment_invitation(
     body: CreateEnrollmentInvitation,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentInvitationOut:
     # one clock sample: created_at and expires_at derive from the SAME instant, so the effective TTL
@@ -163,7 +163,7 @@ def list_enrollments(
     state: Annotated[list[WorkerEnrollmentStateName] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)] = DEFAULT_LIST_LIMIT,
     after: Annotated[str | None, Query(max_length=256)] = None,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentListOut:
     """The org-scoped enrollment inventory: one bounded, keyset-paged page of status projections.
@@ -200,7 +200,7 @@ def list_enrollments(
 @router.get("/{enrollment_id}", response_model=EnrollmentStatusOut)
 def get_enrollment_status(
     enrollment_id: str,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentStatusOut:
     view = svc.load_public_view(session, principal, enrollment_id=enrollment_id)
@@ -211,7 +211,7 @@ def get_enrollment_status(
 def revoke_enrollment(
     enrollment_id: str,
     body: RevokeEnrollment,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentStatusOut:
     outcome = svc.revoke_enrollment(
@@ -224,7 +224,7 @@ def revoke_enrollment(
 def mark_enrollment_recovery_required(
     enrollment_id: str,
     body: MarkRecoveryRequired,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentStatusOut:
     """Operator-triggered recovery — the complement of the scheduled expiry sweep.
@@ -258,7 +258,7 @@ def mark_enrollment_recovery_required(
 def bind_worker_exchange(
     enrollment_id: str,
     body: BindExchangeRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     signer: EnrollmentOfferSignerClient = Depends(get_enrollment_offer_signer),
 ) -> BindExchangeOut:
     outcome = svc.bind_worker_exchange(
@@ -286,7 +286,7 @@ def bind_worker_exchange(
 def record_worker_result_exchange(
     enrollment_id: str,
     body: ResultExchangeRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
 ) -> ResultExchangeOut:
     outcome = svc.record_worker_result_exchange(
         session,
@@ -320,7 +320,7 @@ def record_worker_result_exchange(
 def bind_worker(
     enrollment_id: str,
     body: BindWorkerRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
     settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
@@ -342,7 +342,7 @@ def bind_worker(
 def record_controller_offer(
     enrollment_id: str,
     body: RecordHandoffRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
     settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
@@ -367,7 +367,7 @@ def record_controller_offer(
 def record_worker_result(
     enrollment_id: str,
     body: RecordHandoffRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
     settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
@@ -392,7 +392,7 @@ def record_worker_result(
 def verify_release(
     enrollment_id: str,
     body: VerifyReleaseRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
     settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:
@@ -414,7 +414,7 @@ def verify_release(
 def mark_enrollment_healthy(
     enrollment_id: str,
     body: MarkHealthyRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
     settings: Settings = Depends(settings_dep),
 ) -> EnrollmentStatusOut:

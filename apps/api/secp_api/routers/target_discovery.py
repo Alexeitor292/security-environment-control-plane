@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.schemas_target_discovery import (
     CandidatePlanOut,
     CandidatePlanResourceOut,
@@ -43,7 +43,7 @@ READ_ONLY_NOTICE = "Read-only discovery. Live deployment remains sealed pending 
 @router.post("/target-discovery", response_model=EnrollmentOut, status_code=201)
 def request_discovery(
     body: DiscoveryRequest,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentOut:
     row = svc.request_discovery(
@@ -58,7 +58,7 @@ def request_discovery(
 
 @router.get("/target-discovery", response_model=list[EnrollmentOut])
 def list_enrollments(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[EnrollmentOut]:
     return [EnrollmentOut.model_validate(r) for r in svc.list_enrollments(session, principal)]
@@ -67,7 +67,7 @@ def list_enrollments(
 @router.get("/target-discovery/{enrollment_id}", response_model=EnrollmentOut)
 def get_enrollment(
     enrollment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentOut:
     return EnrollmentOut.model_validate(svc.get_enrollment(session, principal, enrollment_id))
@@ -76,7 +76,7 @@ def get_enrollment(
 @router.get("/target-discovery/{enrollment_id}/evidence", response_model=DiscoveryEvidenceOut)
 def get_evidence(
     enrollment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DiscoveryEvidenceOut:
     """The safe capability/eligibility outcome from the latest immutable discovery snapshot."""
@@ -135,7 +135,7 @@ def get_evidence(
 @router.get("/target-discovery/{enrollment_id}/candidate-plan", response_model=CandidatePlanOut)
 def get_candidate_plan(
     enrollment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> CandidatePlanOut:
     plan = svc.get_active_candidate_plan(session, principal, enrollment_id)
@@ -172,7 +172,7 @@ def get_candidate_plan(
 )
 def get_bootstrap_availability(
     enrollment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DiscoveryBootstrapAvailabilityOut:
     """A SAFE boolean + closed reason only. The worker-local read-only SSH authority is
@@ -185,7 +185,7 @@ def get_bootstrap_availability(
 @router.get("/target-discovery/{enrollment_id}/apply-status", response_model=SealedApplyNoticeOut)
 def get_apply_status(
     enrollment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> SealedApplyNoticeOut:
     svc.get_enrollment(session, principal, enrollment_id)  # authorize + 404
@@ -195,7 +195,7 @@ def get_apply_status(
 @router.post("/target-discovery/{enrollment_id}/rerun", response_model=EnrollmentOut)
 def rerun_discovery(
     enrollment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentOut:
     return EnrollmentOut.model_validate(svc.rerun_discovery(session, principal, enrollment_id))
@@ -205,7 +205,7 @@ def rerun_discovery(
 def approve_candidate_plan(
     enrollment_id: uuid.UUID,
     body: DiscoveryApprove,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentOut:
     """Approve the EXACT candidate plan. Grants NO execution — live apply remains sealed."""
@@ -219,7 +219,7 @@ def approve_candidate_plan(
 @router.post("/target-discovery/{enrollment_id}/reject", response_model=EnrollmentOut)
 def reject_candidate_plan(
     enrollment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> EnrollmentOut:
     return EnrollmentOut.model_validate(

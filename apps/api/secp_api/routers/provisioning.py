@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.schemas_provisioning import (
     ApprovalDecision,
     ChangeSetApprovalOut,
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api/v1", tags=["provisioning"])
 @router.post("/plans/{plan_id}/manifest", response_model=ManifestOut, status_code=201)
 def generate_manifest(
     plan_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ManifestOut:
     """Generate an immutable, secret-free provisioning manifest from an approved plan."""
@@ -41,7 +41,7 @@ def generate_manifest(
 @router.get("/manifests/{manifest_id}", response_model=ManifestOut)
 def get_manifest(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ManifestOut:
     return ManifestOut.model_validate(manifests.get_manifest(session, principal, manifest_id))
@@ -50,7 +50,7 @@ def get_manifest(
 @router.get("/manifests/{manifest_id}/operations", response_model=list[OperationOut])
 def list_operations(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[OperationOut]:
     return [
@@ -62,7 +62,7 @@ def list_operations(
 @router.get("/provisioning-operations/{operation_id}", response_model=OperationOut)
 def get_operation(
     operation_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> OperationOut:
     return OperationOut.model_validate(provisioning.get_operation(session, principal, operation_id))
@@ -79,7 +79,7 @@ def get_operation(
 def register_toolchain_profile(
     target_id: uuid.UUID,
     body: ToolchainProfileCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ToolchainProfileOut:
     """Register an immutable, secret-free toolchain profile for an execution target."""
@@ -92,7 +92,7 @@ def register_toolchain_profile(
 @router.get("/targets/{target_id}/toolchain-profiles", response_model=list[ToolchainProfileOut])
 def list_toolchain_profiles(
     target_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[ToolchainProfileOut]:
     return [
@@ -104,7 +104,7 @@ def list_toolchain_profiles(
 @router.get("/toolchain-profiles/{profile_id}", response_model=ToolchainProfileOut)
 def get_toolchain_profile(
     profile_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ToolchainProfileOut:
     return ToolchainProfileOut.model_validate(
@@ -115,7 +115,7 @@ def get_toolchain_profile(
 @router.post("/toolchain-profiles/{profile_id}/disable", response_model=ToolchainProfileOut)
 def disable_toolchain_profile(
     profile_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ToolchainProfileOut:
     return ToolchainProfileOut.model_validate(
@@ -129,7 +129,7 @@ def disable_toolchain_profile(
 @router.get("/manifests/{manifest_id}/change-sets", response_model=list[ChangeSetApprovalOut])
 def list_change_sets(
     manifest_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[ChangeSetApprovalOut]:
     return [
@@ -141,7 +141,7 @@ def list_change_sets(
 @router.get("/change-sets/{approval_id}", response_model=ChangeSetApprovalOut)
 def get_change_set(
     approval_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ChangeSetApprovalOut:
     return ChangeSetApprovalOut.model_validate(
@@ -153,7 +153,7 @@ def get_change_set(
 def approve_change_set(
     approval_id: uuid.UUID,
     body: ApprovalDecision,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ChangeSetApprovalOut:
     """Explicit human approval of an exact dry-run change set (no AI, no bypass)."""
@@ -166,7 +166,7 @@ def approve_change_set(
 def reject_change_set(
     approval_id: uuid.UUID,
     body: ApprovalDecision,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ChangeSetApprovalOut:
     return ChangeSetApprovalOut.model_validate(

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.errors import NotFoundError
 from secp_api.models import DeploymentPlan
 from secp_api.schemas import DecisionBody, PlanOut
@@ -32,7 +32,7 @@ def _serialize(session: Session, principal: Principal, plan: DeploymentPlan) -> 
 @router.post("/exercises/{exercise_id}/plan", response_model=PlanOut, status_code=201)
 def generate_plan(
     exercise_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanOut:
     plan = planning.generate_plan(session, principal, exercise_id)
@@ -42,7 +42,7 @@ def generate_plan(
 @router.get("/exercises/{exercise_id}/plan", response_model=PlanOut)
 def latest_plan(
     exercise_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanOut:
     plan = planning.latest_plan(session, principal, exercise_id)
@@ -54,7 +54,7 @@ def latest_plan(
 @router.post("/plans/{plan_id}/submit", response_model=PlanOut)
 def submit_plan(
     plan_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanOut:
     plan = planning.submit_plan(session, principal, plan_id)
@@ -65,7 +65,7 @@ def submit_plan(
 def approve_plan(
     plan_id: uuid.UUID,
     body: DecisionBody | None = None,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanOut:
     reason = body.reason if body else ""
@@ -77,7 +77,7 @@ def approve_plan(
 def reject_plan(
     plan_id: uuid.UUID,
     body: DecisionBody | None = None,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> PlanOut:
     reason = body.reason if body else ""

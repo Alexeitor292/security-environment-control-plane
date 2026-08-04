@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.schemas_staging_deployment import (
     BootstrapAvailabilityOut,
     DeploymentApprove,
@@ -42,7 +42,7 @@ CONTROL_PLANE_ONLY_NOTICE = "Control plane only — no infrastructure is contact
 @router.post("/staging-deployments", response_model=DeploymentOut, status_code=201)
 def create_deployment(
     body: DeploymentCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentOut:
     """Create a draft deployment bound to an active onboarding (all labels are server-owned)."""
@@ -58,7 +58,7 @@ def create_deployment(
 
 @router.get("/staging-deployments", response_model=list[DeploymentOut])
 def list_deployments(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[DeploymentOut]:
     return [DeploymentOut.model_validate(d) for d in svc.list_deployments(session, principal)]
@@ -67,7 +67,7 @@ def list_deployments(
 @router.get("/staging-deployments/{deployment_id}", response_model=DeploymentOut)
 def get_deployment(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentOut:
     return DeploymentOut.model_validate(svc.get_deployment(session, principal, deployment_id))
@@ -76,7 +76,7 @@ def get_deployment(
 @router.get("/staging-deployments/{deployment_id}/plan", response_model=DeploymentPlanOut)
 def get_plan(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentPlanOut:
     """The immutable content-addressed plan: safe resource CATEGORIES + counts + generated refs."""
@@ -105,7 +105,7 @@ def get_plan(
 )
 def list_resources(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[DeploymentResourceOut]:
     """Resources the deployment created — safe category, ownership tag, generated ref, and state."""
@@ -121,7 +121,7 @@ def list_resources(
 )
 def list_verifications(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[DeploymentVerificationOut]:
     """Post-apply verification results — closed check code + status only."""
@@ -137,7 +137,7 @@ def list_verifications(
 )
 def get_bootstrap_availability(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> BootstrapAvailabilityOut:
     """A SAFE boolean + closed reason only. The one-time SSH bootstrap authority is worker-local and
@@ -150,7 +150,7 @@ def get_bootstrap_availability(
 @router.post("/staging-deployments/{deployment_id}/plan", response_model=DeploymentOut)
 def generate_plan(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentOut:
     """Compile the immutable content-addressed plan (draft -> planned). No infrastructure hit."""
@@ -160,7 +160,7 @@ def generate_plan(
 @router.post("/staging-deployments/{deployment_id}/submit", response_model=DeploymentOut)
 def submit_for_approval(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentOut:
     """planned -> awaiting_approval."""
@@ -171,7 +171,7 @@ def submit_for_approval(
 def approve_deployment(
     deployment_id: uuid.UUID,
     body: DeploymentApprove,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentOut:
     """Approve the EXACT reviewed plan (awaiting_approval -> approved), binding every drift anchor.
@@ -186,7 +186,7 @@ def approve_deployment(
 @router.post("/staging-deployments/{deployment_id}/reject", response_model=DeploymentOut)
 def reject_deployment(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentOut:
     """Reject a deployment awaiting approval. Records the closed decision code (no free text)."""
@@ -196,7 +196,7 @@ def reject_deployment(
 @router.post("/staging-deployments/{deployment_id}/deploy", response_model=DeploymentOut)
 def deploy(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentOut:
     """approved -> bootstrap_pending; ENQUEUES the durable apply operation (never run by the API).
@@ -210,7 +210,7 @@ def deploy(
 @router.post("/staging-deployments/{deployment_id}/teardown", response_model=DeploymentOut)
 def request_teardown(
     deployment_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> DeploymentOut:
     """ready/failed/rolled_back -> teardown_requested; enqueues the durable teardown operation."""

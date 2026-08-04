@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
-from secp_api.deps import current_principal, db_session
+from secp_api.deps import DB_SESSION, current_principal
 from secp_api.schemas_staging_lab import (
     EligibleSubstrateOut,
     StagingLabApprove,
@@ -33,7 +33,7 @@ SIMULATION_ONLY_NOTICE = "Simulation only — no infrastructure will be created.
 
 @router.get("/staging-labs/eligible-substrates", response_model=list[EligibleSubstrateOut])
 def list_eligible_substrates(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[EligibleSubstrateOut]:
     """Substrates the UI may offer: same-org, active, Proxmox, eligible, onboarded (aliases)."""
@@ -46,7 +46,7 @@ def list_eligible_substrates(
 @router.post("/staging-labs", response_model=StagingLabOut, status_code=201)
 def create_staging_lab(
     body: StagingLabCreate,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     lab = staging_labs.create_staging_lab(
@@ -63,7 +63,7 @@ def create_staging_lab(
 
 @router.get("/staging-labs", response_model=list[StagingLabOut])
 def list_staging_labs(
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[StagingLabOut]:
     return [
@@ -75,7 +75,7 @@ def list_staging_labs(
 @router.get("/staging-labs/{lab_id}", response_model=StagingLabOut)
 def get_staging_lab(
     lab_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     return StagingLabOut.model_validate(staging_labs.get_staging_lab(session, principal, lab_id))
@@ -84,7 +84,7 @@ def get_staging_lab(
 @router.get("/staging-labs/{lab_id}/work-items", response_model=list[StagingLabWorkItemOut])
 def list_work_items(
     lab_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> list[StagingLabWorkItemOut]:
     return [
@@ -96,7 +96,7 @@ def list_work_items(
 @router.post("/staging-labs/{lab_id}/plan", response_model=StagingLabOut)
 def generate_plan(
     lab_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     """Compile the immutable logical plan (no infrastructure is created)."""
@@ -106,7 +106,7 @@ def generate_plan(
 @router.post("/staging-labs/{lab_id}/submit", response_model=StagingLabOut)
 def submit_for_approval(
     lab_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     return StagingLabOut.model_validate(
@@ -118,7 +118,7 @@ def submit_for_approval(
 def approve_staging_lab(
     lab_id: uuid.UUID,
     body: StagingLabApprove,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     """Approve the exact reviewed plan. Grants permission to ENQUEUE fake simulation only —
@@ -133,7 +133,7 @@ def approve_staging_lab(
 @router.post("/staging-labs/{lab_id}/reject", response_model=StagingLabOut)
 def reject_staging_lab(
     lab_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     """Reject a lab awaiting approval. Records the closed decision code (no free text)."""
@@ -143,7 +143,7 @@ def reject_staging_lab(
 @router.post("/staging-labs/{lab_id}/simulate", response_model=StagingLabOut)
 def queue_simulation(
     lab_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     """QUEUE a fake simulation. Simulation only — no infrastructure will be created. The lab
@@ -155,7 +155,7 @@ def queue_simulation(
 @router.post("/staging-labs/{lab_id}/teardown", response_model=StagingLabOut)
 def queue_teardown(
     lab_id: uuid.UUID,
-    session: Session = Depends(db_session),
+    session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> StagingLabOut:
     """QUEUE a fake teardown. Simulation only — no infrastructure exists to destroy. The lab
