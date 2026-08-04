@@ -37,6 +37,8 @@ from secp_acceptance.reasons import (
     OUTCOME_OBSERVED,
     OUTCOME_REFUSED,
     OUTCOME_UNPROVEN,
+    OUTCOME_VIOLATED,
+    PASSING_OUTCOMES,
     STAGE_QUEUES,
 )
 from secp_acceptance.recorder import AcceptanceRecorder
@@ -149,27 +151,56 @@ def test_neither_a_violation_nor_an_outage_is_ever_recorded_as_refused():
     for verdict in (VERDICT_VIOLATED, VERDICT_UNPROVABLE):
         outcome, _ = encode_verdict(_one_of_each()[verdict])
         assert outcome != OUTCOME_REFUSED
-        assert outcome == OUTCOME_UNPROVEN
+        assert outcome not in PASSING_OUTCOMES
 
 
-def test_a_violation_and_an_outage_are_told_apart_by_their_reason_code():
-    """They currently SHARE an outcome, so the reason code is the only thing separating them.
+def test_a_violation_and_an_outage_no_longer_share_an_outcome():
+    """THE line that documented the gap, now documenting its closure.
 
-    This is the cost of the evidence contract having no member meaning "a positive observation of
-    the bad thing". It is recorded as a test rather than a comment so that if a fourth outcome is
-    ever adopted, the assertion below is the one that documents what changed.
+    This test previously asserted ``violated_outcome == outage_outcome`` with a note that a fourth
+    outcome would change exactly this line. The fourth outcome landed, so it did. A proven breach
+    and a probe that could not run are now separated at the OUTCOME level, not merely by reason
+    code — which is what makes them distinguishable to a reader who filters on outcome.
     """
     violated_outcome, violated_reason = encode_verdict(_one_of_each()[VERDICT_VIOLATED])
     outage_outcome, outage_reason = encode_verdict(_one_of_each()[VERDICT_UNPROVABLE])
-    assert violated_outcome == outage_outcome  # today; a fourth outcome would change this line
+    assert violated_outcome == OUTCOME_VIOLATED
+    assert outage_outcome == OUTCOME_UNPROVEN
+    assert violated_outcome != outage_outcome
     assert violated_reason != outage_reason
     assert violated_reason is not None and outage_reason is not None
 
 
-def test_a_violation_carries_the_products_own_name_for_the_condition():
+def test_a_violation_carries_the_contracts_single_prohibited_state_code():
+    """One code for every violated check, by the contract's design: the CHECK ID already names the
+    property, and a per-check code set would grow past review."""
     _, reason = encode_verdict(_one_of_each()[VERDICT_VIOLATED])
-    assert reason == "worker_ordinary_polls_operator_queue"
+    assert reason == "acceptance_prohibited_state_observed"
     assert reason in ALL_REASONS
+
+
+def test_the_producers_specific_cause_survives_into_the_observation():
+    """The contract's single violated code is the DOCUMENT's reason. The producer's more specific
+    tell — which of the four operator-unit signs fired, say — must not be silently dropped on the
+    way there, so the funnel puts it in the bounded observation the check asserted on."""
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_QUEUES)
+    captured: dict = {}
+
+    class _Capturing(AcceptanceRecorder):
+        def violated(self, check, stage, *, reason_code, observation):  # type: ignore[override]
+            captured.update({"reason_code": reason_code, "observation": dict(observation)})
+            super().violated(check, stage, reason_code=reason_code, observation=observation)
+
+    run = _Capturing()
+    run.open_stage(STAGE_QUEUES)
+    record_verdict(
+        run,
+        "operator_unit_never_activated",
+        QueueVerdict(VERDICT_VIOLATED, cause="worker_operator_not_disabled_stopped"),
+    )
+    assert captured["reason_code"] == "acceptance_prohibited_state_observed"
+    assert captured["observation"]["observed_cause"] == "worker_operator_not_disabled_stopped"
 
 
 def test_an_outage_carries_the_cause_the_producer_observed_not_a_fixed_code():
@@ -224,18 +255,24 @@ def test_recording_a_held_verdict_produces_an_observed_check():
     assert sealed.stage == STAGE_QUEUES
 
 
-@pytest.mark.parametrize("verdict", [VERDICT_VIOLATED, VERDICT_UNPROVABLE])
-def test_recording_a_non_held_verdict_is_never_a_pass(verdict: str):
+@pytest.mark.parametrize(
+    ("verdict", "expected_outcome"),
+    [(VERDICT_VIOLATED, OUTCOME_VIOLATED), (VERDICT_UNPROVABLE, OUTCOME_UNPROVEN)],
+)
+def test_recording_a_non_held_verdict_is_never_a_pass(verdict: str, expected_outcome: str):
     """The property that matters most: neither a violation nor an outage can produce a passing run.
 
-    Sealed through the real recorder, so this asserts on what the EVIDENCE says rather than on what
-    the encoding returned — the recorder is what a run actually calls.
+    Recorded through the real recorder, so this asserts on what the EVIDENCE says rather than on
+    what the encoding returned — the recorder is what a run actually calls. The two land on
+    DIFFERENT outcomes now; the property they SHARE is membership — neither is in
+    ``PASSING_OUTCOMES``, which is the allowlist the run verdict is derived from.
     """
     recorder = AcceptanceRecorder()
     recorder.open_stage(STAGE_QUEUES)
     record_verdict(recorder, "operator_queue_has_zero_pollers", QueueVerdict(verdict, cause=_CAUSE))
     sealed = recorder._checks[0]
-    assert sealed.outcome == OUTCOME_UNPROVEN
+    assert sealed.outcome == expected_outcome
+    assert sealed.outcome not in PASSING_OUTCOMES
     assert sealed.reason_code is not None
 
 
@@ -258,16 +295,10 @@ def test_every_queues_check_is_recordable_through_the_funnel():
     assert recorder.missing() == ()
 
 
-def test_a_stage_of_all_held_verdicts_seals_as_a_complete_pass():
-    """The positive control. If the encoding could never produce a passing queues stage, every
-    guard above would be satisfied by a stage that can only fail."""
+def _seal(recorder: AcceptanceRecorder):
     from secp_acceptance.evidence import FleetRecord, ReleaseRecord
 
-    recorder = AcceptanceRecorder()
-    recorder.open_stage(STAGE_QUEUES)
-    for check in CHECKS_BY_STAGE[STAGE_QUEUES]:
-        record_verdict(recorder, check, QueueVerdict(VERDICT_HELD))
-    evidence = recorder.seal(
+    return recorder.seal(
         fleet=FleetRecord(
             host_image_identity="sha256:" + "0" * 64,
             controller_host_identity="sha256:" + "1" * 64,
@@ -286,43 +317,62 @@ def test_a_stage_of_all_held_verdicts_seals_as_a_complete_pass():
             test_only_anchor=True,
         ),
     )
-    assert evidence.outcome == "passed"
+
+
+# THESE TWO ASSERT AT CHECK LEVEL, NOT RUN LEVEL, AND THAT IS DELIBERATE.
+#
+# They used to assert on ``evidence.outcome`` (``passed`` / ``failed``). That stopped being
+# meaningful when the contract made a passing run require ALL NINE stages: a single-stage seal is
+# now ``failed`` no matter what its checks say — measured, not assumed — so ``assert outcome ==
+# "failed"`` had become satisfiable by a stage whose every check was ``observed``. A canary that
+# cannot distinguish the thing it was watching for is worse than no canary, because it still looks
+# like coverage. The run-level rule is the contract's property and E owns its tests; what THIS
+# stage owns is which outcome each of its checks lands on.
+
+
+def test_every_held_verdict_lands_on_a_passing_outcome():
+    """The positive control. If the encoding could never produce a passing check, every guard above
+    would be satisfied by a stage that can only fail."""
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_QUEUES)
+    for check in CHECKS_BY_STAGE[STAGE_QUEUES]:
+        record_verdict(recorder, check, QueueVerdict(VERDICT_HELD))
+    evidence = _seal(recorder)
+    assert evidence.not_passing() == ()
+    assert evidence.violated() == ()
     assert evidence.unproven() == ()
     assert evidence.coverage_complete()
 
 
-def test_one_violated_check_is_enough_to_fail_the_whole_stage():
-    """The MUTATION of the control above: flip exactly one verdict and the run must stop passing.
+def test_one_violated_check_is_enough_to_make_the_stage_not_passing():
+    """The MUTATION of the control above: flip one verdict and it must leave the passing set.
 
-    Without this, ``test_a_stage_of_all_held_verdicts_seals_as_a_complete_pass`` would be satisfied
-    by an encoding that made everything pass.
+    Asserts on ``not_passing()`` and ``violated()`` rather than on the run outcome, so an encoding
+    that mapped ``violated`` to ``observed`` fails here — which the old run-level assertion would no
+    longer have caught.
     """
-    from secp_acceptance.evidence import FleetRecord, ReleaseRecord
-
     recorder = AcceptanceRecorder()
     recorder.open_stage(STAGE_QUEUES)
     checks = CHECKS_BY_STAGE[STAGE_QUEUES]
     record_verdict(recorder, checks[0], QueueVerdict(VERDICT_VIOLATED, cause=_CAUSE))
     for check in checks[1:]:
         record_verdict(recorder, check, QueueVerdict(VERDICT_HELD))
-    evidence = recorder.seal(
-        fleet=FleetRecord(
-            host_image_identity="sha256:" + "0" * 64,
-            controller_host_identity="sha256:" + "1" * 64,
-            worker_host_identity="sha256:" + "2" * 64,
-            network_identity="sha256:" + "3" * 64,
-            hosts_created=2,
-            hosts_destroyed=2,
-            nested_container_runtime=True,
-            real_service_manager=True,
-        ),
-        release=ReleaseRecord(
-            role="worker",
-            baseline_aggregate="sha256:" + "4" * 64,
-            baseline_source_sha="a" * 40,
-            signing_anchor_id="test-anchor",
-            test_only_anchor=True,
-        ),
-    )
-    assert evidence.outcome == "failed"
+    evidence = _seal(recorder)
+    assert evidence.violated() == (checks[0],)
+    assert evidence.not_passing() == (checks[0],)
+    # ...and it is NOT filed as an outage: that is the whole point of the fourth outcome
+    assert evidence.unproven() == ()
+
+
+def test_an_outage_is_not_filed_as_a_violation():
+    """The opposite direction, so the two are pinned apart from both sides."""
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_QUEUES)
+    checks = CHECKS_BY_STAGE[STAGE_QUEUES]
+    record_verdict(recorder, checks[0], QueueVerdict(VERDICT_UNPROVABLE, cause=_CAUSE))
+    for check in checks[1:]:
+        record_verdict(recorder, check, QueueVerdict(VERDICT_HELD))
+    evidence = _seal(recorder)
     assert evidence.unproven() == (checks[0],)
+    assert evidence.violated() == ()
+    assert evidence.not_passing() == (checks[0],)

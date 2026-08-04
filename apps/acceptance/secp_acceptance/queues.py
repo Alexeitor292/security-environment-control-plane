@@ -47,6 +47,15 @@ observed*. ``violated`` is a POSITIVE observation of the bad thing and is emphat
 as ``unprovable`` — collapsing them would make the most serious finding this stage can produce
 indistinguishable from a transport error.
 
+Each of the three now reaches its OWN evidence outcome (``observed`` / ``violated`` / ``unproven``),
+so that distinction survives all the way into the document. It did not always: ``violated`` and
+``unprovable`` briefly shared ``unproven``, separated only by reason code, because the contract had
+no outcome for a proven breach. Worth knowing that the fix was not merely adding the fourth outcome
+— both pass predicates were DENYLISTS ("no unproven"), so any outcome added to the closed set
+became a passing one by default, and a proven violation sealed and loaded clean as ``passed``. The
+allowlist over ``PASSING_OUTCOMES`` is what makes the fourth outcome safe, and it is why nothing
+here checks for "not unproven" by hand.
+
 WHAT THIS MODULE DOES NOT DO
 ----------------------------
 It starts no worker, submits nothing to any operator queue, contacts no provider, and runs no
@@ -70,6 +79,7 @@ from secp_acceptance.reasons import (
     CHECKS_BY_STAGE,
     OUTCOME_OBSERVED,
     OUTCOME_UNPROVEN,
+    OUTCOME_VIOLATED,
     STAGE_QUEUES,
 )
 
@@ -130,21 +140,33 @@ class QueueVerdict:
 
 # --------------------------------------------------------------------------- THE encoding table
 #
-# THE single point of change for how a verdict becomes an evidence record. It is one table and one
-# function on purpose: the evidence contract's three outcomes have no member that means "a positive
-# observation of the bad thing", so ``violated`` currently has to share ``unproven`` with
-# ``unprovable``, distinguished only by reason code. If a fourth outcome is added to the contract,
-# adopting it is ONE row here and nothing else in the stage moves.
+# THE single point of change for how a verdict becomes an evidence record: one table, one function,
+# one recorder call. ``violated`` used to share ``unproven`` here, because the contract had no
+# outcome meaning "a positive observation of the bad thing"; the contract now has one, and adopting
+# it moved exactly the row below and nothing else in the stage.
+#
+# Why the ``violated`` reason is FIXED rather than the producer's own code: the contract carries a
+# single ``acceptance_prohibited_state_observed`` for every violated check, on the reasoning that
+# the CHECK ID already names the property that was violated and a per-check code set would grow
+# past review. The producer's more specific cause is not discarded, though — ``record_verdict``
+# puts it in the bounded observation, so it survives into what the check asserted on rather than
+# being silently dropped on the way to the document.
 
-#: verdict -> (evidence outcome, fixed reason code or None meaning "the producer supplies it").
+#: verdict -> (evidence outcome, fixed reason code, or None meaning "the producer supplies it").
 VERDICT_ENCODING: dict[str, tuple[str, str | None]] = {
     VERDICT_HELD: (OUTCOME_OBSERVED, None),
-    # The product's own bounded name for an ordinary worker serving the operator queue. Using the
-    # product's code rather than a harness one keeps the evidence naming the same condition an
-    # operator would meet in a log.
-    VERDICT_VIOLATED: (OUTCOME_UNPROVEN, "worker_ordinary_polls_operator_queue"),
+    VERDICT_VIOLATED: (OUTCOME_VIOLATED, "acceptance_prohibited_state_observed"),
     # The cause is whatever stopped the observation, so it comes from the producer, not from here.
     VERDICT_UNPROVABLE: (OUTCOME_UNPROVEN, None),
+}
+
+#: verdict -> the recorder/run verb that records it. Kept beside the table rather than as a chain
+#: of ``if``s so that adding an outcome means adding a row in two adjacent dicts, and a verdict with
+#: no verb fails loudly instead of falling through to a default.
+VERDICT_VERB: dict[str, str] = {
+    VERDICT_HELD: "observe",
+    VERDICT_VIOLATED: "violated",
+    VERDICT_UNPROVABLE: "unproven",
 }
 
 
@@ -152,8 +174,8 @@ def encode_verdict(verdict: QueueVerdict) -> tuple[str, str | None]:
     """Map ONE verdict to its ``(outcome, reason_code)`` evidence encoding.
 
     The only place in the stage that decides what a verdict means to a reader. ``held`` is the only
-    verdict that can produce a pass; every other row resolves to an outcome that a ``passed`` run
-    cannot contain.
+    verdict that can produce a pass; every other row resolves to an outcome outside
+    :data:`~secp_acceptance.reasons.PASSING_OUTCOMES`.
     """
     if verdict.verdict not in VERDICT_ENCODING:  # pragma: no cover - QueueVerdict already refuses
         raise AcceptanceError("acceptance_evidence_invalid")
@@ -163,8 +185,13 @@ def encode_verdict(verdict: QueueVerdict) -> tuple[str, str | None]:
     return outcome, fixed_reason or verdict.cause
 
 
-def record_verdict(recorder: object, check: str, verdict: QueueVerdict) -> None:
-    """Record ONE queues-stage check through the encoding above. The stage's only recorder call.
+def record_verdict(run: object, check: str, verdict: QueueVerdict) -> None:
+    """Record ONE queues-stage check through the encoding above. The stage's only recording call.
+
+    ``run`` is duck-typed on the verb surface deliberately: :class:`AcceptanceRecorder` and
+    :class:`~secp_acceptance.run.AcceptanceRun` expose the same ``observe`` / ``violated`` /
+    ``unproven`` signatures, so the stage works against either without this module having to know
+    which layer it was handed.
 
     Refuses a check that the queues stage does not declare, so a proof cannot be filed under a name
     the evidence document would accept for some other stage.
@@ -173,12 +200,15 @@ def record_verdict(recorder: object, check: str, verdict: QueueVerdict) -> None:
         raise AcceptanceError("acceptance_evidence_unknown_check")
     outcome, reason = encode_verdict(verdict)
     observation = dict(verdict.observation)
+    if verdict.verdict == VERDICT_VIOLATED and verdict.cause is not None:
+        # The specific tell, kept where a reader of the projection can still see it. The document's
+        # reason_code is the contract's single violated code; this is what was actually observed.
+        observation["observed_cause"] = verdict.cause
+    verb = getattr(run, VERDICT_VERB[verdict.verdict])
     if outcome == OUTCOME_OBSERVED:
-        recorder.observe(check, STAGE_QUEUES, observation)  # type: ignore[attr-defined]
+        verb(check, STAGE_QUEUES, observation)
         return
-    recorder.unproven(  # type: ignore[attr-defined]
-        check, STAGE_QUEUES, reason_code=reason, observation=observation
-    )
+    verb(check, STAGE_QUEUES, reason_code=reason, observation=observation)
 
 
 # --------------------------------------------------------------------------- queue identities
@@ -775,6 +805,7 @@ __all__ = [
     "TERMINAL_STATUSES",
     "VERDICTS",
     "VERDICT_ENCODING",
+    "VERDICT_VERB",
     "VERDICT_HELD",
     "VERDICT_UNPROVABLE",
     "VERDICT_VIOLATED",
