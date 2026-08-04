@@ -1430,3 +1430,57 @@ def test_the_container_stage_never_stubs_the_process_seam():
     source = module.read_text(encoding="utf-8")
     for forbidden in ("monkeypatch.setattr", "shell.run", "mock.patch", "MagicMock"):
         assert forbidden not in source, f"the container stage must not stub the seam: {forbidden}"
+
+
+def test_the_two_restart_observers_share_no_key_and_neither_says_state():
+    """The third name collision in this harness, guarded rather than merely documented.
+
+    ``state`` names two different facts: the worker's LOCAL restart marker
+    (``unknown``/``offer_verified``/``healthy``) and the controller's AUTHORITATIVE enrollment
+    state. ``observe_restart_marker`` renames its side to ``step`` for exactly that reason, and the
+    rename is load-bearing rather than cosmetic — the container stage merges it with
+    ``observe_worker_key_identity`` into one dict, so a shared key would let one observer silently
+    overwrite the other and the restart proof would compare the wrong value while still passing.
+
+    Two properties, both cheap and neither previously enforced: the marker observer must never
+    surface ``state``, and the two observers merged either side of the restart must have DISJOINT
+    key sets.
+
+    This is the same species as the ``healthy`` collision and the two release documents. The domain
+    names things after WHAT THEY DESCRIBE rather than WHICH SOURCE THEY CAME FROM, so the names
+    collide before the facts do.
+    """
+    import ast
+
+    from secp_acceptance import enrollment
+
+    source = pathlib.Path(enrollment.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    def returned_keys(function_name: str) -> set[str]:
+        fn = next(
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function_name
+        )
+        keys: set[str] = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+                keys |= {
+                    k.value
+                    for k in node.value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                }
+        return keys
+
+    marker = returned_keys("observe_restart_marker")
+    identity = returned_keys("observe_worker_key_identity")
+
+    assert marker, "the marker observer's keys could not be read; this guard is not measuring"
+    assert identity, "the identity observer's keys could not be read; this guard is not measuring"
+    assert "state" not in marker, (
+        "observe_restart_marker surfaces 'state', which is the controller's word for a different "
+        "fact; the local marker is 'step'"
+    )
+    assert not (marker & identity), (
+        f"the two observers merged across the restart share keys {sorted(marker & identity)}; one "
+        "would overwrite the other and the restart proof would compare the wrong value"
+    )
