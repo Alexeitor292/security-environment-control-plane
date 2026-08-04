@@ -276,3 +276,137 @@ def test_an_over_long_poller_list_is_malformed_not_truncated():
         }
     )
     assert parse_probe_output(raw)[ROLE_ORDINARY]["answered"] is False
+
+
+# --------------------------------------------------------------------------- gaps the audit found
+#
+# Six mutations survived the first corpus, and the first two are the SAME DEFECT this stage found
+# in another team's guard hours earlier: a test whose cases are drawn from the very collection it
+# is testing. `for verb in FORBIDDEN_PROBE_VERBS` cannot notice a SHORTENED list — delete an entry
+# and the loop simply stops testing it, reporting green. Knowing the rule did not stop me writing
+# it, which is the point worth keeping.
+#
+# The expectation below is therefore stated INDEPENDENTLY of the list under test.
+
+#: Verbs the probe guard must refuse, written here as a separate claim rather than read from the
+#: module. If someone removes one from the product list, THIS list still demands it and the test
+#: fails — which is the whole difference from iterating the list itself.
+_MUST_REFUSE = (
+    "start_workflow(",
+    "execute_workflow(",
+    "execute_update(",
+    "signal_workflow(",
+    "start_worker(",
+    "Worker(",
+)
+
+
+@pytest.mark.parametrize("verb", _MUST_REFUSE)
+def test_the_guard_refuses_every_verb_it_must(verb: str):
+    """Independently stated, so a SHORTENED product list fails here rather than silently
+    narrowing what the guard covers."""
+    assert verb in FORBIDDEN_PROBE_VERBS, (
+        f"{verb!r} was removed from FORBIDDEN_PROBE_VERBS. The probe would no longer be checked "
+        f"for it, and a probe that can start work is the one thing this stage must never ship."
+    )
+    with pytest.raises(AcceptanceError):
+        assert_probe_is_read_only(f"await client.{verb})")
+
+
+_RPC_STUB = _STUB.replace(
+    'raise RuntimeError("no such queue")', "raise RPCError('refused')"
+).replace("class _Service:", "from types import SimpleNamespace\n\nclass _Service:")
+
+
+def _run_probe_with(tmp_path: pathlib.Path, stub: str, queues: dict, pollers: dict) -> str:
+    request = tmp_path / "input.json"
+    request.write_bytes(probe_request(temporal_host="h", namespace="default", queues=queues))
+    script = tmp_path / "probe.py"
+    script.write_text(
+        stub.replace("__POLLERS__", repr(pollers))
+        + textwrap.dedent(probe_source(input_path=request.as_posix())),
+        encoding="utf-8",
+    )
+    done = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    return done.stdout
+
+
+def test_an_RPCError_specifically_is_unanswered_not_empty(tmp_path: pathlib.Path):
+    """The ``except RPCError`` branch was never taken: the stub raised a generic exception, so it
+    landed in ``except Exception`` and the RPC path went untested. A server that REFUSES the
+    describe call is the realistic outage, and reporting it as an answered empty queue is the
+    single worst confusion available here."""
+    stdout = _run_probe_with(
+        tmp_path, _RPC_STUB, {ROLE_OPERATOR_MANAGEMENT: "absent"}, {"other": []}
+    )
+    entry = parse_probe_output(stdout)[ROLE_OPERATOR_MANAGEMENT]
+    assert entry["answered"] is False
+    observed = observe_pollers("absent", ROLE_OPERATOR_MANAGEMENT, entry)
+    assert resolve_operator_isolation([observed]).verdict == VERDICT_UNPROVABLE
+
+
+def test_a_probe_that_crashes_wholesale_is_unanswered(tmp_path: pathlib.Path):
+    """The outer ``except`` around ``asyncio.run`` had no test, so a total probe failure could have
+    started reporting ``answered: true`` with an empty queue map and nothing would have said so."""
+    broken = _STUB.replace(
+        "    async def connect(cls, host, namespace=None):\n        return cls()",
+        "    async def connect(cls, host, namespace=None):\n        raise ValueError('boom')",
+    )
+    stdout = _run_probe_with(tmp_path, broken, {ROLE_ORDINARY: "q"}, {"q": []})
+    with pytest.raises(AcceptanceError):
+        parse_probe_output(stdout)
+
+
+def test_the_probe_does_not_swallow_a_BaseException(tmp_path: pathlib.Path):
+    """THE OTHER DIRECTION, and it is deliberate rather than an oversight.
+
+    The probe catches ``Exception``, not ``BaseException``, so a ``KeyboardInterrupt`` or a
+    ``SystemExit`` propagates instead of being reported as a tidy unanswered result. Discovered by
+    writing the crash test wrongly first: a probe that swallowed everything would report a clean
+    "could not observe" while the operator was trying to stop it.
+    """
+    request = tmp_path / "input.json"
+    request.write_bytes(probe_request(temporal_host="h", namespace="default", queues={"r": "q"}))
+    script = tmp_path / "probe.py"
+    script.write_text(
+        _STUB.replace("__POLLERS__", "{}").replace(
+            "    async def connect(cls, host, namespace=None):\n        return cls()",
+            "    async def connect(cls, host, namespace=None):\n        raise BaseException('x')",
+        )
+        + textwrap.dedent(probe_source(input_path=request.as_posix())),
+        encoding="utf-8",
+    )
+    done = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode != 0, "a BaseException must escape, not be reported as unanswered"
+
+
+def test_the_probes_own_cause_survives_the_parser():
+    """The parser must carry the probe's bounded cause, not overwrite it with a generic one — the
+    two causes have different remediations and the distinction is the whole reason they exist."""
+    raw = json.dumps(
+        {
+            "answered": True,
+            "queues": {
+                ROLE_ORDINARY: {
+                    "answered": False,
+                    "cause": "acceptance_observation_malformed",
+                    "pollers": [],
+                }
+            },
+        }
+    )
+    assert parse_probe_output(raw)[ROLE_ORDINARY]["cause"] == "acceptance_observation_malformed"
+
+
+@pytest.mark.parametrize("entry", ["not a mapping", 7, None, []])
+def test_a_non_mapping_queue_entry_is_refused(entry: object):
+    """An entry that is not a mapping cannot be read at all, so it must refuse rather than fall
+    through to the unanswered branch and look like an ordinary outage."""
+    raw = json.dumps({"answered": True, "queues": {ROLE_ORDINARY: entry}})
+    with pytest.raises(AcceptanceError):
+        parse_probe_output(raw)
