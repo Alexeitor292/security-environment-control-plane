@@ -276,6 +276,89 @@ def test_recording_a_non_held_verdict_is_never_a_pass(verdict: str, expected_out
     assert sealed.reason_code is not None
 
 
+def test_the_funnel_records_the_dormancy_check_under_the_worker_install_stage():
+    """``resolve_operator_unit_dormant`` is wanted by the worker-install stage too, for
+    ``worker_operator_unit_present_disabled_stopped`` — the same observation asked at a different
+    point in the run. A second dormancy implementation is exactly the duplicate this program
+    refuses, so the funnel takes the stage rather than the producer being copied."""
+    from secp_acceptance.reasons import STAGE_WORKER_INSTALL
+
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_WORKER_INSTALL)
+    record_verdict(
+        recorder,
+        "worker_operator_unit_present_disabled_stopped",
+        QueueVerdict(VERDICT_VIOLATED, cause="worker_operator_not_disabled_stopped"),
+        stage=STAGE_WORKER_INSTALL,
+    )
+    sealed = recorder._checks[0]
+    assert sealed.stage == STAGE_WORKER_INSTALL
+    assert sealed.outcome == OUTCOME_VIOLATED
+    assert sealed.reason_code == "acceptance_prohibited_state_observed"
+
+
+class _PermissiveRun:
+    """A run double that records anything it is given, validating NOTHING.
+
+    Load-bearing. ``record_verdict`` is duck-typed on the verb surface, so it can be handed an
+    object that does not validate — and its OWN check-belongs-to-stage guard is only observable
+    against such an object. Tested first against the real recorder, this guard looked covered while
+    being entirely redundant: the recorder rejects the same call at ``recorder.py:91``, so deleting
+    the funnel's guard changed no test outcome. Mutation testing found that; this double is the fix.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def observe(self, check, stage, observation):
+        self.calls.append(("observe", check, stage))
+
+    def violated(self, check, stage, *, reason_code, observation):
+        self.calls.append(("violated", check, stage))
+
+    def unproven(self, check, stage, *, reason_code, observation):
+        self.calls.append(("unproven", check, stage))
+
+
+def test_the_funnels_own_stage_guard_bites_against_a_non_validating_run():
+    """Generalising the funnel must not let a check be filed under an arbitrary stage — and the
+    funnel must enforce that ITSELF, not lean on the recorder happening to."""
+    from secp_acceptance.reasons import STAGE_WORKER_INSTALL
+
+    run = _PermissiveRun()
+    with pytest.raises(AcceptanceError):
+        record_verdict(
+            run,
+            "operator_queue_has_zero_pollers",  # a QUEUES check
+            QueueVerdict(VERDICT_HELD),
+            stage=STAGE_WORKER_INSTALL,
+        )
+    assert run.calls == [], "the funnel recorded before validating"
+
+
+def test_the_recorder_independently_rejects_the_same_call():
+    """DEFENCE IN DEPTH, verified at both layers rather than assumed at one.
+
+    The funnel's guard above and this one are independent; either alone would stop the misfiling,
+    and knowing both hold is what makes it safe for the funnel to accept a duck-typed run.
+    """
+    from secp_acceptance.reasons import STAGE_WORKER_INSTALL
+
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_WORKER_INSTALL)
+    with pytest.raises(AcceptanceError):
+        recorder.observe("operator_queue_has_zero_pollers", STAGE_WORKER_INSTALL, {})
+
+
+def test_an_unknown_stage_is_refused_by_the_funnel():
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_QUEUES)
+    with pytest.raises(AcceptanceError):
+        record_verdict(
+            recorder, "operator_queue_has_zero_pollers", QueueVerdict(VERDICT_HELD), stage="nope"
+        )
+
+
 def test_a_check_from_another_stage_cannot_be_filed_under_queues():
     """A queue proof filed under a check the queues stage does not declare would be read later as if
     some other stage had proven it."""

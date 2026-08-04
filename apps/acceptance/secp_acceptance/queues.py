@@ -185,18 +185,29 @@ def encode_verdict(verdict: QueueVerdict) -> tuple[str, str | None]:
     return outcome, fixed_reason or verdict.cause
 
 
-def record_verdict(run: object, check: str, verdict: QueueVerdict) -> None:
-    """Record ONE queues-stage check through the encoding above. The stage's only recording call.
+def record_verdict(
+    run: object, check: str, verdict: QueueVerdict, *, stage: str = STAGE_QUEUES
+) -> None:
+    """Record ONE check through the encoding above. The queues stage's only recording call.
 
     ``run`` is duck-typed on the verb surface deliberately: :class:`AcceptanceRecorder` and
     :class:`~secp_acceptance.run.AcceptanceRun` expose the same ``observe`` / ``violated`` /
     ``unproven`` signatures, so the stage works against either without this module having to know
     which layer it was handed.
 
-    Refuses a check that the queues stage does not declare, so a proof cannot be filed under a name
-    the evidence document would accept for some other stage.
+    ``stage`` defaults to the queues stage but is a parameter because
+    :func:`resolve_operator_unit_dormant` is genuinely wanted by the worker-install stage for
+    ``worker_operator_unit_present_disabled_stopped`` — the same observation, asked at a different
+    point in the run. A second implementation of operator-unit dormancy is exactly the duplicate
+    this program refuses, so the funnel takes the stage instead. The check-belongs-to-stage guard
+    below still bites: a check may only be filed under the stage that declares it.
+
+    (If a third stage adopts this machinery, the verdict types belong in their own module rather
+    than in ``queues``; two callers do not yet justify the move.)
     """
-    if check not in CHECKS_BY_STAGE[STAGE_QUEUES]:
+    if stage not in CHECKS_BY_STAGE:
+        raise AcceptanceError("acceptance_evidence_unknown_stage")
+    if check not in CHECKS_BY_STAGE[stage]:
         raise AcceptanceError("acceptance_evidence_unknown_check")
     outcome, reason = encode_verdict(verdict)
     observation = dict(verdict.observation)
@@ -206,9 +217,9 @@ def record_verdict(run: object, check: str, verdict: QueueVerdict) -> None:
         observation["observed_cause"] = verdict.cause
     verb = getattr(run, VERDICT_VERB[verdict.verdict])
     if outcome == OUTCOME_OBSERVED:
-        verb(check, STAGE_QUEUES, observation)
+        verb(check, stage, observation)
         return
-    verb(check, STAGE_QUEUES, reason_code=reason, observation=observation)
+    verb(check, stage, reason_code=reason, observation=observation)
 
 
 # --------------------------------------------------------------------------- queue identities
@@ -264,10 +275,17 @@ def resolve_operator_queues(
 ) -> tuple[dict[str, str], str | None]:
     """The operator queue names to probe, keyed by the ROLE that owns each.
 
-    Returns ``(role -> queue, degradation_cause)``. ``degradation_cause`` is not None when the
-    deployment profile could not be read: the union then covers the management constant only, the
+    Returns ``(role -> queue, degradation_cause)``. ``degradation_cause`` is not None whenever the
+    deployment-local name is unavailable: the union then covers the management constant only, the
     isolation claim is genuinely narrower, and the caller MUST declare that as a gap rather than
     letting a narrower proof wear the same green as a complete one.
+
+    On a host installed by the supported path that is ALWAYS — no product code writes a deployment
+    profile (see :data:`PROFILE_UNREADABLE_WHY`). Passing ``profile_reader=None`` is therefore the
+    accurate call for a real run today, not a degraded one, and it reports
+    :data:`PROFILE_NOT_INSTALLED` rather than an observation failure. The seam is kept because the
+    check is written for the product as it should be: if a profile ever ships, the union widens with
+    no change here.
 
     A name equal to the ordinary queue is DROPPED rather than probed. "Zero pollers on the operator
     queue" is not a well-posed question when that queue IS the queue the worker polls, and a
@@ -281,7 +299,9 @@ def resolve_operator_queues(
         queues[ROLE_OPERATOR_MANAGEMENT] = management
     degradation: str | None = None
     if profile_reader is None:
-        degradation = "acceptance_observation_unavailable"
+        # No reader supplied: the caller is stating that this host has no deployment profile, which
+        # is the truthful state of every supported installation today.
+        degradation = PROFILE_NOT_INSTALLED
     else:
         try:
             declared = profile_reader.operator_task_queue()
@@ -297,17 +317,38 @@ def resolve_operator_queues(
     return queues, degradation
 
 
-#: The gap a run declares when the installed deployment profile could not be read. Named here so the
-#: caller cannot invent a softer wording for the same substitution.
+#: The gap a run declares when the deployment-local operator queue name is unavailable. Named here
+#: so the caller cannot invent a softer wording for the same substitution.
+#:
+#: THE WHY IS STRUCTURAL, NOT A READ FAILURE, and the wording matters. ``FIXED_PROFILE_PATH`` and
+#: ``read_deployment_profile`` are real product code with a real ``operator_task_queue`` field — but
+#: NOTHING IN THE PRODUCT EVER WRITES THAT FILE. Verified: the only non-test references are the
+#: constant's definition (``profile.py:34``), the reader's default argument (``profile.py:309``),
+#: and test fixtures that seed it. What ``secpctl bootstrap worker`` actually installs into
+#: ``/etc/secp/operator-deployment`` is the deployment package zip (``layout.py:50``).
+#:
+#: So this gap fires on EVERY run against a host installed by the supported path, and it is a
+#: permanent property of the product rather than an incident on one host. An earlier wording here
+#: said the profile "could not be read", which describes a transient failure that in fact never
+#: happens — a gap that misdescribes its own cause is worse than no gap, because the next reader
+#: goes looking for a broken host instead of a missing writer.
 PROFILE_UNREADABLE_GAP = "operator_queue_union_incomplete"
 PROFILE_UNREADABLE_SUBSTITUTE = (
     "operator-queue isolation was proven against the management plane's code-owned operator queue "
-    "name only, not against the name the installed deployment profile declares"
+    "name only, not against a deployment-declared name"
 )
 PROFILE_UNREADABLE_WHY = (
-    "the installed deployment profile could not be read from the worker host, so the "
-    "deployment-local operator queue name was unavailable to probe"
+    "no supported installation path writes a deployment profile, so there is no deployment-local "
+    "operator queue name on the host to probe; the product defines the file and a reader for it "
+    "but never writes it"
 )
+
+#: The bounded cause meaning "the profile is absent because the product installs none". Distinct
+#: from a read/parse failure: the remediations are opposite. This one says the harness is looking at
+#: a correctly-installed host and the value genuinely does not exist there; a read failure says the
+#: host is not what it should be. Collapsing them would send a reader hunting a host defect that is
+#: not there — the same observed-false/could-not-look confusion this stage refuses everywhere else.
+PROFILE_NOT_INSTALLED = "acceptance_proof_would_be_vacuous"
 
 
 def declare_profile_gap(recorder: object, *, weakens: tuple[str, ...]) -> None:

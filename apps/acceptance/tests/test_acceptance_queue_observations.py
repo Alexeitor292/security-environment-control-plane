@@ -25,6 +25,7 @@ import pytest
 from secp_acceptance import AcceptanceError
 from secp_acceptance.queues import (
     MAX_POLLERS,
+    PROFILE_NOT_INSTALLED,
     ROLE_OPERATOR_MANAGEMENT,
     ROLE_OPERATOR_PROFILE,
     ROLE_ORDINARY,
@@ -199,8 +200,72 @@ def test_an_unreadable_profile_narrows_the_union_and_SAYS_so():
 
 
 def test_an_absent_profile_reader_is_a_degradation_not_a_silent_narrowing():
-    _, degradation = resolve_operator_queues(ordinary=ordinary_queue_name(), profile_reader=None)
-    assert degradation is not None
+    queues, degradation = resolve_operator_queues(
+        ordinary=ordinary_queue_name(), profile_reader=None
+    )
+    assert degradation == PROFILE_NOT_INSTALLED
+    # ...and the union is still non-empty, so isolation remains provable against the constant
+    assert set(queues) == {ROLE_OPERATOR_MANAGEMENT}
+
+
+def test_a_structurally_absent_profile_is_told_apart_from_a_broken_one():
+    """Opposite remediations, so they must not share a cause.
+
+    ``PROFILE_NOT_INSTALLED`` says the harness is looking at a correctly-installed host and the
+    value genuinely does not exist there. A read failure says the host is not what it should be. A
+    reader who cannot tell them apart goes hunting a host defect that is not there.
+    """
+    _, structural = resolve_operator_queues(ordinary=ordinary_queue_name(), profile_reader=None)
+    _, broken = resolve_operator_queues(
+        ordinary=ordinary_queue_name(),
+        profile_reader=_Profile(AcceptanceError("acceptance_observation_unavailable")),
+    )
+    assert structural != broken
+
+
+def test_the_product_still_installs_no_deployment_profile():
+    """THE PREMISE OF THE GAP THIS STAGE DECLARES ON EVERY RUN, pinned against product source.
+
+    ``FIXED_PROFILE_PATH`` and ``read_deployment_profile`` are real product code with a real
+    ``operator_task_queue`` field, and NOTHING IN THE PRODUCT WRITES THAT FILE — so the
+    deployment-local operator queue name does not exist on a host installed by the supported path,
+    and the operator-queue union is permanently narrower than it reads.
+
+    Asserted rather than commented because it is the kind of fact that silently stops being true:
+    the day someone lands a writer, this fails, and the gap must then be REMOVED rather than left
+    declaring a substitution that is no longer being made. A stale gap understates a run's strength,
+    which is the less-discussed direction of dishonest evidence.
+
+    Searched over non-test product sources only — a fixture that seeds the file in a test is not a
+    writer, and counting one would defeat the whole check.
+    """
+    import pathlib
+
+    root = next(
+        p
+        for p in pathlib.Path(__file__).resolve().parents
+        if (p / "pyproject.toml").is_file() and (p / "apps").is_dir()
+    )
+    packages = (
+        "apps/api/secp_api",
+        "apps/worker/secp_worker",
+        "apps/commissioning/secp_commissioning",
+        "apps/deployment/secp_operator_deployment",
+        "apps/management/secp_management",
+    )
+    sources = {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for package in packages
+        for path in sorted((root / package).rglob("*.py"))
+        if "__pycache__" not in path.parts
+    }
+    assert sources, "the product sweep found nothing; it is not a usable control"
+
+    mentioning = sorted(rel for rel, text in sources.items() if "FIXED_PROFILE_PATH" in text)
+    assert mentioning == ["apps/deployment/secp_operator_deployment/profile.py"], (
+        f"FIXED_PROFILE_PATH is now referenced from {mentioning}. If a writer landed, the "
+        f"operator-queue union is no longer permanently narrow and the gap must be revisited."
+    )
 
 
 @pytest.mark.parametrize("value", ["", None, 7])
