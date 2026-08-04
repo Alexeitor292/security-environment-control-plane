@@ -32,7 +32,7 @@ import pytest
 from secp_acceptance import AcceptanceError
 from secp_acceptance.driver import InstallationRun, _StageRecorder
 from secp_acceptance.hosts import ROLE_WORKER, Host
-from secp_acceptance.install import read_operator_unit_properties
+from secp_acceptance.install import host_untouched, probe_paths, read_operator_unit_properties
 from secp_acceptance.queues import (
     OPERATOR_UNIT_PROPERTIES,
     encode_verdict,
@@ -291,3 +291,83 @@ def test_an_unrecognised_systemd_state_is_not_dormant(monkeypatch: pytest.Monkey
     reading = read_operator_unit_properties(host)
     verdict = resolve_operator_unit_dormant(reading, reading)
     assert encode_verdict(verdict)[0] != OUTCOME_OBSERVED
+
+
+# --------------------------------------------------------------------------- the path probe
+#
+# `host_untouched`'s consumer treats "every path absent" as the PASS condition for
+# `worker_bootstrap_plan_is_dry_run`. So a probe that reports absence when it could not look turns
+# an outage into a pass -- HostFleet.destroy's original defect in a different function. These pin
+# the discrimination in both directions.
+
+
+def _probe_host(monkeypatch: pytest.MonkeyPatch, result: Result) -> Host:
+    def fake_docker(*args: str, timeout: int = 300, check: bool = False) -> Result:
+        return result
+
+    monkeypatch.setattr("secp_acceptance.hosts.docker", fake_docker)
+    return Host(role=ROLE_WORKER, container="c", dns_name="worker.secp.test")
+
+
+_PATHS = ("/etc/secp/worker/compose.yml", "/etc/systemd/system/secp-operator-worker.service")
+
+
+def _lines(*entries: tuple[str, str], sentinel: bool = False) -> str:
+    """Build probe stdout exactly as the host would print it."""
+    out = [f"{verdict} {path}" for verdict, path in entries]
+    if sentinel:
+        out.append("__secp_probe_complete__")
+    return "\n".join(out) + "\n"
+
+
+def test_the_probe_reports_absence_the_host_actually_stated(monkeypatch: pytest.MonkeyPatch):
+    body = _lines(("ABSENT", _PATHS[0]), ("ABSENT", _PATHS[1]), sentinel=True)
+    host = _probe_host(monkeypatch, Result(exit_code=0, stdout=body, stderr=""))
+    assert probe_paths(host, _PATHS) == {_PATHS[0]: False, _PATHS[1]: False}
+    untouched = host_untouched(host, _PATHS)
+    assert untouched["absent"] == untouched["probed"]
+
+
+def test_the_probe_distinguishes_present_from_absent(monkeypatch: pytest.MonkeyPatch):
+    """The control. A probe answering the same for everything would make both directions
+    unfalsifiable, whichever way it leaned."""
+    body = _lines(("PRESENT", _PATHS[0]), ("ABSENT", _PATHS[1]), sentinel=True)
+    host = _probe_host(monkeypatch, Result(exit_code=0, stdout=body, stderr=""))
+    assert probe_paths(host, _PATHS) == {_PATHS[0]: True, _PATHS[1]: False}
+
+
+def test_an_unreachable_host_REFUSES_rather_than_reporting_everything_absent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """THE defect this probe exists to prevent.
+
+    With ``test -e`` in a loop, an unreachable host failed every probe and reported every path
+    absent -- which is the dry-run check's PASS condition. Here it refuses.
+    """
+    host = _probe_host(monkeypatch, Result(exit_code=1, stdout="", stderr="cannot connect"))
+    with pytest.raises(AcceptanceError) as caught:
+        probe_paths(host, _PATHS)
+    assert caught.value.reason_code == "acceptance_observation_unavailable"
+
+
+def test_a_PARTIAL_probe_failure_also_refuses(monkeypatch: pytest.MonkeyPatch):
+    """The case a top-level reachability check alone would miss.
+
+    The host answered and the program ran, but it did not speak about every path -- an
+    untraversable parent, say. An incomplete answer is not absence.
+    """
+    body = _lines(("ABSENT", _PATHS[0]), sentinel=True)
+    host = _probe_host(monkeypatch, Result(exit_code=0, stdout=body, stderr=""))
+    with pytest.raises(AcceptanceError) as caught:
+        probe_paths(host, _PATHS)
+    assert caught.value.reason_code == "acceptance_observation_unavailable"
+
+
+def test_output_without_the_completion_sentinel_refuses(monkeypatch: pytest.MonkeyPatch):
+    """The sentinel proves the program ran to COMPLETION -- a fact no exit status supplies for a
+    program killed midway."""
+    body = _lines(("ABSENT", _PATHS[0]), ("ABSENT", _PATHS[1]))
+    host = _probe_host(monkeypatch, Result(exit_code=0, stdout=body, stderr=""))
+    with pytest.raises(AcceptanceError) as caught:
+        probe_paths(host, _PATHS)
+    assert caught.value.reason_code == "acceptance_observation_unavailable"

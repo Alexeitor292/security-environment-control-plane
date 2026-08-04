@@ -507,25 +507,42 @@ def _observe_api_tls(host: Host) -> tuple[bool, dict[str, object]]:
     """
     from secp_management.controller_api_locator import CONTROLLER_API_LOCATOR_PATH
 
+    # The program catches its OWN failures and reports them as data, so the caller can tell a
+    # handshake that was attempted and lost from a probe that never ran. Anything it cannot catch
+    # (no interpreter, unreachable host) produces no output at all, which the caller refuses as an
+    # outage rather than recording as a TLS failure.
     program = (
-        "import json,ssl,socket,sys,urllib.parse\n"
-        f"loc=json.load(open({CONTROLLER_API_LOCATOR_PATH!r}))\n"
-        "u=urllib.parse.urlparse(loc['canonical_origin'])\n"
-        "ctx=ssl.create_default_context(cafile=loc['ca_bundle_path'])\n"
-        "s=ctx.wrap_socket(socket.create_connection((u.hostname,u.port or 443),timeout=20),"
+        "import json,ssl,socket,urllib.parse\n"
+        "out={}\n"
+        "try:\n"
+        f"    loc=json.load(open({CONTROLLER_API_LOCATOR_PATH!r}))\n"
+        "    u=urllib.parse.urlparse(loc['canonical_origin'])\n"
+        "    ctx=ssl.create_default_context(cafile=loc['ca_bundle_path'])\n"
+        "    s=ctx.wrap_socket(socket.create_connection((u.hostname,u.port or 443),timeout=20),"
         "server_hostname=u.hostname)\n"
-        "cert=s.getpeercert()\n"
-        "print(json.dumps({'tls':s.version(),'san':bool(cert.get('subjectAltName'))}))\n"
+        "    cert=s.getpeercert()\n"
+        "    out={'tls':s.version(),'san':bool(cert.get('subjectAltName'))}\n"
+        "except FileNotFoundError:\n"
+        "    out={'error':'locator_absent'}\n"
+        "except Exception as exc:\n"
+        "    out={'error':type(exc).__name__}\n"
+        "print(json.dumps(out))\n"
     )
     probe = host.exec(("/usr/bin/python3", "-c", program), timeout=180)
-    if not probe.ok:
-        return False, {"handshake": False}
     import json as _json
 
+    # No parsable output means the probe never ran — an outage, not a failed handshake. Returning
+    # False on `not probe.ok` conflated the two and would have recorded "the controller API does
+    # not serve TLS" for a missing /usr/bin/python3.
     try:
         answer = _json.loads(probe.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        raise AcceptanceError("acceptance_observation_malformed") from None
+        raise AcceptanceError("acceptance_observation_unavailable") from None
+    if not isinstance(answer, dict):
+        raise AcceptanceError("acceptance_observation_malformed")
+    if answer.get("error"):
+        # The program ran and the handshake failed. A real negative about the deployment.
+        return False, {"handshake": False, "failed_at": str(answer["error"])[:32]}
     version = str(answer.get("tls", ""))
     return bool(version.startswith("TLSv1.") and answer.get("san")), {
         "tls_version": version[:16],
@@ -542,13 +559,19 @@ def _observe_temporal(host: Host) -> tuple[bool, dict[str, object]]:
     running = host.exec(
         ("docker", "inspect", "--format", "{{.State.Running}}", container), timeout=120
     )
+    # `docker inspect` failing is an OUTAGE, not a stopped component: the inner daemon may be
+    # unreachable or the harness unable to exec into the host. Without this the failed inspect
+    # yields empty stdout, which compares unequal to "true" and reads as "Temporal is not running"
+    # — an accusation against the product for something never observed. The two are separated by
+    # asking whether the COMMAND ran, not by what it printed.
+    if not running.ok or running.stdout.strip() not in ("true", "false"):
+        raise AcceptanceError("acceptance_observation_unavailable")
+    if running.stdout.strip() != "true":
+        return False, {"component_running": "false", "namespace_query_ok": False}
     reachable = host.exec(
         ("docker", "exec", container, "temporal", "operator", "namespace", "list"), timeout=180
     )
-    return (running.stdout.strip() == "true" and reachable.ok), {
-        "component_running": running.stdout.strip()[:8],
-        "namespace_query_ok": reachable.ok,
-    }
+    return reachable.ok, {"component_running": "true", "namespace_query_ok": reachable.ok}
 
 
 def _observe_broker(host: Host) -> tuple[bool, dict[str, object]]:
@@ -568,7 +591,10 @@ def _observe_broker(host: Host) -> tuple[bool, dict[str, object]]:
         timeout=120,
     )
     if not shown.ok:
-        return False, {"unit_observed": False}
+        # `systemctl show` answers even for a unit that does not exist (LoadState=not-found), so a
+        # non-zero exit here is almost purely "could not ask" — an unreachable host or absent
+        # systemd. Reporting it as "the broker is not active" would blame the product for an outage.
+        raise AcceptanceError("acceptance_observation_unavailable")
     properties: dict[str, str] = {}
     for line in shown.stdout.splitlines():
         if "=" in line:

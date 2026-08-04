@@ -162,12 +162,20 @@ class HostInstallation:
         Both halves matter: a console script that exists but cannot import its module is exactly the
         failure a distribution-vs-image mismatch produces, and presence alone would not see it.
         """
-        present = self.host.exec(("test", "-x", self.entrypoint), timeout=60)
+        # Presence through the discriminated probe: `test -x` exiting non-zero means "not
+        # executable" OR "could not run the probe at all", and reporting the second as the first
+        # would blame the product for an outage of the host.
+        exists = probe_paths(self.host, (self.entrypoint,))[self.entrypoint]
         answered = self.host.exec((self.entrypoint, "--json", "host", "inspect"), timeout=300)
         payload = _payload(answered)
+        # An entrypoint that produced no bounded report did not necessarily FAIL — it may not have
+        # run. Absent a report there is nothing to conclude, so refuse rather than record a
+        # negative the product did not earn.
+        if not payload:
+            raise AcceptanceError("acceptance_observation_unavailable")
         return {
             "role": self.host.role,
-            "entrypoint_executable": present.ok,
+            "entrypoint_executable": exists,
             "entrypoint_answers": answered.exit_code in (0, 2),
             "reported_command": str(payload.get("command", ""))[:32],
         }
@@ -397,14 +405,25 @@ def observe_installed_release(host: Host, role: str) -> dict[str, object]:
 
     locations = ManagementLocations()
     path = locations.release_record_path(role)
+    # ABSENCE IS ESTABLISHED FIRST, AND POSITIVELY. `cat` failing means absent, unreadable,
+    # permission-denied, unreachable host, dead container or missing binary — one value for six
+    # causes, and `present: False` is consumed as a BASELINE by three other stages. One of them
+    # (`rollback_removed_documents`) needs proof of REMOVAL, and this record is one of the documents
+    # rollback removes, so "could not read it" answering as "it is gone" would let a rollback that
+    # removed nothing read as a rollback that worked.
+    if not probe_paths(host, (path,))[path]:
+        return {"present": False, "role": role}
     probe = host.exec(("cat", path), timeout=120)
     if not probe.ok:
-        return {"present": False, "role": role}
+        # It exists but could not be read. That is an outage, not a baseline — and it is the case
+        # the old code folded into `present: False`. Severity was inverted too: a MALFORMED record
+        # raised loudly while an UNREADABLE one returned quietly, which is backwards.
+        raise AcceptanceError("acceptance_observation_unavailable")
     from secp_management.release_bundle import manifest_aggregate_digest, parse_manifest_bytes
 
     try:
         manifest = parse_manifest_bytes(probe.stdout.encode("utf-8"))
-    except Exception:  # noqa: BLE001 - a malformed record is an absent baseline, bounded
+    except Exception:  # noqa: BLE001 - bounded; a malformed record is not a baseline
         raise AcceptanceError("acceptance_observation_malformed") from None
     return {
         "present": True,
@@ -469,16 +488,66 @@ def plan_is_dry_run(exit_code: int, payload: dict) -> dict[str, object]:
     }
 
 
+#: Printed by :func:`probe_paths` after every path has been reported. Its presence is what proves
+#: the probe RAN TO COMPLETION, which is the fact an exit status cannot supply.
+_PROBE_COMPLETE = "__secp_probe_complete__"
+
+
+def probe_paths(host: Host, paths: tuple[str, ...]) -> dict[str, bool]:
+    """``{path: exists}`` as the HOST reported it, or REFUSE.
+
+    THE POINT: absence must be a token the host PRINTED, never an exit status the harness inferred.
+
+    ``test -e`` exits non-zero for a genuinely absent path, an unreachable host, a dead container,
+    an untraversable parent, and a missing ``test`` binary alike. A loop over that exit status
+    therefore reports "everything is absent" for an outage — and where a caller's PASS condition is
+    "all absent", which the dry-run check is exactly, an outage becomes a pass.
+
+    This is ``HostFleet.destroy``'s original defect in a different function: every removal failed,
+    every existence probe answered "no" for the same reason, and it reported a clean teardown having
+    done nothing.
+
+    So one program runs, prints one line per path, and prints a completion sentinel. A missing
+    sentinel, a missing line, or an unparsable line means the probe could not be made — raised as
+    ``acceptance_observation_unavailable``, never returned as absence. A PARTIAL failure is caught
+    by the same rule, which is the case a top-level reachability check alone would miss.
+    """
+    if not paths:
+        raise AcceptanceError("acceptance_proof_would_be_vacuous")
+    script = (
+        'for p in "$@"; do '
+        'if [ -e "$p" ]; then echo "PRESENT $p"; else echo "ABSENT $p"; fi; '
+        f"done; echo {_PROBE_COMPLETE}"
+    )
+    result = host.exec(("sh", "-c", script, "sh", *paths), timeout=180)
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if _PROBE_COMPLETE not in lines:
+        raise AcceptanceError("acceptance_observation_unavailable")
+    reported: dict[str, bool] = {}
+    for line in lines:
+        if line.startswith("PRESENT ") or line.startswith("ABSENT "):
+            verdict, _, path = line.partition(" ")
+            reported[path] = verdict == "PRESENT"
+    missing = [path for path in paths if path not in reported]
+    if missing:
+        # The program ran but did not speak about every path. Not absence — an incomplete answer.
+        raise AcceptanceError("acceptance_observation_unavailable")
+    return {path: reported[path] for path in paths}
+
+
 def host_untouched(host: Host, paths: tuple[str, ...]) -> dict[str, object]:
     """Which of the given absolute paths do NOT exist on the host.
 
     Paired with the dry-run report so the check asserts an EFFECT rather than a claim: a plan that
     reported ``dry_run`` while writing its unit file would satisfy the report and fail here.
+
+    Built on :func:`probe_paths`, so "absent" is a positive statement by the host rather than an
+    inference from a failed command. The caller's pass condition is ``absent == probed``, which is
+    precisely the shape that turns an outage into a pass when absence is inferred — and this
+    function is exported, so the next caller may not conjoin it with anything that would catch it.
     """
-    absent: list[str] = []
-    for path in paths:
-        if not host.exec(("test", "-e", path), timeout=60).ok:
-            absent.append(path.rsplit("/", 1)[-1])
+    exists = probe_paths(host, paths)
+    absent = [path.rsplit("/", 1)[-1] for path, present in exists.items() if not present]
     return {"probed": len(paths), "absent": len(absent), "absent_names": sorted(absent)}
 
 
@@ -486,6 +555,7 @@ __all__ = [
     "HOST_STAGING",
     "HostInstallation",
     "observe_installed_release",
+    "probe_paths",
     "host_untouched",
     "observe_health_command_in_worker_image",
     "read_operator_unit_properties",
