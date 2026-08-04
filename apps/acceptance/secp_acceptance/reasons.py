@@ -133,6 +133,19 @@ CHECKS_BY_STAGE: dict[str, tuple[str, ...]] = {
         "drifted_config_refuses_status",
         "unenrolled_worker_health_refused",
         "enroll_without_write_confirm_is_dry_run",
+        # The failed-upgrade restoration. ADR-028 §2.4 says a failed upgrade rolls back to the
+        # prior valid release, and until now no check id named it: `rollback_plan_lists_documents`
+        # and `rollback_removed_documents` are the UNINSTALL verb (`secpctl rollback`), which
+        # removes the managed documents and restores nothing. The thing this names is different —
+        # the transaction's own compensation, which puts every overwritten document back to its
+        # exact prior bytes when the end-state reobservation fails.
+        #
+        # It lives in failure_injection rather than lifecycle because it is only observable by
+        # INJECTING a failure: a signed linear successor whose worker cannot come up healthy. The
+        # proof requires disk AND runtime to agree — byte-identical documents, and the baseline
+        # release still the one actually running — because either alone is satisfiable by a state
+        # the other would refuse.
+        "failed_upgrade_restored_prior_release",
     ),
 }
 
