@@ -1139,3 +1139,62 @@ def test_the_sacrificial_invitation_is_a_separate_enrollment_from_the_identity_o
     assert "site_label" in signature.parameters
     assert signature.parameters["site_label"].default is inspect.Parameter.empty
     assert signature.parameters["ttl_seconds"].default == 300
+
+
+# --------------------------------------------------------------------------- the allowlist binders
+
+
+def test_every_module_that_binds_the_pass_allowlist_is_known_to_the_guards():
+    """A module that binds ``PASSING_OUTCOMES`` at import must be known to whoever narrows it.
+
+    ``test_acceptance_outcome_allowlist.py`` proves the pass predicates are allowlists by narrowing
+    ``PASSING_OUTCOMES`` and re-sealing. It patches ``recorder`` and ``evidence`` BY NAME, because a
+    ``from ... import PASSING_OUTCOMES`` binds the value at import time and a patch of one module
+    does not reach another. Its own comment says "BOTH modules" — an enumeration that was correct
+    when written.
+
+    This module then became the THIRD binder, and nothing would have said so. That is the shape of
+    the hazard: in a half-patched world the unpatched predicate keeps answering from the REAL
+    allowlist, so a narrowed run still reports its checks as passing and the test that was supposed
+    to prove the allowlist is measuring only the modules someone remembered.
+
+    So the binders are DISCOVERED from the package source rather than listed from memory. A fourth
+    binder fails here, which is the moment to extend the patch set — not the moment someone notices
+    a narrowing test that no longer narrows everything.
+    """
+    import ast
+
+    import secp_acceptance
+
+    package = pathlib.Path(secp_acceptance.__file__).parent
+    binders = set()
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "secp_acceptance.reasons":
+                if any(alias.name == "PASSING_OUTCOMES" for alias in node.names):
+                    binders.add(path.name)
+
+    assert binders == {"recorder.py", "evidence.py", "enrollment.py"}, (
+        f"the set of modules binding PASSING_OUTCOMES changed: {sorted(binders)}. "
+        "Every one of them must be patched by the allowlist-narrowing test, or that test "
+        "silently stops measuring the ones it does not name."
+    )
+
+
+def test_the_binder_discovery_can_actually_fail():
+    """Anti-vacuity for the sweep above: prove the discovery FINDS a binder rather than returning an
+    empty set that would match nothing and pass by accident."""
+    import ast
+
+    import secp_acceptance
+
+    package = pathlib.Path(secp_acceptance.__file__).parent
+    recorder = ast.parse((package / "recorder.py").read_text(encoding="utf-8"))
+    found = [
+        alias.name
+        for node in ast.walk(recorder)
+        if isinstance(node, ast.ImportFrom) and node.module == "secp_acceptance.reasons"
+        for alias in node.names
+    ]
+    assert "PASSING_OUTCOMES" in found, "the discovery cannot see a binder it is known to have"
