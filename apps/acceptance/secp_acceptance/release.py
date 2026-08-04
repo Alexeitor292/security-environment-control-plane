@@ -316,6 +316,23 @@ def controller_compose_template(image_map: dict[str, str]) -> bytes:
         lines.append(f"    container_name: {_controller_container(component)}")
         lines.append("    restart: unless-stopped")
         if component == CONTROLLER_API_SERVICE:
+            # THE TRUSTED ISSUER IS A DEPLOY-TIME PARAMETER, NOT A BAKED-IN VALUE.
+            #
+            # Compose ``${VAR}`` substitution, exactly as the reviewed ``infra/dev/
+            # docker-compose.yml`` does it, resolved from the ``.env`` beside this file when the
+            # stack starts. That is what keeps the SIGNED artifact free of any deployment value:
+            # the release names the variable, the deployment supplies it.
+            #
+            # It also removes an ordering constraint this builder briefly believed it had. A
+            # template that omitted the variable would have forced the issuer URL to be known when
+            # the release was SIGNED — i.e. before the fleet that hosts the realm exists — and the
+            # workaround would have been a fixed realm name frozen into a signed artifact. The
+            # product was already right; the omission was ours. A real deployment points at the
+            # customer's own IdP through this same variable, which is why it could not have been
+            # baked.
+            lines.append("    environment:")
+            lines.append("      SECP_OIDC_ISSUER: ${SECP_OIDC_ISSUER}")
+            lines.append("      SECP_OIDC_AUDIENCE: ${SECP_OIDC_AUDIENCE}")
             # The two reviewed read-only binds, emitted in the long form the contract requires.
             lines.append("    volumes:")
             for source, target in (

@@ -405,6 +405,27 @@ ACCEPTANCE_OPERATOR_EMAIL = "acceptance-operator@disposable.invalid"
 ACCEPTANCE_OPERATOR_ROLE = "acceptance-operator"
 
 
+def write_controller_deploy_env(host: Host, *, issuer: str, audience: str) -> dict[str, object]:
+    """Supply the controller stack's DEPLOY-TIME values, beside the signed Compose file.
+
+    The signed controller template names ``${SECP_OIDC_ISSUER}`` / ``${SECP_OIDC_AUDIENCE}`` rather
+    than carrying their values, exactly as the reviewed ``infra/dev/docker-compose.yml`` does.
+    Compose resolves those from a ``.env`` in the project directory, which is the directory holding
+    the compose file — so writing it here supplies the run's issuer WITHOUT touching the signed
+    artifact, and does it after the fleet (and therefore the realm) exists.
+
+    This is what makes the issuer a deployment fact rather than a release fact. A release that
+    baked it would need re-signing per customer, which is why the product never did.
+    """
+    from secp_management.layout import ManagementLocations
+
+    compose_path = ManagementLocations().controller_compose_path()
+    directory = compose_path.rsplit("/", 1)[0]
+    body = f"SECP_OIDC_ISSUER={issuer}\nSECP_OIDC_AUDIENCE={audience}\n".encode("ascii")
+    host.write_file(f"{directory}/.env", body)
+    return {"deploy_env_written": True, "issuer_is_https": issuer.startswith("https://")}
+
+
 def provision_operator_principal(
     host: Host, *, subject: str = ACCEPTANCE_OPERATOR_SUBJECT, permissions: tuple[str, ...]
 ) -> dict[str, object]:

@@ -187,16 +187,23 @@ def worker_host(fleet):
 
 #: The run-scoped realm the acceptance operator authenticates against.
 #:
-#: A FIXED name on the fleet's fixed in-fleet DNS name, so the issuer URL is deterministic at
-#: RELEASE-BUILD time. That is forced rather than chosen: the API reads its trusted issuer from the
-#: environment in the controller Compose template, which is a SIGNED release artifact — and a
-#: realm URL discovered after the fleet exists is not available when the release is signed. A
-#: per-run realm name would mean either signing the release against a live fleet or leaving the
-#: issuer unconfigured, and both are worse.
+#: THE NAME IS FIXED BY CHOICE, NOT BY CONSTRAINT — a correction to an earlier claim here.
 #:
-#: It is disposable in every sense that matters: the realm lives only inside this run's controller
-#: host, and it dies when the fleet is destroyed. The NAME is fixed; the realm is not persistent.
+#: This constant previously carried a justification that the issuer had to be deterministic at
+#: RELEASE-BUILD time, because the API reads it from a SIGNED Compose artifact. That was wrong, and
+#: wrong in the direction that invents work: the reviewed ``infra/dev/docker-compose.yml`` supplies
+#: the issuer by Compose ``${VAR}`` substitution, so it has always been a DEPLOY-TIME parameter.
+#: The signed template now names the variable and the value is supplied when the stack starts —
+#: after the fleet, and therefore the realm, exist. The omission was in our template, not in the
+#: product; a real deployment must point at the customer's own IdP through this same variable, so
+#: it could not have been baked.
+#:
+#: A fixed name is kept only because it is simple and the fleet is disposable — nothing is shared
+#: between runs, so there is nothing for a per-run name to protect against.
 ACCEPTANCE_REALM = "secp-acceptance"
+
+#: The audience the acceptance token carries. Supplied the same deploy-time way as the issuer.
+ACCEPTANCE_AUDIENCE = "secp-api"
 
 
 @pytest.fixture(scope="session")
@@ -226,7 +233,10 @@ def operator_token_path(controller_host, fleet):
     Teardown is the fleet's: the realm, the user, the token file and the database row all live
     inside the controller host and are destroyed with it. Nothing here outlives the run.
     """
-    from secp_acceptance.install import provision_operator_principal
+    from secp_acceptance.install import (
+        provision_operator_principal,
+        write_controller_deploy_env,
+    )
 
     try:
         from secp_acceptance.enrollment import (
@@ -235,6 +245,17 @@ def operator_token_path(controller_host, fleet):
     except Exception:  # noqa: BLE001 - the provisioner is another stage's; absent is not an error
         return None
     try:
+        # The issuer is supplied HERE, at deploy time, into the `.env` beside the signed compose
+        # file — the signed artifact names the variable and never carries the value.
+        write_controller_deploy_env(
+            controller_host,
+            issuer=f"https://{controller_host.dns_name}:8443/realms/{ACCEPTANCE_REALM}",
+            audience=ACCEPTANCE_AUDIENCE,
+        )
+        # EXACTLY `enrollment:manage`, never the seeded platform-admin. `seed.bootstrap_dev` grants
+        # a role holding every Permission, and a stage driving the enrollment API as god-mode
+        # cannot detect a permission-scoping defect: anything that ought to fail for want of this
+        # one permission would pass, and no check in that stage could tell.
         provision_operator_principal(controller_host, permissions=("enrollment:manage",))
         return provision_operator_realm(controller_host, realm=ACCEPTANCE_REALM)
     except Exception:  # noqa: BLE001 - bounded; the consumer records unproven rather than aborting
