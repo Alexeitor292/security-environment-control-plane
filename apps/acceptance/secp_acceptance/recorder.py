@@ -34,6 +34,7 @@ from secp_acceptance.evidence import (
     FleetRecord,
     GapRecord,
     ReleaseRecord,
+    StageProvenance,
     evidence_from_dict,
     observation_digest,
     run_identity,
@@ -51,6 +52,7 @@ from secp_acceptance.reasons import (
     RUN_PASSED,
     STAGES,
 )
+from secp_acceptance.shell import seam_position
 
 
 def utc_now() -> str:
@@ -66,6 +68,11 @@ class AcceptanceRecorder:
         self._checks: list[CheckRecord] = []
         self._gaps: list[GapRecord] = []
         self._seen: set[str] = set()
+        # Seam position when each stage OPENED, and when it last recorded. The difference is how
+        # many commands the stage ran through the one process seam — the only thing in the sealed
+        # document that a literal-only stage cannot produce.
+        self._opened_at: dict[str, tuple[int, str]] = {}
+        self._last_at: dict[str, tuple[int, str]] = {}
 
     # --- stages ---------------------------------------------------------------------------
 
@@ -75,6 +82,7 @@ class AcceptanceRecorder:
             raise AcceptanceError("acceptance_evidence_unknown_stage")
         if stage not in self._stages:
             self._stages.append(stage)
+            self._opened_at[stage] = seam_position()
 
     @property
     def stages(self) -> tuple[str, ...]:
@@ -83,7 +91,14 @@ class AcceptanceRecorder:
     # --- checks ---------------------------------------------------------------------------
 
     def _record(
-        self, *, check: str, stage: str, outcome: str, reason_code: str | None, observation: object
+        self,
+        *,
+        check: str,
+        stage: str,
+        outcome: str,
+        reason_code: str | None,
+        observation: object,
+        observed_cause: str | None = None,
     ) -> None:
         if stage not in self._stages:
             raise AcceptanceError("acceptance_evidence_unknown_stage")
@@ -94,12 +109,14 @@ class AcceptanceRecorder:
         if reason_code is not None and reason_code not in ALL_REASONS:
             raise AcceptanceError("acceptance_evidence_unknown_reason")
         self._seen.add(check)
+        self._last_at[stage] = seam_position()
         self._checks.append(
             CheckRecord(
                 check=check,
                 stage=stage,
                 outcome=outcome,
                 reason_code=reason_code,
+                observed_cause=observed_cause,
                 observation_digest=observation_digest(observation),
             )
         )
@@ -160,7 +177,15 @@ class AcceptanceRecorder:
         )
         return True
 
-    def unproven(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
+    def unproven(
+        self,
+        check: str,
+        stage: str,
+        *,
+        reason_code: str,
+        observation: object,
+        observed_cause: str | None = None,
+    ) -> None:
         """Record a proof the harness could NOT make. Never a pass.
 
         Use this when the harness FAILED TO LOOK — the probe did not complete, the runtime was
@@ -173,15 +198,29 @@ class AcceptanceRecorder:
             outcome=OUTCOME_UNPROVEN,
             reason_code=reason_code,
             observation=observation,
+            observed_cause=observed_cause,
         )
 
-    def violated(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
+    def violated(
+        self,
+        check: str,
+        stage: str,
+        *,
+        reason_code: str,
+        observation: object,
+        observed_cause: str | None = None,
+    ) -> None:
         """Record that the harness POSITIVELY OBSERVED the state this check exists to rule out.
 
         The operator queue had a live poller; the private key left the worker; the operator unit was
         activated. Never a pass, and never the same value as :meth:`unproven` — a proven breach and
         a probe that could not run are opposite findings that call for opposite responses, and the
         management plane's containment probe already keeps them apart for exactly this reason.
+
+        ``observed_cause`` names the SPECIFIC tell, from the producer's own closed vocabulary. Pass
+        it whenever the check can be violated in more than one way: ``reason_code`` is deliberately
+        one coarse code for every violation in the harness, so without a cause a reader of the
+        document cannot tell which of several findings this was.
         """
         self._record(
             check=check,
@@ -189,6 +228,7 @@ class AcceptanceRecorder:
             outcome=OUTCOME_VIOLATED,
             reason_code=reason_code,
             observation=observation,
+            observed_cause=observed_cause,
         )
 
     # --- gaps -----------------------------------------------------------------------------
@@ -219,6 +259,25 @@ class AcceptanceRecorder:
         for stage in self._stages:
             expected.update(CHECKS_BY_STAGE[stage])
         return tuple(sorted(expected - self._seen))
+
+    def _provenance(self) -> list[StageProvenance]:
+        """How much execution each attempted stage did, between opening and its last check.
+
+        A stage that never recorded anything reports ``0`` against its opening position — which is
+        the truthful statement, and exactly what a stage represented only by literals looks like.
+        """
+        records: list[StageProvenance] = []
+        for stage in self._stages:
+            opened_calls, _ = self._opened_at.get(stage, (0, ""))
+            last_calls, last_chain = self._last_at.get(stage, self._opened_at.get(stage, (0, "")))
+            records.append(
+                StageProvenance(
+                    stage=stage,
+                    seam_calls=max(0, last_calls - opened_calls),
+                    chain_digest=last_chain or observation_digest({"seam": "no_execution"}),
+                )
+            )
+        return records
 
     def seal(self, *, fleet: FleetRecord, release: ReleaseRecord) -> AcceptanceEvidence:
         """Seal the run. The outcome is DERIVED, never supplied.
@@ -258,6 +317,7 @@ class AcceptanceRecorder:
             "release": release.canonical(),
             "checks": [record.canonical() for record in self._checks],
             "gaps": [record.canonical() for record in self._gaps],
+            "provenance": [record.canonical() for record in self._provenance()],
             "proxmox_contacted": False,
             "opentofu_executed": False,
             "ephemeral_material_only": True,

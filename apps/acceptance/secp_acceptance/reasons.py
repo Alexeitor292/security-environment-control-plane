@@ -244,6 +244,14 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         # Deliberately ONE code for all of them rather than one per check — the check id already
         # says which property was violated, and a per-check code set would grow past review.
         "acceptance_prohibited_state_observed",
+        # --- execution provenance (completion gate, clause C1) ---
+        # A stage recorded its checks without running a single command through the process seam.
+        # Its observations may be perfectly well-formed; they were not derived from a host.
+        "acceptance_stage_not_derived_from_execution",
+        # The document carries no provenance at all, so the question cannot be answered. Distinct
+        # from the code above on purpose: "we could not tell" and "we can tell, and it did nothing"
+        # are the two states this program keeps having to separate.
+        "acceptance_stage_provenance_absent",
         # --- the run ---
         # The recorder accumulates in memory, so a parallelised session would seal one PARTIAL
         # document per worker and every one of them would look like a complete run.
@@ -251,6 +259,11 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         # Sealing without a fleet record: every stage's claims are claims about a fleet, so a
         # document whose fleet was invented rather than observed misdescribes its own premise.
         "acceptance_run_fleet_not_recorded",
+        # TWO fleets in one session. The document carries exactly one FleetRecord, so this would
+        # describe one machine pair while carrying claims gathered against two, with nothing in the
+        # evidence to say which check belongs to which. Refused where it happens, because it is not
+        # detectable afterwards.
+        "acceptance_run_fleet_conflict",
         # --- evidence ---
         "acceptance_evidence_invalid",
         "acceptance_evidence_forbidden_value",

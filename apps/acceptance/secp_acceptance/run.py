@@ -87,7 +87,10 @@ def _release_not_established() -> ReleaseRecord:
     return ReleaseRecord(
         role="worker",
         baseline_aggregate=absent,
-        baseline_source_sha=absent,
+        # The git NULL object id. A source sha must be a 40-hex commit identity, and there is no
+        # honest commit to name here — this is git's own conventional spelling of "no object",
+        # which is both truthful and inside the grammar.
+        baseline_source_sha="0" * 40,
         signing_anchor_id=absent,
         # True is the honest value: no anchor was used at all, and this field exists to guarantee no
         # PRODUCTION anchor was. Recording False here would assert the opposite of what happened.
@@ -124,11 +127,39 @@ class AcceptanceRun:
             check, stage, expected=expected, actual=actual, observation=observation
         )
 
-    def unproven(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
-        self._recorder.unproven(check, stage, reason_code=reason_code, observation=observation)
+    def unproven(
+        self,
+        check: str,
+        stage: str,
+        *,
+        reason_code: str,
+        observation: object,
+        observed_cause: str | None = None,
+    ) -> None:
+        self._recorder.unproven(
+            check,
+            stage,
+            reason_code=reason_code,
+            observation=observation,
+            observed_cause=observed_cause,
+        )
 
-    def violated(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
-        self._recorder.violated(check, stage, reason_code=reason_code, observation=observation)
+    def violated(
+        self,
+        check: str,
+        stage: str,
+        *,
+        reason_code: str,
+        observation: object,
+        observed_cause: str | None = None,
+    ) -> None:
+        self._recorder.violated(
+            check,
+            stage,
+            reason_code=reason_code,
+            observation=observation,
+            observed_cause=observed_cause,
+        )
 
     def declare_gap(
         self, *, gap: str, stage: str, substitute: str, why: str, weakens: tuple[str, ...]
@@ -140,7 +171,19 @@ class AcceptanceRun:
     # --- what the fleet and release owners call -------------------------------------------
 
     def set_fleet(self, record: FleetRecord) -> None:
-        """Record the fleet that was actually built. Owned by the fleet fixture, called once."""
+        """Record the fleet that was actually built. Owned by the SESSION-scoped fleet fixture.
+
+        Idempotent for the same fleet, and REFUSES a different one. The document carries exactly one
+        :class:`~secp_acceptance.evidence.FleetRecord`, so two fleets in a session would produce a
+        document that describes one machine pair while carrying claims gathered against two — with
+        nothing in the evidence to say which check belongs to which. That is not a discrepancy a
+        reader could detect afterwards, so it is refused at the moment it happens.
+
+        This is why the fleet fixture must be session-scoped rather than module-scoped: as stage
+        modules multiply, module scope silently builds a second fleet for the second module.
+        """
+        if self._fleet_record is not None and self._fleet_record != record:
+            raise AcceptanceError("acceptance_run_fleet_conflict")
         self._fleet_record = record
 
     def set_release(self, record: ReleaseRecord) -> None:
