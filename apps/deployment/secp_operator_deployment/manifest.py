@@ -54,6 +54,7 @@ COVERED_MODULES: tuple[str, ...] = (
     "pinned_exec.py",
     "production_context.py",
     "profile.py",
+    "queue_check.py",
     "runner.py",
     "runtime_seams.py",
     "verify.py",
@@ -75,6 +76,28 @@ class ManifestError(DeploymentPackageError):
     """A covered module failed the implementation-manifest integrity check (bounded reason code)."""
 
 
+def _refuse_symlinked_directory(st_mode: int) -> None:
+    """THE symlinked-directory refusal — one rule, one expression, reused by every enumeration site.
+
+    Three sites enumerate directory entries: :meth:`RealManifestReader.list_modules` per walk level,
+    :meth:`TrustedManifestReader.list_modules` at the package dir, and
+    :meth:`TrustedManifestReader._list_subdirectory` one level down. A symlinked directory is never
+    DESCENDED by any of them, so any site that does not refuse one enumerates it as nothing,
+    silently — and an attacker only has to find the most lenient of the three.
+
+    That is not hypothetical here: the rule was added at the first two sites and missed at the
+    third, in the same function as the descent it guards, which is what a rule copied per site
+    invites. Written once, a site can only fail to CALL it — visible at the call sites — rather
+    than fail to restate it correctly. It also survives the descent bound moving past one level,
+    where a fourth hand-written copy would be the same defect again.
+
+    Takes an ``lstat`` mode: the caller must have stat'd WITHOUT following the link, because a
+    followed symlink to a directory reports ``S_ISDIR`` and is indistinguishable from a real one.
+    """
+    if stat.S_ISLNK(st_mode):
+        raise ManifestError("manifest_symlinked_directory")
+
+
 class ManifestReader(Protocol):
     def list_modules(self) -> tuple[str, ...]: ...
     def read(self, name: str) -> bytes: ...
@@ -88,11 +111,55 @@ class RealManifestReader:
         self._dir = package_dir
 
     def list_modules(self) -> tuple[str, ...]:
-        try:
-            names = os.listdir(self._dir)
-        except OSError:
+        """Every ``.py`` under the package dir, at ANY depth, as a package-relative POSIX name.
+
+        This was a flat ``os.listdir`` filtered to ``.py``. A nested module therefore appeared in
+        neither the listing nor :data:`COVERED_MODULES`, so the inventory equality check did not
+        trip and the file sat SILENTLY OUTSIDE the implementation aggregate — tampering with it
+        would not change the digest. That is a hole in a tamper-detection guarantee, and it makes
+        ``provenance``'s "the installed content recomputes to its reviewed aggregate" true of a
+        subset while reading as true of the package.
+
+        The reviewed inventory is FLAT, so a nested name can never be in it: returning the nested
+        name is what makes ``compute_manifest`` refuse with ``manifest_inventory_mismatch``.
+
+        Note there is NO name-keyed exemption here, deliberately. ``__pycache__`` needs none — it
+        contains ``.pyc`` and no ``.py``, so the content filter already ignores it. A name-based
+        skip would be the very trap that makes a recursive scan worse than a flat one: something
+        could then hide behind the exempt name.
+        """
+
+        def _walk_error(_exc: OSError) -> None:
+            # os.walk SWALLOWS enumeration errors by default, so an unreadable subtree contributed
+            # nothing without complaint and a missing package dir returned () — the inventory check
+            # then matched the flat set and passed. That is the very hole this enumeration exists
+            # to close, surviving one variant down: not-present and not-readable looked identical.
             raise ManifestError("manifest_dir_unreadable") from None
-        return tuple(sorted(n for n in names if n.endswith(".py")))
+
+        found: list[str] = []
+        for root, dirs, names in os.walk(self._dir, onerror=_walk_error, followlinks=False):
+            # followlinks=False does not DESCEND a symlinked subdirectory — it silently skips it,
+            # which is the same "contributes nothing" failure. A plain nested directory is refused,
+            # so a symlinked one must be too: placing it needs the same write access to the
+            # root-owned package dir, and the asymmetry is what an attacker would use.
+            #
+            # ``os.lstat`` rather than ``os.path.islink`` so this site reaches the SHARED refusal on
+            # a mode, like the other two. It also stops an entry that cannot be stat'd from being
+            # read as "not a symlink": islink() returns False on error, which is the silent
+            # not-readable-looks-like-clean failure ``_walk_error`` exists to prevent, one level in.
+            for d in dirs:
+                try:
+                    st_mode = os.lstat(os.path.join(root, d)).st_mode
+                except OSError:
+                    raise ManifestError("manifest_dir_unreadable") from None
+                _refuse_symlinked_directory(st_mode)
+            rel_root = os.path.relpath(root, self._dir)
+            for n in names:
+                if not n.endswith(".py"):
+                    continue
+                rel = n if rel_root == "." else f"{rel_root}/{n}"
+                found.append(rel.replace(os.sep, "/"))
+        return tuple(sorted(found))
 
     def read(self, name: str) -> bytes:
         path = os.path.join(self._dir, name)
@@ -196,11 +263,110 @@ class TrustedManifestReader:
         return cls(open_trusted_package_dir_fd(package_dir))
 
     def list_modules(self) -> tuple[str, ...]:
+        """Every ``.py`` at ANY depth, package-relative, enumerated through the trusted dir fd.
+
+        Same nested-module defect as :meth:`RealManifestReader.list_modules`, though the two differ
+        in the ERROR direction and that is worth not glossing: this reader RAISES on an unreadable
+        directory, where the source-side walk had to be given an explicit ``onerror`` to stop
+        returning partial results. Enumeration descends by FD
+        (``O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`` relative to the parent fd), never by a re-resolvable
+        path, so the property that makes this reader trusted is preserved: a directory-replacement
+        race at the path cannot substitute a tree.
+
+        Descent is bounded to ONE level and refuses deeper rather than guessing. That is
+        deliberate: the reviewed inventory is flat, so anything nested already fails, and a
+        directory it cannot enumerate within that bound is refused
+        (``manifest_nested_directory_unverifiable``) instead of silently contributing nothing —
+        which is the failure mode this whole change is about. The subdirectory it descends into is
+        itself put through :func:`_require_trusted_dir`, so the trust the fd chain establishes from
+        ``/`` reaches every directory this reader reads through, not merely the ancestors.
+
+        No name-keyed exemption: ``__pycache__`` holds no ``.py`` and is ignored by the content
+        filter, so nothing can hide behind an exempt name.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
         try:
             names = os.listdir(self._fd)
         except OSError:
             raise ManifestError("manifest_dir_unreadable") from None
-        return tuple(sorted(n for n in names if n.endswith(".py")))
+
+        found = [n for n in names if n.endswith(".py")]
+        for entry in names:
+            if entry.endswith(".py"):
+                continue
+            try:
+                st = os.stat(entry, dir_fd=self._fd, follow_symlinks=False)
+            except OSError:
+                raise ManifestError("manifest_dir_unreadable") from None
+            # Stat'd with follow_symlinks=False, so a symlink to a directory is NOT S_ISDIR and
+            # would fall through to `continue` — enumerating nothing, silently. Refused, to match
+            # the plain nested-directory case: both need the same write access to the root-owned
+            # package dir, so treating them differently is the gap.
+            _refuse_symlinked_directory(st.st_mode)
+            if not stat.S_ISDIR(st.st_mode):
+                continue  # a non-.py regular file is not a module and never was
+            found.extend(f"{entry}/{n}" for n in self._list_subdirectory(entry, flags))
+        return tuple(sorted(found))
+
+    def _list_subdirectory(self, entry: str, flags: int) -> list[str]:
+        """The ``.py`` names one level down, by fd. Refuses a further nested directory.
+
+        The subdirectory is held to exactly the trust rule every OTHER directory in the chain is
+        held to — :func:`_require_trusted_dir` on its own fd: a real directory, root-owned, and
+        non-group/other-writable. It was the one directory this walk descended into WITHOUT that
+        gate, so a subdirectory an unprivileged user could write was enumerated as if it were
+        root-controlled, and the trust the fd chain establishes from ``/`` stopped one level short
+        of the content it was being used to vouch for.
+
+        The gate is applied WITHOUT a name-keyed exemption, ``__pycache__`` included — the same
+        rule the enumeration itself follows, for the same reason. On a package dir that is already
+        root-owned and non-group/other-writable, only root can create a subdirectory in it at all,
+        so such a cache is necessarily root-OWNED. Whether it VERIFIES then depends on the umask
+        the install byte-compiled under, and that condition is the whole claim — rounding it either
+        way is wrong. "The install's cache passes" is false; "this refusal is a defect" is more
+        false. umask 0022 gives 0755 and verifies; umask 0002 gives 0775 and umask 0000 gives 0777,
+        and both are refused ``manifest_ancestor_world_writable``.
+
+        That refusal is CORRECT and is not to be loosened — a group- or other-writable
+        ``__pycache__`` beneath a root-owned package dir is a ``.pyc`` injection path, and a
+        directory an unprivileged user can write is one this reader cannot vouch for. But the
+        operator consequence is real and belongs here rather than in a surprise: a correctly
+        installed, untampered package byte-compiled under umask 002 exits 15 ``install_untrusted``,
+        and what closes it is the cache's MODE, not a compromised file. The remediation for that
+        refusal is not the same as for a modified module, even though the code is the same one.
+
+        A SYMLINKED directory here reaches :func:`_refuse_symlinked_directory` — the same call the
+        other two enumeration sites make, not a third copy of the rule. Stat'd with
+        ``follow_symlinks=False`` a symlink is NOT ``S_ISDIR``, so it fell through the ``continue``
+        below and enumerated nothing SILENTLY — the very failure this descent exists to close,
+        surviving one level down.
+        """
+        try:
+            sub_fd = os.open(entry, flags, dir_fd=self._fd)
+        except OSError:
+            raise ManifestError("manifest_dir_unreadable") from None
+        try:
+            _require_trusted_dir(sub_fd)
+            try:
+                names = os.listdir(sub_fd)
+            except OSError:
+                raise ManifestError("manifest_dir_unreadable") from None
+            for n in names:
+                if n.endswith(".py"):
+                    continue
+                try:
+                    st = os.stat(n, dir_fd=sub_fd, follow_symlinks=False)
+                except OSError:
+                    raise ManifestError("manifest_dir_unreadable") from None
+                # The same call the other two sites make, not a third copy of the rule.
+                _refuse_symlinked_directory(st.st_mode)
+                if stat.S_ISDIR(st.st_mode):
+                    # Beyond the bounded descent. Refuse rather than enumerate nothing.
+                    raise ManifestError("manifest_nested_directory_unverifiable")
+            return [n for n in names if n.endswith(".py")]
+        finally:
+            os.close(sub_fd)
 
     def read(self, name: str) -> bytes:
         no_follow = getattr(os, "O_NOFOLLOW", 0)

@@ -11,6 +11,14 @@ is
 absent/sealed; tests inject trusted pins through typed DI. ``require_profile_agreement`` fails
 closed
 on any disagreement with a bounded reason that never echoes a value.
+
+THE QUEUE PAIR IS ANCHORED TO CODE, NOT ONLY TO THE PROFILE. ``require_profile_agreement`` makes the
+profile and these pins agree with EACH OTHER, which is not the same as either agreeing with the
+worker. :func:`assert_expected_package_identity` therefore binds ``ordinary_task_queue`` to
+:func:`worker_ordinary_task_queue` — the ``Settings`` attribute the shipped worker entrypoint hands
+to ``Worker(task_queue=...)`` — so a deployment cannot name a queue nothing polls and still verify
+green. The operator queue is constrained to be DISTINCT rather than equal to a code-owned name,
+because it is deployment-local by design.
 """
 
 from __future__ import annotations
@@ -53,6 +61,26 @@ ELIGIBILITY_PROVIDER_IDENTITY = (
 
 class IdentityError(DeploymentPackageError):
     """A profile value disagreed with an independent trusted pin (bounded reason code)."""
+
+
+def worker_ordinary_task_queue() -> str:
+    """The ONE code-owned authority for the ordinary queue name: the queue the shipped worker polls.
+
+    Read from the LOADED ``Settings`` field default — the very attribute
+    ``secp_worker.main._run_temporal`` passes to ``Worker(task_queue=...)``. Deliberately NOT
+    re-declared here: this module must add no further copy of the name. Binding to the value rather
+    than restating it is what makes the check follow a change to the worker instead of having to be
+    remembered alongside one.
+
+    The FIELD DEFAULT, not ``Settings()``. Instantiating would read this process's environment, and
+    this runs in the OPERATOR's CLI process, whose environment is not the worker container's — an
+    env-sensitive answer here would describe the wrong process. The default is what the shipped
+    image runs with, and it is the value every other plane's literal is proven equal to
+    (``tests/test_task_queue_consistency.py``).
+    """
+    from secp_api.config import Settings
+
+    return str(Settings.model_fields["temporal_task_queue"].default)
 
 
 @dataclass(frozen=True)
@@ -198,6 +226,40 @@ def require_profile_agreement(profile: object, expected: ExpectedDeploymentIdent
         _require(getattr(profile, "parent_sha", None) == expected.parent_sha, "parent_sha_mismatch")
 
 
+# The queue-only subset of _AGREEMENT_FIELDS, kept as its own table so the focused ``queue``
+# command checks exactly these two and a field added to one table is never silently assumed by the
+# other. Same attribute name on both sides, unlike the general table.
+_QUEUE_AGREEMENT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("ordinary_task_queue", "ordinary_queue_mismatch"),
+    ("operator_task_queue", "operator_queue_mismatch"),
+)
+
+
+def assert_expected_queue_authority(expected: ExpectedDeploymentIdentities) -> None:
+    """Bind the independent queue pins to the queue authority owned by shipped worker code."""
+    _require(
+        expected.ordinary_task_queue == worker_ordinary_task_queue(),
+        "expected_ordinary_queue_not_worker_queue",
+    )
+    _require(
+        expected.operator_task_queue != expected.ordinary_task_queue,
+        "expected_operator_queue_not_distinct",
+    )
+
+
+def require_queue_authority(profile: object, expected: ExpectedDeploymentIdentities) -> None:
+    """Bind the deployment queue pair to its independent pins and the shipped worker authority.
+
+    This is the queue-only subset needed by the standalone ``queue`` command. Keeping it separate
+    from :func:`require_profile_agreement` prevents that focused command from claiming queue
+    authority merely because the profile is internally distinct, while also avoiding unrelated
+    package-identity fields becoming prerequisites for a queue observation.
+    """
+    assert_expected_queue_authority(expected)
+    for attr, reason in _QUEUE_AGREEMENT_FIELDS:
+        _require(getattr(profile, attr) == getattr(expected, attr), reason)
+
+
 def assert_reviewed_provider(provider: object, expected_type: type, *, reason: str) -> None:
     """Bind a constructed controlled-live provider to its EXACT authoritative TYPE OBJECT via
     ``type(provider) is expected_type`` — NOT a forgeable ``module``/``qualname`` string. A foreign
@@ -266,6 +328,18 @@ def assert_expected_package_identity(expected: ExpectedDeploymentIdentities) -> 
         expected.eligibility_provider_identity == ELIGIBILITY_PROVIDER_IDENTITY,
         "expected_eligibility_provider_invalid",
     )  # noqa: E501
+    # --- the queue pair (SECP queue-integration) --------------------------------------------------
+    # Until this existed, the queue names were the ONLY security-sensitive pins never anchored to
+    # code. ``_AGREEMENT_FIELDS`` binds the profile to these pins, and the pins were then binding to
+    # nothing: profile and pins could agree with each other on a name the shipped worker does not
+    # poll, and every operator-side check stayed green — correctly, since each was reporting about
+    # the artefact it reads. This is the edge that closes the triangle profile == pins == code.
+    # The pins must not be able to authorize a queue the shipped worker does not poll, or a SHARED
+    # queue. The profile validator already refuses ordinary == operator at parse time, but this
+    # function is also called with the pins ALONE (``verify`` before profile agreement;
+    # ``compositions`` before the profile is resolved). Deliberately NOT pinned to a code-owned
+    # operator NAME: that queue is deployment-local and the shipped worker never reads it.
+    assert_expected_queue_authority(expected)
 
 
 # --------------------------------------------------------------------------- independent loader
