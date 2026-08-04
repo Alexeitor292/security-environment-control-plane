@@ -53,7 +53,10 @@ _RELEASE = ReleaseRecord(
     baseline_source_sha="a" * 40,
     successor_source_sha="b" * 40,
     successor_parent_sha="a" * 40,
-    signing_anchor_id="secp-acceptance-ephemeral-anchor/v1",
+    # A DIGEST, not a name. The anchor id used to read
+    # "secp-acceptance-ephemeral-anchor/v1" — a path-shaped string in a public document, which the
+    # release-record grammar now refuses along with origins, host paths and queue names.
+    signing_anchor_id="sha256:" + "7" * 64,
     test_only_anchor=True,
 )
 

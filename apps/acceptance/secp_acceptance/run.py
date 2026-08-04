@@ -87,7 +87,10 @@ def _release_not_established() -> ReleaseRecord:
     return ReleaseRecord(
         role="worker",
         baseline_aggregate=absent,
-        baseline_source_sha=absent,
+        # The git NULL object id. A source sha must be a 40-hex commit identity, and there is no
+        # honest commit to name here — this is git's own conventional spelling of "no object",
+        # which is both truthful and inside the grammar.
+        baseline_source_sha="0" * 40,
         signing_anchor_id=absent,
         # True is the honest value: no anchor was used at all, and this field exists to guarantee no
         # PRODUCTION anchor was. Recording False here would assert the opposite of what happened.

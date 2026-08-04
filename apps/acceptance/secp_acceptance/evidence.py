@@ -75,6 +75,15 @@ _Text = Annotated[str, Field(min_length=1, max_length=1000, strict=True)]
 #: document from a future vocabulary still cannot carry punctuation, a path separator, or a space.
 _IDENT = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
+#: A git commit identity. The release lineage carries source shas, and they are the one place a
+#: 40-hex string is legitimate.
+_SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
+
+#: The roles a release bundle may carry. Closed, because ``role`` decides which host a bundle is
+#: allowed to install onto, and a run that installed a controller bundle on the worker is a
+#: different run from the one the document claims.
+_RELEASE_ROLES: frozenset[str] = frozenset({"worker", "controller"})
+
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -321,6 +330,60 @@ def _assert_check_semantics(record: CheckRecord) -> None:
         raise AcceptanceError("acceptance_evidence_invalid")
 
 
+def _assert_digest(value: str) -> None:
+    if not is_sha256_digest(value):
+        raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
+
+
+def _assert_fleet_semantics(fleet: FleetRecord) -> None:
+    """The fleet record carries DIGESTS and COUNTS. Nothing else is admissible.
+
+    Nothing inspected this record at all until now — it was reachable only through pydantic's
+    ``_Str`` (any string, 1..200 chars). Measured on the unmodified parent: a ``passed`` document
+    was accepted carrying ``network_identity`` as a raw docker network name, ``controller_host_
+    identity`` as an absolute host path, and ``host_image_identity`` as an internal registry origin.
+
+    Each identity is a content address by construction (:func:`observation_digest`), so requiring
+    the digest SHAPE is an allowlist rather than a denylist: a path, an origin, a container id, a
+    queue name or a hostname all fail it without anyone having to enumerate them.
+    """
+    for value in (
+        fleet.host_image_identity,
+        fleet.controller_host_identity,
+        fleet.worker_host_identity,
+        fleet.network_identity,
+    ):
+        _assert_digest(value)
+    if fleet.hosts_destroyed > fleet.hosts_created:
+        # More destroyed than created describes a run that tore down something it did not build.
+        raise AcceptanceError("acceptance_evidence_invalid")
+
+
+def _assert_release_semantics(release: ReleaseRecord) -> None:
+    """The release lineage: a closed role, digests for aggregates, git shas for sources.
+
+    ``test_only_anchor`` is NOT checked here — it is a PROHIBITION, handled with the other four in
+    :func:`_assert_evidence_semantics`, because it says what the harness was permitted to do rather
+    than what it observed.
+    """
+    if release.role not in _RELEASE_ROLES:
+        raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
+    for value in (
+        release.baseline_aggregate,
+        release.successor_aggregate,
+        release.signing_anchor_id,
+    ):
+        if value is not None:
+            _assert_digest(value)
+    for value in (
+        release.baseline_source_sha,
+        release.successor_source_sha,
+        release.successor_parent_sha,
+    ):
+        if value is not None and not _SOURCE_SHA.fullmatch(value):
+            raise AcceptanceError("acceptance_evidence_public_value_not_permitted")
+
+
 def _assert_gap_semantics(record: GapRecord) -> None:
     _assert_ident(record.gap)
     _assert_ident(record.stage)
@@ -378,6 +441,15 @@ def _assert_evidence_semantics(ev: AcceptanceEvidence) -> None:
             raise AcceptanceError("acceptance_evidence_forbidden_value")
     if ev.ephemeral_material_only is not True:
         raise AcceptanceError("acceptance_evidence_forbidden_value")
+    # ``test_only_anchor`` is a FIFTH prohibition, not an observation. The harness is never
+    # permitted to use a production signing anchor, so a document asserting it did describes a run
+    # this harness may not have made — refused outright rather than read, exactly like the four
+    # above. It sat outside this block until now: a document claiming a PRODUCTION trust anchor
+    # loaded clean and reported ``passed``.
+    if ev.release.test_only_anchor is not True:
+        raise AcceptanceError("acceptance_evidence_forbidden_value")
+    _assert_fleet_semantics(ev.fleet)
+    _assert_release_semantics(ev.release)
     # A ``passed`` run must be complete and must contain ONLY passing outcomes. ``failed`` carries
     # no such requirement — a failed run is expected to be partial, and forcing it to be complete
     # would push the harness toward not recording the failure at all.
@@ -396,6 +468,18 @@ def _assert_evidence_semantics(ev: AcceptanceEvidence) -> None:
         if ev.missing_checks():
             raise AcceptanceError("acceptance_evidence_incomplete")
         if ev.not_passing():
+            raise AcceptanceError("acceptance_evidence_incomplete")
+        # The fleet PREMISE, required only of a passing run. A failed run may legitimately report
+        # both False — that is what a fleet which never built looks like, and forcing it to claim
+        # otherwise would be the lie. But a run cannot pass a TWO-HOST acceptance while recording
+        # that it had neither two real machines nor a real service manager: every isolation claim
+        # in the document is a claim about one machine unless these hold.
+        if not (ev.fleet.nested_container_runtime and ev.fleet.real_service_manager):
+            raise AcceptanceError("acceptance_evidence_incomplete")
+        # Nothing leaked. `hosts_destroyed == hosts_created` was measured to be violable while
+        # still reporting `passed`: a document saying it created two privileged hosts and destroyed
+        # none is the most expensive thing this harness can leave behind, and it read as green.
+        if ev.fleet.hosts_destroyed != ev.fleet.hosts_created:
             raise AcceptanceError("acceptance_evidence_incomplete")
 
 
