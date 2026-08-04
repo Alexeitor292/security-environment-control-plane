@@ -256,7 +256,19 @@ def test_the_single_seam_is_the_only_way_a_route_gets_a_session(app):
             if name != "Depends":
                 continue
             first = node.args[0] if node.args else None
-            if isinstance(first, ast.Name) and first.id in {"db_session", "get_db"}:
+            # BOTH spellings. ``Depends(db_session)`` is an ``ast.Name``;
+            # ``Depends(deps.db_session)`` is an ``ast.Attribute`` and was MISSED by an earlier
+            # version of this check — measured, not hypothesised: a new registered route written
+            # that way failed only the served-tree test, leaving this one green. The served-tree
+            # walk caught it, so nothing shipped unprotected, but a source check that misses a
+            # legal spelling of the thing it forbids will eventually be believed about a case it
+            # never examined.
+            target = None
+            if isinstance(first, ast.Name):
+                target = first.id
+            elif isinstance(first, ast.Attribute):
+                target = first.attr
+            if target in {"db_session", "get_db"}:
                 # The seam's own definition is the one legitimate site.
                 if path.name == "deps.py" and any(kw.arg == "scope" for kw in node.keywords):
                     continue
