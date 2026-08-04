@@ -210,6 +210,26 @@ def test_a_non_boolean_field_is_not_coerced_into_a_verdict(value: object):
     assert Report(REPORT_OK, 0, {"d": value}).flag("d") is None
 
 
+@pytest.mark.parametrize("value", [123, True, None, [], {}, 0.5])
+def test_a_non_string_field_is_not_coerced_into_text(value: object):
+    """The string counterpart of the boolean guard, and it matters more than it looks.
+
+    ``text()`` reads ``classification``, ``mode``, ``release_aggregate_digest`` and
+    ``installation_id``. Without the type guard a report carrying ``classification: 123`` would
+    compare unequal to ``managed_upgrade`` and be recorded as a VIOLATION — the harness accusing
+    the product of a wrong classification on the strength of a report shape it does not understand.
+    A malformed report is unreadable, never a finding.
+
+    Found by mutation: relaxing the guard failed no test.
+    """
+    assert Report(REPORT_OK, 0, {"classification": value}).text("classification") is None
+
+
+def test_an_empty_string_field_is_also_absent():
+    """An empty ``classification`` is not a classification. Same rule as a missing one."""
+    assert Report(REPORT_OK, 0, {"classification": ""}).text("classification") is None
+
+
 def test_field_traversal_stops_at_a_non_mapping():
     assert Report(REPORT_OK, 0, {"a": 5}).field("a", "b") == (False, None)
 
