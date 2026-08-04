@@ -14,14 +14,27 @@ name: Acceptance (two-host container tier)
 #
 # READ THIS BEFORE CALLING A GREEN RUN "ACCEPTANCE"
 # -------------------------------------------------
-# A green run here proves the FLEET PREMISE and one image observation: two hosts that are genuinely
-# two machines (real systemd, a nested Docker daemon each, distinct from each other and from the
-# outer one), DNS between them, honest teardown, and that the pinned worker health interpreter
-# exists in the real worker base image. That is FOUR witness stages out of the nine evidence stages
-# `secp_acceptance.reasons` declares. Package installation, controller bring-up, enrollment,
-# identity verification, live queue execution, lifecycle (restart/upgrade/rollback/recovery) and
-# failure injection have NO producing code yet. This workflow therefore cannot, and must not, be
-# reported as a two-host acceptance result.
+# A green run here proves the FLEET PREMISE, one image observation, and THREE of the nine evidence
+# stages `secp_acceptance.reasons` declares:
+#
+#   * the fleet premise — two hosts that are genuinely two machines (real systemd, a nested Docker
+#     daemon each, distinct from each other and from the outer one), DNS between them, honest
+#     teardown, and the pinned worker health interpreter present in the real worker base image;
+#   * `packages`, `controller` and `worker_install` — one signed release built through the reviewed
+#     release-authority tooling, installed on both hosts through the real `secpctl`, with the
+#     controller stack brought up from the signed bundle and the operator unit observed
+#     present-disabled-stopped by real systemd.
+#
+# STILL WITHOUT PRODUCING CODE: enrollment, identity verification, live queue execution, lifecycle
+# (restart/upgrade/rollback/recovery) and failure injection — FIVE of the nine. So a green run here
+# is not a two-host acceptance result and must not be reported as one. `coverage_complete()` on the
+# evidence document speaks only for the stages that were ATTEMPTED; it says nothing about the five
+# that were not.
+#
+# A RED RUN IS ALSO INFORMATION. The installation nodes record `unproven` rather than skipping when
+# a proof cannot be made, and then FAIL on it — so a stage the product genuinely cannot complete
+# (for example an image archive over the installer's own 512 MiB cap) shows up as a standing red
+# node naming the reason, not as a stage that quietly vanished.
 
 on:
   # `workflow_dispatch` ALONE cannot run this before it is on the default branch: GitHub only
@@ -55,9 +68,14 @@ concurrency:
 env:
   # The exact number of `container_tier`-marked nodes. Pinned, because the JUnit report CANNOT
   # express deselection: a run with the tier undeclared emits `tests=130 skipped=0` and is missing
-  # the 13 nodes entirely, with no attribute recording their absence. A gate that only refused
-  # skips would pass that run. Measured, not assumed — see the "prove the tier can fail" job.
-  EXPECTED_CONTAINER_NODES: "13"
+  # the container nodes entirely, with no attribute recording their absence. A gate that only
+  # refused skips would pass that run. Measured, not assumed — see the "prove the tier can fail"
+  # job.
+  #
+  # Raised 13 -> 33 by the release/installation stages, which add 20 nodes (2 release-shape nodes,
+  # 4 `packages`, 5 `controller`, 7 `worker_install`, and 2 document-level nodes). The number was
+  # taken from `pytest -m container_tier --collect-only -q`, not counted by hand.
+  EXPECTED_CONTAINER_NODES: "33"
 
 jobs:
   # --- the real thing ---------------------------------------------------------------------------

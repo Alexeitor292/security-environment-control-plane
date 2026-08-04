@@ -59,7 +59,17 @@ RUN apt-get update \
 # The management adapters invoke the compose runtime as a STANDALONE binary with global flags
 # before the subcommand (`<compose> --project-name P --file F up ...`). The v2 plugin binary
 # supports exactly that invocation, so expose it at a stable absolute path the harness can pin.
-RUN ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+#
+# A COPY, NOT A SYMLINK, and that is load-bearing rather than a style choice. Every host-invoked
+# executable goes through `secp_operator_deployment.pinned_exec.open_pinned_executable`, which
+# opens the pinned path with O_NOFOLLOW and then fstats the descriptor. O_NOFOLLOW fails with
+# ELOOP when the FINAL path component is a symlink, so a symlinked `/usr/local/bin/docker-compose`
+# refuses with `executable_open_failed` at the first real adapter call — before any compose command
+# runs, and with a reason that points at the pin rather than at the link. The same routine also
+# requires a regular file with exactly one hardlink, root ownership, and no group/other write bit,
+# all of which `install -m 0755` satisfies and none of which a symlink can.
+RUN install -m 0755 -o root -g root \
+      /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
 # Strip the units a throwaway host does not need, so `systemctl is-system-running` reaches
 # `running` instead of sitting in `degraded` over a failed getty or network target.

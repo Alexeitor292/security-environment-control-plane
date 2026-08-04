@@ -65,11 +65,20 @@ TIERS: frozenset[str] = frozenset({TIER_HERMETIC, TIER_CONTAINER})
 #: fleet. It is listed because a declared tier that built hosts and never probed the image would
 #: otherwise be indistinguishable from a complete one, and that probe is the only place the pinned
 #: worker health interpreter is checked against a real image rather than against another constant.
+#: The installation witnesses mark that a stage's body EXECUTED, not that it succeeded. That
+#: distinction is deliberate: a controller the harness could not bring up records five ``unproven``
+#: checks and is a real, reviewable result, whereas a controller stage that never ran leaves nothing
+#: at all — and it is only the second case this witness can see. Tying a witness to success would
+#: collapse the two and make a silently-absent stage indistinguishable from a failing one.
 CONTAINER_TIER_STAGES: tuple[str, ...] = (
     "fleet_created",
     "fleet_proved",
     "fleet_destroyed",
     "worker_image_probed",
+    "release_built",
+    "packages_installed",
+    "controller_attempted",
+    "worker_install_attempted",
 )
 
 _witnessed: set[str] = set()
