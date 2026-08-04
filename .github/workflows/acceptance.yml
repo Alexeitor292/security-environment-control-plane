@@ -24,6 +24,25 @@ name: Acceptance (two-host container tier)
 # reported as a two-host acceptance result.
 
 on:
+  # `workflow_dispatch` ALONE cannot run this before it is on the default branch: GitHub only
+  # registers a dispatchable workflow from the default branch, so a dispatch against this feature
+  # branch answers 404 and the tier could not execute even once until after the PR that adds it had
+  # merged. That is a chicken-and-egg — "merge ~4200 lines whose only real-runtime path has never
+  # run" is precisely what must not happen — so the workflow also triggers on `pull_request`,
+  # NARROWLY.
+  #
+  # The `paths` filter is what keeps the cost honest: this fires only when the harness itself, the
+  # disposable host image, or this workflow changes. An unrelated PR never pays for a privileged
+  # nested-systemd build. Note the contrast with `ci.yml`, which deliberately has NO path filtering
+  # because it IS the required gate and must run in full on every PR — this one is not, and must
+  # not be confused for it. Being visible in the checks list is not the same as being required;
+  # required-ness is branch protection, and the merge gate for this repo is `ci.yml`.
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/acceptance/**"
+      - "infra/acceptance/**"
+      - ".github/workflows/acceptance.yml"
   workflow_dispatch:
 
 permissions:
