@@ -779,3 +779,57 @@ def test_an_unreadable_evidence_report_cannot_settle_the_identity():
 
     assert ok is False
     assert observation["evidence_readable"] is False
+
+
+def test_a_report_surrounded_by_real_host_noise_is_still_read():
+    """THE defect this seam had until the payload extraction was shared.
+
+    A real host emits pip warnings, systemd notices and journal lines around the report.
+    ``json.loads(stdout)`` succeeds against a clean local fixture and fails on every real
+    invocation — failing CLOSED, so nothing would have passed falsely, but a stage reporting
+    "could not observe" for its whole run would have read as an infrastructure problem rather
+    than as a parser bug.
+    """
+    noisy = (
+        "WARNING: You are using pip version 21.0; however, version 24.0 is available.\n"
+        "Created symlink /etc/systemd/system/multi-user.target.wants/x.service\n"
+        '{"command": "status", "role": "worker", "ok": true}\n'
+    )
+    host = _FakeHost([Result(exit_code=0, stdout=noisy, stderr="")])
+
+    report = secpctl(host, ("status", "worker"))
+
+    assert report.status == REPORT_OK
+    assert report.flag("ok") is True
+
+
+def test_the_last_json_object_wins_when_several_are_written():
+    """A command that logged a JSON progress line before its report must be read by its REPORT."""
+    host = _FakeHost(
+        [
+            Result(
+                exit_code=0,
+                stdout='{"stage": "starting"}\n{"command": "status", "ok": true}\n',
+                stderr="",
+            )
+        ]
+    )
+
+    assert secpctl(host, ("status", "worker")).flag("ok") is True
+
+
+def test_noise_with_no_report_at_all_is_still_unreadable():
+    """The control. Tolerance must not become "find something JSON-shaped and trust it" — output
+    carrying no report object is an absent observation, exactly as before."""
+    host = _FakeHost([Result(exit_code=0, stdout="WARNING: pip\nnot a report\n", stderr="")])
+
+    assert secpctl(host, ("status", "worker")).status == REPORT_UNREADABLE
+
+
+def test_the_payload_extraction_is_the_shared_one_not_a_second_copy():
+    """Two copies of the tolerance would drift, and this seam is where that would go unnoticed."""
+    import inspect
+
+    from secp_acceptance import lifecycle
+
+    assert "secpctl_payload" in inspect.getsource(lifecycle.secpctl)

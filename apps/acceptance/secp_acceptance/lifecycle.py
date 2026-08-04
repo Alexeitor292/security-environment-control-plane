@@ -40,7 +40,6 @@ installation id from another — not from re-deriving the arithmetic.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -141,6 +140,20 @@ def secpctl(host: Host, argv: tuple[str, ...], *, timeout: int = _DEFAULT_TIMEOU
     parses as no report at all — and a caller who forgot the flag would get ``unreadable`` for every
     invocation, which is a confusing way to discover a typo. Appended only when absent, so an
     explicit one does not become a duplicate argument.
+
+    THE PAYLOAD IS EXTRACTED, NOT ASSUMED
+    -------------------------------------
+    Delegates to :func:`secp_acceptance.install.secpctl_payload` rather than parsing ``stdout``
+    whole. This function DID parse it whole, and that was a defect with a very specific shape: a
+    real host emits pip warnings, systemd notices and journal lines around the report, so
+    ``json.loads(stdout)`` succeeds locally against a clean fixture and fails on every real
+    invocation. It failed CLOSED — every check would have read ``unreadable`` rather than passing
+    falsely — but a stage that reports "could not observe" for its whole run is not much better
+    than one that lies, and it would have looked like an infrastructure problem rather than a
+    parser bug.
+
+    Shared rather than reimplemented: a second copy of the tolerance is a second thing to keep
+    correct, and this is exactly the seam where the two would drift apart unnoticed.
     """
     args = tuple(argv)
     if "--json" not in args:
@@ -152,11 +165,11 @@ def secpctl(host: Host, argv: tuple[str, ...], *, timeout: int = _DEFAULT_TIMEOU
         # one would let a missing entrypoint satisfy an assertion that the product refused.
         return Report(REPORT_UNREADABLE, result.exit_code, {})
 
-    try:
-        parsed = json.loads(result.stdout)
-    except ValueError:
-        return Report(REPORT_UNREADABLE, result.exit_code, {})
-    if not isinstance(parsed, dict):
+    from secp_acceptance.install import secpctl_payload
+
+    parsed = secpctl_payload(result)
+    if not parsed:
+        # No JSON object anywhere in the output. An absent report, not an empty one.
         return Report(REPORT_UNREADABLE, result.exit_code, {})
 
     if result.exit_code == EXIT_OK:
