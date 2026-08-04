@@ -14,14 +14,26 @@ name: Acceptance (two-host container tier)
 #
 # READ THIS BEFORE CALLING A GREEN RUN "ACCEPTANCE"
 # -------------------------------------------------
-# A green run here proves the FLEET PREMISE and one image observation: two hosts that are genuinely
-# two machines (real systemd, a nested Docker daemon each, distinct from each other and from the
-# outer one), DNS between them, honest teardown, and that the pinned worker health interpreter
-# exists in the real worker base image. That is FOUR witness stages out of the nine evidence stages
-# `secp_acceptance.reasons` declares. Package installation, controller bring-up, enrollment,
-# identity verification, live queue execution, lifecycle (restart/upgrade/rollback/recovery) and
-# failure injection have NO producing code yet. This workflow therefore cannot, and must not, be
-# reported as a two-host acceptance result.
+# A green run here proves the FLEET PREMISE, one image observation, and THREE of the nine evidence
+# stages `secp_acceptance.reasons` declares:
+#
+#   * the fleet premise — two hosts that are genuinely two machines (real systemd, a nested Docker
+#     daemon each, distinct from each other and from the outer one), DNS between them, honest
+#     teardown, and the pinned worker health interpreter present in the real worker image;
+#   * `packages`, `controller` and `worker_install` — one signed release built through the reviewed
+#     release-authority tooling, installed on both hosts through the real `secpctl`, the controller
+#     stack brought up from the signed bundle, and the operator unit observed dormant by real
+#     systemd.
+#
+# STILL WITHOUT PRODUCING CODE: enrollment, identity verification, live queue execution, lifecycle
+# (restart/upgrade/rollback/recovery) and failure injection — FIVE of the nine. So a green run here
+# is not a two-host acceptance result and must not be reported as one. `coverage_complete()` speaks
+# only for the stages that were ATTEMPTED; it says nothing about the five that were not.
+#
+# A RED RUN IS ALSO INFORMATION. The installation nodes record `unproven` rather than skipping when
+# a proof cannot be made, and `violated` when a prohibited state is positively observed — then FAIL
+# on it. A stage the product genuinely cannot complete shows up as a standing red node naming the
+# bounded reason, not as a stage that quietly vanished.
 
 on:
   # `workflow_dispatch` ALONE cannot run this before it is on the default branch: GitHub only
@@ -52,12 +64,12 @@ concurrency:
   group: acceptance-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  # The exact number of `container_tier`-marked nodes. Pinned, because the JUnit report CANNOT
-  # express deselection: a run with the tier undeclared emits `tests=130 skipped=0` and is missing
-  # the 13 nodes entirely, with no attribute recording their absence. A gate that only refused
-  # skips would pass that run. Measured, not assumed — see the "prove the tier can fail" job.
-  EXPECTED_CONTAINER_NODES: "13"
+# The expected node count is NOT declared here. It lives in `secp_acceptance.tier` as a per-module
+# mapping and is read out of the harness at run time by the step below, so there is exactly one
+# source of truth. It used to be a YAML literal (`EXPECTED_CONTAINER_NODES: "13"`) that nothing
+# compared against anything — a second copy that could drift from the harness silently, and one line
+# for four concurrent streams to conflict on. `apps/acceptance/tests/test_acceptance_node_pin.py`
+# runs in the REQUIRED gate and tells a stream the right number on its own PR.
 
 jobs:
   # --- the real thing ---------------------------------------------------------------------------
@@ -93,6 +105,15 @@ jobs:
           docker info --format '{{.ID}}'
           test "$(stat -fc %T /sys/fs/cgroup)" = "cgroup2fs" \
             || { echo "::error::/sys/fs/cgroup is not cgroup2fs; systemd-as-PID-1 hosts need it"; exit 1; }
+
+      - name: Read the pinned node count from the harness
+        # ONE source of truth. The harness owns the per-module mapping; this exports its total so
+        # both the assertion below and the negative-control job compare against the same number the
+        # required gate maintains.
+        run: |
+          echo "EXPECTED_CONTAINER_NODES=$(uv run python -c \
+            'from secp_acceptance.tier import EXPECTED_CONTAINER_NODES as n; print(n)')" \
+            >> "$GITHUB_ENV"
 
       - name: Run the container tier (declared, never deselected, never skipped)
         env:
@@ -200,6 +221,12 @@ jobs:
         run: |
           uv venv --python 3.11
           uv pip install -e ".[dev]"
+
+      - name: Read the pinned node count from the harness
+        run: |
+          echo "EXPECTED_CONTAINER_NODES=$(uv run python -c \
+            'from secp_acceptance.tier import EXPECTED_CONTAINER_NODES as n; print(n)')" \
+            >> "$GITHUB_ENV"
 
       - name: A declared tier with an unreachable daemon must FAIL, with zero skips
         # DOCKER_HOST points at a closed port, so every docker invocation fails while the runner's
