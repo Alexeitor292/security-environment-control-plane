@@ -555,6 +555,259 @@ def test_an_unchanged_identity_and_marker_survive_a_restart():
     assert observed["survived"] is True
 
 
+# --------------------------------------------------------------------------- outcome classification
+#
+# THE VACUITY THESE TESTS ARE WRITTEN AGAINST
+# -------------------------------------------
+# A run-level assertion such as ``evidence.outcome == "failed"`` became unfalsifiable the moment a
+# single-stage recorder could never be complete: it passes for a reason unrelated to what it
+# watches, and would keep passing if a violation were encoded as ``observed``. Nothing here
+# asserts a run
+# outcome. Every assertion is at CHECK level — which outcome a specific observation earns — because
+# that is the property this stage owns.
+#
+# Each classifier gets all three branches, and the pairs below are the point: the SAME check must
+# reach different outcomes for "could not look" and "looked and found it".
+
+
+def test_a_verdict_cannot_carry_a_reason_it_should_not_have():
+    """The reason/outcome pairing is enforced where the verdict is decided, not at the recorder, so
+    an incoherent pair cannot travel."""
+    from secp_acceptance import AcceptanceError
+    from secp_acceptance.enrollment import (
+        OUTCOME_OBSERVED,
+        OUTCOME_UNPROVEN,
+        CheckVerdict,
+    )
+
+    assert CheckVerdict(OUTCOME_OBSERVED).is_pass is True
+    with pytest.raises(AcceptanceError):
+        CheckVerdict(OUTCOME_OBSERVED, "acceptance_observation_unavailable")
+    with pytest.raises(AcceptanceError):
+        CheckVerdict(OUTCOME_UNPROVEN)
+
+
+def test_neither_violated_nor_unproven_is_ever_a_pass():
+    """The single most important property of the three-valued scheme."""
+    from secp_acceptance.enrollment import (
+        OUTCOME_UNPROVEN,
+        OUTCOME_VIOLATED,
+        REASON_COULD_NOT_LOOK,
+        REASON_PRIVATE_KEY_ESCAPED,
+        CheckVerdict,
+    )
+
+    assert CheckVerdict(OUTCOME_VIOLATED, REASON_PRIVATE_KEY_ESCAPED).is_pass is False
+    assert CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK).is_pass is False
+
+
+def test_an_incomplete_containment_scan_is_unproven_but_a_found_key_is_violated():
+    """The pair that makes the distinction real.
+
+    Both are failures, and a scheme that only had ``unproven`` would render them identically — so a
+    private key FOUND on the controller would be reported as an absence of evidence.
+    """
+    from secp_acceptance.enrollment import (
+        OUTCOME_UNPROVEN,
+        OUTCOME_VIOLATED,
+        classify_private_key_containment,
+        containment_verdict,
+    )
+
+    digest = "aa" * 32
+    could_not_look = containment_verdict(
+        key_digest=digest,
+        controller_root_present=False,
+        scan_complete=False,
+        scanned_files=1,
+        scanned_digests=frozenset(),
+    )
+    found_it = containment_verdict(
+        key_digest=digest,
+        controller_root_present=False,
+        scan_complete=True,
+        scanned_files=99,
+        scanned_digests=frozenset({digest}),
+    )
+    clean = containment_verdict(
+        key_digest=digest,
+        controller_root_present=False,
+        scan_complete=True,
+        scanned_files=99,
+        scanned_digests=frozenset({"bb" * 32}),
+    )
+
+    assert classify_private_key_containment(could_not_look).outcome == OUTCOME_UNPROVEN
+    assert classify_private_key_containment(found_it).outcome == OUTCOME_VIOLATED
+    assert classify_private_key_containment(clean).is_pass is True
+
+
+def test_an_unreadable_key_is_unproven_not_containment():
+    from secp_acceptance.enrollment import (
+        OUTCOME_UNPROVEN,
+        classify_private_key_containment,
+        containment_verdict,
+    )
+
+    verdict = classify_private_key_containment(
+        containment_verdict(
+            key_digest="",
+            controller_root_present=False,
+            scan_complete=True,
+            scanned_files=99,
+            scanned_digests=frozenset(),
+        )
+    )
+    assert verdict.outcome == OUTCOME_UNPROVEN
+
+
+def test_an_unreadable_status_is_unproven_but_a_refetchable_invitation_is_violated():
+    from secp_acceptance.enrollment import (
+        OUTCOME_UNPROVEN,
+        OUTCOME_VIOLATED,
+        classify_invitation_one_shot,
+    )
+
+    leaked = observe_invitation_is_not_refetchable({"invitation_id": "sha256:leaked"})
+    clean = observe_invitation_is_not_refetchable({"enrollment_id": "x", "state": "healthy"})
+
+    assert classify_invitation_one_shot(clean, status_readable=False).outcome == OUTCOME_UNPROVEN
+    assert classify_invitation_one_shot(leaked, status_readable=True).outcome == OUTCOME_VIOLATED
+    assert classify_invitation_one_shot(clean, status_readable=True).is_pass is True
+
+
+def test_a_missing_identity_is_unproven_but_a_disagreeing_one_is_violated():
+    """A disagreement means the controller holds an identity that is not this worker's — observed,
+    not unobserved. An absent side means the exchange may never have reached the controller."""
+    from secp_acceptance.enrollment import (
+        OUTCOME_UNPROVEN,
+        OUTCOME_VIOLATED,
+        classify_identity_agreement,
+    )
+    from secp_api.worker_enrollment_contract import _fingerprint
+
+    absent = observe_key_fingerprint_agreement(
+        worker_key_id=_KEY_ID, status_report={"worker_key_fingerprint": ""}
+    )
+    disagreeing = observe_key_fingerprint_agreement(
+        worker_key_id=_KEY_ID, status_report={"worker_key_fingerprint": _fingerprint(_OTHER_KEY_ID)}
+    )
+    agreeing = observe_key_fingerprint_agreement(
+        worker_key_id=_KEY_ID, status_report={"worker_key_fingerprint": _fingerprint(_KEY_ID)}
+    )
+
+    assert classify_identity_agreement(absent).outcome == OUTCOME_UNPROVEN
+    assert classify_identity_agreement(disagreeing).outcome == OUTCOME_VIOLATED
+    assert classify_identity_agreement(agreeing).is_pass is True
+
+
+def test_the_same_three_way_split_applies_to_the_installation_id():
+    from secp_acceptance.enrollment import (
+        OUTCOME_UNPROVEN,
+        OUTCOME_VIOLATED,
+        classify_identity_agreement,
+    )
+    from secp_worker.enrollment_http_transport import _installation_from_key
+
+    assert (
+        classify_identity_agreement(
+            observe_installation_id_agreement(
+                worker_key_id="", status_report={"worker_installation_id": ""}
+            )
+        ).outcome
+        == OUTCOME_UNPROVEN
+    )
+    assert (
+        classify_identity_agreement(
+            observe_installation_id_agreement(
+                worker_key_id=_KEY_ID,
+                status_report={"worker_installation_id": _installation_from_key(_OTHER_KEY_ID)},
+            )
+        ).outcome
+        == OUTCOME_VIOLATED
+    )
+
+
+def test_a_measured_release_divergence_is_violated_not_unproven():
+    """The program's most consequential product finding, and the outcome it earns.
+
+    Both digests were READ. They differ. The harness settled the question rather than failing to
+    look at it, so this is ``violated``. Recording it ``unproven`` would report a measured,
+    reproducible disagreement as "we could not tell" — understating it in exactly the direction that
+    gets a finding deprioritised.
+    """
+    from secp_acceptance.enrollment import (
+        OUTCOME_UNPROVEN,
+        OUTCOME_VIOLATED,
+        classify_release_agreement,
+    )
+
+    measured_divergence = {
+        "installed_present": True,
+        "enrolled_present": True,
+        "agree": False,
+    }
+    unreadable = {"installed_present": False, "enrolled_present": True, "agree": False}
+    matching = {"installed_present": True, "enrolled_present": True, "agree": True}
+
+    assert classify_release_agreement(measured_divergence).outcome == OUTCOME_VIOLATED
+    assert classify_release_agreement(unreadable).outcome == OUTCOME_UNPROVEN
+    assert classify_release_agreement(matching).is_pass is True
+
+
+def test_every_violated_reason_is_a_harness_reason_never_a_product_one():
+    """``violated`` is the HARNESS reporting what it saw. A product code here would attribute the
+    harness's own observation to a product refusal that never happened."""
+    from secp_acceptance.enrollment import (
+        PENDING_HARNESS_REASONS,
+        REASON_IDENTITY_DISAGREES,
+        REASON_INVITATION_REFETCHABLE,
+        REASON_PRIVATE_KEY_ESCAPED,
+        REASON_RELEASE_DISAGREES,
+    )
+    from secp_acceptance.reasons import HARNESS_REASONS, PRODUCT_REASONS
+
+    proposed = {
+        REASON_IDENTITY_DISAGREES,
+        REASON_INVITATION_REFETCHABLE,
+        REASON_PRIVATE_KEY_ESCAPED,
+        REASON_RELEASE_DISAGREES,
+    }
+    assert not (proposed & PRODUCT_REASONS), "a violated reason must never be a product code"
+    # Recomputed, not asserted from a literal: the pending set shrinks on its own as the vocabulary
+    # grows, and a code that lands under a DIFFERENT name fails here instead of shipping wrong.
+    assert PENDING_HARNESS_REASONS == proposed - HARNESS_REASONS
+
+
+def test_the_outcome_vocabulary_is_pinned_in_whichever_state_this_tree_is_in():
+    """Non-vacuous both before and after the evidence stream's contract lands.
+
+    Today ``violated`` is not in ``reasons.OUTCOMES``, so this pins the three that ARE there — a
+    silent change to them fails here. Once ``violated`` lands, the first branch pins that this
+    module's string is the same one the vocabulary uses, rather than a near-miss that would be
+    rejected by the loader at the end of a long run.
+    """
+    from secp_acceptance import reasons
+    from secp_acceptance.enrollment import (
+        OUTCOME_OBSERVED,
+        OUTCOME_UNPROVEN,
+        OUTCOME_VIOLATED,
+    )
+
+    assert OUTCOME_OBSERVED == reasons.OUTCOME_OBSERVED
+    assert OUTCOME_UNPROVEN == reasons.OUTCOME_UNPROVEN
+    if hasattr(reasons, "OUTCOME_VIOLATED"):
+        assert OUTCOME_VIOLATED == reasons.OUTCOME_VIOLATED
+        assert OUTCOME_VIOLATED in reasons.OUTCOMES
+    else:
+        assert reasons.OUTCOMES == frozenset({"observed", "refused", "unproven"})
+        assert OUTCOME_VIOLATED not in reasons.OUTCOMES
+        # Pin the literal while there is nothing to compare it against. Without this the branch
+        # would accept any string absent from the vocabulary — including a typo — and the mistake
+        # would surface only when the loader rejected it at the end of a long run.
+        assert OUTCOME_VIOLATED == "violated"
+
+
 # --------------------------------------------------------------------------- the embedded programs
 #
 # Executed, not merely parsed. These run inside a host in the container tier, where a wrong argv

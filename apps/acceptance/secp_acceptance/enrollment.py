@@ -281,6 +281,154 @@ def secpctl_json(
     return result.exit_code, report
 
 
+# --------------------------------------------------------------------------- outcome classification
+#
+# THE DISTINCTION THIS SECTION EXISTS FOR
+# ---------------------------------------
+# "The harness could not look" and "the harness looked and found the bad thing" are different
+# results, and collapsing them is how a positively-observed defect gets filed as an absence of
+# evidence. Every classifier below is a pure function of an observation dict, so which of the three
+# it returns is testable without a fleet.
+#
+# The rule, applied uniformly: if the producer can distinguish observed-false from could-not-look,
+# then observed-false is VIOLATED. Severity lives in the reason code, never in the outcome.
+#
+# WHY THE OUTCOME STRING IS A LOCAL CONSTANT
+# ------------------------------------------
+# ``violated`` is not yet in this tree's ``secp_acceptance.reasons`` vocabulary — it arrives
+# with the evidence stream's contract. Rather than guess at an import that does not resolve, the
+# value is held here, and a guard test pins it against the real vocabulary the moment that
+# vocabulary carries it while still asserting something true about the vocabulary as it stands.
+
+OUTCOME_OBSERVED = "observed"
+OUTCOME_UNPROVEN = "unproven"
+OUTCOME_VIOLATED = "violated"
+
+#: Reason codes for the two non-positive outcomes. A ``violated`` reason MUST be a HARNESS reason:
+#: the harness is reporting what it saw, and attributing that observation to a PRODUCT refusal code
+#: would say the product refused when it did not.
+#:
+#: This tree has no harness code meaning "the harness observed the condition this check rules out" —
+#: the closest, ``acceptance_observation_malformed``, describes a broken observation rather than a
+#: sound observation of a broken thing. So the intended codes are named here and listed as PENDING;
+#: a guard test asserts exactly which are still missing, and will fail when they land under other
+#: names rather than letting a wrong code ship quietly.
+REASON_COULD_NOT_LOOK = "acceptance_observation_unavailable"
+REASON_OBSERVATION_MALFORMED = "acceptance_observation_malformed"
+REASON_IDENTITY_DISAGREES = "acceptance_cross_host_identity_disagrees"
+REASON_PRIVATE_KEY_ESCAPED = "acceptance_worker_private_key_escaped"
+REASON_INVITATION_REFETCHABLE = "acceptance_invitation_refetchable"
+REASON_RELEASE_DISAGREES = "acceptance_enrolled_release_disagrees"
+
+#: The codes above that this tree's ``HARNESS_REASONS`` does not yet carry. Not a wish list — the
+#: guard test recomputes it, so it shrinks on its own as the vocabulary grows and cannot drift.
+PENDING_HARNESS_REASONS: frozenset[str] = frozenset(
+    {
+        REASON_IDENTITY_DISAGREES,
+        REASON_PRIVATE_KEY_ESCAPED,
+        REASON_INVITATION_REFETCHABLE,
+        REASON_RELEASE_DISAGREES,
+    }
+)
+
+
+@dataclass(frozen=True)
+class CheckVerdict:
+    """One check's three-valued outcome plus its bounded reason.
+
+    ``reason_code`` is REQUIRED for everything except ``observed`` and FORBIDDEN for ``observed`` —
+    the same rule :class:`~secp_acceptance.evidence.CheckRecord` enforces, applied at the point the
+    verdict is decided so a malformed pair cannot reach the recorder at all.
+    """
+
+    outcome: str
+    reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.outcome == OUTCOME_OBSERVED and self.reason_code is not None:
+            raise AcceptanceError("acceptance_evidence_invalid")
+        if self.outcome != OUTCOME_OBSERVED and not self.reason_code:
+            raise AcceptanceError("acceptance_evidence_invalid")
+
+    @property
+    def is_pass(self) -> bool:
+        """Only a positive observation passes. ``violated`` and ``unproven`` are both failures, for
+        different reasons, and neither is ever a pass."""
+        return self.outcome == OUTCOME_OBSERVED
+
+
+def classify_private_key_containment(observed: Mapping[str, object]) -> CheckVerdict:
+    """Three-valued verdict for ``worker_private_key_never_left_worker``.
+
+    Finding the key material on the controller is an OBSERVATION, not a failure to observe — the
+    scan ran, completed, and found it. Filing that as ``unproven`` would report the strongest
+    possible negative result as an absence of evidence.
+    """
+    if not observed.get("key_digest_observed"):
+        return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
+    if not observed.get("controller_scan_complete"):
+        # A truncated walk did not look everywhere it claimed to, so it can neither clear nor
+        # convict. This is the one branch that must NOT become `violated`.
+        return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
+    if observed.get("contained"):
+        return CheckVerdict(OUTCOME_OBSERVED)
+    return CheckVerdict(OUTCOME_VIOLATED, REASON_PRIVATE_KEY_ESCAPED)
+
+
+def classify_invitation_one_shot(
+    observed: Mapping[str, object], *, status_readable: bool
+) -> CheckVerdict:
+    """Three-valued verdict for ``invitation_is_one_shot``.
+
+    A status read that SUCCEEDED and carried redeemable invitation material is a positive
+    observation that the invitation is re-fetchable — the property the check exists to rule out.
+    """
+    if not status_readable:
+        return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
+    if observed.get("not_refetchable"):
+        return CheckVerdict(OUTCOME_OBSERVED)
+    return CheckVerdict(OUTCOME_VIOLATED, REASON_INVITATION_REFETCHABLE)
+
+
+def classify_identity_agreement(observed: Mapping[str, object]) -> CheckVerdict:
+    """Three-valued verdict for the two cross-host identity checks.
+
+    A DISAGREEMENT is not an absence of evidence: both sides produced an identity and they are not
+    the same one, which means the controller recorded an identity that is not this worker's. That is
+    the condition the check exists to rule out, so it is ``violated``.
+
+    Either side being absent IS an absence of evidence — the exchange may simply never have reached
+    the controller — so that is ``unproven``.
+    """
+    if not observed.get("derived_present") or not observed.get("recorded_present"):
+        return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
+    if observed.get("agree"):
+        return CheckVerdict(OUTCOME_OBSERVED)
+    return CheckVerdict(OUTCOME_VIOLATED, REASON_IDENTITY_DISAGREES)
+
+
+def classify_release_agreement(observed: Mapping[str, object]) -> CheckVerdict:
+    """Three-valued verdict for ``enrolled_release_equals_installed_release``.
+
+    READ THIS BEFORE CHANGING IT TO ``unproven``. Both digests are read from their own authority,
+    and when both are present and differ the harness has SETTLED the question — it has not failed to
+    look. Under the program's own eligibility rule (can the producer distinguish observed-false from
+    could-not-look?) that is ``violated``.
+
+    This matters because the divergence is the program's most consequential product finding.
+    ``unproven`` would report a measured, reproducible disagreement as "we could not tell", which
+    understates it in precisely the direction that gets a finding deprioritised.
+
+    ``unproven`` remains correct when a digest could not be READ at all — an unbootstrapped worker,
+    or an invitation that was never created.
+    """
+    if not observed.get("installed_present") or not observed.get("enrolled_present"):
+        return CheckVerdict(OUTCOME_UNPROVEN, REASON_COULD_NOT_LOOK)
+    if observed.get("agree"):
+        return CheckVerdict(OUTCOME_OBSERVED)
+    return CheckVerdict(OUTCOME_VIOLATED, REASON_RELEASE_DISAGREES)
+
+
 # --------------------------------------------------------------------------- the invitation
 
 
@@ -1015,10 +1163,25 @@ __all__ = [
     "INVITATION_HOST_PATH",
     "MANAGEMENT_WORKER_IDENTITY_PATH",
     "OPERATOR_TOKEN_FILE_ENV",
+    "OUTCOME_OBSERVED",
+    "OUTCOME_UNPROVEN",
+    "OUTCOME_VIOLATED",
+    "PENDING_HARNESS_REASONS",
+    "REASON_COULD_NOT_LOOK",
+    "REASON_IDENTITY_DISAGREES",
+    "REASON_INVITATION_REFETCHABLE",
+    "REASON_OBSERVATION_MALFORMED",
+    "REASON_PRIVATE_KEY_ESCAPED",
+    "REASON_RELEASE_DISAGREES",
     "REDEEMABLE_INVITATION_KEYS",
     "REQUIRED_INVITATION_KEYS",
     "SECPCTL",
     "STATE_HEALTHY",
+    "CheckVerdict",
+    "classify_identity_agreement",
+    "classify_invitation_one_shot",
+    "classify_private_key_containment",
+    "classify_release_agreement",
     "WORKER_ENROLLMENT_PRIVATE_PATH",
     "WORKER_ENROLLMENT_PUBLIC_PATH",
     "WORKER_ENROLLMENT_ROOT",
