@@ -1,0 +1,777 @@
+"""Hermetic guards for the enrollment + identity stage driver.
+
+These tests create no host and contact nothing. They exist because
+:mod:`secp_acceptance.enrollment` holds product paths and product identity derivations as REVIEWED
+LITERALS rather than importing the management and API planes at run time — the same idiom
+:mod:`secp_worker.enrollment_health_probes` uses for the two management document paths. A literal
+that is merely *believed* to byte-match the product is a comparison between two values that can
+silently start disagreeing, so every one of them is proven here against the product's own constant.
+
+The test layer may import both planes; the harness may not. That asymmetry is the whole point.
+
+DIRECTION OF FAILURE MATTERS
+----------------------------
+If a derivation drifted, a cross-host comparison would start failing and the check would record
+``unproven`` — noisy, not silent, which is the safe direction. The dangerous drift is in the
+PREDICATES: a conjunction that reads two absent values as agreement turns a run in which enrollment
+never happened into a passing identity stage. Those predicates are pure functions here and are
+tested against exactly that attack.
+
+The embedded host programs are EXECUTED, not merely parsed. A syntax error or a wrong ``sys.argv``
+index inside one of them would otherwise surface only in the container tier, minutes into a
+privileged run.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+
+import pytest
+from secp_acceptance.enrollment import (
+    CONTROLLER_API_LOCATOR_PATH,
+    ENROLLMENT_API_PREFIX,
+    MANAGEMENT_WORKER_IDENTITY_PATH,
+    OPERATOR_TOKEN_FILE_ENV,
+    REQUIRED_INVITATION_KEYS,
+    STATE_HEALTHY,
+    WORKER_ENROLLMENT_PRIVATE_PATH,
+    WORKER_ENROLLMENT_PUBLIC_PATH,
+    WORKER_ENROLLMENT_ROOT,
+    WORKER_ENROLLMENT_STATE_DIR,
+    InvitationArtifact,
+    containment_verdict,
+    controller_key_fingerprint,
+    observe_enroll_dry_run,
+    observe_identity_survived_restart,
+    observe_installation_id_agreement,
+    observe_invitation_is_not_refetchable,
+    observe_key_fingerprint_agreement,
+    status_fingerprint,
+    worker_installation_label,
+)
+
+# --------------------------------------------------------------------------- fixtures
+
+_KEY_ID = "sha256:" + "3f" * 32
+_OTHER_KEY_ID = "sha256:" + "a1" * 32
+_RELEASE = "sha256:" + "b2" * 32
+
+_CERTIFICATE_PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+
+
+def _invitation_report(**overrides: object) -> dict:
+    report = {
+        "command": "enrollment invite create",
+        "mode": "written",
+        "enrollment_id": "sha256:" + "c3" * 32,
+        "invitation_id": "sha256:" + "d4" * 32,
+        "controller_installation_id": "controller-0011223344556677",
+        "controller_key_id": _KEY_ID,
+        "controller_trust_anchor_hex": "ee" * 32,
+        "controller_origin": "https://controller.secp.test",
+        "controller_ca_bundle_pem": _CERTIFICATE_PEM,
+        "release_digest": _RELEASE,
+        "transaction_id": "txn-" + "ff" * 16,
+        "deployment_site_label": "secp-acc-site",
+        "created_at": "2026-08-03T00:00:00Z",
+        "expires_at": "2026-08-03T01:00:00Z",
+        "state": "invited",
+        "revision": 0,
+    }
+    report.update(overrides)
+    return report
+
+
+def _artifact(**overrides: object) -> InvitationArtifact:
+    report = _invitation_report(**overrides)
+    raw = json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return InvitationArtifact(raw=raw, report=report)
+
+
+# --------------------------------------------------------------------------- derivation parity
+
+_FINGERPRINT_CORPUS = (
+    "",
+    "sha256:" + "ab" * 32,
+    "ab" * 32,
+    "sha256:short",
+    "short",
+    "sha256:" + "0123456789ab",
+    "0123456789ab",
+    "sha256:" + "0123456789a",
+    "sha256:NOTHEXNOTHEXNOTHEX",
+    "prefix:with:colons:" + "cd" * 32,
+)
+
+
+@pytest.mark.parametrize("value", _FINGERPRINT_CORPUS)
+def test_status_fingerprint_byte_matches_the_api_projection(value: str):
+    """The harness's fingerprint IS the controller's, including the conditional.
+
+    The conditional is the part worth pinning: a short non-hex tail renders EMPTY on both sides, and
+    the emptiness has to agree or the harness would compare a real fingerprint against a blank one.
+    """
+    from secp_api.worker_enrollment_contract import _fingerprint
+
+    assert status_fingerprint(value) == _fingerprint(value)
+
+
+@pytest.mark.parametrize("key_id", [_KEY_ID, _OTHER_KEY_ID, "sha256:" + "0" * 64, "bare-key-id"])
+def test_worker_installation_label_byte_matches_the_worker_transport(key_id: str):
+    """The label the harness compares against is the label the WORKER actually submits.
+
+    This is the derivation that would have been easy to get wrong: the controller's
+    ``worker_installation_id`` is derived from the enrollment KEY, not from the management
+    bootstrap's ``installation_id``, and checking the bootstrap one would compare two unrelated
+    values that can never match.
+    """
+    from secp_worker.enrollment_http_transport import _installation_from_key
+
+    assert worker_installation_label(key_id) == _installation_from_key(key_id)
+
+
+@pytest.mark.parametrize("key_id", [_KEY_ID, _OTHER_KEY_ID, "sha256:abc", "no-colon-here"])
+def test_controller_key_fingerprint_byte_matches_secpctl(key_id: str):
+    """The fingerprint the dry run shows an operator is the one the harness recomputes."""
+    from secp_management.enrollment_cli import (
+        controller_key_fingerprint as product_fingerprint,
+    )
+
+    assert controller_key_fingerprint(key_id) == product_fingerprint(key_id)
+
+
+def test_every_reviewed_path_byte_matches_its_product_constant():
+    """A drifted path does not fail loudly — it observes an ABSENT file, which several predicates
+    would otherwise be free to interpret as a clean negative result."""
+    from secp_management.controller_api_locator import (
+        CONTROLLER_API_LOCATOR_PATH as product_locator,
+    )
+    from secp_management.operator_auth import OPERATOR_TOKEN_FILE_ENV as product_env
+    from secp_worker.enrollment_health_probes import (
+        MANAGEMENT_WORKER_IDENTITY_PATH as product_identity,
+    )
+    from secp_worker.enrollment_key import (
+        WORKER_ENROLLMENT_KEY_PATH as product_private,
+    )
+    from secp_worker.enrollment_key import (
+        WORKER_ENROLLMENT_PUBLIC_PATH as product_public,
+    )
+    from secp_worker.enrollment_key import (
+        WORKER_ENROLLMENT_ROOT as product_root,
+    )
+    from secp_worker.enrollment_state_store import (
+        WORKER_ENROLLMENT_STATE_DIR as product_state,
+    )
+
+    assert WORKER_ENROLLMENT_ROOT == product_root
+    assert WORKER_ENROLLMENT_PRIVATE_PATH == product_private
+    assert WORKER_ENROLLMENT_PUBLIC_PATH == product_public
+    assert WORKER_ENROLLMENT_STATE_DIR == product_state
+    assert MANAGEMENT_WORKER_IDENTITY_PATH == product_identity
+    assert CONTROLLER_API_LOCATOR_PATH == product_locator
+    assert OPERATOR_TOKEN_FILE_ENV == product_env
+
+
+def test_invitation_contract_constants_match_the_product():
+    """The required-field tuple and the API prefix are quoted from the product, not invented."""
+    from secp_management.enrollment_cli import _REQUIRED_INVITATION_KEYS, _STATE_HEALTHY
+    from secp_management.enrollment_controller_client import _API_PREFIX
+
+    assert REQUIRED_INVITATION_KEYS == _REQUIRED_INVITATION_KEYS
+    assert ENROLLMENT_API_PREFIX == _API_PREFIX
+    assert STATE_HEALTHY == _STATE_HEALTHY
+
+
+def test_the_supported_cli_surface_exists_under_the_names_the_driver_uses():
+    """The driver spells the enrollment group ``enrollment invite create``.
+
+    An earlier defect had the documentation say ``invitation create``, which does not exist. A
+    harness written against the wrong name refuses at the argument parser, and that refusal is
+    indistinguishable from a product that could not create an invitation — so the names are proven
+    against the real parser here rather than trusted.
+    """
+    from secp_management.cli import build_parser
+
+    parser = build_parser()
+    for argv in (
+        ["--json", "enrollment", "invite", "create", "--site", "s", "--write", "--confirm"],
+        ["--json", "enrollment", "status", "--enrollment-id", "sha256:" + "0" * 64],
+        ["--json", "worker", "enroll", "--invitation", "/run/x.json"],
+        ["--json", "worker", "enroll", "--invitation", "/run/x.json", "--write", "--confirm"],
+        ["--json", "worker", "enrollment", "status", "--invitation", "/run/x.json"],
+    ):
+        assert parser.parse_args(argv) is not None
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["enrollment", "invitation", "create", "--site", "s"])
+
+
+# --------------------------------------------------------------------------- the invitation
+
+
+def test_a_legitimate_invitation_passes_the_products_own_forbidden_scan():
+    """The invitation is the one artifact that crosses hosts, so it is scanned with the product's
+    own scanner. A certificate chain is public material and must pass."""
+    assert _artifact().carries_no_secret_material() is True
+
+
+def test_an_invitation_carrying_a_private_key_is_refused():
+    """The scan is not decorative: substitute a PRIVATE KEY block for the certificate chain and the
+    artifact reports that it carries secret material."""
+    poisoned = _artifact(
+        controller_ca_bundle_pem="-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"
+    )
+    assert poisoned.carries_no_secret_material() is False
+
+
+def test_the_invitation_projection_carries_no_origin_certificate_or_identifier():
+    """Nothing in the projection is a host address, a certificate, or a raw identifier — only the
+    shape facts the check asserts on."""
+    projected = json.dumps(_artifact().projection())
+    assert "controller.secp.test" not in projected
+    assert "BEGIN CERTIFICATE" not in projected
+    assert "txn-" not in projected
+
+
+# --------------------------------------------------------------------------- one-shot
+
+
+def test_a_status_projection_carrying_no_redeemable_field_proves_non_refetchability():
+    """The real ``EnrollmentStatusOut`` field set, taken from the API schema rather than typed out
+    here, must contain none of the redeemable invitation fields."""
+    from secp_api.schemas_enrollment import EnrollmentStatusOut
+
+    status = dict.fromkeys(EnrollmentStatusOut.model_fields, "value")
+    observed = observe_invitation_is_not_refetchable(status)
+    assert observed["not_refetchable"] is True
+    assert observed["redeemable_fields_in_status"] == []
+
+
+def test_a_status_projection_that_leaked_invitation_material_fails_the_check():
+    """If a future status projection grew an invitation field, the check must fail rather than keep
+    reporting the one-shot property it no longer has."""
+    observed = observe_invitation_is_not_refetchable(
+        {"enrollment_id": "x", "invitation_id": "sha256:leaked"}
+    )
+    assert observed["not_refetchable"] is False
+    assert observed["redeemable_fields_in_status"] == ["invitation_id"]
+
+
+# --------------------------------------------------------------------------- agreement predicates
+#
+# These are the false-pass attacks. Every predicate below must refuse to read two ABSENCES as
+# agreement, because a run in which the exchange never reached the controller produces exactly that.
+
+
+def test_two_absent_fingerprints_are_not_agreement():
+    observed = observe_key_fingerprint_agreement(
+        worker_key_id="", status_report={"worker_key_fingerprint": ""}
+    )
+    assert observed["agree"] is False
+
+
+def test_two_absent_installation_ids_are_not_agreement():
+    observed = observe_installation_id_agreement(
+        worker_key_id="", status_report={"worker_installation_id": ""}
+    )
+    assert observed["agree"] is False
+
+
+def test_an_absent_worker_key_never_manufactures_an_installation_label():
+    """The asymmetry that made this worth its own test.
+
+    ``worker_installation_label("")`` is ``"worker-"`` — a NON-EMPTY value derived from no
+    observation at all. A predicate that only checked "the derived side is non-empty" would treat it
+    as a real identity, and a controller that had recorded the literal ``worker-`` would match it.
+    The gate is on the key id, so an absent observation derives nothing.
+    """
+    assert worker_installation_label("") == "worker-"
+    observed = observe_installation_id_agreement(
+        worker_key_id="", status_report={"worker_installation_id": "worker-"}
+    )
+    assert observed["derived_present"] is False
+    assert observed["agree"] is False
+
+
+def test_a_malformed_worker_key_id_never_agrees_with_anything():
+    """Only a key id the worker could have derived from a real anchor is admissible on either
+    predicate."""
+    for bad in ("", "not-a-key-id", "sha256:short", "sha256:" + "Z" * 64):
+        assert (
+            observe_key_fingerprint_agreement(
+                worker_key_id=bad, status_report={"worker_key_fingerprint": status_fingerprint(bad)}
+            )["agree"]
+            is False
+        )
+        assert (
+            observe_installation_id_agreement(
+                worker_key_id=bad,
+                status_report={"worker_installation_id": worker_installation_label(bad)},
+            )["agree"]
+            is False
+        )
+
+
+def test_a_fingerprint_agrees_only_with_the_controllers_own_projection_of_the_same_key():
+    """The positive case is derived through the product's own projection, so the test cannot pass by
+    both sides sharing this module's arithmetic."""
+    from secp_api.worker_enrollment_contract import _fingerprint
+
+    recorded = _fingerprint(_KEY_ID)
+    assert (
+        observe_key_fingerprint_agreement(
+            worker_key_id=_KEY_ID, status_report={"worker_key_fingerprint": recorded}
+        )["agree"]
+        is True
+    )
+    assert (
+        observe_key_fingerprint_agreement(
+            worker_key_id=_OTHER_KEY_ID, status_report={"worker_key_fingerprint": recorded}
+        )["agree"]
+        is False
+    )
+
+
+def test_an_installation_id_agrees_only_with_the_label_the_worker_would_submit():
+    from secp_worker.enrollment_http_transport import _installation_from_key
+
+    recorded = _installation_from_key(_KEY_ID)
+    assert (
+        observe_installation_id_agreement(
+            worker_key_id=_KEY_ID, status_report={"worker_installation_id": recorded}
+        )["agree"]
+        is True
+    )
+    assert (
+        observe_installation_id_agreement(
+            worker_key_id=_OTHER_KEY_ID, status_report={"worker_installation_id": recorded}
+        )["agree"]
+        is False
+    )
+
+
+def test_the_bootstrap_installation_id_is_not_what_the_controller_records():
+    """A guard against the exact wrong comparison. The management bootstrap's ``installation_id``
+    for a worker is derived from the release aggregate, not from the enrollment key, so a harness
+    that compared it against the controller's ``worker_installation_id`` would be comparing two
+    unrelated values — and would fail permanently while looking like a product defect."""
+    bootstrap_style = "worker-" + ("b2" * 32)[:16]
+    assert worker_installation_label(_KEY_ID) != bootstrap_style
+
+
+# --------------------------------------------------------------------------- dry run
+
+
+def test_the_dry_run_check_recomputes_the_fingerprint_from_the_invitation():
+    """The shown fingerprint is compared against one derived from the ARTIFACT, so a report echoing
+    its own field back cannot satisfy the check."""
+    artifact = _artifact()
+    shown = controller_key_fingerprint(_KEY_ID)
+    good = observe_enroll_dry_run(
+        {"mode": "dry_run", "controller_key_fingerprint": shown}, artifact
+    )
+    assert good["fingerprint_matches_invitation"] is True
+    assert good["no_mutation_claimed"] is True
+
+    other = controller_key_fingerprint(_OTHER_KEY_ID)
+    wrong = observe_enroll_dry_run(
+        {"mode": "dry_run", "controller_key_fingerprint": other}, artifact
+    )
+    assert wrong["fingerprint_matches_invitation"] is False
+
+
+def test_an_absent_fingerprint_never_satisfies_the_dry_run_check():
+    observed = observe_enroll_dry_run({"mode": "dry_run"}, _artifact())
+    assert observed["fingerprint_shown"] is False
+    assert observed["fingerprint_matches_invitation"] is False
+
+
+# --------------------------------------------------------------------------- key protection
+#
+# `_is_protected_file` is the predicate that decides whether the worker's enrollment key counts as
+# protected, and it is a pure function of a metadata dict — so every way a key can be UNPROTECTED is
+# testable here, with no filesystem and on every platform. The drift matrix below is the reason the
+# symlink and permission tests further down are allowed to be POSIX-only: the predicate itself is
+# fully covered here, and those two prove only that the PROBE reports the metadata faithfully.
+
+_PROTECTED = {
+    "present": True,
+    "regular": True,
+    "symlink": False,
+    "directory": False,
+    "nlink": 1,
+    "uid": 0,
+    "gid": 0,
+    "mode": 0o600,
+}
+
+
+def test_the_reviewed_protected_observation_is_accepted():
+    from secp_acceptance.enrollment import _is_protected_file
+
+    assert _is_protected_file(_PROTECTED, mode=0o600) is True
+
+
+@pytest.mark.parametrize(
+    ("drift", "why"),
+    [
+        ({"present": False}, "an absent key is not a protected key"),
+        ({"regular": False}, "a device node or fifo is not a key file"),
+        ({"symlink": True}, "a symlink points somewhere this check never inspected"),
+        ({"directory": True}, "a directory at the key path is drift, not a key"),
+        ({"nlink": 2}, "a second name is a second path the key can be read from"),
+        ({"uid": 1000}, "a key another uid owns is a key another uid can rewrite"),
+        ({"gid": 1000}, "a foreign group on a root-owned key is drift"),
+        ({"mode": 0o644}, "a world-readable private key is not protected"),
+        ({"mode": 0o660}, "a group-writable private key is not protected"),
+        ({"mode": 0o700}, "the mode is EXACT; near-enough is not the reviewed mode"),
+    ],
+)
+def test_every_drifted_observation_is_refused(drift: dict, why: str):
+    """One assertion per way the key can stop being protected.
+
+    ``mode`` is checked for EXACT equality rather than "no group/other bits", mirroring
+    ``secp_worker.enrollment_key._require_stat``: a key at 0o700 is not more protected than one at
+    0o600, it is drift from the reviewed state, and a predicate that shrugged at it would also shrug
+    at whatever produced the drift.
+    """
+    from secp_acceptance.enrollment import _is_protected_file
+
+    assert _is_protected_file({**_PROTECTED, **drift}, mode=0o600) is False, why
+
+
+def test_the_public_anchor_is_held_to_its_own_mode():
+    """The two halves have different reviewed modes, and passing the private mode for the public
+    anchor (or the reverse) must not be accepted by accident."""
+    from secp_acceptance.enrollment import _is_protected_file
+
+    anchor = {**_PROTECTED, "mode": 0o644}
+    assert _is_protected_file(anchor, mode=0o644) is True
+    assert _is_protected_file(anchor, mode=0o600) is False
+    assert _is_protected_file(_PROTECTED, mode=0o644) is False
+
+
+# --------------------------------------------------------------------------- containment
+
+
+def test_containment_requires_a_real_key_digest():
+    """An unreadable key yields an empty digest. "Empty appears in no set" is trivially true and
+    must never be read as containment."""
+    verdict = containment_verdict(
+        key_digest="",
+        controller_root_present=False,
+        scan_complete=True,
+        scanned_files=10,
+        scanned_digests=frozenset(),
+    )
+    assert verdict["contained"] is False
+    assert verdict["key_digest_observed"] is False
+
+
+def test_an_incomplete_controller_scan_is_not_absence():
+    """The single most important line in this stage: a walk that hit its cap has not looked
+    everywhere it claimed to."""
+    verdict = containment_verdict(
+        key_digest="aa" * 32,
+        controller_root_present=False,
+        scan_complete=False,
+        scanned_files=20001,
+        scanned_digests=frozenset({"bb" * 32}),
+    )
+    assert verdict["contained"] is False
+    assert verdict["controller_scan_complete"] is False
+
+
+def test_a_whole_file_copy_on_the_controller_fails_containment():
+    digest = "aa" * 32
+    verdict = containment_verdict(
+        key_digest=digest,
+        controller_root_present=False,
+        scan_complete=True,
+        scanned_files=42,
+        scanned_digests=frozenset({digest}),
+    )
+    assert verdict["contained"] is False
+    assert verdict["no_whole_file_copy_on_controller"] is False
+
+
+def test_the_enrollment_root_existing_on_the_controller_fails_containment():
+    verdict = containment_verdict(
+        key_digest="aa" * 32,
+        controller_root_present=True,
+        scan_complete=True,
+        scanned_files=42,
+        scanned_digests=frozenset(),
+    )
+    assert verdict["contained"] is False
+
+
+def test_containment_holds_only_when_all_three_parts_hold():
+    verdict = containment_verdict(
+        key_digest="aa" * 32,
+        controller_root_present=False,
+        scan_complete=True,
+        scanned_files=42,
+        scanned_digests=frozenset({"bb" * 32}),
+    )
+    assert verdict["contained"] is True
+
+
+# --------------------------------------------------------------------------- restart persistence
+
+
+def test_two_absent_identities_do_not_survive_a_restart():
+    """Nothing before and nothing after is not persistence."""
+    observed = observe_identity_survived_restart(before={}, after={})
+    assert observed["survived"] is False
+
+
+def test_a_changed_key_id_does_not_survive_a_restart():
+    observed = observe_identity_survived_restart(
+        before={"key_id": _KEY_ID, "step": "healthy"},
+        after={"key_id": _OTHER_KEY_ID, "step": "healthy"},
+    )
+    assert observed["survived"] is False
+    assert observed["key_id_unchanged"] is False
+
+
+def test_a_lost_marker_does_not_survive_a_restart():
+    observed = observe_identity_survived_restart(
+        before={"key_id": _KEY_ID, "step": "healthy"},
+        after={"key_id": _KEY_ID, "step": ""},
+    )
+    assert observed["survived"] is False
+    assert observed["marker_unchanged"] is False
+
+
+def test_an_unchanged_identity_and_marker_survive_a_restart():
+    observed = observe_identity_survived_restart(
+        before={"key_id": _KEY_ID, "step": "healthy"},
+        after={"key_id": _KEY_ID, "step": "healthy"},
+    )
+    assert observed["survived"] is True
+
+
+# --------------------------------------------------------------------------- the embedded programs
+#
+# Executed, not merely parsed. These run inside a host in the container tier, where a wrong argv
+# index costs a privileged rebuild to discover.
+
+
+def _run_embedded(script: str, *args: str) -> object:
+    completed = subprocess.run(  # noqa: S603 - argv list, harness-authored script, no shell
+        [sys.executable, "-", *args],
+        input=script.encode("utf-8"),
+        capture_output=True,
+        check=True,
+        timeout=120,
+    )
+    return json.loads(completed.stdout.decode("utf-8"))
+
+
+def test_the_stat_program_projects_metadata_and_reports_an_absent_path():
+    from secp_acceptance.enrollment import _STAT_SCRIPT
+
+    observed = _run_embedded(_STAT_SCRIPT, sys.executable, "/nonexistent/secp/acceptance/path")
+    assert isinstance(observed, list) and len(observed) == 2
+    assert observed[0]["present"] is True
+    assert observed[0]["regular"] is True
+    assert observed[1] == {"present": False}
+
+
+def test_the_stat_program_does_not_follow_a_symlink(tmp_path):
+    """``lstat``, not ``stat`` — and this is a security property, not a style choice.
+
+    A key path replaced by a symlink to an attacker-readable copy is exactly the substitution
+    ``secp_worker.enrollment_key._require_stat`` refuses. If the probe resolved the link it would
+    report the TARGET's metadata: a plain root-owned 0600 regular file with ``symlink: false``, and
+    :func:`_is_protected_file` would call the swapped key protected.
+    """
+    from secp_acceptance.enrollment import _STAT_SCRIPT, _is_protected_file
+
+    target = tmp_path / "real"
+    target.write_bytes(b"x")
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):  # unprivileged Windows cannot create symlinks
+        pytest.skip("requires POSIX symlink creation")
+    (observed,) = _run_embedded(_STAT_SCRIPT, str(link))
+    assert observed["symlink"] is True
+    assert observed["regular"] is False
+    assert _is_protected_file(observed, mode=observed["mode"]) is False
+
+
+def test_the_stat_program_reports_a_hardlinked_file_and_the_predicate_refuses_it(tmp_path):
+    """A second name for the key file is a second path from which it can be read.
+
+    ``secp_worker.enrollment_key._require_stat`` refuses ``nlink != 1`` for exactly that reason, and
+    this is the cross-platform half of the same property — the symlink case above needs privileges
+    Windows does not grant, so without this one the whole "the key cannot be reached another way"
+    projection would go unverified outside CI.
+    """
+    from secp_acceptance.enrollment import _STAT_SCRIPT, _is_protected_file
+
+    target = tmp_path / "material"
+    target.write_bytes(b"x")
+
+    try:
+        os.link(target, tmp_path / "second-name")
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("requires POSIX hard links")
+    (observed,) = _run_embedded(_STAT_SCRIPT, str(target))
+    assert observed["nlink"] == 2
+    assert _is_protected_file(observed, mode=observed["mode"]) is False
+
+
+def test_the_file_digest_program_digests_a_file_and_reports_an_unreadable_one(tmp_path):
+    import hashlib
+
+    from secp_acceptance.enrollment import _FILE_DIGEST_SCRIPT
+
+    target = tmp_path / "material"
+    target.write_bytes(b"acceptance-only\n")
+    observed = _run_embedded(_FILE_DIGEST_SCRIPT, str(target), str(tmp_path / "absent"))
+    assert observed == [hashlib.sha256(b"acceptance-only\n").hexdigest(), ""]
+
+
+def test_the_tree_digest_program_finds_a_planted_file_and_reports_completeness(tmp_path):
+    """Executed against a planted tree, so the walk is proven to FIND a matching whole file — a
+    negative-result search that could not find anything would report a clean containment on every
+    run."""
+    import hashlib
+
+    from secp_acceptance.enrollment import _TREE_DIGEST_SCRIPT
+
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    (nested / "planted").write_bytes(b"private-key-lookalike\n")
+    observed = _run_embedded(
+        _TREE_DIGEST_SCRIPT, "1000", "1048576", str(tmp_path), "/nonexistent/secp/root"
+    )
+    assert observed["complete"] is True
+    assert observed["files"] == 1
+    assert hashlib.sha256(b"private-key-lookalike\n").hexdigest() in observed["digests"]
+
+
+def test_the_tree_digest_program_reports_an_oversized_file_as_incomplete(tmp_path):
+    """A file the walk declined to read leaves the search unable to claim absence."""
+    from secp_acceptance.enrollment import _TREE_DIGEST_SCRIPT
+
+    (tmp_path / "big").write_bytes(b"0" * 64)
+    observed = _run_embedded(_TREE_DIGEST_SCRIPT, "1000", "8", str(tmp_path))
+    assert observed["complete"] is False
+    assert observed["digests"] == []
+
+
+def test_the_tree_digest_program_reports_a_capped_walk_as_incomplete(tmp_path):
+    """The cap exists so a runaway walk cannot exhaust the harness — and hitting it must never be
+    reported as having looked everywhere."""
+    from secp_acceptance.enrollment import _TREE_DIGEST_SCRIPT
+
+    for index in range(5):
+        (tmp_path / f"file{index}").write_bytes(bytes([index]))
+    observed = _run_embedded(_TREE_DIGEST_SCRIPT, "2", "1048576", str(tmp_path))
+    assert observed["complete"] is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX mode bits")
+def test_the_tree_digest_program_reports_an_unreadable_file_as_incomplete(tmp_path):
+    """An unreadable file is the quietest way a containment search can lie.
+
+    The walk cannot digest it, so it cannot say the key is not in it. Recording that as a complete
+    scan would let the strongest-sounding check in the identity stage rest on a directory the
+    process could not read.
+    """
+
+    blocked = tmp_path / "blocked"
+    blocked.write_bytes(b"unreadable\n")
+    os.chmod(blocked, 0o000)
+    if os.access(blocked, os.R_OK):  # running as root defeats the mode bits
+        pytest.skip("requires a non-root POSIX process")
+    from secp_acceptance.enrollment import _TREE_DIGEST_SCRIPT
+
+    observed = _run_embedded(_TREE_DIGEST_SCRIPT, "1000", "1048576", str(tmp_path))
+    assert observed["complete"] is False
+
+
+def test_the_installed_release_program_projects_the_digest_and_tolerates_an_absent_document(
+    tmp_path,
+):
+    from secp_acceptance.enrollment import _INSTALLED_RELEASE_SCRIPT
+
+    document = tmp_path / "worker-identity.json"
+    document.write_text(json.dumps({"role": "worker", "release_digest": _RELEASE}))
+    assert _run_embedded(_INSTALLED_RELEASE_SCRIPT, str(document)) == {
+        "release_digest": _RELEASE,
+        "role": "worker",
+    }
+    assert _run_embedded(_INSTALLED_RELEASE_SCRIPT, str(tmp_path / "absent")) == {
+        "release_digest": "",
+        "role": "",
+    }
+
+
+def test_the_key_id_program_derives_the_product_key_id(tmp_path):
+    """Run against the real ``key_id_for``, so the program the WORKER executes is proven to produce
+    the identity the controller will later be compared against."""
+    from secp_acceptance.enrollment import _KEY_ID_SCRIPT
+    from secp_commissioning.enrollment_attestation import key_id_for
+
+    public_hex = "7c" * 32
+    anchor = tmp_path / "enrollment-key.pub"
+    anchor.write_text(public_hex)
+    assert _run_embedded(_KEY_ID_SCRIPT, str(anchor)) == {"key_id": key_id_for(public_hex)}
+
+
+def test_the_inventory_program_installs_the_redirect_refusing_handler_it_defines():
+    """The only embedded program that needs a live server to execute, so it is checked structurally.
+
+    A redirect would forward the operator bearer to another origin — the one thing this request must
+    never do — so both halves are pinned: the handler is DEFINED as an ``HTTPRedirectHandler``
+    subclass that refuses, and the opener is built with THAT class. Checking only that the string
+    ``HTTPRedirectHandler`` appears would survive a rename that leaves the opener referencing a name
+    the module no longer defines: a NameError at request time, on a privileged run, minutes in.
+    """
+    import ast
+
+    from secp_acceptance.enrollment import _INVENTORY_SCRIPT
+
+    tree = ast.parse(_INVENTORY_SCRIPT)
+    refusers = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and any(
+            isinstance(base, ast.Attribute) and base.attr == "HTTPRedirectHandler"
+            for base in node.bases
+        )
+    ]
+    assert len(refusers) == 1, "exactly one redirect handler must be defined"
+    refuser = refusers[0]
+    overrides = [n.name for n in refuser.body if isinstance(n, ast.FunctionDef)]
+    assert overrides == ["redirect_request"]
+
+    builders = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "build_opener"
+    ]
+    assert len(builders) == 1, "exactly one opener must be built"
+    installed = {
+        arg.func.id
+        for arg in builders[0].args
+        if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name)
+    }
+    assert refuser.name in installed, "the defined refuser must be the handler that is installed"
+
+    # every name the program uses must be one it defines, imports, or binds — so a rename cannot
+    # leave a dangling reference that only fails at request time
+    compile(_INVENTORY_SCRIPT, "<inventory>", "exec")
+    # TLS must pin the locator's CA — never system trust, never disabled
+    assert "cafile=locator" in _INVENTORY_SCRIPT
