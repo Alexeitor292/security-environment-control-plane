@@ -12,13 +12,19 @@
 #     (topology.BROKER_ENTRYPOINT) looks. That unit is an ExecStart on the HOST, so this is the
 #     filesystem that has to satisfy it.
 #
-# NOT so for the worker health command. topology.ORDINARY_HEALTH_COMMAND pins the same
-# /usr/bin/python3, but it is exec'd INSIDE the ordinary worker CONTAINER, so it is resolved against
-# the worker IMAGE's filesystem and this host's python3 is irrelevant to it. The worker image is
-# built from python:3.11-slim, which provides /usr/local/bin/python3 and no /usr/bin/python3 — see
-# Finding D in apps/acceptance/tests/test_acceptance_health_command_interpreter.py. Do NOT "fix"
-# that by installing a /usr/bin/python3 symlink here: it would not be on the path that matters, and
-# it would hide the finding rather than resolve it.
+# NOT so for the worker health command. topology.ORDINARY_HEALTH_COMMAND starts with
+# topology.WORKER_CONTAINER_INTERPRETER, and it is exec'd INSIDE the ordinary worker CONTAINER, so
+# it is resolved against the worker IMAGE's filesystem and this host's python3 is irrelevant to it.
+# The worker image is built from python:3.11-slim, which provides /usr/local/bin/python3 and no
+# /usr/bin/python3 — which is exactly what that constant now names. It once named /usr/bin/python3,
+# and the resulting unresolvable probe both blocked the install and manufactured a false
+# operator-queue containment breach.
+#
+# So do NOT install a /usr/bin/python3 symlink into the WORKER image to "make the paths agree", and
+# do not unify the two constants. The host interpreter below and the container interpreter are
+# different files on different filesystems; apps/acceptance/tests/
+# test_acceptance_container_worker_image.py observes both against the real base image, and
+# tests/test_health_command_interpreter.py binds the container one to the base image's build recipe.
 #
 # Ubuntu 24.04 is the base because the project requires Python >= 3.11 and 24.04 ships 3.12; 22.04
 # ships 3.10 and would need a PPA to run the product at all.

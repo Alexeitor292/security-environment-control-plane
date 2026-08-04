@@ -63,8 +63,8 @@ TIERS: frozenset[str] = frozenset({TIER_HERMETIC, TIER_CONTAINER})
 #:
 #: ``worker_image_probed`` covers the interpreter measurement, which needs the outer runtime but no
 #: fleet. It is listed because a declared tier that built hosts and never probed the image would
-#: otherwise be indistinguishable from a complete one, and the image probe is what discharges
-#: Finding D's antecedent.
+#: otherwise be indistinguishable from a complete one, and that probe is the only place the pinned
+#: worker health interpreter is checked against a real image rather than against another constant.
 CONTAINER_TIER_STAGES: tuple[str, ...] = (
     "fleet_created",
     "fleet_proved",

@@ -83,11 +83,12 @@ CHECKS_BY_STAGE: dict[str, tuple[str, ...]] = {
         "worker_status_ok",
         "worker_operator_unit_present_disabled_stopped",
         "worker_evidence_attested",
-        # Discharges the ANTECEDENT of Finding D. The pinned ordinary health command starts with an
-        # absolute interpreter path and is exec'd INSIDE the worker container, so whether that path
-        # exists in the worker image is a fact about the image, not about this repo — it can only
-        # be settled by looking. The hermetic file proves the conditional; this check measures the
-        # premise.
+        # The ordinary health command starts with an ABSOLUTE interpreter path and is exec'd INSIDE
+        # the worker container, so whether that path exists is a fact about the worker IMAGE, not
+        # about this repo, and it can only be settled by looking. It once named a path the image
+        # does not have, which both blocked the install and manufactured a false operator-queue
+        # containment breach; the constant was corrected, and this check is what keeps the
+        # correction tied to an observation rather than to agreement between two constants.
         "worker_health_command_resolves_in_the_worker_image",
     ),
     STAGE_ENROLLMENT: (
