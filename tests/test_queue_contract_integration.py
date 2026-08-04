@@ -278,11 +278,16 @@ def test_a_prepared_host_reports_the_operator_dormant_and_the_check_can_say_othe
     A dormancy check that returned "dormant" for every input would pass the first half. The second
     half drives an ENABLED+RUNNING host through the same builder and requires the contrary status.
     """
-    from _deploy_support import host_evidence, valid_profile
+    from _deploy_support import host_evidence, valid_expected, valid_profile
     from secp_operator_deployment.queue_check import build_queue_report
 
+    # Both calls supply the trusted pins: the queue-authority rung sits ABOVE dormancy in the
+    # ladder, so a report built without them refuses at `queue_unverified` and never reaches the
+    # dormancy verdict this test exists to observe.
     dormant = build_queue_report(
-        profile=valid_profile(), host_observation=host_evidence(enabled=False, running=False)
+        profile=valid_profile(),
+        expected=valid_expected(),
+        host_observation=host_evidence(enabled=False, running=False),
     )
     assert dormant["operator_consumer"]["unit_enabled"] is False
     assert dormant["operator_consumer"]["unit_running"] is False
@@ -292,7 +297,9 @@ def test_a_prepared_host_reports_the_operator_dormant_and_the_check_can_say_othe
     assert dormant["submission_preview"]["submission_performed"] is False
 
     active = build_queue_report(
-        profile=valid_profile(), host_observation=host_evidence(enabled=True, running=True)
+        profile=valid_profile(),
+        expected=valid_expected(),
+        host_observation=host_evidence(enabled=True, running=True),
     )
     assert active["operator_consumer"]["dormant"] is False
     assert active["status"] == "queue_operator_consuming"
