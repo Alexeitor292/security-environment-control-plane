@@ -69,7 +69,7 @@ def fleet(runtime_version: str):
         yield built
     finally:
         clean, residual = built.destroy()
-        witness("fleet_destroyed")
+        witness("fleet_torn_down")
         # Reported, not swallowed. A teardown that could not finish is a real problem for the next
         # run on this machine, and it must not be discoverable only by noticing a slow disk.
         assert clean, f"the disposable fleet did not fully tear down: {residual}"
