@@ -1484,3 +1484,139 @@ def test_the_two_restart_observers_share_no_key_and_neither_says_state():
         f"the two observers merged across the restart share keys {sorted(marker & identity)}; one "
         "would overwrite the other and the restart proof would compare the wrong value"
     )
+
+
+# --------------------------------------------------------------------------- operator provisioning
+
+
+def test_the_subject_matches_the_installation_stage_in_whichever_state_this_tree_is_in():
+    """The one string both halves of the credential must agree on.
+
+    The Keycloak user is created WITH this id, so the token's ``sub`` equals the
+    ``app_user.subject`` the installation stage provisions. Disagree and the lookup finds no row,
+    the request is unauthenticated, and it reads as a token defect — the failure the other stream
+    warned about and the symmetric one I nearly caused from this side.
+
+    Non-vacuous before and after the installation module arrives: today it pins the literal, so a
+    typo fails; once that module is present it pins equality against its constant instead.
+    """
+    from secp_acceptance.enrollment import ACCEPTANCE_OPERATOR_SUBJECT
+
+    try:
+        from secp_acceptance.install import ACCEPTANCE_OPERATOR_SUBJECT as theirs
+    except ImportError:
+        assert ACCEPTANCE_OPERATOR_SUBJECT == "5ec9ad00-0000-4000-8000-acce97ab1e01"
+        return
+    assert ACCEPTANCE_OPERATOR_SUBJECT == theirs
+
+
+def test_provisioning_returns_none_rather_than_raising_when_nothing_is_provisioned():
+    """The honesty rule, at the one seam where the whole stage's authentication depends on it.
+
+    A fixture that raises aborts the run and records NOTHING, and recording nothing is
+    indistinguishable from passing. ``None`` lets every controller-side check record ``unproven``
+    with a reason.
+
+    Passing ``None`` as the host is deliberate: if either guard were removed the call would reach
+    the host seam and fail on the ``None``, so this cannot pass by accident.
+    """
+    from secp_acceptance.enrollment import provision_operator_realm
+
+    assert provision_operator_realm(None, admin_password="", client_secret="x") is None
+    assert provision_operator_realm(None, admin_password="x", client_secret="") is None
+    assert provision_operator_realm(None) is None
+
+
+def test_provisioning_invents_no_credential_of_its_own():
+    """Every secret is injected. A credential this module made up would be a value nobody could
+    trace to a source, and the run would authenticate with something no reviewer had approved."""
+    import inspect
+
+    from secp_acceptance.enrollment import provision_operator_realm
+
+    signature = inspect.signature(provision_operator_realm)
+    assert signature.parameters["admin_password"].default == ""
+    assert signature.parameters["client_secret"].default == ""
+
+
+def test_the_realm_program_sets_the_user_id_explicitly():
+    """The one-field mistake that costs a day.
+
+    Keycloak puts the user id in ``sub``. Create the user without an explicit ``id`` and Keycloak
+    assigns a random UUID, the controller-side row lookup returns zero rows, and every request is
+    unauthenticated — presenting as a token or realm defect, which it is not.
+    """
+    import ast
+
+    from secp_acceptance.enrollment import _REALM_SCRIPT
+
+    tree = ast.parse(_REALM_SCRIPT)
+    users_call = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "call"
+        and node.args
+        and "users" in ast.dump(node.args[0])
+    ]
+    assert len(users_call) == 1, "exactly one user-creation call is expected"
+    payload = users_call[0].args[1]
+    keys = {k.value for k in payload.keys if isinstance(k, ast.Constant)}
+    assert "id" in keys, "the user must be created with an explicit id, or `sub` will not match"
+
+
+def test_the_realm_program_declares_itself_disposable():
+    """The realm carries the same warning the reviewed skeleton in the tree carries, so anyone who
+    finds it in a running Keycloak knows what it is without reading this module."""
+    from secp_acceptance.enrollment import _REALM_SCRIPT
+
+    assert "DISPOSABLE" in _REALM_SCRIPT
+    assert "UNSAFE FOR PRODUCTION" in _REALM_SCRIPT
+
+
+def test_the_token_lands_somewhere_that_cannot_outlive_the_host():
+    from secp_acceptance.enrollment import OPERATOR_TOKEN_HOST_PATH
+
+    assert OPERATOR_TOKEN_HOST_PATH.startswith("/run/")
+
+
+def test_the_realm_program_is_valid_python():
+    from secp_acceptance.enrollment import _REALM_SCRIPT
+
+    compile(_REALM_SCRIPT, "<realm>", "exec")
+
+
+def test_the_operator_token_is_written_with_the_mode_the_product_requires():
+    """0600, and the mode is the whole protection.
+
+    ``ProtectedTokenFileProvider`` refuses anything that is not a plain, unlinked file owned by the
+    invoking uid at EXACTLY 0600 — so a token written 0644 would be readable by every process on the
+    host AND then refused by the product, presenting as an auth failure rather than as the exposure
+    it is.
+
+    This mutant survived the first sweep of this section: every other property of the provisioning
+    path was pinned and the one that makes the file protected was not. Read out of the AST so the
+    mode is checked where it is written rather than inferred from a docstring.
+    """
+    import ast
+
+    from secp_acceptance import enrollment
+    from secp_management.operator_auth import ProtectedTokenFileProvider  # noqa: F401
+
+    tree = ast.parse(pathlib.Path(enrollment.__file__).read_text(encoding="utf-8"))
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "provision_operator_realm"
+    )
+    modes = [
+        kw.value.value
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "mode" and isinstance(kw.value, ast.Constant)
+    ]
+    assert modes == ["0600"], (
+        f"the operator token must be written 0600 and nothing else; found {modes}"
+    )

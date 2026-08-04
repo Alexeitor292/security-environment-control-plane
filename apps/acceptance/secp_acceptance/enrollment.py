@@ -1213,6 +1213,180 @@ def observe_restart_marker(worker: Host, invitation_path: str) -> dict[str, str]
     return {"step": str(report.get("state", ""))}
 
 
+# --------------------------------------------------------------------------- operator provisioning
+#
+# THE HALF OF THE CREDENTIAL THAT LIVES IN THE IDENTITY PROVIDER
+# --------------------------------------------------------------
+# A realm, a client, a user, a real grant, and a protected token file. The OTHER half — the
+# controller-side ``app_user`` row and its ``enrollment:manage`` role assignment — belongs to the
+# installation stage, and neither half authenticates anything alone:
+# ``secp_api.auth.principal_from_oidc_claims`` maps a verified token's ``sub`` to exactly one
+# pre-provisioned row and NEVER trusts a role or group carried in the token. A realm role named
+# ``enrollment_manage`` is ignored by design.
+#
+# WHY THIS EXISTS AT ALL, AND WHAT IT SUBSTITUTES
+# -----------------------------------------------
+# In production posture the product seeds no operator and exposes no path to create one — every
+# router requires an already-authenticated principal, and the only writer of an ``app_user`` row is
+# refused outside dev/test. So a controller in production posture cannot be reached by ANY client on
+# day one. The acceptance therefore runs its controller in TEST POSTURE, and that substitution is
+# named in the evidence: the exchange it exercises is real, the posture is not.
+#
+# EVERY BYTE OF THIS IS DISPOSABLE
+# --------------------------------
+# Created inside the run's own controller host, destroyed with the fleet. Nothing here is a
+# production credential, a production trust root, or material that outlives the run. The realm is
+# modelled on the reviewed disposable skeleton already in the tree, whose display name says
+# "DISPOSABLE, placeholder credentials, UNSAFE FOR PRODUCTION" — this one says the same.
+
+#: The subject BOTH halves must agree on: the Keycloak user is created WITH this id, so the token's
+#: ``sub`` equals the ``app_user.subject`` the installation stage provisions. A reviewed literal
+#: rather than an import, so this module does not depend on the installation module's load order; a
+#: guard pins it against that module's constant whenever the module is present.
+ACCEPTANCE_OPERATOR_SUBJECT = "5ec9ad00-0000-4000-8000-acce97ab1e01"
+
+#: Fixed, not per-run. The API reads its trusted issuer from a SIGNED release artifact, so the
+#: issuer URL must be deterministic at release-build time — which a per-run realm name cannot be.
+#: The realm is still disposable; only its NAME is fixed.
+ACCEPTANCE_REALM = "secp-acceptance"
+
+#: Where the operator token lands. Under ``/run`` so it cannot outlive the host.
+OPERATOR_TOKEN_HOST_PATH = f"{INVITATION_HOST_DIR}/operator-token"
+
+_REALM_SCRIPT = """
+import json, sys, urllib.error, urllib.request
+
+base, realm, subject, admin_user, admin_password, secret = sys.argv[1:7]
+
+
+def call(path, payload=None, token=None, form=False):
+    url = base + path
+    if form:
+        body = "&".join(str(k) + "=" + str(v) for k, v in payload.items()).encode("ascii")
+        ctype = "application/x-www-form-urlencoded"
+    elif payload is None:
+        body, ctype = None, None
+    else:
+        body, ctype = json.dumps(payload).encode("utf-8"), "application/json"
+    request = urllib.request.Request(url, data=body, method="POST" if body else "GET")
+    if ctype:
+        request.add_header("Content-Type", ctype)
+    if token:
+        request.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read(65536)
+            return response.status, (json.loads(raw) if raw[:1] in (b"{", b"[") else {})
+    except urllib.error.HTTPError as exc:
+        return exc.code, {}
+    except Exception:
+        return 0, {}
+
+
+status, body = call(
+    "/realms/master/protocol/openid-connect/token",
+    {"grant_type": "password", "client_id": "admin-cli",
+     "username": admin_user, "password": admin_password},
+    form=True,
+)
+admin = body.get("access_token") if status == 200 else None
+if not admin:
+    sys.stdout.write(json.dumps({"ok": False, "stage": "admin_token", "status": status}))
+    raise SystemExit(0)
+
+# Each create is idempotent: 409 means a previous call in THIS fleet already made it.
+call("/admin/realms", {"realm": realm, "enabled": True,
+                       "displayName": "SECP acceptance - DISPOSABLE, UNSAFE FOR PRODUCTION",
+                       "sslRequired": "none", "accessTokenLifespan": 900}, token=admin)
+call("/admin/realms/" + realm + "/clients",
+     {"clientId": "secp-acceptance-operator", "enabled": True, "publicClient": False,
+      "secret": secret, "directAccessGrantsEnabled": True, "standardFlowEnabled": False,
+      "serviceAccountsEnabled": False,
+      "protocolMappers": [{"name": "aud", "protocol": "openid-connect",
+                           "protocolMapper": "oidc-audience-mapper",
+                           "config": {"included.custom.audience": "secp-api",
+                                      "access.token.claim": "true"}}]}, token=admin)
+# The id is set EXPLICITLY: Keycloak puts the user id in `sub`, and the controller-side app_user row
+# carries this exact value. Letting Keycloak choose would make `sub` a random UUID, the row lookup
+# return zero rows, and the request unauthenticated -- which reads as a token defect and is not one.
+call("/admin/realms/" + realm + "/users",
+     {"id": subject, "username": "acceptance-operator", "enabled": True, "emailVerified": True,
+      "email": "acceptance-operator@disposable.invalid",
+      "credentials": [{"type": "password", "value": secret, "temporary": False}]}, token=admin)
+
+status, body = call(
+    "/realms/" + realm + "/protocol/openid-connect/token",
+    {"grant_type": "password", "client_id": "secp-acceptance-operator", "client_secret": secret,
+     "username": "acceptance-operator", "password": secret, "scope": "openid"},
+    form=True,
+)
+granted = body.get("access_token") if status == 200 else None
+if not granted:
+    sys.stdout.write(json.dumps({"ok": False, "stage": "operator_grant", "status": status}))
+    raise SystemExit(0)
+sys.stdout.write(json.dumps({"ok": True, "token": granted}))
+"""
+
+
+def provision_operator_realm(
+    controller_host: Host,
+    *,
+    realm: str = ACCEPTANCE_REALM,
+    keycloak_base: str = "http://localhost:8080",
+    admin_user: str = "admin",
+    admin_password: str = "",
+    client_secret: str = "",
+) -> str | None:
+    """Provision the disposable realm and land a real operator token, or return ``None``.
+
+    Returns the PATH of the protected token file — the shape the installation stage's fixture
+    publishes as ``operator_token_path``.
+
+    ``None`` on every failure path, and never an exception. A fixture that raises aborts the run and
+    records nothing, and a stage that records nothing is indistinguishable from a stage that passed;
+    returning ``None`` lets each check record ``unproven`` with a reason, which is the truth.
+
+    The grant is REAL — a password grant against a real Keycloak returning a real signed token the
+    API verifies against its configured issuer. What is disposable is the realm, the user and the
+    secret, all of which die with the fleet.
+
+    ``admin_password`` and ``client_secret`` are INJECTED rather than invented here. The bootstrap
+    admin belongs to whoever composes the controller stack, and a credential this module made up
+    would be one more value nobody could trace to a source. Empty means "not provisioned", which
+    returns ``None`` rather than guessing.
+    """
+    if not admin_password or not client_secret:
+        return None
+    observed = host_python(
+        controller_host,
+        _REALM_SCRIPT,
+        (
+            keycloak_base,
+            realm,
+            ACCEPTANCE_OPERATOR_SUBJECT,
+            admin_user,
+            admin_password,
+            client_secret,
+        ),
+        timeout=300,
+    )
+    if not observed.ok:
+        return None
+    try:
+        result = json.loads(observed.stdout)
+    except ValueError:
+        return None
+    token = result.get("token") if isinstance(result, dict) and result.get("ok") else None
+    if not isinstance(token, str) or not token:
+        return None
+    try:
+        controller_host.exec(("mkdir", "-p", INVITATION_HOST_DIR), check=True)
+        controller_host.write_file(OPERATOR_TOKEN_HOST_PATH, token.encode("ascii"), mode="0600")
+    except AcceptanceError:
+        return None
+    return OPERATOR_TOKEN_HOST_PATH
+
+
 __all__ = [
     "CONTROLLER_API_LOCATOR_PATH",
     "CONTROLLER_STATE_ROOTS",
@@ -1237,6 +1411,9 @@ __all__ = [
     "WORKER_ENROLLMENT_STATE_DIR",
     "InvitationArtifact",
     "containment_verdict",
+    "ACCEPTANCE_OPERATOR_SUBJECT",
+    "ACCEPTANCE_REALM",
+    "OPERATOR_TOKEN_HOST_PATH",
     "controller_enrollment_status",
     "create_sacrificial_invitation",
     "controller_key_fingerprint",
@@ -1257,6 +1434,7 @@ __all__ = [
     "observe_restart_marker",
     "observe_worker_enrollment_key",
     "observe_worker_key_identity",
+    "provision_operator_realm",
     "restart_worker_host",
     "revoke_enrollment",
     "secpctl_json",
