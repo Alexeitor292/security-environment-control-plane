@@ -414,14 +414,41 @@ def test_the_single_seam_is_the_only_way_a_route_gets_a_session(app):
                 continue
 
     def _is_the_canonical_seam_assignment(path, node, tree):
-        """True only for the module-level assignment that binds the canonical seam object."""
+        """True only for the module-level statement that binds the canonical seam object.
+
+        The bound names are read by DUCK TYPING the AST's own naming convention — ``targets``
+        (plural, ``X = ...``) or ``target`` (singular, ``X: T = ...``) — rather than by listing
+        node types. That is deliberate, and it is the third time this predicate has been narrowed
+        by an assumption it did not know it was making:
+
+            v1  keyed on a BASENAME   — "the seam lives in a file called deps.py"
+            v2  keyed on a PATH       — "the seam lives at this resolved location"
+            v3  keyed on a NODE TYPE  — "the seam is a bare Assign, not an AnnAssign"
+
+        v3's cost was the worse direction: the perfectly idiomatic
+        ``DB_SESSION: Depends = Depends(db_session, scope="function")`` made the guard flag the
+        seam's OWN definition. A false green gets re-checked by the next person to touch it; a
+        false red gets acted on — someone sees the guard reject correct code and edits the seam to
+        appease it.
+
+        Duck typing on ``value``/``target(s)`` removes the node-type list, so any binding statement
+        that follows the AST's convention is handled without this predicate being told about it.
+        The residual assumption, stated rather than hidden: the seam is bound by a module-level
+        statement whose ``value`` is the ``Depends(...)`` call itself. A seam built indirectly —
+        through a helper call, a comprehension, or a conditional — would not be recognised, and
+        should not be: that is no longer one obvious construction site.
+        """
         module = modules_by_file.get(path.resolve())
         if module is None:
             return False  # not imported: cannot be the seam the application actually uses
         for stmt in tree.body:  # module level only, deliberately
-            if not isinstance(stmt, ast.Assign) or stmt.value is not node:
+            if getattr(stmt, "value", None) is not node:
                 continue
-            for target in stmt.targets:
+            targets = getattr(stmt, "targets", None)
+            if targets is None:
+                single = getattr(stmt, "target", None)
+                targets = [single] if single is not None else []
+            for target in targets:
                 if isinstance(target, ast.Name):
                     if getattr(module, target.id, None) is secp_deps.DB_SESSION:
                         return True
