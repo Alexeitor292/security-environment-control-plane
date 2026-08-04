@@ -143,14 +143,47 @@ CHECKS: frozenset[str] = frozenset(check for checks in CHECKS_BY_STAGE.values() 
 OUTCOME_OBSERVED = "observed"
 OUTCOME_REFUSED = "refused"
 OUTCOME_UNPROVEN = "unproven"
+OUTCOME_VIOLATED = "violated"
 
 #: ``observed`` — the harness made the positive observation the check names.
 #: ``refused`` — the product refused, and the refusal IS the expected result of the check
-#:   (every failure-injection check ends here).
+#:   (every failure-injection check that behaves correctly ends here).
 #: ``unproven`` — the harness could not make the observation. This is never a pass. It is recorded
 #:   rather than skipped silently, because a check that quietly disappears reads as a check that
 #:   passed.
-OUTCOMES: frozenset[str] = frozenset({OUTCOME_OBSERVED, OUTCOME_REFUSED, OUTCOME_UNPROVEN})
+#: ``violated`` — the harness POSITIVELY OBSERVED the condition the check exists to rule out.
+#:
+#: WHY ``violated`` IS NOT FOLDED INTO ``unproven``
+#: -----------------------------------------------
+#: ``unproven`` and ``violated`` are opposites: maximal ignorance versus maximal knowledge. Folding
+#: them together makes the single most serious finding this harness can produce — a worker actually
+#: polling the controlled-live operator queue, a product accepting a tampered artifact — read
+#: exactly like a transport error.
+#:
+#: The management plane already learned this and paid for the fix. ``real_adapters
+#: ._observe_queue_containment`` is three-valued for the same reason, and says so in its own
+#: docstring: folding ``unprovable`` into ``breached`` "is fail-closed and therefore SAFE, but it is
+#: not honest". A two-valued evidence outcome would re-collapse, one level up, a distinction that
+#: plane already spent a fix separating.
+#:
+#: The checks this matters for are disproportionately the SECURITY ones: operator-queue containment,
+#: key confinement, the never-activated operator unit, and every failure-injection check (where "the
+#: product did not refuse at all" is a proven defect, not a failure to look).
+OUTCOMES: frozenset[str] = frozenset(
+    {OUTCOME_OBSERVED, OUTCOME_REFUSED, OUTCOME_UNPROVEN, OUTCOME_VIOLATED}
+)
+
+#: The outcomes a PASSING run may contain — stated as an ALLOWLIST, which is the whole point.
+#:
+#: This was a denylist ("pass unless something is ``unproven``") and that shape is a false-green
+#: generator: every outcome added to :data:`OUTCOMES` becomes a passing outcome by default. Adding
+#: ``violated`` as a one-line vocabulary edit was measured to seal and load a document containing a
+#: PROVEN VIOLATION while still reporting ``passed``. The closed vocabulary was the only thing
+#: holding that shut, and it stops holding in the same commit that widens it.
+#:
+#: Written this way round, a future fifth outcome fails CLOSED — it is not in this set, so it cannot
+#: pass — and whoever adds it is told by a test rather than by an escaped green.
+PASSING_OUTCOMES: frozenset[str] = frozenset({OUTCOME_OBSERVED, OUTCOME_REFUSED})
 
 RUN_PASSED = "passed"
 RUN_FAILED = "failed"
@@ -198,9 +231,26 @@ HARNESS_REASONS: frozenset[str] = frozenset(
         # --- proofs ---
         "acceptance_observation_unavailable",
         "acceptance_observation_malformed",
+        # The harness looked and the product did NOT refuse something it must reject. Paired with
+        # OUTCOME_VIOLATED, never with OUTCOME_UNPROVEN: this is a proven product defect, not a
+        # failure to observe. (`acceptance_unexpected_reason_code` below is the opposite case — the
+        # product DID refuse, just not for the reason that makes the check meaningful — and that
+        # stays `unproven`, because the property was not proven and nothing bad was observed.)
         "acceptance_expected_refusal_absent",
         "acceptance_unexpected_reason_code",
         "acceptance_proof_would_be_vacuous",
+        # The harness positively observed the state a check exists to rule out: an operator queue
+        # with a live poller, a private key that left its host, an operator unit that was activated.
+        # Deliberately ONE code for all of them rather than one per check — the check id already
+        # says which property was violated, and a per-check code set would grow past review.
+        "acceptance_prohibited_state_observed",
+        # --- the run ---
+        # The recorder accumulates in memory, so a parallelised session would seal one PARTIAL
+        # document per worker and every one of them would look like a complete run.
+        "acceptance_run_not_single_process",
+        # Sealing without a fleet record: every stage's claims are claims about a fleet, so a
+        # document whose fleet was invented rather than observed misdescribes its own premise.
+        "acceptance_run_fleet_not_recorded",
         # --- evidence ---
         "acceptance_evidence_invalid",
         "acceptance_evidence_forbidden_value",
@@ -268,6 +318,8 @@ __all__ = [
     "OUTCOME_OBSERVED",
     "OUTCOME_REFUSED",
     "OUTCOME_UNPROVEN",
+    "OUTCOME_VIOLATED",
+    "PASSING_OUTCOMES",
     "PRODUCT_REASONS",
     "RUN_FAILED",
     "RUN_OUTCOMES",
