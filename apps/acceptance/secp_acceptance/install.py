@@ -337,17 +337,39 @@ def _ed25519_public(private: bytes) -> str:
 
 
 def observe_operator_unit(host: Host) -> dict[str, object]:
-    """The headline safety observation: the operator unit is PRESENT, DISABLED and STOPPED.
+    """The headline safety observation: the operator unit is PRESENT, NOT-ENABLED and STOPPED.
 
-    Asked of real systemd on a host where systemd is PID 1, so the three answers are systemd's own.
-    All three properties are read in ONE ``systemctl show`` call: reading them separately would let
-    the unit change between questions and produce a combination that never actually existed.
+    Asked of real systemd on a host where systemd is PID 1, so the answers are systemd's own. All
+    properties are read in ONE ``systemctl show`` call: reading them separately would let the unit
+    change between questions and produce a combination that never actually existed.
 
-    ``LoadState`` is read too. Without it, a unit systemd cannot load at all reports
-    ``ActiveState=inactive`` — indistinguishable from a correctly stopped one — and the check would
-    pass for a unit that is not really there.
+    THE STATE TABLE IS THE PRODUCT'S, NOT OURS — this is the whole point of the function.
+    Written the obvious way (``UnitFileState == "disabled"``) this check FAILS A CORRECTLY PREPARED
+    HOST. The reviewed operator unit is rendered with no ``[Install]`` section
+    (``systemd.py`` emits one only when ``wanted_by is not None``, which defaults to ``None``), and
+    systemd reports a unit with no ``[Install]`` as ``static`` — not ``disabled``. So the three
+    classifiers are IMPORTED from ``secp_operator_deployment.host_adapters``, which already carries
+    that knowledge and says so at its definition. Restating any systemd state table here would be
+    the same shape of defect as the health-interpreter constant that once both blocked the install
+    and manufactured a false operator-queue containment breach: a harness constant that agrees with
+    itself and disagrees with the host.
+
+    THREE-VALUED ON PURPOSE. Each classifier returns ``None`` for a value it does not recognise,
+    and that is neither "fine" nor "prohibited" — it is "could not settle". The caller maps the
+    three cases to ``observed`` / ``violated`` / ``unproven`` rather than collapsing them, because
+    an operator unit observed ENABLED OR RUNNING is a proven prohibited state, while an
+    unclassifiable one means the harness could not look.
+
+    ``LoadState`` is load-bearing beyond presence: ``not-found`` classifies as NOT-enabled and
+    reports ``ActiveState=inactive``, so without the load check an ABSENT unit would satisfy both
+    of the other two conditions and read as correctly prepared.
     """
     from secp_management.topology import OPERATOR_SERVICE_NAME
+    from secp_operator_deployment.host_adapters import (
+        _classify_active,
+        _classify_load,
+        _classify_unit_file_state,
+    )
 
     shown = host.exec(
         (
@@ -368,16 +390,67 @@ def observe_operator_unit(host: Host) -> dict[str, object]:
         if "=" in line:
             key, _, value = line.partition("=")
             properties[key.strip()] = value.strip()[:32]
+
+    present = _classify_load(properties.get("LoadState", ""))
+    enabled = _classify_unit_file_state(properties.get("UnitFileState", ""))
+    running = _classify_active(properties.get("ActiveState", ""))
+    unclassifiable = None in (present, enabled, running)
     return {
-        "unit_loaded": properties.get("LoadState") == "loaded",
         "unit_file_state": properties.get("UnitFileState", ""),
         "active_state": properties.get("ActiveState", ""),
         "sub_state": properties.get("SubState", ""),
+        "present": present,
+        "enabled": enabled,
+        "running": running,
+        # Could not settle: at least one value the product's own classifiers do not recognise.
+        "unclassifiable": unclassifiable,
+        # The prepared end state.
         "present_disabled_stopped": (
-            properties.get("LoadState") == "loaded"
-            and properties.get("UnitFileState") == "disabled"
-            and properties.get("ActiveState") == "inactive"
+            not unclassifiable and bool(present) and not enabled and not running
         ),
+        # The PROHIBITED state, observed rather than merely not-proven: the unit is really there and
+        # it is enabled or running. Distinguished from the case above so the caller can record a
+        # violation instead of an absence of proof.
+        "prohibited_state_observed": (
+            not unclassifiable and bool(present) and (bool(enabled) or bool(running))
+        ),
+    }
+
+
+def observe_installed_release(host: Host, role: str) -> dict[str, object]:
+    """The installed release lineage, READ BACK OFF THE HOST rather than remembered.
+
+    Published for the enrollment, identity and lifecycle stages, which need a baseline to compare
+    against. The distinction matters more than it looks: what the harness *believes* it installed
+    and what the host *has* are different facts, and an identity or upgrade proof built on the
+    former would still pass if the install had silently put something else there. That is precisely
+    the class of defect this program exists to remove, so this reads the record the product itself
+    wrote and re-parses it through the product's own manifest parser.
+
+    Returns ``{present, role, source_sha, parent_sha, aggregate_digest, signing_anchor_id}``.
+    ``present`` False means no installed-release record exists — an absent baseline, which a caller
+    must record as ``unproven`` rather than treating as a mismatch.
+    """
+    from secp_management.layout import ManagementLocations
+
+    locations = ManagementLocations()
+    path = locations.release_record_path(role)
+    probe = host.exec(("cat", path), timeout=120)
+    if not probe.ok:
+        return {"present": False, "role": role}
+    from secp_management.release_bundle import manifest_aggregate_digest, parse_manifest_bytes
+
+    try:
+        manifest = parse_manifest_bytes(probe.stdout.encode("utf-8"))
+    except Exception:  # noqa: BLE001 - a malformed record is an absent baseline, bounded
+        raise AcceptanceError("acceptance_observation_malformed") from None
+    return {
+        "present": True,
+        "role": manifest.role,
+        "source_sha": manifest.source_sha,
+        "parent_sha": manifest.parent_sha or "",
+        "aggregate_digest": manifest_aggregate_digest(manifest),
+        "signing_anchor_id": manifest.signing_anchor_id,
     }
 
 
@@ -450,6 +523,7 @@ def host_untouched(host: Host, paths: tuple[str, ...]) -> dict[str, object]:
 __all__ = [
     "HOST_STAGING",
     "HostInstallation",
+    "observe_installed_release",
     "host_untouched",
     "observe_health_command_in_worker_image",
     "observe_operator_unit",

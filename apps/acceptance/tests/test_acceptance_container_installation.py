@@ -34,12 +34,10 @@ from secp_acceptance.driver import (
     drive_packages,
     drive_worker,
 )
-from secp_acceptance.evidence import ReleaseRecord, evidence_from_bytes
-from secp_acceptance.evidence import canonical_bytes as evidence_bytes
+from secp_acceptance.evidence import ReleaseRecord
 from secp_acceptance.hosts import ROLE_CONTROLLER, ROLE_WORKER, HostFleet
 from secp_acceptance.install import HOST_STAGING, HostInstallation
 from secp_acceptance.reasons import CHECKS_BY_STAGE, OUTCOME_OBSERVED
-from secp_acceptance.recorder import AcceptanceRecorder
 from secp_acceptance.release import (
     PRODUCT_MAX_IMAGE_ARCHIVE_BYTES,
     Artifact,
@@ -58,6 +56,7 @@ from secp_acceptance.release import (
     source_lineage,
     worker_compose_template,
 )
+from secp_acceptance.run import AcceptanceRun
 from secp_acceptance.tier import require_container_runtime_or_refuse, witness
 
 pytestmark = pytest.mark.container_tier
@@ -249,9 +248,30 @@ def release(fleet: HostFleet, workdir: pathlib.Path) -> ReleaseMaterial:
 
 
 @pytest.fixture(scope="module")
-def installation(fleet: HostFleet, release: ReleaseMaterial) -> InstallationRun:
-    """Deliver the release to both hosts and drive all three stages, recording every check."""
-    run = InstallationRun(recorder=AcceptanceRecorder(), material=release)
+def installation(
+    fleet: HostFleet, release: ReleaseMaterial, acceptance_run: AcceptanceRun
+) -> InstallationRun:
+    """Deliver the release to both hosts and drive all three stages, recording every check.
+
+    Records into the SESSION's run, never a recorder of its own — four streams produce the nine
+    stages and four recorders would produce four documents that cannot be reconciled.
+
+    This fixture also supplies the two records only it can supply: the fleet (without which the run
+    cannot seal at all) and the release lineage (which no other stream builds).
+    """
+    run = InstallationRun(acceptance_run=acceptance_run, material=release)
+    acceptance_run.set_fleet(fleet.record())
+    acceptance_run.set_release(
+        ReleaseRecord(
+            role="worker",
+            baseline_aggregate=release.aggregates["worker"],
+            baseline_source_sha=release.source_sha,
+            signing_anchor_id=release.anchor["key_id"],
+            # TRUE, and it is the gap declared below: the anchor is one this run minted, because
+            # the shipped trust root is empty and production holds no release-signing key.
+            test_only_anchor=True,
+        )
+    )
     wheel_name = release.wheel_name
 
     for role, bundle_role in ((ROLE_CONTROLLER, "controller"), (ROLE_WORKER, "worker")):
@@ -263,6 +283,16 @@ def installation(fleet: HostFleet, release: ReleaseMaterial) -> InstallationRun:
         install.deliver(release.bundles[bundle_role], HOST_BUNDLE)
 
     drive_packages(run, fleet, wheel_name)
+    acceptance_run.declare_gap(
+        gap="ephemeral_release_anchor",
+        stage="packages",
+        substitute="A run-scoped Ed25519 anchor minted by release_authority.authority_init.",
+        why=(
+            "signing.SHIPPED_TRUST_ROOT is empty and production holds no release-signing private "
+            "key, so no reviewed anchor exists to sign an acceptance release with."
+        ),
+        weakens=("controller_packages_installed", "worker_packages_installed"),
+    )
     witness("packages_installed")
 
     for role in (ROLE_CONTROLLER, ROLE_WORKER):
@@ -456,49 +486,29 @@ def test_every_opened_stage_is_completely_covered(installation: InstallationRun)
     This is what makes a partially-driven stage a failure rather than a quiet omission: a stage that
     recorded four of its five checks is INCOMPLETE, not partially passed.
     """
-    missing = installation.recorder.missing()
+    missing = installation.acceptance_run.missing()
     assert not missing, f"opened stages left checks unrecorded: {missing}"
     # The recorder and the driver's own per-stage view must agree. They are written separately, so
     # a check present in one and absent from the other would mean a node is asserting on something
     # the document does not carry (or the reverse) — which is how a check gets a passing node and no
     # evidence record.
-    for stage in installation.recorder.stages:
+    for stage in installation.acceptance_run.stages:
         for check in CHECKS_BY_STAGE[stage]:
             assert installation.outcome_of(check) != "absent", (
                 f"{check} is declared by stage {stage} and has no driver outcome"
             )
 
 
-def test_the_three_stages_seal_into_a_loadable_evidence_document(
-    installation: InstallationRun, fleet: HostFleet, release: ReleaseMaterial
+def test_the_run_carries_this_release_lineage_and_its_declared_gap(
+    installation: InstallationRun, release: ReleaseMaterial
 ):
-    """The stages and the evidence contract meet here.
+    """The two records only this stream can supply are on the SESSION's run.
 
-    Sealed through the same loader a reader applies, so these three stages cannot produce a document
-    shape the loader would refuse. The run outcome is DERIVED — an unproven check makes the document
-    ``failed``, and there is no way for this test to assert otherwise.
+    Deliberately does NOT seal. ``AcceptanceRun.seal`` is idempotent and caches, so sealing here
+    would freeze the document mid-session and silently discard every check the later stages have
+    not recorded yet. The session-final hook in ``conftest.py`` is the only sealer, and it runs on
+    the failure paths too.
     """
-    record = ReleaseRecord(
-        role="worker",
-        baseline_aggregate=release.aggregates["worker"],
-        baseline_source_sha=release.source_sha,
-        signing_anchor_id=release.anchor["key_id"],
-        # TRUE, and it is the gap: the anchor is one this run minted, because the shipped trust root
-        # is empty and production holds no release-signing key. A reader must not take the signature
-        # path as proven against the reviewed anchor.
-        test_only_anchor=True,
-    )
-    installation.recorder.declare_gap(
-        gap="ephemeral_release_anchor",
-        stage="packages",
-        substitute="A run-scoped Ed25519 anchor minted by release_authority.authority_init.",
-        why=(
-            "signing.SHIPPED_TRUST_ROOT is empty and production holds no release-signing private "
-            "key, so no reviewed anchor exists to sign an acceptance release with."
-        ),
-        weakens=("controller_packages_installed", "worker_packages_installed"),
-    )
-    document = installation.recorder.seal(fleet=fleet.record(), release=record)
-    reloaded = evidence_from_bytes(evidence_bytes(document))
-    assert reloaded.digest() == document.digest()
-    assert set(reloaded.stages_attempted) == {"packages", "controller", "worker_install"}
+    assert set(installation.acceptance_run.stages) >= {"packages", "controller", "worker_install"}
+    assert release.aggregates["worker"]
+    assert release.anchor["key_id"].startswith("sha256:")

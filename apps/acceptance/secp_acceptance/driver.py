@@ -51,8 +51,8 @@ from secp_acceptance.reasons import (
     STAGE_PACKAGES,
     STAGE_WORKER_INSTALL,
 )
-from secp_acceptance.recorder import AcceptanceRecorder
 from secp_acceptance.release import ReleaseMaterial
+from secp_acceptance.run import AcceptanceRun
 
 #: The bundle directory name inside each host. Fixed, so no host-read value becomes a host path.
 HOST_BUNDLE = f"{HOST_STAGING}/bundle"
@@ -69,9 +69,15 @@ class StageOutcome:
 
 @dataclass
 class InstallationRun:
-    """The complete driven installation: the recorder, and the per-stage outcomes."""
+    """The complete driven installation: the SHARED run, and the per-stage outcomes.
 
-    recorder: AcceptanceRecorder
+    Holds the session's :class:`~secp_acceptance.run.AcceptanceRun` rather than a recorder of its
+    own. Four streams produce the nine stages; a per-stream recorder would give four partial
+    documents that cannot be reconciled and a ``stages_attempted`` that means only "whatever this
+    module happened to open".
+    """
+
+    acceptance_run: AcceptanceRun
     material: ReleaseMaterial
     packages: StageOutcome = field(default_factory=StageOutcome)
     controller: StageOutcome = field(default_factory=StageOutcome)
@@ -102,18 +108,36 @@ class _StageRecorder:
         self._run = run
         self._stage = stage
         self._outcome = outcome
-        run.recorder.open_stage(stage)
+        run.acceptance_run.open_stage(stage)
 
     def observed(self, check: str, observation: object) -> None:
-        self._run.recorder.observe(check, self._stage, observation)
+        self._run.acceptance_run.observe(check, self._stage, observation)
         self._outcome.recorded[check] = "observed"
 
     def unproven(self, check: str, *, reason: str, observation: object) -> None:
-        self._run.recorder.unproven(check, self._stage, reason_code=reason, observation=observation)
+        self._run.acceptance_run.unproven(
+            check, self._stage, reason_code=reason, observation=observation
+        )
         self._outcome.recorded[check] = "unproven"
         self._outcome.reasons[check] = reason
 
-    def attempt(self, check: str, *, reason: str, produce) -> object | None:
+    def violated(self, check: str, *, observation: object) -> None:
+        """The harness POSITIVELY OBSERVED the state the check exists to rule out.
+
+        The opposite of ``unproven``, not a worse flavour of it: maximal knowledge rather than
+        maximal ignorance. Only reachable where the producer can tell observed-false apart from
+        could-not-look, which is why the observation helpers are three-valued.
+        """
+        self._run.acceptance_run.violated(
+            check,
+            self._stage,
+            reason_code="acceptance_prohibited_state_observed",
+            observation=observation,
+        )
+        self._outcome.recorded[check] = "violated"
+        self._outcome.reasons[check] = "acceptance_prohibited_state_observed"
+
+    def attempt(self, check: str, *, reason: str, produce, violation=None) -> object | None:
         """Run ``produce`` and record its result, or record ``unproven`` with ``reason``.
 
         ``produce`` returns ``(ok, observation)``. A False ``ok`` is a real negative observation —
@@ -130,7 +154,12 @@ class _StageRecorder:
             self.unproven(check, reason=reason, observation={"harness_fault": True})
             return None
         if not ok:
-            self.unproven(check, reason=reason, observation=observation)
+            # A negative result splits two ways. If the producer can say the PROHIBITED state was
+            # positively observed, that is a violation and must not be filed as "we could not tell".
+            if violation is not None and violation(observation):
+                self.violated(check, observation=observation)
+            else:
+                self.unproven(check, reason=reason, observation=observation)
             return None
         self.observed(check, observation)
         return observation
@@ -381,6 +410,10 @@ def drive_worker(run: InstallationRun, fleet: HostFleet, ordinary_image: str) ->
         "worker_operator_unit_present_disabled_stopped",
         reason="acceptance_observation_unavailable",
         produce=operator_unit,
+        # An operator unit that is really there and is enabled or running is the exact state this
+        # check exists to rule out. Recording that as `unproven` would file the program's headline
+        # safety breach as a failure to look.
+        violation=lambda obs: bool(obs.get("prohibited_state_observed")),
     )
 
     def attested():

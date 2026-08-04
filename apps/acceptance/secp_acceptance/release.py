@@ -512,6 +512,93 @@ def release_spec(material: ReleaseMaterial, role: str) -> dict[str, object]:
     return spec
 
 
+def build_variant_bundle(
+    material: ReleaseMaterial,
+    role: str,
+    label: str,
+    *,
+    source_sha: str | None = None,
+    parent_sha: str | None = None,
+    image_overrides: dict[str, tuple[pathlib.Path, str]] | None = None,
+) -> dict[str, object]:
+    """Cut a SIBLING bundle from this release, differing in exactly the fields named.
+
+    Published for the lifecycle stage, which needs three siblings signed by the SAME anchor: a
+    linear successor, a non-successor differing in ``parent_sha`` ALONE, and an unhealthy successor
+    differing in the ordinary worker image ALONE.
+
+    SINGLE-FIELD ATTRIBUTION IS THE POINT. A "non-linear upgrade refused" proof means nothing if the
+    refused bundle also differed in its images, its lineage and its digests — the product could have
+    refused it for any of those, and the check would pass without ever exercising linearity. So this
+    copies the base bundle verbatim and changes only what the caller named; everything else,
+    including the signing anchor, is shared with the release the run installed.
+
+    Returns ``{bundle_dir, source_sha, parent_sha, aggregate_digest}``. ``bundle_dir`` is a real
+    directory the caller can hand to ``secpctl --bundle``; the three scalars are what an upgrade
+    assertion needs to state which sibling it drove.
+
+    There is deliberately no second signer here. A stream that minted its own anchor would be
+    proving that ITS releases upgrade, not that this run's release does.
+    """
+    import shutil
+
+    if role not in material.bundles:
+        raise AcceptanceError("acceptance_release_build_failed")
+    variant_dir = material.workdir / f"bundle-{role}-{label}"
+    if variant_dir.exists():
+        shutil.rmtree(variant_dir)
+    shutil.copytree(material.bundles[role], variant_dir)
+
+    # Artifacts are frozen, so sharing the unreplaced ones is safe and keeps every untouched
+    # declaration byte-identical to the base release.
+    artifacts = list(material.artifacts[role])
+    if image_overrides:
+        replaced: list[Artifact] = []
+        for artifact in artifacts:
+            override = image_overrides.get(artifact.purpose or "")
+            if override is None or artifact.kind != "image_archive":
+                replaced.append(artifact)
+                continue
+            archive, digest = override
+            target = variant_dir / artifact.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(archive, target)
+            sha, size = sha256_file(target)
+            replaced.append(
+                Artifact(
+                    name=artifact.name,
+                    kind=artifact.kind,
+                    role=artifact.role,
+                    sha256=sha,
+                    size=size,
+                    image_digest=digest,
+                    purpose=artifact.purpose,
+                )
+            )
+        artifacts = replaced
+
+    # A scratch material sharing this run's anchor and key, differing only where asked.
+    variant = ReleaseMaterial(
+        workdir=material.workdir,
+        anchor=dict(material.anchor),
+        key_path=material.key_path,
+        source_sha=source_sha or material.source_sha,
+        parent_sha=material.parent_sha if parent_sha is None else parent_sha,
+        migration_identity=material.migration_identity,
+        implementation_aggregate=material.implementation_aggregate,
+        runtime_pins=list(material.runtime_pins),
+        artifacts={role: artifacts},
+        bundles={role: variant_dir},
+    )
+    build_and_sign(variant, role)
+    return {
+        "bundle_dir": variant_dir,
+        "source_sha": variant.source_sha,
+        "parent_sha": variant.parent_sha,
+        "aggregate_digest": variant.aggregates[role],
+    }
+
+
 def _canonical_arch() -> str:
     """The canonical architecture name, through the product's ONE normalization boundary.
 
@@ -581,6 +668,7 @@ __all__ = [
     "PRODUCT_MAX_IMAGE_ARCHIVE_BYTES",
     "ReleaseMaterial",
     "build_and_sign",
+    "build_variant_bundle",
     "build_image",
     "build_wheel",
     "image_id",
