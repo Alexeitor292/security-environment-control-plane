@@ -70,6 +70,40 @@ def db_session() -> Iterator[Session]:
 # The ``Depends(...)`` marker in the endpoint SIGNATURE is the only thing that survives that
 # rebuild. ``tests/test_api_commit_boundary.py`` walks the SERVED trees and fails on exactly that
 # disagreement, so this comment cannot quietly become false.
+#
+# BUILD THIS SEAM RIGHT HERE, INLINE. Do not construct it indirectly — ``DB_SESSION =
+# _make_seam()`` fails the guard (measured: 1 failed), even though the result is semantically
+# correct: one shared frozen ``Depends`` at function scope. That is a deliberate, declared
+# boundary rather than an oversight. The guard recognises the seam as the module-level statement
+# whose value IS the ``Depends(...)`` call, because a helper could return a different object per
+# call and no static check can rule that out — and a per-call object would reinstate exactly the
+# per-site decision this seam exists to remove. The failure is loud and names this line, so a
+# refactor cannot slip past it; this note exists so you meet the constraint here, where the seam is
+# written, rather than from a test failure afterwards.
+#
+# THE ONE REAL CONSTRAINT THIS IMPOSES: DO NOT STREAM ORM INSTANCES.
+# Function scope closes the session after the endpoint returns and after the response model is
+# serialized, but BEFORE ``await response(scope, receive, send)``. An ordinary JSON response is
+# therefore unaffected — serialization has already finished, so ``expire_on_commit`` cannot bite. A
+# ``StreamingResponse`` is different: its body is produced DURING the send, by which point the
+# session is closed, so touching an ORM attribute inside the generator raises
+# ``DetachedInstanceError``. Measured on fastapi 0.138.2:
+#     streaming ORM instances @ scope="request"   -> 200, complete body
+#     streaming ORM instances @ scope="function"  -> headers already sent, then the connection
+#                                                    closes mid-body (truncated chunked read)
+#     streaming plain data / raw SQL @ "function" -> 200, complete body
+# The truncation is the nasty part: the status line is already on the wire, so the client sees a
+# 200 with a short body rather than an error. Materialise rows into plain data BEFORE returning a
+# StreamingResponse. There is no streaming route in this application today, and the commit-boundary
+# guard does NOT detect this — it has no notion of response classes.
+#
+# WEBSOCKET ROUTES ARE ALSO NOT COVERED. ``@router.websocket(...)`` produces an
+# ``APIWebSocketRoute``, which is neither an ``_IncludedRouter`` nor an ``APIRoute``, so the
+# commit-boundary guard's walk does not reach it and a request-scoped session generator behind one
+# would go unreported. Left as documentation rather than detection on purpose: none exist in this
+# application, and "commit before the response" does not map cleanly onto a socket that has no
+# single response to be ordered against. If a WebSocket route is ever added, its session lifetime
+# needs deciding on its own terms — not by assuming this guard covered it.
 DB_SESSION = Depends(db_session, scope="function")
 
 

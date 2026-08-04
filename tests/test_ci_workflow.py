@@ -1054,11 +1054,16 @@ def test_socket_gate_carries_no_expected_failure_marker():
 
     gate = _socket_gate_module()
     target = getattr(gate, SOCKET_GATE_TEST)
-    xfails = [mark for mark in _marks(target) if mark.name == "xfail"]
+    # BOTH scopes. `pytestmark` on the FUNCTION is the obvious place, but a module-level
+    # `pytestmark = [..., pytest.mark.xfail(strict=True)]` applies to every test in the file and
+    # would leave a function-only check green while the gate's result was being absorbed exactly as
+    # before. The CI job's `xfailed == 0` accounting backstops this, but a test asserting the
+    # absence of a marker should not itself be defeated by where the marker was written.
+    xfails = [mark for owner in (target, gate) for mark in _marks(owner) if mark.name == "xfail"]
     assert not xfails, (
-        f"the read-after-write gate carries {len(xfails)} expected-failure marker(s): "
-        f"{[mark.kwargs for mark in xfails]}. The defect is fixed; a marker here can only be "
-        "absorbing a regression."
+        f"the read-after-write gate carries {len(xfails)} expected-failure marker(s) (function- or "
+        f"module-level): {[mark.kwargs for mark in xfails]}. The defect is fixed; a marker here "
+        "can only be absorbing a regression."
     )
 
     # The gate's ability to REFUSE an unmeasurable run is unchanged by the fix and is still the
