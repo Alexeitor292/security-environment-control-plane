@@ -392,6 +392,99 @@ def read_operator_unit_properties(host: Host) -> dict[str, str]:
     return {name: parsed.get(name, "") for name in OPERATOR_UNIT_PROPERTIES}
 
 
+#: The run-scoped operator identity. The SUBJECT is chosen here, by the side that owns both ends,
+#: because it is the only thing that links the two halves of the operator credential: the realm's
+#: user must be created WITH this id (so the token's ``sub`` claim carries it) and the controller's
+#: ``app_user`` row must carry the same string. Deriving it on one side and reading it back on the
+#: other would add a round trip and a failure mode for no benefit.
+#:
+#: A visibly fake, well-formed UUID in the same shape as the product's own dev principal, so it can
+#: never be mistaken for a real identity in a database dump.
+ACCEPTANCE_OPERATOR_SUBJECT = "5ec9ad00-0000-4000-8000-acce97ab1e01"
+ACCEPTANCE_OPERATOR_EMAIL = "acceptance-operator@disposable.invalid"
+ACCEPTANCE_OPERATOR_ROLE = "acceptance-operator"
+
+
+def provision_operator_principal(
+    host: Host, *, subject: str = ACCEPTANCE_OPERATOR_SUBJECT, permissions: tuple[str, ...]
+) -> dict[str, object]:
+    """Provision the controller-side half of the operator credential: the DB principal.
+
+    WHY THIS EXISTS AT ALL — a realm and a token are NOT enough.
+    ``secp_api.auth.principal_from_oidc_claims`` verifies the token, then requires the ``sub`` to
+    map to exactly one pre-provisioned ``app_user`` row, and takes permissions from that user's
+    ``UserRoleAssignment`` rows. Its docstring is explicit that it "never trusts token roles/groups"
+    and that an unknown subject is unauthenticated rather than a new user. So a realm role named
+    ``enrollment_manage`` is ignored by design, and a token minted against a realm alone
+    authenticates as nobody.
+
+    That makes this the controller stage's job rather than the enrollment stage's: it is a write to
+    the controller's own database, through the product's own models, and the enrollment stage has no
+    reason to know the API's identity internals.
+
+    Runs INSIDE the api container so it uses the product's session, models and enums rather than raw
+    SQL — a hand-written INSERT would drift from the schema the API actually reads.
+
+    Returns a bounded projection; raises nothing on a provisioning failure that the caller should
+    record as unproven — the caller decides, because a stage that aborts records nothing, and
+    recording nothing is indistinguishable from passing.
+    """
+    from secp_management.real_adapters import _controller_container
+
+    program = (
+        "import json,uuid\n"
+        "from secp_api.db import session_scope\n"
+        "from secp_api.models import Organization, Role, User, UserRoleAssignment\n"
+        "from secp_api.services import catalog\n"
+        "from sqlalchemy import select\n"
+        f"SUBJECT={subject!r}\n"
+        f"EMAIL={ACCEPTANCE_OPERATOR_EMAIL!r}\n"
+        f"ROLE={ACCEPTANCE_OPERATOR_ROLE!r}\n"
+        f"PERMS={list(permissions)!r}\n"
+        "out={}\n"
+        "with session_scope() as s:\n"
+        "    org=s.execute(select(Organization)).scalars().first()\n"
+        "    if org is None:\n"
+        "        org=catalog.create_organization(s, name='Acceptance', slug='acceptance-org')\n"
+        "        s.flush()\n"
+        "    role=s.execute(select(Role).where(Role.name==ROLE)).scalar_one_or_none()\n"
+        "    if role is None:\n"
+        "        role=Role(name=ROLE, description='run-scoped acceptance operator',"
+        " permissions=PERMS)\n"
+        "        s.add(role); s.flush()\n"
+        "    else:\n"
+        "        role.permissions=PERMS\n"
+        "    user=s.execute(select(User).where(User.subject==SUBJECT)).scalar_one_or_none()\n"
+        "    if user is None:\n"
+        "        user=User(organization_id=org.id, email=EMAIL, subject=SUBJECT,"
+        " display_name='Acceptance Operator')\n"
+        "        s.add(user); s.flush()\n"
+        "    have=s.execute(select(UserRoleAssignment).where("
+        "UserRoleAssignment.user_id==user.id, UserRoleAssignment.role_id==role.id"
+        ")).scalar_one_or_none()\n"
+        "    if have is None:\n"
+        "        s.add(UserRoleAssignment(organization_id=org.id, user_id=user.id,"
+        " role_id=role.id))\n"
+        "    out={'subject_provisioned':True,'permissions':len(PERMS)}\n"
+        "print(json.dumps(out))\n"
+    )
+    probe = host.exec(
+        ("docker", "exec", _controller_container("api"), "python", "-c", program), timeout=300
+    )
+    if not probe.ok:
+        raise AcceptanceError("acceptance_observation_unavailable")
+    for line in reversed(probe.stdout.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                answer = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(answer, dict) and answer.get("subject_provisioned"):
+                return {"subject_provisioned": True, "permissions": answer.get("permissions", 0)}
+    raise AcceptanceError("acceptance_observation_malformed")
+
+
 def observe_installed_release(host: Host, role: str) -> dict[str, object]:
     """The installed release lineage, READ BACK OFF THE HOST rather than remembered.
 

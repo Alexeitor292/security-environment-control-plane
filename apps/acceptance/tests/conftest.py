@@ -185,6 +185,62 @@ def worker_host(fleet):
     return fleet.hosts[ROLE_WORKER]
 
 
+#: The run-scoped realm the acceptance operator authenticates against.
+#:
+#: A FIXED name on the fleet's fixed in-fleet DNS name, so the issuer URL is deterministic at
+#: RELEASE-BUILD time. That is forced rather than chosen: the API reads its trusted issuer from the
+#: environment in the controller Compose template, which is a SIGNED release artifact — and a
+#: realm URL discovered after the fleet exists is not available when the release is signed. A
+#: per-run realm name would mean either signing the release against a live fleet or leaving the
+#: issuer unconfigured, and both are worse.
+#:
+#: It is disposable in every sense that matters: the realm lives only inside this run's controller
+#: host, and it dies when the fleet is destroyed. The NAME is fixed; the realm is not persistent.
+ACCEPTANCE_REALM = "secp-acceptance"
+
+
+@pytest.fixture(scope="session")
+def operator_token_path(controller_host, fleet):
+    """An operator access token on the controller host, or ``None``.
+
+    THE SEAM, and it has two halves that must agree on one string:
+
+    * ``secp_acceptance.enrollment.provision_operator_realm`` (owned by the enrollment stage) makes
+      the run-scoped realm, the acceptance user — created WITH id
+      :data:`~secp_acceptance.install.ACCEPTANCE_OPERATOR_SUBJECT` — and the 0600 token file, and
+      returns its path. Only that stage knows what the token must carry.
+    * :func:`~secp_acceptance.install.provision_operator_principal` (owned here) makes the
+      controller-side ``app_user`` row and role assignment carrying ``enrollment:manage``.
+
+    BOTH ARE REQUIRED, and that is not obvious from the ask. ``secp_api.auth`` verifies the token
+    and then resolves permissions from the DATABASE, explicitly never trusting token roles or
+    groups; an unknown ``sub`` is unauthenticated rather than a new user. A realm and a token file
+    alone therefore authenticate as nobody, and a realm role named ``enrollment_manage`` is ignored
+    by design.
+
+    RETURNS ``None`` RATHER THAN RAISING when either half cannot be completed — including when the
+    enrollment stage's provisioner does not exist yet. A stage that errors out records nothing, and
+    recording nothing is indistinguishable from passing, so the consumer must be able to record
+    ``unproven`` instead of dying.
+
+    Teardown is the fleet's: the realm, the user, the token file and the database row all live
+    inside the controller host and are destroyed with it. Nothing here outlives the run.
+    """
+    from secp_acceptance.install import provision_operator_principal
+
+    try:
+        from secp_acceptance.enrollment import (
+            provision_operator_realm,  # type: ignore[attr-defined]
+        )
+    except Exception:  # noqa: BLE001 - the provisioner is another stage's; absent is not an error
+        return None
+    try:
+        provision_operator_principal(controller_host, permissions=("enrollment:manage",))
+        return provision_operator_realm(controller_host, realm=ACCEPTANCE_REALM)
+    except Exception:  # noqa: BLE001 - bounded; the consumer records unproven rather than aborting
+        return None
+
+
 @pytest.fixture(scope="session")
 def installed_baseline(worker_host) -> dict[str, object]:
     """The worker's installed release LINEAGE, read off the host from the RELEASE RECORD.
