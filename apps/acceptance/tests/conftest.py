@@ -106,6 +106,110 @@ def acceptance_run(request: pytest.FixtureRequest) -> AcceptanceRun:
     return run
 
 
+# --------------------------------------------------------------------------- the one fleet
+#
+# THE FLEET IS SESSION-SCOPED FOR THE SAME REASON THE RUN IS.
+#
+# The evidence document carries exactly ONE ``FleetRecord``. Two module-scoped fleets in a session
+# would produce a document describing one machine pair while carrying claims gathered against two —
+# and nothing downstream could tell, because the claims look identical either way. That is
+# undetectable after the fact, which is why ``AcceptanceRun.set_fleet`` refuses a second, different
+# record outright rather than trusting every stage to remember the convention.
+#
+# It is also the cheaper arrangement by a wide margin: the host image build plus two privileged
+# systemd containers with nested daemons is the most expensive thing in the run, and it now happens
+# once no matter how many stage modules execute.
+
+
+@pytest.fixture(scope="session")
+def runtime_version() -> str:
+    """Prove the OUTER container runtime before anything is built.
+
+    REFUSES when Docker is absent — never skips. This is where "Docker is down" becomes a loud,
+    bounded, attributable failure instead of a quiet green run that measured nothing.
+    """
+    from secp_acceptance.tier import require_container_runtime_or_refuse
+
+    return require_container_runtime_or_refuse()
+
+
+@pytest.fixture(scope="session")
+def fleet(runtime_version: str, acceptance_run: AcceptanceRun):
+    """THE disposable two-host fleet. Built once, destroyed on every path including failure.
+
+    The fleet RECORD is set during teardown rather than after creation, deliberately: the record
+    carries ``hosts_destroyed``, so a record taken while the fleet was still up would permanently
+    report zero teardown no matter what actually happened. Teardown runs before
+    ``pytest_sessionfinish`` (verified, not assumed), so the record is in place before the run is
+    sealed.
+
+    ``set_fleet`` is called exactly once for that reason too — it refuses a second, differing
+    record, and the pre-teardown and post-teardown records genuinely differ.
+    """
+    import uuid
+
+    from secp_acceptance.hosts import HostFleet
+    from secp_acceptance.release import repo_root
+    from secp_acceptance.tier import witness
+
+    built = HostFleet(prefix=f"secp-acc-{uuid.uuid4().hex[:10]}")
+    infra = repo_root() / "infra" / "acceptance"
+    try:
+        built.build_image(context=str(infra), dockerfile=str(infra / "Dockerfile.host"))
+        built.create()
+        witness("fleet_created")
+        yield built
+    finally:
+        clean, residual = built.destroy()
+        witness("fleet_torn_down")
+        acceptance_run.set_fleet(built.record())
+        # Reported, not swallowed. A leaked privileged container with a nested Docker daemon is the
+        # most expensive thing this harness can leave behind, and it must not be discoverable only
+        # by noticing a slow disk on the next run.
+        assert clean, f"the disposable fleet did not fully tear down: {residual}"
+
+
+@pytest.fixture(scope="session")
+def controller_host(fleet):
+    """The controller host, for stages that need to reach it directly."""
+    from secp_acceptance.hosts import ROLE_CONTROLLER
+
+    return fleet.hosts[ROLE_CONTROLLER]
+
+
+@pytest.fixture(scope="session")
+def worker_host(fleet):
+    """The worker host, for stages that need to reach it directly."""
+    from secp_acceptance.hosts import ROLE_WORKER
+
+    return fleet.hosts[ROLE_WORKER]
+
+
+@pytest.fixture(scope="session")
+def installed_baseline(worker_host) -> dict[str, object]:
+    """The worker's installed release lineage, READ BACK OFF THE HOST.
+
+    Published for the enrollment, identity and lifecycle stages, which each need a baseline to
+    compare against. The distinction this fixture exists to preserve is the whole point: what the
+    harness BELIEVES it installed and what the host HAS are different facts, and a proof built on
+    the former would still pass if the install had quietly put something else there.
+
+    So it re-reads the record the product itself wrote and re-parses it through the product's own
+    manifest parser. ``{"present": False, ...}`` means no baseline exists — a caller must record
+    that ``unproven``, never as a mismatch, and never as proof of removal: absence established by a
+    failed read would let a rollback that removed nothing read as one that worked.
+
+    Session-scoped so every consumer sees the same baseline. It is a READ, so it is safe to take
+    before or after any stage — but a caller wanting the POST-install baseline must order itself
+    after the worker install, because this fixture will happily report the truthful absence that
+    precedes it.
+    """
+    from secp_acceptance.hosts import ROLE_WORKER
+    from secp_acceptance.install import observe_installed_release
+
+    return observe_installed_release(worker_host, ROLE_WORKER)
+
+
 def _seal_the_run(session: pytest.Session) -> None:
     """Seal and write the evidence document for a session that actually opened a stage.
 

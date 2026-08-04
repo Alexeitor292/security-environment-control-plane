@@ -33,7 +33,7 @@ import pytest
 from secp_acceptance.hosts import ROLE_CONTROLLER, ROLE_WORKER, HostFleet
 from secp_acceptance.reasons import STAGE_FLEET
 from secp_acceptance.recorder import AcceptanceRecorder
-from secp_acceptance.tier import require_container_runtime_or_refuse, witness
+from secp_acceptance.tier import witness
 
 pytestmark = pytest.mark.container_tier
 
@@ -46,33 +46,10 @@ def _repo_root() -> pathlib.Path:
     raise AssertionError("repository root not found from the test file location")
 
 
-@pytest.fixture(scope="module")
-def runtime_version() -> str:
-    """Prove the outer container runtime before anything is built.
-
-    REFUSES when Docker is absent. This is the point in the harness where "Docker is down" becomes
-    a loud, bounded, attributable failure instead of a quiet skip.
-    """
-    return require_container_runtime_or_refuse()
-
-
-@pytest.fixture(scope="module")
-def fleet(runtime_version: str):
-    """The run-scoped disposable fleet. Always destroyed, including on the failure paths."""
-    prefix = f"secp-acc-{uuid.uuid4().hex[:10]}"
-    built = HostFleet(prefix=prefix)
-    infra = _repo_root() / "infra" / "acceptance"
-    try:
-        built.build_image(context=str(infra), dockerfile=str(infra / "Dockerfile.host"))
-        built.create()
-        witness("fleet_created")
-        yield built
-    finally:
-        clean, residual = built.destroy()
-        witness("fleet_torn_down")
-        # Reported, not swallowed. A teardown that could not finish is a real problem for the next
-        # run on this machine, and it must not be discoverable only by noticing a slow disk.
-        assert clean, f"the disposable fleet did not fully tear down: {residual}"
+# The fleet and the runtime probe are SESSION-scoped and live in conftest.py: the evidence document
+# carries exactly one FleetRecord, so a second fleet built here would describe one machine pair
+# while the document carried claims gathered against two. `AcceptanceRun.set_fleet` refuses that
+# outright now, so it fails loudly rather than producing a plausible document.
 
 
 # --------------------------------------------------------------------------- the fleet premise
