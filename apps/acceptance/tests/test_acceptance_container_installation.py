@@ -24,7 +24,6 @@ controller-stack component. Installing the worker first would be cheaper and wou
 from __future__ import annotations
 
 import pathlib
-import uuid
 
 import pytest
 from secp_acceptance.driver import (
@@ -57,7 +56,7 @@ from secp_acceptance.release import (
     worker_compose_template,
 )
 from secp_acceptance.run import AcceptanceRun
-from secp_acceptance.tier import require_container_runtime_or_refuse, witness
+from secp_acceptance.tier import witness
 
 pytestmark = pytest.mark.container_tier
 
@@ -66,29 +65,8 @@ pytestmark = pytest.mark.container_tier
 
 
 @pytest.fixture(scope="module")
-def runtime_version() -> str:
-    """Prove the outer runtime first. REFUSES when Docker is absent — never skips."""
-    return require_container_runtime_or_refuse()
-
-
-@pytest.fixture(scope="module")
 def workdir(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
     return tmp_path_factory.mktemp("secp-acc-release")
-
-
-@pytest.fixture(scope="module")
-def fleet(runtime_version: str):
-    """The run-scoped disposable fleet. Destroyed on every path, including the failure paths."""
-    prefix = f"secp-acc-{uuid.uuid4().hex[:10]}"
-    built = HostFleet(prefix=prefix)
-    infra = repo_root() / "infra" / "acceptance"
-    try:
-        built.build_image(context=str(infra), dockerfile=str(infra / "Dockerfile.host"))
-        built.create()
-        yield built
-    finally:
-        clean, residual = built.destroy()
-        assert clean, f"the disposable fleet did not fully tear down: {residual}"
 
 
 @pytest.fixture(scope="module")
@@ -256,11 +234,13 @@ def installation(
     Records into the SESSION's run, never a recorder of its own — four streams produce the nine
     stages and four recorders would produce four documents that cannot be reconciled.
 
-    This fixture also supplies the two records only it can supply: the fleet (without which the run
-    cannot seal at all) and the release lineage (which no other stream builds).
+    Supplies the RELEASE record, which no other stream builds. The FLEET record is set by the
+    session fleet fixture during its teardown, not here: it carries ``hosts_destroyed``, so a
+    record taken while the fleet is still up would permanently report zero teardown. Setting it
+    from both places would also be refused — ``set_fleet`` rejects a second, differing record, and
+    those two records genuinely differ.
     """
     run = InstallationRun(acceptance_run=acceptance_run, material=release)
-    acceptance_run.set_fleet(fleet.record())
     acceptance_run.set_release(
         ReleaseRecord(
             role="worker",

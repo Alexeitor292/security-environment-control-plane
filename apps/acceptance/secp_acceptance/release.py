@@ -523,6 +523,20 @@ def build_variant_bundle(
 ) -> dict[str, object]:
     """Cut a SIBLING bundle from this release, differing in exactly the fields named.
 
+    PUBLISHED SIGNATURE — three positionals, then keyword-only overrides::
+
+        build_variant_bundle(material, role, label, *, source_sha=None, parent_sha=None,
+                             image_overrides=None) -> dict
+
+    ``material`` is the run's :class:`ReleaseMaterial` (it carries the anchor and key, which is what
+    makes the sibling a sibling); ``role`` is ``"controller"`` or ``"worker"``; ``label`` names the
+    variant and becomes part of its directory name, so two variants of one role cannot collide.
+    The signature is written out because an omitted required positional in a published summary is
+    the same class of defect as a stale comment — a caller writing against the summary gets it
+    wrong and finds out at run time.
+
+    Returns ``{"bundle_dir": Path, "source_sha": str, "parent_sha": str, "aggregate_digest": str}``.
+
     Published for the lifecycle stage, which needs three siblings signed by the SAME anchor: a
     linear successor, a non-successor differing in ``parent_sha`` ALONE, and an unhealthy successor
     differing in the ordinary worker image ALONE.

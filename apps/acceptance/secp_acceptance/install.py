@@ -162,12 +162,20 @@ class HostInstallation:
         Both halves matter: a console script that exists but cannot import its module is exactly the
         failure a distribution-vs-image mismatch produces, and presence alone would not see it.
         """
-        present = self.host.exec(("test", "-x", self.entrypoint), timeout=60)
+        # Presence through the discriminated probe: `test -x` exiting non-zero means "not
+        # executable" OR "could not run the probe at all", and reporting the second as the first
+        # would blame the product for an outage of the host.
+        exists = probe_paths(self.host, (self.entrypoint,))[self.entrypoint]
         answered = self.host.exec((self.entrypoint, "--json", "host", "inspect"), timeout=300)
-        payload = _payload(answered)
+        payload = secpctl_payload(answered)
+        # An entrypoint that produced no bounded report did not necessarily FAIL — it may not have
+        # run. Absent a report there is nothing to conclude, so refuse rather than record a
+        # negative the product did not earn.
+        if not payload:
+            raise AcceptanceError("acceptance_observation_unavailable")
         return {
             "role": self.host.role,
-            "entrypoint_executable": present.ok,
+            "entrypoint_executable": exists,
             "entrypoint_answers": answered.exit_code in (0, 2),
             "reported_command": str(payload.get("command", ""))[:32],
         }
@@ -299,11 +307,16 @@ class HostInstallation:
         Always ``--json``: the harness parses a bounded report, never scraped human text.
         """
         result = self.host.exec((self.entrypoint, "--json", *argv), timeout=timeout)
-        return result.exit_code, _payload(result)
+        return result.exit_code, secpctl_payload(result)
 
 
-def _payload(result: Result) -> dict:
+def secpctl_payload(result: Result) -> dict:
     """The last JSON object a ``secpctl`` invocation wrote, or an empty report.
+
+    PUBLIC because every stage that drives ``secpctl`` needs exactly this and a second copy would
+    drift. The tolerance below is the part worth sharing: a real host emits pip warnings, systemd
+    notices and journal lines around the report, so a parser that assumed the payload was the whole
+    of stdout would work locally and fail on a real host.
 
     Tolerant of leading output (pip warnings, systemd notices) and never raises on unparsable text:
     a command that produced no report is an absent observation, which the caller records as
@@ -336,85 +349,47 @@ def _ed25519_public(private: bytes) -> str:
 # --------------------------------------------------------------------------- worker observations
 
 
-def observe_operator_unit(host: Host) -> dict[str, object]:
-    """The headline safety observation: the operator unit is PRESENT, NOT-ENABLED and STOPPED.
+def read_operator_unit_properties(host: Host) -> dict[str, str]:
+    """ONE reading of the operator unit's systemd properties, verbatim.
 
-    Asked of real systemd on a host where systemd is PID 1, so the answers are systemd's own. All
-    properties are read in ONE ``systemctl show`` call: reading them separately would let the unit
-    change between questions and produce a combination that never actually existed.
+    Deliberately does no classification. Dormancy is resolved by
+    :func:`secp_acceptance.queues.resolve_operator_unit_dormant`, which the queues stage owns and
+    which this stage reuses rather than reimplementing — the same observation asked at a different
+    point in the run. A second dormancy implementation is exactly the duplicate this program
+    refuses: two versions drift, and the drift lands on the operator-dormancy claim.
 
-    THE STATE TABLE IS THE PRODUCT'S, NOT OURS — this is the whole point of the function.
-    Written the obvious way (``UnitFileState == "disabled"``) this check FAILS A CORRECTLY PREPARED
-    HOST. The reviewed operator unit is rendered with no ``[Install]`` section
-    (``systemd.py`` emits one only when ``wanted_by is not None``, which defaults to ``None``), and
-    systemd reports a unit with no ``[Install]`` as ``static`` — not ``disabled``. So the three
-    classifiers are IMPORTED from ``secp_operator_deployment.host_adapters``, which already carries
-    that knowledge and says so at its definition. Restating any systemd state table here would be
-    the same shape of defect as the health-interpreter constant that once both blocked the install
-    and manufactured a false operator-queue containment breach: a harness constant that agrees with
-    itself and disagrees with the host.
+    The property list comes from ``queues.OPERATOR_UNIT_PROPERTIES``, not from a list restated here,
+    so a property the resolver starts requiring cannot go unread by this caller.
 
-    THREE-VALUED ON PURPOSE. Each classifier returns ``None`` for a value it does not recognise,
-    and that is neither "fine" nor "prohibited" — it is "could not settle". The caller maps the
-    three cases to ``observed`` / ``violated`` / ``unproven`` rather than collapsing them, because
-    an operator unit observed ENABLED OR RUNNING is a proven prohibited state, while an
-    unclassifiable one means the harness could not look.
-
-    ``LoadState`` is load-bearing beyond presence: ``not-found`` classifies as NOT-enabled and
-    reports ``ActiveState=inactive``, so without the load check an ABSENT unit would satisfy both
-    of the other two conditions and read as correctly prepared.
+    All properties are read in ONE ``systemctl show`` call: asking separately would let the unit
+    change between questions and produce a combination that never actually existed. A property
+    systemd does not report comes back as the empty string, which the resolver treats as an absent
+    observation rather than guessing — except ``InvocationID``, where empty is a POSITIVE statement
+    that the unit has never started.
     """
     from secp_management.topology import OPERATOR_SERVICE_NAME
-    from secp_operator_deployment.host_adapters import (
-        _classify_active,
-        _classify_load,
-        _classify_unit_file_state,
-    )
+
+    from secp_acceptance.queues import OPERATOR_UNIT_PROPERTIES
 
     shown = host.exec(
         (
             "systemctl",
             "show",
             OPERATOR_SERVICE_NAME,
-            "--property=LoadState",
-            "--property=UnitFileState",
-            "--property=ActiveState",
-            "--property=SubState",
+            *(f"--property={name}" for name in OPERATOR_UNIT_PROPERTIES),
         ),
         timeout=120,
     )
     if not shown.ok:
         raise AcceptanceError("acceptance_observation_unavailable")
-    properties: dict[str, str] = {}
+    parsed: dict[str, str] = {}
     for line in shown.stdout.splitlines():
         if "=" in line:
             key, _, value = line.partition("=")
-            properties[key.strip()] = value.strip()[:32]
-
-    present = _classify_load(properties.get("LoadState", ""))
-    enabled = _classify_unit_file_state(properties.get("UnitFileState", ""))
-    running = _classify_active(properties.get("ActiveState", ""))
-    unclassifiable = None in (present, enabled, running)
-    return {
-        "unit_file_state": properties.get("UnitFileState", ""),
-        "active_state": properties.get("ActiveState", ""),
-        "sub_state": properties.get("SubState", ""),
-        "present": present,
-        "enabled": enabled,
-        "running": running,
-        # Could not settle: at least one value the product's own classifiers do not recognise.
-        "unclassifiable": unclassifiable,
-        # The prepared end state.
-        "present_disabled_stopped": (
-            not unclassifiable and bool(present) and not enabled and not running
-        ),
-        # The PROHIBITED state, observed rather than merely not-proven: the unit is really there and
-        # it is enabled or running. Distinguished from the case above so the caller can record a
-        # violation instead of an absence of proof.
-        "prohibited_state_observed": (
-            not unclassifiable and bool(present) and (bool(enabled) or bool(running))
-        ),
-    }
+            parsed[key.strip()] = value.strip()[:64]
+    # Every required property must be present as a string; the resolver refuses a missing one, and
+    # defaulting here would hand it a value systemd never gave.
+    return {name: parsed.get(name, "") for name in OPERATOR_UNIT_PROPERTIES}
 
 
 def observe_installed_release(host: Host, role: str) -> dict[str, object]:
@@ -435,14 +410,25 @@ def observe_installed_release(host: Host, role: str) -> dict[str, object]:
 
     locations = ManagementLocations()
     path = locations.release_record_path(role)
+    # ABSENCE IS ESTABLISHED FIRST, AND POSITIVELY. `cat` failing means absent, unreadable,
+    # permission-denied, unreachable host, dead container or missing binary — one value for six
+    # causes, and `present: False` is consumed as a BASELINE by three other stages. One of them
+    # (`rollback_removed_documents`) needs proof of REMOVAL, and this record is one of the documents
+    # rollback removes, so "could not read it" answering as "it is gone" would let a rollback that
+    # removed nothing read as a rollback that worked.
+    if not probe_paths(host, (path,))[path]:
+        return {"present": False, "role": role}
     probe = host.exec(("cat", path), timeout=120)
     if not probe.ok:
-        return {"present": False, "role": role}
+        # It exists but could not be read. That is an outage, not a baseline — and it is the case
+        # the old code folded into `present: False`. Severity was inverted too: a MALFORMED record
+        # raised loudly while an UNREADABLE one returned quietly, which is backwards.
+        raise AcceptanceError("acceptance_observation_unavailable")
     from secp_management.release_bundle import manifest_aggregate_digest, parse_manifest_bytes
 
     try:
         manifest = parse_manifest_bytes(probe.stdout.encode("utf-8"))
-    except Exception:  # noqa: BLE001 - a malformed record is an absent baseline, bounded
+    except Exception:  # noqa: BLE001 - bounded; a malformed record is not a baseline
         raise AcceptanceError("acceptance_observation_malformed") from None
     return {
         "present": True,
@@ -507,16 +493,66 @@ def plan_is_dry_run(exit_code: int, payload: dict) -> dict[str, object]:
     }
 
 
+#: Printed by :func:`probe_paths` after every path has been reported. Its presence is what proves
+#: the probe RAN TO COMPLETION, which is the fact an exit status cannot supply.
+_PROBE_COMPLETE = "__secp_probe_complete__"
+
+
+def probe_paths(host: Host, paths: tuple[str, ...]) -> dict[str, bool]:
+    """``{path: exists}`` as the HOST reported it, or REFUSE.
+
+    THE POINT: absence must be a token the host PRINTED, never an exit status the harness inferred.
+
+    ``test -e`` exits non-zero for a genuinely absent path, an unreachable host, a dead container,
+    an untraversable parent, and a missing ``test`` binary alike. A loop over that exit status
+    therefore reports "everything is absent" for an outage — and where a caller's PASS condition is
+    "all absent", which the dry-run check is exactly, an outage becomes a pass.
+
+    This is ``HostFleet.destroy``'s original defect in a different function: every removal failed,
+    every existence probe answered "no" for the same reason, and it reported a clean teardown having
+    done nothing.
+
+    So one program runs, prints one line per path, and prints a completion sentinel. A missing
+    sentinel, a missing line, or an unparsable line means the probe could not be made — raised as
+    ``acceptance_observation_unavailable``, never returned as absence. A PARTIAL failure is caught
+    by the same rule, which is the case a top-level reachability check alone would miss.
+    """
+    if not paths:
+        raise AcceptanceError("acceptance_proof_would_be_vacuous")
+    script = (
+        'for p in "$@"; do '
+        'if [ -e "$p" ]; then echo "PRESENT $p"; else echo "ABSENT $p"; fi; '
+        f"done; echo {_PROBE_COMPLETE}"
+    )
+    result = host.exec(("sh", "-c", script, "sh", *paths), timeout=180)
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if _PROBE_COMPLETE not in lines:
+        raise AcceptanceError("acceptance_observation_unavailable")
+    reported: dict[str, bool] = {}
+    for line in lines:
+        if line.startswith("PRESENT ") or line.startswith("ABSENT "):
+            verdict, _, path = line.partition(" ")
+            reported[path] = verdict == "PRESENT"
+    missing = [path for path in paths if path not in reported]
+    if missing:
+        # The program ran but did not speak about every path. Not absence — an incomplete answer.
+        raise AcceptanceError("acceptance_observation_unavailable")
+    return {path: reported[path] for path in paths}
+
+
 def host_untouched(host: Host, paths: tuple[str, ...]) -> dict[str, object]:
     """Which of the given absolute paths do NOT exist on the host.
 
     Paired with the dry-run report so the check asserts an EFFECT rather than a claim: a plan that
     reported ``dry_run`` while writing its unit file would satisfy the report and fail here.
+
+    Built on :func:`probe_paths`, so "absent" is a positive statement by the host rather than an
+    inference from a failed command. The caller's pass condition is ``absent == probed``, which is
+    precisely the shape that turns an outage into a pass when absence is inferred — and this
+    function is exported, so the next caller may not conjoin it with anything that would catch it.
     """
-    absent: list[str] = []
-    for path in paths:
-        if not host.exec(("test", "-e", path), timeout=60).ok:
-            absent.append(path.rsplit("/", 1)[-1])
+    exists = probe_paths(host, paths)
+    absent = [path.rsplit("/", 1)[-1] for path, present in exists.items() if not present]
     return {"probed": len(paths), "absent": len(absent), "absent_names": sorted(absent)}
 
 
@@ -524,9 +560,11 @@ __all__ = [
     "HOST_STAGING",
     "HostInstallation",
     "observe_installed_release",
+    "probe_paths",
+    "secpctl_payload",
     "host_untouched",
     "observe_health_command_in_worker_image",
-    "observe_operator_unit",
+    "read_operator_unit_properties",
     "plan_is_dry_run",
     "shipped_packages",
 ]
