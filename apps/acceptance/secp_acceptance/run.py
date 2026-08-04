@@ -127,11 +127,39 @@ class AcceptanceRun:
             check, stage, expected=expected, actual=actual, observation=observation
         )
 
-    def unproven(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
-        self._recorder.unproven(check, stage, reason_code=reason_code, observation=observation)
+    def unproven(
+        self,
+        check: str,
+        stage: str,
+        *,
+        reason_code: str,
+        observation: object,
+        observed_cause: str | None = None,
+    ) -> None:
+        self._recorder.unproven(
+            check,
+            stage,
+            reason_code=reason_code,
+            observation=observation,
+            observed_cause=observed_cause,
+        )
 
-    def violated(self, check: str, stage: str, *, reason_code: str, observation: object) -> None:
-        self._recorder.violated(check, stage, reason_code=reason_code, observation=observation)
+    def violated(
+        self,
+        check: str,
+        stage: str,
+        *,
+        reason_code: str,
+        observation: object,
+        observed_cause: str | None = None,
+    ) -> None:
+        self._recorder.violated(
+            check,
+            stage,
+            reason_code=reason_code,
+            observation=observation,
+            observed_cause=observed_cause,
+        )
 
     def declare_gap(
         self, *, gap: str, stage: str, substitute: str, why: str, weakens: tuple[str, ...]

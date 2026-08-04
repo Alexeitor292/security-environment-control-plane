@@ -116,15 +116,29 @@ def run_identity(*, harness_version: str, fleet_identity: str, release_identity:
 class CheckRecord(_Strict):
     """One recorded acceptance check.
 
-    ``reason_code`` is REQUIRED for ``refused`` and ``unproven`` and FORBIDDEN for ``observed``: a
+    ``reason_code`` is REQUIRED for every non-``observed`` outcome and FORBIDDEN for ``observed``: a
     positive observation that also carries a refusal reason is incoherent, and a refusal without a
     bounded code is exactly the unreadable outcome the closed vocabulary exists to prevent.
+
+    ``observed_cause`` is the OPTIONAL specific tell, and it exists because the reason-code
+    vocabulary is deliberately coarse. One code — ``acceptance_prohibited_state_observed`` — covers
+    every "the harness saw the ruled-out state" case across all nine stages, because a code per
+    check would grow past review and the check id already names the property. But WITHIN a check the
+    tell varies: ``operator_unit_never_activated`` fires on an enabled unit, a running unit, a
+    populated ``InvocationID``, or a non-zero restart count. Those are four different findings with
+    four different remediations.
+
+    Only the observation's DIGEST reaches this document, so without this field the distinction is
+    unrecoverable by a reader — which matters most for exactly the outcome where it matters most,
+    ``violated``. Constrained to a bounded identifier: it is a closed per-producer vocabulary, never
+    free text, so it can never carry a path, an id, a queue name or an origin.
     """
 
     check: _Str
     stage: _Str
     outcome: _Str
     reason_code: _Str | None = None
+    observed_cause: _Str | None = None
     observation_digest: _Str
 
     def canonical(self) -> dict:
@@ -321,11 +335,21 @@ def _assert_check_semantics(record: CheckRecord) -> None:
     if record.outcome == OUTCOME_OBSERVED:
         if record.reason_code is not None:
             raise AcceptanceError("acceptance_evidence_invalid")
+        # A positive observation has no "cause of the bad thing" to name. Forbidden for the same
+        # reason as `reason_code`: a passing check carrying a cause is incoherent, and permitting it
+        # would let a producer file a finding somewhere the verdict never looks.
+        if record.observed_cause is not None:
+            raise AcceptanceError("acceptance_evidence_invalid")
     else:
         if record.reason_code is None:
             raise AcceptanceError("acceptance_evidence_invalid")
         if record.reason_code not in ALL_REASONS:
             raise AcceptanceError("acceptance_evidence_unknown_reason")
+    if record.observed_cause is not None:
+        # A bounded identifier from a closed per-producer vocabulary — never free text, so it cannot
+        # become the place a path, a container id, a queue name or an origin reaches public evidence
+        # by the back door.
+        _assert_ident(record.observed_cause)
     if not is_sha256_digest(record.observation_digest):
         raise AcceptanceError("acceptance_evidence_invalid")
 
