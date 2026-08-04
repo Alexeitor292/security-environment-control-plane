@@ -98,11 +98,17 @@ class InstallationRun:
         return ""
 
 
-class _StageRecorder:
-    """Records into the run's recorder AND into the stage outcome, so the two cannot drift.
+class StageRecorder:
+    """Records into the shared run AND into a local stage outcome, so the two cannot drift.
+
+    PUBLIC on purpose. The lifecycle stage consumes this rather than forking a second copy, and a
+    leading underscore is a promise the owner may change it freely — so a cross-stream consumer of a
+    private name is a dependency that breaks silently at integration. It is published instead.
 
     Every path through :meth:`attempt` produces exactly one record. There is no way to call it and
-    get nothing, which is what keeps a stage from being half-covered.
+    get nothing, which is what keeps a stage from being half-covered — and it is what makes the
+    per-check assertions in the container tier mean anything, since a path that recorded nothing
+    would leave a check ``absent`` rather than failing.
     """
 
     def __init__(self, run: InstallationRun, stage: str, outcome: StageOutcome) -> None:
@@ -185,7 +191,7 @@ class _StageRecorder:
 
 def drive_packages(run: InstallationRun, fleet: HostFleet, wheel_name: str) -> None:
     """Install the release wheel on both hosts and prove the distribution is really there."""
-    stage = _StageRecorder(run, STAGE_PACKAGES, run.packages)
+    stage = StageRecorder(run, STAGE_PACKAGES, run.packages)
     root = _repo_root()
     declared = shipped_packages(root)
 
@@ -233,7 +239,7 @@ def drive_controller(run: InstallationRun, fleet: HostFleet) -> None:
     unproven against the bounded reason the product gave — the run reports a controller that could
     not be brought up, which is a true and reviewable statement, rather than omitting the stage.
     """
-    stage = _StageRecorder(run, STAGE_CONTROLLER, run.controller)
+    stage = StageRecorder(run, STAGE_CONTROLLER, run.controller)
     install = run.installations[ROLE_CONTROLLER]
     checks = (
         "controller_database_migrated",
@@ -347,7 +353,7 @@ def drive_controller(run: InstallationRun, fleet: HostFleet) -> None:
 
 def drive_worker(run: InstallationRun, fleet: HostFleet, ordinary_image: str) -> None:
     """Install the worker from the signed bundle and observe the seven worker-install facts."""
-    stage = _StageRecorder(run, STAGE_WORKER_INSTALL, run.worker)
+    stage = StageRecorder(run, STAGE_WORKER_INSTALL, run.worker)
     install = run.installations[ROLE_WORKER]
     host = install.host
 
@@ -653,6 +659,7 @@ __all__ = [
     "HOST_BUNDLE",
     "InstallationRun",
     "StageOutcome",
+    "StageRecorder",
     "drive_controller",
     "drive_packages",
     "drive_worker",

@@ -167,7 +167,7 @@ class HostInstallation:
         # would blame the product for an outage of the host.
         exists = probe_paths(self.host, (self.entrypoint,))[self.entrypoint]
         answered = self.host.exec((self.entrypoint, "--json", "host", "inspect"), timeout=300)
-        payload = _payload(answered)
+        payload = secpctl_payload(answered)
         # An entrypoint that produced no bounded report did not necessarily FAIL — it may not have
         # run. Absent a report there is nothing to conclude, so refuse rather than record a
         # negative the product did not earn.
@@ -307,11 +307,16 @@ class HostInstallation:
         Always ``--json``: the harness parses a bounded report, never scraped human text.
         """
         result = self.host.exec((self.entrypoint, "--json", *argv), timeout=timeout)
-        return result.exit_code, _payload(result)
+        return result.exit_code, secpctl_payload(result)
 
 
-def _payload(result: Result) -> dict:
+def secpctl_payload(result: Result) -> dict:
     """The last JSON object a ``secpctl`` invocation wrote, or an empty report.
+
+    PUBLIC because every stage that drives ``secpctl`` needs exactly this and a second copy would
+    drift. The tolerance below is the part worth sharing: a real host emits pip warnings, systemd
+    notices and journal lines around the report, so a parser that assumed the payload was the whole
+    of stdout would work locally and fail on a real host.
 
     Tolerant of leading output (pip warnings, systemd notices) and never raises on unparsable text:
     a command that produced no report is an absent observation, which the caller records as
@@ -556,6 +561,7 @@ __all__ = [
     "HostInstallation",
     "observe_installed_release",
     "probe_paths",
+    "secpctl_payload",
     "host_untouched",
     "observe_health_command_in_worker_image",
     "read_operator_unit_properties",

@@ -16,7 +16,7 @@ answered "observed" regardless — because every branch fell through to the succ
 an exception silently skipped the record — would make all twenty of those nodes pass without
 measuring anything, and they would keep passing through any future encoding mistake.
 
-So these tests drive the REAL ``_StageRecorder`` and require each of its outcomes to be reachable
+So these tests drive the REAL ``StageRecorder`` and require each of its outcomes to be reachable
 and distinguishable. They are the falsifiability control for the container tier, and they run in the
 required gate on every PR.
 
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import pytest
 from secp_acceptance import AcceptanceError
-from secp_acceptance.driver import InstallationRun, _StageRecorder
+from secp_acceptance.driver import InstallationRun, StageRecorder
 from secp_acceptance.hosts import ROLE_WORKER, Host
 from secp_acceptance.install import host_untouched, probe_paths, read_operator_unit_properties
 from secp_acceptance.queues import (
@@ -51,14 +51,14 @@ from secp_acceptance.shell import Result
 _CHECK = "worker_operator_unit_present_disabled_stopped"
 
 
-def _run() -> tuple[InstallationRun, _StageRecorder]:
+def _run() -> tuple[InstallationRun, StageRecorder]:
     """A real run and a real stage recorder over the worker_install stage."""
     import pathlib
 
     install_run = InstallationRun(
         acceptance_run=AcceptanceRun(), material=ReleaseMaterial(workdir=pathlib.Path("."))
     )
-    stage = _StageRecorder(install_run, STAGE_WORKER_INSTALL, install_run.worker)
+    stage = StageRecorder(install_run, STAGE_WORKER_INSTALL, install_run.worker)
     return install_run, stage
 
 
