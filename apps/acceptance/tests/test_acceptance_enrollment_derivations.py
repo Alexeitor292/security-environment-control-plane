@@ -1198,3 +1198,34 @@ def test_the_binder_discovery_can_actually_fail():
         for alias in node.names
     ]
     assert "PASSING_OUTCOMES" in found, "the discovery cannot see a binder it is known to have"
+
+
+def test_management_worker_status_is_independent_of_enrollment():
+    """The two "healthy" facts this harness reports are genuinely different, and this pins it.
+
+    ``observe_controller_state`` documents that the lifecycle stage's
+    ``restart_worker_still_healthy`` is a MANAGEMENT-plane verdict unaffected by the defect, while
+    ``controller_reports_healthy`` is the enrollment state machine. That claim is only safe while
+    ``secpctl status worker`` really does ignore enrollment — so it is measured against the product
+    rather than asserted in prose, and a future coupling fails here instead of quietly making one
+    stage's result depend on the other's.
+    """
+    import ast
+
+    import secp_management.engine as engine
+
+    source = pathlib.Path(engine.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    status = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_worker_status"
+    )
+    body = (ast.get_source_segment(source, status) or "").lower()
+    assert body, "the worker status implementation could not be read; this guard is not measuring"
+    for token in ("enroll", "invitation", "offer_fingerprint", "worker_key_id"):
+        assert token not in body, (
+            f"secpctl status worker now references {token!r}; management-plane worker health and "
+            "enrollment health are no longer independent, and observe_controller_state's docstring "
+            "is wrong"
+        )

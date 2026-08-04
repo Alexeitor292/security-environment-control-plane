@@ -665,7 +665,23 @@ def create_sacrificial_invitation(
 
 
 def observe_controller_state(report: dict) -> dict[str, object]:
-    """The bounded projection of the controller's authoritative enrollment state."""
+    """The bounded projection of the controller's authoritative ENROLLMENT state.
+
+    "HEALTHY" MEANS TWO DIFFERENT THINGS IN THIS HARNESS. Read this before comparing results across
+    stages, because the words are identical and the facts are not:
+
+    * ``healthy`` HERE is the controller's enrollment state machine reaching its terminal state. It
+      is what this stage's ``controller_reports_healthy`` asserts, and it is currently unreachable
+      on a genuine two-host install (see :func:`observe_release_agreement`).
+    * ``healthy`` in the lifecycle stage's ``restart_worker_still_healthy`` is the MANAGEMENT-plane
+      worker installation being sound — ``secpctl status worker``, whose verdict is derived from
+      seals, record revalidation, document integrity and the end-state gate. Its implementation
+      contains no enrollment reference at all, so it is unaffected by the enrollment defect.
+
+    The two are separately observable and must not be reconciled. A reader who assumes one word
+    means one fact would conclude either that the worker is broken (it is not) or that enrollment
+    succeeded (it did not) — and both conclusions are reachable from a correct run.
+    """
     return {
         "state": report.get("state"),
         "revision": report.get("revision"),
