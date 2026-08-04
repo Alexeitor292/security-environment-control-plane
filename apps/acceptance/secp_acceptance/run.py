@@ -140,7 +140,19 @@ class AcceptanceRun:
     # --- what the fleet and release owners call -------------------------------------------
 
     def set_fleet(self, record: FleetRecord) -> None:
-        """Record the fleet that was actually built. Owned by the fleet fixture, called once."""
+        """Record the fleet that was actually built. Owned by the SESSION-scoped fleet fixture.
+
+        Idempotent for the same fleet, and REFUSES a different one. The document carries exactly one
+        :class:`~secp_acceptance.evidence.FleetRecord`, so two fleets in a session would produce a
+        document that describes one machine pair while carrying claims gathered against two — with
+        nothing in the evidence to say which check belongs to which. That is not a discrepancy a
+        reader could detect afterwards, so it is refused at the moment it happens.
+
+        This is why the fleet fixture must be session-scoped rather than module-scoped: as stage
+        modules multiply, module scope silently builds a second fleet for the second module.
+        """
+        if self._fleet_record is not None and self._fleet_record != record:
+            raise AcceptanceError("acceptance_run_fleet_conflict")
         self._fleet_record = record
 
     def set_release(self, record: ReleaseRecord) -> None:

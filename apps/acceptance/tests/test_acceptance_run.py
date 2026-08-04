@@ -86,6 +86,32 @@ def test_a_run_that_never_recorded_a_fleet_cannot_seal():
     assert exc.value.reason_code == "acceptance_run_fleet_not_recorded"
 
 
+def test_a_second_DIFFERENT_fleet_in_one_session_is_refused():
+    """Two fleets, one document. The evidence carries exactly one ``FleetRecord``, so a session that
+    built two would describe one machine pair while carrying claims gathered against both — and
+    nothing in the document would say which check belonged to which.
+
+    This is the failure mode a MODULE-scoped fleet fixture produces as soon as a second stage module
+    exists, which is why the fleet fixture must be session-scoped.
+    """
+    run = AcceptanceRun()
+    run.set_fleet(_FLEET)
+    second = _FLEET.model_copy(update={"controller_host_identity": "sha256:" + "9" * 64})
+    with pytest.raises(AcceptanceError) as exc:
+        run.set_fleet(second)
+    assert exc.value.reason_code == "acceptance_run_fleet_conflict"
+
+
+def test_recording_the_SAME_fleet_twice_is_allowed():
+    """The control. A session-scoped fixture may legitimately hand over the same record more than
+    once, and refusing that would push streams toward not recording it at all."""
+    run = AcceptanceRun()
+    run.set_fleet(_FLEET)
+    run.set_fleet(_FLEET)  # does not raise
+    _cover(run, STAGE_FLEET)
+    assert run.seal().fleet == _FLEET
+
+
 def test_a_fully_covered_run_seals_passed():
     run = AcceptanceRun()
     run.set_fleet(_FLEET)

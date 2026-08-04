@@ -239,31 +239,73 @@ def test_the_fifth_outcome_probe_is_not_vacuous(monkeypatch):
     assert payload["checks"][0]["check"] in loaded.not_passing()
 
 
+def _fully_covered_with_real_refusals() -> AcceptanceRecorder:
+    """All nine stages covered, with the failure-injection stage carrying REAL ``refused`` checks.
+
+    :func:`_fully_covered` records everything as ``observed``, which cannot exercise the ``refused``
+    half of the allowlist at all. This recorder holds both passing outcomes, so narrowing
+    ``PASSING_OUTCOMES`` to ``{observed}`` is the ONLY thing that can change the verdict — the
+    nine-stage requirement is satisfied either way.
+    """
+    rec = AcceptanceRecorder()
+    for stage in sorted(STAGES):
+        rec.open_stage(stage)
+        for check in CHECKS_BY_STAGE[stage]:
+            if stage == STAGE_FAILURE_INJECTION:
+                rec.expect_refusal(
+                    check,
+                    stage,
+                    expected="release_role_mismatch",
+                    actual="release_role_mismatch",
+                    observation={"check": check},
+                )
+            else:
+                rec.observe(check, stage, {"check": check})
+    return rec
+
+
 def test_the_recorder_verdict_uses_the_same_allowlist(monkeypatch):
     """The recorder and the loader must not disagree about what passes.
 
     ``seal`` sealing a ``passed`` document the loader then refuses would make the loader's guarantee
     decorative — and the recorder is where the verdict is DERIVED, so a denylist left behind here
     would reintroduce the whole defect one layer up.
+
+    SENSITIVITY, WHICH THIS TEST PREVIOUSLY LACKED
+    ----------------------------------------------
+    The second arm used to build a ONE-stage recorder of ``refused`` checks and assert ``failed``.
+    That assertion held identically with and without the narrowing — the nine-stage rule failed the
+    run either way — so it could not detect whether narrowing ``PASSING_OUTCOMES`` did anything at
+    all, inside the guard protecting the allowlist. Found by acc-C-queues.
+
+    Both arms now use the SAME nine-stage recorder, so the allowlist is the only variable and the
+    verdict genuinely flips on it.
     """
+    import secp_acceptance.evidence as evidence_module
     import secp_acceptance.recorder as recorder_module
 
-    rec = _fully_covered()
-    monkeypatch.setattr(
-        recorder_module, "PASSING_OUTCOMES", frozenset({OUTCOME_OBSERVED}), raising=True
-    )
-    # every check is `observed`, so narrowing the allowlist to exactly that must still pass...
-    assert rec.seal(fleet=_FLEET, release=_RELEASE).outcome == RUN_PASSED
+    # Baseline: `refused` IS a passing outcome, so a complete run carrying refusals PASSES.
+    baseline = _fully_covered_with_real_refusals().seal(fleet=_FLEET, release=_RELEASE)
+    assert baseline.outcome == RUN_PASSED
+    assert {record.outcome for record in baseline.checks} == {OUTCOME_OBSERVED, OUTCOME_REFUSED}
+    assert baseline.not_passing() == ()
 
-    # ...and widening the recorded set beyond it must not
-    rec2 = AcceptanceRecorder()
-    rec2.open_stage(STAGE_FAILURE_INJECTION)
-    for check in CHECKS_BY_STAGE[STAGE_FAILURE_INJECTION]:
-        rec2.expect_refusal(
-            check,
-            STAGE_FAILURE_INJECTION,
-            expected="release_role_mismatch",
-            actual="release_role_mismatch",
-            observation={},
-        )
-    assert rec2.seal(fleet=_FLEET, release=_RELEASE).outcome == RUN_FAILED
+    # Narrow the allowlist to `observed` alone. NOTHING else changes — same stages, same checks.
+    # BOTH modules are patched because each binds the name at import, and the whole subject of this
+    # test is that the two must not disagree; patching one would leave the loader answering from the
+    # real allowlist while the recorder used the narrowed one.
+    narrowed_allowlist = frozenset({OUTCOME_OBSERVED})
+    monkeypatch.setattr(recorder_module, "PASSING_OUTCOMES", narrowed_allowlist, raising=True)
+    monkeypatch.setattr(evidence_module, "PASSING_OUTCOMES", narrowed_allowlist, raising=True)
+
+    narrowed = _fully_covered_with_real_refusals().seal(fleet=_FLEET, release=_RELEASE)
+    assert narrowed.outcome == RUN_FAILED, (
+        "narrowing PASSING_OUTCOMES did not change the verdict, so this test is not measuring the "
+        "allowlist"
+    )
+    # the LOADER's view moved with the recorder's — that agreement is the property under test
+    assert set(narrowed.not_passing()) == set(CHECKS_BY_STAGE[STAGE_FAILURE_INJECTION])
+
+    # A run of purely `observed` checks is unaffected by the narrowing — the control that shows the
+    # flip above came from the refusals and not from the patch breaking sealing outright.
+    assert _fully_covered().seal(fleet=_FLEET, release=_RELEASE).outcome == RUN_PASSED
