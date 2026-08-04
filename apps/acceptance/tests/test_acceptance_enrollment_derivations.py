@@ -1345,3 +1345,88 @@ def test_the_release_source_is_the_document_the_product_probe_reads():
     assert MANAGEMENT_WORKER_IDENTITY_PATH == probe_path, (
         "this stage must read the same document the product's exact_release probe reads"
     )
+
+
+# --------------------------------------------------------------------------- stage completeness
+
+
+def test_the_container_stage_records_every_check_both_stages_declare():
+    """The omission failure, caught without a fleet.
+
+    ``open_stage`` commits the run to covering every check the stage declares, and a check that is
+    never recorded reads exactly like a check that passed — the evidence document's completeness
+    predicate is the only thing standing between those two, and it only runs at seal time, at the
+    end of a privileged run that costs minutes to reach.
+
+    So the check ids the container module mentions are read out of its SOURCE and compared against
+    the two stages' declared sets. Adding a check to ``CHECKS_BY_STAGE`` without recording it, or
+    deleting a recording call, fails here instead of at seal time.
+
+    This is a completeness check, not a correctness one: it proves each id is MENTIONED, not that
+    the right outcome is recorded for it. The classifier tests above own that half.
+    """
+    import ast
+
+    from secp_acceptance.reasons import CHECKS_BY_STAGE, STAGE_ENROLLMENT, STAGE_IDENTITY
+
+    module = pathlib.Path(__file__).parent / "test_acceptance_container_enrollment.py"
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    declared = set(CHECKS_BY_STAGE[STAGE_ENROLLMENT]) | set(CHECKS_BY_STAGE[STAGE_IDENTITY])
+    assert declared, "the stages declare no checks; this guard is not measuring anything"
+
+    missing = sorted(declared - literals)
+    assert not missing, (
+        f"the container stage never names these checks, so opening its stages would commit the run "
+        f"to coverage it cannot deliver: {missing}"
+    )
+
+
+def test_the_container_stage_opens_only_the_two_stages_it_owns():
+    """Opening a third stage would commit the run to checks this stream does not produce.
+
+    The lifecycle stage is the live temptation: this module performs a worker restart, and its
+    two natural check ids live there. Recording them would need ``open_stage(STAGE_LIFECYCLE)``,
+    which commits to all nine lifecycle checks — seven of which belong to another stream.
+    """
+    import ast
+
+    module = pathlib.Path(__file__).parent / "test_acceptance_container_enrollment.py"
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    opened = {
+        node.args[0].id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "open_stage"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+    }
+    assert opened == {"STAGE_ENROLLMENT", "STAGE_IDENTITY"}, (
+        f"this stream owns two stages; it opens {sorted(opened)}"
+    )
+
+
+def test_the_container_stage_node_count_is_registered():
+    """The workflow pins the container-tier node count from this mapping, so a module that adds
+    nodes without registering them makes the tier witness disagree with reality."""
+    from secp_acceptance.tier import EXPECTED_CONTAINER_NODES_BY_MODULE
+
+    assert EXPECTED_CONTAINER_NODES_BY_MODULE["test_acceptance_container_enrollment.py"] == 12
+
+
+def test_the_container_stage_never_stubs_the_process_seam():
+    """A stage that patches ``shell.run`` bypasses the very thing the completion gate counts.
+
+    Patching ``subprocess.run`` INSIDE the seam is the supported way to get a fast loop; patching
+    the seam itself produces a document that looks real and is not.
+    """
+    module = pathlib.Path(__file__).parent / "test_acceptance_container_enrollment.py"
+    source = module.read_text(encoding="utf-8")
+    for forbidden in ("monkeypatch.setattr", "shell.run", "mock.patch", "MagicMock"):
+        assert forbidden not in source, f"the container stage must not stub the seam: {forbidden}"

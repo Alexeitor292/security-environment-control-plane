@@ -103,6 +103,7 @@ CONTAINER_TIER_STAGES: tuple[str, ...] = (
 EXPECTED_CONTAINER_NODES_BY_MODULE: dict[str, int] = {
     "test_acceptance_container_fleet.py": 9,
     "test_acceptance_container_worker_image.py": 4,
+    "test_acceptance_container_enrollment.py": 12,
 }
 
 #: The total the acceptance workflow pins. DERIVED from the mapping so the two can never disagree.
