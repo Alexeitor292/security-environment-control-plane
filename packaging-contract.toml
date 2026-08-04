@@ -165,17 +165,27 @@ job and `pyproject.toml`, so it is sequenced separately from this contract."""
 
 # --------------------------------------------------------------------------- importable-only
 #
-# None today. The class is not speculative: `apps/acceptance/secp_acceptance` (the two-host
-# acceptance harness, in flight on `feature/secp-two-host-acceptance`) is the first instance, and it
-# is exactly why a flat equality rule could not be adopted — it belongs in `pythonpath` and
-# `mypy_path` so it can drive and type-check against the real product, and it must never be
-# installed into the controller/worker runtime image.
+# The class was never speculative: `apps/acceptance/secp_acceptance` (the two-host acceptance
+# harness) is its first instance, and it is exactly why a flat equality rule could not be adopted —
+# it belongs in `pythonpath` and `mypy_path` so it can drive and type-check against the real
+# product, and it must never be installed into the controller/worker runtime image.
 #
 # It qualifies for `importable-only` rather than `image-resident` because it gets a ROOT OF ITS OWN
 # (`apps/acceptance`), which no `COPY` line names — so its absence from the image is a fact about
 # the Dockerfile, not a claim about intent. That is precisely the distinction the third posture
 # exists to keep honest, and `test_the_incoming_acceptance_harness_is_importable_only_not_resident`
-# pins the acceptance harness's shape against both classes so it cannot land as the wrong one.
-#
-# It is deliberately NOT declared here yet, because it does not exist on this branch and the guard
-# refuses a declaration with no code on disk. It is added in the same commit that adds the package.
+# pinned the shape against both classes BEFORE the package existed, so it could not land as the
+# wrong one.
+
+[packages.secp_acceptance]
+root = "apps/acceptance"
+distribution = "importable-only"
+why = """The two-host acceptance harness. It drives the REAL product — it imports \
+`secp_management`, `secp_operator_deployment` and `secp_commissioning` to put the production \
+observer in front of the production end-state gate — so it must be importable and type-checked \
+against the same tree the wheel builds from. It must NEVER be installed into the controller or \
+worker runtime image: it builds privileged systemd containers with nested Docker daemons, and \
+shipping that into production would put host-fleet construction inside the very image the fleet \
+is supposed to contain. Its root `apps/acceptance` is named by no COPY line in \
+`infra/dev/Dockerfile.python` and it appears in no wheel `packages` entry, so both halves of \
+`importable-only` are facts about the build files rather than claims about intent."""

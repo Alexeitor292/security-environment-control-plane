@@ -89,6 +89,7 @@ pythonpath = [
     "apps/commissioning",
     "apps/deployment",
     "apps/management",
+    "apps/acceptance",
     "contracts/scenario-schema",
     "contracts/plugin-api",
     "contracts/reconciliation",
@@ -101,6 +102,7 @@ testpaths = [
     "apps/commissioning/tests",
     "apps/deployment/tests",
     "apps/management/tests",
+    "apps/acceptance/tests",
 ]
 filterwarnings = ["ignore::DeprecationWarning"]
 addopts = "-ra"
@@ -127,6 +129,7 @@ mypy_path = [
     "apps/commissioning",
     "apps/deployment",
     "apps/management",
+    "apps/acceptance",
     "contracts/scenario-schema",
     "contracts/plugin-api",
     "contracts/reconciliation",
