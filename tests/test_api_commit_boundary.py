@@ -41,6 +41,8 @@ to catch.
 
 from __future__ import annotations
 
+import functools
+import inspect
 import sys
 
 import fastapi
@@ -86,19 +88,25 @@ from secp_api.main import create_app
 #
 # IT IS A BINDING, NEVER A REIMPLEMENTATION, and that is the load-bearing decision here. It would
 # be one line to write ``inspect.isgeneratorfunction(call) or inspect.isasyncgenfunction(call)``
-# and have both versions pass. That line is wrong in the dangerous direction. MEASURED against that
-# exact substitute, on the shapes FastAPI's own predicate accepts:
+# and have both versions pass. That line is wrong in the dangerous direction: it UNDER-reports, so a
+# dependency of a shape it misses would be INVISIBLE to the gate while FastAPI still scheduled its
+# teardown after the response — a silent green, which is the exact failure this module exists to
+# catch.
 #
-#     functools.partial of a generator   substitute True   (the stdlib unwraps partials itself)
-#     @wraps-decorated generator         substitute FALSE  (FastAPI walks ``inspect.unwrap``)
-#     instance with generator __call__   substitute FALSE  (FastAPI looks through ``__call__``)
-#     instance with async gen __call__   substitute FALSE
+# WHICH shapes it misses is deliberately NOT written here as prose.
 #
-# Three of the four are missed. A dependency of any of those shapes would be INVISIBLE to the gate
-# while FastAPI still scheduled its teardown after the response — a silent green, which is the exact
-# failure mode this whole module exists to catch. (The partial is stated as a pass on purpose: an
-# argument for this binding that overclaimed what the substitute gets wrong would be the same kind
-# of unearned claim.)
+# It was, and that is why this paragraph is shaped like this. The count lived in two places — a
+# table in this comment and a sentence in the discrimination test's docstring — and one of them was
+# already wrong: it claimed the substitute misses ``functools.partial``, which the stdlib has
+# unwrapped itself since 3.8. The measurement it sat next to was correct; the summarising clause was
+# a fresh unmeasured claim wearing the clothes of a restatement, and by the time its own author
+# caught it, it had reached a review and a public PR description.
+#
+# So the answer is COMPUTED instead. ``_naive_substitute`` below is that exact one-line substitute,
+# ``TEARDOWN_SHAPE_CORPUS`` is the single corpus both tests consume, and
+# ``NAIVE_SUBSTITUTE_UNDER_REPORTS`` names the shapes it misses ONCE, as data that a test checks
+# against a live measurement. Adding or removing a shape cannot leave a stale number behind,
+# because there is no number to leave.
 #
 # So the lookup resolves FastAPI's own object and RAISES if it can find neither spelling. A future
 # version that genuinely removed the concept must STOP this gate and force a decision, not be
@@ -171,6 +179,81 @@ def _bind_to_fastapis_teardown_disjunction():
     SHAPE_PREDICATE_BINDING,
     _BOUND_FASTAPI_OBJECTS,
 ) = _bind_to_fastapis_teardown_disjunction()
+
+
+def _build_teardown_shape_corpus():
+    """``(label, call, carries_teardown)`` for each shape FastAPI's predicate classifies.
+
+    ONE corpus, consumed by both tests below. Two tests with two private copies of "the shapes" is
+    the same duplication as two prose copies of a count, and decays the same way.
+    """
+
+    def plain():  # pragma: no cover - never executed, only classified
+        return None
+
+    async def coroutine():  # pragma: no cover
+        return None
+
+    def sync_generator():  # pragma: no cover
+        yield None
+
+    async def async_generator():  # pragma: no cover
+        yield None
+
+    @functools.wraps(sync_generator)
+    def wrapped_generator(*args, **kwargs):  # pragma: no cover
+        return sync_generator(*args, **kwargs)
+
+    class GeneratorCall:
+        def __call__(self):  # pragma: no cover
+            yield None
+
+    class AsyncGeneratorCall:
+        async def __call__(self):  # pragma: no cover
+            yield None
+
+    class PlainClass:
+        def __init__(self):  # pragma: no cover
+            pass
+
+    return (
+        ("plain function", plain, False),
+        ("coroutine function", coroutine, False),
+        ("class (constructed, never torn down)", PlainClass, False),
+        ("sync generator", sync_generator, True),
+        ("async generator", async_generator, True),
+        ("functools.partial of a sync generator", functools.partial(sync_generator), True),
+        ("@wraps-wrapped sync generator", wrapped_generator, True),
+        ("instance with generator __call__", GeneratorCall(), True),
+        ("instance with async generator __call__", AsyncGeneratorCall(), True),
+    )
+
+
+TEARDOWN_SHAPE_CORPUS = _build_teardown_shape_corpus()
+
+
+def _naive_substitute(call):
+    """The one-line reimplementation this module REFUSES, kept only so its failures are measured.
+
+    Nothing in the gate calls this. It exists so the argument for binding is a live measurement
+    rather than a sentence — see ``NAIVE_SUBSTITUTE_UNDER_REPORTS``.
+    """
+    return inspect.isgeneratorfunction(call) or inspect.isasyncgenfunction(call)
+
+
+# The shapes ``_naive_substitute`` misses, named ONCE, as data.
+#
+# This is the single copy. There is no count anywhere in this module — not in a comment, not in a
+# docstring — because the count is ``len()`` of this set and the test below re-measures it against
+# the live predicates on every run. Adding a shape to the corpus that the substitute also misses
+# fails that test until this set is updated, which is the point: the edit cannot be half-done.
+NAIVE_SUBSTITUTE_UNDER_REPORTS = frozenset(
+    {
+        "@wraps-wrapped sync generator",
+        "instance with generator __call__",
+        "instance with async generator __call__",
+    }
+)
 
 # Identity on the loaded objects, never a name or a source string: a rename, a copy, or a
 # same-named helper in another module cannot satisfy these.
@@ -405,62 +488,19 @@ def test_the_shape_predicate_is_bound_to_fastapis_own_definition():
 def test_the_shape_predicate_still_discriminates_across_every_teardown_shape():
     """A constant, or a predicate bound to the wrong concept, must not survive this.
 
-    Nine shapes, chosen so the naive substitute this module refuses —
-    ``inspect.isgeneratorfunction(call) or inspect.isasyncgenfunction(call)`` — fails three of
-    them: the ``@wraps``-wrapped generator and both generator ``__call__`` instances are
-    dependencies FastAPI DOES schedule teardown for and a local copy does not see. (It gets the
-    ``functools.partial`` right; the stdlib unwraps partials itself. Kept in the corpus anyway,
-    since FastAPI's own predicate handles it explicitly.)
+    Every shape in ``TEARDOWN_SHAPE_CORPUS``, which is also what
+    ``test_the_naive_substitute_this_module_refuses_really_does_under_report`` consumes — one
+    corpus, so the two tests cannot drift apart.
 
     Each shape is then cross-checked against FastAPI's ``computed_scope``, which derives "request"
     from the same disjunction through a DIFFERENT bound object. That is not independent of
     FastAPI's logic — nothing here could be — but it is independent of which object this module
     bound, which is the mistake the indirection could actually make.
     """
-    import functools
-
-    def plain():  # pragma: no cover - never executed, only classified
-        return None
-
-    async def coroutine():  # pragma: no cover
-        return None
-
-    def sync_generator():  # pragma: no cover
-        yield None
-
-    async def async_generator():  # pragma: no cover
-        yield None
-
-    @functools.wraps(sync_generator)
-    def wrapped_generator(*args, **kwargs):  # pragma: no cover
-        return sync_generator(*args, **kwargs)
-
-    class GeneratorCall:
-        def __call__(self):  # pragma: no cover
-            yield None
-
-    class AsyncGeneratorCall:
-        async def __call__(self):  # pragma: no cover
-            yield None
-
-    class PlainClass:
-        def __init__(self):  # pragma: no cover
-            pass
-
-    cases = (
-        ("plain function", plain, False),
-        ("coroutine function", coroutine, False),
-        ("class (constructed, never torn down)", PlainClass, False),
-        ("sync generator", sync_generator, True),
-        ("async generator", async_generator, True),
-        ("functools.partial of a sync generator", functools.partial(sync_generator), True),
-        ("@wraps-wrapped sync generator", wrapped_generator, True),
-        ("instance with generator __call__", GeneratorCall(), True),
-        ("instance with async generator __call__", AsyncGeneratorCall(), True),
-    )
+    assert TEARDOWN_SHAPE_CORPUS, "the corpus is empty; this test would assert nothing"
 
     wrong = []
-    for label, call, expected in cases:
+    for label, call, expected in TEARDOWN_SHAPE_CORPUS:
         observed = _is_generator_dependency(Dependant(call=call))
         if observed is not expected:
             wrong.append(f"{label}: predicate said {observed!r}, expected {expected!r}")
@@ -472,6 +512,58 @@ def test_the_shape_predicate_still_discriminates_across_every_teardown_shape():
     assert not wrong, (
         f"the shape predicate ({SHAPE_PREDICATE_BINDING}) no longer classifies teardown-carrying "
         f"dependencies correctly, so every verdict in this module is unsound: {wrong}"
+    )
+
+
+def test_the_naive_substitute_this_module_refuses_really_does_under_report():
+    """The reason for binding rather than reimplementing, MEASURED on every run.
+
+    The module comment above argues that a one-line ``inspect`` check would make this gate
+    silently vacuous. That argument used to be prose carrying a count, in two places, and one copy
+    was already wrong — it claimed ``functools.partial`` was missed, which the stdlib has unwrapped
+    itself since 3.8. So the claim is now computed here instead, and three things are checked:
+
+    * the substitute really does disagree with FastAPI on a NON-EMPTY set — otherwise the whole
+      argument for the binding is vacuous and the indirection buys nothing;
+    * every disagreement is in the UNDER-reporting direction — the substitute says False where
+      FastAPI says True. That is the direction that matters: an over-report would be noisy and
+      safe, an under-report hides a dependency whose teardown runs after the response;
+    * the set is exactly ``NAIVE_SUBSTITUTE_UNDER_REPORTS``, so adding a corpus shape that the
+      substitute also misses fails here until that one declaration is updated.
+
+    There is no number to keep in step, in this docstring or anywhere else in the module. The count
+    is ``len(NAIVE_SUBSTITUTE_UNDER_REPORTS)`` and nothing restates it.
+    """
+    assert TEARDOWN_SHAPE_CORPUS, "the corpus is empty; this test would assert nothing"
+
+    under = set()
+    over = set()
+    for label, call, expected in TEARDOWN_SHAPE_CORPUS:
+        # Compared against ``expected`` rather than against the bound predicate, so a defect in the
+        # binding surfaces in the discrimination test above rather than being masked here by both
+        # sides moving together.
+        assert _is_generator_dependency(Dependant(call=call)) is expected, (
+            f"{label}: FastAPI's own predicate disagrees with the corpus, so this comparison "
+            "cannot say anything about the substitute"
+        )
+        if _naive_substitute(call) is expected:
+            continue
+        (under if expected else over).add(label)
+
+    assert under, (
+        "the naive inspect substitute now agrees with FastAPI on every shape in the corpus. Either "
+        "the corpus no longer contains a shape that distinguishes them — in which case this test, "
+        "and the argument for binding rather than reimplementing, are both vacuous — or the "
+        "stdlib has absorbed the cases FastAPI handles. Re-derive before believing the second."
+    )
+    assert not over, (
+        f"the substitute OVER-reports on {sorted(over)}, which is not the failure this module "
+        "documents; re-derive the argument rather than adjusting the expectation"
+    )
+    assert under == NAIVE_SUBSTITUTE_UNDER_REPORTS, (
+        f"measured under-reported shapes {sorted(under)} != declared "
+        f"{sorted(NAIVE_SUBSTITUTE_UNDER_REPORTS)}. Update the declaration — it is the ONLY place "
+        "this is written down, which is why this test can catch it."
     )
 
 
