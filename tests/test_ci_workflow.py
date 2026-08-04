@@ -890,6 +890,59 @@ def test_every_environment_building_job_syncs_from_the_frozen_lock():
     )
 
 
+def _sync_commands() -> dict[str, list[str]]:
+    """``"<workflow>:<job>" -> the `uv sync` COMMAND lines`` (shell comments excluded)."""
+    out = {}
+    for name, run in _jobs_by_run_text().items():
+        commands = [
+            line.strip()
+            for line in run.splitlines()
+            if "uv sync" in line and not line.strip().startswith("#")
+        ]
+        if commands:
+            out[name] = commands
+    return out
+
+
+def test_every_sync_pins_both_the_interpreter_and_the_dev_extra():
+    """`uv sync` alone is not the repair. Both flags are load-bearing, and both were MEASURED.
+
+    On this project, in a directory with no environment already created:
+
+        uv sync --frozen                  -> CPython 3.12.13, and pytest/ruff/mypy ABSENT
+        uv sync --frozen --extra dev      -> CPython 3.12.13, toolchain present
+        uv venv --python 3.11, then sync  -> CPython 3.11.15, toolchain present
+
+    Two separate traps. `dev` is an `[project.optional-dependencies]` EXTRA rather than a
+    dependency group, so a plain sync installs no test or lint toolchain at all — and a job whose
+    `uv run pytest` finds no pytest fails in a way that looks nothing like its cause. And
+    `requires-python = ">=3.11"` lets uv select the newest interpreter it can find, which is not
+    the one any of this is tested against.
+
+    The `uv venv --python 3.11` line above each sync already pins the interpreter — measured, the
+    converted steps land on 3.11.15. But that makes each sync depend on its NEIGHBOUR surviving,
+    and neighbours do not survive refactors. The flag is therefore repeated on the sync itself, so
+    the step is self-contained, and pinned here so it cannot quietly decay back.
+    """
+    commands = _sync_commands()
+    assert len(commands) >= MIN_ENVIRONMENT_BUILDING_JOBS, (
+        f"only {len(commands)} job(s) run `uv sync`, expected at least "
+        f"{MIN_ENVIRONMENT_BUILDING_JOBS}; this check is not engaging"
+    )
+    problems = []
+    for name, lines in sorted(commands.items()):
+        for line in lines:
+            missing = [
+                flag for flag in ("--frozen", "--extra dev", "--python 3.11") if flag not in line
+            ]
+            if missing:
+                problems.append(f"{name}: {line!r} is missing {missing}")
+    assert not problems, (
+        f"{len(problems)} `uv sync` invocation(s) do not pin the lock, the dev extra and the "
+        f"interpreter: {problems}"
+    )
+
+
 def test_the_lock_is_proven_in_step_with_pyproject(wf):
     """`--frozen` uses the lock as-is; it does not notice a lock that fell behind pyproject.toml.
 

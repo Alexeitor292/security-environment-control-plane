@@ -358,6 +358,26 @@ def test_the_shape_predicate_is_bound_to_fastapis_own_definition():
         f"unrecognised binding {SHAPE_PREDICATE_BINDING!r}"
     )
     assert len(_BOUND_FASTAPI_OBJECTS) == 3, _BOUND_FASTAPI_OBJECTS
+
+    # NON-VACUITY ON THE PIN ITSELF, asserted here rather than inferred from elsewhere.
+    #
+    # This is not hypothetical. A probe written to verify this very relocation compared
+    # ``getattr(utils, "_is_gen_callable", None) is getattr(models, "_is_gen_callable", None)`` on
+    # a 0.138.2 environment and reported True — because BOTH were ``None``, and ``None is None``.
+    # An identity assertion passes vacuously in exactly the case where the thing it pins has
+    # ceased to exist, which is the failure mode this program has now met repeatedly.
+    #
+    # The binding cannot actually reach that state: the module-level branch is gated on
+    # ``callable(obj)``, which ``None`` fails, and the ownership check below would reject ``None``
+    # anyway. But a property that holds only because of two other places is weaker than one stated
+    # where the identity comparison is, so it is stated here.
+    for bound in _BOUND_FASTAPI_OBJECTS:
+        assert bound is not None, (
+            "a bound object is None, so the identity comparison below would be comparing two "
+            "absences and would pass while pinning nothing at all"
+        )
+        assert callable(bound), f"{bound!r} is not callable and so cannot be the predicate"
+
     for bound in _BOUND_FASTAPI_OBJECTS:
         owner = getattr(bound, "__module__", "") or ""
         assert owner.split(".")[0] == "fastapi", (
