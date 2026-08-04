@@ -41,7 +41,8 @@ installation id from another — not from re-deriving the arithmetic.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from secp_acceptance import AcceptanceError
@@ -380,8 +381,244 @@ def expected_installation_id(role: str, release_aggregate: str) -> str:
     return _installation_id(role, release_aggregate)
 
 
+# --------------------------------------------------------------------------- upgrade lineage
+
+#: The successor descends from what is actually installed. This is the trust window the managed
+#: upgrade rests on, and the reason an attacker holding a validly-signed but UNRELATED release
+#: cannot install it over a running worker.
+LINEAR = "linear"
+#: The successor does NOT descend from the installed release. Observed, not guessed — a downgrade,
+#: a sideways move, or an unrelated bundle. This is the state the failure-injection twin drives.
+NOT_LINEAR = "not_linear"
+#: No baseline to descend FROM, or a reading we could not make. Never a mismatch.
+LINEAGE_UNPROVEN = "unproven"
+
+
+@dataclass(frozen=True)
+class LineageVerdict:
+    """Whether a candidate bundle is a linear successor of the INSTALLED release."""
+
+    verdict: str
+    reason_code: str | None
+    observation: dict[str, object] = field(default_factory=dict)
+
+
+def linear_successor_binding(
+    *, baseline: Mapping[str, object], successor: Mapping[str, object]
+) -> LineageVerdict:
+    """Bind a candidate successor to the release that is actually installed on the host.
+
+    ``baseline`` is :func:`secp_acceptance.install.observe_installed_release` — read OFF THE HOST
+    and re-parsed through the product's own manifest parser, not what the harness believes it
+    installed. That distinction is the whole point: an upgrade proof built on the harness's memory
+    would still pass if the install had silently put something else there.
+
+    ABSENT BASELINE IS ``unproven``, NEVER ``not_linear``
+    ----------------------------------------------------
+    ``present: False`` from that seam means one of several things — no record, an unreadable record,
+    an unreachable host — and NONE of them is "the successor does not descend from the baseline".
+    There is no baseline to descend from, so the question was never asked. Recording it as a
+    mismatch would manufacture a lineage failure out of an infrastructure outage, which is a false
+    accusation in the direction this program cares about least but still cares about.
+
+    (That collapse is real and known: the seam returns ``present: False`` on any ``cat`` failure. It
+    is on the owning stream's fix list. This function is written so the ambiguity cannot become a
+    wrong verdict HERE regardless of when that lands.)
+    """
+    if not baseline.get("present"):
+        return LineageVerdict(
+            LINEAGE_UNPROVEN,
+            "acceptance_observation_unavailable",
+            {"baseline_present": False},
+        )
+    installed = baseline.get("source_sha")
+    claimed_parent = successor.get("parent_sha")
+    observation: dict[str, object] = {
+        "baseline_present": True,
+        "successor_declares_parent": bool(claimed_parent),
+        # Digested, not carried: a source sha is a real commit identity of this repository.
+        "lineage_identity": observation_digest({"installed": installed, "parent": claimed_parent}),
+    }
+    if not isinstance(installed, str) or not installed:
+        # The record parsed but carries no source sha. That is a malformed baseline, not a
+        # non-linear successor.
+        return LineageVerdict(LINEAGE_UNPROVEN, "acceptance_observation_malformed", observation)
+    # One comparison settles both shapes. A successor declaring NO parent (absent, empty, or a
+    # non-string) cannot equal a non-empty installed sha, so it falls out here as NOT_LINEAR —
+    # which is the right answer and the one the engine gives, for the same reason: a bundle that
+    # descends from nothing descends from nothing in particular.
+    #
+    # There WAS a separate branch for the no-parent case. Mutation testing showed deleting it
+    # changed no result and failed no test, because this comparison already covered it. An
+    # unexercised branch that cannot alter an outcome is not defence in depth, it is a second place
+    # to have to keep correct — unlike the state/digest pair in `restoration_verdict`, which a
+    # hand-built DocumentState genuinely can drive apart. ``successor_declares_parent`` keeps the
+    # distinction visible to a reader of the observation without branching on it.
+    if claimed_parent != installed:
+        return LineageVerdict(NOT_LINEAR, None, observation)
+    return LineageVerdict(LINEAR, None, observation)
+
+
+# --------------------------------------------------------------------------- classification
+
+
+#: What ``secpctl bootstrap worker --bundle X`` (DRY RUN) called the operation. Read from the
+#: engine so a renamed classification breaks the build rather than turning a check into a branch
+#: that can never be taken.
+def managed_upgrade_classification() -> str:
+    from secp_management.evidence import CLASSIFY_MANAGED_UPGRADE
+
+    return CLASSIFY_MANAGED_UPGRADE
+
+
+CLASSIFIED_MANAGED = "managed_upgrade"
+CLASSIFIED_OTHER = "other"
+CLASSIFICATION_UNPROVEN = "unproven"
+
+
+@dataclass(frozen=True)
+class ClassificationVerdict:
+    """How the product classified a candidate bundle, before any mutation."""
+
+    verdict: str
+    reason_code: str | None
+    classification: str
+    observation: dict[str, object] = field(default_factory=dict)
+
+
+def classification_verdict(report: Report) -> ClassificationVerdict:
+    """Read the classification out of a DRY-RUN bootstrap report.
+
+    The dry run is where this is settled, and that matters: the engine classifies before any host
+    op, so the upgrade is admitted (or refused) with the host untouched. A check that only looked
+    after the write could not tell an admitted upgrade from one that was never classified at all.
+
+    A REFUSAL is passed through with the product's own reason rather than flattened. The
+    failure-injection twin drives the identical path with one field changed and expects
+    ``worker_upgrade_not_linear_successor``; if a refusal read as "unclassified" here, that twin
+    would assert on a branch it could never reach.
+    """
+    if not report.readable:
+        return ClassificationVerdict(
+            CLASSIFICATION_UNPROVEN,
+            "acceptance_observation_unavailable",
+            "",
+            {"report_readable": False},
+        )
+    if report.status == REPORT_REFUSED:
+        return ClassificationVerdict(
+            CLASSIFICATION_UNPROVEN,
+            report.reason_code,
+            "",
+            {"report_readable": True, "refused": True},
+        )
+    declared = report.text("classification") or ""
+    mode = report.text("mode") or ""
+    observation: dict[str, object] = {
+        "report_readable": True,
+        "refused": False,
+        "classification": declared[:32],
+        "declared_dry_run": mode == "dry_run",
+    }
+    if not declared:
+        # An OK report with no classification field is a report shape this harness does not
+        # understand. Guessing "not managed" would be inventing the product's answer.
+        return ClassificationVerdict(
+            CLASSIFICATION_UNPROVEN, "acceptance_observation_malformed", "", observation
+        )
+    if declared != managed_upgrade_classification():
+        # We READ the classification and it was not the one this check requires. Observed-false.
+        return ClassificationVerdict(CLASSIFIED_OTHER, None, declared, observation)
+    return ClassificationVerdict(CLASSIFIED_MANAGED, None, declared, observation)
+
+
+# --------------------------------------------------------------------------- upgraded identity
+
+
+def upgraded_identity_verdict(
+    *, before: Mapping[str, object], after: Mapping[str, object], evidence: Report
+) -> tuple[bool, dict[str, object]]:
+    """Did the upgrade actually change the installation to the successor release?
+
+    Three separate facts, all required, each obtained from a DIFFERENT reading:
+
+    * the release read back off the host CHANGED (``before`` vs ``after``, both
+      :func:`observe_installed_release`);
+    * ``secpctl evidence worker`` — a different command, which reports its identity only after the
+      attestation, record binding and document integrity all verify — names the successor aggregate;
+    * that aggregate DERIVES the installation id the same command reports.
+
+    The third is the cross-report check, and it is why this takes both a snapshot pair and an
+    evidence report rather than trusting either alone. A product that updated its release record but
+    kept the old identity, or minted an identity unrelated to the release it claims, fails it.
+    """
+    observation: dict[str, object] = {
+        "baseline_present": bool(before.get("present")),
+        "successor_present": bool(after.get("present")),
+        "evidence_readable": evidence.readable,
+        "evidence_authenticated": evidence.flag("authenticated") is True,
+    }
+    if not (before.get("present") and after.get("present") and evidence.ok):
+        return False, observation
+
+    old_aggregate = before.get("aggregate_digest")
+    new_aggregate = after.get("aggregate_digest")
+    reported_aggregate = evidence.text("release_aggregate_digest")
+    reported_identity = evidence.text("installation_id")
+    observation["release_changed"] = bool(
+        isinstance(old_aggregate, str)
+        and isinstance(new_aggregate, str)
+        and old_aggregate != new_aggregate
+    )
+    observation["evidence_names_successor"] = reported_aggregate == new_aggregate
+    if not (reported_aggregate and reported_identity):
+        observation["identity_derives_from_release"] = False
+        return False, observation
+
+    try:
+        expected = expected_installation_id("worker", reported_aggregate)
+    except AcceptanceError:
+        observation["identity_derives_from_release"] = False
+        return False, observation
+    observation["identity_derives_from_release"] = reported_identity == expected
+    observation["identity_changed"] = (
+        reported_identity != expected_installation_id("worker", str(old_aggregate))
+        if isinstance(old_aggregate, str) and old_aggregate
+        else False
+    )
+
+    # ``release_changed`` stays in the OBSERVATION — a reader wants to see that the two host
+    # readings moved — but it is deliberately NOT a term here, because the remaining three already
+    # imply it: the identity derives from the reported aggregate, the reported aggregate IS the
+    # successor, and the identity differs from the one the baseline aggregate derives. Those cannot
+    # all hold unless the release changed.
+    #
+    # Mutation testing is why this is stated rather than assumed: dropping ``release_changed`` from
+    # the conjunction failed no test, because it is perfectly correlated with ``identity_changed``.
+    # A term that cannot change an answer does not strengthen a proof; keeping it in the conjunction
+    # would only have made the redundancy harder to see next time.
+    ok = bool(
+        observation["evidence_names_successor"]
+        and observation["identity_derives_from_release"]
+        and observation["identity_changed"]
+    )
+    return ok, observation
+
+
 __all__ = [
     "CHANGED",
+    "CLASSIFICATION_UNPROVEN",
+    "CLASSIFIED_MANAGED",
+    "CLASSIFIED_OTHER",
+    "LINEAGE_UNPROVEN",
+    "LINEAR",
+    "NOT_LINEAR",
+    "ClassificationVerdict",
+    "LineageVerdict",
+    "classification_verdict",
+    "linear_successor_binding",
+    "managed_upgrade_classification",
+    "upgraded_identity_verdict",
     "VIOLATION_REASON",
     "DOC_ABSENT",
     "DOC_PRESENT",

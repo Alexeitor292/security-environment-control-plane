@@ -33,9 +33,15 @@ import pytest
 from secp_acceptance import AcceptanceError
 from secp_acceptance.lifecycle import (
     CHANGED,
+    CLASSIFICATION_UNPROVEN,
+    CLASSIFIED_MANAGED,
+    CLASSIFIED_OTHER,
     DOC_ABSENT,
     DOC_PRESENT,
     DOC_UNREADABLE,
+    LINEAGE_UNPROVEN,
+    LINEAR,
+    NOT_LINEAR,
     REPORT_OK,
     REPORT_REFUSED,
     REPORT_UNREADABLE,
@@ -46,12 +52,16 @@ from secp_acceptance.lifecycle import (
     DocumentState,
     Report,
     RestorationVerdict,
+    classification_verdict,
     document_snapshot,
     expected_installation_id,
+    linear_successor_binding,
     managed_document_paths,
+    managed_upgrade_classification,
     outcome_for_restoration,
     restoration_verdict,
     secpctl,
+    upgraded_identity_verdict,
 )
 from secp_acceptance.reasons import (
     HARNESS_REASONS,
@@ -539,3 +549,233 @@ def test_an_empty_input_refuses_rather_than_deriving_a_plausible_identity(
     possible thing to compare a real report against."""
     with pytest.raises(AcceptanceError):
         expected_installation_id(role, aggregate)
+
+
+# --------------------------------------------------------------------------- upgrade lineage
+
+
+def _baseline(**over: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "present": True,
+        "role": "worker",
+        "source_sha": "a" * 40,
+        "parent_sha": "",
+        "aggregate_digest": "sha256:" + "1" * 64,
+        "signing_anchor_id": "sha256:" + "7" * 64,
+    }
+    base.update(over)
+    return base
+
+
+def test_a_successor_whose_parent_is_the_installed_release_is_linear():
+    verdict = linear_successor_binding(
+        baseline=_baseline(), successor={"parent_sha": "a" * 40, "source_sha": "b" * 40}
+    )
+
+    assert verdict.verdict == LINEAR
+    assert verdict.reason_code is None
+
+
+def test_a_successor_with_a_different_parent_is_observed_not_linear():
+    """The failure-injection twin. Differs from the case above in ``parent_sha`` ALONE, which is
+    what makes ``non_linear_upgrade_refused`` a measurement rather than a restatement."""
+    verdict = linear_successor_binding(
+        baseline=_baseline(), successor={"parent_sha": "c" * 40, "source_sha": "b" * 40}
+    )
+
+    assert verdict.verdict == NOT_LINEAR
+    assert verdict.reason_code is None, "an observed mismatch is not a failure to observe"
+
+
+@pytest.mark.parametrize("missing", ["", None])
+def test_a_successor_declaring_no_parent_cannot_descend_from_anything(missing):
+    """A positive observation, not a missing one: a bundle with no parent is not linear by
+    construction, and the engine refuses it for exactly that reason."""
+    verdict = linear_successor_binding(baseline=_baseline(), successor={"parent_sha": missing})
+
+    assert verdict.verdict == NOT_LINEAR
+
+
+def test_an_absent_baseline_is_unproven_never_a_mismatch():
+    """THE finding this function is written around.
+
+    ``observe_installed_release`` returns ``present: False`` for an absent record, an unreadable
+    one, an unreachable host and a dead container alike. None of those means "the successor does
+    not descend from the baseline" — there is no baseline, so the question was never asked.
+    Recording it as a mismatch would manufacture a lineage failure out of an outage.
+    """
+    verdict = linear_successor_binding(
+        baseline=_baseline(present=False), successor={"parent_sha": "a" * 40}
+    )
+
+    assert verdict.verdict == LINEAGE_UNPROVEN
+    assert verdict.reason_code == "acceptance_observation_unavailable"
+    assert verdict.verdict != NOT_LINEAR
+
+
+def test_a_baseline_with_no_source_sha_is_malformed_not_a_mismatch():
+    verdict = linear_successor_binding(
+        baseline=_baseline(source_sha=""), successor={"parent_sha": "a" * 40}
+    )
+
+    assert verdict.verdict == LINEAGE_UNPROVEN
+    assert verdict.reason_code == "acceptance_observation_malformed"
+
+
+def test_the_lineage_observation_carries_no_commit_sha():
+    """A source sha is a real commit identity of this repository. Digested, never listed."""
+    verdict = linear_successor_binding(baseline=_baseline(), successor={"parent_sha": "a" * 40})
+
+    rendered = repr(verdict.observation)
+    assert "a" * 40 not in rendered
+    assert str(verdict.observation["lineage_identity"]).startswith("sha256:")
+
+
+# --------------------------------------------------------------------------- classification
+
+
+def test_a_managed_upgrade_classification_is_read_from_the_dry_run():
+    report = Report(REPORT_OK, 0, {"classification": "managed_upgrade", "mode": "dry_run"})
+
+    verdict = classification_verdict(report)
+
+    assert verdict.verdict == CLASSIFIED_MANAGED
+    assert verdict.observation["declared_dry_run"] is True
+
+
+def test_the_managed_classification_string_is_read_from_the_engine():
+    """Restating it would agree with itself after the product renamed it."""
+    from secp_management.evidence import CLASSIFY_MANAGED_UPGRADE
+
+    assert managed_upgrade_classification() == CLASSIFY_MANAGED_UPGRADE
+
+
+@pytest.mark.parametrize("declared", ["fresh", "exact_same_release"])
+def test_a_different_classification_is_observed_false_not_unproven(declared: str):
+    """We read the field and it was not the one required. That is knowledge, and it must not be
+    filed as "we could not tell" — a fresh classification means the prior install vanished."""
+    verdict = classification_verdict(Report(REPORT_OK, 0, {"classification": declared}))
+
+    assert verdict.verdict == CLASSIFIED_OTHER
+    assert verdict.classification == declared
+    assert verdict.reason_code is None
+
+
+def test_a_refusal_keeps_the_products_own_reason():
+    """The failure-injection twin drives this exact path and asserts on
+    ``worker_upgrade_not_linear_successor``. Flattening a refusal to "unclassified" would leave
+    that assertion on a branch it can never reach."""
+    report = Report(
+        REPORT_REFUSED,
+        2,
+        {"reason_code": "worker_upgrade_not_linear_successor"},
+        reason_code="worker_upgrade_not_linear_successor",
+    )
+
+    verdict = classification_verdict(report)
+
+    assert verdict.reason_code == "worker_upgrade_not_linear_successor"
+    assert verdict.observation["refused"] is True
+
+
+def test_an_unreadable_report_cannot_classify_anything():
+    verdict = classification_verdict(Report(REPORT_UNREADABLE, 127, {}))
+
+    assert verdict.verdict == CLASSIFICATION_UNPROVEN
+    assert verdict.reason_code == "acceptance_observation_unavailable"
+
+
+def test_an_ok_report_with_no_classification_field_is_malformed():
+    """Guessing "not managed" would be inventing the product's answer."""
+    verdict = classification_verdict(Report(REPORT_OK, 0, {"mode": "dry_run"}))
+
+    assert verdict.verdict == CLASSIFICATION_UNPROVEN
+    assert verdict.reason_code == "acceptance_observation_malformed"
+
+
+# --------------------------------------------------------------------------- upgraded identity
+
+
+def _evidence(aggregate: str) -> Report:
+    return Report(
+        REPORT_OK,
+        0,
+        {
+            "authenticated": True,
+            "release_aggregate_digest": aggregate,
+            "installation_id": expected_installation_id("worker", aggregate),
+        },
+    )
+
+
+def test_an_upgrade_that_changed_release_and_identity_together_is_observed():
+    old, new = "sha256:" + "1" * 64, "sha256:" + "2" * 64
+
+    ok, observation = upgraded_identity_verdict(
+        before=_baseline(aggregate_digest=old),
+        after=_baseline(aggregate_digest=new),
+        evidence=_evidence(new),
+    )
+
+    assert ok is True
+    assert observation["release_changed"] is True
+    assert observation["evidence_names_successor"] is True
+    assert observation["identity_derives_from_release"] is True
+
+
+def test_an_identity_that_does_not_derive_from_the_reported_release_fails():
+    """THE cross-report check. A product that minted an identity unrelated to the release it claims
+    passes every single-report assertion and fails this one."""
+    new = "sha256:" + "2" * 64
+    evidence = Report(
+        REPORT_OK,
+        0,
+        {
+            "authenticated": True,
+            "release_aggregate_digest": new,
+            "installation_id": "secp-mgmt-deadbeefdeadbeef",
+        },
+    )
+
+    ok, observation = upgraded_identity_verdict(
+        before=_baseline(aggregate_digest="sha256:" + "1" * 64),
+        after=_baseline(aggregate_digest=new),
+        evidence=evidence,
+    )
+
+    assert ok is False
+    assert observation["identity_derives_from_release"] is False
+
+
+def test_an_unchanged_release_is_not_an_upgrade():
+    same = "sha256:" + "1" * 64
+
+    ok, observation = upgraded_identity_verdict(
+        before=_baseline(aggregate_digest=same),
+        after=_baseline(aggregate_digest=same),
+        evidence=_evidence(same),
+    )
+
+    assert ok is False
+    assert observation["release_changed"] is False
+
+
+def test_evidence_naming_a_release_the_host_does_not_have_fails():
+    """The evidence command and the installed record are different readings; they must agree."""
+    ok, observation = upgraded_identity_verdict(
+        before=_baseline(aggregate_digest="sha256:" + "1" * 64),
+        after=_baseline(aggregate_digest="sha256:" + "2" * 64),
+        evidence=_evidence("sha256:" + "9" * 64),
+    )
+
+    assert ok is False
+    assert observation["evidence_names_successor"] is False
+
+
+def test_an_unreadable_evidence_report_cannot_settle_the_identity():
+    ok, observation = upgraded_identity_verdict(
+        before=_baseline(), after=_baseline(), evidence=Report(REPORT_UNREADABLE, 127, {})
+    )
+
+    assert ok is False
+    assert observation["evidence_readable"] is False
