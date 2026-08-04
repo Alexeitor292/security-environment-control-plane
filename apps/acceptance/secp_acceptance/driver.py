@@ -51,7 +51,7 @@ from secp_acceptance.reasons import (
     STAGE_PACKAGES,
     STAGE_WORKER_INSTALL,
 )
-from secp_acceptance.release import ReleaseMaterial
+from secp_acceptance.release import PRODUCT_MAX_IMAGE_ARCHIVE_BYTES, ReleaseMaterial
 from secp_acceptance.run import AcceptanceRun
 
 #: The bundle directory name inside each host. Fixed, so no host-read value becomes a host path.
@@ -230,14 +230,27 @@ def drive_controller(run: InstallationRun, fleet: HostFleet) -> None:
 
     oversized = run.material.oversized()
     if oversized:
-        # The product's own loader will refuse these archives. Recorded before the attempt so the
-        # reason names the cap rather than whatever downstream symptom it produces, and so an OOM
-        # during the read-before-refuse window cannot erase the explanation.
+        # The reason code is the PRODUCT's own (`bootstrap_image_too_large`), because the document
+        # must be able to tell "the controller stack failed to come up" apart from "the reviewed
+        # bundle path cannot install the product's own image at its real size". Those are completely
+        # different findings and only the second one points at the product.
+        #
+        # PREDICTED, NOT OBSERVED — and the observation says so rather than letting the reason code
+        # imply the product spoke. The install is deliberately not attempted: the size check in
+        # `_load_and_verify_image` happens AFTER the whole archive is read into memory, so driving
+        # it on a host already running an eight-service stack risks an OOM that takes the run down
+        # and destroys every other stage's evidence with it. Declining to attempt costs one
+        # distinction, and the observation records exactly which one.
         for check in checks:
             stage.unproven(
                 check,
-                reason="acceptance_controller_bringup_failed",
-                observation={"oversized_archives": len(oversized), "cap_refusal_expected": True},
+                reason="bootstrap_image_too_large",
+                observation={
+                    "oversized_archives": len(oversized),
+                    "product_cap_bytes": PRODUCT_MAX_IMAGE_ARCHIVE_BYTES,
+                    "refusal_predicted_from_measured_size": True,
+                    "refusal_observed_from_product": False,
+                },
             )
         run.controller.notes["oversized"] = list(oversized)
         return
