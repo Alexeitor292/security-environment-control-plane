@@ -116,6 +116,13 @@ KINDS: tuple[str, ...] = tuple(kind for kind, _argv in SWEEP_ARGV)
 PROBE_TIMEOUT_SECONDS = 60
 LIST_TIMEOUT_SECONDS = 60
 
+#: The reason code a ``violated`` outcome carries. It is a HARNESS code, and that is the whole
+#: point: ``violated`` is the harness reporting what IT saw, so attributing it to a product code
+#: would credit the product with a refusal it never made. The vocabulary deliberately has ONE code
+#: for every violation rather than one per check, because the check id already names the property
+#: that broke — so a leaked container and an activated operator unit share it.
+VIOLATION_REASON = "acceptance_prohibited_state_observed"
+
 
 @dataclass(frozen=True)
 class ResidueReport:
@@ -256,7 +263,7 @@ def sweep(prefix: str, *, expected_daemon: str = "") -> ResidueReport:
                     VERDICT_RESIDUAL,
                     tuple(sorted(residual)),
                     tuple(observed),
-                    "acceptance_fleet_teardown_incomplete",
+                    VIOLATION_REASON,
                     daemon_bound=bound,
                 )
             return ResidueReport(
@@ -277,7 +284,7 @@ def sweep(prefix: str, *, expected_daemon: str = "") -> ResidueReport:
             VERDICT_RESIDUAL,
             tuple(sorted(residual)),
             tuple(observed),
-            "acceptance_fleet_teardown_incomplete",
+            VIOLATION_REASON,
             daemon_bound=bound,
         )
     return ResidueReport(VERDICT_CLEAN, (), tuple(observed), None, daemon_bound=bound)
@@ -309,7 +316,7 @@ def outcome_for(report: ResidueReport) -> tuple[str, str | None]:
     if report.verdict == VERDICT_CLEAN:
         return OUTCOME_OBSERVED, None
     if report.verdict == VERDICT_RESIDUAL:
-        return OUTCOME_VIOLATED, report.reason_code or "acceptance_fleet_teardown_incomplete"
+        return OUTCOME_VIOLATED, report.reason_code or VIOLATION_REASON
     if report.verdict == VERDICT_UNOBSERVABLE:
         return OUTCOME_UNPROVEN, report.reason_code or "acceptance_observation_unavailable"
     raise AcceptanceError("acceptance_observation_malformed")

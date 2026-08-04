@@ -41,6 +41,7 @@ from secp_acceptance.lifecycle import (
     REPORT_UNREADABLE,
     RESTORATION_UNPROVEN,
     RESTORED,
+    VIOLATION_REASON,
     DocumentSnapshot,
     DocumentState,
     Report,
@@ -53,11 +54,13 @@ from secp_acceptance.lifecycle import (
     secpctl,
 )
 from secp_acceptance.reasons import (
+    HARNESS_REASONS,
     OUTCOME_OBSERVED,
     OUTCOME_REFUSED,
     OUTCOME_UNPROVEN,
     OUTCOME_VIOLATED,
     PASSING_OUTCOMES,
+    PRODUCT_REASONS,
 )
 from secp_acceptance.shell import Result
 
@@ -447,6 +450,58 @@ def test_an_unrecognised_restoration_verdict_raises_rather_than_defaulting():
     """A default here would be a silent extra path to a pass."""
     with pytest.raises(AcceptanceError):
         outcome_for_restoration(_verdict_named("probably_fine"))
+
+
+# --------------------------------------------------------------------------- reason vocabulary
+
+
+def test_every_reason_code_this_module_can_emit_is_a_harness_code():
+    """A code outside the vocabulary is refused by the evidence loader at SEAL time — the end of a
+    twenty-minute container run, and the worst moment to find a typo.
+
+    Driven through the real failure paths rather than read off the module's literals, so a code
+    that is reachable but was never added to the vocabulary fails here.
+    """
+    emitted = {
+        outcome_for_restoration(_verdict_named(name))[1] for name in (CHANGED, RESTORATION_UNPROVEN)
+    }
+    emitted |= {
+        restoration_verdict(
+            _snapshot(**{KINDS[0]: DocumentState(KINDS[0], DOC_UNREADABLE, None)}), _snapshot()
+        ).reason_code,
+        restoration_verdict(
+            _snapshot(), _snapshot(**{KINDS[0]: DocumentState(KINDS[0], DOC_PRESENT, DIGEST_B)})
+        ).reason_code,
+    }
+
+    assert None not in emitted
+    assert emitted <= HARNESS_REASONS
+    assert not (emitted & PRODUCT_REASONS)
+
+
+def test_a_violation_is_reported_with_a_harness_code_not_a_product_one():
+    """``violated`` is the HARNESS reporting what it saw. A product code here would credit the
+    product with a refusal it never made — and WHO refused is the single fact a reader of the
+    evidence most needs, which is why the two vocabularies are kept disjoint."""
+    real = restoration_verdict(
+        _snapshot(), _snapshot(**{KINDS[0]: DocumentState(KINDS[0], DOC_PRESENT, DIGEST_B)})
+    )
+    outcome, code = outcome_for_restoration(real)
+
+    assert real.verdict == CHANGED
+    assert outcome == OUTCOME_VIOLATED
+    assert code == VIOLATION_REASON
+    assert code in HARNESS_REASONS
+    assert code not in PRODUCT_REASONS
+
+
+def test_the_violation_code_is_shared_with_the_residue_sweep_not_restated():
+    """One code for every violation, per the vocabulary's own design: the CHECK id names the
+    property that broke, so a per-check code set would grow past review. Read from one definition
+    so the two modules cannot drift into two spellings of the same fact."""
+    from secp_acceptance.residue import VIOLATION_REASON as residue_reason
+
+    assert VIOLATION_REASON is residue_reason
 
 
 # --------------------------------------------------------------------------- identity binding

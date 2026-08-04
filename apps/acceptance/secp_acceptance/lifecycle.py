@@ -48,6 +48,7 @@ from secp_acceptance import AcceptanceError
 from secp_acceptance.evidence import observation_digest
 from secp_acceptance.hosts import Host
 from secp_acceptance.reasons import OUTCOME_OBSERVED, OUTCOME_UNPROVEN, OUTCOME_VIOLATED
+from secp_acceptance.residue import VIOLATION_REASON
 
 #: The management CLI, invoked on a host by name. Resolved through the host's PATH because the
 #: package installs a console script; a hard-coded absolute path here would be this module's guess
@@ -335,7 +336,7 @@ def restoration_verdict(before: DocumentSnapshot, after: DocumentSnapshot) -> Re
     if differing:
         # We READ both sides and they disagree: the restoration provably did not happen. That is a
         # proven defect, not an absence of evidence.
-        return RestorationVerdict(CHANGED, "acceptance_observation_malformed", differing)
+        return RestorationVerdict(CHANGED, VIOLATION_REASON, differing)
     return RestorationVerdict(RESTORED, None, ())
 
 
@@ -354,7 +355,7 @@ def outcome_for_restoration(verdict: RestorationVerdict) -> tuple[str, str | Non
     if verdict.verdict == RESTORED:
         return OUTCOME_OBSERVED, None
     if verdict.verdict == CHANGED:
-        return OUTCOME_VIOLATED, verdict.reason_code or "acceptance_observation_malformed"
+        return OUTCOME_VIOLATED, verdict.reason_code or VIOLATION_REASON
     if verdict.verdict == RESTORATION_UNPROVEN:
         return OUTCOME_UNPROVEN, verdict.reason_code or "acceptance_observation_unavailable"
     raise AcceptanceError("acceptance_observation_malformed")
@@ -381,6 +382,7 @@ def expected_installation_id(role: str, release_aggregate: str) -> str:
 
 __all__ = [
     "CHANGED",
+    "VIOLATION_REASON",
     "DOC_ABSENT",
     "DOC_PRESENT",
     "DOC_UNREADABLE",

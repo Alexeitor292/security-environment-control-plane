@@ -57,6 +57,7 @@ from secp_acceptance.residue import (
     VERDICT_RESIDUAL,
     VERDICT_UNOBSERVABLE,
     VERDICTS,
+    VIOLATION_REASON,
     ResidueReport,
     outcome_for,
     sweep,
@@ -210,7 +211,7 @@ def test_surviving_objects_of_every_kind_are_found_and_named(monkeypatch):
     assert report.verdict == VERDICT_RESIDUAL
     assert report.clean is False
     assert report.observed is True
-    assert report.reason_code == "acceptance_fleet_teardown_incomplete"
+    assert report.reason_code == VIOLATION_REASON
     assert report.residual == (
         f"container:{PREFIX}-controller",
         f"container:{PREFIX}-worker",
@@ -553,15 +554,13 @@ def test_an_enumerated_leak_is_a_violation_not_an_absence_of_proof():
     thing this harness can leave behind under "we are not sure" would understate it.
     """
     outcome, code = outcome_for(
-        ResidueReport(
-            VERDICT_RESIDUAL,
-            (f"container:{PREFIX}-worker",),
-            KINDS,
-            "acceptance_fleet_teardown_incomplete",
-        )
+        ResidueReport(VERDICT_RESIDUAL, (f"container:{PREFIX}-worker",), KINDS, VIOLATION_REASON)
     )
     assert outcome == OUTCOME_VIOLATED
-    assert code == "acceptance_fleet_teardown_incomplete"
+    assert code == VIOLATION_REASON
+    # ...and it is a HARNESS code: `violated` is the harness reporting what IT saw, so a product
+    # code here would credit the product with a refusal it never made.
+    assert code in HARNESS_REASONS
 
 
 def test_an_unobservable_sweep_maps_to_unproven():
@@ -625,7 +624,7 @@ def test_an_unrecognised_verdict_raises_rather_than_defaulting():
     ("verdict", "fallback"),
     [
         (VERDICT_UNOBSERVABLE, "acceptance_observation_unavailable"),
-        (VERDICT_RESIDUAL, "acceptance_fleet_teardown_incomplete"),
+        (VERDICT_RESIDUAL, VIOLATION_REASON),
     ],
 )
 def test_a_non_clean_report_missing_its_reason_still_cannot_become_a_pass(
