@@ -303,6 +303,82 @@ def test_recording_a_non_held_verdict_is_never_a_pass(verdict: str, expected_out
     assert sealed.reason_code is not None
 
 
+# --------------------------------------------------------------------------- the scope gap
+#
+# These were missing entirely until the gap semantics were tightened: the declarator existed and
+# nothing exercised it, so nothing proved the gap it emits survives the loader. A gap that the
+# document refuses would fail the run at seal time, in the last second of a twenty-minute
+# container-tier run, for a reason authored twenty minutes earlier.
+
+
+def test_the_scope_gap_survives_the_loader():
+    """The gap this stage declares on EVERY run must be a gap the document accepts."""
+    from secp_acceptance.queues import (
+        OPERATOR_QUEUE_SCOPE_GAP,
+        declare_operator_queue_scope_gap,
+    )
+
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_QUEUES)
+    for check in CHECKS_BY_STAGE[STAGE_QUEUES]:
+        record_verdict(recorder, check, QueueVerdict(VERDICT_HELD))
+    declare_operator_queue_scope_gap(recorder, weakens=("operator_queue_has_zero_pollers",))
+    evidence = _seal(recorder)
+    gaps = [g for g in evidence.gaps if g.gap == OPERATOR_QUEUE_SCOPE_GAP]
+    assert len(gaps) == 1
+    assert gaps[0].stage == STAGE_QUEUES
+    assert gaps[0].weakens == ("operator_queue_has_zero_pollers",)
+
+
+def test_the_scope_gap_names_real_checks_and_refuses_invented_ones():
+    """``weakens`` is what connects a gap to the claims a reader should discount. A gap that
+    weakened a check id nobody declares would be a footnote on nothing."""
+    from secp_acceptance.queues import declare_operator_queue_scope_gap
+
+    recorder = AcceptanceRecorder()
+    recorder.open_stage(STAGE_QUEUES)
+    with pytest.raises(AcceptanceError):
+        declare_operator_queue_scope_gap(recorder, weakens=("no_such_check",))
+    with pytest.raises(AcceptanceError):
+        declare_operator_queue_scope_gap(recorder, weakens=())
+
+
+def test_the_scope_gap_is_a_substitution_not_a_smuggled_failure():
+    """A gap must not carry a finding that belongs in ``checks``.
+
+    The contract's rule is that a gap says "proven against a stand-in", never "could not be proven"
+    — filing the latter as a gap moves a real finding out of ``checks``, where the verdict is
+    derived from it, into ``gaps``, where nothing computes on it. So the gap's own text must not
+    read as a refusal, and declaring it must not change the run's verdict.
+    """
+    from secp_acceptance.queues import (
+        OPERATOR_QUEUE_SCOPE_SUBSTITUTE,
+        OPERATOR_QUEUE_SCOPE_WHY,
+        declare_operator_queue_scope_gap,
+    )
+
+    def _covered() -> AcceptanceRecorder:
+        rec = AcceptanceRecorder()
+        rec.open_stage(STAGE_QUEUES)
+        for check in CHECKS_BY_STAGE[STAGE_QUEUES]:
+            record_verdict(rec, check, QueueVerdict(VERDICT_HELD))
+        return rec
+
+    without = _seal(_covered())
+    with_gap = _covered()
+    declare_operator_queue_scope_gap(with_gap, weakens=("operator_queue_has_zero_pollers",))
+    sealed = _seal(with_gap)
+
+    # the gap annotates; it does not move a check out of the passing set
+    assert sealed.not_passing() == without.not_passing() == ()
+    assert sealed.violated() == () and sealed.unproven() == ()
+    # ...and its prose describes what WAS proven, not something that was not
+    for text in (OPERATOR_QUEUE_SCOPE_SUBSTITUTE, OPERATOR_QUEUE_SCOPE_WHY):
+        assert "could not" not in text.lower()
+        assert "failed" not in text.lower()
+    assert "proven against" in OPERATOR_QUEUE_SCOPE_SUBSTITUTE
+
+
 def test_the_funnel_records_the_dormancy_check_under_the_worker_install_stage():
     """``resolve_operator_unit_dormant`` is wanted by the worker-install stage too, for
     ``worker_operator_unit_present_disabled_stopped`` — the same observation asked at a different
