@@ -24,6 +24,7 @@ from secp_api.range_models import (
     CompetitionScore,
     CompetitionSubmission,
     CompetitionTeam,
+    CompetitionTeamMember,
     RangeDeploymentOperation,
     RangeInstance,
     RangeLifecycleEvent,
@@ -46,6 +47,7 @@ from secp_api.schemas_range import (
     ScoreboardEntryOut,
     ScoreboardOut,
     SubmissionOut,
+    TeamMemberOut,
     TeamOut,
     TeardownEvidenceOut,
     TeardownResourceOut,
@@ -340,6 +342,17 @@ def team_out(session: Session, team: CompetitionTeam) -> TeamOut:
         score=int(score),
         solved_count=int(solved),
         created_at=team.created_at,
+    )
+
+
+def team_member_out(row: CompetitionTeamMember) -> TeamMemberOut:
+    return TeamMemberOut(
+        id=row.id,
+        competition_id=row.competition_id,
+        team_id=row.team_id,
+        display_name=row.display_name,
+        user_id=row.user_id,
+        created_at=row.created_at,
     )
 
 

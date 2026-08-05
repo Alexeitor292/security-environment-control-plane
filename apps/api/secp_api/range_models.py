@@ -326,6 +326,55 @@ class CompetitionTeam(Base):
     )
 
     competition: Mapped[Competition] = relationship(back_populates="teams")
+    members: Mapped[list[CompetitionTeamMember]] = relationship(
+        back_populates="team", cascade="all, delete-orphan"
+    )
+
+
+class CompetitionTeamMember(Base):
+    """One competitor on one team.
+
+    A competitor is identified by a DISPLAY NAME, not by an ``app_user`` foreign key, and that is
+    deliberate. Competitors at a training event are usually not provisioned SECP users — they are
+    students, or visitors, or a rotating cast on a workshop day — and requiring a real user row to
+    put someone on a scoreboard would either block the common case or push the platform into
+    creating throwaway accounts. ``user_id`` is therefore optional, for the case where a competitor
+    IS a known user and the link is worth keeping.
+
+    Membership carries no authorization whatsoever. It never grants a permission, never affects
+    which organization anything belongs to, and is not consulted when judging a submission — a
+    submission is attributed to a TEAM, and the authenticated principal is what authorizes it. This
+    table is a roster, and treating it as anything more would make display data load-bearing for
+    access control.
+    """
+
+    __tablename__ = "competition_team_member"
+    #: One display name per team. Two "Alex"es on the same team cannot be told apart on a
+    #: scoreboard, so the constraint forces the disambiguation to happen at entry time rather than
+    #: leaving an unreadable roster. The same name on a DIFFERENT team is fine.
+    __table_args__ = (UniqueConstraint("team_id", "display_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("organization.id"), nullable=False, index=True
+    )
+    competition_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("competition.id"), nullable=False, index=True
+    )
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("competition_team.id"), nullable=False, index=True
+    )
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    #: Set only when the competitor is a provisioned SECP user. Never required.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("app_user.id"), nullable=True
+    )
+    added_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    team: Mapped[CompetitionTeam] = relationship(back_populates="members")
 
 
 class CompetitionChallenge(Base):

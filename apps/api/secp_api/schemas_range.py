@@ -53,6 +53,13 @@ class TeamCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class TeamMemberCreate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    #: Optional link to a provisioned SECP user. Competitors at a training event usually are not
+    #: users, so this is never required; when given it must be in the caller's own organization.
+    user_id: uuid.UUID | None = None
+
+
 class SubmissionCreate(BaseModel):
     team_id: uuid.UUID
     challenge_id: uuid.UUID
@@ -227,6 +234,17 @@ class TeamOut(BaseModel):
     join_code: str
     score: int
     solved_count: int
+    created_at: datetime
+
+
+class TeamMemberOut(BaseModel):
+    """A roster entry. Carries no permission and never affects scoring or authorization."""
+
+    id: uuid.UUID
+    competition_id: uuid.UUID
+    team_id: uuid.UUID
+    display_name: str
+    user_id: uuid.UUID | None = None
     created_at: datetime
 
 

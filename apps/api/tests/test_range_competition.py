@@ -419,3 +419,181 @@ def test_competitions_are_organization_scoped(session, principal, other_org_prin
 
     with pytest.raises(AuthorizationError):
         competitions.get_competition(session, other_org_principal, competition.id)
+
+
+# --- range-scoped aliases and team membership ---------------------------------
+
+
+def test_range_scoped_aliases_return_the_same_data_as_the_competition_routes(
+    session, principal, started
+):
+    """The aliases must be aliases. If they ever diverge, one of the two spellings is lying."""
+    competition, team = started
+    challenge = _challenge(session, principal, competition)
+    competitions.submit_flag(
+        session,
+        principal,
+        competition.id,
+        team_id=team.id,
+        challenge_id=challenge.id,
+        value=FIRST_FLAG,
+    )
+    session.commit()
+    range_id = competition.range_instance_id
+
+    # Resolving by range id must reach exactly this competition.
+    assert competitions.get_competition_for_range(session, principal, range_id).id == competition.id
+
+    by_competition = competitions.list_teams(session, principal, competition.id)
+    by_range = competitions.list_teams(
+        session,
+        principal,
+        competitions.get_competition_for_range(session, principal, range_id).id,
+    )
+    assert [t.id for t in by_range] == [t.id for t in by_competition]
+
+    _, entries_a, total_a = competitions.scoreboard(session, principal, competition.id)
+    _, entries_b, total_b = competitions.scoreboard(
+        session,
+        principal,
+        competitions.get_competition_for_range(session, principal, range_id).id,
+    )
+    assert total_a == total_b
+    assert [(e.rank, e.team_id, e.score) for e in entries_a] == [
+        (e.rank, e.team_id, e.score) for e in entries_b
+    ]
+
+
+def test_a_range_without_a_competition_is_a_404_not_an_empty_list(session, principal, ready_range):
+    """An empty roster and 'there is no competition here' are different answers."""
+    from secp_api.errors import NotFoundError
+
+    bare = ranges.create_range(session, principal, template_slug="web-breach-lab")
+    session.commit()
+    with pytest.raises(NotFoundError):
+        competitions.get_competition_for_range(session, principal, bare.id)
+
+
+def test_team_membership_is_a_roster_and_grants_nothing(session, principal, started):
+    competition, team = started
+    member = competitions.add_team_member(
+        session, principal, competition.id, team.id, display_name="Alex Rivera"
+    )
+    session.commit()
+
+    assert member.team_id == team.id
+    assert member.competition_id == competition.id
+    assert member.user_id is None, "a competitor need not be a provisioned SECP user"
+    assert [m.display_name for m in competitions.list_team_members(
+        session, principal, competition.id, team.id
+    )] == ["Alex Rivera"]
+
+    # Membership is not consulted when scoring: the team scores, not the person.
+    challenge = _challenge(session, principal, competition)
+    outcome = competitions.submit_flag(
+        session,
+        principal,
+        competition.id,
+        team_id=team.id,
+        challenge_id=challenge.id,
+        value=FIRST_FLAG,
+    )
+    session.commit()
+    assert outcome.submission.verdict is SubmissionVerdict.accepted
+
+
+def test_members_may_be_added_while_the_competition_is_running(session, principal, started):
+    """A team appearing mid-event changes what the scoreboard means; a latecomer does not."""
+    competition, team = started
+    assert competition.state is CompetitionState.running
+    competitions.add_team_member(
+        session, principal, competition.id, team.id, display_name="Late Arrival"
+    )
+    session.commit()
+    assert len(competitions.list_team_members(session, principal, competition.id, team.id)) == 1
+
+
+def test_a_duplicate_display_name_on_one_team_is_refused(session, principal, started):
+    from secp_api.errors import ValidationFailedError
+
+    competition, team = started
+    competitions.add_team_member(
+        session, principal, competition.id, team.id, display_name="Sam"
+    )
+    session.commit()
+    with pytest.raises(ValidationFailedError):
+        competitions.add_team_member(
+            session, principal, competition.id, team.id, display_name="  Sam  "
+        )
+
+
+def test_the_same_name_on_a_different_team_is_fine(session, principal, started):
+    competition, red = started
+    blue = competitions.create_team(session, principal, competition.id, name="Blue Team")
+    session.commit()
+    competitions.add_team_member(session, principal, competition.id, red.id, display_name="Sam")
+    competitions.add_team_member(session, principal, competition.id, blue.id, display_name="Sam")
+    session.commit()
+    assert len(competitions.list_team_members(session, principal, competition.id, red.id)) == 1
+    assert len(competitions.list_team_members(session, principal, competition.id, blue.id)) == 1
+
+
+def test_a_linked_user_must_be_in_the_same_organization(
+    session, principal, other_org_principal, started
+):
+    """A roster entry must not be able to reference someone outside the tenant."""
+    from secp_api.errors import ValidationFailedError
+
+    competition, team = started
+    with pytest.raises(ValidationFailedError):
+        competitions.add_team_member(
+            session,
+            principal,
+            competition.id,
+            team.id,
+            display_name="Outsider",
+            user_id=other_org_principal.user_id,
+        )
+
+
+def test_removing_a_member_does_not_retract_their_team_solves(session, principal, started):
+    """The scoreboard records what happened. A roster change must not rewrite it."""
+    competition, team = started
+    member = competitions.add_team_member(
+        session, principal, competition.id, team.id, display_name="Departing"
+    )
+    challenge = _challenge(session, principal, competition)
+    competitions.submit_flag(
+        session,
+        principal,
+        competition.id,
+        team_id=team.id,
+        challenge_id=challenge.id,
+        value=FIRST_FLAG,
+    )
+    session.commit()
+
+    competitions.remove_team_member(session, principal, competition.id, team.id, member.id)
+    session.commit()
+
+    assert competitions.list_team_members(session, principal, competition.id, team.id) == []
+    _, entries, _ = competitions.scoreboard(session, principal, competition.id)
+    assert entries[0].score == challenge.points
+    assert entries[0].solved_count == 1
+
+
+def test_a_team_from_another_competition_cannot_be_rostered(session, principal, started):
+    from secp_api.errors import NotFoundError
+
+    competition, _ = started
+    other_range = ranges.create_range(session, principal, template_slug="web-breach-lab")
+    other_range.state = RangeState.ready
+    session.commit()
+    other = competitions.create_competition(session, principal, other_range.id)
+    foreign_team = competitions.create_team(session, principal, other.id, name="Outsiders")
+    session.commit()
+
+    with pytest.raises(NotFoundError):
+        competitions.add_team_member(
+            session, principal, competition.id, foreign_team.id, display_name="Nope"
+        )

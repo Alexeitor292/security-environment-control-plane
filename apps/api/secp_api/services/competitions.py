@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 from secp_api.auth import Principal
 from secp_api.enums import Permission
 from secp_api.errors import DomainError, NotFoundError, ValidationFailedError
+from secp_api.models import User
 from secp_api.range_catalog import get_template
 from secp_api.range_enums import CompetitionState, RangeState, SubmissionVerdict
 from secp_api.range_models import (
@@ -44,6 +45,7 @@ from secp_api.range_models import (
     CompetitionScore,
     CompetitionSubmission,
     CompetitionTeam,
+    CompetitionTeamMember,
     RangeInstance,
     RangeTemplate,
 )
@@ -287,6 +289,106 @@ def list_teams(
         .scalars()
         .all()
     )
+
+
+def _team_in(session: Session, competition: Competition, team_id: uuid.UUID) -> CompetitionTeam:
+    team = session.get(CompetitionTeam, team_id)
+    if team is None or team.competition_id != competition.id:
+        raise NotFoundError("team not found")
+    return team
+
+
+def add_team_member(
+    session: Session,
+    principal: Principal,
+    competition_id: uuid.UUID,
+    team_id: uuid.UUID,
+    *,
+    display_name: str,
+    user_id: uuid.UUID | None = None,
+) -> CompetitionTeamMember:
+    """Put one competitor on one team.
+
+    Roster data only — see :class:`~secp_api.range_models.CompetitionTeamMember`. Adding someone
+    grants them nothing; submissions are attributed to the team and authorized by the authenticated
+    principal.
+
+    Members may be added while the competition is RUNNING, unlike teams. A team appearing mid-event
+    changes what the scoreboard means; a latecomer joining an existing team does not.
+    """
+    competition = get_competition(session, principal, competition_id)
+    principal.require(Permission.exercise_operate)
+    team = _team_in(session, competition, team_id)
+
+    cleaned = display_name.strip()
+    if not cleaned:
+        raise ValidationFailedError("a team member needs a display name")
+    clash = session.execute(
+        select(CompetitionTeamMember).where(
+            CompetitionTeamMember.team_id == team.id,
+            CompetitionTeamMember.display_name == cleaned[:120],
+        )
+    ).scalar_one_or_none()
+    if clash is not None:
+        raise ValidationFailedError(f"'{cleaned}' is already on this team")
+
+    if user_id is not None:
+        # A named user must belong to the SAME organization. Accepting an arbitrary user id here
+        # would let a roster entry quietly reference someone outside the tenant.
+        user = session.get(User, user_id)
+        if user is None or user.organization_id != competition.organization_id:
+            raise ValidationFailedError("that user is not in this organization")
+
+    member = CompetitionTeamMember(
+        organization_id=competition.organization_id,
+        competition_id=competition.id,
+        team_id=team.id,
+        display_name=cleaned[:120],
+        user_id=user_id,
+        added_by=principal.user_id,
+    )
+    session.add(member)
+    session.flush()
+    return member
+
+
+def list_team_members(
+    session: Session,
+    principal: Principal,
+    competition_id: uuid.UUID,
+    team_id: uuid.UUID,
+) -> list[CompetitionTeamMember]:
+    competition = get_competition(session, principal, competition_id)
+    team = _team_in(session, competition, team_id)
+    return list(
+        session.execute(
+            select(CompetitionTeamMember)
+            .where(CompetitionTeamMember.team_id == team.id)
+            .order_by(CompetitionTeamMember.created_at)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def remove_team_member(
+    session: Session,
+    principal: Principal,
+    competition_id: uuid.UUID,
+    team_id: uuid.UUID,
+    member_id: uuid.UUID,
+) -> None:
+    competition = get_competition(session, principal, competition_id)
+    principal.require(Permission.exercise_operate)
+    team = _team_in(session, competition, team_id)
+    member = session.get(CompetitionTeamMember, member_id)
+    if member is None or member.team_id != team.id:
+        raise NotFoundError("team member not found")
+    # Removing a competitor does NOT retract their team's solves. The team earned them, the
+    # scoreboard is a record of what happened, and silently restating history because a roster
+    # changed would make the scoreboard unreliable.
+    session.delete(member)
+    session.flush()
 
 
 def delete_team(

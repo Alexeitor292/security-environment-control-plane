@@ -21,6 +21,7 @@ from secp_api.range_projection import (
     competition_out,
     scoreboard_out,
     submission_out,
+    team_member_out,
     team_out,
 )
 from secp_api.schemas_range import (
@@ -31,6 +32,8 @@ from secp_api.schemas_range import (
     SubmissionCreate,
     SubmissionOut,
     TeamCreate,
+    TeamMemberCreate,
+    TeamMemberOut,
     TeamOut,
 )
 from secp_api.services import competitions
@@ -57,6 +60,129 @@ def get_competition_for_range(
 ) -> CompetitionOut:
     competition = competitions.get_competition_for_range(session, principal, range_id)
     return competition_out(session, competition)
+
+
+# --- range-scoped aliases -----------------------------------------------------
+#
+# A range has exactly ONE competition (unique constraint on
+# ``competition.range_instance_id``), so every competition-scoped read has an unambiguous
+# range-scoped spelling. These three exist because the shipped UI addresses them that way: an
+# operator holds a range id, not a competition id, and making the client fetch the competition
+# first only to fetch its teams is a round trip that buys nothing.
+#
+# They are ALIASES, not a second implementation. Each resolves the range's competition and calls
+# the same service function as its ``/competitions/{id}/...`` twin, so there is no second code path
+# to keep in step and no way for the two spellings to disagree. The competition-scoped routes are
+# unchanged and are not deprecated — a client that already holds a competition id should keep
+# using them.
+
+
+@router.get("/ranges/{range_id}/teams", response_model=list[TeamOut])
+def list_range_teams(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> list[TeamOut]:
+    competition = competitions.get_competition_for_range(session, principal, range_id)
+    return [
+        team_out(session, team)
+        for team in competitions.list_teams(session, principal, competition.id)
+    ]
+
+
+@router.post("/ranges/{range_id}/teams", response_model=TeamOut, status_code=201)
+def create_range_team(
+    range_id: uuid.UUID,
+    body: TeamCreate,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> TeamOut:
+    competition = competitions.get_competition_for_range(session, principal, range_id)
+    team = competitions.create_team(session, principal, competition.id, name=body.name)
+    return team_out(session, team)
+
+
+@router.get("/ranges/{range_id}/teams/{team_id}/members", response_model=list[TeamMemberOut])
+def list_range_team_members(
+    range_id: uuid.UUID,
+    team_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> list[TeamMemberOut]:
+    competition = competitions.get_competition_for_range(session, principal, range_id)
+    return [
+        team_member_out(member)
+        for member in competitions.list_team_members(
+            session, principal, competition.id, team_id
+        )
+    ]
+
+
+@router.post(
+    "/ranges/{range_id}/teams/{team_id}/members",
+    response_model=TeamMemberOut,
+    status_code=201,
+)
+def add_range_team_member(
+    range_id: uuid.UUID,
+    team_id: uuid.UUID,
+    body: TeamMemberCreate,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> TeamMemberOut:
+    competition = competitions.get_competition_for_range(session, principal, range_id)
+    member = competitions.add_team_member(
+        session,
+        principal,
+        competition.id,
+        team_id,
+        display_name=body.display_name,
+        user_id=body.user_id,
+    )
+    return team_member_out(member)
+
+
+@router.delete(
+    "/ranges/{range_id}/teams/{team_id}/members/{member_id}",
+    status_code=204,
+)
+def remove_range_team_member(
+    range_id: uuid.UUID,
+    team_id: uuid.UUID,
+    member_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> None:
+    competition = competitions.get_competition_for_range(session, principal, range_id)
+    competitions.remove_team_member(session, principal, competition.id, team_id, member_id)
+
+
+@router.get("/ranges/{range_id}/challenges", response_model=list[ChallengeOut])
+def list_range_challenges(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> list[ChallengeOut]:
+    competition = competitions.get_competition_for_range(session, principal, range_id)
+    rows = competitions.list_challenges(session, principal, competition.id)
+    solvers = competitions.solvers_by_challenge(session, competition.id)
+    return [challenge_out(row, solvers) for row in rows]
+
+
+@router.get("/ranges/{range_id}/scoreboard", response_model=ScoreboardOut)
+def get_range_scoreboard(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ScoreboardOut:
+    competition = competitions.get_competition_for_range(session, principal, range_id)
+    resolved, entries, total_points = competitions.scoreboard(
+        session, principal, competition.id
+    )
+    return scoreboard_out(resolved, entries, total_points)
+
+
+# --- competition-scoped routes ------------------------------------------------
 
 
 @router.get("/competitions/{competition_id}", response_model=CompetitionOut)
@@ -120,6 +246,61 @@ def list_teams(
         team_out(session, team)
         for team in competitions.list_teams(session, principal, competition_id)
     ]
+
+
+@router.get(
+    "/competitions/{competition_id}/teams/{team_id}/members",
+    response_model=list[TeamMemberOut],
+)
+def list_team_members(
+    competition_id: uuid.UUID,
+    team_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> list[TeamMemberOut]:
+    return [
+        team_member_out(member)
+        for member in competitions.list_team_members(
+            session, principal, competition_id, team_id
+        )
+    ]
+
+
+@router.post(
+    "/competitions/{competition_id}/teams/{team_id}/members",
+    response_model=TeamMemberOut,
+    status_code=201,
+)
+def add_team_member(
+    competition_id: uuid.UUID,
+    team_id: uuid.UUID,
+    body: TeamMemberCreate,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> TeamMemberOut:
+    member = competitions.add_team_member(
+        session,
+        principal,
+        competition_id,
+        team_id,
+        display_name=body.display_name,
+        user_id=body.user_id,
+    )
+    return team_member_out(member)
+
+
+@router.delete(
+    "/competitions/{competition_id}/teams/{team_id}/members/{member_id}",
+    status_code=204,
+)
+def remove_team_member(
+    competition_id: uuid.UUID,
+    team_id: uuid.UUID,
+    member_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> None:
+    competitions.remove_team_member(session, principal, competition_id, team_id, member_id)
 
 
 @router.delete("/competitions/{competition_id}/teams/{team_id}", status_code=204)
