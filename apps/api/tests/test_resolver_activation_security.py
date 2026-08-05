@@ -12,6 +12,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from frontend_scan import assert_no_forbidden_tokens
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 API_PKG = REPO_ROOT / "apps" / "api" / "secp_api"
 WEB_SRC = REPO_ROOT / "apps" / "web" / "src"
@@ -189,15 +191,8 @@ def test_frontend_has_no_secret_backend_or_activation_toggle_field():
         "/secrets",
         "readSecret",
     )
-    scanned = 0
-    for path in list(WEB_SRC.rglob("*.ts")) + list(WEB_SRC.rglob("*.tsx")):
-        if ".mypy_cache" in path.parts or "node_modules" in path.parts:
-            continue
-        scanned += 1
-        text = path.read_text(encoding="utf-8")
-        for token in forbidden:
-            assert token not in text, f"frontend {path.name} references `{token}`"
-    assert scanned >= 5
+    # Coverage proved against `git ls-files` rather than a floor of five — see `frontend_scan`.
+    assert_no_forbidden_tokens(forbidden)
 
 
 def test_frontend_states_the_sealed_until_evidence_wording():

@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from frontend_scan import assert_no_forbidden_tokens
 from secp_api.live_read_contract import (
     LIVE_READ_COLLECTOR_CONTRACT_VERSION,
     PROXMOX_READONLY_POLICY_VERSION,
@@ -157,15 +158,11 @@ def test_frontend_has_no_openbao_or_secret_resolution_interface():
         'type="password"',
         "type='password'",
     )
-    scanned = 0
-    for path in list(WEB_SRC.rglob("*.ts")) + list(WEB_SRC.rglob("*.tsx")):
-        if ".mypy_cache" in path.parts or "node_modules" in path.parts:
-            continue
-        scanned += 1
-        text = path.read_text(encoding="utf-8")
-        for token in forbidden:
-            assert token not in text, f"frontend {path.name} references `{token}`"
-    assert scanned >= 5
+    # Coverage is proved against `git ls-files`, not against a floor. The old `scanned >= 5` was
+    # written when the frontend was tiny; at 200+ files it would have passed while covering three
+    # percent of the tree. See `frontend_scan` for why the cross-check is Git rather than a second
+    # traversal, and why every violation is reported together instead of the first one.
+    assert_no_forbidden_tokens(forbidden)
 
 
 # --- default wiring constructs no client and never resolves --------------------------------------
