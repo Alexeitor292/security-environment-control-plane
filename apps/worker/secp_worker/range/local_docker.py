@@ -79,8 +79,40 @@ OWNER_LABEL_KEY = "secp.range.owner"
 OWNER_LABEL_VALUE = "secp-range"
 RANGE_ID_LABEL_KEY = "secp.range.id"
 
-#: Vulnerable software is bound to loopback only — never 0.0.0.0.
+#: Vulnerable software is bound to loopback only — never 0.0.0.0. This is the address the range is
+#: PUBLISHED on and the address the operator is TOLD to use, and it is a security property rather
+#: than an implementation detail. It is never widened to make a probe succeed.
 BIND_HOST = "127.0.0.1"
+
+#: Where the worker LOOKS for the published port. Distinct from ``BIND_HOST``, which is where the
+#: port is published and what every observation, event and operator-facing URL keeps reporting.
+#:
+#: The two differ as soon as the worker itself runs in a container. ``--publish 127.0.0.1::p`` binds
+#: the DAEMON HOST's loopback; on Docker Desktop that is the Windows/macOS host, reached through the
+#: port-forwarding proxy. A containerized worker's own ``127.0.0.1`` is its private namespace, so
+#: the probe gets ECONNREFUSED while the service is up and answering the operator perfectly well —
+#: readiness reported as ``readiness_not_observed`` for a range that had genuinely deployed.
+#:
+#: Measured on Docker Desktop 29.4.0, one juice-shop container, one published port, three vantage
+#: points: from the host ``127.0.0.1:<p>`` answered HTTP 200; from the shipped Compose worker the
+#: same address was refused and ``host.docker.internal:<p>`` answered HTTP 200. ``network_mode:
+#: host`` does NOT close the gap — it joins the Linux VM's namespace, which is also not where the
+#: forwarded port lives — so this cannot be fixed by how the worker is networked.
+#:
+#: ``BIND_HOST`` stays FIRST so a worker running directly on the host probes exactly what it always
+#: did, on the same first attempt. The alternate is only ever consulted after the primary has
+#: actually failed to connect, and it resolves only inside a container — on a host-run worker the
+#: name does not resolve and the extra attempt costs a failed DNS lookup.
+#:
+#: Both names denote the SAME published port on the same daemon host, so this widens where the
+#: worker looks, never what counts as an answer. Readiness still requires a real HTTP response.
+#:
+#: KNOWN GAP: on a NATIVE Linux Engine a containerized worker is still unable to reach a
+#: loopback-published port — no container namespace can — and ``host.docker.internal`` resolves
+#: there only with an explicit ``host-gateway`` mapping, which points at the bridge gateway rather
+#: than the loopback. That configuration is untested and is expected to still report
+#: ``readiness_not_observed``. It is not claimed as fixed.
+PROBE_HOSTS: tuple[str, ...] = (BIND_HOST, "host.docker.internal")
 
 #: Bounded resources per range container so a runaway demo cannot exhaust the host.
 CONTAINER_MEMORY = "1g"
@@ -436,10 +468,16 @@ class LocalDockerProvider:
         """
         deadline = time.monotonic() + component.readiness_timeout_seconds
         last_detail = "not observed"
-        url = (
-            f"{component.protocol}://{BIND_HOST}:{observation.host_port}{component.path}"
+        # One entry per vantage point the SAME published port may be reachable from. See
+        # ``PROBE_HOSTS``: the port is published on BIND_HOST, but a containerized worker cannot
+        # reach the daemon host's loopback from its own namespace.
+        probes = (
+            [
+                (host, f"{component.protocol}://{host}:{observation.host_port}{component.path}")
+                for host in PROBE_HOSTS
+            ]
             if observation.host_port is not None
-            else None
+            else []
         )
         while time.monotonic() < deadline:
             payload = inspect_json("container", observation.name)
@@ -448,7 +486,7 @@ class LocalDockerProvider:
             if status in {"exited", "dead"}:
                 exit_code = state.get("ExitCode")
                 return False, f"container {status} (exit {exit_code})"
-            if url is None:
+            if not probes:
                 if status == "running":
                     # Require the running state to PERSIST, so a container that dies immediately
                     # after start is not mistaken for a healthy one.
@@ -459,10 +497,17 @@ class LocalDockerProvider:
                         return True, "running"
                 last_detail = f"container {status}"
             else:
-                ok, detail = _probe_http(url)
-                if ok:
-                    return True, detail
-                last_detail = detail
+                for host, url in probes:
+                    ok, detail = _probe_http(url)
+                    if ok:
+                        # An answer from the primary reads exactly as it always did. Only a fallback
+                        # names the vantage point, because "responded on 127.0.0.1 (HTTP 200)" would
+                        # otherwise hide that the worker could not in fact reach 127.0.0.1 — which
+                        # is the one thing a person debugging this environment needs to be told.
+                        if host == BIND_HOST:
+                            return True, detail
+                        return True, f"{detail}; probed via {host}"
+                    last_detail = detail
             time.sleep(_READINESS_POLL_SECONDS)
         return False, last_detail
 
