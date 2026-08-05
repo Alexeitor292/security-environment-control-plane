@@ -50,6 +50,7 @@ from enum import Enum
 from secp_worker.provisioning.proxmox_verification import (
     CheckFinding,
     VerificationCheck,
+    finding_from,
 )
 
 
@@ -308,7 +309,7 @@ def bootstrap_finding(verdicts: tuple[GuestBootstrapVerdict, ...]) -> CheckFindi
       range whose bootstrap passed — it is one nothing was checked about.
     """
     if not verdicts:
-        return CheckFinding(
+        return finding_from(
             check=VerificationCheck.guest_readiness,
             observed=False,
             ok=False,
@@ -320,7 +321,7 @@ def bootstrap_finding(verdicts: tuple[GuestBootstrapVerdict, ...]) -> CheckFindi
         for v in verdicts
         if v.state in BOOTSTRAP_OBSERVED_FAILURES
     ]
-    return CheckFinding(
+    return finding_from(
         check=VerificationCheck.guest_readiness,
         observed=not unobserved,
         ok=not failures and not unobserved,

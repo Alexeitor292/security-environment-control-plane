@@ -374,7 +374,10 @@ def test_an_operation_generation_that_does_not_advance_is_refused():
 
 
 def finding(check: VerificationCheck, *, observed: bool = True, ok: bool = True) -> CheckFinding:
-    return CheckFinding(check=check, observed=observed, ok=ok, detail="")
+    """``observed=False`` yields ``ok=None`` — an unobserved check has no verdict to carry."""
+    if not observed:
+        return CheckFinding.unobserved(check, "")
+    return CheckFinding.observed_result(check, ok=ok, detail="")
 
 
 def full_report(outcome=VerificationOutcome.verified, **overrides) -> VerificationReport:

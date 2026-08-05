@@ -422,6 +422,43 @@ class ProxmoxDestroyAuthorizationOut(BaseModel):
     blocked_reason: str | None = None
 
 
+class CheckFindingOut(BaseModel):
+    """One check the worker recorded, with the ``(observed, ok)`` PAIR on the contract.
+
+    These arrays used to be published as ``list[dict[str, Any]]``, so the generated TypeScript was
+    ``{ [key: string]: unknown }[]`` and the pair did not exist in the contract at all. The
+    projection preserved it faithfully and every client received it as ``unknown`` — which meant
+    "unknown is not false" was enforced by convention on the frontend rather than by the schema, in
+    the one place the per-check tri-state actually lives.
+
+    ``extra="allow"`` is what makes typing these safe. The worker writes the finding and may write
+    keys this model does not name; a strict model would silently DROP them, which is a worse defect
+    than the one being fixed — it would discard evidence a worker went to the trouble of recording.
+    So the four fields the contract guarantees are declared, and anything else the worker wrote
+    passes through untouched.
+
+    THE THREE LEGAL STATES, and the fourth that is not:
+
+        observed=false, ok=null    the check could not be run; nothing is known
+        observed=true,  ok=false   the check ran and failed
+        observed=true,  ok=true    the check ran and passed
+
+    ``observed=false, ok=false`` is the substitution this pair exists to prevent — a check nobody
+    could make reading as a check that failed. It is now unconstructible upstream:
+    ``secp_worker.provisioning.proxmox_verification.CheckFinding`` refuses it.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    check: str
+    #: False when the check could not be run. Never a pass.
+    observed: bool
+    #: ``None`` exactly when ``observed`` is false. A verdict requires an observation, so a null
+    #: here means "nobody looked" and never "it failed".
+    ok: bool | None = None
+    detail: str | None = None
+
+
 class ProxmoxVerificationOut(BaseModel):
     """What was OBSERVED after an apply — infrastructure and isolation reported separately.
 
@@ -439,12 +476,17 @@ class ProxmoxVerificationOut(BaseModel):
     infrastructure_outcome: str | None = None
     isolation_outcome: str | None = None
     #: ``None`` when nothing was recorded, and ``None`` also when a recorded report carried
-    #: no such key. Each finding keeps whatever the worker wrote — in particular a check's
-    #: observed/ok PAIR, never flattened to one boolean: a check that could not be observed
-    #: and a check that ran and failed are different outcomes, and one boolean makes them
-    #: indistinguishable to every client downstream.
-    infrastructure_checks: list[dict[str, Any]] | None = None
-    isolation_checks: list[dict[str, Any]] | None = None
+    #: no such key — distinct from ``[]``, which says a report was recorded and contained no
+    #: checks of this class.
+    #:
+    #: TYPED, so the ``(observed, ok)`` pair is in the CONTRACT and not merely preserved by the
+    #: projection. It used to be ``list[dict[str, Any]]``: the pair survived serialization
+    #: faithfully but was invisible to the generated client, which received
+    #: ``{ [key: string]: unknown }[]`` and had no typed guarantee that ``observed`` was even
+    #: present. ``CheckFindingOut`` allows extra keys, so anything else the worker recorded still
+    #: travels — declaring the shape must not become a reason to discard evidence.
+    infrastructure_checks: list[CheckFindingOut] | None = None
+    isolation_checks: list[CheckFindingOut] | None = None
     observed_at: datetime | None = None
     detail: str | None = None
 

@@ -622,7 +622,14 @@ def test_without_a_prober_isolation_is_unobserved_and_the_range_is_not_verified(
         finding = report.finding(check)
         assert finding is not None
         assert finding.observed is False
-        assert finding.ok is False
+        # ``ok is None``, NOT ``ok is False``. This assertion used to read ``is False``, which
+        # asserted the very substitution the pair exists to prevent: a check nobody could run
+        # reported with the same verdict as a check that ran and failed. An unobserved check has
+        # no verdict at all, and the type now refuses to give it one.
+        assert finding.ok is None
+        # And it still counts against the range, which is the property that actually matters:
+        # "no verdict" must never resolve to a pass.
+        assert finding.counts_as_failure is True
         assert "never inferred from configuration" in finding.detail
 
 
@@ -661,7 +668,17 @@ def test_uncollected_state_makes_agreement_unobserved_rather_than_agreed():
 
 
 def finding(check: VerificationCheck, *, observed=True, ok=True) -> CheckFinding:
-    return CheckFinding(check=check, observed=observed, ok=ok, detail="")
+    """Build a finding, routing through the constructor that matches what is being expressed.
+
+    ``observed=False`` now yields ``ok=None`` rather than ``ok=False``. The callers below that ask
+    for an unobserved check were passing ``ok=False`` and meaning "nothing was established" — which
+    is precisely the substitution the pair exists to prevent, written into the tests that were
+    supposed to be guarding against it. ``CheckFinding`` now refuses the combination, so this
+    helper says which of the three states each call site means.
+    """
+    if not observed:
+        return CheckFinding.unobserved(check, "")
+    return CheckFinding.observed_result(check, ok=ok, detail="")
 
 
 def test_outcome_precedence_ranks_isolation_above_state_disagreement():

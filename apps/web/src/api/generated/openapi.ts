@@ -4695,6 +4695,44 @@ export interface components {
             toolchain_profile_id: string;
         };
         /**
+         * CheckFindingOut
+         * @description One check the worker recorded, with the ``(observed, ok)`` PAIR on the contract.
+         *
+         *     These arrays used to be published as ``list[dict[str, Any]]``, so the generated TypeScript was
+         *     ``{ [key: string]: unknown }[]`` and the pair did not exist in the contract at all. The
+         *     projection preserved it faithfully and every client received it as ``unknown`` — which meant
+         *     "unknown is not false" was enforced by convention on the frontend rather than by the schema, in
+         *     the one place the per-check tri-state actually lives.
+         *
+         *     ``extra="allow"`` is what makes typing these safe. The worker writes the finding and may write
+         *     keys this model does not name; a strict model would silently DROP them, which is a worse defect
+         *     than the one being fixed — it would discard evidence a worker went to the trouble of recording.
+         *     So the four fields the contract guarantees are declared, and anything else the worker wrote
+         *     passes through untouched.
+         *
+         *     THE THREE LEGAL STATES, and the fourth that is not:
+         *
+         *         observed=false, ok=null    the check could not be run; nothing is known
+         *         observed=true,  ok=false   the check ran and failed
+         *         observed=true,  ok=true    the check ran and passed
+         *
+         *     ``observed=false, ok=false`` is the substitution this pair exists to prevent — a check nobody
+         *     could make reading as a check that failed. It is now unconstructible upstream:
+         *     ``secp_worker.provisioning.proxmox_verification.CheckFinding`` refuses it.
+         */
+        CheckFindingOut: {
+            /** Check */
+            check: string;
+            /** Detail */
+            detail?: string | null;
+            /** Observed */
+            observed: boolean;
+            /** Ok */
+            ok?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * CommandKind
          * @description Which operator act a durable command record is.
          *
@@ -7047,15 +7085,11 @@ export interface components {
             /** Detail */
             detail?: string | null;
             /** Infrastructure Checks */
-            infrastructure_checks?: {
-                [key: string]: unknown;
-            }[] | null;
+            infrastructure_checks?: components["schemas"]["CheckFindingOut"][] | null;
             /** Infrastructure Outcome */
             infrastructure_outcome?: string | null;
             /** Isolation Checks */
-            isolation_checks?: {
-                [key: string]: unknown;
-            }[] | null;
+            isolation_checks?: components["schemas"]["CheckFindingOut"][] | null;
             /** Isolation Outcome */
             isolation_outcome?: string | null;
             /** Observed At */
@@ -9062,6 +9096,7 @@ export type CandidatePlanResourceOut = components['schemas']['CandidatePlanResou
 export type CapabilityState = components['schemas']['CapabilityState'];
 export type ChallengeOut = components['schemas']['ChallengeOut'];
 export type ChangeSetApprovalOut = components['schemas']['ChangeSetApprovalOut'];
+export type CheckFindingOut = components['schemas']['CheckFindingOut'];
 export type CommandKind = components['schemas']['CommandKind'];
 export type CompetitionCreate = components['schemas']['CompetitionCreate'];
 export type CompetitionOut = components['schemas']['CompetitionOut'];
