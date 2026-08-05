@@ -153,9 +153,18 @@ describe("permission strings are real server permissions", () => {
   it("gates on nothing the server cannot grant", async () => {
     // THE LOAD-BEARING ASSERTION. A string outside this set hides its surface
     // from every user, forever, while rendering a notice that looks deliberate.
+    //
+    // ITS OWN COUNT IS ASSERTED HERE, not only in the precondition above, and
+    // that is not belt-and-braces. "No forbidden thing was found" is the natural
+    // shape for a boundary guard and it PASSES VACUOUSLY on an empty scan --
+    // measured: emptying the glob left this assertion green while the precondition
+    // went red. Two tests can be separated, skipped, or deleted independently, so
+    // the assertion that must never lie carries its own floor.
     const permissions = await serverPermissions();
-    const unknown = declaredPermissions().filter((u) => !permissions.has(u.permission));
+    const usages = declaredPermissions();
+    expect(usages.length, "nothing was scanned; this result means nothing").toBeGreaterThan(0);
 
+    const unknown = usages.filter((u) => !permissions.has(u.permission));
     expect(
       unknown.map((u) => `${u.permission} (${u.file})`),
       "permission strings no principal can ever hold",

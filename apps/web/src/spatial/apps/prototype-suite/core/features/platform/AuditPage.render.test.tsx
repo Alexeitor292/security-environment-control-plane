@@ -68,9 +68,32 @@ function paint(state: QueryState<AuditRowView>, permissions: readonly string[] =
   );
 }
 
-/** Just the audit card, so the evidence half's own loading skeleton cannot satisfy an assertion. */
+/**
+ * Just the audit card, so the evidence half's own loading skeleton cannot satisfy
+ * an assertion — AND a floor under every assertion in this file.
+ *
+ * MOST OF THE ASSERTIONS BELOW ARE NEGATIVE (`not.toContain("<table")`,
+ * `not.toContain("<th>Origin</th>")`), which is the natural shape for "this must
+ * not be shown" and the shape that PASSES VACUOUSLY ON EMPTY INPUT. A page that
+ * rendered nothing at all — a component returning null, a provider throwing, a
+ * marker that moved — satisfies every one of them at once, and the suite reports
+ * a page that does not exist as a page behaving correctly.
+ *
+ * Measured elsewhere in this change: emptying the frontend enumeration in
+ * `permission-strings.test.ts` left its load-bearing negative green and was
+ * caught only by a separate positive test. Two tests can be separated; a floor
+ * inside the accessor cannot be, and it covers assertions nobody has written yet.
+ */
 function auditRegion(html: string): string {
-  return html.slice(0, html.indexOf("Evidence records"));
+  const marker = html.indexOf("Evidence records");
+  expect(marker, "the evidence section is missing; the page did not render").toBeGreaterThan(0);
+
+  const region = html.slice(0, marker);
+  expect(
+    region.length,
+    "the audit region is empty; every negative assertion would pass vacuously",
+  ).toBeGreaterThan(200);
+  return region;
 }
 
 beforeEach(() => {

@@ -380,6 +380,19 @@ describe("security-property claims", () => {
     // host" is unacknowledged by construction and fails here. The message tells
     // whoever trips it what the choice is, because they will not have read the
     // header.
+    //
+    // IT CARRIES ITS OWN FLOOR. "No unacknowledged claim was found" is the
+    // natural shape for a boundary guard and it passes vacuously on an empty
+    // scan. Measured 2026-08-05 by emptying the glob: four other tests in this
+    // file went red and this one stayed GREEN. That is enough protection today
+    // and it is protection by neighbours -- separable, skippable, deletable. The
+    // assertion that must never lie should not depend on which of its siblings
+    // still exist.
+    expect(
+      Object.keys(PAGE_SOURCES).length,
+      "nothing was scanned; an empty result here means nothing",
+    ).toBeGreaterThan(350);
+
     const unacknowledged: string[] = [];
 
     for (const [key, count] of absoluteClaims()) {
