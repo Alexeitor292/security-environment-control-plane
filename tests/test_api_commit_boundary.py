@@ -203,13 +203,33 @@ def _bind_to_fastapis_teardown_disjunction():
 #   site 3  ``getattr(_unwrapped_call(call), "__call__")``
 #
 # and tests each under two TRANSFORMS — ``_impartial`` (unwrap ``functools.partial``) and
-# ``_unwrapped_call`` (that, then ``inspect.unwrap``) — in two FLAVOURS, sync and async. Three by
-# two by two is twelve cells, plus the ``isclass`` early-out and the negatives.
+# ``_unwrapped_call`` (that, then ``inspect.unwrap``) — in two FLAVOURS, sync and async. The cells
+# are that product; ``len(TEARDOWN_CELLS)`` is how many there are, and it is deliberately not
+# written out here. Outside the grid sit the ``isclass`` early-out and the negatives.
 #
 # So the corpus is that product, one genuinely callable shape per cell, and the counts are read out
 # of FastAPI's own source by ``_derive_predicate_structure`` rather than typed here. A future
 # FastAPI that adds a call site changes the derived number and FAILS, instead of quietly leaving a
 # cell uncovered — which is the failure this replaces.
+#
+# WHY THE GRID, AND NOT A COUNT OF THE PREDICATE'S RETURN POINTS.
+#
+# Two independent derivations of this gap were made, and they disagreed on the number: one counted
+# seven return points with six exercised, the other mapped eight branch labels and found three
+# unreached. They were not in conflict — they were two conventions over one structure, differing
+# only in whether sync and async collapse into a single return point. Reconciling the numbers was
+# not the useful move, because BOTH conventions are blind to the thing that actually bit us.
+#
+# A return point is reached by the FIRST shape that gets there, so branch coverage is satisfied
+# cheaply and then stops asking questions. The wrong binding did not fail by missing a branch. It
+# failed on a COMPOSITION — ``_impartial`` and THEN ``.__call__`` — whose every individual branch
+# the old corpus already reached. Branch coverage and transform coverage are different properties,
+# and only the second one catches this. (Concretely: ``functools.partial`` of an instance is not a
+# new branch at all, it takes one the corpus already reached, and it was still a real gap.)
+#
+# So the grid indexes by (call site x transform x flavour) rather than by return point. It is the
+# finer partition, it subsumes both enumerations, and a cell can be uncovered while every return
+# point is green — which is precisely the state this module was in when review found it.
 
 _DECLARED_CALL_SITES = 3
 _DECLARED_TRANSFORMS = ("_impartial", "_unwrapped_call")
@@ -324,7 +344,10 @@ def _build_teardown_shape_corpus():
         yield None
 
     def revealed_by_unwrap(target):
-        """A PLAIN function whose ``__wrapped__`` is a generator; only ``_unwrapped_call`` sees it."""
+        """A PLAIN function whose ``__wrapped__`` is a generator.
+
+        Only ``_unwrapped_call`` sees the generator; ``_impartial`` stops at the plain wrapper.
+        """
 
         @functools.wraps(target)
         def revealed(*args, **kwargs):  # pragma: no cover
