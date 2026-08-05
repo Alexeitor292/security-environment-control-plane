@@ -1269,6 +1269,165 @@ def test_socket_gate_declares_its_engine_scope_and_refuses_anything_else():
         sqlite.dispose()
 
 
+# --- the Proxmox operator surface socket gate ------------------------------------------------
+#
+# A SECOND excluded live-socket module with its OWN job. The same three-part pairing is proved for
+# it — the exclusion, the job, and the module's own shape — because the failure mode is identical
+# and not covered by the proofs above: those are all keyed to `SOCKET_GATE_MODULE` by name, so a
+# second excluded module could be added, be run by nothing, and every one of them would stay green.
+
+OPERATOR_GATE_JOB = "backend-operator-surface-socket-gate"
+OPERATOR_GATE_MODULE = "apps/api/socket_gate_tests/test_operator_surface_over_socket.py"
+
+
+def _operator_gate_module():
+    from socket_gate_tests import test_operator_surface_over_socket as gate
+
+    return gate
+
+
+def test_operator_gate_module_is_excluded_from_the_corpus_and_names_its_job(suite):
+    entries = {entry["path"]: entry for entry in suite.get("exclusions", [])}
+    assert OPERATOR_GATE_MODULE in entries, (
+        "the operator surface gate lives outside the canonical roots, so it must be an explicit "
+        "exclusion or the inventory proof fails closed"
+    )
+    entry = entries[OPERATOR_GATE_MODULE]
+    assert entry["job"] == OPERATOR_GATE_JOB
+    assert entry["reason"].strip(), "an exclusion without a justification is not a decision"
+    assert not any(
+        OPERATOR_GATE_MODULE == root or OPERATOR_GATE_MODULE.startswith(root + "/")
+        for root in suite["roots"]
+    )
+
+
+def test_every_excluded_pytest_module_has_a_job_that_runs_it(suite, wf):
+    """Keyed on the DATA, not on a list in this file.
+
+    The proofs above name their modules as constants, so a third excluded pytest module could be
+    added tomorrow, be run by nothing, and every named-constant test would still pass. This one
+    enumerates the exclusions from the suite config: any entry that declares a ``job`` must name a
+    job that exists and actually runs that path, and any pytest-shaped exclusion that declares no
+    job must say in its reason why nothing needs to run it.
+    """
+    jobs = _jobs(wf)
+    for entry in suite.get("exclusions", []):
+        path = entry["path"]
+        job = entry.get("job")
+        if job is None:
+            # A non-suite module (a runtime self-test that merely matches the glob). Its reason has
+            # to say so; otherwise an excluded real suite could hide here by omitting the key.
+            assert "not a pytest suite" in entry["reason"], (
+                f"{path} is excluded with no job and no statement that it is not a suite"
+            )
+            continue
+        assert job in jobs, f"{path} names job {job!r}, which does not exist in the workflow"
+        assert path in _run_text(jobs[job]), f"job {job!r} does not run {path}"
+
+
+def test_operator_gate_job_runs_the_exact_module_against_real_postgres(wf):
+    jobs = _jobs(wf)
+    assert OPERATOR_GATE_JOB in jobs
+    job = jobs[OPERATOR_GATE_JOB]
+    assert job["services"]["postgres"]["image"].startswith("postgres:16")
+    assert job["env"]["SECP_TEST_POSTGRES_URL"].startswith("postgresql+psycopg://")
+    run = _run_text(job)
+    assert OPERATOR_GATE_MODULE in run
+    # Scoped to the gate: it does not elevate or re-run any other corpus.
+    assert "apps/api/tests" not in run
+    assert "pytest_shards.py" not in run
+    # It reaches no real infrastructure. `proxmox` is NOT forbidden here (it is the module's own
+    # name), so the check is on the things that would actually contact something.
+    for forbidden in ("ssh ", "opentofu", "terraform", "secp-operator", "docker run"):
+        assert forbidden not in run.lower()
+
+
+def test_operator_gate_job_refuses_a_skipped_miscollected_or_absorbed_run(wf):
+    """No PENDING state: this gate's only acceptable shape is "ran in full and passed".
+
+    The read-after-write gate legitimately has two states because it was written while its defect
+    was still present. This one asserts properties that hold today, so an expected failure would
+    mean one of them stopped holding and was absorbed — and it is refused by name.
+    """
+    run = _run_text(_jobs(wf)[OPERATOR_GATE_JOB])
+    assert "--junitxml=junit-operator-surface-socket-gate.xml" in run
+    assert "tests != EXPECTED_TESTS" in run, "an exact count, never a floor"
+    assert "plain_skipped" in run and "SKIPPED outright" in run
+    assert "pytest.xfail" in run, "it must tell an expected failure from a real skip"
+    assert "if xfailed:" in run, "an absorbed failure must be refused, not counted as coverage"
+    assert "sys.exit(1)" in run
+    upload = next(
+        step
+        for step in _steps(_jobs(wf)[OPERATOR_GATE_JOB])
+        if str(step.get("uses", "")).startswith("actions/upload-artifact")
+    )
+    assert upload.get("if") == "always()"
+    assert upload["with"]["if-no-files-found"] == "error"
+    parse_steps = [
+        step
+        for step in _steps(_jobs(wf)[OPERATOR_GATE_JOB])
+        if "plain_skipped" in str(step.get("run", "")) and step.get("if") == "always()"
+    ]
+    assert parse_steps, "the JUnit-enforcement step must run with if: always()"
+
+
+def test_operator_gate_job_is_required_by_the_backend_aggregate(wf):
+    jobs = _jobs(wf)
+    assert OPERATOR_GATE_JOB in jobs["backend"]["needs"]
+    assert f"needs.{OPERATOR_GATE_JOB}.result" in _run_text(jobs["backend"])
+
+
+def test_operator_gate_job_expects_exactly_the_module_s_test_count(wf):
+    """Couple the workflow's exact count to the module, so neither can drift alone.
+
+    Parametrized tests are counted at their true node count, not one per function: eight of the
+    nodes are the per-command authentication proofs and six are the per-read ones, so deleting a
+    command route's proof moves this number and fails here.
+    """
+    import re
+
+    run = _run_text(_jobs(wf)[OPERATOR_GATE_JOB])
+    declared = re.search(r"EXPECTED_TESTS\s*=\s*(\d+)", run)
+    assert declared, "the operator gate job must declare an exact expected test count"
+
+    gate = _operator_gate_module()
+    total = 0
+    for name in dir(gate):
+        if not name.startswith("test_"):
+            continue
+        function = getattr(gate, name)
+        if not callable(function):
+            continue
+        cases = 1
+        for mark in _marks(function):
+            if mark.name == "parametrize":
+                cases *= len(mark.args[1])
+        total += cases
+    assert int(declared.group(1)) == total, (
+        f"the job expects {declared.group(1)} tests but the module defines {total} nodes"
+    )
+
+
+def test_operator_gate_carries_no_expected_failure_marker():
+    """Re-adding an expected failure is how a broken property is made to look green again."""
+    gate = _operator_gate_module()
+    xfails = [
+        mark
+        for owner in (gate, *(getattr(gate, n) for n in dir(gate) if n.startswith("test_")))
+        for mark in _marks(owner)
+        if mark.name == "xfail"
+    ]
+    assert not xfails, f"the operator surface gate carries expected-failure marker(s): {xfails}"
+
+
+def test_operator_gate_declares_its_engine_scope(wf):
+    """An absent gate must be visible: the skip has to name the capability that was missing."""
+    del wf
+    gate = _operator_gate_module()
+    reasons = [mark.kwargs.get("reason", "") for mark in _marks(gate) if mark.name == "skipif"]
+    assert any("SECP_TEST_POSTGRES_URL" in reason for reason in reasons)
+
+
 def test_socket_gate_job_expects_exactly_the_module_s_test_count(wf):
     """Couple the workflow's exact count to the module, so neither can drift alone."""
     import re
