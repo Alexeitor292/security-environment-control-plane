@@ -115,9 +115,14 @@ class ProxmoxExecutionRequest(_CommandBody, _WorkerFields):
 
 
 class ProxmoxResetRequest(_CommandBody, _WorkerFields):
-    """Request a reset against the authorized plan. ``plan_hash`` ONLY."""
+    """Request a reset of the authorized reset scope. ``reset_hash`` ONLY.
 
-    plan_hash: str = Field(min_length=8, max_length=200)
+    Not ``plan_hash``. A reset DESTROYS every guest in the range and rebuilds it, so it is
+    authorized by naming the guests that will be destroyed — a third hash domain, distinct from
+    both the creation plan and the destroy deletion set (a reset preserves the whole network).
+    """
+
+    reset_hash: str = Field(min_length=8, max_length=200)
 
 
 class ProxmoxReconciliationRequest(_CommandBody):

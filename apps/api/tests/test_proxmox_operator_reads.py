@@ -539,31 +539,46 @@ def test_the_observed_ok_pair_keeps_all_three_states_over_the_wire(client, sessi
 # --- the reset gate is explicit, not a fall-through -------------------------------
 
 
-def test_a_proxmox_reset_refusal_names_the_reset_not_an_apply(session, principal):
-    """The provider-neutral gate used to answer "apply is not authorized" for a reset.
+def test_a_proxmox_reset_refusal_names_the_reset_and_its_own_authorization(session, principal):
+    """A reset needs the RESET authorization, and the refusal says so.
 
-    The gate is unchanged in what it REQUIRES — a reset re-materialises the approved desired state,
-    so the apply authorization is the right one — but it now reaches that conclusion by an explicit
-    branch and says which act it refused, so an operator is not sent to investigate an apply they
-    never requested.
+    The gate used to answer "apply is not authorized" for a reset, by falling through the destroy
+    check. That was wrong in two ways at once: the message named an act the operator had not
+    requested, and — the part that mattered — the apply authorization genuinely was the gate, so an
+    approval to CREATE guests authorized destroying the ones that were running.
     """
+    from secp_api.range_enums import RangeOperationKind
+
     instance = proxmox_range(session, principal)
     with pytest.raises(proxmox_lifecycle.ProxmoxApprovalMissingError) as excinfo:
-        proxmox_lifecycle.require_operation_authorized(session, instance, "reset")
+        proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.reset)
     message = str(excinfo.value)
     assert message.startswith("reset is not authorized")
-    assert "recreates the guests" in message
+    assert "DESTROYS every guest" in message
 
     with pytest.raises(proxmox_lifecycle.ProxmoxApprovalMissingError) as excinfo:
-        proxmox_lifecycle.require_operation_authorized(session, instance, "deploy")
+        proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.deploy)
     assert str(excinfo.value).startswith("apply is not authorized")
 
 
-def test_an_unrecognised_operation_kind_still_requires_an_apply_authorization(session, principal):
-    """Fail closed: an unknown kind is refused, never waved through."""
+def test_an_apply_authorization_does_not_permit_a_reset(session, principal):
+    """The defect this slice corrected, pinned directly.
+
+    Fully authorize an apply — approval and authorization, both current — and a reset must still be
+    refused. Before the reset gained its own hash domain and its own authorization, this passed the
+    gate and would have destroyed every guest in a running range on an apply approval.
+    """
+    from secp_api.range_enums import RangeOperationKind
+
     instance = proxmox_range(session, principal)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    proxmox_lifecycle.approve_plan(session, principal, instance.id, plan_hash=compiled.plan_hash)
+    proxmox_lifecycle.authorize_apply(session, principal, instance.id, plan_hash=compiled.plan_hash)
+    # The apply is genuinely authorized...
+    proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.deploy)
+    # ...and the reset is still refused.
     with pytest.raises(proxmox_lifecycle.ProxmoxApprovalMissingError):
-        proxmox_lifecycle.require_operation_authorized(session, instance, "something_new")
+        proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.reset)
 
 
 # --- non-Proxmox ranges -----------------------------------------------------------

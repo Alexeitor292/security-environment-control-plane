@@ -1210,11 +1210,23 @@ def test_refusal_release_mismatch(session, principal):
 # --- reset and destroy execution over the full chain ---------------------------
 
 
-def test_a_reset_is_gated_on_the_apply_authorization_deliberately(session, principal, monkeypatch):
-    """Stated, not fallen into. The provider-neutral gate reaches this by an else-branch."""
+def drive_to_authorized_reset(session, principal, instance):
+    """Approve and authorize the RESET scope — the guests that will be destroyed."""
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    proxmox_lifecycle.approve_reset_plan(
+        session, principal, instance.id, reset_hash=compiled.reset_hash
+    )
+    proxmox_lifecycle.authorize_reset(
+        session, principal, instance.id, reset_hash=compiled.reset_hash
+    )
+    return compiled
+
+
+def test_a_reset_requires_its_own_authorization_not_the_applys(session, principal, monkeypatch):
+    """A reset DESTROYS every guest, so it carries its own approval over its own hash domain."""
     instance = proxmox_range(session, principal)
     enroll_worker(session, principal)
-    compiled = drive_to_authorized_apply(session, principal, instance)
+    compiled = drive_to_authorized_reset(session, principal, instance)
     instance.state = RangeState.ready
     session.flush()
     dispatched: list[uuid.UUID] = []
@@ -1224,12 +1236,73 @@ def test_a_reset_is_gated_on_the_apply_authorization_deliberately(session, princ
         principal,
         instance.id,
         envelope=envelope(session, instance),
-        plan_hash=compiled.plan_hash,
+        reset_hash=compiled.reset_hash,
         worker=worker_assertion(),
     )
     assert record.operation_kind is CommandKind.request_reset
+    assert record.subject_hash == compiled.reset_hash
+    assert record.subject_hash != compiled.plan_hash
     assert record.enqueued is True
     assert len(dispatched) == 1
+
+
+def test_refusal_reset_plan_not_approved(session, principal):
+    """An authorized APPLY does not approve the reset scope."""
+    instance = proxmox_range(session, principal)
+    enroll_worker(session, principal)
+    compiled = drive_to_authorized_apply(session, principal, instance)
+    instance.state = RangeState.ready
+    session.flush()
+    refuses(
+        RefusalCode.reset_plan_not_approved,
+        proxmox_commands.request_reset,
+        session,
+        principal,
+        instance.id,
+        envelope=envelope(session, instance),
+        reset_hash=compiled.reset_hash,
+        worker=worker_assertion(),
+    )
+
+
+def test_refusal_reset_not_authorized(session, principal):
+    instance = proxmox_range(session, principal)
+    enroll_worker(session, principal)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    proxmox_lifecycle.approve_reset_plan(
+        session, principal, instance.id, reset_hash=compiled.reset_hash
+    )
+    instance.state = RangeState.ready
+    session.flush()
+    refuses(
+        RefusalCode.reset_not_authorized,
+        proxmox_commands.request_reset,
+        session,
+        principal,
+        instance.id,
+        envelope=envelope(session, instance),
+        reset_hash=compiled.reset_hash,
+        worker=worker_assertion(),
+    )
+
+
+def test_refusal_reset_plan_identity_mismatch(session, principal):
+    """A plan hash is not a valid reset hash — a third domain, not a variant of the first."""
+    instance = proxmox_range(session, principal)
+    enroll_worker(session, principal)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    instance.state = RangeState.ready
+    session.flush()
+    refuses(
+        RefusalCode.reset_plan_identity_mismatch,
+        proxmox_commands.request_reset,
+        session,
+        principal,
+        instance.id,
+        envelope=envelope(session, instance),
+        reset_hash=compiled.plan_hash,
+        worker=worker_assertion(),
+    )
 
 
 def test_destroy_execution_runs_the_whole_destroy_chain(session, principal, monkeypatch):

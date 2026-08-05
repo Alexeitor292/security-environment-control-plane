@@ -34,6 +34,7 @@ from secp_api.schemas_proxmox import (
     ProxmoxOwnershipOut,
     ProxmoxPlanOut,
     ProxmoxReadinessOut,
+    ProxmoxResetAuthorizationOut,
     ProxmoxResetDispositionsOut,
     ProxmoxResidueOut,
     ProxmoxTopologyOut,
@@ -319,6 +320,36 @@ def apply_authorization_out(
         approval=approval_out(approval),
         authorization=approval_out(authorization),
         blocked_reason=blocked,
+    )
+
+
+def reset_authorization_out(
+    compiled: CompiledRangePlan | BlockedPlan,
+    approval: ApprovalRecord | None,
+    authorization: ApprovalRecord | None,
+    reset_state: PlanState,
+    auth_state: AuthorizationState,
+) -> ProxmoxResetAuthorizationOut:
+    """Whether a reset is authorized, with the guests it would destroy published alongside."""
+    reset_hash = None if isinstance(compiled, BlockedPlan) else compiled.reset_hash
+    blocked: str | None
+    if isinstance(compiled, BlockedPlan):
+        blocked = blocked_summary(compiled)
+    elif auth_state is AuthorizationState.authorized:
+        blocked = None
+    elif approval is None or approval.approved_hash != reset_hash:
+        blocked = "the current reset scope has not been approved"
+    else:
+        blocked = "the reset scope is approved but the reset has not been authorized"
+    return ProxmoxResetAuthorizationOut(
+        state=auth_state,
+        reset_hash=reset_hash,
+        reset_plan_state=reset_state,
+        approval=approval_out(approval),
+        authorization=approval_out(authorization),
+        blocked_reason=blocked,
+        reset_scope=None if isinstance(compiled, BlockedPlan) else list(compiled.reset_scope),
+        reset_scope_size=None if isinstance(compiled, BlockedPlan) else len(compiled.reset_scope),
     )
 
 

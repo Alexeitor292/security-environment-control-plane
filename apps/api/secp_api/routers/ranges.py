@@ -31,6 +31,7 @@ from secp_api.proxmox_projection import (
     ownership_out,
     plan_out,
     readiness_out,
+    reset_authorization_out,
     reset_dispositions_out,
     residue_out,
     topology_out,
@@ -73,7 +74,10 @@ from secp_api.schemas_proxmox import (
     ProxmoxPlanApprovalRequest,
     ProxmoxPlanOut,
     ProxmoxReadinessOut,
+    ProxmoxResetAuthorizationOut,
+    ProxmoxResetAuthorizationRequest,
     ProxmoxResetDispositionsOut,
+    ProxmoxResetPlanApprovalRequest,
     ProxmoxResidueOut,
     ProxmoxTopologyOut,
     ProxmoxVerificationOut,
@@ -268,7 +272,10 @@ def _start(
     are unaffected.
     """
     instance = ranges.get_range(session, principal, range_id)
-    proxmox_lifecycle.require_operation_authorized(session, instance, kind.value)
+    # The ENUM, not ``kind.value``. Passing the string is what let the gate's destroy branch depend
+    # on ``RangeOperationKind.destroy.value`` still spelling ``"destroy"`` — a rename away from a
+    # destroy being authorized by an apply approval, with nothing to catch it.
+    proxmox_lifecycle.require_operation_authorized(session, instance, kind)
     _, operation = ranges.start_operation(session, principal, range_id, kind)
     get_dispatcher().dispatch_range_operation(session, operation.id)
     return operation_out(operation)
@@ -954,12 +961,12 @@ def request_proxmox_reset(
     session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ProxmoxCommandOut:
-    """Request a reset against the authorized plan. RESETS NOTHING HERE.
+    """Request a reset of the authorized reset scope. RESETS NOTHING HERE.
 
-    Gated on the APPLY authorization, deliberately: a reset re-materialises the same approved
-    desired state, so the authorization that permitted creating those guests is the one that
-    permits recreating them. It is never gated on the destroy authorization — that names a deletion
-    scope in a different hash domain, not the state being restored.
+    Gated on the RESET authorization, not the apply one. A reset DESTROYS every guest in the range
+    and rebuilds it — ``proxmox_reset.plan_reset`` gives ``ResetSubject.guests`` the disposition
+    ``recreated``, defined there as "Destroyed and rebuilt from the reviewed base image" — so an
+    approval to create those guests does not authorize deleting the ones currently running.
     """
     return command_out(
         proxmox_commands.request_reset(
@@ -967,7 +974,7 @@ def request_proxmox_reset(
             principal,
             range_id,
             envelope=_envelope(body),
-            plan_hash=body.plan_hash,
+            reset_hash=body.reset_hash,
             worker=_worker(body),
         )
     )
@@ -1118,6 +1125,93 @@ def authorize_proxmox_apply(
     )
     approval = proxmox_lifecycle.plan_approval(session, instance)
     return apply_authorization_out(
+        compiled,
+        approval,
+        authorization,
+        proxmox_lifecycle.PlanState.approved,
+        proxmox_lifecycle.AuthorizationState.authorized,
+    )
+
+
+@router.get(
+    "/ranges/{range_id}/proxmox/reset-authorization",
+    response_model=ProxmoxResetAuthorizationOut,
+)
+def get_proxmox_reset_authorization(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxResetAuthorizationOut:
+    """Whether a reset is authorized, and exactly which guests it would DESTROY.
+
+    Neither an apply nor a destroy authorization satisfies this. The scope is published because
+    that is what is being approved: approving a reset without seeing the guests that will be
+    deleted would be approving a deletion sight unseen.
+    """
+    instance, _, compiled = _resolve(session, principal, range_id)
+    approval = proxmox_lifecycle.reset_plan_approval(session, instance)
+    authorization = proxmox_lifecycle.reset_authorization(session, instance)
+    return reset_authorization_out(
+        compiled,
+        approval,
+        authorization,
+        proxmox_lifecycle.reset_plan_state(compiled, approval),
+        proxmox_lifecycle.authorization_state(
+            compiled, authorization, expected_hash=getattr(compiled, "reset_hash", None)
+        ),
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/reset-plan-approval",
+    response_model=ProxmoxResetAuthorizationOut,
+    status_code=201,
+)
+def approve_proxmox_reset_plan(
+    range_id: uuid.UUID,
+    body: ProxmoxResetPlanApprovalRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxResetAuthorizationOut:
+    """Approve the exact reset scope, by its own hash. STARTS NOTHING.
+
+    Takes ``reset_hash`` and rejects unknown fields, so neither an apply nor a destroy body
+    validates here. Requires ``exercise:reset``.
+    """
+    instance, compiled, approval = proxmox_lifecycle.approve_reset_plan(
+        session, principal, range_id, reset_hash=body.reset_hash
+    )
+    return reset_authorization_out(
+        compiled,
+        approval,
+        proxmox_lifecycle.reset_authorization(session, instance),
+        proxmox_lifecycle.PlanState.approved,
+        proxmox_lifecycle.AuthorizationState.absent,
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/reset-authorization",
+    response_model=ProxmoxResetAuthorizationOut,
+    status_code=201,
+)
+def authorize_proxmox_reset(
+    range_id: uuid.UUID,
+    body: ProxmoxResetAuthorizationRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxResetAuthorizationOut:
+    """Authorize a reset of an already-approved reset scope. ENQUEUES NOTHING, RESETS NOTHING.
+
+    Structurally distinct from the apply and destroy authorizations at every level: its own path,
+    its own required field, its own hash domain, its own event kind and its own permission. There
+    is no body that satisfies more than one of the three.
+    """
+    instance, compiled, authorization = proxmox_lifecycle.authorize_reset(
+        session, principal, range_id, reset_hash=body.reset_hash
+    )
+    approval = proxmox_lifecycle.reset_plan_approval(session, instance)
+    return reset_authorization_out(
         compiled,
         approval,
         authorization,

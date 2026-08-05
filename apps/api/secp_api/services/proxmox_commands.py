@@ -152,6 +152,27 @@ DESTROY_FAMILY: frozenset[CommandKind] = frozenset(
     {CommandKind.generate_destroy_plan, CommandKind.request_destroy_execution}
 )
 
+#: The RESET family, identified by the reset scope's own digest — a third domain, not a variant of
+#: either other one. A reset destroys every guest and preserves every network object, so its scope
+#: is neither the creation manifest nor the destroy deletion set.
+RESET_FAMILY: frozenset[CommandKind] = frozenset({CommandKind.request_reset})
+
+
+def subject_hash_for(kind: CommandKind, compiled: proxmox_lifecycle.CompiledRangePlan) -> str:
+    """Which digest identifies this command, by family.
+
+    A function rather than a conditional expression inline in the preflight, because it is the one
+    place the three families are distinguished and it must stay exhaustive: a command added to
+    neither set silently falls into the apply family, which is the same fail-open shape that let a
+    string-compared gate authorize a destroy with an apply approval.
+    """
+    if kind in DESTROY_FAMILY:
+        return compiled.destroy_hash
+    if kind in RESET_FAMILY:
+        return compiled.reset_hash
+    return compiled.plan_hash
+
+
 #: Commands that require the range to be in a state where it still owns (or may own) resources.
 _ALLOWED_RANGE_STATES: dict[CommandKind, frozenset[RangeState]] = {
     CommandKind.compile_topology: frozenset(
@@ -231,6 +252,11 @@ class RefusalCode(str, Enum):
     plan_not_approved = "plan_not_approved"
     #: Apply is not authorized for the plan the range currently has.
     apply_not_authorized = "apply_not_authorized"
+    #: The reset scope carries no current approval. A reset destroys every guest, so it is approved
+    #: by naming the guests that will be destroyed — an apply approval is not that approval.
+    reset_plan_not_approved = "reset_plan_not_approved"
+    #: A reset is not authorized. An apply authorization never satisfies this.
+    reset_not_authorized = "reset_not_authorized"
     #: A destroy plan generation record must exist before destroy can be approved or executed.
     destroy_plan_not_generated = "destroy_plan_not_generated"
     #: The destroy plan carries no current approval.
@@ -243,6 +269,8 @@ class RefusalCode(str, Enum):
     plan_identity_mismatch = "plan_identity_mismatch"
     #: The caller named a destroy hash that is not the destroy plan's current hash.
     destroy_plan_identity_mismatch = "destroy_plan_identity_mismatch"
+    #: The caller named a reset hash that is not the reset scope's current hash.
+    reset_plan_identity_mismatch = "reset_plan_identity_mismatch"
     #: The desired state moved between the record being referenced and now.
     desired_state_changed = "desired_state_changed"
     #: The allocation ledger moved: the same plan would now reserve different identifiers.
@@ -287,6 +315,9 @@ _REFUSAL_STATUS: dict[RefusalCode, int] = {
     RefusalCode.plan_not_submitted: 409,
     RefusalCode.plan_not_approved: 409,
     RefusalCode.apply_not_authorized: 409,
+    RefusalCode.reset_plan_not_approved: 409,
+    RefusalCode.reset_not_authorized: 409,
+    RefusalCode.reset_plan_identity_mismatch: 409,
     RefusalCode.destroy_plan_not_generated: 409,
     RefusalCode.destroy_plan_not_approved: 409,
     RefusalCode.destroy_not_authorized: 409,
@@ -727,7 +758,7 @@ def preflight(
     # 5. exact plan identity, in the RIGHT hash family. A destroy hash can never satisfy an apply
     #    command: the two are computed under different domain prefixes, so this is not merely a
     #    comparison that happens to fail — there is no digest that passes both.
-    subject_hash = compiled.destroy_hash if kind in DESTROY_FAMILY else compiled.plan_hash
+    subject_hash = subject_hash_for(kind, compiled)
     if declared_hash is not None and declared_hash != subject_hash:
         if kind in DESTROY_FAMILY:
             raise _refuse(
@@ -735,6 +766,13 @@ def preflight(
                 f"the destroy plan has changed since you read it: you named {declared_hash}, the "
                 f"current destroy plan is {subject_hash}. Re-read the destroy plan and act on the "
                 "deletion scope you actually saw.",
+            )
+        if kind in RESET_FAMILY:
+            raise _refuse(
+                RefusalCode.reset_plan_identity_mismatch,
+                f"the reset scope has changed since you read it: you named {declared_hash}, the "
+                f"current reset scope is {subject_hash}. Re-read it and act on the set of guests "
+                "you actually saw — it names what will be destroyed.",
             )
         raise _refuse(
             RefusalCode.plan_identity_mismatch,
@@ -1263,20 +1301,27 @@ def request_reset(
     range_id: uuid.UUID,
     *,
     envelope: CommandEnvelope,
-    plan_hash: str,
+    reset_hash: str,
     worker: WorkerAssertion,
 ) -> CommandRecord:
     """Ask for a reset of the deployed range. RESETS NOTHING HERE.
 
-    Gated on the APPLY authorization for the current plan, and that is a deliberate decision rather
-    than a fall-through: a reset re-materialises the same approved desired state, so the
-    authorization that permits creating those guests is the one that permits recreating them. It is
-    stated here because the provider-neutral gate reaches the same conclusion by falling out of a
-    ``kind == "destroy"`` check, which reads as an oversight and produces an "apply is not
-    authorized" message for a reset.
+    Gated on the RESET authorization, over the reset scope's own hash — not on the apply
+    authorization, and this is a correction rather than a preference.
 
-    A reset is NOT gated on the destroy authorization, and could not be: the destroy hash is
-    computed in a different domain and names a deletion scope, not the state being restored.
+    A reset destroys things. ``secp_worker.provisioning.proxmox_reset.plan_reset`` gives
+    ``ResetSubject.guests`` the disposition ``ResetDisposition.recreated``, which that module
+    defines as "Destroyed and rebuilt from the reviewed base image", and
+    ``ResetPlan.recreated_guest_refs`` is "Guest refs that will be destroyed and rebuilt". Every
+    guest in the range, and every disk with it, is deleted and made again. Letting the apply
+    authorization stand for that would mean an approval to CREATE guests also authorized deleting
+    the guests currently running — which on a live range discards every team's work mid-event, and
+    is exactly the collapse the separation between the hash domains exists to prevent.
+
+    The reset scope is narrower than a destroy's deletion set, and deliberately so: every network
+    subject — the SDN zone, the VNets, the subnets and VLANs, the firewall objects — and the sealed
+    allocation ledger are ``preserved``. So the reset hash is neither the plan hash nor the destroy
+    hash, and no digest from either family satisfies this command.
     """
     checked = preflight(
         session,
@@ -1284,24 +1329,26 @@ def request_reset(
         range_id,
         CommandKind.request_reset,
         envelope,
-        declared_hash=plan_hash,
+        declared_hash=reset_hash,
         worker=worker,
     )
     if isinstance(checked, CommandRecord):
         return checked
-    approval = proxmox_lifecycle.plan_approval(session, checked.instance)
+    approval = proxmox_lifecycle.reset_plan_approval(session, checked.instance)
     if approval is None or approval.approved_hash != checked.subject_hash:
         raise _refuse(
-            RefusalCode.plan_not_approved,
-            f"plan {checked.subject_hash} carries no current approval, so there is no reviewed "
-            "desired state for a reset to restore.",
+            RefusalCode.reset_plan_not_approved,
+            f"reset scope {checked.subject_hash} carries no current approval. Approve the reset "
+            f"scope (POST /api/v1/ranges/{range_id}/proxmox/reset-plan-approval) first — it names "
+            "the guests that will be destroyed.",
         )
-    authorization = proxmox_lifecycle.apply_authorization(session, checked.instance)
+    authorization = proxmox_lifecycle.reset_authorization(session, checked.instance)
     if authorization is None or authorization.approved_hash != checked.subject_hash:
         raise _refuse(
-            RefusalCode.apply_not_authorized,
-            f"apply is not authorized for plan {checked.subject_hash}. A reset recreates the "
-            "guests this plan describes, so it needs the same authorization creating them needed.",
+            RefusalCode.reset_not_authorized,
+            f"reset is not authorized for reset scope {checked.subject_hash}. An apply "
+            "authorization does not authorize a reset: a reset DESTROYS every guest in this range "
+            "and rebuilds it, and approving their creation is not approving their deletion.",
         )
     return _enqueue(
         session,
@@ -1309,7 +1356,8 @@ def request_reset(
         checked,
         CommandKind.request_reset,
         envelope,
-        message=f"Reset requested against authorized Proxmox plan {checked.subject_hash}",
+        message=f"Reset requested against authorized Proxmox reset scope {checked.subject_hash}",
+        level="warning",
     )
 
 

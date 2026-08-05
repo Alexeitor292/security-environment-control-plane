@@ -72,6 +72,24 @@ class ProxmoxApplyAuthorizationRequest(_Strict):
     plan_hash: str = Field(min_length=8, max_length=200)
 
 
+class ProxmoxResetPlanApprovalRequest(_Strict):
+    """Approve the exact reset scope. Deliberately carries ``reset_hash`` ONLY.
+
+    A reset DESTROYS every guest in the range and rebuilds it, so it is approved by naming the
+    guests that will be destroyed — not by naming a creation plan. The field, the hash domain and
+    the required permission all differ from the apply family's, so an apply body cannot be posted
+    here and be accepted.
+    """
+
+    reset_hash: str = Field(min_length=8, max_length=200)
+
+
+class ProxmoxResetAuthorizationRequest(_Strict):
+    """Authorize a reset of an already-approved reset scope. ``reset_hash`` ONLY."""
+
+    reset_hash: str = Field(min_length=8, max_length=200)
+
+
 class ProxmoxDestroyPlanApprovalRequest(_Strict):
     """Approve the exact destroy plan. Deliberately carries ``destroy_hash`` ONLY."""
 
@@ -337,6 +355,40 @@ class ProxmoxDestroyPlanOut(BaseModel):
     deletion_set_size: int | None = None
     approval: ApprovalOut | None = None
     approved_hash_is_current: bool | None = None
+
+
+class ProxmoxResetAuthorizationOut(BaseModel):
+    """Whether a reset is authorized. Never satisfied by an apply or a destroy authorization.
+
+    ``reset_scope`` is published because that is what is being approved: the exact guests that will
+    be DESTROYED and rebuilt. Approving a reset without seeing them would be approving a deletion
+    sight unseen.
+    """
+
+    state: AuthorizationState
+    reset_hash: str | None = None
+    reset_plan_state: PlanState
+    approval: ApprovalOut | None = None
+    authorization: ApprovalOut | None = None
+    blocked_reason: str | None = None
+    #: The guests a reset would destroy and rebuild. ``None`` when the plan did not compile — an
+    #: empty list would say "a reset would destroy nothing", which makes a reset look inert.
+    reset_scope: list[dict[str, Any]] | None = None
+    #: ``None``, never ``0``, when the scope was not computed.
+    reset_scope_size: int | None = None
+    #: What a reset leaves alone, named rather than implied. Every one of these is ``preserved`` by
+    #: ``proxmox_reset.plan_reset``, and that is why the reset scope is narrower than a destroy's.
+    preserved_subjects: list[str] = Field(
+        default_factory=lambda: [
+            "range_identity",
+            "sdn_zone",
+            "vnets",
+            "subnets_and_vlans",
+            "firewall_objects",
+            "allocation_ledger",
+            "team_membership",
+        ]
+    )
 
 
 class ProxmoxDestroyAuthorizationOut(BaseModel):
