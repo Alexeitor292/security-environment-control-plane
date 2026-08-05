@@ -1,0 +1,404 @@
+.ai-prompt-box,
+.ai-prompt-box * {
+  box-sizing: border-box;
+}
+
+.ai-prompt-box {
+  position: relative;
+  display: grid;
+  width: 100%;
+  gap: 8px;
+  padding: 10px;
+  color: #eaf8ff;
+  background: linear-gradient(145deg, rgba(18, 51, 73, 0.96), rgba(3, 16, 28, 0.985));
+  border: 1px solid rgba(104, 205, 250, 0.28);
+  border-radius: 22px;
+  box-shadow:
+    0 34px 90px rgba(0, 0, 0, 0.58),
+    inset 0 1px rgba(255, 255, 255, 0.08);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  backdrop-filter: blur(30px) saturate(1.18);
+  transform: translateY(18px) scale(0.965);
+  transform-origin: 50% 100%;
+  transition:
+    opacity 220ms ease,
+    visibility 0s linear 240ms,
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.ai-prompt-box--open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 220ms ease,
+    visibility 0s linear 0s,
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.ai-prompt-box--sent {
+  border-color: rgba(113, 226, 255, 0.62);
+  box-shadow:
+    0 34px 90px rgba(0, 0, 0, 0.58),
+    0 0 32px rgba(72, 208, 255, 0.18);
+}
+
+.ai-prompt-box__bridge {
+  position: absolute;
+  bottom: -24px;
+  left: 50%;
+  width: 96px;
+  height: 30px;
+  background: radial-gradient(ellipse at 50% 0, rgba(58, 197, 247, 0.24), transparent 72%);
+  filter: blur(5px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.ai-prompt-box__header {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 3px;
+}
+
+.ai-prompt-box__header > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.ai-prompt-box__header > div > span {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  background: #62dfff;
+  border-radius: 50%;
+  box-shadow: 0 0 9px rgba(81, 214, 255, 0.74);
+}
+
+.ai-prompt-box__header strong {
+  font-size: 0.62rem;
+}
+
+.ai-prompt-box__header small {
+  overflow: hidden;
+  color: #64889d;
+  font-size: 0.57rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-prompt-box__header nav {
+  display: flex;
+  gap: 4px;
+}
+
+.ai-prompt-box__header button,
+.ai-prompt-box__attachment button {
+  appearance: none;
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  padding: 0;
+  color: #66899d;
+  background: rgba(16, 50, 70, 0.44);
+  border: 1px solid rgba(100, 195, 239, 0.1);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.ai-prompt-box__header button:hover,
+.ai-prompt-box__attachment button:hover {
+  color: #eafaff;
+  background: rgba(30, 104, 143, 0.35);
+}
+
+.ai-prompt-box__textarea {
+  appearance: none;
+  width: 100%;
+  min-height: 62px;
+  max-height: 150px;
+  padding: 10px 8px 5px;
+  overflow-y: auto;
+  color: #eefaff;
+  font: inherit;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  resize: none;
+}
+
+.ai-prompt-box__textarea::placeholder {
+  color: #66889c;
+}
+
+.ai-prompt-box__attachment {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 25px;
+  gap: 10px;
+  align-items: center;
+  margin: 2px 4px 0;
+  padding: 7px;
+  background: rgba(4, 22, 37, 0.68);
+  border: 1px solid rgba(97, 192, 236, 0.13);
+  border-radius: 12px;
+}
+
+.ai-prompt-box__attachment img {
+  display: block;
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 9px;
+}
+
+.ai-prompt-box__attachment > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.ai-prompt-box__attachment strong {
+  overflow: hidden;
+  font-size: 0.63rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-prompt-box__attachment small {
+  color: #63869a;
+  font-size: 0.55rem;
+}
+
+.ai-prompt-box__recording {
+  display: grid;
+  min-height: 68px;
+  place-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+}
+
+.ai-prompt-box__recording > div:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ai-prompt-box__recording > div:first-child span {
+  width: 7px;
+  height: 7px;
+  background: #ff5c72;
+  border-radius: 50%;
+  box-shadow: 0 0 9px rgba(255, 80, 105, 0.65);
+  animation: ai-prompt-recording-dot 1s ease-in-out infinite;
+}
+
+.ai-prompt-box__recording strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.65rem;
+}
+
+.ai-prompt-box__waveform {
+  display: flex;
+  width: 100%;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.ai-prompt-box__waveform i {
+  width: 2px;
+  height: 34%;
+  background: rgba(112, 218, 255, 0.6);
+  border-radius: 999px;
+  animation: ai-prompt-wave 680ms ease-in-out infinite alternate;
+}
+
+.ai-prompt-box__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(98, 189, 233, 0.09);
+}
+
+.ai-prompt-box__tools {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+}
+
+.ai-prompt-box__tools > i {
+  width: 1px;
+  height: 20px;
+  background: linear-gradient(180deg, transparent, rgba(111, 207, 249, 0.3), transparent);
+}
+
+.ai-prompt-tool {
+  appearance: none;
+  display: inline-flex;
+  width: 31px;
+  min-width: 31px;
+  height: 31px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 7px;
+  overflow: hidden;
+  color: #7694a6;
+  font: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    width 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease;
+}
+
+.ai-prompt-tool span {
+  width: 0;
+  overflow: hidden;
+  font-size: 0.56rem;
+  font-weight: 720;
+  opacity: 0;
+  white-space: nowrap;
+  transition:
+    width 220ms ease,
+    opacity 160ms ease;
+}
+
+.ai-prompt-tool:hover {
+  color: #d7edf7;
+  background: rgba(42, 108, 143, 0.18);
+}
+
+.ai-prompt-tool--active {
+  width: 78px;
+}
+
+.ai-prompt-tool--active span {
+  width: 40px;
+  opacity: 1;
+}
+
+.ai-prompt-tool--search {
+  color: #63d6ff;
+  background: rgba(30, 174, 219, 0.12);
+  border-color: rgba(30, 174, 219, 0.42);
+}
+
+.ai-prompt-tool--think {
+  color: #ab8dff;
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+.ai-prompt-tool--canvas {
+  color: #ffad6e;
+  background: rgba(249, 115, 22, 0.1);
+  border-color: rgba(249, 115, 22, 0.38);
+}
+
+.ai-prompt-box__submit {
+  appearance: none;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: #88a6b6;
+  background: rgba(19, 54, 74, 0.62);
+  border: 1px solid rgba(102, 196, 239, 0.13);
+  border-radius: 50%;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.ai-prompt-box__submit:hover {
+  color: #e8f9ff;
+  transform: scale(1.04);
+}
+
+.ai-prompt-box__submit--ready {
+  color: #03141f;
+  background: linear-gradient(145deg, #8ee8ff, #46bfe9);
+  border-color: rgba(181, 241, 255, 0.72);
+  box-shadow: 0 0 18px rgba(63, 195, 241, 0.25);
+}
+
+.ai-prompt-box__submit--recording {
+  color: #ff687d;
+  background: rgba(95, 24, 38, 0.38);
+  border-color: rgba(255, 83, 107, 0.35);
+}
+
+@keyframes ai-prompt-recording-dot {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.84);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+
+@keyframes ai-prompt-wave {
+  from {
+    height: 22%;
+  }
+
+  to {
+    height: 92%;
+  }
+}
+
+@media (max-width: 720px) {
+  .ai-prompt-box {
+    border-radius: 18px;
+  }
+
+  .ai-prompt-box__header small,
+  .ai-prompt-box__tools > i {
+    display: none;
+  }
+
+  .ai-prompt-tool--active {
+    width: 67px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-prompt-box,
+  .ai-prompt-box * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

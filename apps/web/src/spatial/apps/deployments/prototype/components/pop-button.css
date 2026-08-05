@@ -1,0 +1,254 @@
+/*
+ * Pop Button — Vengeance UI "Pop Button" mechanics on SECP tokens.
+ *
+ * The reference stacks three box-shadows to fake a physical body:
+ *   0 12px 0 -2px <inner lip>, 0 12px 0 0 <solid edge>, 0 22px 0 0 <ground>
+ * and then walks the button down (`translate-y-1` → `translate-y-3`) while
+ * shrinking those shadows to zero. That model is kept exactly; only the depth,
+ * palette and density are re-tokenized for a dense dark control room.
+ *
+ * All displacement uses `translate` — never margin or layout — so a press never
+ * nudges the controls around it.
+ */
+
+.pop-btn {
+  /* Per-variant knobs; every variant only overrides these four. */
+  --btn-surface: var(--pop-surface);
+  --btn-surface-hover: var(--pop-surface-hover);
+  --btn-edge: var(--pop-edge);
+  --btn-text: var(--text-primary);
+  /* Per-size knobs. */
+  --btn-edge-h: var(--pop-edge-height);
+  --btn-press: var(--pop-travel-press);
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  margin-bottom: var(--btn-edge-h); /* reserves the edge, so rows never jump */
+  border: 1px solid var(--btn-edge);
+  border-radius: var(--radius-md);
+  background: var(--btn-surface);
+  color: var(--btn-text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  translate: 0 0;
+  box-shadow:
+    0 var(--btn-edge-h) 0 -1px var(--btn-surface-hover),
+    0 var(--btn-edge-h) 0 0 var(--btn-edge),
+    var(--pop-shadow-rest);
+  transition:
+    translate var(--pop-duration) var(--pop-ease),
+    box-shadow var(--pop-duration) var(--pop-ease),
+    background-color var(--motion-fast),
+    border-color var(--motion-fast);
+}
+
+.pop-btn:hover:not(:disabled) {
+  background: var(--btn-surface-hover);
+  translate: 0 var(--pop-travel-hover);
+  box-shadow:
+    0 calc(var(--btn-edge-h) - var(--pop-travel-hover)) 0 -1px var(--btn-surface-hover),
+    0 calc(var(--btn-edge-h) - var(--pop-travel-hover)) 0 0 var(--btn-edge),
+    var(--pop-shadow-hover);
+}
+
+/* Pressed: the body travels the full edge height and the edge collapses flat,
+   so the button reads as pushed into the surface. Keyboard activation gets the
+   same treatment via :active, which fires for Space/Enter on a native button. */
+.pop-btn:active:not(:disabled) {
+  background: var(--btn-surface-hover);
+  translate: 0 var(--btn-press);
+  box-shadow:
+    0 0 0 0 var(--btn-surface-hover),
+    0 0 0 0 var(--btn-edge),
+    var(--pop-shadow-press);
+}
+
+.pop-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Disabled: flat on the surface, dimmer fill, dimmer edge — it must not look
+   like something that can be pressed. `disabled` is native, so pointer and
+   keyboard activation are both blocked. */
+.pop-btn:disabled {
+  background: var(--disabled-surface);
+  border-color: var(--disabled-border);
+  color: var(--disabled-text);
+  cursor: not-allowed;
+  translate: 0 0;
+  box-shadow: 0 1px 0 0 var(--disabled-border);
+}
+
+.pop-btn__spinner {
+  flex: 0 0 auto;
+}
+
+/* Pointer-target expansion that does not alter the rendered box or layout. */
+.pop-btn--hit::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: max(100%, 44px);
+  height: max(100%, 44px);
+  transform: translate(-50%, -50%);
+}
+
+/* --- Sizes ---------------------------------------------------------------
+   Smaller sizes keep a real, readable edge (2–3px) rather than losing the
+   depth cue entirely. */
+.pop-btn--xs {
+  --btn-edge-h: var(--pop-edge-height-xs);
+  --btn-press: var(--pop-travel-press-xs);
+  height: 22px;
+  padding: 0 8px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  gap: 4px;
+}
+
+.pop-btn--sm {
+  --btn-edge-h: var(--pop-edge-height-sm);
+  --btn-press: var(--pop-travel-press-sm);
+  height: 27px;
+  padding: 0 11px;
+  font-size: var(--text-xs);
+  gap: 5px;
+}
+
+.pop-btn--md {
+  height: 32px;
+  padding: 0 14px;
+}
+
+.pop-btn--lg {
+  height: 38px;
+  padding: 0 18px;
+  font-size: var(--text-base);
+}
+
+/* --- Variants ------------------------------------------------------------- */
+.pop-btn--primary {
+  --btn-surface: color-mix(in srgb, var(--accent) 16%, var(--surface-2));
+  --btn-surface-hover: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
+  --btn-edge: var(--accent-strong);
+  --btn-text: var(--accent-hover);
+}
+
+.pop-btn--secondary {
+  --btn-surface: var(--surface-2);
+  --btn-surface-hover: var(--surface-interactive);
+  --btn-edge: var(--pop-edge);
+  --btn-text: var(--text-primary);
+}
+
+.pop-btn--neutral {
+  --btn-surface: var(--surface-1);
+  --btn-surface-hover: var(--surface-2);
+  --btn-edge: var(--border-default);
+  --btn-text: var(--text-secondary);
+}
+
+.pop-btn--danger {
+  --btn-surface: color-mix(in srgb, var(--status-error) 15%, var(--surface-2));
+  --btn-surface-hover: color-mix(in srgb, var(--status-error) 25%, var(--surface-2));
+  --btn-edge: color-mix(in srgb, var(--status-error) 70%, var(--border-strong));
+  --btn-text: var(--status-error);
+}
+
+.pop-btn--warning {
+  --btn-surface: color-mix(in srgb, var(--status-warn) 14%, var(--surface-2));
+  --btn-surface-hover: color-mix(in srgb, var(--status-warn) 24%, var(--surface-2));
+  --btn-edge: color-mix(in srgb, var(--status-warn) 60%, var(--border-strong));
+  --btn-text: var(--status-warn);
+}
+
+.pop-btn--success {
+  --btn-surface: color-mix(in srgb, var(--status-ok) 14%, var(--surface-2));
+  --btn-surface-hover: color-mix(in srgb, var(--status-ok) 24%, var(--surface-2));
+  --btn-edge: color-mix(in srgb, var(--status-ok) 60%, var(--border-strong));
+  --btn-text: var(--status-ok);
+}
+
+/* Lowest-emphasis pop: no fill at rest, but it still has a real edge and still
+   travels, so it reads as a button rather than as a text link. */
+.pop-btn--ghost-pop {
+  --btn-surface: transparent;
+  --btn-surface-hover: var(--bg-hover);
+  --btn-edge: var(--border-default);
+  --btn-text: var(--text-secondary);
+}
+
+.pop-btn--ghost-pop:hover:not(:disabled) {
+  --btn-text: var(--text-primary);
+}
+
+.pop-btn--icon {
+  --btn-surface: var(--surface-2);
+  --btn-surface-hover: var(--surface-interactive);
+  --btn-edge: var(--pop-edge);
+  --btn-text: var(--text-secondary);
+  width: 32px;
+  padding: 0;
+}
+
+.pop-btn--icon:hover:not(:disabled) {
+  --btn-text: var(--text-primary);
+}
+
+.pop-btn--icon.pop-btn--xs {
+  width: 22px;
+}
+.pop-btn--icon.pop-btn--sm {
+  width: 27px;
+}
+.pop-btn--icon.pop-btn--lg {
+  width: 38px;
+}
+
+/* --- High contrast -------------------------------------------------------- */
+@media (prefers-contrast: more) {
+  .pop-btn {
+    --btn-edge: var(--text-secondary);
+    border-color: var(--text-secondary);
+  }
+}
+
+/* --- Reduced motion -------------------------------------------------------
+   Travel is removed, but the rest/hover/active states stay visually distinct:
+   the edge still collapses on press, so the feedback is immediate and obvious
+   without anything sliding. */
+@media (prefers-reduced-motion: reduce) {
+  .pop-btn,
+  .pop-btn:hover:not(:disabled),
+  .pop-btn:active:not(:disabled) {
+    translate: 0 0;
+    transition:
+      background-color var(--motion-fast),
+      box-shadow var(--motion-fast),
+      border-color var(--motion-fast);
+  }
+
+  .pop-btn:hover:not(:disabled) {
+    box-shadow:
+      0 var(--btn-edge-h) 0 -1px var(--btn-surface-hover),
+      0 var(--btn-edge-h) 0 0 var(--btn-edge),
+      var(--pop-shadow-hover);
+  }
+
+  .pop-btn:active:not(:disabled) {
+    box-shadow:
+      0 0 0 1px var(--btn-edge),
+      var(--pop-shadow-press);
+  }
+}

@@ -41,6 +41,15 @@ import { WorkerEnrollment } from "./pages/WorkerEnrollment";
 const TopologyView = React.lazy(() =>
   import("./pages/TopologyView").then((m) => ({ default: m.TopologyView })),
 );
+// The spatial workspace (P7-C) is code-split for two reasons, both load-bearing.
+// It pulls in the three.js/@react-three runtime and two glTF models totalling
+// ~28 MB, which no other route needs; and it owns a GLOBAL stylesheet
+// (`spatial/index.css` sets :root, html, body) that would restyle the legacy
+// pages if it were imported eagerly. Splitting keeps both confined to the route
+// that actually wants them.
+const SpatialWorkspace = React.lazy(() =>
+  import("./spatial/SpatialWorkspace").then((m) => ({ default: m.SpatialWorkspace })),
+);
 import "./design/tokens.css";
 import "./styles.css";
 
@@ -48,6 +57,22 @@ const router = createBrowserRouter([
   // Public auth routes (ADR-018 / OIDC-B) render outside the protected shell.
   { path: "/login", element: <Login /> },
   { path: "/auth/callback", element: <AuthCallback /> },
+  // P7-C: the spatial workspace. Guarded by the SAME AuthBoundary as every other
+  // application route -- it renders only for an authenticated principal -- but
+  // deliberately NOT nested inside `App`. `App` supplies the legacy AppShell
+  // chrome, and the spatial shell brings its own dock and notch and paints
+  // `position: fixed; inset: 0`; nesting them would show two navigations at once
+  // and let the spatial surface cover the chrome containing it.
+  {
+    path: "/spatial",
+    element: (
+      <AuthBoundary>
+        <React.Suspense fallback={<p className="muted">Loading spatial workspace…</p>}>
+          <SpatialWorkspace />
+        </React.Suspense>
+      </AuthBoundary>
+    ),
+  },
   {
     path: "/",
     // Every application route is guarded: protected content renders only once authenticated.
