@@ -83,6 +83,19 @@ class RangeStepStatus(str, Enum):
 class RangeResourceKind(str, Enum):
     network = "network"
     container = "container"
+    # SECP-PROXMOX — the object kinds a Proxmox range owns. Stored via the VARCHAR-backed
+    # EnumType, so these values are additive (no migration). They are listed here rather than in a
+    # provider-local enum because the resource table is provider-neutral: the lifecycle, the
+    # residue verdict and the teardown proof all key on this one vocabulary, and a provider that
+    # invented its own would fall outside the ``unproven`` accounting that makes teardown honest.
+    virtual_machine = "virtual_machine"
+    lxc_container = "lxc_container"
+    sdn_zone = "sdn_zone"
+    vnet = "vnet"
+    subnet = "subnet"
+    firewall_group = "firewall_group"
+    ip_set = "ip_set"
+    egress_gateway = "egress_gateway"
 
 
 class RangeResourceState(str, Enum):
