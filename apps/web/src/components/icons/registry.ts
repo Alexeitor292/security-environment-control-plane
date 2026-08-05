@@ -1,3 +1,6 @@
+// React 19 removed the global `JSX` namespace — see the note in ./icons.tsx.
+import type { JSX } from "react";
+
 import type { SecpIconProps } from "./SecpIcon";
 import {
   ApprovalIcon,
