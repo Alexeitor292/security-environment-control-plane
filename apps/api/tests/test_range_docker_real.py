@@ -9,7 +9,7 @@ daemon exists. Both halves are necessary and neither substitutes for the other.
 
 This module is the other half. It drives the ordinary HTTP API against a real Docker daemon and
 then checks the outcome with ``docker`` commands that this code did not issue, through a subprocess
-helper that deliberately does NOT import :mod:`secp_api.range_providers.docker_cli`. A verifier that
+helper that deliberately does NOT import :mod:`secp_worker.range.docker_cli`. A verifier that
 shares its implementation with the thing it verifies can only confirm that the code agrees with
 itself.
 
@@ -83,7 +83,7 @@ DEAD_DOCKER_ENDPOINT = "tcp://127.0.0.1:1"
 def _docker(*args: str) -> subprocess.CompletedProcess:
     """Run ``docker`` directly.
 
-    Intentionally a separate implementation from ``range_providers.docker_cli``. ``encoding`` is
+    Intentionally a separate implementation from ``secp_worker.range.docker_cli``. ``encoding`` is
     explicit for the same reason it is there: ``text=True`` alone decodes with the locale codec,
     which is cp1252 on a default Windows host, and the Juice Shop image carries a label containing
     a character that codec cannot represent.
@@ -178,19 +178,31 @@ def _unreachable_daemon():
 
 @pytest.fixture
 def docker_range_env(monkeypatch):
-    """Unseal the local Docker provider and run range operations synchronously.
+    """Unseal the local Docker provider and run the dispatched operation synchronously.
 
     The provider is sealed by default because a Docker socket is root-equivalent. Enabling it is an
     explicit, dev-only opt-in, and this fixture is the only place in the suite that does it.
+
+    **What the substitution here does and does not prove.** Range execution is worker-owned: the
+    API
+    may not touch a provider (Charter Invariants 6/7, ADR-005), so ``InlineDispatcher`` refuses
+    range
+    operations outright and the real path is enqueue → Temporal → worker activity. Standing up
+    Temporal would prove little extra here, so the dispatcher is replaced by one calling the very
+    function that activity calls — ``secp_worker.range.execution.execute_range_operation`` —
+    with
+    no other change to the path.
+
+    So this module proves the FEATURE: that a real daemon is really driven and really observed. It
+    does not prove the BOUNDARY; that is ``tests/test_architecture_boundary.py``'s job, and it fails
+    if anything under ``secp_api`` reacquires the ability to do this itself.
     """
     from secp_api.config import get_settings
-    from secp_api.services import range_runner
+    from secp_worker.range import reset_providers
+    from secp_worker.range.execution import execute_range_operation
 
     monkeypatch.setenv("SECP_RANGE_LOCAL_DOCKER", "true")
     get_settings.cache_clear()
-
-    from secp_api.range_providers import reset_providers
-
     reset_providers()
 
     assert get_settings().range_local_docker_enabled, (
@@ -198,12 +210,21 @@ def docker_range_env(monkeypatch):
         "(is SECP_ENVIRONMENT set to a production value?)"
     )
 
-    previous_mode = range_runner.get_mode()
-    range_runner.set_mode("inline")
+    class _WorkerInProcessDispatcher:
+        """Stands in for enqueue + Temporal + activity, and for nothing else."""
+
+        mode = "test-worker-inprocess"
+
+        def dispatch_range_operation(self, session, operation_id):
+            execute_range_operation(session, operation_id)
+            return None
+
+    monkeypatch.setattr(
+        "secp_api.routers.ranges.get_dispatcher", lambda: _WorkerInProcessDispatcher()
+    )
     try:
         yield
     finally:
-        range_runner.set_mode(previous_mode)
         reset_providers()
         get_settings.cache_clear()
 
@@ -390,7 +411,9 @@ def test_one_real_container_deploys_answers_and_is_removed_without_residue(
         for e in client.get(f"/api/v1/ranges/{range_id}/teardown-evidence").json()
         if e["verdict"] == ResidueVerdict.unproven.value
     ]
-    assert len(unproven_evidence) == 1, "the blind teardown must leave a record of its own blindness"
+    assert len(unproven_evidence) == 1, (
+        "the blind teardown must leave a record of its own blindness"
+    )
     assert unproven_evidence[0]["probe_reachable"] is False
     assert unproven_evidence[0]["removed_confirmed"] == 0
     assert unproven_evidence[0]["unproven_count"] == 2, _pretty(unproven_evidence[0])

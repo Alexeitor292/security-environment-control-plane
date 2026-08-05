@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
 from secp_api.deps import DB_SESSION, current_principal
+from secp_api.dispatch import get_dispatcher
 from secp_api.range_enums import RangeOperationKind, RangeState
 from secp_api.range_projection import (
     event_out,
@@ -35,7 +36,7 @@ from secp_api.schemas_range import (
     RangeTemplateOut,
     TeardownEvidenceOut,
 )
-from secp_api.services import range_runner, ranges
+from secp_api.services import ranges
 
 router = APIRouter(prefix="/api/v1", tags=["ranges"])
 
@@ -97,16 +98,19 @@ def _start(
     range_id: uuid.UUID,
     kind: RangeOperationKind,
 ) -> RangeOperationOut:
-    """Create the operation, commit it, then schedule the work.
+    """Validate the transition, create the operation row, and DISPATCH it.
 
-    The commit before scheduling matters: the runner opens its OWN session, so the operation row
-    must already be durable when the background thread looks for it.
+    The API stops here. Everything that touches a provider happens in the worker
+    (:mod:`secp_worker.range.execution`), reached only through the dispatch seam — the API process
+    never contacts a container runtime (Charter Invariants 6/7, ADR-005).
+
+    Enqueue-only: the dispatcher writes a durable outbox row and nothing is submitted to Temporal
+    until this request's transaction commits, so a rolled-back request cannot leave a range
+    half-deployed.
     """
     _, operation = ranges.start_operation(session, principal, range_id, kind)
-    projected = operation_out(operation)
-    session.commit()
-    range_runner.submit(projected.id)
-    return projected
+    get_dispatcher().dispatch_range_operation(session, operation.id)
+    return operation_out(operation)
 
 
 @router.post("/ranges/{range_id}/deploy", response_model=RangeOperationOut, status_code=202)

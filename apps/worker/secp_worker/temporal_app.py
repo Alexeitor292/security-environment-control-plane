@@ -41,6 +41,7 @@ from secp_worker.temporal_activity_names import (  # noqa: E402 - after the temp
     ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
     ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME,
     PLAN_SECRET_READINESS_ACTIVITY_NAME,
+    RANGE_OPERATION_ACTIVITY_NAME,
     REAL_PLAN_GENERATION_ACTIVITY_NAME,
     REMOTE_STATE_READINESS_ACTIVITY_NAME,
     RESET_ACTIVITY_NAME,
@@ -597,6 +598,37 @@ async def enrollment_recovery_sweep_activity(arg: dict) -> str:
     return json.dumps(report.as_log_fields(), sort_keys=True)
 
 
+@activity.defn(name=RANGE_OPERATION_ACTIVITY_NAME)
+async def range_operation_activity(arg: dict) -> str:
+    """Execute ONE range lifecycle operation (SECP-RANGE).
+
+    This is the only path by which a range is ever deployed, reset or destroyed: the API may not
+    drive a provider (Charter Invariants 6/7, ADR-005), so it enqueues and stops.
+
+    The argument carries only ``range_operation_id``. The activity opens its OWN session and
+    re-derives everything else — spec, template, provider — from the database, so nothing about
+    what gets deployed can be influenced by the workflow argument.
+
+    Runs in a worker thread because the whole range stack is synchronous (SQLAlchemy + the docker
+    CLI), and blocking the event loop would stall every other activity on this worker.
+    """
+    import uuid as _uuid
+
+    from secp_api.db import session_scope
+
+    operation_id = _uuid.UUID(str(arg["range_operation_id"]))
+
+    def _run() -> None:
+        from secp_worker.range.execution import execute_range_operation
+
+        with session_scope() as session:
+            execute_range_operation(session, operation_id)
+
+    await asyncio.to_thread(_run)
+    # Identifier-free result: the operation's own row and lifecycle events are the record.
+    return "range_operation_complete"
+
+
 # --- The DEFAULT activities the SHIPPED (sealed-by-default) worker registers
 # -----------------------
 # Each is constructed with its SEALED provider, so ordinary worker startup refuses at the
@@ -635,6 +667,7 @@ from secp_worker.temporal_workflows import (  # noqa: E402 - re-export at module
     EligibilityPreflightWorkflow,
     EnrollmentRecoverySweepWorkflow,
     PlanSecretReadinessWorkflow,
+    RangeOperationWorkflow,
     RealPlanGenerationWorkflow,
     RemoteStateReadinessWorkflow,
     ResetWorkflow,
@@ -648,6 +681,7 @@ __all__ = [
     "ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME",
     "ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME",
     "PLAN_SECRET_READINESS_ACTIVITY_NAME",
+    "RANGE_OPERATION_ACTIVITY_NAME",
     "REAL_PLAN_GENERATION_ACTIVITY_NAME",
     "REMOTE_STATE_READINESS_ACTIVITY_NAME",
     "RESET_ACTIVITY_NAME",
@@ -658,10 +692,12 @@ __all__ = [
     "EligibilityPreflightWorkflow",
     "EnrollmentRecoverySweepWorkflow",
     "PlanSecretReadinessWorkflow",
+    "RangeOperationWorkflow",
     "RealPlanGenerationWorkflow",
     "RemoteStateReadinessWorkflow",
     "ResetWorkflow",
     "ToolchainAttestationWorkflow",
+    "range_operation_activity",
     "EligibilityPreflightActivity",
     "ToolchainAttestationActivity",
     "RemoteStateReadinessActivity",

@@ -33,6 +33,7 @@ from secp_worker.temporal_activity_names import (
     ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
     ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME,
     PLAN_SECRET_READINESS_ACTIVITY_NAME,
+    RANGE_OPERATION_ACTIVITY_NAME,
     REAL_PLAN_GENERATION_ACTIVITY_NAME,
     REMOTE_STATE_READINESS_ACTIVITY_NAME,
     RESET_ACTIVITY_NAME,
@@ -218,6 +219,32 @@ class RealPlanGenerationWorkflow:
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
         return await workflow.execute_activity(
             REAL_PLAN_GENERATION_ACTIVITY_NAME,
+            arg,
+            result_type=str,
+            start_to_close_timeout=_activity_timeout(),
+        )
+
+
+@workflow.defn
+class RangeOperationWorkflow:
+    """Durable, worker-only range lifecycle operation (SECP-RANGE).
+
+    The API may not drive a range provider at all — for the local Docker provider that means a
+    root-equivalent socket, which Charter Invariants 6/7 and ADR-005 place in the worker. So the API
+    enqueues and stops, and this workflow is the only way a range is ever deployed, reset or
+    destroyed. ``InlineDispatcher`` refuses range operations outright; there is no in-process path
+    and no fallback.
+
+    The argument carries ONLY the range operation id. No image reference, container id, network
+    name, port or provider configuration travels in it — the activity opens a fresh session and
+    re-derives the spec from the template row, so a stale or tampered argument cannot redirect what
+    gets deployed.
+    """
+
+    @workflow.run
+    async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        return await workflow.execute_activity(
+            RANGE_OPERATION_ACTIVITY_NAME,
             arg,
             result_type=str,
             start_to_close_timeout=_activity_timeout(),

@@ -18,7 +18,6 @@ from __future__ import annotations
 import pytest
 import secp_api.range_models  # noqa: F401
 from secp_api.range_enums import RangeResourceKind
-from secp_api.range_providers import docker_cli
 from secp_api.range_providers.base import (
     ComponentSpec,
     OperationContext,
@@ -29,12 +28,13 @@ from secp_api.range_providers.base import (
     TeardownObservation,
     TeardownResourceOutcome,
 )
-from secp_api.range_providers.docker_cli import (
+from secp_worker.range import docker_cli
+from secp_worker.range.docker_cli import (
     CommandResult,
     DaemonHealth,
     DockerUnavailableError,
 )
-from secp_api.range_providers.local_docker import (
+from secp_worker.range.local_docker import (
     OWNER_LABEL_KEY,
     OWNER_LABEL_VALUE,
     RANGE_ID_LABEL_KEY,
@@ -217,7 +217,7 @@ def test_a_daemon_that_dies_mid_teardown_invalidates_the_removals(monkeypatch):
         ),
     )
     # The post-removal health check is the one that matters — and it fails.
-    import secp_api.range_providers.local_docker as local_docker
+    import secp_worker.range.local_docker as local_docker
 
     monkeypatch.setattr(
         local_docker, "daemon_health", lambda: DaemonHealth(reachable=False, detail="gone")
@@ -257,7 +257,7 @@ def test_a_different_daemon_answering_does_not_prove_our_resources_are_gone(monk
             detail="removal requested",
         ),
     )
-    import secp_api.range_providers.local_docker as local_docker
+    import secp_worker.range.local_docker as local_docker
 
     # Reachable — but it is a DIFFERENT daemon than the one that created the resources.
     monkeypatch.setattr(
@@ -289,7 +289,7 @@ def test_a_different_daemon_answering_does_not_prove_our_resources_are_gone(monk
 def test_a_resource_without_our_ownership_labels_is_refused_not_removed(monkeypatch):
     """A recorded id that now points at something else must NOT be deleted."""
     provider = LocalDockerProvider()
-    import secp_api.range_providers.local_docker as local_docker
+    import secp_worker.range.local_docker as local_docker
 
     removals: list[list[str]] = []
 
@@ -323,7 +323,7 @@ def test_a_resource_without_our_ownership_labels_is_refused_not_removed(monkeypa
 
 def test_a_resource_labelled_for_a_different_range_is_refused(monkeypatch):
     provider = LocalDockerProvider()
-    import secp_api.range_providers.local_docker as local_docker
+    import secp_worker.range.local_docker as local_docker
 
     removals: list[list[str]] = []
     monkeypatch.setattr(local_docker, "object_exists", lambda kind, ref: True)
@@ -361,7 +361,7 @@ def test_a_resource_labelled_for_a_different_range_is_refused(monkeypatch):
 
 def test_our_own_resource_is_removed(monkeypatch):
     provider = LocalDockerProvider()
-    import secp_api.range_providers.local_docker as local_docker
+    import secp_worker.range.local_docker as local_docker
 
     removals: list[list[str]] = []
     monkeypatch.setattr(local_docker, "object_exists", lambda kind, ref: True)
@@ -414,7 +414,7 @@ def test_a_destroy_only_ever_names_specific_recorded_ids(monkeypatch):
     select by pattern, and a pattern can match a bystander that merely looks like ours.
     """
     provider = LocalDockerProvider()
-    import secp_api.range_providers.local_docker as local_docker
+    import secp_worker.range.local_docker as local_docker
     monkeypatch.setattr(
         provider, "health", lambda: ProviderHealth(reachable=True, endpoint_id="D1", version="29.4")
     )
@@ -465,7 +465,7 @@ def test_a_destroy_only_ever_names_specific_recorded_ids(monkeypatch):
 def test_published_ports_bind_loopback_only(monkeypatch):
     """Intentionally vulnerable software is never offered to the LAN."""
     provider = LocalDockerProvider()
-    import secp_api.range_providers.local_docker as local_docker
+    import secp_worker.range.local_docker as local_docker
     assert local_docker.BIND_HOST == "127.0.0.1"
     monkeypatch.setattr(
         provider, "health", lambda: ProviderHealth(reachable=True, endpoint_id="D1", version="29.4")
@@ -501,7 +501,7 @@ def test_the_local_docker_provider_is_sealed_by_default(monkeypatch):
     acquiring privileged local execution by accident.
     """
     from secp_api.config import get_settings
-    from secp_api.range_providers import (
+    from secp_worker.range import (
         RangeProviderSealedError,
         get_provider,
         reset_providers,

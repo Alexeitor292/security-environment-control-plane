@@ -31,7 +31,6 @@ from secp_api.range_models import (
     RangeTeardownEvidence,
     RangeTemplate,
 )
-from secp_api.range_providers.local_docker import BIND_HOST
 from secp_api.schemas_range import (
     AccessTargetOut,
     ChallengeOut,
@@ -51,6 +50,11 @@ from secp_api.schemas_range import (
     TeardownEvidenceOut,
     TeardownResourceOut,
 )
+
+#: Fallback only. The authoritative bind host is the one the provider RECORDED on the resource
+#: (``detail["bind_host"]``) — the API must not import a provider to find it out, and a resource
+#: deployed by a future provider that binds elsewhere would make a hardcoded constant a lie.
+_DEFAULT_BIND_HOST = "127.0.0.1"
 
 #: The states in which access targets are meaningful. In any other state the range either has no
 #: containers or has containers whose reachability was never established.
@@ -191,12 +195,13 @@ def access_targets(
         component = names.get(row.component_key or "", {})
         protocol = component.get("protocol", "http")
         path = component.get("path", "/")
+        bind_host = str((row.detail or {}).get("bind_host") or _DEFAULT_BIND_HOST)
         targets.append(
             AccessTargetOut(
                 component_key=row.component_key or row.name,
                 name=component.get("name", row.name),
-                url=f"{protocol}://{BIND_HOST}:{row.host_port}{path}",
-                host=BIND_HOST,
+                url=f"{protocol}://{bind_host}:{row.host_port}{path}",
+                host=bind_host,
                 port=row.host_port,
                 protocol=protocol,
                 reachable=True,

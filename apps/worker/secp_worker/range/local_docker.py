@@ -1,27 +1,24 @@
 """The local Docker range provider — EPHEMERAL DEVELOPMENT/DEMO USE ONLY.
 
-UNRESOLVED ARCHITECTURE EXCEPTION — READ FIRST
------------------------------------------------
-This module executes ``docker`` from inside the API process. That conflicts with Charter
-Invariants 6/7 and ADR-005: ``secp_api`` must not perform privileged infrastructure execution, and
-``tests/test_architecture_boundary.py`` fails on exactly this file (``subprocess`` is in
-``HARD_FORBIDDEN_MODULES``) and on ``services/ranges.py`` calling ``provider.reset``/
-``provider.destroy``. A Docker socket is root-equivalent on the host, so the invariant applies in
-substance and not merely in letter.
+WHY THIS LIVES IN THE WORKER
+----------------------------
+Driving a Docker socket is root-equivalent on the host, so this is privileged infrastructure
+execution in substance and not merely in letter. Charter Invariants 6/7 and ADR-005 put that in the
+worker, and ``tests/test_architecture_boundary.py`` enforces it: ``subprocess`` is in
+``HARD_FORBIDDEN_MODULES`` for everything under ``secp_api``, and ``reset``/``destroy`` may not be
+called there directly.
 
-That guard has deliberately NOT been relaxed. Adding a ``RESTRICTED_MODULES`` seam entry for this
-file would be a charter-level exception, and that is an owner's decision rather than something to
-grant while writing the feature. Two honest resolutions exist:
+This module was first written inside ``secp_api`` and the guard failed on it. The guard was right.
+It was NOT relaxed — adding a ``RESTRICTED_MODULES`` seam entry would have made ``secp_api``
+privileged because that was convenient. Instead the execution moved here, the API kept only the
+contract types (:mod:`secp_api.range_providers`), and it now reaches this code solely by dispatching
+through :mod:`secp_api.dispatch`. Moving the file without moving the execution would have been
+guard evasion; moving the execution is the fix.
 
-1. Dispatch range operations through the worker boundary like every other privileged action, and
-   implement :class:`~secp_api.range_providers.base.RangeProvider` there. The provider protocol was
-   built for this: it holds no database session and returns only observations, so the move is
-   mechanical.
-2. Record an explicit, reviewed charter exception for a development-only provider and add the seam
-   entry with that justification alongside the existing ``httpx``/OIDC one.
-
-Until one is chosen, the provider is SEALED BY DEFAULT (``SECP_RANGE_LOCAL_DOCKER``, refused in
-production outright) so a deployment cannot acquire this capability by accident.
+The provider is additionally SEALED BY DEFAULT (``SECP_RANGE_LOCAL_DOCKER``, refused in production
+outright). Being in the worker answers *where* this capability may run; the seal answers *whether it
+is switched on at all*. There is no inline path — ``InlineDispatcher`` refuses range operations,
+because there is no inline-safe range provider.
 
 It creates a dedicated bridge network per range, launches the pinned intentionally-vulnerable
 images onto it, publishes each component on a loopback-only ephemeral host port, and verifies
@@ -39,7 +36,7 @@ SAFETY PROPERTIES THIS MODULE IS RESPONSIBLE FOR
    a specific id. A resource this control plane did not create cannot be selected.
 3. **No invented success.** ``verified`` is set only when an HTTP response was actually received
    from the component. A container that started but never answered is not ready.
-4. **No invented absence.** See :mod:`secp_api.range_providers.docker_cli`. When the daemon cannot
+4. **No invented absence.** See :mod:`secp_worker.range.docker_cli`. When the daemon cannot
    be observed, teardown reports ``unproven``, never ``removed``.
 """
 
@@ -63,7 +60,8 @@ from secp_api.range_providers.base import (
     TeardownResourceOutcome,
     TeardownResult,
 )
-from secp_api.range_providers.docker_cli import (
+
+from secp_worker.range.docker_cli import (
     PULL_TIMEOUT_SECONDS,
     DockerCommandError,
     DockerUnavailableError,

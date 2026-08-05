@@ -32,6 +32,7 @@ from secp_worker.temporal_app import (
     eligibility_preflight_activity,
     enrollment_recovery_sweep_activity,
     plan_secret_readiness_activity,
+    range_operation_activity,
     real_plan_generation_activity,
     remote_state_readiness_activity,
     reset_activity,
@@ -44,6 +45,7 @@ from secp_worker.temporal_workflows import (
     EligibilityPreflightWorkflow,
     EnrollmentRecoverySweepWorkflow,
     PlanSecretReadinessWorkflow,
+    RangeOperationWorkflow,
     RealPlanGenerationWorkflow,
     RemoteStateReadinessWorkflow,
     ResetWorkflow,
@@ -79,6 +81,10 @@ SHIPPED_WORKFLOWS: tuple = (
     # it is a pure database lifecycle transition (no provider, no OpenTofu, no host, no credential),
     # so there is no controlled-live variant of it and the operator queue never serves it.
     EnrollmentRecoverySweepWorkflow,
+    # SECP-RANGE: the range lifecycle operation. Ordinary queue — it contacts no provider
+    # credential and no infrastructure beyond a LOCAL container runtime that is sealed off by
+    # default (SECP_RANGE_LOCAL_DOCKER), so there is no controlled-live variant of it.
+    RangeOperationWorkflow,
 )
 SHIPPED_ACTIVITIES: tuple = (
     deploy_activity,
@@ -98,6 +104,9 @@ SHIPPED_ACTIVITIES: tuple = (
     real_plan_generation_activity,
     # WS-B R3: has no sealed/controlled-live split — it contacts nothing. See the workflow note.
     enrollment_recovery_sweep_activity,
+    # SECP-RANGE: sealed by configuration rather than by composition — it refuses to construct a
+    # provider at all unless SECP_RANGE_LOCAL_DOCKER is set, and never in production.
+    range_operation_activity,
 )
 
 

@@ -21,7 +21,6 @@ from secp_api.range_enums import (
     ResidueVerdict,
 )
 from secp_api.range_models import RangeInstance
-from secp_api.range_providers import reset_providers, set_provider
 from secp_api.range_providers.base import (
     DeployResult,
     ProviderHealth,
@@ -32,6 +31,8 @@ from secp_api.range_providers.base import (
     TeardownResult,
 )
 from secp_api.services import competitions, ranges
+from secp_worker.range import reset_providers, set_provider
+from secp_worker.range.execution import execute_range_operation
 
 
 class FakeProvider:
@@ -125,15 +126,6 @@ def provider():
     reset_providers()
 
 
-@pytest.fixture(autouse=True)
-def _inline_runner():
-    from secp_api.services import range_runner
-
-    range_runner.set_mode("inline")
-    yield
-    range_runner.set_mode("thread")
-
-
 def _deploy(session, principal, provider) -> RangeInstance:
     instance = ranges.create_range(session, principal, template_slug="web-breach-lab")
     session.commit()
@@ -141,20 +133,29 @@ def _deploy(session, principal, provider) -> RangeInstance:
         session, principal, instance.id, RangeOperationKind.deploy
     )
     session.commit()
-    ranges.execute_operation(session, operation.id)
+    execute_range_operation(session, operation.id)
     session.refresh(instance)
     return instance
 
 
 def test_catalog_ships_one_complete_range(session, principal):
-    templates = ranges.list_templates(session)
-    assert [template.slug for template in templates] == ["web-breach-lab"]
-    spec = templates[0].spec
+    """One COMPLETE starter range. Other templates may exist — ``juice-shop-solo`` is a deliberately
+    minimal single-container one used by the real-Docker tier — but exactly one ships the full
+    multi-component, fully-seeded experience, and this pins that one."""
+    templates = {template.slug: template for template in ranges.list_templates(session)}
+    assert "web-breach-lab" in templates
+
+    spec = templates["web-breach-lab"].spec
     assert {component["key"] for component in spec["components"]} == {"dvwa", "juice-shop"}
     assert len(spec["challenges"]) == 6
     # The persisted spec must never carry a flag value — only how many there are.
     assert all("flag_count" in challenge for challenge in spec["challenges"])
-    assert "flags" not in str(spec)
+
+    # No template's persisted spec may carry flag values: the templates table is readable by
+    # anything that can read the database, and a plaintext flag there would defeat the salted
+    # hashing done on CompetitionFlag.
+    for template in templates.values():
+        assert "flags" not in str(template.spec)
 
 
 def test_deploy_reaches_ready_only_with_verified_resources(session, principal, provider):
@@ -197,7 +198,7 @@ def test_destroy_confirmed_absent_is_clean_and_destroyed(session, principal, pro
         session, principal, instance.id, RangeOperationKind.destroy
     )
     session.commit()
-    ranges.execute_operation(session, operation.id)
+    execute_range_operation(session, operation.id)
     session.refresh(instance)
 
     assert instance.state is RangeState.destroyed
@@ -239,7 +240,7 @@ def test_unreachable_daemon_makes_teardown_unproven_never_clean(session, princip
         session, principal, instance.id, RangeOperationKind.destroy
     )
     session.commit()
-    ranges.execute_operation(session, operation.id)
+    execute_range_operation(session, operation.id)
     session.refresh(instance)
     session.refresh(operation)
 
@@ -299,7 +300,7 @@ def test_a_single_unproven_resource_taints_the_whole_verdict(session, principal,
         session, principal, instance.id, RangeOperationKind.destroy
     )
     session.commit()
-    ranges.execute_operation(session, operation.id)
+    execute_range_operation(session, operation.id)
     session.refresh(instance)
 
     assert instance.residue_verdict is ResidueVerdict.unproven
@@ -326,7 +327,7 @@ def test_resource_still_present_is_residue_not_unproven(session, principal, prov
         session, principal, instance.id, RangeOperationKind.destroy
     )
     session.commit()
-    ranges.execute_operation(session, operation.id)
+    execute_range_operation(session, operation.id)
     session.refresh(instance)
     session.refresh(operation)
 
@@ -356,7 +357,7 @@ def test_reset_returns_to_ready_and_clears_scores(session, principal, provider):
 
     _, operation = ranges.start_operation(session, principal, instance.id, RangeOperationKind.reset)
     session.commit()
-    ranges.execute_operation(session, operation.id)
+    execute_range_operation(session, operation.id)
     session.refresh(instance)
 
     assert instance.state is RangeState.ready
@@ -385,7 +386,7 @@ def test_a_failed_operation_never_narrows_the_set_of_resources_we_own(session, p
     provider.deploy_ok = False
     _, operation = ranges.start_operation(session, principal, instance.id, RangeOperationKind.reset)
     session.commit()
-    ranges.execute_operation(session, operation.id)
+    execute_range_operation(session, operation.id)
     session.refresh(instance)
     assert instance.state is RangeState.failed
 
@@ -405,7 +406,7 @@ def test_a_failed_operation_never_narrows_the_set_of_resources_we_own(session, p
         session, principal, instance.id, RangeOperationKind.destroy
     )
     session.commit()
-    ranges.execute_operation(session, destroy_op.id)
+    execute_range_operation(session, destroy_op.id)
     session.refresh(instance)
 
     evidence = ranges.list_teardown_evidence(session, principal, instance.id)[0]
@@ -430,7 +431,7 @@ def test_teardown_evidence_never_counts_a_resource_that_was_never_created(
         session, principal, instance.id, RangeOperationKind.destroy
     )
     session.commit()
-    ranges.execute_operation(session, operation.id)
+    execute_range_operation(session, operation.id)
 
     evidence = ranges.list_teardown_evidence(session, principal, instance.id)[0]
     assert evidence.expected_count == 0

@@ -404,6 +404,11 @@ class WorkflowKind(str, Enum):
     # still-sealed plan-only process boundary — it constructs no executor and runs no process
     # (ADR-022).
     real_plan_generation = "real_plan_generation"
+    # SECP-RANGE — a durable, worker-owned range lifecycle operation (deploy/reset/destroy against a
+    # real provider). Stored via the VARCHAR-backed EnumType, so this value is additive (no
+    # migration). It has no inline path: the local Docker provider drives a root-equivalent socket,
+    # which is precisely the privileged execution the inline dispatcher must never perform.
+    range_operation = "range_operation"
 
 
 class WorkflowStatus(str, Enum):
