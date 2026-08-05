@@ -41,6 +41,15 @@ HAND_CHECKED: dict[str, list[str]] = {
     "GET /api/v1/target-discovery/read-only-bootstrap/worker-nodes": ["target_discovery_manage"],
     "GET /api/v1/enrollment": ["enrollment_read"],
     "GET /api/v1/audit": ["audit_read"],
+    # THE DEEPEST CHAIN, and the case a one-hop resolver was warned about. Three hops:
+    #   routers/competitions.list_range_teams
+    #     -> services/competitions.get_competition_for_range
+    #       -> services/ranges.get_range   <- principal.require(Permission.exercise_operate)
+    # Nothing in the route path, the handler, or even the function it calls mentions a
+    # permission; the gate is two functions below the one the handler names. A resolver that
+    # inspected the route's immediate dependency would report this unguarded.
+    "GET /api/v1/ranges/{range_id}/teams": ["exercise_operate"],
+    "GET /api/v1/ranges/{range_id}/scoreboard": ["exercise_operate"],
 }
 
 #: Routes verified BY HAND to enforce no permission beyond authentication. Not "unresolved" —
