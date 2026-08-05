@@ -30,6 +30,7 @@ from secp_api.range_projection import (
 from secp_api.schemas_range import (
     RangeCreate,
     RangeEventOut,
+    RangeOperationAbandonIn,
     RangeOperationOut,
     RangeOut,
     RangeResourceOut,
@@ -138,6 +139,33 @@ def destroy_range(
     principal: Principal = Depends(current_principal),
 ) -> RangeOperationOut:
     return _start(session, principal, range_id, RangeOperationKind.destroy)
+
+
+@router.post("/range-operations/{operation_id}/abandon", response_model=RangeOperationOut)
+def abandon_range_operation(
+    operation_id: uuid.UUID,
+    body: RangeOperationAbandonIn | None = None,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> RangeOperationOut:
+    """Release a stranded operation and put its range into ``recovery_required``.
+
+    This endpoint exists because there was previously NO way out. An operation dispatched to a
+    worker that could not resolve it stayed ``pending`` forever, its range stayed ``resetting``
+    forever, and ``destroy`` and ``reset`` both answered 409 because neither may start from an
+    in-flight state. The only recovery was hand-written SQL against
+    ``range_deployment_operation`` — on a running system, with the range's containers still up.
+
+    Refuses (409) while the operation is still within its lease, unless the caller passes
+    ``force``: abandoning an operation that IS executing puts a second writer on the range. The
+    operation becomes ``unproven``, never ``failed``; nothing here observed it fail. Every resource
+    the range has created stays enumerated and none is marked absent, so the destroy that follows
+    still sweeps the complete set and still has to PROVE each one gone.
+    """
+    _, operation = ranges.abandon_operation(
+        session, principal, operation_id, force=bool(body and body.force)
+    )
+    return operation_out(operation)
 
 
 @router.get("/range-operations/{operation_id}", response_model=RangeOperationOut)

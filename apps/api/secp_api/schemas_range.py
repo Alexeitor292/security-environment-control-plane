@@ -114,6 +114,17 @@ class RangeOperationSummaryOut(BaseModel):
     percent: int
 
 
+class RangeOperationAbandonIn(BaseModel):
+    """Body for ``POST /range-operations/{id}/abandon``.
+
+    ``force`` is the operator asserting they have checked that nothing is executing the operation.
+    Without it the endpoint refuses while the lease is still live, because abandoning a running
+    operation puts a second writer on the range.
+    """
+
+    force: bool = False
+
+
 class RangeOperationOut(BaseModel):
     id: uuid.UUID
     range_id: uuid.UUID
@@ -128,6 +139,15 @@ class RangeOperationOut(BaseModel):
     started_at: datetime
     finished_at: datetime | None = None
     steps: list[RangeOperationStepOut]
+    #: When this operation's lease runs out. Renewed by observable progress, so a slow-but-moving
+    #: operation is never stale. ``None`` once the operation is resolved.
+    lease_expires_at: datetime | None = None
+    #: True when an in-flight operation has outlived its lease — nothing is executing it and an
+    #: operator may abandon it. NOT a failure: what the operation did is unknown.
+    stale: bool = False
+    #: Why it is considered stranded, in operator language. ``None`` exactly when ``stale`` is
+    #: false.
+    stale_reason: str | None = None
 
 
 class AccessTargetOut(BaseModel):

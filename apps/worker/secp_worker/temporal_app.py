@@ -616,15 +616,55 @@ async def range_operation_activity(arg: dict) -> str:
 
     from secp_api.db import session_scope
 
+    from secp_worker.range.execution import RangeExecutionUnresolvable
+
     operation_id = _uuid.UUID(str(arg["range_operation_id"]))
+
+    def _optional_uuid(key: str) -> _uuid.UUID | None:
+        raw = arg.get(key)
+        return _uuid.UUID(str(raw)) if raw else None
+
+    # What the DISPATCHING database says this id denotes. A worker attached to a different
+    # deployment — the trigger of the original stranding, two workers on one task queue against two
+    # databases — resolves the id to different rows, or to none, and refuses either way.
+    expected_range_instance_id = _optional_uuid("range_instance_id")
+    expected_organization_id = _optional_uuid("organization_id")
 
     def _run() -> None:
         from secp_worker.range.execution import execute_range_operation
 
         with session_scope() as session:
-            execute_range_operation(session, operation_id)
+            execute_range_operation(
+                session,
+                operation_id,
+                expected_range_instance_id=expected_range_instance_id,
+                expected_organization_id=expected_organization_id,
+            )
 
-    await asyncio.to_thread(_run)
+    try:
+        await asyncio.to_thread(_run)
+    except RangeExecutionUnresolvable as exc:
+        # THE FIX FOR THE STRANDED OPERATION. This used to be unreachable: work the worker could
+        # not resolve was a log line and a normal return, so the activity returned
+        # "range_operation_complete", Temporal recorded the workflow Completed, and the range sat
+        # in `resetting` forever with both destroy and reset answering 409.
+        #
+        # The reason travels as the error TYPE so it is visible in Temporal's UI and in a failure
+        # history without opening the message. ``non_retryable`` carries the activity's own
+        # classification: only a row that might merely not be visible yet is worth another attempt,
+        # and even that is bounded by the workflow's retry policy.
+        if not TEMPORAL_AVAILABLE:
+            # No temporalio to classify against (tooling, or a test calling this body directly).
+            # The classified error is already the truthful outcome — propagate it rather than
+            # failing on an import and hiding what actually went wrong.
+            raise
+        from temporalio.exceptions import ApplicationError
+
+        raise ApplicationError(
+            str(exc),
+            type=f"range_{exc.reason}",
+            non_retryable=not exc.retryable,
+        ) from exc
     # Identifier-free result: the operation's own row and lifecycle events are the record.
     return "range_operation_complete"
 
