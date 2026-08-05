@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from secp_api.auth import Principal
 from secp_api.deps import DB_SESSION, current_principal
 from secp_api.dispatch import get_dispatcher
+from secp_api.errors import NotFoundError
 from secp_api.proxmox_projection import (
     allocations_out,
     apply_authorization_out,
@@ -34,6 +35,7 @@ from secp_api.proxmox_projection import (
     verification_out,
 )
 from secp_api.range_enums import RangeOperationKind, RangeState
+from secp_api.range_models import RangeTemplate
 from secp_api.range_projection import (
     event_out,
     operation_out,
@@ -41,6 +43,12 @@ from secp_api.range_projection import (
     resource_out,
     teardown_evidence_out,
     template_out,
+)
+from secp_api.range_scenario_projection import scenario_out
+from secp_api.range_scenarios import (
+    build_scenario,
+    list_scenarios,
+    scenario_key_for_template,
 )
 from secp_api.schemas_proxmox import (
     ProxmoxAllocationsOut,
@@ -71,6 +79,7 @@ from secp_api.schemas_range import (
     RangeTemplateOut,
     TeardownEvidenceOut,
 )
+from secp_api.schemas_range_scenarios import ScenarioOut
 from secp_api.services import proxmox_lifecycle, ranges
 
 router = APIRouter(prefix="/api/v1", tags=["ranges"])
@@ -93,6 +102,86 @@ def get_range_template(
 ) -> RangeTemplateOut:
     del principal
     return template_out(ranges.get_template_row(session, slug))
+
+
+@router.get("/range-scenarios", response_model=list[ScenarioOut])
+def list_range_scenarios(
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> list[ScenarioOut]:
+    """Every shipped scenario ONCE, with every provider it can run on.
+
+    This is the provider-compatibility view of the same catalog ``/range-templates`` lists. The
+    templates endpoint is unchanged and still lists concrete deployable definitions — three of them,
+    two of which are the Web Breach Lab on two substrates. Here that lab appears a single time with
+    two provider variants, because an operator choosing a scenario is choosing a lab and then a
+    substrate, not choosing between two labs.
+
+    A scenario that cannot run on a provider is RETURNED, marked ``blocked``, with its blockers
+    named. It is never omitted and never marked eligible. The substrate-dependent Proxmox
+    requirements are ``undetermined`` here — this endpoint names no range, so no cluster observation
+    is in scope and nothing has been checked. ``GET /ranges/{id}/scenario`` answers them against the
+    observation actually recorded for that range.
+    """
+    del principal  # authentication only; the shipped catalog is not tenant data
+    del session  # pure catalog projection: no row is read
+    return [scenario_out(scenario) for scenario in list_scenarios()]
+
+
+@router.get("/range-scenarios/{key}", response_model=ScenarioOut)
+def get_range_scenario(
+    key: str,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ScenarioOut:
+    del principal
+    del session
+    scenario = build_scenario(key)
+    if scenario is None:
+        raise NotFoundError(f"range scenario '{key}' not found")
+    return scenario_out(scenario)
+
+
+@router.get("/ranges/{range_id}/scenario", response_model=ScenarioOut)
+def get_range_scenario_for_range(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ScenarioOut:
+    """This range's scenario, with compatibility answered against ITS recorded observation.
+
+    The difference from the catalog read matters: there, every substrate-dependent Proxmox
+    requirement is ``undetermined`` because no cluster is in scope. Here the requirements are
+    answered from the observation the worker recorded for this range — so a missing management CIDR
+    or an unobserved VLAN list becomes a NAMED blocker with the same ``reason_id`` the plan compiler
+    would block on, rather than a generic "not ready".
+
+    A non-Proxmox range still gets an answer: its own provider's requirements are decidable from the
+    catalog, and the Proxmox column stays ``undetermined`` because this range records no cluster
+    observation.
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    template_row = session.get(RangeTemplate, instance.template_id)
+    slug = template_row.slug if template_row is not None else ""
+    key = scenario_key_for_template(slug)
+    if key is None:
+        raise NotFoundError(
+            f"template '{slug}' does not belong to a shipped scenario, so it has no provider "
+            "compatibility to report"
+        )
+    binding = (
+        proxmox_lifecycle.load_binding(session, instance)
+        if instance.provider == proxmox_lifecycle.PROXMOX_PROVIDER
+        else None
+    )
+    scenario = build_scenario(
+        key,
+        observation=binding.observation if binding is not None else None,
+        team_count=len(binding.teams) if binding is not None else None,
+    )
+    if scenario is None:  # pragma: no cover - key came from the same table
+        raise NotFoundError(f"range scenario '{key}' not found")
+    return scenario_out(scenario)
 
 
 @router.post("/ranges", response_model=RangeOut, status_code=201)
