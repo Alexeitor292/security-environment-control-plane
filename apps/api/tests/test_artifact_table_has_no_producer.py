@@ -20,6 +20,8 @@ import ast
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -84,6 +86,36 @@ def _constructions(paths: list[Path], symbol: str) -> list[str]:
     return found
 
 
+#: A symbol that certainly IS constructed in this tree. It is the scan's positive control, and it
+#: lives inside the shared accessor rather than in a test of its own — see
+#: :func:`_scan_committed_tree`.
+_CONTROL_SYMBOL = "AuditEvent"
+
+
+def _scan_committed_tree(symbol: str) -> list[str]:
+    """Every construction of ``symbol`` in the committed tree, with the control checked FIRST.
+
+    THE CONTROL LIVES HERE, NOT IN A SIBLING TEST, AND THAT IS THE POINT.
+
+    Every assertion built on this scan has the form "nothing was found", which is satisfied just as
+    well by a scan that looked at nothing. A separate test proving the scan reaches the tree does
+    fix that — right up until someone skips it, splits the file, or deletes it as redundant, at
+    which point the negative assertions silently go vacuous and nothing reports it. **An assertion
+    that must never lie cannot depend on which of its siblings still exist.**
+
+    So the accessor refuses instead. Every caller inherits the control, including callers nobody
+    has written yet.
+    """
+    paths = _tracked_python_files()
+    if symbol != _CONTROL_SYMBOL and not _constructions(paths, _CONTROL_SYMBOL):
+        raise ArtifactScanUnmeasurable(
+            f"the scan found no {_CONTROL_SYMBOL} constructions across {len(paths)} tracked files, "
+            f"so it is not reaching the tree and any '{symbol} has no producer' result from it "
+            "would be vacuous rather than informative"
+        )
+    return _constructions(paths, symbol)
+
+
 def test_artifact_table_has_no_producer() -> None:
     """Nothing constructs an ``Artifact``, anywhere in the committed tree.
 
@@ -91,7 +123,7 @@ def test_artifact_table_has_no_producer() -> None:
     docstring on ``secp_api.models.Artifact`` is now wrong and a read surface may finally be
     honest. Update both together.
     """
-    producers = _constructions(_tracked_python_files(), "Artifact")
+    producers = _scan_committed_tree("Artifact")
     assert not producers, (
         "secp_api.models.Artifact now has a producer, so the model's docstring — which states that "
         "nothing writes it and that no artifact store exists — is out of date. Update it, and "
@@ -137,13 +169,26 @@ def test_the_scan_ignores_mentions_that_are_not_constructions(tmp_path: Path) ->
 
 
 def test_the_real_tree_is_actually_being_scanned() -> None:
-    """Positive control: the scan must find a symbol that certainly IS constructed.
+    """The positive control, asserted directly as well as enforced in the accessor.
 
-    Otherwise ``no producers found`` is indistinguishable from ``nothing was scanned`` — the two
-    have the same output and opposite meanings, and only one of them is a finding.
+    Deleting THIS test no longer makes the guard above vacuous — ``_scan_committed_tree`` refuses
+    on its own — but keeping it means the failure names the cause in one line instead of arriving
+    as an exception from inside another test.
     """
-    found = _constructions(_tracked_python_files(), "AuditEvent")
-    assert found, (
-        "the scan found no AuditEvent constructions either, so it is not reaching the tree and the "
-        "Artifact result above is vacuous rather than informative"
+    assert _constructions(_tracked_python_files(), _CONTROL_SYMBOL), (
+        f"the scan found no {_CONTROL_SYMBOL} constructions, so it is not reaching the tree"
     )
+
+
+def test_the_accessor_refuses_when_the_control_is_absent(monkeypatch) -> None:
+    """Red-direction on the control itself, which is what makes an empty scan safe.
+
+    Without this, "the accessor enforces the control" is a claim about code nobody has run in the
+    failing direction — the same gap the control exists to close, one level up.
+    """
+    monkeypatch.setattr(
+        "test_artifact_table_has_no_producer._constructions",
+        lambda paths, symbol: [],
+    )
+    with pytest.raises(ArtifactScanUnmeasurable, match="not reaching the tree"):
+        _scan_committed_tree("Artifact")
