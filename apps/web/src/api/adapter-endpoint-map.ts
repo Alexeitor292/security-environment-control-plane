@@ -459,6 +459,30 @@ export const ADAPTER_ENDPOINT_MAP: readonly AdapterMapping[] = [
   },
 ];
 
+/**
+ * Path segments that would name a CREDENTIAL INVENTORY route.
+ *
+ * `listSecretRefs` is withheld, and "withheld" only means something if somebody would notice a
+ * route appearing. This is what the test checks the published contract against.
+ *
+ * Whole SEGMENTS, not substrings. An earlier version matched on substring and fired on
+ * `/provisioning-manifests/{id}/plan-secret-readiness` — the authorization-governance family,
+ * which decides whether a secret PURPOSE may be used and returns no inventory at all. A guard
+ * that fires on the wrong thing gets deleted by the next person who hits it, so it was made
+ * precise rather than tolerated.
+ */
+export const CREDENTIAL_INVENTORY_SEGMENTS: ReadonlySet<string> = new Set([
+  "secrets",
+  "secret-refs",
+  "credentials",
+  "vault",
+]);
+
+/** True when any whole segment of `path` names a credential-inventory collection. */
+export function hasCredentialInventorySegment(path: string): boolean {
+  return path.split("/").some((segment) => CREDENTIAL_INVENTORY_SEGMENTS.has(segment));
+}
+
 /** Convenience: every method the transport layer can serve against `main` today. */
 export function servedMethods(): readonly AdapterMapping[] {
   return ADAPTER_ENDPOINT_MAP.filter((m) => m.status === "exact" || m.status === "shaped");

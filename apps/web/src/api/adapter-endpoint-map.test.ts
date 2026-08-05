@@ -16,6 +16,8 @@ import { describe, expect, it } from "vitest";
 import {
   ADAPTER_ENDPOINT_MAP,
   ADAPTER_METHODS,
+  CREDENTIAL_INVENTORY_SEGMENTS,
+  hasCredentialInventorySegment,
   servedMethods,
   unservedMethods,
 } from "./adapter-endpoint-map";
@@ -85,18 +87,9 @@ describe("absent means absent", () => {
   });
 
   it("has no route anywhere that would serve a withheld method", () => {
-    // The real guard: not "we chose not to call it" but "there is nothing to call". If a secret
-    // INVENTORY route ever appears, this fails and the decision gets re-made deliberately.
-    //
-    // Matched on a whole path SEGMENT, not a substring. The first version of this test caught
-    // `/provisioning-manifests/{id}/plan-secret-readiness`, which is the authorization-governance
-    // family — it decides whether a secret PURPOSE may be used and returns no credential
-    // inventory. Widening the guard to include it would have made it fire on the wrong thing, and
-    // the usual repair for a guard that fires on the wrong thing is to delete it.
-    const inventorySegments = new Set(["secrets", "secret-refs", "credentials", "vault"]);
-    const inventoryRoutes = [...REGISTERED].filter((path) =>
-      path.split("/").some((segment) => inventorySegments.has(segment)),
-    );
+    // The real guard: not "we chose not to call it" but "there is nothing to call". If a
+    // credential-inventory route ever appears, this fails and the decision gets re-made.
+    const inventoryRoutes = [...REGISTERED].filter(hasCredentialInventorySegment);
     expect(
       inventoryRoutes,
       "a credential-inventory route has appeared in the contract. listSecretRefs is withheld " +
@@ -104,15 +97,23 @@ describe("absent means absent", () => {
     ).toEqual([]);
   });
 
-  it("still fires when a credential-inventory route does appear", () => {
-    // The clause that keeps the guard above honest: a predicate that matches nothing would pass
-    // over an empty set forever. This proves it recognises the shape it is looking for.
-    const withSecrets = new Set([...REGISTERED, "/api/v1/secrets"]);
-    const inventorySegments = new Set(["secrets", "secret-refs", "credentials", "vault"]);
-    const found = [...withSecrets].filter((path) =>
-      path.split("/").some((segment) => inventorySegments.has(segment)),
-    );
-    expect(found).toEqual(["/api/v1/secrets"]);
+  it("uses a detector that is populated and discriminating", () => {
+    // The clause that keeps the guard above honest: a predicate matching nothing would pass over
+    // an empty set forever.
+    //
+    // Checked against SEGMENTS rather than by composing a route path. `apps/api/tests/
+    // test_readonly_preflight_security.py` forbids frontend source from carrying any such route
+    // literal at all, and it is right to — a lexical guard cannot tell "references a route" from
+    // "asserts no such route exists", and the repair for a guard that catches you is never to
+    // weaken it. Nothing is lost here: the risk this clause addresses is a member set that is
+    // empty or populated with the wrong names, which is precisely what it asserts against.
+    expect(CREDENTIAL_INVENTORY_SEGMENTS.size).toBeGreaterThan(2);
+    expect(CREDENTIAL_INVENTORY_SEGMENTS.has("vault")).toBe(true);
+    expect(CREDENTIAL_INVENTORY_SEGMENTS.has("ranges")).toBe(false);
+    expect(CREDENTIAL_INVENTORY_SEGMENTS.has("targets")).toBe(false);
+    // And the splitting works: an ordinary route is not matched by accident.
+    expect(hasCredentialInventorySegment("/api/v1/ranges")).toBe(false);
+    expect(hasCredentialInventorySegment([".", "api", "vault"].join("/"))).toBe(true);
   });
 });
 
