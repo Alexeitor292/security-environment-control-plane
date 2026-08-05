@@ -419,7 +419,33 @@ both thorough, both scoped to the guards their author already knew about.** An
 include list of *guards* fails the same way an include list of *files* does. The
 tree tells you what it forbids only when you ask the tree.
 
-### 4.7 What the frontend suite structurally could not catch
+### 4.7 For P7-D: claims enter scope when you wire a module — by design
+
+**If you wire `domain/proxmox/proxmox-view.ts` (or `adapter-endpoint-map.ts`) into
+a component and `security-claims.test.ts` goes red, that is the guard working, not
+a broken test.**
+
+The claims guard scopes itself by **reachability**: a module is in scope if any
+`.tsx` can reach it by following imports, recomputed from the tree every run.
+A string no component can reach is not user-facing copy, so it is not checked.
+
+`domain/proxmox/proxmox-view.ts` carries deliberate safety copy — `UNPROVEN_IS_NOT_CLEAN_NOTE`,
+`AUTHORIZATION_IS_SERVER_SIDE_NOTE`, and 8 absolute claims. Nothing imports it
+today, so it sits outside scope. **The moment a component imports it, those 8
+claims become user-facing and must each be removed or acknowledged with a written
+reason.**
+
+That is the correct moment for the decision: the copy becomes a claim to an
+operator exactly when it can reach a screen, and not before. What it is *not* is
+a reason to add the module to an exemption list — the claims are the point of
+review, and the review is owed at the moment of wiring.
+
+The same applies to `api/adapter-endpoint-map.ts`, which additionally pins its
+importer set (currently empty): importing it from anywhere at all, component or
+not, fails that pin and forces the exemption to be re-decided rather than
+silently becoming false.
+
+### 4.8 What the frontend suite structurally could not catch
 
 The backend guards found a real boundary violation that **1058 passing frontend
 tests did not**. That is not a gap in those tests; it is the shape of the
