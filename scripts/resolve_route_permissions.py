@@ -52,6 +52,11 @@ VERIFIED_OPEN: frozenset[str] = frozenset(
         # `worker_identity_manage` from an unrelated function of a matching name, which would have
         # HIDDEN the integrations surface from operators entitled to see it.
         "GET /api/v1/plugins",
+        # routers/ranges.py:126 — `del principal  # authentication only; the shipped catalog is
+        # not tenant data`. The only route in the contract where the code states WHY it is open
+        # rather than leaving the absence to be inferred, which is worth more than the reading.
+        "GET /api/v1/range-templates",
+        "GET /api/v1/range-templates/{slug}",
     }
 )
 

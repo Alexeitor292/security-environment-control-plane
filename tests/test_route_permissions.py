@@ -60,6 +60,11 @@ VERIFIED_UNGUARDED: set[str] = {
     "GET /api/v1/targets",
     # routers/system.py:33 — reads the plugin registry's health; no service call, no `require`.
     "GET /api/v1/plugins",
+    # routers/ranges.py:126 — the handler DELETES the principal with a comment saying why:
+    # "authentication only; the shipped catalog is not tenant data". The only open route in the
+    # contract that states its own reason.
+    "GET /api/v1/range-templates",
+    "GET /api/v1/range-templates/{slug}",
 }
 
 

@@ -191,11 +191,11 @@
   },
   "GET /api/v1/range-templates": {
     "permissions": [],
-    "state": "unknown"
+    "state": "open"
   },
   "GET /api/v1/range-templates/{slug}": {
     "permissions": [],
-    "state": "unknown"
+    "state": "open"
   },
   "GET /api/v1/ranges": {
     "permissions": [
