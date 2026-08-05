@@ -1,8 +1,8 @@
 """The range-capable development Compose profile (infra/dev/docker-compose.range.yml).
 
 `docker compose up worker` builds a worker that connects to Temporal, accepts a range operation and
-then refuses at the seal: the base `worker` service passes no `SECP_RANGE_LOCAL_DOCKER` and mounts no
-Docker socket. The overlay is what makes the SHIPPED Compose path range-capable, so that acceptance
+then refuses at the seal: the base `worker` service passes no `SECP_RANGE_LOCAL_DOCKER` and mounts
+no Docker socket. The overlay is what makes the SHIPPED Compose path range-capable, so acceptance
 runs stop depending on a worker started by hand on the host.
 
 These are structural checks; they start no containers. The one property worth more than all the
@@ -272,7 +272,9 @@ def test_only_the_range_overlay_mounts_a_docker_socket_anywhere_in_the_repo(comp
     fails on arrival rather than after someone remembers to extend a list.
     """
     offenders = sorted(
-        name for name, svc in _services(compose_file).items() if DOCKER_SOCKET in _mount_sources(svc)
+        name
+        for name, svc in _services(compose_file).items()
+        if DOCKER_SOCKET in _mount_sources(svc)
     )
     if compose_file.name == RANGE_OVERLAY.name:
         assert set(offenders) <= SOCKET_ALLOWED_SERVICES, (
@@ -303,7 +305,7 @@ def test_no_production_material_references_the_range_overlay():
     assert scanned, "scanned no production files; this check proved nothing"
 
 
-# --- the file tells the truth about what it does ---------------------------------------------------
+# --- the file tells the truth about what it does ------------------------------------------------
 
 
 def test_overlay_warns_that_socket_access_is_root_equivalent():
@@ -327,7 +329,9 @@ def test_overlay_documents_the_env_file_requirement():
 
 def test_range_dockerfile_adds_only_the_cli_and_stays_non_root():
     text = RANGE_DOCKERFILE.read_text(encoding="utf-8")
-    assert "FROM base" in text, "the range image must layer on the built worker image, not restate it"
+    assert "FROM base" in text, (
+        "the range image must layer on the built worker image, not restate it"
+    )
     lowered = text.lower()
     assert lowered.rstrip().endswith("user secp"), (
         "Dockerfile.range-worker must end back on the unprivileged runtime user"
