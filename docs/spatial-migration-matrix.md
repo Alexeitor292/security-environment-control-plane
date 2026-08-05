@@ -546,10 +546,32 @@ it.
 
 **Coverage limit, stated because the numbers expose it:** at 640px, 74 pairs were
 measured and **228 were skipped because their selectors match no element on the
-home shell** — they target markup inside apps that this pass did not open. So
-this verifies the responsive layer *of the surfaces that were mounted*, not all
-314 pairs. At 1280 and 1600 only one property was measurable, so those two rows
-are near-empty and should not be read as broad agreement.
+home shell** — they target markup inside apps that this pass did not open. At
+1280 and 1600 only one property was measurable, so those two rows are near-empty
+and should not be read as broad agreement.
+
+**The 228 are not a hole, and the reason is worth stating precisely.** They are
+covered by a stronger and entirely independent source: **all 16 donor CSS files
+are byte-identical in the repository** — verified per file, and none of the 11
+intentionally-modified files is a stylesheet. So the responsive rules inside the
+unopened apps are not *unverified*; they are identical **by construction**, which
+is a stronger guarantee than "the same computed value was observed once, in one
+browser, at one width".
+
+That makes the computed-style comparison the **second** source of truth rather
+than the only one, and the two answer different questions:
+
+| Instrument | Question it answers |
+| --- | --- |
+| Byte-identity of the CSS | Are the rules the same? |
+| Computed style in a live browser | Do those rules actually **apply** the same way? |
+
+Byte-identity cannot see a divergence caused by cascade order, bundling, or a
+differing base stylesheet — two identical rule sets can still compute
+differently if something around them changed. Measurement catches that and
+cannot, on its own, prove the rules match everywhere it did not look. Neither
+subsumes the other; **228 is the boundary between two methods, not a gap in
+one.**
 | **Animation & transition timing** | **55 distinct durations, identical counts; easings identical; 6 delay values; 33 `animation-name`s — zero difference** |
 
 ### The 3D scene — driven through the real flow, on both sides
