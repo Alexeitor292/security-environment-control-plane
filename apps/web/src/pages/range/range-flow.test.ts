@@ -16,7 +16,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { api } from "../../api/client";
 import { createFakeRangeApi, type FakeRangeApi } from "../../testing/fake-control-plane";
-import { FLOW_STEPS, firstMissingInOrder, runRangeFlow } from "./range-flow";
+import {
+  EXPECTED_EVENT_KIND_ORDER,
+  FLOW_STEPS,
+  firstMissingInOrder,
+  runRangeFlow,
+} from "./range-flow";
 
 const originalFetch = globalThis.fetch;
 let server: FakeRangeApi;
@@ -94,19 +99,12 @@ describe("range vertical slice — end to end against a conforming range API", (
   });
 
   it("records the server-side event log that proves the flow happened", async () => {
+    // The SAME list the live run asserts, and it was captured from a real control plane rather
+    // than chosen here. That is what stops this test from passing against the fake's own fiction:
+    // when the two disagreed, the live run failed and the fake was corrected, not the assertion.
     const { eventKinds } = await runRangeFlow(api, { rangeName: "Acceptance Run", sleep: noSleep });
 
-    expect(
-      firstMissingInOrder(eventKinds, [
-        "range_created",
-        "deploy_started",
-        "deploy_completed",
-        "reset_started",
-        "reset_completed",
-        "destroy_started",
-        "destroy_completed",
-      ]),
-    ).toBeNull();
+    expect(firstMissingInOrder(eventKinds, EXPECTED_EVENT_KIND_ORDER)).toBeNull();
   });
 
   it("reaches a clean, proved teardown on the happy path", async () => {
