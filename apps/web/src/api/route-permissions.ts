@@ -17,20 +17,36 @@ import permissions from "../../../../contracts/openapi/route-permissions.json";
 /** `"GET /api/v1/ranges"` -> the permission names its call graph requires. */
 export type RouteKey = string;
 
-const TABLE = permissions as Record<RouteKey, { permissions: string[] }>;
+const TABLE = permissions as Record<RouteKey, { state: string; permissions: string[] }>;
 
 /**
- * What a route requires, or `null` when the resolver could not tell.
+ * What a route requires — THREE states, and collapsing any two is a real defect.
  *
- * `null` is NOT "requires nothing". The walk reaching no `require` and there being no gate are
- * different facts, and only one of them is safe to render — a client told "this needs nothing"
- * shows the control to everyone. `VERIFIED_UNGUARDED` in the Python test records the routes that
- * were read by hand and found genuinely open; everything else stays unknown here.
+ * A discriminated union rather than `string[] | null`, because `null` and `[]` are one `??` away
+ * from each other and mean opposite things. `owner-spatial-migration` is wiring `requires: []` for
+ * a route this module would have returned `null` for; both are correct and they are not the same
+ * claim, so the type makes them impossible to confuse at the call site.
+ *
+ *   requires  the call graph resolved a gate; render "you need X"
+ *   open      somebody READ the code and there is no gate; the control is for everyone
+ *   unknown   the walk found nothing, which is not the same as finding nothing there
+ *
+ * `unknown` must never render as `open`. That is precisely what a broken walk produces — every
+ * route reporting no permission — and it shows every control to everyone.
  */
-export function permissionsFor(route: RouteKey): readonly string[] | null {
+export type RouteRequirement =
+  | { readonly state: "requires"; readonly permissions: readonly string[] }
+  | { readonly state: "open" }
+  | { readonly state: "unknown" };
+
+export function requirementFor(route: RouteKey): RouteRequirement {
   const entry = TABLE[route];
-  if (entry === undefined) return null;
-  return entry.permissions.length > 0 ? entry.permissions : null;
+  if (entry === undefined) return { state: "unknown" };
+  if (entry.state === "requires" && entry.permissions.length > 0) {
+    return { state: "requires", permissions: entry.permissions };
+  }
+  if (entry.state === "open") return { state: "open" };
+  return { state: "unknown" };
 }
 
 /** Every route the artifact knows, for tests that assert coverage rather than sample it. */

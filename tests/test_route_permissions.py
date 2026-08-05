@@ -58,11 +58,13 @@ HAND_CHECKED: dict[str, list[str]] = {
 VERIFIED_UNGUARDED: set[str] = {
     # services/targets.py:269 — scopes by `actor.organization_id` and requires no permission.
     "GET /api/v1/targets",
+    # routers/system.py:33 — reads the plugin registry's health; no service call, no `require`.
+    "GET /api/v1/plugins",
 }
 
 
 @pytest.fixture(scope="module")
-def resolved() -> dict[str, dict[str, list[str]]]:
+def resolved() -> dict[str, dict[str, object]]:
     return route_permissions()
 
 
@@ -75,14 +77,14 @@ def test_the_artifact_is_in_step_with_the_call_graph() -> None:
 
 @pytest.mark.parametrize(("route", "expected"), sorted(HAND_CHECKED.items()))
 def test_the_resolver_agrees_with_the_hand_check(
-    resolved: dict[str, dict[str, list[str]]], route: str, expected: list[str]
+    resolved: dict[str, dict[str, object]], route: str, expected: list[str]
 ) -> None:
     assert route in resolved, f"{route} is not a registered route"
     assert resolved[route]["permissions"] == expected
 
 
 def test_an_unguarded_route_is_recorded_as_verified_rather_than_unresolved(
-    resolved: dict[str, dict[str, list[str]]],
+    resolved: dict[str, dict[str, object]],
 ) -> None:
     """The distinction a client cannot afford to lose.
 
@@ -93,9 +95,30 @@ def test_an_unguarded_route_is_recorded_as_verified_rather_than_unresolved(
     for route in VERIFIED_UNGUARDED:
         assert route in resolved, f"{route} is not a registered route"
         assert resolved[route]["permissions"] == []
+        assert resolved[route]["state"] == "open", (
+            f"{route} was read by hand and found open, but the artifact says "
+            f"{resolved[route]['state']!r}. `open` and `unknown` are different instructions to a "
+            "client and must not collapse."
+        )
 
 
-def test_the_resolver_resolves_most_routes(resolved: dict[str, dict[str, list[str]]]) -> None:
+def test_an_unresolved_route_is_never_reported_as_open(
+    resolved: dict[str, dict[str, object]],
+) -> None:
+    """The pair that must not merge.
+
+    `unknown` means the walk found no gate. `open` means somebody read the code and there is no
+    gate. A client rendering the first as the second shows every control to everyone — which is
+    exactly what a broken walk produces, so the two states carry the failure apart.
+    """
+    for route, entry in resolved.items():
+        if entry["state"] == "open":
+            assert route in VERIFIED_UNGUARDED, f"{route} claims `open` without a hand check"
+        if entry["state"] == "unknown":
+            assert route not in VERIFIED_UNGUARDED
+
+
+def test_the_resolver_resolves_most_routes(resolved: dict[str, dict[str, object]]) -> None:
     """A smoke check on the resolver itself, not a target to tune toward.
 
     If a future change breaks the walk, the failure mode is silent: every route reports no

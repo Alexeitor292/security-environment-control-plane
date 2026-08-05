@@ -2,29 +2,45 @@
 
 import { describe, expect, it } from "vitest";
 
-import { knownRoutes, permissionsFor } from "./route-permissions";
+import { knownRoutes, requirementFor } from "./route-permissions";
 
 describe("permissions come from the call graph", () => {
   it("knows the three answers no route path would suggest", () => {
     // Same pins as tests/test_route_permissions.py, asserted on the client side too: the artifact
     // is the seam between them, and a seam checked from only one end is checked once.
-    expect(permissionsFor("GET /api/v1/ranges")).toEqual(["exercise_operate"]);
+    expect(requirementFor("GET /api/v1/ranges")).toEqual({
+      state: "requires",
+      permissions: ["exercise_operate"],
+    });
     expect(
-      permissionsFor("GET /api/v1/target-discovery/read-only-bootstrap/worker-nodes"),
-    ).toEqual(["target_discovery_manage"]);
-    expect(permissionsFor("GET /api/v1/enrollment")).toEqual(["enrollment_read"]);
+      requirementFor("GET /api/v1/target-discovery/read-only-bootstrap/worker-nodes"),
+    ).toEqual({ state: "requires", permissions: ["target_discovery_manage"] });
+    expect(requirementFor("GET /api/v1/enrollment")).toEqual({
+      state: "requires",
+      permissions: ["enrollment_read"],
+    });
   });
 
-  it("returns null for a route with no resolved gate, and null is not 'open'", () => {
-    // `GET /api/v1/targets` genuinely enforces nothing beyond authentication — verified by
-    // reading `services/targets.py`. It still returns null here, because this module cannot tell
-    // that case from a walk that lost the thread, and rendering "no permission needed" over the
-    // second one shows a control to everyone.
-    expect(permissionsFor("GET /api/v1/targets")).toBeNull();
+  it("distinguishes a VERIFIED open route from one it could not resolve", () => {
+    // The pair that must not merge. Both were read by hand and found to enforce nothing beyond
+    // authentication, so they are `open` — a positive claim. Everything unresolved stays
+    // `unknown`, and a page must render those differently: `open` shows the control to everyone,
+    // `unknown` is the state a BROKEN WALK produces for every route at once.
+    expect(requirementFor("GET /api/v1/targets")).toEqual({ state: "open" });
+    expect(requirementFor("GET /api/v1/plugins")).toEqual({ state: "open" });
   });
 
-  it("returns null for a route it has never heard of", () => {
-    expect(permissionsFor("GET /api/v1/not-a-route")).toBeNull();
+  it("treats a route it has never heard of as unknown, never as open", () => {
+    expect(requirementFor("GET /api/v1/not-a-route")).toEqual({ state: "unknown" });
+  });
+
+  it("never reports `requires` with an empty permission list", () => {
+    // A third way the two could collapse: `{state:"requires", permissions:[]}` renders as a
+    // requirement nobody can hold, which is indistinguishable from a locked surface.
+    for (const route of knownRoutes()) {
+      const requirement = requirementFor(route);
+      if (requirement.state === "requires") expect(requirement.permissions.length).toBeGreaterThan(0);
+    }
   });
 
   it("covers the whole registered surface, so a missing entry is a real absence", () => {
