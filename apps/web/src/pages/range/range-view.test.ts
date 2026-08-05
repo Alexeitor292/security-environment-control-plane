@@ -24,13 +24,13 @@ import {
   resourceRows,
   teardownSummary,
 } from "./range-view";
+import type { ScoreboardEntry } from "../../api/range-types";
 import {
   VERDICT_LABEL,
   displayRank,
   isTiedRank,
   orderScoreboard,
   verdictTone,
-  type ScoreboardEntry,
 } from "./scoreboard-view";
 
 function template(over: Partial<RangeTemplate> = {}): RangeTemplate {
