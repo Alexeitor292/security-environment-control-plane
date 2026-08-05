@@ -17,7 +17,10 @@ No provider SDK is imported and no network connection is opened.
 
 from __future__ import annotations
 
+from secp_api.range_providers.proxmox_manifest import MANIFEST_KEY
+
 from secp_worker.provisioning.adapters.base import AdapterError
+from secp_worker.provisioning.adapters.proxmox_bundle import render_bundle
 
 # Clearly-fake, non-routable fixture provenance. NOT a real provider or registry.
 _FAKE_PROVIDER_SOURCE = "example.test/fake/labproxmox"
@@ -32,6 +35,15 @@ class ProxmoxAdapter:
     adapter_kind = "proxmox"
 
     def render(self, manifest: dict, profile: dict) -> dict[str, str]:
+        # A manifest carrying a COMPILED desired state renders the reviewed module bundle against
+        # the real pinned provider. A manifest without one renders the original inert fixture
+        # topology below, byte-for-byte unchanged. Dispatching on manifest content rather than on
+        # a new adapter_kind keeps the sealed _KNOWN_ADAPTER_KINDS set intact: the adapter kind is
+        # still "proxmox", what changed is the fidelity of the desired state it is handed.
+        desired_state = manifest.get(MANIFEST_KEY)
+        if desired_state:
+            return render_bundle(desired_state, profile)
+
         topology = manifest.get("topology")
         if not topology:
             raise AdapterError("manifest topology is empty; nothing to render")
