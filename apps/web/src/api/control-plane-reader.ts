@@ -116,8 +116,18 @@ export interface ControlPlaneReader extends ProvenanceDeclaring {
   /** `GET /api/v1/ranges/{id}/operations`. Carries `stale`, which is neither running nor failed. */
   listWorkflowRuns(rangeId: string): Promise<readonly RangeOperationOut[]>;
 
-  /** `GET /api/v1/ranges/{id}/teardown-evidence`. Carries `unproven_count`; see the note there. */
-  listEvidence(rangeId: string): Promise<readonly TeardownEvidenceOut[]>;
+  /**
+   * `GET /api/v1/ranges/{id}/teardown-evidence` — the residue verdicts for ONE range.
+   *
+   * Named for the route rather than for "evidence", because `listEvidence` named two different
+   * concepts across the adapter layer: this, a residue-verification verdict, and the org-wide
+   * content-addressed artifact index (`kind`, `sha256`, `store`) the spatial adapter wanted.
+   * Different arity, different payload, one name — and the absent-endpoint inventory recorded ONE
+   * entry where there are two, only one of which has a backend at all.
+   *
+   * One name now spans three planes: the route, the generated client method, and this reader.
+   */
+  listTeardownEvidence(rangeId: string): Promise<readonly TeardownEvidenceOut[]>;
 
   /** `GET /api/v1/ranges/{id}/scoreboard`. One total per team — no score components exist. */
   listScores(rangeId: string): Promise<ScoreboardOut>;
@@ -191,7 +201,7 @@ export const liveReader: ControlPlaneReader = {
   listTeams: (rangeId: string) => api.listTeams(rangeId),
   listIntegrations: () => api.plugins(),
   listWorkflowRuns: (rangeId: string) => api.listRangeOperations(rangeId),
-  listEvidence: (rangeId: string) => api.listTeardownEvidence(rangeId),
+  listTeardownEvidence: (rangeId: string) => api.listTeardownEvidence(rangeId),
   listScores: (rangeId: string) => api.getScoreboard(rangeId),
   getEvent: (rangeId: string) => api.getCompetition(rangeId),
   listRangeLog: (rangeId: string, afterSequence?: number) =>
@@ -245,7 +255,7 @@ export function fixtureReader(rows: {
     listTeams: async () => rows.teams ?? missing("teams")(),
     listIntegrations: async () => rows.integrations ?? missing("integrations")(),
     listWorkflowRuns: async () => rows.workflowRuns ?? missing("workflowRuns")(),
-    listEvidence: async () => rows.evidence ?? missing("evidence")(),
+    listTeardownEvidence: async () => rows.evidence ?? missing("evidence")(),
     listScores: async () => rows.scoreboard ?? missing("scoreboard")(),
     getEvent: async () => rows.competition ?? missing("competition")(),
     listRangeLog: async () => rows.rangeLog ?? missing("rangeLog")(),

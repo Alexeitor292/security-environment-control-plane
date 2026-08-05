@@ -9,16 +9,17 @@ Seven gaps, resolved against the routes the live application registers rather th
 
 | method | sketch | unblocks |
 | --- | --- | --- |
-| `listEvidence` | `no new route — GET /api/v1/ranges then /ranges/{range_id}/teardown-evidence` | The evidence half of the audit surface, behind a range picker |
+| `listArtifactIndex` | `no new route — GET /api/v1/ranges then /ranges/{range_id}/teardown-evidence` | The evidence half of the audit surface, behind a range picker |
 | `listApprovals` | `GET /api/v1/approvals?status=pending` | An approvals inbox |
 | `listEvents` | `GET /api/v1/competitions` | Any competition index |
 | `listUsers` | `GET /api/v1/users` | Any surface naming a person other than the viewer |
 | `listAlerts` | `GET /api/v1/alerts` | An alerting surface |
 | `listReports` | `GET /api/v1/reports` | Reporting, entirely |
 | `auditOutcomeFacet` | `GET /api/v1/audit/outcomes  (or a `facets` block on the audit response)` | A truthful outcome filter on the audit surface |
+| `workerLiveness` | `a heartbeat, then GET /api/v1/workers with a last-seen and a reachability state` | WorkersPage, which is currently unbuildable rather than degraded |
 | `listAccessProfiles` | `GET /api/v1/access-profiles?team_id=` | Participant access surfaces |
 
-## `listEvidence`
+## `listArtifactIndex`
 
 **Sketch** — `no new route — GET /api/v1/ranges then /ranges/{range_id}/teardown-evidence`
 
@@ -26,9 +27,9 @@ Seven gaps, resolved against the routes the live application registers rather th
 
 **Unblocks** — The evidence half of the audit surface, behind a range picker. `GET /api/v1/audit` serves the action log org-wide with no picker, so the two halves of that page ask for their scope differently — which is a design problem, not a missing route.
 
-**What exists today** — `/api/v1/ranges/{range_id}/teardown-evidence` · `/api/v1/onboarding/{onboarding_id}/evidence` · `/api/v1/target-discovery/{enrollment_id}/evidence`
+**What exists today** — nothing
 
-Evidence exists in three unrelated, differently-shaped, separately-scoped places and there is no combined feed. TeardownEvidenceOut is the richest and carries the zero-residue proof — verdict, probe_reachable, expected_count, removed_confirmed, still_present, unproven_count. `unproven_count` has no domain field, and folding it away turns 'nobody could prove these are gone' into 'these are gone'.
+SPLIT FROM `listEvidence` on 2026-08-05, which named TWO concepts. This one is the org-wide content-addressed artifact index the spatial adapter wants — `kind`, `sha256`, `store` — and it has no backend at all. `secp_api.models.Artifact` has the right columns and NO writer, NO reader and NO route; it has never held a row, and there is no artifact store for its `uri` to point at. The other concept — per-range residue verdicts — is served, and is recorded separately as `listTeardownEvidence`. One entry where there were two concepts was the inventory's own version of the collision.
 
 ## `listApprovals`
 
@@ -97,6 +98,14 @@ No reporting surface is registered. Nothing generates, lists or stores a report.
 **Scoping** — NO-ENDPOINT. Not a scoping problem at all — no route publishes the DISTINCT SET of audit outcomes, so a filter can only offer the outcomes that appear in the rows currently loaded. The set shrinks as you page, and an outcome with no rows on this page looks like an outcome that never happens.
 
 **Unblocks** — A truthful outcome filter on the audit surface. Without it the control is a summary of the current page wearing the clothes of a filter over the whole log.
+
+## `workerLiveness`
+
+**Sketch** — `a heartbeat, then GET /api/v1/workers with a last-seen and a reachability state`
+
+**Scoping** — NOT a field gap, which is how it was first measured. WorkersPage splits the whole page into online and offline, drives its unserved-targets panel from that split, and renders four columns from `status`, `taskQueues`, `lastHeartbeat` and `version`. None of those exists on the wire, and the reason is deeper than five missing fields: NOTHING IN THIS SYSTEM OBSERVES WORKER LIVENESS. `WorkerNodeOut` and `EnrollmentStatusOut` carry timestamps, revisions and fingerprints — no heartbeat, no last-seen, nothing meaning 'reachable now'.
+
+**Unblocks** — WorkersPage, which is currently unbuildable rather than degraded. And a warning for whoever builds it: `enrollmentState: healthy` is NOT `status: online`. Enrollment is a lifecycle record; liveness is a heartbeat. Mapping one to the other asserts the single fact an operator most needs during an incident, from a record that cannot know it.
 
 ## `listAccessProfiles`
 

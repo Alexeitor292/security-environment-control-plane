@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   ADAPTER_ENDPOINT_MAP,
   ADAPTER_METHODS,
+  READER_SURFACES,
   UNSERVED_METHOD_PROBES,
   CREDENTIAL_INVENTORY_SEGMENTS,
   hasCredentialInventorySegment,
@@ -38,7 +39,7 @@ describe("the map covers the adapter exactly", () => {
     // Set equality in BOTH directions. A method covered twice, or a method covered by nothing,
     // are different bugs and both are silent — the first shadows, the second reads as "no comment".
     const mapped = ADAPTER_ENDPOINT_MAP.map((m) => m.method);
-    expect([...mapped].sort()).toEqual([...ADAPTER_METHODS].sort());
+    expect([...mapped].sort()).toEqual([...ADAPTER_METHODS, ...READER_SURFACES].sort());
     expect(new Set(mapped).size, "a method is mapped twice").toBe(mapped.length);
   });
 
@@ -159,10 +160,13 @@ describe("parent reachability is computed, not judged", () => {
     expect([...new Set(blocked)]).toEqual(["api/v1/manifests"]);
   });
 
-  it("keeps listEvidence off the backend list, because ranges are enumerable", () => {
-    const evidence = MISSING_SURFACES.find((s) => s.method === "listEvidence");
-    expect(evidence?.owner).toBe("frontend");
+  it("keeps teardown evidence reachable, and the artifact index separate from it", () => {
+    // The two concepts that shared the name `listEvidence`. One is served and range-scoped; the
+    // other has no backend at all. Recorded apart so the inventory stops counting them as one.
     expect(reachability.isReachable("/api/v1/ranges/{range_id}/teardown-evidence")).toBe(true);
+    const index = MISSING_SURFACES.find((s) => s.method === "listArtifactIndex");
+    expect(index?.owner).toBe("backend");
+    expect(index?.blockedOn).toBe("capability");
   });
 });
 

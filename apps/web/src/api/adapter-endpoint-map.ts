@@ -89,7 +89,7 @@ export const ADAPTER_METHODS = [
   "listApprovals",
   "listAlerts",
   "listAuditEvents",
-  "listEvidence",
+  "listArtifactIndex",
   "listScores",
   "listReports",
   "listUsers",
@@ -98,6 +98,17 @@ export const ADAPTER_METHODS = [
 ] as const;
 
 export type AdapterMethod = (typeof ADAPTER_METHODS)[number];
+
+/**
+ * Surfaces the READER serves that the adapter has no method for.
+ *
+ * `listTeardownEvidence` is here because the spatial adapter never had a method for per-range
+ * residue verdicts — it had `listEvidence`, which meant the artifact index. The two concepts
+ * sharing one name is exactly why one of them had no entry of its own.
+ */
+export const READER_SURFACES = ["listTeardownEvidence"] as const;
+
+export type DocumentedSurface = AdapterMethod | (typeof READER_SURFACES)[number];
 
 export const ADAPTER_ENDPOINT_MAP: readonly AdapterMapping[] = [
   {
@@ -399,20 +410,38 @@ export const ADAPTER_ENDPOINT_MAP: readonly AdapterMapping[] = [
     unsourcedFields: ["origin"],
   },
   {
-    method: "listEvidence",
-    status: "shaped",
-    endpoints: [
-      "/api/v1/ranges/{range_id}/teardown-evidence",
-      "/api/v1/onboarding/{onboarding_id}/evidence",
-      "/api/v1/target-discovery/{enrollment_id}/evidence",
-    ],
+    method: "listArtifactIndex",
+    status: "absent",
+    endpoints: [],
     note:
-      "Evidence exists in three unrelated, differently-shaped, separately-scoped places and there "
-      + "is no combined feed. TeardownEvidenceOut is the richest and carries the zero-residue "
-      + "proof — verdict, probe_reachable, expected_count, removed_confirmed, still_present, "
-      + "unproven_count. `unproven_count` has no domain field, and folding it away turns 'nobody "
-      + "could prove these are gone' into 'these are gone'.",
-    unsourcedFields: ["kind", "sha256", "store", "subject"],
+      "SPLIT FROM `listEvidence` on 2026-08-05, which named TWO concepts. This one is the "
+      + "org-wide content-addressed artifact index the spatial adapter wants — `kind`, `sha256`, "
+      + "`store` — and it has no backend at all. `secp_api.models.Artifact` has the right columns "
+      + "and NO writer, NO reader and NO route; it has never held a row, and there is no artifact "
+      + "store for its `uri` to point at. "
+      + "The other concept — per-range residue verdicts — is served, and is recorded separately as "
+      + "`listTeardownEvidence`. One entry where there were two concepts was the inventory's own "
+      + "version of the collision.",
+    unsourcedFields: ["kind", "sha256", "store", "subject", "time"],
+    requires:
+      "NOT a route. A producer, a store, and then a route — in that order. `GET /api/v1/evidence` "
+      + "written today would return an empty list forever, and an empty list reads as 'no evidence "
+      + "exists' where a missing route reads as 'not built yet'. Adding the route first would be "
+      + "the worse outcome.",
+  },
+  {
+    method: "listTeardownEvidence",
+    status: "shaped",
+    endpoints: ["/api/v1/ranges/{range_id}/teardown-evidence"],
+    note:
+      "The other half of the old `listEvidence`, and the half that exists. Per-range residue "
+      + "verdicts: verdict, probe_reachable, expected_count, removed_confirmed, still_present, "
+      + "unproven_count. `unproven_count` has no domain field, and folding it away turns 'nobody could prove these are gone' into 'these are gone'. "
+      + "Range-scoped and reachable — `GET /api/v1/ranges` enumerates — so this is a selection "
+      + "step, not a backend gap. It is a READER surface rather than an adapter method: the "
+      + "spatial adapter has no method for it, which is part of how the two concepts came to "
+      + "share one name.",
+    unsourcedFields: ["kind", "sha256", "store"],
   },
   {
     method: "listScores",
@@ -520,13 +549,19 @@ export function hasCredentialInventorySegment(path: string): boolean {
  * id the screen is trying to discover.
  */
 export interface MissingSurface {
-  readonly method: AdapterMethod | "auditOutcomeFacet";
+  readonly method: DocumentedSurface | "auditOutcomeFacet" | "workerLiveness";
   /**
    * Which side owns the fix. `frontend` entries are listed so they are not mistaken for backend
    * asks — `listEvidence` spent a day on P7-A's list before anyone checked that ranges are
    * enumerable and the only thing missing was a picker.
    */
   readonly owner: "backend" | "frontend";
+  /**
+   * A missing ROUTE can be written this week. A missing CAPABILITY means the system does not
+   * observe or store the thing at all — there is no producer to expose. Two very different
+   * tickets, and collapsing them makes the second look like the first.
+   */
+  readonly blockedOn: "route" | "capability" | "selection";
   /** A suggested route. NOT a proposal to implement as written — the shape matters, not the path. */
   readonly sketch: string;
   /** The scoping the frontend needs, and why the obvious parent-scoped version does not serve. */
@@ -537,8 +572,9 @@ export interface MissingSurface {
 
 export const MISSING_SURFACES: readonly MissingSurface[] = [
   {
-    method: "listEvidence",
-    owner: "frontend",
+    method: "listArtifactIndex",
+    owner: "backend",
+    blockedOn: "capability",
     sketch: "no new route — GET /api/v1/ranges then /ranges/{range_id}/teardown-evidence",
     scoping:
       "PARENT-NOT-SELECTED, and therefore NOT a backend ask. The eight evidence routes are all "
@@ -558,6 +594,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   {
     method: "listApprovals",
     owner: "backend",
+    blockedOn: "route",
     sketch: "GET /api/v1/approvals?status=pending",
     scoping:
       "NOT manifest-scoped. Change-sets are already enumerable per manifest; the missing question "
@@ -570,6 +607,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   {
     method: "listEvents",
     owner: "backend",
+    blockedOn: "route",
     sketch: "GET /api/v1/competitions",
     scoping: "Organization-wide. `/ranges/{id}/competition` serves one, given a range.",
     unblocks:
@@ -580,6 +618,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   {
     method: "listUsers",
     owner: "backend",
+    blockedOn: "route",
     sketch: "GET /api/v1/users",
     scoping: "Organization-wide. `/me` is the current principal only.",
     unblocks:
@@ -589,6 +628,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   {
     method: "listAlerts",
     owner: "backend",
+    blockedOn: "capability",
     sketch: "GET /api/v1/alerts",
     scoping: "Organization-wide, and it needs write state — `acknowledged` is a fact the control "
       + "plane would have to hold, which nothing does today.",
@@ -600,6 +640,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   {
     method: "listReports",
     owner: "backend",
+    blockedOn: "capability",
     sketch: "GET /api/v1/reports",
     scoping:
       "Organization-wide, and it is the one gap where scoping is not the hard part. Nothing "
@@ -612,6 +653,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   {
     method: "auditOutcomeFacet",
     owner: "backend",
+    blockedOn: "route",
     sketch: "GET /api/v1/audit/outcomes  (or a `facets` block on the audit response)",
     scoping:
       "NO-ENDPOINT. Not a scoping problem at all — no route publishes the DISTINCT SET of audit "
@@ -623,8 +665,27 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
       + "current page wearing the clothes of a filter over the whole log.",
   },
   {
+    method: "workerLiveness",
+    owner: "backend",
+    blockedOn: "capability",
+    sketch: "a heartbeat, then GET /api/v1/workers with a last-seen and a reachability state",
+    scoping:
+      "NOT a field gap, which is how it was first measured. WorkersPage splits the whole page into "
+      + "online and offline, drives its unserved-targets panel from that split, and renders four "
+      + "columns from `status`, `taskQueues`, `lastHeartbeat` and `version`. None of those exists "
+      + "on the wire, and the reason is deeper than five missing fields: NOTHING IN THIS SYSTEM "
+      + "OBSERVES WORKER LIVENESS. `WorkerNodeOut` and `EnrollmentStatusOut` carry timestamps, "
+      + "revisions and fingerprints — no heartbeat, no last-seen, nothing meaning 'reachable now'.",
+    unblocks:
+      "WorkersPage, which is currently unbuildable rather than degraded. And a warning for whoever "
+      + "builds it: `enrollmentState: healthy` is NOT `status: online`. Enrollment is a lifecycle "
+      + "record; liveness is a heartbeat. Mapping one to the other asserts the single fact an "
+      + "operator most needs during an incident, from a record that cannot know it.",
+  },
+  {
     method: "listAccessProfiles",
     owner: "backend",
+    blockedOn: "route",
     sketch: "GET /api/v1/access-profiles?team_id=",
     scoping: "Team-scoped is fine here; the team id is on screen when the question is asked.",
     unblocks:
@@ -665,6 +726,14 @@ export const UNSERVED_METHOD_PROBES: Readonly<Record<string, (path: string) => b
     );
   },
   listSecretRefs: hasCredentialInventorySegment,
+  // ORG-WIDE only. Eight parent-scoped evidence routes already exist and none of them serves an
+  // index — a probe matching any `evidence` segment would fire on all eight and report the gap
+  // closed. What would close it is a route with no path parameter at all.
+  listArtifactIndex: (path) => {
+    const segments = path.split("/");
+    if (segments.includes("artifacts")) return true;
+    return segments.includes("evidence") && !path.includes("{");
+  },
 };
 
 /** Convenience: every method the transport layer can serve against `main` today. */
