@@ -59,12 +59,24 @@ encode real invariants (a worker present in only one source still gets a row).
 
 ## Wiring order — cheapest first
 
-Ordered so each merge is small enough to review. "Cost" is the number of
-unsourced fields needing a presentation decision, not the fetching.
+Ordered so each merge is small enough to review.
+
+**Correction, from wiring the first page: unsourced-field count is NOT a proxy
+for wiring cost.** It counts the gaps the map *names* and is blind to vocabulary
+mismatches, which are the more dangerous kind. `AuditPage` was listed cheapest on
+one unsourced field (`origin`); its real difficulty is that the control plane
+emits **seven** audit outcomes and the domain type declares three, so four have
+no home and every plausible coercion asserts a different fact.
+
+A field that is absent is **visible**. An outcome coerced to the nearest familiar
+value is **invisible and reads as a reading**. The order below is kept — the
+work at the top really is smaller — but the column is a rough guide to review
+size, not a measure of difficulty, and a vocabulary check belongs in every
+wiring change before its cost is judged.
 
 | # | Page | Methods | Unsourced fields to decide | Permission | Notes |
 | ---: | --- | --- | ---: | --- | --- |
-| 1 | **AuditPage** | `listAuditEvents`, `listEvidence` | 1 + 4 | **`audit:read`** | Smallest real gap. `origin` unsourced |
+| 1 | **AuditPage** | `listAuditEvents`, `listEvidence` | 1 + 4 | **`audit:read`** | Audit table live; **evidence table stays fixture-backed** (no org-wide route). 7 server outcomes vs 3 domain — see the correction above |
 | 2 | **TargetsPage** | `listTargets`, `listWorkers` | 10 + 5 | targets: **none** (org-scope, verified a decision); workers: **`target_discovery:manage`** | Two different answers on one page |
 | 3 | **WorkersPage** | `listTargets`, `listWorkers` | 10 + 5 | as above | **Consumes `placement-view.ts`** |
 | 4 | **PlacementPage** | `listTargets` | 10 | **none** — org-scope, verified a decision | Same reader as #2 |
@@ -87,6 +99,7 @@ unsourced fields needing a presentation decision, not the fetching.
 | `EventsListPage`, `ScenarioOverviewPage` | `listEvents` | **absent** |
 | `PlatformOverviewPage` | `listUsers`, `listApprovals` | **absent** ×2 |
 | `DeploymentAdvancedPage` | `listSecretRefs` | **withheld — must stay that way** |
+| `AuditPage` (evidence table only) | org-wide `listEvidence` | **absent** — the reader's `listEvidence(rangeId)` is range-scoped and there is no org-wide evidence route |
 
 These are an **input to P7-A**, not a frontend problem to work around. A page
 that cannot be wired keeps its fixture badge and its `not determined` states; it
