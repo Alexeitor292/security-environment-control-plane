@@ -189,6 +189,25 @@ const PRE_EXISTING: [file: string, phrase: string, count: number][] = [
   ["testing/fake-control-plane.ts", "cannot", 1],
 ];
 
+/**
+ * P7-H retires `src/pages/` wholesale. 54 of the 66 `PRE_EXISTING` entries live
+ * there, and they are resolved by that DELETION rather than by review -- which
+ * is why they were never audited.
+ *
+ * Pinning the number turns the retirement into a checked event instead of an
+ * assumed one: when `pages/` goes, the count must fall by exactly 54. If it
+ * falls by less, a claim MOVED rather than died -- carried into the spatial tree
+ * by someone porting a page, which is exactly how false claims reached the
+ * fixtures in the first place. A count that fails to drop is a signal no diff
+ * review produces, because the claim looks like ordinary ported copy in the
+ * diff that carries it.
+ *
+ * Relocation is caught from the other side too: a claim ported into `spatial/`
+ * arrives unacknowledged and fails the main assertion above. This pin is what
+ * catches the case where it lands somewhere else in `src` entirely.
+ */
+const PAGES_ENTRIES_AT_PIN = 54;
+
 function acknowledgedCount(file: string, phrase: string): number | undefined {
   return [...ACKNOWLEDGED, ...PRE_EXISTING].find(([f, p]) => f === file && p === phrase)?.[2];
 }
@@ -268,6 +287,28 @@ describe("security-property claims", () => {
       ([f, p]) => `${f}: "${p}"`,
     );
     expect(stale, `Stale acknowledgements:\n${stale.join("\n")}`).toEqual([]);
+  });
+
+  it("tracks the pages/ retirement: 54 entries must die, not move", () => {
+    // `pages/` is obsolete and scheduled for wholesale removal in P7-H.
+    const pagesTreeLive = Object.keys(PAGE_SOURCES).some((k) => k.startsWith("../pages/"));
+    const pagesEntries = PRE_EXISTING.filter(([f]) => f.startsWith("pages/"));
+
+    if (pagesTreeLive) {
+      expect(
+        pagesEntries.length,
+        "The pages/ baseline changed while pages/ still exists. If a claim was removed, " +
+          "drop its entry and lower PAGES_ENTRIES_AT_PIN in the same change; if one was " +
+          "added, it is a new absolute claim and needs removing, not pinning.",
+      ).toBe(PAGES_ENTRIES_AT_PIN);
+    } else {
+      expect(
+        pagesEntries,
+        "pages/ has been retired but its PRE_EXISTING entries remain. Every one of the 54 " +
+          "must be deleted from this list. If a claim survived the retirement it was PORTED, " +
+          "not resolved -- find where it landed and remove the claim itself.",
+      ).toEqual([]);
+    }
   });
 
   it("renders provider capability as not-determined, in the unknown tone", () => {
