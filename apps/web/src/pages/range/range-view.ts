@@ -51,6 +51,18 @@ export const RESET_IS_DISPATCHED_NOTE =
 export const DESTROY_IS_IRREVERSIBLE_NOTE =
   "Destroy tears down every team instance in this range. It cannot be undone, and a destroyed range cannot be redeployed — create a new one from the blueprint.";
 
+/**
+ * The `recovery_required` explanation. This is the one piece of copy on these surfaces that must
+ * not be softened: the phase does NOT mean the range broke, and it does NOT mean the range is gone.
+ * It means nothing observed the outcome, so neither claim can be made.
+ */
+export const RECOVERY_REQUIRED_NOTE =
+  "This range could not be observed to completion. That is not the same as a failure and not the same as a clean teardown: nobody has proved what is left. Resources this range created may still exist. Check the provider directly before assuming anything is gone.";
+
+/** Why `unproven` gets its own colour wherever a status is shown. */
+export const UNPROVEN_NOTE =
+  "Unproven means the provider could not be observed — the answer is unknown, not good and not bad. It is never rolled up into a success or a failure count.";
+
 /** Closed-code copy for range surfaces. Raw backend messages never render. */
 export const RANGE_ERROR_TEXT: Record<string, string> = {
   domain_error: "That action is not allowed in the range's current state.",
@@ -376,9 +388,21 @@ export function teamInstanceRows(
     }));
 }
 
-/** Whether an individual team instance can be reset. The server re-checks. */
+/**
+ * Whether an individual team instance can be reset.
+ *
+ * Mirrors the range contract's rule — reset is allowed from `ready`, `active` and `failed`. A
+ * failed instance is included deliberately: resetting is how an operator recovers one, so hiding
+ * the control on exactly the instance that needs it would be backwards.
+ *
+ * `recovery_required` is NOT included. Nothing there is known to be in a resettable state, and
+ * re-running an operation over infrastructure nobody could observe is how you turn one unproven
+ * outcome into two. The server re-checks all of this and is authoritative.
+ */
 export function canResetInstance(row: Pick<TeamInstanceRow, "lifecycle">): boolean {
-  return row.lifecycle.known && row.lifecycle.phase === "ready";
+  if (!row.lifecycle.known) return false;
+  const { phase } = row.lifecycle;
+  return phase === "ready" || phase === "active" || phase === "failed";
 }
 
 // -------------------------------------------------------------------------------- timeline
@@ -429,6 +453,60 @@ export function timelineTally(entries: readonly TimelineEntry[]): {
 }
 
 // -------------------------------------------------------------- destroy confirmation
+
+/**
+ * What a destroy will actually tear down, enumerated from the server's own instance and topology
+ * records.
+ *
+ * A confirmation that cannot state its own blast radius is a button with a warning label on it. So
+ * this reports what was READ, and reports gaps as gaps: `complete` is false when the topology could
+ * not be loaded, and the UI must then say the list may be incomplete rather than presenting a short
+ * list as the whole story. Under-stating a blast radius is the failure mode that matters.
+ */
+export interface BlastRadius {
+  teamCount: number;
+  targetCount: number;
+  /** One line per team: "team1 — 3 targets (team1-attacker, …)". */
+  lines: string[];
+  /** Every declared address that will stop answering. */
+  addresses: string[];
+  /** False when a source could not be read, so the enumeration may be short. */
+  complete: boolean;
+  /** Set when `complete` is false — names which source was missing. */
+  incompleteReason: string | null;
+}
+
+export function blastRadius(
+  instances: readonly Instance[] | null,
+  topologies: readonly TeamTopology[] | null,
+): BlastRadius {
+  const targets = accessTargets(topologies ?? []);
+  const rows = teamInstanceRows(instances ?? [], topologies ?? []);
+  const byInstance = new Map<string, AccessTarget[]>();
+  for (const t of targets) {
+    byInstance.set(t.instanceId, [...(byInstance.get(t.instanceId) ?? []), t]);
+  }
+  const lines = rows.map((r) => {
+    const names = (byInstance.get(r.instanceId) ?? []).map((t) => t.label);
+    return names.length === 0
+      ? `${r.teamRef} — no targets declared`
+      : `${r.teamRef} — ${names.length} target${names.length === 1 ? "" : "s"} (${names.join(", ")})`;
+  });
+  const incompleteReason =
+    instances === null
+      ? "The team instance list could not be read, so this enumeration may be incomplete."
+      : topologies === null
+        ? "The topology could not be read, so per-team targets may be missing from this list."
+        : null;
+  return {
+    teamCount: rows.length,
+    targetCount: targets.length,
+    lines,
+    addresses: targets.map((t) => t.ip).filter((ip): ip is string => ip !== null),
+    complete: incompleteReason === null,
+    incompleteReason,
+  };
+}
 
 /**
  * Whether a typed confirmation matches the range name.

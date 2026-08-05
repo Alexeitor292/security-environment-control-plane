@@ -11,6 +11,7 @@ import type {
 } from "../../api/types";
 import {
   accessTargets,
+  blastRadius,
   canResetInstance,
   deployGate,
   destroyConfirmationMatches,
@@ -21,7 +22,14 @@ import {
   timelineEntries,
   timelineTally,
 } from "./range-view";
-import { displayRank, orderScoreboard, type ScoreboardRow } from "./scoreboard-view";
+import {
+  VERDICT_LABEL,
+  displayRank,
+  isTiedRank,
+  orderScoreboard,
+  verdictTone,
+  type ScoreboardEntry,
+} from "./scoreboard-view";
 
 function template(over: Partial<Template> = {}): Template {
   return {
@@ -226,10 +234,33 @@ describe("teamInstanceRows", () => {
     expect(rows.find((r) => r.instanceId === "i2")?.targetCount).toBe(0);
   });
 
-  it("permits reset only on a ready instance", () => {
+  it("permits reset on a deployed instance but not one mid-deploy", () => {
     const rows = teamInstanceRows(instances, []);
-    expect(canResetInstance(rows.find((r) => r.instanceId === "i2")!)).toBe(true);
-    expect(canResetInstance(rows.find((r) => r.instanceId === "i1")!)).toBe(false);
+    expect(canResetInstance(rows.find((r) => r.instanceId === "i2")!)).toBe(true); // running/active
+    expect(canResetInstance(rows.find((r) => r.instanceId === "i1")!)).toBe(false); // deploying
+  });
+
+  it("offers reset on a failed instance — that is how an operator recovers it", () => {
+    const failed = teamInstanceRows(
+      [{ ...instances[0], id: "i3", lifecycle_state: "failed" }],
+      [],
+    );
+    expect(canResetInstance(failed[0])).toBe(true);
+  });
+
+  it("refuses reset on recovery_required and on an unknown state", () => {
+    // Re-running an operation over infrastructure nobody could observe turns one unproven outcome
+    // into two.
+    const unprovable = teamInstanceRows(
+      [
+        // Not a legacy LifecycleState — this is what a range-backend instance will carry.
+        { ...instances[0], id: "i4", lifecycle_state: "recovery_required" as Instance["lifecycle_state"] },
+        { ...instances[0], id: "i5", lifecycle_state: "who-knows" as Instance["lifecycle_state"] },
+      ],
+      [],
+    );
+    expect(canResetInstance(unprovable[0])).toBe(false);
+    expect(canResetInstance(unprovable[1])).toBe(false);
   });
 });
 
@@ -265,7 +296,72 @@ describe("rangeSummaries", () => {
       exercise({ id: "new", created_at: "2026-02-01T00:00:00", lifecycle_state: "draft" }),
     ]);
     expect(list.map((r) => r.id)).toEqual(["new", "old"]);
-    expect(list[1].lifecycle.phase).toBe("ready");
+    expect(list[1].lifecycle.phase).toBe("active");
+  });
+});
+
+describe("blastRadius", () => {
+  const instances: Instance[] = [
+    { id: "i1", exercise_id: "e1", team_index: 1, team_ref: "team-1", instance_ref: "r1", lifecycle_state: "running", provider: "sim" },
+    { id: "i2", exercise_id: "e1", team_index: 2, team_ref: "team-2", instance_ref: "r2", lifecycle_state: "running", provider: "sim" },
+  ];
+  const topo = (instanceId: string, teamRef: string, teamIndex: number, ip: string): TeamTopology => ({
+    instance_id: instanceId,
+    team_ref: teamRef,
+    team_index: teamIndex,
+    lifecycle_state: "running",
+    nodes: [
+      { id: `${instanceId}-a`, type: "x", data: { label: `${teamRef}-web`, kind: "target", ip } },
+      { id: `${instanceId}-n`, type: "x", data: { label: "lan", kind: "network" } },
+    ],
+    edges: [],
+  });
+
+  it("enumerates every team and target that will be destroyed", () => {
+    const r = blastRadius(instances, [topo("i1", "team-1", 1, "10.0.0.1"), topo("i2", "team-2", 2, "10.0.1.1")]);
+    expect(r.teamCount).toBe(2);
+    expect(r.targetCount).toBe(2);
+    expect(r.lines).toEqual([
+      "team-1 — 1 target (team-1-web)",
+      "team-2 — 1 target (team-2-web)",
+    ]);
+    expect(r.addresses).toEqual(["10.0.0.1", "10.0.1.1"]);
+    expect(r.complete).toBe(true);
+    expect(r.incompleteReason).toBeNull();
+  });
+
+  it("says so when a team has no declared targets rather than omitting it", () => {
+    const r = blastRadius(instances, [topo("i1", "team-1", 1, "10.0.0.1")]);
+    expect(r.lines).toContain("team-2 — no targets declared");
+  });
+
+  it("marks the enumeration incomplete when the topology could not be read", () => {
+    // Under-stating a blast radius is the failure mode that matters, so a missing source is
+    // reported rather than silently producing a short list.
+    const r = blastRadius(instances, null);
+    expect(r.complete).toBe(false);
+    expect(r.incompleteReason).toMatch(/topology/i);
+    expect(r.teamCount).toBe(2);
+  });
+
+  it("marks the enumeration incomplete when instances could not be read", () => {
+    const r = blastRadius(null, [topo("i1", "team-1", 1, "10.0.0.1")]);
+    expect(r.complete).toBe(false);
+    expect(r.incompleteReason).toMatch(/instance/i);
+  });
+
+  it("omits addresses the plan never declared instead of inventing placeholders", () => {
+    const noIp: TeamTopology = {
+      instance_id: "i1",
+      team_ref: "team-1",
+      team_index: 1,
+      lifecycle_state: "running",
+      nodes: [{ id: "n", type: "x", data: { label: "ghost", kind: "target" } }],
+      edges: [],
+    };
+    const r = blastRadius(instances, [noIp]);
+    expect(r.addresses).toEqual([]);
+    expect(r.targetCount).toBe(1);
   });
 });
 
@@ -286,50 +382,83 @@ describe("destroyConfirmationMatches", () => {
 });
 
 describe("scoreboard ordering", () => {
-  const row = (over: Partial<ScoreboardRow>): ScoreboardRow => ({
+  const row = (over: Partial<ScoreboardEntry>): ScoreboardEntry => ({
     team_id: "t",
-    team_ref: "team",
-    display_name: "Team",
+    team_name: "Team",
+    rank: 1,
     score: 0,
-    rank: null,
     solved_count: 0,
     last_solve_at: null,
+    solved_challenge_ids: [],
     ...over,
   });
 
-  it("honours the server's rank when present", () => {
+  it("honours the server's rank over the score", () => {
+    // The server ranks. A higher score with a worse rank stays where the server put it.
     const rows = orderScoreboard([
-      row({ team_ref: "b", rank: 2, score: 999 }),
-      row({ team_ref: "a", rank: 1, score: 1 }),
+      row({ team_name: "b", rank: 2, score: 999 }),
+      row({ team_name: "a", rank: 1, score: 1 }),
     ]);
-    expect(rows.map((r) => r.team_ref)).toEqual(["a", "b"]);
+    expect(rows.map((r) => r.team_name)).toEqual(["a", "b"]);
   });
 
-  it("sorts unranked rows after every ranked row", () => {
+  it("preserves shared ranks for ties instead of renumbering them", () => {
+    // The contract says ties SHARE a rank. Renumbering would turn two teams tied at 1st into a
+    // 1st and a 2nd — a placement the server never made.
     const rows = orderScoreboard([
-      row({ team_ref: "unranked", rank: null, score: 500 }),
-      row({ team_ref: "ranked", rank: 9, score: 1 }),
+      row({ team_name: "b", rank: 1, score: 300 }),
+      row({ team_name: "a", rank: 1, score: 300 }),
+      row({ team_name: "c", rank: 3, score: 100 }),
     ]);
-    expect(rows.map((r) => r.team_ref)).toEqual(["ranked", "unranked"]);
+    expect(rows.map((r) => r.rank)).toEqual([1, 1, 3]);
+    expect(rows.map((r) => displayRank(r))).toEqual(["1", "1", "3"]);
   });
 
-  it("breaks ties stably by team ref", () => {
+  it("breaks ties stably by team name so polls do not reshuffle", () => {
     const rows = orderScoreboard([
-      row({ team_ref: "b", score: 10 }),
-      row({ team_ref: "a", score: 10 }),
+      row({ team_name: "b", rank: 1 }),
+      row({ team_name: "a", rank: 1 }),
     ]);
-    expect(rows.map((r) => r.team_ref)).toEqual(["a", "b"]);
+    expect(rows.map((r) => r.team_name)).toEqual(["a", "b"]);
   });
 
   it("never alters a score while ordering", () => {
-    const input = [row({ team_ref: "a", score: 7 }), row({ team_ref: "b", score: 3 })];
+    const input = [row({ team_name: "a", rank: 1, score: 7 }), row({ team_name: "b", rank: 2, score: 3 })];
     const out = orderScoreboard(input);
-    expect(out.map((r) => r.score).sort()).toEqual([3, 7]);
+    expect(out.map((r) => r.score)).toEqual([7, 3]);
     expect(input.map((r) => r.score)).toEqual([7, 3]); // input untouched
   });
 
-  it("shows an em dash rather than a position the server did not assign", () => {
-    expect(displayRank({ rank: null })).toBe("—");
-    expect(displayRank({ rank: 3 })).toBe("3");
+  it("displays the server's rank, never the array index", () => {
+    const rows = orderScoreboard([row({ team_name: "only", rank: 4 })]);
+    expect(displayRank(rows[0])).toBe("4");
+  });
+
+  it("marks tied rows as tied", () => {
+    const entries = [row({ rank: 1 }), row({ rank: 1 }), row({ rank: 3 })];
+    expect(isTiedRank(entries[0], entries)).toBe(true);
+    expect(isTiedRank(entries[2], entries)).toBe(false);
+  });
+});
+
+describe("submission verdicts", () => {
+  it("labels every verdict", () => {
+    for (const v of ["accepted", "incorrect", "duplicate", "already_solved", "not_open", "attempts_exhausted"] as const) {
+      expect(VERDICT_LABEL[v]).toBeTruthy();
+    }
+  });
+
+  it("does not present an already-solved challenge as a wrong answer", () => {
+    // Telling a competitor their correct flag was "incorrect" is the bug this guards.
+    expect(verdictTone("already_solved")).not.toBe("danger");
+    expect(verdictTone("duplicate")).not.toBe("danger");
+    expect(verdictTone("incorrect")).toBe("danger");
+  });
+
+  it("treats only accepted as a scoring success", () => {
+    expect(verdictTone("accepted")).toBe("ok");
+    for (const v of ["incorrect", "duplicate", "already_solved", "not_open", "attempts_exhausted"] as const) {
+      expect(verdictTone(v)).not.toBe("ok");
+    }
   });
 });

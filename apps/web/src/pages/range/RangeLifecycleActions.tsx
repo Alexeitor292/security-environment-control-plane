@@ -23,6 +23,7 @@ import {
   DESTROY_IS_IRREVERSIBLE_NOTE,
   RANGE_ERROR_TEXT,
   RESET_IS_DISPATCHED_NOTE,
+  blastRadius,
   canResetInstance,
   destroyConfirmationMatches,
   teamInstanceRows,
@@ -57,6 +58,13 @@ export function RangeLifecycleActions() {
 
   const teams = useMemo(
     () => (instances.data ? teamInstanceRows(instances.data, topology.data ?? []) : []),
+    [instances.data, topology.data],
+  );
+  // Enumerated from the SERVER's records, and honest about gaps: a source that could not be read
+  // makes `complete` false, and the panel says the list may be short rather than presenting it as
+  // the whole story.
+  const radius = useMemo(
+    () => blastRadius(instances.data, topology.data),
     [instances.data, topology.data],
   );
 
@@ -158,10 +166,35 @@ export function RangeLifecycleActions() {
             </EmptyState>
           ) : (
             <>
+              {/* Blast radius. A confirmation that cannot state what it will destroy is a button
+                  with a warning label, so this enumerates the server's own records. */}
+              <div className="rng-blast">
+                <h4>What will be destroyed</h4>
+                <p className="rng-sub">
+                  {radius.teamCount} team instance{radius.teamCount === 1 ? "" : "s"} and{" "}
+                  {radius.targetCount} declared target{radius.targetCount === 1 ? "" : "s"}:
+                </p>
+                <ul className="rng-blast-list">
+                  {radius.lines.map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+                {radius.addresses.length > 0 && (
+                  <p className="rng-sub">
+                    These declared addresses will stop answering:{" "}
+                    <span className="mono">{radius.addresses.join(", ")}</span>
+                  </p>
+                )}
+                {!radius.complete && (
+                  <SafetyNotice role="alert" tone="warn">
+                    {radius.incompleteReason} Treat the list above as a minimum, not a complete
+                    inventory.
+                  </SafetyNotice>
+                )}
+              </div>
+
               <p className="rng-sub">
-                Destroying tears down all {range.team_count} team instance
-                {range.team_count === 1 ? "" : "s"}. To confirm, type the range name exactly:{" "}
-                <strong>{range.name}</strong>
+                To confirm, type the range name exactly: <strong>{range.name}</strong>
               </p>
 
               <div className="rng-confirm-field">
