@@ -14,6 +14,14 @@
 // remembered. If a service starts writing an eighth value, this scan sees it on
 // the commit that introduces it.
 //
+// #127 DOES NOT MAKE THIS REDUNDANT, and it will look as though it does. It
+// lands an audit-outcome enum on the WRITE path, but `AuditEventOut.outcome`
+// stays a bare `str` on the READ path deliberately: closed on write, open on
+// read, so entries already in an append-only ledger round-trip rather than
+// failing validation. The generated client therefore still cannot narrow this
+// field after #127, and this scan is still the only thing measuring what the
+// surface must be able to display.
+//
 // WHAT THE SCAN CANNOT SEE, STATED SO NOBODY READS MORE INTO IT.
 //
 //   * Two call sites forward a variable (`services/bootstrap_discovery.py`,

@@ -34,31 +34,28 @@ function fmtUtc(iso?: string): string {
 const EMPTY_ROWS: readonly AuditRowView[] = []
 
 /**
- * `outcome` is rendered VERBATIM, and the tone is asked of the design system
- * rather than derived from the projection's `toned` flag.
+ * The word comes from the server; the colour comes from the design system.
  *
- * THE DISTINCTION THAT COST A DEFECT. `OutcomeView.toned` answers "is this one
- * of the three values the MIGRATED DOMAIN TYPE allows" -- it is a statement
- * about `models/types.ts`, not about what this surface can display. Using it to
- * pick a colour rendered `revoked` and `expired` in the neutral "we don't know"
- * badge, even though `STATE_TONE` classifies both as `error`. In a ledger where
- * `failed` is red, a revoked authorization sitting in grey with a question mark
- * reads as less serious than it is, which is the under-claiming direction.
+ * THE DISTINCTION THAT COST A DEFECT, kept here because the deleted symbol is
+ * the only trace of it left. The projection used to export a `toned` flag that
+ * answered "is this one of the three values the MIGRATED DOMAIN TYPE allows" --
+ * a fact about `models/types.ts` under a name that reads as "can this surface
+ * display it". This page asked it the second way to pick a badge colour, so
+ * `revoked` and `expired` rendered in the neutral "we don't know" badge although
+ * `STATE_TONE` has always classified both as errors. Grey with a question mark,
+ * in a ledger where `failed` is red: under-claimed severity, which is the
+ * direction someone gets hurt.
  *
- * So the tone comes from `toneForState`, whose own documented rule is that an
- * unrecognised state resolves to `unknown` and never to a healthy default. That
- * gives error for `revoked`/`expired`/`denied`/`failed`, ok for `success`, and
- * neutral `unknown` for `refused`/`failure` -- the two the design system has
- * genuinely never been told about.
+ * `toneForState` is the right oracle because its own documented rule is that an
+ * unrecognised state resolves to `unknown` and never to a healthy default --
+ * error for `revoked`/`expired`/`denied`/`failed`, ok for `success`, neutral for
+ * `refused`/`failure`, the two nothing has ever been told about.
  *
  * `label` is passed explicitly so the word survives untouched: the badge's own
  * default would run `state.replace(/-/g, ' ')` over it.
- *
- * `origin` has no wire source at all and says so -- never an empty cell, which
- * would read as "no origin" rather than "not supplied".
  */
-function OutcomeBadge({ outcome }: { outcome: AuditRowView['outcome'] }) {
-  return <StatusBadge state={outcome.raw} label={outcome.raw} />
+function OutcomeBadge({ outcome }: { outcome: string }) {
+  return <StatusBadge state={outcome} label={outcome} />
 }
 
 const AUDIT_COLUMNS: Column<AuditRowView>[] = [
@@ -83,15 +80,13 @@ const AUDIT_COLUMNS: Column<AuditRowView>[] = [
     header: 'Outcome',
     render: (e) => <OutcomeBadge outcome={e.outcome} />,
   },
-  {
-    key: 'origin',
-    header: 'Origin',
-    render: () => (
-      <span className="u-muted u-xs" title="The control plane does not supply this field">
-        not supplied
-      </span>
-    ),
-  },
+  // NO `origin` COLUMN. The control plane does not publish the field, so every
+  // cell would read "not supplied" -- a sixth of the table width spent repeating
+  // one static fact, narrowing the five columns that carry real data. The
+  // absence is stated once in the card footnote, where it is a standing property
+  // of the surface, and once per record in the drawer, where a reader asking
+  // about ONE record is in a position to want it. Dropping the column without
+  // either would make the field silently missing rather than visibly considered.
 ]
 
 const EVIDENCE_COLUMNS: Column<EvidenceRecord>[] = [
@@ -146,7 +141,7 @@ export default function AuditPage() {
    * endpoint, which does not exist and is recorded as `no-endpoint`.
    */
   const outcomeOptions = useMemo(() => {
-    const present = [...new Set(loaded.map((e) => e.outcome.raw))].sort()
+    const present = [...new Set(loaded.map((e) => e.outcome))].sort()
     return [
       { value: 'all', label: 'All loaded outcomes' },
       ...present.map((o) => ({ value: o, label: o })),
@@ -155,7 +150,7 @@ export default function AuditPage() {
 
   const filtered = useMemo(() => {
     let list: readonly AuditRowView[] = loaded
-    if (outcome !== 'all') list = list.filter((e) => e.outcome.raw === outcome)
+    if (outcome !== 'all') list = list.filter((e) => e.outcome === outcome)
     if (search.trim()) {
       const q = search.toLowerCase()
       list = list.filter(
@@ -225,7 +220,9 @@ export default function AuditPage() {
           than silent drops. Entries are read live from the control plane. Outcomes are shown
           exactly as recorded: the ledger uses more values than this surface has colours for, and
           an unfamiliar one is displayed as itself rather than mapped to the nearest familiar one.
-          The outcome filter covers the entries currently loaded, not the whole ledger.
+          The outcome filter covers the entries currently loaded, not the whole ledger. The control
+          plane does not record an origin for audit entries, so that field is not shown here and
+          reads as not supplied on each record.
         </p>
       </Card>
 

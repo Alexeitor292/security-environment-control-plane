@@ -42,20 +42,20 @@ const { default: AuditPage } = await import("./AuditPage");
 
 function row(over: Partial<AuditRowView> = {}): AuditRowView {
   return {
-    id: `id-${over.outcome?.raw ?? "success"}`,
+    id: `id-${over.outcome ?? "success"}`,
     time: "2026-08-05T12:00:00Z",
     actor: "operator@example.test",
     action: "target.register",
     resource: "execution_target 2222",
-    outcome: { raw: "success", toned: "success" },
+    outcome: "success",
     origin: NOT_SUPPLIED,
     ...over,
   };
 }
 
-/** An outcome outside the migrated union: `toned` is null, the word is still real. */
-function untoned(raw: string): AuditRowView {
-  return row({ id: `id-${raw}`, outcome: { raw, toned: null } });
+/** A row carrying one specific outcome word, whatever the design system makes of it. */
+function withOutcome(outcome: string): AuditRowView {
+  return row({ id: `id-${outcome}`, outcome });
 }
 
 function paint(state: QueryState<AuditRowView>, permissions: readonly string[] = ["audit:read"]) {
@@ -186,14 +186,14 @@ describe("outcomes reach the DOM as the server wrote them", () => {
     // Including the four outside the migrated union. Dropping or renaming one is
     // the specific failure an audit surface exists to prevent, and both look
     // perfectly fine on screen.
-    const html = auditRegion(paint(served(VOCABULARY.map(untoned), "live")));
+    const html = auditRegion(paint(served(VOCABULARY.map(withOutcome), "live")));
     for (const raw of VOCABULARY) {
       expect(html, `${raw} must appear as itself`).toContain(`>${raw}</span>`);
     }
   });
 
   it("keeps `failure` and `failed` as two different words on screen", () => {
-    const html = auditRegion(paint(served([untoned("failure"), untoned("failed")], "live")));
+    const html = auditRegion(paint(served([withOutcome("failure"), withOutcome("failed")], "live")));
     expect(html).toContain(">failure</span>");
     expect(html).toContain(">failed</span>");
   });
@@ -204,7 +204,7 @@ describe("outcomes reach the DOM as the server wrote them", () => {
     // a colour, so two outcomes the design system has always classified as
     // errors rendered grey in a ledger where `failed` is red.
     for (const raw of ["revoked", "expired"]) {
-      const html = auditRegion(paint(served([untoned(raw)], "live")));
+      const html = auditRegion(paint(served([withOutcome(raw)], "live")));
       expect(html, `${raw} badge tone`).toContain("c-badge--error");
       expect(html, `${raw} must not read as undetermined`).not.toContain("c-badge--unknown");
     }
@@ -214,28 +214,51 @@ describe("outcomes reach the DOM as the server wrote them", () => {
     // `refused` and `failure` have no entry in the tone map. Neutral is honest;
     // the word carries the meaning and the colour claims nothing.
     for (const raw of ["refused", "failure", "quarantined"]) {
-      const html = auditRegion(paint(served([untoned(raw)], "live")));
+      const html = auditRegion(paint(served([withOutcome(raw)], "live")));
       expect(html, `${raw} badge tone`).toContain("c-badge--unknown");
       expect(html).toContain(`>${raw}</span>`);
     }
   });
 
   it("renders an outcome nobody has written yet without dropping the row", () => {
-    const html = auditRegion(paint(served([untoned("chartreuse"), row()], "live")));
+    const html = auditRegion(paint(served([withOutcome("chartreuse"), row()], "live")));
     expect(html).toContain(">chartreuse</span>");
     expect(html).toContain("<table");
   });
 });
 
-describe("a field with no wire source says so", () => {
-  it("renders origin as not supplied rather than blank or a dash", () => {
+describe("a field with no wire source says so, once", () => {
+  it("spends no table column on a value that is always absent", () => {
+    // Every cell of an origin column would read the same three words. The
+    // column is gone; what must not follow is the absence going unmentioned,
+    // which is the difference between "not supplied" and "we forgot".
+    const html = auditRegion(paint(served([row()], "live")));
+    expect(html).not.toContain("<th>Origin</th>");
+  });
+
+  it("states the absence in the card footnote instead", () => {
+    // The standing property of the surface, said once where it applies to every
+    // row, rather than repeated per row where it applies to none of them
+    // specifically.
+    const html = auditRegion(paint(served([row()], "live")));
+    expect(html).toContain("does not record an origin");
+    expect(html).toContain("not supplied");
+  });
+
+  it("never renders an absent field as a blank or a dash anywhere", () => {
     // "" and "—" both read as "this record has no origin". The control plane
     // does not publish the field at all, which is a different statement.
     const html = auditRegion(paint(served([row()], "live")));
-    expect(html).toContain("not supplied");
-    expect(html).toContain("Origin");
     expect(html).not.toContain("<td>—</td>");
+    expect(html).not.toContain("<td></td>");
   });
+
+  // NOT COVERED HERE, and stated rather than left to be assumed: the per-record
+  // `Origin: not supplied by the control plane` line lives in the drawer, which
+  // opens on a row click. These assertions render to static markup with no
+  // interaction, so the drawer never mounts. Covering it needs a DOM test that
+  // clicks a row -- `use-reader-query.test.tsx` shows the `mount` helper that
+  // would do it. The footnote above is what this file can prove.
 });
 
 describe("the outcome filter does not overstate its reach", () => {
@@ -243,13 +266,13 @@ describe("the outcome filter does not overstate its reach", () => {
     // There is no facet endpoint, so this control can only ever offer the values
     // present in the rows already fetched. Calling it "All outcomes" would claim
     // a filter over the ledger.
-    const html = auditRegion(paint(served(["success", "revoked"].map(untoned), "live")));
+    const html = auditRegion(paint(served(["success", "revoked"].map(withOutcome), "live")));
     expect(html).toContain("All loaded outcomes");
     expect(html).not.toContain(">All outcomes<");
   });
 
   it("offers exactly the outcomes present in the loaded rows", () => {
-    const html = auditRegion(paint(served([untoned("revoked"), untoned("success")], "live")));
+    const html = auditRegion(paint(served([withOutcome("revoked"), withOutcome("success")], "live")));
     expect(html).toContain('value="revoked"');
     expect(html).toContain('value="success"');
     // Not offered, because no loaded row carries it -- the honest limitation.

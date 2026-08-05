@@ -28,6 +28,28 @@
 // there is nothing to import. A hand-copied list of 45 values in this repo would
 // share an origin with the code it checks and could only say yes. The server's
 // `Permission` enum is the definition; this reads the definition.
+//
+// THE EXTENSION THIS IS WAITING FOR, so whoever reaches it does not rebuild it.
+//
+// `owner-openapi-client` is landing `scripts/resolve_route_permissions.py`: a
+// committed artifact mapping route -> handler -> service -> `require(Permission.X)`,
+// with CI failing when code and artifact diverge. Once it is on main, the two
+// compose into a check neither can make alone -- **a page's `requires` set
+// asserted against the permissions its endpoints actually demand.**
+//
+// They answer different questions and the difference is the point. Theirs:
+// "what does this route require". This one: "is this string a permission at
+// all". A gate that is real-but-wrong is theirs to catch; a gate spelled with a
+// permission that does not exist is only visible here, because a route lookup
+// finds nothing to compare against.
+//
+// DO NOT hand-walk the call graph to build the first half yourself. It is deeper
+// than it looks: `list_range_teams` -> `get_competition_for_range` -> `get_range`,
+// with the `require` THREE hops down and no mention of a permission in the
+// route, the handler, or the function the handler calls. A resolver that stopped
+// at depth 1 would be wrong in the same way a grep is wrong at depth 0. Theirs
+// walks to a bounded depth and is regression-tested by setting `MAX_DEPTH=1` and
+// checking those exact routes fail.
 
 import { describe, expect, it } from "vitest";
 
