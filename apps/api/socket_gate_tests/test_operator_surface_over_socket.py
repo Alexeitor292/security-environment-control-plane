@@ -424,6 +424,29 @@ def test_every_new_read_route_requires_authentication(
     assert response.status_code in (401, 403), (suffix, response.status_code)
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/api/v1/range-scenarios",
+        "/api/v1/range-scenarios/web-breach-lab",
+        "/api/v1/ranges/{range_id}/scenario",
+    ),
+)
+def test_every_scenario_catalog_route_requires_authentication(
+    live_base_url: str, fixtures: dict, path: str
+):
+    """The catalog is not tenant data, and it still requires an authenticated caller.
+
+    Two of these name no range at all, so they are the routes most likely to be assumed public.
+    They are not: the shipped catalog tells an unauthenticated reader which scenarios this
+    deployment can run and what is blocking them, which is a description of the environment.
+    """
+    url = path.replace("{range_id}", fixtures["range_id"])
+    with _client(live_base_url) as client:
+        response = client.get(url, headers={"Authorization": "Bearer not-a-real-token"})
+    assert response.status_code in (401, 403), (path, response.status_code)
+
+
 # --- organization scoping ----------------------------------------------------------
 
 

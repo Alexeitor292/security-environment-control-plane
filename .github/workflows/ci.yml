@@ -787,9 +787,10 @@ jobs:
           # Count-based and EXACT, not a floor: a floor lets a deleted proof pass unnoticed. The
           # count is machine-checked against the module itself by tests/test_ci_workflow.py, so
           # adding or removing a test without updating it here fails rather than under-enforcing.
-          # Eight of these are the per-command authentication proofs and six are the per-read ones,
-          # both parametrized — so deleting a command route's proof changes this number.
-          EXPECTED_TESTS = 23
+          # Eight of these are the per-command authentication proofs, six are the per-read ones and
+          # three are the scenario-catalog ones, all parametrized — so deleting any route's proof
+          # changes this number.
+          EXPECTED_TESTS = 26
 
           report = Path("junit-operator-surface-socket-gate.xml")
           if not report.exists():
