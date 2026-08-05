@@ -12,6 +12,12 @@ Command surface (there is deliberately NO ``activate``/``apply``/``destroy``/``p
     secpctl rollback  controller|worker                 [--write --confirm]
     secpctl auth      login|refresh|logout              [--write --confirm]
     secpctl auth      status
+    secpctl worker    install --role ordinary|infrastructure_operator ... [--write --confirm]
+
+``worker install`` is the supported single operation for a Proxmox-adjacent worker host. It takes
+the invitation by PATH (never the enrollment material itself), installs the service for ONE of the
+two logical roles bound to that role's OWN task queue, and drives the authenticated enrollment —
+rolling the service back if it activates but enrollment does not reach healthy.
 
 Every mutation defaults to DRY-RUN; a real write requires BOTH ``--write`` and ``--confirm``.
 ``--json``
@@ -57,6 +63,8 @@ from secp_management.enrollment_cli import (
     worker_status,
 )
 from secp_management.transaction import EXIT_REFUSED, WriteGate
+from secp_management.worker_installer import WORKER_PLANES
+from secp_management.worker_roles import WorkerRole
 
 _ROLES = ("controller", "worker")
 
@@ -197,6 +205,38 @@ def _add_worker_parser(groups) -> None:
     )
     _add_write_confirm(enroll)
 
+    # ``install`` is the SUPPORTED single operation for a Proxmox-adjacent worker host: it installs
+    # the service for ONE of the two logical roles and drives the authenticated enrollment, failing
+    # closed (and rolling the service back) if the service activates but enrollment does not. The
+    # enrollment material is referenced by PATH only — it is never a command-line argument, so it
+    # never reaches shell history or the process table.
+    inst = actions.add_parser("install", help="install + enroll this worker for one role")
+    inst.add_argument("--invitation", required=True, help="path to the non-secret invitation file")
+    inst.add_argument(
+        "--role", required=True, choices=[r.value for r in WorkerRole], help="the worker role"
+    )
+    inst.add_argument("--plane", required=True, choices=list(WORKER_PLANES))
+    inst.add_argument("--installation-id", required=True)
+    inst.add_argument("--controller-origin", required=True)
+    inst.add_argument(
+        "--controller-trust-anchor",
+        required=True,
+        help="the EXPECTED controller trust anchor (raw Ed25519 public key hex), obtained "
+        "out of band; an invitation that does not match it is refused",
+    )
+    inst.add_argument("--release-digest", required=True)
+    inst.add_argument("--service-name", required=True)
+    inst.add_argument("--ordinary-queue", required=True, help="the ordinary worker task queue")
+    inst.add_argument(
+        "--operator-queue", required=True, help="the controlled-live operator task queue"
+    )
+    inst.add_argument(
+        "--target-association",
+        default=None,
+        help="Proxmox target association; REQUIRED for the operator role, refused for the ordinary",
+    )
+    _add_write_confirm(inst)
+
     enrollment = actions.add_parser(
         "enrollment", help="worker enrollment status/retry"
     ).add_subparsers(dest="worker_action", required=True)
@@ -306,6 +346,8 @@ def _dispatch_auth(args: argparse.Namespace, auth: AuthCliDeps) -> tuple[int, di
 
 
 def _dispatch_worker(args: argparse.Namespace, enr: EnrollmentCliDeps) -> tuple[int, dict]:
+    if args.action == "install":
+        return _dispatch_worker_install(args, enr)
     if args.action == "enroll":
         return worker_enroll(enr, invitation_file=args.invitation, gate=_gate(args))
     if args.action == "enrollment" and args.worker_action == "status":
@@ -313,6 +355,40 @@ def _dispatch_worker(args: argparse.Namespace, enr: EnrollmentCliDeps) -> tuple[
     if args.action == "enrollment" and args.worker_action == "retry":
         return worker_retry(enr, invitation_file=args.invitation, gate=_gate(args))
     return EXIT_REFUSED, {"command": "worker", "reason_code": "unknown_command"}
+
+
+def _dispatch_worker_install(args: argparse.Namespace, enr: EnrollmentCliDeps) -> tuple[int, dict]:
+    """Build the installation request from parsed arguments and run the installer.
+
+    The request is built here and validated inside the installer — never partially validated in the
+    parser, so one module owns every refusal. The installer's host seams stay SEALED in this
+    composition (see ``build_installer_deps``), so the write path refuses honestly on a host with no
+    reviewed service adapter rather than reporting an install that did not happen.
+    """
+    from secp_management.worker_installer import (
+        InstallationRequest,
+        build_installer_deps,
+        worker_install,
+    )
+
+    request = InstallationRequest(
+        controller_origin=args.controller_origin,
+        installation_id=args.installation_id,
+        release_digest=args.release_digest,
+        role=args.role,
+        worker_plane=args.plane,
+        controller_trust_anchor_hex=args.controller_trust_anchor,
+        invitation_file=args.invitation,
+        service_name=args.service_name,
+        target_association=args.target_association,
+    )
+    return worker_install(
+        request,
+        build_installer_deps(enr.worker_enroller),
+        ordinary_task_queue=args.ordinary_queue,
+        operator_task_queue=args.operator_queue,
+        gate=_gate(args),
+    )
 
 
 def _dispatch_enrollment(args: argparse.Namespace, enr: EnrollmentCliDeps) -> tuple[int, dict]:
