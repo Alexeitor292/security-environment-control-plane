@@ -30,13 +30,37 @@ function fmtUtc(iso?: string): string {
   return iso ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : '—'
 }
 
+/** Stable identity for "no rows loaded", so the memos below keep their deps honest. */
+const EMPTY_ROWS: readonly AuditRowView[] = []
+
 /**
- * `outcome` is rendered VERBATIM. The control plane emits seven values and this
- * surface has tones for three, so anything else keeps its own word in a neutral
- * badge rather than being coerced to the nearest familiar one. `origin` has no
- * wire source at all and says so -- never an empty cell, which would read as
- * "no origin" rather than "not supplied".
+ * `outcome` is rendered VERBATIM, and the tone is asked of the design system
+ * rather than derived from the projection's `toned` flag.
+ *
+ * THE DISTINCTION THAT COST A DEFECT. `OutcomeView.toned` answers "is this one
+ * of the three values the MIGRATED DOMAIN TYPE allows" -- it is a statement
+ * about `models/types.ts`, not about what this surface can display. Using it to
+ * pick a colour rendered `revoked` and `expired` in the neutral "we don't know"
+ * badge, even though `STATE_TONE` classifies both as `error`. In a ledger where
+ * `failed` is red, a revoked authorization sitting in grey with a question mark
+ * reads as less serious than it is, which is the under-claiming direction.
+ *
+ * So the tone comes from `toneForState`, whose own documented rule is that an
+ * unrecognised state resolves to `unknown` and never to a healthy default. That
+ * gives error for `revoked`/`expired`/`denied`/`failed`, ok for `success`, and
+ * neutral `unknown` for `refused`/`failure` -- the two the design system has
+ * genuinely never been told about.
+ *
+ * `label` is passed explicitly so the word survives untouched: the badge's own
+ * default would run `state.replace(/-/g, ' ')` over it.
+ *
+ * `origin` has no wire source at all and says so -- never an empty cell, which
+ * would read as "no origin" rather than "not supplied".
  */
+function OutcomeBadge({ outcome }: { outcome: AuditRowView['outcome'] }) {
+  return <StatusBadge state={outcome.raw} label={outcome.raw} />
+}
+
 const AUDIT_COLUMNS: Column<AuditRowView>[] = [
   {
     key: 'time',
@@ -57,12 +81,7 @@ const AUDIT_COLUMNS: Column<AuditRowView>[] = [
   {
     key: 'outcome',
     header: 'Outcome',
-    render: (e) =>
-      e.outcome.toned ? (
-        <StatusBadge state={e.outcome.toned} />
-      ) : (
-        <StatusBadge state={e.outcome.raw} label={e.outcome.raw} tone="unknown" />
-      ),
+    render: (e) => <OutcomeBadge outcome={e.outcome} />,
   },
   {
     key: 'origin',
@@ -109,7 +128,13 @@ export default function AuditPage() {
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<AuditRowView | undefined>()
 
-  const loaded = auditQ.status === 'ready' ? auditQ.rows : []
+  // Memoised for identity, not for cost: the bare conditional produced a fresh
+  // `[]` on every render, so both memos below re-ran every time and the linter
+  // was right to say their dependency lists meant nothing.
+  const loaded = useMemo(
+    () => (auditQ.status === 'ready' ? auditQ.rows : EMPTY_ROWS),
+    [auditQ],
+  )
 
   /**
    * Options come from the rows CURRENTLY LOADED, and the control says so.
@@ -242,15 +267,7 @@ export default function AuditPage() {
                 { key: 'Resource', value: selected.resource, mono: true },
                 {
                   key: 'Outcome',
-                  value: selected.outcome.toned ? (
-                    <StatusBadge state={selected.outcome.toned} />
-                  ) : (
-                    <StatusBadge
-                      state={selected.outcome.raw}
-                      label={selected.outcome.raw}
-                      tone="unknown"
-                    />
-                  ),
+                  value: <OutcomeBadge outcome={selected.outcome} />,
                 },
                 {
                   key: 'Origin',
