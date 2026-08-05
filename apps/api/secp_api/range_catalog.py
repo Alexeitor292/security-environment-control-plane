@@ -148,6 +148,63 @@ JUICE_SHOP_CHALLENGES: tuple[CatalogChallenge, ...] = (
 )
 
 
+#: DVWA, defined once and shared for the same reason :data:`JUICE_SHOP_COMPONENT` is: the Docker
+#: lab and the Proxmox lab must stand up the same application at the same pinned version.
+DVWA_COMPONENT = CatalogComponent(
+    key="dvwa",
+    name="DVWA",
+    role=ComponentRole.target,
+    image="vulnerables/web-dvwa:1.9",
+    container_port=80,
+    path="/",
+    readiness_timeout_seconds=180,
+)
+
+DVWA_CHALLENGES: tuple[CatalogChallenge, ...] = (
+    CatalogChallenge(
+        key="dvwa-default-credentials",
+        title="Get into DVWA",
+        description=(
+            "DVWA ships with a well-known administrative account. Log in, then submit the "
+            "administrator's password as the flag."
+        ),
+        category="access",
+        points=50,
+        component_key="dvwa",
+        hint="The application's own documentation gives this away.",
+        flags=(CatalogFlag(value="password", label="admin password"),),
+    ),
+    CatalogChallenge(
+        key="dvwa-sqli-password-hash",
+        title="Extract a password hash by SQL injection",
+        description=(
+            "The SQL Injection page interpolates the User ID directly into a query. Use it to "
+            "read the users table and submit the MD5 hash stored for the user 'gordonb'."
+        ),
+        category="injection",
+        points=150,
+        component_key="dvwa",
+        hint="A user ID of 1' OR '1'='1 returns more rows than intended.",
+        flags=(
+            CatalogFlag(value="e99a18c428cb38d5f260853678922e03", label="gordonb password hash"),
+        ),
+    ),
+    CatalogChallenge(
+        key="dvwa-command-injection",
+        title="Run a command on the DVWA host",
+        description=(
+            "The Command Injection page passes its input to a shell. Chain a command onto the "
+            "ping and run 'id'. Submit the uid field exactly as the shell prints it."
+        ),
+        category="injection",
+        points=150,
+        component_key="dvwa",
+        hint="A semicolon ends the ping and starts something else.",
+        flags=(CatalogFlag(value="uid=33(www-data)", label="www-data uid"),),
+    ),
+)
+
+
 #: A ONE-CONTAINER range. It exists because the smallest thing that exercises the entire lifecycle
 #: end to end — create, pull, start, observe readiness by talking to the app, tear down, prove no
 #: residue — is a single component, and a single component is what the first real-Docker proof runs
@@ -196,68 +253,71 @@ WEB_BREACH_LAB = CatalogTemplate(
         "flaws. Ephemeral local Docker only. Ports bind to 127.0.0.1 and must never be forwarded, "
         "proxied, or exposed to an untrusted network."
     ),
-    components=(
-        CatalogComponent(
-            key="dvwa",
-            name="DVWA",
-            role=ComponentRole.target,
-            image="vulnerables/web-dvwa:1.9",
-            container_port=80,
-            path="/",
-            readiness_timeout_seconds=180,
-        ),
-        JUICE_SHOP_COMPONENT,
-    ),
-    challenges=(
-        CatalogChallenge(
-            key="dvwa-default-credentials",
-            title="Get into DVWA",
-            description=(
-                "DVWA ships with a well-known administrative account. Log in, then submit the "
-                "administrator's password as the flag."
-            ),
-            category="access",
-            points=50,
-            component_key="dvwa",
-            hint="The application's own documentation gives this away.",
-            flags=(CatalogFlag(value="password", label="admin password"),),
-        ),
-        CatalogChallenge(
-            key="dvwa-sqli-password-hash",
-            title="Extract a password hash by SQL injection",
-            description=(
-                "The SQL Injection page interpolates the User ID directly into a query. Use it to "
-                "read the users table and submit the MD5 hash stored for the user 'gordonb'."
-            ),
-            category="injection",
-            points=150,
-            component_key="dvwa",
-            hint="A user ID of 1' OR '1'='1 returns more rows than intended.",
-            flags=(
-                CatalogFlag(
-                    value="e99a18c428cb38d5f260853678922e03", label="gordonb password hash"
-                ),
-            ),
-        ),
-        CatalogChallenge(
-            key="dvwa-command-injection",
-            title="Run a command on the DVWA host",
-            description=(
-                "The Command Injection page passes its input to a shell. Chain a command onto the "
-                "ping and run 'id'. Submit the uid field exactly as the shell prints it."
-            ),
-            category="injection",
-            points=150,
-            component_key="dvwa",
-            hint="A semicolon ends the ping and starts something else.",
-            flags=(CatalogFlag(value="uid=33(www-data)", label="www-data uid"),),
-        ),
-        *JUICE_SHOP_CHALLENGES,
-    ),
+    components=(DVWA_COMPONENT, JUICE_SHOP_COMPONENT),
+    challenges=(*DVWA_CHALLENGES, *JUICE_SHOP_CHALLENGES),
 )
 
 
-CATALOG: tuple[CatalogTemplate, ...] = (JUICE_SHOP_SOLO, WEB_BREACH_LAB)
+#: The same Web Breach Lab content on Proxmox instead of local Docker.
+#:
+#: The COMPONENTS AND CHALLENGES ARE THE SHARED OBJECTS, not copies: this template reuses
+#: :data:`JUICE_SHOP_COMPONENT` and the DVWA component and challenge definitions that
+#: ``web-breach-lab`` already uses. That is deliberate and load-bearing — the substrate changes, the
+#: content must not. A Proxmox range and a Docker range of the same lab stand up the same
+#: applications, at the same pinned versions, scored against the same flags.
+#:
+#: WHAT ``image`` MEANS ON A PROXMOX RANGE. On ``local_docker`` the component's ``image`` is pulled
+#: directly. On Proxmox nothing pulls it: guests are cloned from a reviewed Proxmox TEMPLATE, named
+#: by :class:`~secp_api.range_providers.proxmox_workload.ReviewedGuestImage`, which carries its own
+#: ``template_ref``, ``image_digest`` and ``approval_reference``. The ``image`` recorded here is the
+#: pinned application VERSION that reviewed template is required to contain, which is what keeps the
+#: two substrates comparable and is checked by the ``workload_versions_pinned`` readiness
+#: requirement. It is never a pull reference on this template.
+#:
+#: TWO TEAMS, and that is a floor rather than a default. The segregated network compiler refuses a
+#: single-team request outright — with one team there is nothing to segregate, and cross-team
+#: isolation is not a property that can be exercised, let alone proved. The attacker guest per team
+#: is synthesised by the workload compiler and is deliberately NOT a catalog component: it is
+#: competition infrastructure, not lab content.
+PROXMOX_WEB_BREACH_LAB = CatalogTemplate(
+    slug="proxmox-web-breach-lab",
+    name="Web Breach Lab (Proxmox, two teams)",
+    summary=(
+        "The Web Breach Lab as full virtual machines on Proxmox, one segregated segment per team."
+    ),
+    description=(
+        "The same two intentionally vulnerable web applications as 'web-breach-lab' — DVWA and "
+        "OWASP Juice Shop — but stood up as full guests on a Proxmox cluster rather than as "
+        "containers on one host. Each team gets its own SDN VNet, its own subnet and VLAN, its own "
+        "copy of both targets and its own attacker workstation. Teams cannot reach each other, and "
+        "no team segment can reach the Proxmox management plane; both are compiled into the "
+        "firewall and proved against the compiled ruleset before anything is applied. A shared "
+        "scoring segment is the one path every team is permitted, on the scoring port alone.\n\n"
+        "This range is NOT applied by requesting a deploy. It compiles to a plan, the plan is "
+        "approved by its exact hash, and apply is authorized separately — because on Proxmox a "
+        "mistake creates real VMs on real hardware and consumes real addresses."
+    ),
+    provider="proxmox",
+    difficulty="intermediate",
+    estimated_deploy_seconds=1800,
+    warning=(
+        "Contains deliberately vulnerable software with known remote-code-execution and injection "
+        "flaws, running as full virtual machines on shared cluster hardware. Every team segment is "
+        "compiled to be unable to reach the Proxmox management plane, the control plane, or "
+        "another team — that isolation is proved against the compiled firewall before apply and "
+        "observed again after it. Do not apply this range to a cluster whose management network "
+        "you have not declared, and do not attach a team segment to a bridge that carries "
+        "management traffic."
+    ),
+    components=(
+        DVWA_COMPONENT,
+        JUICE_SHOP_COMPONENT,
+    ),
+    challenges=(*DVWA_CHALLENGES, *JUICE_SHOP_CHALLENGES),
+)
+
+
+CATALOG: tuple[CatalogTemplate, ...] = (JUICE_SHOP_SOLO, WEB_BREACH_LAB, PROXMOX_WEB_BREACH_LAB)
 
 
 def get_template(slug: str) -> CatalogTemplate | None:
