@@ -177,12 +177,27 @@ function readMember<T extends string>(
 export type CheckStatus = "passed" | "failed" | "not_observed";
 
 export function checkStatus(finding: CheckFindingOut): CheckStatus {
+  // DO NOT FOLD THIS INTO THE `ok` CHECK BELOW. It looks redundant — `ok` would be consulted
+  // anyway — and it is the single line standing between recorded history and a false pass.
+  //
+  // Before the pair had a producer, roughly thirteen sites computed `observed` and `ok` from
+  // INDEPENDENT expressions, and "no problems were found" is trivially true when nothing was
+  // examined. So durable events almost certainly carry `observed=false, ok=TRUE`: a pass nobody
+  // made. The worker refuses to construct that shape now, but the events already written cannot
+  // be un-written, and the API deliberately keeps no validator forbidding them so that history
+  // stays readable.
+  //
+  // `observed` short-circuiting is what makes reading that history safe. `ok` is never consulted
+  // when nothing was observed, so a historical `observed=false, ok=true` reads as `not_observed`
+  // and cannot reach a screen as a pass. The dangerous direction was closed here, at the reader,
+  // before the producer was fixed.
   if (!finding.observed) return "not_observed";
-  // The worker cannot emit `observed=true, ok=null` — its __post_init__ refuses it. It
-  // is handled explicitly anyway rather than left to falsiness: `null ? a : b` takes the `false`
-  // branch, so a `CheckFinding` built by hand with the contradiction would silently render as a
-  // FAILURE — the exact substitution this module exists to prevent, arriving through the one path
-  // that skips the reader.
+
+  // A separate concern: `observed=true, ok=null` is a contradiction the worker's `__post_init__`
+  // refuses, so it should be unreachable. Handled explicitly rather than left to falsiness anyway,
+  // because `null ? a : b` takes the `false` branch — a missing verdict arriving through a
+  // hand-built value would otherwise render as a FAILURE, which is the substitution this module
+  // exists to prevent. `undefined` is included because the contract marks `ok` optional.
   if (finding.ok === null || finding.ok === undefined) return "not_observed";
   return finding.ok ? "passed" : "failed";
 }

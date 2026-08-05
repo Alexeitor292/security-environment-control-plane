@@ -27,10 +27,17 @@ describe("checkStatus reads the (observed, ok) pair, not `ok` alone", () => {
   });
 
   it("reports an unobserved check as not_observed whatever `ok` says", () => {
-    // Both legacy and current shapes. `ok: false` is what two producers emitted before `ok`
-    // became nullable, and those events are durable; `ok: null` is what the worker writes now.
+    // Three shapes, and the THIRD is the one that matters. `ok: null` is what the worker writes
+    // now; `ok: false` is what producers emitted before the pair had a contract.
     expect(checkStatus(finding(false, null))).toBe("not_observed");
     expect(checkStatus(finding(false, false))).toBe("not_observed");
+
+    // `observed=false, ok=TRUE` — a pass nobody made. Roughly thirteen sites computed the two
+    // from independent expressions before #120, and "no problems were found" is trivially true
+    // when nothing was examined, so durable events almost certainly carry this. The worker
+    // refuses to construct it now; the records already written cannot be un-written. This is the
+    // assertion that pins the `observed` short-circuit in `checkStatus` — remove that line and
+    // this test is what fails, which is the point of writing it separately from the other two.
     expect(checkStatus(finding(false, true))).toBe("not_observed");
   });
 
