@@ -27,11 +27,29 @@
  * stylesheet is fetched only once a user actually opens the spatial workspace.
  */
 
+import { useAuth } from '../auth/AuthProvider'
+import { SpatialPrincipalProvider } from './integrations/principal'
 import { SecpShell } from './shell/SecpShell'
 import './index.css'
 
+/**
+ * The route boundary is the ONE place `useAuth()` is called for the spatial tree.
+ *
+ * `useAuth` throws outside `<AuthProvider>`, and the shell is mounted in two
+ * places: this route, which sits inside it, and `ShellHarness`, which
+ * deliberately does not. Reading the principal here and publishing it through
+ * `SpatialPrincipalProvider` keeps every page below working in both mounts —
+ * and, because the provider's default is an EMPTY permission set, the harness
+ * mount fails closed rather than rendering gated surfaces to nobody.
+ */
 export function SpatialWorkspace() {
-  return <SecpShell />
+  const { principal } = useAuth()
+
+  return (
+    <SpatialPrincipalProvider permissions={principal?.permissions}>
+      <SecpShell />
+    </SpatialPrincipalProvider>
+  )
 }
 
 export default SpatialWorkspace
