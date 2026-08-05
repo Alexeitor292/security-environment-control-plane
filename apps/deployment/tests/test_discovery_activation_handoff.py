@@ -41,6 +41,16 @@ from secp_discovery_activation.handoff import (
     verify_handoff,
 )
 
+
+# The all-held posture, DERIVED from the probe that produces it rather than typed here. A fixture
+# that spells its own seal names cannot notice the probe adding, renaming or removing one -- and
+# `apply_execution_absent`, the seal the hold point actually needs, arrived exactly that way.
+def _sealed_states() -> tuple[tuple[str, str], ...]:
+    from secp_worker.safety_seal_probe import REQUIRED_SEAL_NAMES, SealState
+
+    return tuple(sorted((name, SealState.sealed.value) for name in REQUIRED_SEAL_NAMES))
+
+
 SHA_A = "sha256:" + "a" * 64
 SHA_B = "sha256:" + "b" * 64
 SHA_C = "sha256:" + "c" * 64
@@ -224,10 +234,7 @@ def _result(offer: ControllerOffer) -> WorkerResult:
         database_private_material_absent=True,
         operator_service_present=False,
         operator_queue_polled=False,
-        generic_activation_subprocess_sealed=True,
-        generic_executor_subprocess_sealed=True,
-        plan_only_process_sealed=False,
-        real_provisioning_enabled=False,
+        seal_states=_sealed_states(),
         forbidden_infrastructure_contacts_performed=False,
         workflows_submitted=False,
         run_plan_generation_called=False,
@@ -296,3 +303,151 @@ def test_duplicate_unknown_and_effectful_payloads_refuse() -> None:
     value["private_key"] = "forbidden"
     with pytest.raises(ActivationHandoffError):
         parse_controller_offer(json.dumps(value).encode("ascii"))
+
+
+# --------------------------------------------------------------------------------------------
+# The seal posture on the SIGNED worker result.
+#
+# Until this change these were four booleans -- `generic_activation_subprocess_sealed`,
+# `generic_executor_subprocess_sealed`, `plan_only_process_sealed`, `real_provisioning_enabled` --
+# built by `split_engine` from four hardcoded `True/True/False/False` literals and "validated" by
+# `_v_semantics` requiring exactly those literals. The worker host signed an attestation of a
+# safety posture nothing on that host had observed, and the validator checked a constant against
+# itself. These tests exist so that cannot be reintroduced quietly.
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_signed_result_carries_every_seal_the_probe_produces() -> None:
+    """Including ``apply_execution_absent``, which had no name in this document at all.
+
+    Derived from the probe rather than listed here: a test that spells the names cannot notice the
+    probe growing a fifth seal that the document then silently fails to carry.
+    """
+    from secp_worker.safety_seal_probe import REQUIRED_SEAL_NAMES
+
+    result = _result(_offer())
+    assert {name for name, _ in result.seal_states} == set(REQUIRED_SEAL_NAMES)
+    assert "apply_execution_absent" in {name for name, _ in result.seal_states}
+
+
+def test_the_seal_states_survive_the_signed_round_trip() -> None:
+    """The pairs are a tuple in Python and a list of lists in JSON.
+
+    Under ``strict=True`` a list does not validate as a tuple, so without an explicit coercion the
+    document would be produced successfully and refused on arrival -- which reads exactly like
+    tampering, on a path whose whole job is to detect tampering.
+    """
+    result = _result(_offer())
+    parsed = parse_worker_result(handoff_bytes(result))
+    assert parsed.seal_states == result.seal_states
+    assert parsed == result
+    raw = json.loads(handoff_bytes(result))
+    assert raw["seal_states"] == [list(pair) for pair in result.seal_states]
+
+
+def test_a_pre_collapse_worker_result_is_refused_not_reinterpreted() -> None:
+    """The old shape must fail closed, and it must fail on the VERSION.
+
+    Reconstructing four seal states from four booleans that were never four observations would
+    republish fabricated structure in a shape indistinguishable from real observations. Refusing is
+    a decision made for a stated reason; reconstructing is fabrication.
+    """
+    value = json.loads(handoff_bytes(_result(_offer())))
+    value.pop("seal_states")
+    value["generic_activation_subprocess_sealed"] = True
+    value["generic_executor_subprocess_sealed"] = True
+    value["plan_only_process_sealed"] = False
+    value["real_provisioning_enabled"] = False
+    value["contract_version"] = "secp.discovery-activation/v1alpha1"
+    with pytest.raises(ActivationHandoffError):
+        parse_worker_result(json.dumps(value).encode("ascii"))
+
+
+@pytest.mark.parametrize("state", ["unsealed", "undetermined"])
+def test_a_failing_seal_names_which_one(state: str) -> None:
+    """`unsealed` and `undetermined` are different facts and both must reach the message.
+
+    One means the surface was exercised and did not refuse; the other means the derivation could
+    not run. They call for different responses, and a bare "posture invalid" erases the difference.
+    """
+    value = json.loads(handoff_bytes(_result(_offer())))
+    value["seal_states"] = [
+        [name, state if name == "apply_execution_absent" else "sealed"]
+        for name, _ in _sealed_states()
+    ]
+    with pytest.raises(ActivationHandoffError) as exc:
+        parse_worker_result(json.dumps(value).encode("ascii"))
+    assert "apply_execution_absent" in str(exc.value)
+    assert state in str(exc.value)
+
+
+def test_an_absent_seal_posture_is_refused_rather_than_vacuously_held() -> None:
+    """``all()`` over nothing is True. Empty is the case that would otherwise read as held."""
+    value = json.loads(handoff_bytes(_result(_offer())))
+    value["seal_states"] = []
+    with pytest.raises(ActivationHandoffError):
+        parse_worker_result(json.dumps(value).encode("ascii"))
+
+
+def test_a_broken_derivation_reports_undetermined_and_never_sealed() -> None:
+    """The probe's failure mode must not be able to manufacture a held posture.
+
+    This is the property the whole collapse exists to protect: when the derivation cannot run, the
+    state it reports is ``undetermined``, and ``undetermined`` fails closed at this boundary.
+    """
+    from secp_worker import safety_seal_probe
+
+    observation = safety_seal_probe._observe(
+        "generic_executor_subprocess_sealed",
+        "detail",
+        lambda: (_ for _ in ()).throw(RuntimeError("the derivation could not run")),
+    )
+    assert observation.state is safety_seal_probe.SealState.undetermined
+    assert observation.state is not safety_seal_probe.SealState.sealed
+
+    value = json.loads(handoff_bytes(_result(_offer())))
+    value["seal_states"] = [
+        [name, observation.state.value if name == observation.name else "sealed"]
+        for name, _ in _sealed_states()
+    ]
+    with pytest.raises(ActivationHandoffError) as exc:
+        parse_worker_result(json.dumps(value).encode("ascii"))
+    assert "undetermined" in str(exc.value)
+
+
+def test_a_malformed_seal_entry_is_refused() -> None:
+    """A garbled journal or document must not arrive as a plausible-looking posture."""
+    for broken in ([["only-one-element"]], [["name", 7]], [["", "sealed"]], ["not-a-pair"]):
+        value = json.loads(handoff_bytes(_result(_offer())))
+        value["seal_states"] = broken
+        with pytest.raises(ActivationHandoffError):
+            parse_worker_result(json.dumps(value).encode("ascii"))
+
+
+def test_a_hostile_seal_name_cannot_escape_into_the_reason_code() -> None:
+    """Naming the failing seal must not turn a bounded error channel into a free-text one.
+
+    The pairs arrive from the PEER host, so the name is attacker-influenced. It is echoed only when
+    it matches the safe-identifier shape this module already enforces; anything else becomes
+    ``unnamed``. Without this, the legibility improvement would be a log-injection surface.
+    """
+    hostile = "secret=hunter2\nFAKE LOG LINE: everything is fine"
+    value = json.loads(handoff_bytes(_result(_offer())))
+    value["seal_states"] = [[hostile, "unsealed"]]
+    with pytest.raises(ActivationHandoffError) as exc:
+        parse_worker_result(json.dumps(value).encode("ascii"))
+    assert "hunter2" not in exc.value.reason_code
+    assert "\n" not in exc.value.reason_code
+    assert exc.value.reason_code == "seal_posture:invalid:unnamed=unsealed"
+
+
+def test_the_seal_posture_reason_is_the_only_widened_channel() -> None:
+    """Every other refusal on this document stays collapsed to one bounded code.
+
+    Stated as a test rather than a comment so that widening a second one is a deliberate act.
+    """
+    value = json.loads(handoff_bytes(_result(_offer())))
+    value["worker_healthy"] = False
+    with pytest.raises(ActivationHandoffError) as exc:
+        parse_worker_result(json.dumps(value).encode("ascii"))
+    assert exc.value.reason_code == "worker_result_invalid"

@@ -75,6 +75,31 @@ _CONTROLLER_ROLES = frozenset(
 )
 _WORKER_ROLES = frozenset({ROLE_WORKER_OVERRIDE, ROLE_WORKER_RUNTIME_OVERLAY, ROLE_WORKER_STATE})
 
+#: Prefix marking a seal-posture refusal so ``parse_worker_result`` can surface WHICH seal failed
+#: without widening the module's rule that every reason code is bounded and non-sensitive.
+#:
+#: Every other validation failure here collapses to a single ``worker_result_invalid``, which is
+#: correct for a cross-host boundary: an error message must never carry attacker-influenced text.
+#: But collapsing the seal posture too would mean an operator learns only that "something on the
+#: worker host is unsafe" — and `unsealed` (the surface was exercised and did not refuse) calls for
+#: a different response than `undetermined` (the derivation could not run). The name is therefore
+#: carried through :func:`_bounded`, which admits only the safe-identifier shape this module
+#: already enforces elsewhere, so nothing free-form can reach a log or a screen.
+_SEAL_MARKER = "seal_posture:"
+#: At most this many failing seals are named. The document is size-bounded but its seal list is
+#: not, and a reason code is not a report.
+_SEAL_DETAIL = 8
+
+
+def _bounded(value: str) -> str:
+    """A seal name or state, or ``unnamed`` when it is not the shape this module permits.
+
+    The pairs arrive from the PEER host. Echoing one into a reason code without constraining its
+    shape would turn a bounded error channel into an arbitrary-text one, which is the thing the
+    whole module is careful about.
+    """
+    return value if _SAFE_ID.fullmatch(value) else "unnamed"
+
 
 class ActivationHandoffError(DiscoveryActivationError):
     """A cross-host handoff failed closed with a bounded reason code."""
@@ -290,10 +315,34 @@ class WorkerResult(_Strict):
     database_private_material_absent: bool
     operator_service_present: bool
     operator_queue_polled: bool
-    generic_activation_subprocess_sealed: bool
-    generic_executor_subprocess_sealed: bool
-    plan_only_process_sealed: bool
-    real_provisioning_enabled: bool
+    #: The per-seal states the worker host's probe actually OBSERVED, as ``(name, state)`` pairs.
+    #:
+    #: This replaces four booleans — ``generic_activation_subprocess_sealed``,
+    #: ``generic_executor_subprocess_sealed``, ``plan_only_process_sealed`` and
+    #: ``real_provisioning_enabled`` — and the replacement ADDS information rather than reshaping
+    #: it, because those four were never four facts. Every one of them was set from a single
+    #: ``probe.seals_valid``, two of them negated, and ``seals_valid`` is itself one whole-dict
+    #: equality. Four names, four validator clauses, and one bit behind all of them.
+    #:
+    #: Worse, and the reason this is a wire-contract change rather than a tidy-up: the producer
+    #: did not consult the probe at all. ``split_engine`` built this document with four hardcoded
+    #: ``True/True/False/False`` literals, so the worker host SIGNED an attestation of a safety
+    #: posture nothing on that host had observed — and ``_v_semantics`` "validated" it by requiring
+    #: exactly those literals. A signed cross-host safety claim checked against itself.
+    #:
+    #: Two of the old names did not even correspond to seals the probe produces:
+    #: ``plan_only_process_sealed`` had to be ``False`` here while the probe requires
+    #: ``plan_only_process_gated`` to be ``sealed``, and ``apply_execution_absent`` — the seal the
+    #: hold point actually needs — appeared under no name at all.
+    #:
+    #: VERSIONING. A pre-collapse document is REFUSED, not reinterpreted: ``_v_semantics`` already
+    #: rejects any ``contract_version`` that is not the current one, so bumping that constant is
+    #: the whole compatibility story. ``contract_schema`` deliberately stays at
+    #: ``worker-result/v1`` because it names the document FAMILY, not its shape; the version field
+    #: is the gate, and it is the one that is enforced. Refusing is a decision we make for a stated
+    #: reason; reconstructing four states out of booleans that were never four observations would
+    #: be fabrication wearing the new format's credibility.
+    seal_states: tuple[tuple[str, str], ...]
     forbidden_infrastructure_contacts_performed: bool
     workflows_submitted: bool
     run_plan_generation_called: bool
@@ -345,6 +394,28 @@ class WorkerResult(_Strict):
             raise ValueError("installation identity invalid")
         return value
 
+    @field_validator("seal_states", mode="before")
+    @classmethod
+    def _v_seal_states_shape(cls, value: object) -> object:
+        """Accept the JSON form of the pairs, and refuse anything that is not a pair of strings.
+
+        This document is serialized, signed, transported and re-parsed, and ``model_dump(mode=
+        "json")`` turns a tuple of tuples into a LIST OF LISTS. Under ``strict=True`` that no
+        longer validates, so without this the document could not survive its own round trip — it
+        would be produced successfully and refused on arrival, which reads exactly like tampering.
+        """
+        if not isinstance(value, list | tuple):
+            return value
+        coerced: list[tuple[str, str]] = []
+        for item in value:
+            if not isinstance(item, list | tuple) or len(item) != 2:
+                raise ValueError("worker result seal state entry malformed")
+            name, state = item
+            if not isinstance(name, str) or not isinstance(state, str) or not name or not state:
+                raise ValueError("worker result seal state entry malformed")
+            coerced.append((name, state))
+        return tuple(coerced)
+
     @model_validator(mode="after")
     def _v_semantics(self) -> WorkerResult:
         if (
@@ -358,12 +429,27 @@ class WorkerResult(_Strict):
             or self.database_private_material_absent is not True
             or self.operator_service_present is not False
             or self.operator_queue_polled is not False
-            or self.generic_activation_subprocess_sealed is not True
-            or self.generic_executor_subprocess_sealed is not True
-            or self.plan_only_process_sealed is not False
-            or self.real_provisioning_enabled is not False
         ):
             raise ValueError("worker result posture invalid")
+        # The seal posture, checked against what ARRIVED rather than against four literals.
+        #
+        # Empty refuses instead of passing: `all()` over nothing is True, so a document carrying no
+        # seals would otherwise assert a held posture by carrying no evidence of one. That is the
+        # same failure mode as the old four booleans, reached by a different route.
+        if not self.seal_states:
+            raise ValueError(_SEAL_MARKER + "absent")
+        # NAME the seals that did not hold. A bare "posture invalid" tells the operator that
+        # something on the worker host is unsafe and not which thing, and `unsealed` (the surface
+        # was exercised and did not refuse) calls for a different response than `undetermined`
+        # (the derivation could not run). Any spelling other than `sealed` fails closed here, so a
+        # typo or an unknown state is refused rather than silently treated as held.
+        failing = tuple(
+            f"{_bounded(name)}={_bounded(state)}"
+            for name, state in self.seal_states
+            if state != "sealed"
+        )
+        if failing:
+            raise ValueError(_SEAL_MARKER + "invalid:" + ",".join(sorted(failing)[:_SEAL_DETAIL]))
         if self.object_classifications[ROLE_WORKER_STATE] != self.persistent_state.classification:
             raise ValueError("worker state classification mismatch")
         if (
@@ -532,13 +618,28 @@ def parse_controller_offer(raw: bytes) -> ControllerOffer:
         raise ActivationHandoffError("controller_offer_invalid") from None
 
 
+def _seal_posture_reason(exc: ValidationError) -> str | None:
+    """The bounded seal-posture code, if that is why validation failed.
+
+    Pydantic wraps a validator's ``ValueError`` message, so the marker is recovered from the error
+    list rather than from the exception's string form — which also carries the input value and
+    must never be surfaced.
+    """
+    for error in exc.errors():
+        message = str(error.get("msg", ""))
+        index = message.find(_SEAL_MARKER)
+        if index >= 0:
+            return message[index:]
+    return None
+
+
 def parse_worker_result(raw: bytes) -> WorkerResult:
     try:
         return WorkerResult.model_validate(
             _parse(raw, limit=_MAX_HANDOFF_BYTES, what="worker_result")
         )
-    except ValidationError:
-        raise ActivationHandoffError("worker_result_invalid") from None
+    except ValidationError as exc:
+        raise ActivationHandoffError(_seal_posture_reason(exc) or "worker_result_invalid") from None
 
 
 def parse_handoff_attestation(raw: bytes) -> HandoffAttestation:

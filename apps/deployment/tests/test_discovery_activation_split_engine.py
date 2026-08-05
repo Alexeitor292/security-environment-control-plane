@@ -58,6 +58,16 @@ from secp_discovery_activation.tls import (
     import_admission_ca,
 )
 
+
+# The all-held posture, DERIVED from the probe that produces it rather than typed here. A fixture
+# that spells its own seal names cannot notice the probe adding, renaming or removing one -- and
+# `apply_execution_absent`, the seal the hold point actually needs, arrived exactly that way.
+def _sealed_states() -> tuple[tuple[str, str], ...]:
+    from secp_worker.safety_seal_probe import REQUIRED_SEAL_NAMES, SealState
+
+    return tuple(sorted((name, SealState.sealed.value) for name in REQUIRED_SEAL_NAMES))
+
+
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 GATE = WriteGate(write=True, confirm=True)
 
@@ -185,10 +195,7 @@ def _worker_before(profile) -> WorkerObservation:  # noqa: ANN001
         operator_container_present=False,
         operator_registration_present=False,
         operator_queue_polled=False,
-        generic_activation_subprocess_sealed=True,
-        generic_executor_subprocess_sealed=True,
-        plan_only_process_sealed=False,
-        real_provisioning_enabled=False,
+        seal_states=_sealed_states(),
     )
 
 
@@ -255,10 +262,7 @@ def _worker_after(profile, ca_certificate) -> WorkerObservation:  # noqa: ANN001
         operator_container_present=False,
         operator_registration_present=False,
         operator_queue_polled=False,
-        generic_activation_subprocess_sealed=True,
-        generic_executor_subprocess_sealed=True,
-        plan_only_process_sealed=False,
-        real_provisioning_enabled=False,
+        seal_states=_sealed_states(),
         tls_ready=True,
         keys_generated=True,
         key_metadata_safe=True,

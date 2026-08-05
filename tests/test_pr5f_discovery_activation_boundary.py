@@ -425,10 +425,10 @@ def test_authenticated_evidence_schema_requires_absence_of_forbidden_effects() -
     assert {
         "operator_service_present",
         "operator_queue_polled",
-        "generic_activation_subprocess_sealed",
-        "generic_executor_subprocess_sealed",
-        "plan_only_process_sealed",
-        "real_provisioning_enabled",
+        # The safety posture is now the per-seal states, not four booleans. Those four were every
+        # one of them set from a single `probe.seals_valid`, two inverted, so this assertion used
+        # to name four fields carrying one bit between them.
+        "seal_states",
         "forbidden_infrastructure_contacts_performed",
         "workflows_submitted",
         "run_plan_generation_called",
@@ -437,6 +437,13 @@ def test_authenticated_evidence_schema_requires_absence_of_forbidden_effects() -
     } <= fields
     source = (ACTIVATION_PACKAGE / "evidence.py").read_text(encoding="utf-8")
     assert "if getattr(self, field_name) is not False:" in source
+    # The posture must be REFUSED when absent, not accepted vacuously -- `all()` over nothing is
+    # True, which is precisely how an empty posture would read as a held one.
+    assert 'raise ValueError("safety seal posture absent")' in source
+    # And a failing seal must be NAMED. "Posture invalid" tells an operator that something on the
+    # worker host is unsafe without saying which thing, and `unsealed` and `undetermined` call for
+    # different responses.
+    assert '"safety seal posture invalid: " + ", ".join(sorted(failing))' in source
 
 
 def test_package_source_contains_no_operator_queue_or_plan_activation_hook() -> None:
