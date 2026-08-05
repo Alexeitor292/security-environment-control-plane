@@ -511,6 +511,36 @@ class Plugin(Base, TimestampMixin):
 
 
 class Artifact(Base, TimestampMixin):
+    """NOTHING WRITES THIS TABLE. It has never held a row, and reading it will return none.
+
+    A declared model with a migration, plausible columns and no producer is a trap: the columns
+    below map almost field-for-field onto what a client would want from an evidence or artifact
+    index (``kind``, ``sha256``, ``uri``, ``created_at``), so the reasonable assumption on finding
+    it is that something populates it. Nothing does — verified by
+    ``test_artifact_table_has_no_producer``, which fails the moment one appears, so this docstring
+    cannot quietly go stale.
+
+    WHAT WOULD HAVE TO EXIST FIRST, and neither does:
+
+    1. **A producer.** No code path records "this plan / receipt / snapshot was produced, here is
+       its digest". The digests themselves DO exist — plan, destroy and reset content hashes are
+       computed in ``services/proxmox_lifecycle`` — but they live on the compiled plan and in
+       lifecycle events, not in an index.
+    2. **A store.** ``uri`` presumes somewhere to put the bytes. This system has no artifact store,
+       so a row could carry a real ``sha256`` and no way to fetch what it digests.
+
+    That second gap is why a read route over this table would be worse than its absence rather
+    than merely useless. An index of digests with nowhere to resolve them *looks* like
+    verifiability and provides none, and an operator who can see a digest and not fetch the
+    artifact is worse off than one who is told the index does not exist — the first believes they
+    have evidence. An empty list also reads as "no evidence exists", which is a claim; a missing
+    route reads as "not built yet", which is the truth.
+
+    Do not build a read surface over this table before both gaps are closed. Deleting the model is
+    also a live option; it is kept only because the decision belongs with whoever owns the evidence
+    story, not with a change that happens to pass through here.
+    """
+
     __tablename__ = "artifact"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
