@@ -229,17 +229,18 @@ class WorkflowRunOut(ORMModel):
     finished_at: datetime | None
 
 
+# NOTE: no class docstring here on purpose. Pydantic publishes a model's docstring as the schema
+# `description`, so a maintenance rationale written as a docstring becomes part of the wire contract
+# and of every generated client. The reasoning below is for whoever edits this model, not for API
+# consumers, so it stays a comment.
+#
+# `AuditEventOut.outcome` is a plain `str` DELIBERATELY, even though the write path is now closed to
+# `secp_api.enums.AuditOutcome`. The ledger is append-only: rows written before that change hold
+# values outside the enum (`failure`, `written`, `worker_key_rotated`, and eligibility verdicts),
+# and typing this field as the enum would make the endpoint fail to serialize its own history — a
+# 500 on the exact rows an auditor most wants to see. Closed on write, open on read, and the
+# asymmetry is the point: history is evidence, not state.
 class AuditEventOut(ORMModel):
-    """Read model for one audit row.
-
-    ``outcome`` is a plain ``str`` DELIBERATELY, even though the write path is now closed to
-    :class:`~secp_api.enums.AuditOutcome`. The ledger is append-only: rows written before that
-    change hold values outside the enum (``failure``, ``written``, ``worker_key_rotated``, and
-    eligibility verdicts), and typing this field as the enum would make the endpoint fail to
-    serialize its own history — a 500 on the exact rows an auditor most wants to see. Closed on
-    write, open on read, and the asymmetry is the point: history is evidence, not state.
-    """
-
     id: uuid.UUID
     actor: str
     action: str
