@@ -553,16 +553,62 @@ def _run_destroy(
             }
         )
 
-    if not result.probe_reachable or unproven:
+    # COVERAGE. A verdict is about the range's whole live set, but the loop above only ever visits
+    # what the provider CHOSE to mention. A provider that reports "reachable, and here is nothing"
+    # would otherwise score removed=present=unproven=0 and fall straight through to ``clean`` —
+    # proving absence of nothing while every resource is still recorded as live.
+    #
+    # That is not a hypothetical shape. This repo has already shipped a false ``clean`` from a
+    # silently narrowed set, and the abandon path deliberately retains every row precisely so the
+    # destroy after a recovery is asked about all of them. A teardown that then declines to answer
+    # for some of them has not observed them, and unobserved is ``unproven``.
+    silent = sorted(name for name in by_name if name not in {o.name for o in result.observations})
+    for name in silent:
+        row = by_name[name]
+        row.state = RangeResourceState.unproven
+        unproven += 1
+        resource_payload.append(
+            {
+                "kind": row.kind.value,
+                "name": name,
+                "external_id": row.external_id,
+                "verdict": "unproven",
+                "detail": "the teardown returned no observation for this resource",
+            }
+        )
+
+    # Precedence, strongest CLAIM first — not "worst outcome first".
+    #
+    # An unreachable probe observed nothing at all, so nothing else it reports means anything:
+    # ``unproven``. Otherwise a resource CONFIRMED present is a fact, and a fact outranks an
+    # absence of information — reporting ``unproven`` for a range we know still has a container
+    # running would understate what we actually established. Only when nothing was confirmed
+    # present does unfinished business (an ``unproven`` observation, or a resource the teardown
+    # said nothing about) decide it. ``clean`` therefore still requires every live resource to have
+    # been individually proved absent.
+    #
+    # Either way the range lands in ``recovery_required`` and the per-resource states and the
+    # evidence row carry the full picture; this only chooses the single headline verdict.
+    if not result.probe_reachable:
         verdict = ResidueVerdict.unproven
     elif present:
         verdict = ResidueVerdict.residue
+    elif unproven:
+        verdict = ResidueVerdict.unproven
     else:
         verdict = ResidueVerdict.clean
 
     reason = result.reason
-    if reason is None and verdict is ResidueVerdict.residue:
-        reason = f"{present} owned resource(s) were still present after removal"
+    if reason is None:
+        parts = []
+        if present:
+            parts.append(f"{present} owned resource(s) were still present after removal")
+        if silent:
+            parts.append(
+                f"the teardown said nothing about {len(silent)} owned resource(s) "
+                f"({', '.join(silent)}), so their absence was not proved"
+            )
+        reason = "; ".join(parts) or None
 
     evidence = RangeTeardownEvidence(
         organization_id=instance.organization_id,

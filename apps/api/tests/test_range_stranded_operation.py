@@ -56,7 +56,11 @@ from secp_api.range_models import (
     RangeLifecycleEvent,
     RangeProviderResource,
 )
-from secp_api.range_providers.base import TeardownResult
+from secp_api.range_providers.base import (
+    TeardownObservation,
+    TeardownResourceOutcome,
+    TeardownResult,
+)
 from secp_api.services import ranges
 from secp_worker.range.execution import (
     RangeExecutionUnresolvable,
@@ -545,6 +549,69 @@ def test_recovery_destroy_cannot_reach_clean_when_the_probe_could_not_run(
     evidence = ranges.list_teardown_evidence(session, principal, instance.id)
     assert evidence[0].verdict is ResidueVerdict.unproven
     assert evidence[0].probe_reachable is False
+
+
+def test_a_teardown_that_says_nothing_about_a_resource_cannot_report_clean(
+    session, principal, provider
+):
+    """The OTHER way to fake a clean teardown: answer only about some of the set.
+
+    A reachable probe that returns no observation for a resource has not proved that resource
+    absent — it declined to look. Counting only what the provider chose to mention would score
+    zero-present, zero-unproven and fall through to ``clean``.
+
+    This is the same silent narrowing that once produced a ``clean`` destroy with a container and a
+    network still running, arriving from the provider side instead of the row side. The abandon
+    path retains every row so the recovery destroy is asked about all of them; that retention is
+    worth nothing if the answer may quietly omit them.
+    """
+    instance = deploy_ready_range(session, principal, provider)
+    operation = _reset_in_flight(session, principal, instance)
+    _age(session, operation, minutes=45)
+    ranges.abandon_operation(session, principal, operation.id)
+    session.commit()
+
+    live = ranges.list_resources(session, principal, instance.id)
+    assert len(live) == 3
+    spoken_for = live[0]
+
+    # Reachable, confident, and quiet about two of the three resources.
+    provider.teardown = TeardownResult(
+        probe_reachable=True,
+        observations=(
+            TeardownObservation(
+                kind=spoken_for.kind,
+                name=spoken_for.name,
+                external_id=spoken_for.external_id,
+                outcome=TeardownResourceOutcome.removed,
+                detail="confirmed absent",
+            ),
+        ),
+    )
+    _, destroy_op = ranges.start_operation(
+        session, principal, instance.id, RangeOperationKind.destroy
+    )
+    session.commit()
+    execute_range_operation(session, destroy_op.id)
+    session.expire_all()
+
+    instance = session.get(RangeInstance, instance.id)
+    assert instance.residue_verdict is ResidueVerdict.unproven
+    assert instance.state is RangeState.recovery_required
+    assert instance.state is not RangeState.destroyed
+
+    # The two it declined to answer for are unproven and still live; only the one it actually
+    # proved absent is removed.
+    by_name = {row.name: row for row in ranges.list_resources(session, principal, instance.id)}
+    assert by_name[spoken_for.name].state is RangeResourceState.removed
+    silent = [row for name, row in by_name.items() if name != spoken_for.name]
+    assert len(silent) == 2
+    assert all(row.state is RangeResourceState.unproven for row in silent)
+    assert all(row.removed_at is None for row in silent)
+
+    evidence = ranges.list_teardown_evidence(session, principal, instance.id)[0]
+    assert evidence.unproven_count == 2
+    assert "said nothing about 2 owned resource(s)" in evidence.reason
 
 
 def test_recovery_destroy_reaches_clean_only_after_proving_each_resource_absent(
