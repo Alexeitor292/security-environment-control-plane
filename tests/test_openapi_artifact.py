@@ -75,17 +75,53 @@ def test_export_is_byte_reproducible_in_process() -> None:
     assert export_document() == export_document()
 
 
-def test_export_does_not_depend_on_the_exporting_machine() -> None:
-    """Export under a HOSTILE environment and demand identical bytes.
+#: The five settings that can make ``Settings`` REFUSE TO CONSTRUCT when they hold a value the
+#: model rejects. None of them moves the document — nothing does — but each one turns the export
+#: into a crash, which the check reports as a non-zero exit indistinguishable from a real drift.
+#:
+#: This list is illustrative, not load-bearing: the exporter clears EVERY ``SECP_*`` rather than
+#: enumerating them, so a sixth of these appearing does not need anybody to update anything.
+REFUSING_SETTINGS = {
+    "SECP_CORS_ALLOW_ORIGINS": "not-a-json-list",
+    "SECP_WORKFLOW_DISPATCH_MODE": "celery",
+    "SECP_PROVISIONING_APPLICATION_MODE": "yolo",
+    "SECP_OIDC_MAX_TOKEN_BYTES": "-1",
+    "SECP_OIDC_MAX_DOCUMENT_BYTES": "0",
+}
 
-    Inverted on purpose. The exporter pins the two settings it knows reach the document, but a
-    list of variables that matter is a closed set someone will out-grow: the next setting to be
-    interpolated into a description would sail past it. This instead states the property —
-    ``SECP_*`` from the environment changes nothing in the artifact — and lets any new leak fail
-    here, whether or not anybody thought of it.
+
+def _export_check(env: dict[str, str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """Run ``--check`` in a subprocess with an EXPLICITLY built environment.
+
+    ``env`` is passed whole and is never merged with ``os.environ``. The previous version of this
+    helper spread ``{**os.environ, ...}``, which is how a test named "does not depend on the
+    exporting machine" came to depend on the exporting machine: it inherited every ambient
+    ``SECP_*`` a developer happened to have, so it exercised their environment rather than a
+    controlled one. CI has no such variables, so CI could never see the difference — the guard over
+    the transport source of truth was green on the only machine anyone checked.
+    """
+    minimal = {
+        key: os.environ[key]
+        for key in ("PATH", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "HOME", "LANG", "LC_ALL")
+        if key in os.environ
+    }
+    return subprocess.run(
+        [sys.executable, "scripts/export_openapi.py", "--check"],
+        cwd=cwd or REPO_ROOT,
+        env={**minimal, **env},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_export_does_not_depend_on_the_exporting_machine() -> None:
+    """Export under a HOSTILE environment and demand the check still passes.
+
+    Inverted on purpose. Enumerating "the settings that reach the document" is a closed set someone
+    will out-grow, so this states the property instead — ``SECP_*`` from the environment changes
+    nothing — and lets any new leak fail here whether or not anybody thought of it.
     """
     hostile = {
-        **os.environ,
         "SECP_APP_NAME": "Some Developer's Local Build",
         "SECP_APP_ENV": "dev",
         "SECP_CORS_ALLOW_ORIGINS": '["http://localhost:4173"]',
@@ -93,17 +129,53 @@ def test_export_does_not_depend_on_the_exporting_machine() -> None:
         "SECP_AUTH_DEV_MODE": "true",
         "PYTHONHASHSEED": "12345",
     }
-    result = subprocess.run(
-        [sys.executable, "scripts/export_openapi.py", "--check"],
-        cwd=REPO_ROOT,
-        env=hostile,
-        capture_output=True,
-        text=True,
-    )
+    result = _export_check(hostile)
     assert result.returncode == 0, (
         "exporting under a perturbed environment produced a different document:\n"
         f"{result.stdout}\n{result.stderr}"
     )
+
+
+@pytest.mark.parametrize(("variable", "value"), sorted(REFUSING_SETTINGS.items()))
+def test_a_setting_that_refuses_to_construct_does_not_break_the_export(
+    variable: str, value: str
+) -> None:
+    """The regression this whole investigation produced.
+
+    Each of these makes ``Settings`` raise. Before the exporter cleared the environment, one of
+    them present on a developer's machine turned ``--check`` into a crash — reported as a non-zero
+    exit, read as a stale artifact, and impossible to see in CI where the environment is clean.
+    The artifact was never stale; the guard was.
+    """
+    result = _export_check({variable: value})
+    assert result.returncode == 0, (
+        f"{variable}={value!r} in the ambient environment broke the export. The exporter must "
+        f"clear SECP_* rather than inherit it.\n{result.stdout}\n{result.stderr}"
+    )
+
+
+def test_a_developer_dotenv_cannot_reach_the_artifact(tmp_path: Path) -> None:
+    """``Settings`` declares ``env_file=".env"``, resolved against the CWD.
+
+    ``.env.example`` tells developers to copy it to ``.env`` for the compose stack, so a working
+    checkout routinely has one and CI never does. The export constructs settings from a sealed
+    empty directory so the file cannot reach the document whatever it holds — proved here with a
+    ``.env`` that would otherwise both rename the app AND refuse to construct.
+    """
+    dotenv = REPO_ROOT / ".env"
+    if dotenv.exists():  # pragma: no cover - a developer's real file is never touched
+        pytest.skip(".env already exists in the checkout; refusing to overwrite a real one")
+    dotenv.write_text(
+        "SECP_APP_NAME=A Developer's Local Build\nSECP_WORKFLOW_DISPATCH_MODE=celery\n",
+        encoding="utf-8",
+    )
+    try:
+        result = _export_check({})
+        assert result.returncode == 0, (
+            f"a .env in the checkout reached the export:\n{result.stdout}\n{result.stderr}"
+        )
+    finally:
+        dotenv.unlink()
 
 
 def test_serialize_sorts_keys_so_an_unrelated_edit_moves_nothing() -> None:

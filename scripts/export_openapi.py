@@ -35,6 +35,7 @@ import difflib
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -58,14 +59,44 @@ def build_document() -> dict[str, Any]:
 
     ``create_app()`` registers routers and error handlers only; the ``startup`` handler that seeds
     the development database does not run, so exporting touches no database and no filesystem.
+
+    THE ARTIFACT IS A FUNCTION OF THE CODE, and this is where that is made true rather than hoped
+    for. Two ambient influences are removed before ``Settings`` is constructed, and each was a real
+    failure, not a hypothetical:
+
+    * **Every ``SECP_*`` variable in the environment**, not just the two that reach the document.
+      Pinning only the two was the original mistake. No setting moves the document — that is
+      verified across all of them in ``tests/test_openapi_artifact.py`` — but five of them
+      (``cors_allow_origins``, ``workflow_dispatch_mode``, ``provisioning_application_mode``,
+      ``oidc_max_token_bytes``, ``oidc_max_document_bytes``) can make ``Settings`` REFUSE to
+      construct. A developer with one of those set got a crash where CI, whose environment is
+      clean, got a document. The guard was therefore green on the only machine anyone checked.
+
+    * **A ``.env`` in the working directory.** ``Settings`` declares ``env_file=".env"``, resolved
+      against the CWD, and ``.env.example`` tells developers to copy it there for the compose
+      stack. The construction below happens from a directory that has no ``.env``, so the file
+      cannot reach the artifact whatever it contains.
     """
-    for key, value in PINNED_ENV.items():
-        os.environ[key] = value
+    for key in [key for key in os.environ if key.startswith("SECP_")]:
+        del os.environ[key]
+    os.environ.update(PINNED_ENV)
 
-    # Imported after the environment is pinned: ``get_settings`` is cached on first call.
-    from secp_api.main import create_app
+    # ``env_file`` is resolved against the CWD when ``Settings`` is CONSTRUCTED, and the import
+    # below is what constructs it: ``secp_api.main`` ends with a module-level ``app =
+    # create_app()``, so settings are read the instant the module is imported. Wrapping only the
+    # explicit ``create_app()`` call left the .env reaching the artifact through the import — which
+    # is exactly what ``test_a_developer_dotenv_cannot_reach_the_artifact`` caught. The import has
+    # to happen inside the sealed directory too.
+    previous = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix="secp-openapi-export-") as sealed:
+        os.chdir(sealed)
+        try:
+            from secp_api.main import create_app
 
-    return create_app().openapi()
+            app = create_app()
+        finally:
+            os.chdir(previous)
+    return app.openapi()
 
 
 def serialize(document: dict[str, Any]) -> str:
@@ -108,6 +139,23 @@ def _diff(committed: str, regenerated: str) -> str:
     return "".join(lines)
 
 
+def _write_stderr(message: str) -> None:
+    """Report to stderr without dying on the console's encoding.
+
+    The document carries characters a Windows console codepage cannot encode — em dashes and an
+    arrow, out of the model docstrings. Printing a diff hunk containing one raises
+    UnicodeEncodeError, so the ONE path with something useful to say (a stale artifact) would exit
+    on a traceback about encoding instead of naming the field that moved. Written as bytes with a
+    replacing codec: a mangled character in a diagnostic beats losing the diagnostic.
+    """
+    buffer = getattr(sys.stderr, "buffer", None)
+    if buffer is None:  # pragma: no cover - a stderr with no byte buffer (pytest capture)
+        sys.stderr.write(message + "\n")
+        return
+    buffer.write((message + "\n").encode(sys.stderr.encoding or "utf-8", "replace"))
+    buffer.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -126,10 +174,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if committed is None:
-        print(
+        _write_stderr(
             "OpenAPI artifact is MISSING: contracts/openapi/openapi.json does not exist.\n"
-            "Run: python scripts/export_openapi.py",
-            file=sys.stderr,
+            "Run: python scripts/export_openapi.py"
         )
         return 1
 
@@ -137,14 +184,13 @@ def main(argv: list[str] | None = None) -> int:
         diff = _diff(committed, regenerated)
         # Bounded: a full 200-path diff buries the cause in the log it is supposed to explain.
         excerpt = "".join(diff.splitlines(keepends=True)[:120])
-        print(
+        _write_stderr(
             "OpenAPI artifact is STALE. The committed contract no longer matches the application "
             "that serves it.\n"
             "Run: python scripts/export_openapi.py "
             "&& (cd apps/web && npm run generate:api)\n"
             "and commit both the document and the regenerated TypeScript.\n\n"
-            f"{excerpt}",
-            file=sys.stderr,
+            f"{excerpt}"
         )
         return 1
 
