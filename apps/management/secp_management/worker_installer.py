@@ -750,7 +750,7 @@ def build_supported_installer_deps(enroller: WorkerEnroller | None = None) -> In
     """
     from secp_management.worker_service_adapters import build_posix_installer_deps
 
-    return build_posix_installer_deps(enroller)  # type: ignore[return-value]
+    return build_posix_installer_deps(enroller)
 
 
 __all__ = [

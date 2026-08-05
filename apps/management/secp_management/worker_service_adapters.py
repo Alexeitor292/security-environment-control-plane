@@ -75,7 +75,7 @@ from secp_management import ManagementError
 from secp_management.layout import ManagementLocations
 from secp_management.real_adapters import RealAdapterContext
 from secp_management.systemd import render_service_unit
-from secp_management.worker_installer import WorkerInstallerError
+from secp_management.worker_installer import InstallerDeps, WorkerEnroller, WorkerInstallerError
 from secp_management.worker_roles import WorkerRole
 
 # --- code-owned constants (never descriptor-selected, never a CLI argument) ---------------------
@@ -197,10 +197,16 @@ class PosixAccountResolver:
         return "PosixAccountResolver(<posix>)"
 
     def resolve(self, user: str, group: str) -> tuple[int, int]:
+        # `pwd`/`grp` are POSIX-only and carry no stubs on a Windows type-check host, so the
+        # attribute access is ignored rather than the import. Reaching here on a non-POSIX host is
+        # already impossible: every caller passes require_supported_install_host() first.
         import grp
         import pwd
 
-        return pwd.getpwnam(user).pw_uid, grp.getgrnam(group).gr_gid
+        return (
+            pwd.getpwnam(user).pw_uid,  # type: ignore[attr-defined]
+            grp.getgrnam(group).gr_gid,  # type: ignore[attr-defined]
+        )
 
 
 # --- the real service manager --------------------------------------------------------------------
@@ -502,7 +508,7 @@ class PosixDurableIdentityStore:
 # --- production composition ----------------------------------------------------------------------
 
 
-def build_posix_installer_deps(enroller: object | None = None) -> object:
+def build_posix_installer_deps(enroller: WorkerEnroller | None = None) -> InstallerDeps:
     """Compose the installer over the REAL host adapters on a supported POSIX host.
 
     This is the composition ``build_installer_deps`` deliberately would not make while the host
@@ -522,7 +528,6 @@ def build_posix_installer_deps(enroller: object | None = None) -> object:
 
     from secp_management.production import _load_executables, _production_paths
     from secp_management.worker_enroller import build_worker_enroller
-    from secp_management.worker_installer import InstallerDeps
 
     locations = ManagementLocations()
     filesystem = RealFilesystem()
