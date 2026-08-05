@@ -13,14 +13,17 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
 from secp_api.deps import DB_SESSION, current_principal
 from secp_api.dispatch import get_dispatcher
+from secp_api.errors import NotFoundError
 from secp_api.proxmox_projection import (
     allocations_out,
     apply_authorization_out,
+    command_out,
     destroy_authorization_out,
     destroy_plan_out,
     lifecycle_out,
@@ -28,12 +31,21 @@ from secp_api.proxmox_projection import (
     ownership_out,
     plan_out,
     readiness_out,
+    reset_authorization_out,
     reset_dispositions_out,
     residue_out,
     topology_out,
     verification_out,
 )
+from secp_api.proxmox_read_projection import (
+    evidence_out,
+    reconciliation_out,
+    reset_plan_out,
+    worker_out,
+    workload_out,
+)
 from secp_api.range_enums import RangeOperationKind, RangeState
+from secp_api.range_models import RangeTemplate
 from secp_api.range_projection import (
     event_out,
     operation_out,
@@ -41,6 +53,12 @@ from secp_api.range_projection import (
     resource_out,
     teardown_evidence_out,
     template_out,
+)
+from secp_api.range_scenario_projection import scenario_out
+from secp_api.range_scenarios import (
+    build_scenario,
+    list_scenarios,
+    scenario_key_for_template,
 )
 from secp_api.schemas_proxmox import (
     ProxmoxAllocationsOut,
@@ -56,10 +74,31 @@ from secp_api.schemas_proxmox import (
     ProxmoxPlanApprovalRequest,
     ProxmoxPlanOut,
     ProxmoxReadinessOut,
+    ProxmoxResetAuthorizationOut,
+    ProxmoxResetAuthorizationRequest,
     ProxmoxResetDispositionsOut,
+    ProxmoxResetPlanApprovalRequest,
     ProxmoxResidueOut,
     ProxmoxTopologyOut,
     ProxmoxVerificationOut,
+)
+from secp_api.schemas_proxmox_commands import (
+    ProxmoxCommandOut,
+    ProxmoxCompileTopologyRequest,
+    ProxmoxDestroyExecutionRequest,
+    ProxmoxDestroyPlanGenerateRequest,
+    ProxmoxExecutionRequest,
+    ProxmoxGeneratePlanRequest,
+    ProxmoxReconciliationRequest,
+    ProxmoxResetRequest,
+    ProxmoxSubmitPlanRequest,
+)
+from secp_api.schemas_proxmox_reads import (
+    ProxmoxEvidenceOut,
+    ProxmoxReconciliationOut,
+    ProxmoxResetPlanOut,
+    ProxmoxWorkerOut,
+    ProxmoxWorkloadOut,
 )
 from secp_api.schemas_range import (
     RangeCreate,
@@ -71,7 +110,10 @@ from secp_api.schemas_range import (
     RangeTemplateOut,
     TeardownEvidenceOut,
 )
-from secp_api.services import proxmox_lifecycle, ranges
+from secp_api.schemas_range_scenarios import ScenarioOut
+from secp_api.services import proxmox_commands, proxmox_lifecycle, ranges
+from secp_api.services.proxmox_lifecycle import EVENT_RECONCILIATION
+from secp_api.worker_enrollment_models import WorkerEnrollmentState
 
 router = APIRouter(prefix="/api/v1", tags=["ranges"])
 
@@ -93,6 +135,86 @@ def get_range_template(
 ) -> RangeTemplateOut:
     del principal
     return template_out(ranges.get_template_row(session, slug))
+
+
+@router.get("/range-scenarios", response_model=list[ScenarioOut])
+def list_range_scenarios(
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> list[ScenarioOut]:
+    """Every shipped scenario ONCE, with every provider it can run on.
+
+    This is the provider-compatibility view of the same catalog ``/range-templates`` lists. The
+    templates endpoint is unchanged and still lists concrete deployable definitions — three of them,
+    two of which are the Web Breach Lab on two substrates. Here that lab appears a single time with
+    two provider variants, because an operator choosing a scenario is choosing a lab and then a
+    substrate, not choosing between two labs.
+
+    A scenario that cannot run on a provider is RETURNED, marked ``blocked``, with its blockers
+    named. It is never omitted and never marked eligible. The substrate-dependent Proxmox
+    requirements are ``undetermined`` here — this endpoint names no range, so no cluster observation
+    is in scope and nothing has been checked. ``GET /ranges/{id}/scenario`` answers them against the
+    observation actually recorded for that range.
+    """
+    del principal  # authentication only; the shipped catalog is not tenant data
+    del session  # pure catalog projection: no row is read
+    return [scenario_out(scenario) for scenario in list_scenarios()]
+
+
+@router.get("/range-scenarios/{key}", response_model=ScenarioOut)
+def get_range_scenario(
+    key: str,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ScenarioOut:
+    del principal
+    del session
+    scenario = build_scenario(key)
+    if scenario is None:
+        raise NotFoundError(f"range scenario '{key}' not found")
+    return scenario_out(scenario)
+
+
+@router.get("/ranges/{range_id}/scenario", response_model=ScenarioOut)
+def get_range_scenario_for_range(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ScenarioOut:
+    """This range's scenario, with compatibility answered against ITS recorded observation.
+
+    The difference from the catalog read matters: there, every substrate-dependent Proxmox
+    requirement is ``undetermined`` because no cluster is in scope. Here the requirements are
+    answered from the observation the worker recorded for this range — so a missing management CIDR
+    or an unobserved VLAN list becomes a NAMED blocker with the same ``reason_id`` the plan compiler
+    would block on, rather than a generic "not ready".
+
+    A non-Proxmox range still gets an answer: its own provider's requirements are decidable from the
+    catalog, and the Proxmox column stays ``undetermined`` because this range records no cluster
+    observation.
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    template_row = session.get(RangeTemplate, instance.template_id)
+    slug = template_row.slug if template_row is not None else ""
+    key = scenario_key_for_template(slug)
+    if key is None:
+        raise NotFoundError(
+            f"template '{slug}' does not belong to a shipped scenario, so it has no provider "
+            "compatibility to report"
+        )
+    binding = (
+        proxmox_lifecycle.load_binding(session, instance)
+        if instance.provider == proxmox_lifecycle.PROXMOX_PROVIDER
+        else None
+    )
+    scenario = build_scenario(
+        key,
+        observation=binding.observation if binding is not None else None,
+        team_count=len(binding.teams) if binding is not None else None,
+    )
+    if scenario is None:  # pragma: no cover - key came from the same table
+        raise NotFoundError(f"range scenario '{key}' not found")
+    return scenario_out(scenario)
 
 
 @router.post("/ranges", response_model=RangeOut, status_code=201)
@@ -150,7 +272,10 @@ def _start(
     are unaffected.
     """
     instance = ranges.get_range(session, principal, range_id)
-    proxmox_lifecycle.require_operation_authorized(session, instance, kind.value)
+    # The ENUM, not ``kind.value``. Passing the string is what let the gate's destroy branch depend
+    # on ``RangeOperationKind.destroy.value`` still spelling ``"destroy"`` — a rename away from a
+    # destroy being authorized by an apply approval, with nothing to catch it.
+    proxmox_lifecycle.require_operation_authorized(session, instance, kind)
     _, operation = ranges.start_operation(session, principal, range_id, kind)
     get_dispatcher().dispatch_range_operation(session, operation.id)
     return operation_out(operation)
@@ -566,6 +691,395 @@ def get_proxmox_residue(
 # --- authorization: four separate acts, none of which executes anything --------
 
 
+@router.get("/ranges/{range_id}/proxmox/worker", response_model=ProxmoxWorkerOut)
+def get_proxmox_worker(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxWorkerOut:
+    """The enrolled worker that would execute for this range, and whether it may.
+
+    Installation, enrollment state, identity, release and eligibility in one answer. ``enrolled:
+    false`` is a real response rather than a 404 — "nobody is enrolled" is something an operator
+    needs to be told, and it is a different answer from "a worker is enrolled but is not healthy".
+
+    Publishes public identity only: no transaction id, no compare-and-swap digests, no key material.
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    proxmox_lifecycle.require_proxmox(instance)
+    row = (
+        session.execute(
+            select(WorkerEnrollmentState)
+            .where(WorkerEnrollmentState.organization_id == instance.organization_id)
+            .order_by(WorkerEnrollmentState.observed_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    return worker_out(row)
+
+
+@router.get("/ranges/{range_id}/proxmox/workload", response_model=ProxmoxWorkloadOut)
+def get_proxmox_workload(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxWorkloadOut:
+    """The per-guest workload and bootstrap contracts — including the WORKER's own addresses.
+
+    ``/proxmox/topology`` publishes the topology's ``published_address`` and ``probe_address`` plus
+    the observed one. This publishes the bootstrap contract's ``probe_address``/``probe_port`` (what
+    the worker connects to when it checks a guest came up) and ``report_address``/``report_port``
+    (where the guest reports back), which had no route at all. They are separate concepts from the
+    topology's addresses, none is ever substituted for another, and an absent one stays null.
+
+    Bootstrap material appears as a REFERENCE and never as material.
+    """
+    instance, _, compiled = _resolve(session, principal, range_id)
+    state = proxmox_lifecycle.plan_state(
+        compiled, proxmox_lifecycle.plan_approval(session, instance)
+    )
+    return workload_out(
+        compiled,
+        state,
+        verification=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_VERIFICATION
+        ),
+    )
+
+
+@router.get("/ranges/{range_id}/proxmox/reset-plan", response_model=ProxmoxResetPlanOut)
+def get_proxmox_reset_plan(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxResetPlanOut:
+    """What a reset WOULD do to each guest.
+
+    A different endpoint and a different shape from ``/proxmox/reset-dispositions``, which reports
+    what the worker OBSERVED a reset doing. A plan and an observation are different claims, and the
+    moment they share a surface a client starts reading one as the other.
+    """
+    instance, _, compiled = _resolve(session, principal, range_id)
+    state = proxmox_lifecycle.plan_state(
+        compiled, proxmox_lifecycle.plan_approval(session, instance)
+    )
+    return reset_plan_out(
+        compiled,
+        state,
+        last_reset=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_RESET_DISPOSITIONS
+        ),
+    )
+
+
+@router.get("/ranges/{range_id}/proxmox/reconciliation", response_model=ProxmoxReconciliationOut)
+def get_proxmox_reconciliation(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxReconciliationOut:
+    """Whether reconciliation was asked for, and whether anything has answered.
+
+    Two independent facts. ``requested`` says an operator asked; ``state`` says whether a worker
+    recorded an observation, and stays ``undetermined`` until one does. Neither implies the other.
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    proxmox_lifecycle.require_proxmox(instance)
+    return reconciliation_out(
+        proxmox_commands.latest_command(
+            session, instance, proxmox_commands.CommandKind.request_reconciliation
+        ),
+        proxmox_lifecycle.recorded_stage(session, instance, EVENT_RECONCILIATION),
+    )
+
+
+@router.get("/ranges/{range_id}/proxmox/evidence", response_model=ProxmoxEvidenceOut)
+def get_proxmox_evidence(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxEvidenceOut:
+    """Which evidence exists for this range and what identifies it. REFERENCES, never payloads.
+
+    Every class is listed whether or not it exists. Omitting the absent ones would make "we have no
+    residue proof" indistinguishable from "nobody asked about residue".
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    proxmox_lifecycle.require_proxmox(instance)
+    binding = proxmox_lifecycle.load_binding(session, instance)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    return evidence_out(
+        instance,
+        binding,
+        compiled,
+        verification=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_VERIFICATION
+        ),
+        residue=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_RESIDUE
+        ),
+        reset=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_RESET_DISPOSITIONS
+        ),
+        teardown_ids=[
+            row.id for row in ranges.list_teardown_evidence(session, principal, range_id)
+        ],
+    )
+
+
+# --- the operator command surface ----------------------------------------------
+#
+# Eight acts, each with its own path, its own request schema, its own permission and its own event
+# kind. Every one persists intent and stops; the three that need a worker create the durable
+# operation and hand it to the OUTBOX, which submits nothing until this request's transaction
+# commits. Nothing below runs OpenTofu, spawns a process, opens a socket to a cluster, holds a
+# provider credential or imports a privileged adapter.
+#
+# The apply family takes ``plan_hash``; the destroy family takes ``destroy_hash``. Both are required
+# and every body forbids unknown fields, so no request validates as the other — see
+# :mod:`secp_api.schemas_proxmox_commands`.
+
+
+def _envelope(body) -> proxmox_commands.CommandEnvelope:
+    return proxmox_commands.CommandEnvelope(
+        idempotency_key=body.idempotency_key,
+        expected_version=body.expected_version,
+        operation_generation=body.operation_generation,
+        target_id=body.target_id,
+        cluster_fingerprint=body.cluster_fingerprint,
+    )
+
+
+def _worker(body) -> proxmox_commands.WorkerAssertion:
+    return proxmox_commands.WorkerAssertion(
+        worker_installation_id=body.worker_installation_id,
+        release_digest=body.release_digest,
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/topology-compilation",
+    response_model=ProxmoxCommandOut,
+    status_code=201,
+)
+def compile_proxmox_topology(
+    range_id: uuid.UUID,
+    body: ProxmoxCompileTopologyRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxCommandOut:
+    """Recompile the topology from the observation of record. CONTACTS NOTHING.
+
+    "Refresh" means recompile against the newest observation the WORKER recorded. This process
+    cannot go and look at a cluster, and an observation the control plane invented would be
+    indistinguishable downstream from one discovery proved — which is the assumption the entire
+    compiler safety argument rests on not being made.
+    """
+    return command_out(
+        proxmox_commands.compile_topology(session, principal, range_id, envelope=_envelope(body))
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/plan-generation", response_model=ProxmoxCommandOut, status_code=201
+)
+def generate_proxmox_plan(
+    range_id: uuid.UUID,
+    body: ProxmoxGeneratePlanRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxCommandOut:
+    """Materialise the compiled plan as a durable, hash-identified record. STARTS NOTHING."""
+    return command_out(
+        proxmox_commands.generate_plan(
+            session, principal, range_id, envelope=_envelope(body), plan_hash=body.plan_hash
+        )
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/plan-review-submission",
+    response_model=ProxmoxCommandOut,
+    status_code=201,
+)
+def submit_proxmox_plan_for_review(
+    range_id: uuid.UUID,
+    body: ProxmoxSubmitPlanRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxCommandOut:
+    """Put an exact generated plan in front of a reviewer. APPROVES NOTHING.
+
+    A separate act from approval and a separate permission (``plan:approve`` here,
+    ``exercise:apply`` to approve). Submitting says "this is ready to be looked at"; approving says
+    "I looked at it and it is right". Collapsing them lets whoever prepared a plan sign it off.
+    """
+    return command_out(
+        proxmox_commands.submit_plan_for_review(
+            session, principal, range_id, envelope=_envelope(body), plan_hash=body.plan_hash
+        )
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/execution-request",
+    response_model=ProxmoxCommandOut,
+    status_code=202,
+)
+def request_proxmox_execution(
+    range_id: uuid.UUID,
+    body: ProxmoxExecutionRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxCommandOut:
+    """Request execution of the AUTHORIZED apply. APPLIES NOTHING HERE.
+
+    Requires the whole chain, each link refusing with its own stable code: generated, submitted,
+    approved by hash, and apply authorized against that same hash. ``202`` because what it produced
+    is a queued operation, not a finished apply.
+    """
+    return command_out(
+        proxmox_commands.request_execution(
+            session,
+            principal,
+            range_id,
+            envelope=_envelope(body),
+            plan_hash=body.plan_hash,
+            worker=_worker(body),
+        )
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/reset-request", response_model=ProxmoxCommandOut, status_code=202
+)
+def request_proxmox_reset(
+    range_id: uuid.UUID,
+    body: ProxmoxResetRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxCommandOut:
+    """Request a reset of the authorized reset scope. RESETS NOTHING HERE.
+
+    Gated on the RESET authorization, not the apply one. A reset DESTROYS every guest in the range
+    and rebuilds it — ``proxmox_reset.plan_reset`` gives ``ResetSubject.guests`` the disposition
+    ``recreated``, defined there as "Destroyed and rebuilt from the reviewed base image" — so an
+    approval to create those guests does not authorize deleting the ones currently running.
+    """
+    return command_out(
+        proxmox_commands.request_reset(
+            session,
+            principal,
+            range_id,
+            envelope=_envelope(body),
+            reset_hash=body.reset_hash,
+            worker=_worker(body),
+        )
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/reconciliation-request",
+    response_model=ProxmoxCommandOut,
+    status_code=201,
+)
+def request_proxmox_reconciliation(
+    range_id: uuid.UUID,
+    body: ProxmoxReconciliationRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxCommandOut:
+    """Request reconciliation of the deployed range against its desired state.
+
+    ``201`` and not ``202``, because ``202`` would claim the work was accepted for processing and
+    nothing has taken it: the response carries ``enqueued: false`` with
+    ``not_enqueued_reason: reconciliation_consumer_unavailable``. The intent is durable and
+    auditable; a worker picking it up is a separate, later fact. See
+    :func:`secp_api.services.proxmox_commands.request_reconciliation` for why enqueueing it as a
+    range operation would run a deploy.
+    """
+    return command_out(
+        proxmox_commands.request_reconciliation(
+            session, principal, range_id, envelope=_envelope(body)
+        )
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/destroy-plan-generation",
+    response_model=ProxmoxCommandOut,
+    status_code=201,
+)
+def generate_proxmox_destroy_plan(
+    range_id: uuid.UUID,
+    body: ProxmoxDestroyPlanGenerateRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxCommandOut:
+    """Materialise the deletion scope as its own durable record. DESTROYS NOTHING.
+
+    Takes ``destroy_hash`` and requires ``exercise:destroy``. Holding ``exercise:apply`` does not
+    let you enumerate a deletion, and an apply body does not validate against this schema.
+    """
+    return command_out(
+        proxmox_commands.generate_destroy_plan(
+            session, principal, range_id, envelope=_envelope(body), destroy_hash=body.destroy_hash
+        )
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/destroy-execution-request",
+    response_model=ProxmoxCommandOut,
+    status_code=202,
+)
+def request_proxmox_destroy_execution(
+    range_id: uuid.UUID,
+    body: ProxmoxDestroyExecutionRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxCommandOut:
+    """Request execution of the AUTHORIZED destroy. DESTROYS NOTHING HERE.
+
+    Structurally incapable of being satisfied by anything from the apply family: its own path, its
+    own required field, its own hash domain, its own generation record, its own approval, its own
+    authorization and its own permission. There is no apply artifact that reaches any of them.
+    """
+    return command_out(
+        proxmox_commands.request_destroy_execution(
+            session,
+            principal,
+            range_id,
+            envelope=_envelope(body),
+            destroy_hash=body.destroy_hash,
+            worker=_worker(body),
+        )
+    )
+
+
+@router.get("/ranges/{range_id}/proxmox/commands", response_model=list[ProxmoxCommandOut])
+def list_proxmox_commands(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> list[ProxmoxCommandOut]:
+    """The most recent record of each command kind for this range — the audit read.
+
+    One row per kind rather than the full history, because this answers "where is this range in the
+    operator workflow". The complete, ordered history is already published by
+    ``GET /ranges/{id}/events``, which is the same log these are folded from.
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    proxmox_lifecycle.require_proxmox(instance)
+    records = (
+        proxmox_commands.latest_command(session, instance, kind)
+        for kind in proxmox_commands.CommandKind
+    )
+    return [command_out(record) for record in records if record is not None]
+
+
 @router.post(
     "/ranges/{range_id}/proxmox/plan-approval", response_model=ProxmoxPlanOut, status_code=201
 )
@@ -611,6 +1125,93 @@ def authorize_proxmox_apply(
     )
     approval = proxmox_lifecycle.plan_approval(session, instance)
     return apply_authorization_out(
+        compiled,
+        approval,
+        authorization,
+        proxmox_lifecycle.PlanState.approved,
+        proxmox_lifecycle.AuthorizationState.authorized,
+    )
+
+
+@router.get(
+    "/ranges/{range_id}/proxmox/reset-authorization",
+    response_model=ProxmoxResetAuthorizationOut,
+)
+def get_proxmox_reset_authorization(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxResetAuthorizationOut:
+    """Whether a reset is authorized, and exactly which guests it would DESTROY.
+
+    Neither an apply nor a destroy authorization satisfies this. The scope is published because
+    that is what is being approved: approving a reset without seeing the guests that will be
+    deleted would be approving a deletion sight unseen.
+    """
+    instance, _, compiled = _resolve(session, principal, range_id)
+    approval = proxmox_lifecycle.reset_plan_approval(session, instance)
+    authorization = proxmox_lifecycle.reset_authorization(session, instance)
+    return reset_authorization_out(
+        compiled,
+        approval,
+        authorization,
+        proxmox_lifecycle.reset_plan_state(compiled, approval),
+        proxmox_lifecycle.authorization_state(
+            compiled, authorization, expected_hash=getattr(compiled, "reset_hash", None)
+        ),
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/reset-plan-approval",
+    response_model=ProxmoxResetAuthorizationOut,
+    status_code=201,
+)
+def approve_proxmox_reset_plan(
+    range_id: uuid.UUID,
+    body: ProxmoxResetPlanApprovalRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxResetAuthorizationOut:
+    """Approve the exact reset scope, by its own hash. STARTS NOTHING.
+
+    Takes ``reset_hash`` and rejects unknown fields, so neither an apply nor a destroy body
+    validates here. Requires ``exercise:reset``.
+    """
+    instance, compiled, approval = proxmox_lifecycle.approve_reset_plan(
+        session, principal, range_id, reset_hash=body.reset_hash
+    )
+    return reset_authorization_out(
+        compiled,
+        approval,
+        proxmox_lifecycle.reset_authorization(session, instance),
+        proxmox_lifecycle.PlanState.approved,
+        proxmox_lifecycle.AuthorizationState.absent,
+    )
+
+
+@router.post(
+    "/ranges/{range_id}/proxmox/reset-authorization",
+    response_model=ProxmoxResetAuthorizationOut,
+    status_code=201,
+)
+def authorize_proxmox_reset(
+    range_id: uuid.UUID,
+    body: ProxmoxResetAuthorizationRequest,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxResetAuthorizationOut:
+    """Authorize a reset of an already-approved reset scope. ENQUEUES NOTHING, RESETS NOTHING.
+
+    Structurally distinct from the apply and destroy authorizations at every level: its own path,
+    its own required field, its own hash domain, its own event kind and its own permission. There
+    is no body that satisfies more than one of the three.
+    """
+    instance, compiled, authorization = proxmox_lifecycle.authorize_reset(
+        session, principal, range_id, reset_hash=body.reset_hash
+    )
+    approval = proxmox_lifecycle.reset_plan_approval(session, instance)
+    return reset_authorization_out(
         compiled,
         approval,
         authorization,

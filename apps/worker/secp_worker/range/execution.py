@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import assert_never
 
 from secp_api.range_enums import (
     RangeOperationKind,
@@ -262,8 +263,15 @@ def execute_range_operation(
     existing = tuple(_observation_of(row) for row in _live_resources(session, instance))
 
     try:
-        if operation.kind is RangeOperationKind.destroy:
-            _run_destroy(session, instance, operation, provider, spec, existing, ctx)
+        # EXHAUSTIVE, with no ``else``. This dispatch used to end in
+        # ``else: _run_bring_up(... provider.deploy(...))``, so any operation kind the worker did
+        # not recognise ran a DEPLOY — the fail-open pointed at the most creative action available.
+        # A new ``RangeOperationKind`` member added upstream would have been executed as a deploy
+        # against real hardware without anyone deciding it should be, and no type checker or test
+        # would have said a word. ``assert_never`` makes mypy refuse the file until the new member
+        # is given an execution path deliberately.
+        if operation.kind is RangeOperationKind.deploy:
+            _run_bring_up(session, instance, operation, provider.deploy(spec, ctx), ctx)
         elif operation.kind is RangeOperationKind.reset:
             _run_bring_up(
                 session,
@@ -273,8 +281,10 @@ def execute_range_operation(
                 ctx,
                 reset=True,
             )
+        elif operation.kind is RangeOperationKind.destroy:
+            _run_destroy(session, instance, operation, provider, spec, existing, ctx)
         else:
-            _run_bring_up(session, instance, operation, provider.deploy(spec, ctx), ctx)
+            assert_never(operation.kind)
     except Exception as exc:  # pragma: no cover - defensive; a provider bug must not wedge a range
         logger.exception("range operation %s failed unexpectedly", operation_id)
         # The rollback discards the identity map, so both rows are re-read. They are bound to NEW

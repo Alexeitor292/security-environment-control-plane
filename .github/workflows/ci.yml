@@ -723,6 +723,149 @@ jobs:
               sys.exit(1)
           PY
 
+  # --- Proxmox operator surface: PostgreSQL + real-socket gate ----------------------------------
+  # Four properties the brief requires proving ON THE WIRE rather than by direct function call:
+  # every command route refuses an unauthenticated caller, organization scoping holds, target
+  # scoping holds, and an ordinary (enrolled-but-not-healthy) worker cannot be used for
+  # controlled-live execution. A `TestClient` test cannot establish any of them the same way: it
+  # runs the ASGI app to completion in-process, so the request scope is always closed before the
+  # assertion and a route that nothing actually serves answers through the same object graph.
+  #
+  # A SEPARATE job from `backend-api-socket-gate`, not an extension of it. That job's accounting is
+  # calibrated to exactly one module and understands an expected failure as its PENDING state; this
+  # module carries no xfail marker and its correct state is "every test passed". Folding them
+  # together would make one count cover two modules and let a deletion in either hide behind the
+  # other. It also keeps that job's assertion that it names no Proxmox module true.
+  #
+  # It creates no container, starts no service beyond its own job-local PostgreSQL, contacts no
+  # Proxmox cluster, runs no OpenTofu and spawns no process. The only listener is an ephemeral
+  # 127.0.0.1 port inside the runner.
+  backend-operator-surface-socket-gate:
+    name: Operator surface socket gate (real PostgreSQL + real HTTP socket)
+    runs-on: ubuntu-latest
+    env:
+      SECP_APP_ENV: test
+      SECP_TEST_POSTGRES_URL: postgresql+psycopg://secp:secp@localhost:5432/secptest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: secp
+          POSTGRES_PASSWORD: secp
+          POSTGRES_DB: secptest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U secp -d secptest"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Create venv and install project
+        run: |
+          uv venv --python 3.11
+          uv sync --frozen --extra dev --python 3.11
+      - name: Run the operator surface live-socket gate against real PostgreSQL
+        run: >-
+          uv run pytest
+          apps/api/socket_gate_tests/test_operator_surface_over_socket.py
+          -q -p no:cacheprovider -rxXs
+          --junitxml=junit-operator-surface-socket-gate.xml
+      - name: Upload operator surface socket gate JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-backend-operator-surface-socket-gate
+          path: junit-operator-surface-socket-gate.xml
+          if-no-files-found: error
+      - name: Enforce the operator surface gate ran in full
+        if: always()
+        # Parse the JUnit programmatically; the pytest exit code alone is NOT trusted, because a
+        # module that skipped every test exits 0. Exactly ONE shape is acceptable here: every test
+        # ran and every test passed. Unlike the read-after-write gate there is no PENDING state —
+        # this module asserts properties that hold today, so an expected failure would mean one of
+        # them had stopped holding and been papered over, and it is refused explicitly.
+        run: |
+          "$(pwd)/.venv/bin/python" - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          # Count-based and EXACT, not a floor: a floor lets a deleted proof pass unnoticed. The
+          # count is machine-checked against the module itself by tests/test_ci_workflow.py, so
+          # adding or removing a test without updating it here fails rather than under-enforcing.
+          # Eight of these are the per-command authentication proofs, six are the per-read ones and
+          # three are the scenario-catalog ones, all parametrized — so deleting any route's proof
+          # changes this number.
+          EXPECTED_TESTS = 26
+
+          report = Path("junit-operator-surface-socket-gate.xml")
+          if not report.exists():
+              print("::error::junit-operator-surface-socket-gate.xml missing - no results")
+              sys.exit(1)
+          root = ET.parse(report).getroot()
+
+          tests = failures = errors = 0
+          for suite in root.iter("testsuite"):
+              tests += int(suite.get("tests", 0))
+              failures += int(suite.get("failures", 0))
+              errors += int(suite.get("errors", 0))
+
+          xfailed, plain_skipped = [], []
+          for case in root.iter("testcase"):
+              marker = case.find("skipped")
+              if marker is None:
+                  continue
+              name = f"{case.get('classname', '')}::{case.get('name', '')}"
+              entry = (name, (marker.get("message") or "").strip())
+              if (marker.get("type") or "") == "pytest.xfail":
+                  xfailed.append(entry)
+              else:
+                  plain_skipped.append(entry)
+
+          print(f"collected={tests} failures={failures} errors={errors} "
+                f"xfailed={len(xfailed)} plain_skipped={len(plain_skipped)}")
+          for name, message in plain_skipped:
+              print(f"  SKIPPED: {name}: {message}")
+
+          problems = []
+          if tests != EXPECTED_TESTS:
+              problems.append(
+                  f"expected exactly {EXPECTED_TESTS} operator-surface gate tests, "
+                  f"collected {tests}"
+              )
+          if failures:
+              problems.append(f"{failures} failing operator-surface gate test(s)")
+          if errors:
+              problems.append(f"{errors} errored operator-surface gate test(s)")
+          if plain_skipped:
+              problems.append(
+                  f"{len(plain_skipped)} test(s) were SKIPPED outright - PostgreSQL was "
+                  "unavailable, so the gate never executed and its silence proves nothing"
+              )
+          if xfailed:
+              problems.append(
+                  f"{len(xfailed)} expected-failure(s) - this gate has no PENDING state; an xfail "
+                  "here means a property it asserts stopped holding and was absorbed rather than "
+                  f"fixed: {[name for name, _ in xfailed]}"
+              )
+
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+          print(
+              "STATE=ENFORCED: every operator-surface proof ran over a real socket against real "
+              "PostgreSQL and passed."
+          )
+          PY
+
   # --- dependency/security scan ----------------------------------------------------------------
   backend-security:
     name: Backend security (pip-audit)
@@ -1958,6 +2101,7 @@ jobs:
         backend-pr5f-postgres-finalization,
         backend-pr5h-postgres-enrollment,
         backend-api-socket-gate,
+        backend-operator-surface-socket-gate,
         backend-realfs-root,
         backend-discovery-activation-root,
         backend-deployment-root,
@@ -1978,6 +2122,7 @@ jobs:
           echo "backend-pr5f-postgres   = ${{ needs.backend-pr5f-postgres-finalization.result }}"
           echo "backend-pr5h-postgres   = ${{ needs.backend-pr5h-postgres-enrollment.result }}"
           echo "backend-api-socket-gate = ${{ needs.backend-api-socket-gate.result }}"
+          echo "backend-operator-socket = ${{ needs.backend-operator-surface-socket-gate.result }}"
           echo "backend-realfs-root     = ${{ needs.backend-realfs-root.result }}"
           echo "backend-pr5f-root       = ${{ needs.backend-discovery-activation-root.result }}"
           echo "backend-deployment-root = ${{ needs.backend-deployment-root.result }}"
@@ -1995,6 +2140,7 @@ jobs:
             "${{ needs.backend-pr5f-postgres-finalization.result }}" \
             "${{ needs.backend-pr5h-postgres-enrollment.result }}" \
             "${{ needs.backend-api-socket-gate.result }}" \
+            "${{ needs.backend-operator-surface-socket-gate.result }}" \
             "${{ needs.backend-realfs-root.result }}" \
             "${{ needs.backend-discovery-activation-root.result }}" \
             "${{ needs.backend-deployment-root.result }}" \

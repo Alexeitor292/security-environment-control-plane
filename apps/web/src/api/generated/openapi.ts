@@ -1206,7 +1206,18 @@ export interface paths {
         };
         /**
          * Provider Capabilities
-         * @description Tells the UI that provisioning is NOT enabled in SECP-002A.
+         * @description What this build can actually do, derived from the live modules that implement it.
+         *
+         *     This endpoint used to return a hardcoded ``provisioning_enabled: False`` with the note
+         *     "Proxmox provisioning is deferred to SECP-002B", and a docstring saying its purpose was to tell
+         *     the UI provisioning was not enabled. It had been false for six merges: #105-#110 shipped
+         *     desired-state compilation, plan generation, apply authorization, observed verification, destroy
+         *     authorization and the residue proof.
+         *
+         *     A capability endpoint that reads a constant is a restatement — it cannot notice the capability
+         *     changing, which is the one thing it exists to do. Every value here is now derived, and
+         *     ``supported_unauthorized`` is distinguished from ``not_supported`` because the old single flag
+         *     conflated them (along with "not for this target"), and they call for different actions.
          */
         get: operations["provider_capabilities_api_v1_providers_capabilities_get"];
         put?: never;
@@ -1477,6 +1488,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/range-scenarios": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Range Scenarios
+         * @description Every shipped scenario ONCE, with every provider it can run on.
+         *
+         *     This is the provider-compatibility view of the same catalog ``/range-templates`` lists. The
+         *     templates endpoint is unchanged and still lists concrete deployable definitions — three of them,
+         *     two of which are the Web Breach Lab on two substrates. Here that lab appears a single time with
+         *     two provider variants, because an operator choosing a scenario is choosing a lab and then a
+         *     substrate, not choosing between two labs.
+         *
+         *     A scenario that cannot run on a provider is RETURNED, marked ``blocked``, with its blockers
+         *     named. It is never omitted and never marked eligible. The substrate-dependent Proxmox
+         *     requirements are ``undetermined`` here — this endpoint names no range, so no cluster observation
+         *     is in scope and nothing has been checked. ``GET /ranges/{id}/scenario`` answers them against the
+         *     observation actually recorded for that range.
+         */
+        get: operations["list_range_scenarios_api_v1_range_scenarios_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/range-scenarios/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Range Scenario */
+        get: operations["get_range_scenario_api_v1_range_scenarios__key__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/range-templates": {
         parameters: {
             query?: never;
@@ -1721,6 +1781,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/ranges/{range_id}/proxmox/commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Proxmox Commands
+         * @description The most recent record of each command kind for this range — the audit read.
+         *
+         *     One row per kind rather than the full history, because this answers "where is this range in the
+         *     operator workflow". The complete, ordered history is already published by
+         *     ``GET /ranges/{id}/events``, which is the same log these are folded from.
+         */
+        get: operations["list_proxmox_commands_api_v1_ranges__range_id__proxmox_commands_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/ranges/{range_id}/proxmox/destroy-authorization": {
         parameters: {
             query?: never;
@@ -1743,6 +1827,30 @@ export interface paths {
          *     body that satisfies both.
          */
         post: operations["authorize_proxmox_destroy_api_v1_ranges__range_id__proxmox_destroy_authorization_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/destroy-execution-request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Request Proxmox Destroy Execution
+         * @description Request execution of the AUTHORIZED destroy. DESTROYS NOTHING HERE.
+         *
+         *     Structurally incapable of being satisfied by anything from the apply family: its own path, its
+         *     own required field, its own hash domain, its own generation record, its own approval, its own
+         *     authorization and its own permission. There is no apply artifact that reaches any of them.
+         */
+        post: operations["request_proxmox_destroy_execution_api_v1_ranges__range_id__proxmox_destroy_execution_request_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1790,6 +1898,76 @@ export interface paths {
          *     not validate here.
          */
         post: operations["approve_proxmox_destroy_plan_api_v1_ranges__range_id__proxmox_destroy_plan_approval_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/destroy-plan-generation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate Proxmox Destroy Plan
+         * @description Materialise the deletion scope as its own durable record. DESTROYS NOTHING.
+         *
+         *     Takes ``destroy_hash`` and requires ``exercise:destroy``. Holding ``exercise:apply`` does not
+         *     let you enumerate a deletion, and an apply body does not validate against this schema.
+         */
+        post: operations["generate_proxmox_destroy_plan_api_v1_ranges__range_id__proxmox_destroy_plan_generation_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Proxmox Evidence
+         * @description Which evidence exists for this range and what identifies it. REFERENCES, never payloads.
+         *
+         *     Every class is listed whether or not it exists. Omitting the absent ones would make "we have no
+         *     residue proof" indistinguishable from "nobody asked about residue".
+         */
+        get: operations["get_proxmox_evidence_api_v1_ranges__range_id__proxmox_evidence_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/execution-request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Request Proxmox Execution
+         * @description Request execution of the AUTHORIZED apply. APPLIES NOTHING HERE.
+         *
+         *     Requires the whole chain, each link refusing with its own stable code: generated, submitted,
+         *     approved by hash, and apply authorized against that same hash. ``202`` because what it produced
+         *     is a queued operation, not a finished apply.
+         */
+        post: operations["request_proxmox_execution_api_v1_ranges__range_id__proxmox_execution_request_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1888,6 +2066,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/ranges/{range_id}/proxmox/plan-generation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate Proxmox Plan
+         * @description Materialise the compiled plan as a durable, hash-identified record. STARTS NOTHING.
+         */
+        post: operations["generate_proxmox_plan_api_v1_ranges__range_id__proxmox_plan_generation_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/plan-review-submission": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit Proxmox Plan For Review
+         * @description Put an exact generated plan in front of a reviewer. APPROVES NOTHING.
+         *
+         *     A separate act from approval and a separate permission (``plan:approve`` here,
+         *     ``exercise:apply`` to approve). Submitting says "this is ready to be looked at"; approving says
+         *     "I looked at it and it is right". Collapsing them lets whoever prepared a plan sign it off.
+         */
+        post: operations["submit_proxmox_plan_for_review_api_v1_ranges__range_id__proxmox_plan_review_submission_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/ranges/{range_id}/proxmox/readiness": {
         parameters: {
             query?: never;
@@ -1904,6 +2126,88 @@ export interface paths {
         get: operations["get_proxmox_readiness_api_v1_ranges__range_id__proxmox_readiness_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/reconciliation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Proxmox Reconciliation
+         * @description Whether reconciliation was asked for, and whether anything has answered.
+         *
+         *     Two independent facts. ``requested`` says an operator asked; ``state`` says whether a worker
+         *     recorded an observation, and stays ``undetermined`` until one does. Neither implies the other.
+         */
+        get: operations["get_proxmox_reconciliation_api_v1_ranges__range_id__proxmox_reconciliation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/reconciliation-request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Request Proxmox Reconciliation
+         * @description Request reconciliation of the deployed range against its desired state.
+         *
+         *     ``201`` and not ``202``, because ``202`` would claim the work was accepted for processing and
+         *     nothing has taken it: the response carries ``enqueued: false`` with
+         *     ``not_enqueued_reason: reconciliation_consumer_unavailable``. The intent is durable and
+         *     auditable; a worker picking it up is a separate, later fact. See
+         *     :func:`secp_api.services.proxmox_commands.request_reconciliation` for why enqueueing it as a
+         *     range operation would run a deploy.
+         */
+        post: operations["request_proxmox_reconciliation_api_v1_ranges__range_id__proxmox_reconciliation_request_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/reset-authorization": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Proxmox Reset Authorization
+         * @description Whether a reset is authorized, and exactly which guests it would DESTROY.
+         *
+         *     Neither an apply nor a destroy authorization satisfies this. The scope is published because
+         *     that is what is being approved: approving a reset without seeing the guests that will be
+         *     deleted would be approving a deletion sight unseen.
+         */
+        get: operations["get_proxmox_reset_authorization_api_v1_ranges__range_id__proxmox_reset_authorization_get"];
+        put?: never;
+        /**
+         * Authorize Proxmox Reset
+         * @description Authorize a reset of an already-approved reset scope. ENQUEUES NOTHING, RESETS NOTHING.
+         *
+         *     Structurally distinct from the apply and destroy authorizations at every level: its own path,
+         *     its own required field, its own hash domain, its own event kind and its own permission. There
+         *     is no body that satisfies more than one of the three.
+         */
+        post: operations["authorize_proxmox_reset_api_v1_ranges__range_id__proxmox_reset_authorization_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1927,6 +2231,78 @@ export interface paths {
         get: operations["get_proxmox_reset_dispositions_api_v1_ranges__range_id__proxmox_reset_dispositions_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/reset-plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Proxmox Reset Plan
+         * @description What a reset WOULD do to each guest.
+         *
+         *     A different endpoint and a different shape from ``/proxmox/reset-dispositions``, which reports
+         *     what the worker OBSERVED a reset doing. A plan and an observation are different claims, and the
+         *     moment they share a surface a client starts reading one as the other.
+         */
+        get: operations["get_proxmox_reset_plan_api_v1_ranges__range_id__proxmox_reset_plan_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/reset-plan-approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve Proxmox Reset Plan
+         * @description Approve the exact reset scope, by its own hash. STARTS NOTHING.
+         *
+         *     Takes ``reset_hash`` and rejects unknown fields, so neither an apply nor a destroy body
+         *     validates here. Requires ``exercise:reset``.
+         */
+        post: operations["approve_proxmox_reset_plan_api_v1_ranges__range_id__proxmox_reset_plan_approval_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/reset-request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Request Proxmox Reset
+         * @description Request a reset of the authorized reset scope. RESETS NOTHING HERE.
+         *
+         *     Gated on the RESET authorization, not the apply one. A reset DESTROYS every guest in the range
+         *     and rebuilds it — ``proxmox_reset.plan_reset`` gives ``ResetSubject.guests`` the disposition
+         *     ``recreated``, defined there as "Destroyed and rebuilt from the reviewed base image" — so an
+         *     approval to create those guests does not authorize deleting the ones currently running.
+         */
+        post: operations["request_proxmox_reset_api_v1_ranges__range_id__proxmox_reset_request_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1981,6 +2357,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/ranges/{range_id}/proxmox/topology-compilation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Compile Proxmox Topology
+         * @description Recompile the topology from the observation of record. CONTACTS NOTHING.
+         *
+         *     "Refresh" means recompile against the newest observation the WORKER recorded. This process
+         *     cannot go and look at a cluster, and an observation the control plane invented would be
+         *     indistinguishable downstream from one discovery proved — which is the assumption the entire
+         *     compiler safety argument rests on not being made.
+         */
+        post: operations["compile_proxmox_topology_api_v1_ranges__range_id__proxmox_topology_compilation_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/ranges/{range_id}/proxmox/verification": {
         parameters: {
             query?: never;
@@ -1996,6 +2397,60 @@ export interface paths {
          *     nobody has looked yet.
          */
         get: operations["get_proxmox_verification_api_v1_ranges__range_id__proxmox_verification_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/worker": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Proxmox Worker
+         * @description The enrolled worker that would execute for this range, and whether it may.
+         *
+         *     Installation, enrollment state, identity, release and eligibility in one answer. ``enrolled:
+         *     false`` is a real response rather than a 404 — "nobody is enrolled" is something an operator
+         *     needs to be told, and it is a different answer from "a worker is enrolled but is not healthy".
+         *
+         *     Publishes public identity only: no transaction id, no compare-and-swap digests, no key material.
+         */
+        get: operations["get_proxmox_worker_api_v1_ranges__range_id__proxmox_worker_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/proxmox/workload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Proxmox Workload
+         * @description The per-guest workload and bootstrap contracts — including the WORKER's own addresses.
+         *
+         *     ``/proxmox/topology`` publishes the topology's ``published_address`` and ``probe_address`` plus
+         *     the observed one. This publishes the bootstrap contract's ``probe_address``/``probe_port`` (what
+         *     the worker connects to when it checks a guest came up) and ``report_address``/``report_port``
+         *     (where the guest reports back), which had no route at all. They are separate concepts from the
+         *     topology's addresses, none is ever substituted for another, and an absent one stays null.
+         *
+         *     Bootstrap material appears as a REFERENCE and never as material.
+         */
+        get: operations["get_proxmox_workload_api_v1_ranges__range_id__proxmox_workload_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2030,6 +2485,36 @@ export interface paths {
         };
         /** List Range Resources */
         get: operations["list_range_resources_api_v1_ranges__range_id__resources_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/ranges/{range_id}/scenario": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Range Scenario For Range
+         * @description This range's scenario, with compatibility answered against ITS recorded observation.
+         *
+         *     The difference from the catalog read matters: there, every substrate-dependent Proxmox
+         *     requirement is ``undetermined`` because no cluster is in scope. Here the requirements are
+         *     answered from the observation the worker recorded for this range — so a missing management CIDR
+         *     or an unobserved VLAN list becomes a NAMED blocker with the same ``reason_id`` the plan compiler
+         *     would block on, rather than a generic "not ready".
+         *
+         *     A non-Proxmox range still gets an answer: its own provider's requirements are decidable from the
+         *     catalog, and the Proxmox column stays ``undetermined`` because this range records no cluster
+         *     observation.
+         */
+        get: operations["get_range_scenario_for_range_api_v1_ranges__range_id__scenario_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3728,10 +4213,14 @@ export interface components {
         };
         /**
          * ApprovalKind
-         * @description Which of the four authorization acts a recorded approval is.
+         * @description Which of the six authorization acts a recorded approval is.
+         *
+         *     Three families — apply, reset, destroy — each with an approve step and an authorize step, each
+         *     over a digest from its own hash domain. No member stands for more than one family, so a record
+         *     read out of its response is still unambiguous about what was authorized.
          * @enum {string}
          */
-        ApprovalKind: "plan_approval" | "apply_authorization" | "destroy_plan_approval" | "destroy_authorization";
+        ApprovalKind: "plan_approval" | "apply_authorization" | "reset_plan_approval" | "reset_authorization" | "destroy_plan_approval" | "destroy_authorization";
         /**
          * ApprovalOut
          * @description A recorded approval or authorization, as it was made.
@@ -3916,6 +4405,15 @@ export interface components {
             /** Proof Text */
             proof_text?: string | null;
         };
+        /** BootstrapOperationOut */
+        BootstrapOperationOut: {
+            /** Description */
+            description: string;
+            /** Key */
+            key: string;
+            /** Timeout Seconds */
+            timeout_seconds: number;
+        };
         /** BootstrapScriptOut */
         BootstrapScriptOut: {
             /** Account */
@@ -4095,6 +4593,16 @@ export interface components {
             resource_ref: string;
         };
         /**
+         * CapabilityState
+         * @description Whether this build can do something, and whether this caller may.
+         *
+         *     ``supported_unauthorized`` and ``not_supported`` were the same value before, and they are the
+         *     two an operator most needs to tell apart: one is fixed by granting a permission, the other
+         *     cannot be fixed at all in this build.
+         * @enum {string}
+         */
+        CapabilityState: "not_supported" | "supported_unauthorized" | "supported_authorized" | "undetermined";
+        /**
          * ChallengeOut
          * @description NOTE: there is deliberately no flag field. Adding one would leak solutions.
          */
@@ -4186,6 +4694,17 @@ export interface components {
              */
             toolchain_profile_id: string;
         };
+        /**
+         * CommandKind
+         * @description Which operator act a durable command record is.
+         *
+         *     Each member is its own act with its own permission, its own preconditions and its own request
+         *     schema. There is deliberately no ``approve`` or ``execute`` member that could stand for either
+         *     an apply or a destroy — see the module docstring. ``operation_kind`` on the wire is exactly one
+         *     of these, never derived by a client from the path it called.
+         * @enum {string}
+         */
+        CommandKind: "compile_topology" | "generate_plan" | "submit_plan_for_review" | "request_execution" | "request_reset" | "request_reconciliation" | "generate_destroy_plan" | "request_destroy_execution";
         /** CompetitionCreate */
         CompetitionCreate: {
             /** Name */
@@ -4793,6 +5312,26 @@ export interface components {
              */
             validation_result_id: string;
         };
+        /**
+         * EvidenceReferenceOut
+         * @description One pointer to evidence. A reference and a timestamp, never a payload.
+         *
+         *     ``present`` is false with ``reference: null`` when this class of evidence does not exist yet —
+         *     which is a different fact from evidence that exists and could not be read, and both are
+         *     different from evidence that exists and is clean.
+         */
+        EvidenceReferenceOut: {
+            /** Detail */
+            detail?: string | null;
+            /** Kind */
+            kind: string;
+            /** Observed At */
+            observed_at?: string | null;
+            /** Present */
+            present: boolean;
+            /** Reference */
+            reference?: string | null;
+        };
         /** ExerciseCreate */
         ExerciseCreate: {
             /** Execution Target Id */
@@ -4958,6 +5497,24 @@ export interface components {
             expected_revision: number;
         };
         /**
+         * MaterialRefOut
+         * @description A REFERENCE to post-provisioning material. Never the material.
+         *
+         *     The reference names where something lives and on which channel it travels. Publishing the
+         *     reference lets an operator reason about a stuck bootstrap; publishing the material would put
+         *     it in a response, a log and a browser cache.
+         */
+        MaterialRefOut: {
+            /** Channel */
+            channel: string;
+            /** Purpose */
+            purpose: string;
+            /** Ref */
+            ref: string;
+            /** Scope */
+            scope: string;
+        };
+        /**
          * ObservationFreshness
          * @description How much the recorded cluster observation can still be relied on.
          * @enum {string}
@@ -5053,6 +5610,19 @@ export interface components {
             organization_id: string;
             /** Status */
             status: string;
+        };
+        /**
+         * OperationCapabilityOut
+         * @description One operator verb and whether this caller can use it.
+         */
+        OperationCapabilityOut: {
+            /** Detail */
+            detail: string;
+            /** Operation */
+            operation: string;
+            /** Required Permission */
+            required_permission: string;
+            state: components["schemas"]["CapabilityState"];
         };
         /** OperationOut */
         OperationOut: {
@@ -5566,6 +6136,69 @@ export interface components {
             user_id: string;
         };
         /**
+         * ProviderCapabilitiesOut
+         * @description Derived capability. No field here is a constant somebody chose.
+         */
+        ProviderCapabilitiesOut: {
+            /** Authorized Operations */
+            authorized_operations?: string[];
+            /** Discovery */
+            discovery: string;
+            /** Discovery Detail */
+            discovery_detail: string;
+            /** Operations */
+            operations: components["schemas"]["OperationCapabilityOut"][];
+            /** Providers */
+            providers: components["schemas"]["ProviderCapabilityOut"][];
+            /** Unauthorized Operations */
+            unauthorized_operations?: string[];
+            /** Unsupported Operations */
+            unsupported_operations?: string[];
+        };
+        /**
+         * ProviderCapabilityOut
+         * @description What one provider substrate can do in this build.
+         */
+        ProviderCapabilityOut: {
+            /** Deployable */
+            deployable: boolean;
+            /** Detail */
+            detail: string;
+            /** Lifecycle Operations */
+            lifecycle_operations?: string[];
+            /** Provider */
+            provider: string;
+        };
+        /**
+         * ProviderCompatibilityOut
+         * @description How one scenario stands on one provider — including when the answer is "it cannot run".
+         */
+        ProviderCompatibilityOut: {
+            /** Blocked */
+            blocked: boolean;
+            /** Blockers */
+            blockers: components["schemas"]["RequirementFindingOut"][];
+            /** Max Teams */
+            max_teams?: number | null;
+            /** Min Teams */
+            min_teams?: number | null;
+            /** Provider */
+            provider: string;
+            /** Requirements */
+            requirements: components["schemas"]["RequirementFindingOut"][];
+            support: components["schemas"]["ProviderSupport"];
+            /** Template Slug */
+            template_slug?: string | null;
+            /** Unmet Capabilities */
+            unmet_capabilities: components["schemas"]["RequirementFindingOut"][];
+        };
+        /**
+         * ProviderSupport
+         * @description Whether a scenario can run on a provider at all — a property of the shipped catalog.
+         * @enum {string}
+         */
+        ProviderSupport: "supported" | "unsupported";
+        /**
          * ProvisioningReadinessOut
          * @description The derived combined current-readiness view. It is NOT plan approval and launches nothing.
          */
@@ -5645,6 +6278,77 @@ export interface components {
             plan_hash: string;
         };
         /**
+         * ProxmoxCommandOut
+         * @description One durable command record, as it was accepted.
+         */
+        ProxmoxCommandOut: {
+            /** Accepted Version */
+            accepted_version: number;
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /**
+             * Deduplicated
+             * @default false
+             */
+            deduplicated: boolean;
+            /**
+             * Enqueued
+             * @default false
+             */
+            enqueued: boolean;
+            /** Idempotency Key */
+            idempotency_key: string;
+            not_enqueued_reason?: components["schemas"]["RefusalCode"] | null;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Operation Id */
+            operation_id?: string | null;
+            operation_kind: components["schemas"]["CommandKind"];
+            /**
+             * Organization Id
+             * Format: uuid
+             */
+            organization_id: string;
+            /**
+             * Range Id
+             * Format: uuid
+             */
+            range_id: string;
+            /** Requested By */
+            requested_by?: string | null;
+            /** Sequence */
+            sequence: number;
+            /** Subject Hash */
+            subject_hash?: string | null;
+            /** Target Id */
+            target_id: string;
+        };
+        /**
+         * ProxmoxCompileTopologyRequest
+         * @description Recompile the topology from the observation of record.
+         *
+         *     Deliberately carries NO hash: this is the act that produces one. Requiring the caller to name
+         *     the hash they expect would make it impossible to refresh after the observation changed, which
+         *     is the only case in which refreshing is interesting.
+         */
+        ProxmoxCompileTopologyRequest: {
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /** Expected Version */
+            expected_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Target Id */
+            target_id: string;
+        };
+        /**
          * ProxmoxDestroyAuthorizationOut
          * @description Whether destroy is authorized. Never satisfied by an apply authorization.
          */
@@ -5667,12 +6371,55 @@ export interface components {
             destroy_hash: string;
         };
         /**
+         * ProxmoxDestroyExecutionRequest
+         * @description Request execution of the authorized destroy. ``destroy_hash`` ONLY.
+         */
+        ProxmoxDestroyExecutionRequest: {
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /** Destroy Hash */
+            destroy_hash: string;
+            /** Expected Version */
+            expected_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Release Digest */
+            release_digest: string;
+            /** Target Id */
+            target_id: string;
+            /** Worker Installation Id */
+            worker_installation_id: string;
+        };
+        /**
          * ProxmoxDestroyPlanApprovalRequest
          * @description Approve the exact destroy plan. Deliberately carries ``destroy_hash`` ONLY.
          */
         ProxmoxDestroyPlanApprovalRequest: {
             /** Destroy Hash */
             destroy_hash: string;
+        };
+        /**
+         * ProxmoxDestroyPlanGenerateRequest
+         * @description Materialise the deletion scope. ``destroy_hash`` ONLY.
+         *
+         *     An apply body cannot validate here: ``plan_hash`` is rejected as an unknown field and the
+         *     required ``destroy_hash`` is absent.
+         */
+        ProxmoxDestroyPlanGenerateRequest: {
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /** Destroy Hash */
+            destroy_hash: string;
+            /** Expected Version */
+            expected_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Target Id */
+            target_id: string;
         };
         /**
          * ProxmoxDestroyPlanOut
@@ -5693,6 +6440,65 @@ export interface components {
             /** Destroy Hash */
             destroy_hash?: string | null;
             state: components["schemas"]["PlanState"];
+        };
+        /**
+         * ProxmoxEvidenceOut
+         * @description Every evidence reference this range has, in one place.
+         *
+         *     References only. The verification report, the residue proof and the discovery snapshot are each
+         *     reachable through their own endpoints; this says WHICH of them exist and what identifies them,
+         *     so an operator assembling a record for an event knows what they have before they fetch it.
+         */
+        ProxmoxEvidenceOut: {
+            /**
+             * Range Id
+             * Format: uuid
+             */
+            range_id: string;
+            /** References */
+            references: components["schemas"]["EvidenceReferenceOut"][];
+            /** Teardown Evidence Ids */
+            teardown_evidence_ids?: string[];
+        };
+        /**
+         * ProxmoxExecutionRequest
+         * @description Request execution of the authorized apply. ``plan_hash`` ONLY — never ``destroy_hash``.
+         */
+        ProxmoxExecutionRequest: {
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /** Expected Version */
+            expected_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Plan Hash */
+            plan_hash: string;
+            /** Release Digest */
+            release_digest: string;
+            /** Target Id */
+            target_id: string;
+            /** Worker Installation Id */
+            worker_installation_id: string;
+        };
+        /**
+         * ProxmoxGeneratePlanRequest
+         * @description Materialise the compiled plan as a durable record. Carries ``plan_hash`` ONLY.
+         */
+        ProxmoxGeneratePlanRequest: {
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /** Expected Version */
+            expected_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Plan Hash */
+            plan_hash: string;
+            /** Target Id */
+            target_id: string;
         };
         /**
          * ProxmoxGuestAddressOut
@@ -5728,6 +6534,51 @@ export interface components {
             probe_is_distinct: boolean;
             /** Published Address */
             published_address: string;
+        };
+        /**
+         * ProxmoxGuestBootstrapOut
+         * @description One guest's bootstrap contract — the WORKER's view, kept apart from the topology's.
+         *
+         *     ``probe_address`` here is what the worker connects to in order to check this guest came up. It
+         *     is NOT the topology's ``published_address`` (what a participant is told to use) and NOT the
+         *     topology's own ``probe_address``, and there is no fallback between any of them. A readiness
+         *     check that quietly probes the published address proves the address was published.
+         *
+         *     ``report_address`` is a fourth thing again: where the guest reports its own bootstrap result.
+         */
+        ProxmoxGuestBootstrapOut: {
+            attestation_ref: components["schemas"]["MaterialRefOut"];
+            /** Deadline Seconds */
+            deadline_seconds: number;
+            /** Guest Ref */
+            guest_ref: string;
+            /** Image Digest */
+            image_digest: string;
+            /**
+             * Observed
+             * @default false
+             */
+            observed: boolean;
+            /** Observed Address */
+            observed_address?: string | null;
+            /** Operations */
+            operations?: components["schemas"]["BootstrapOperationOut"][];
+            /** Probe Address */
+            probe_address?: string | null;
+            /** Probe Port */
+            probe_port?: number | null;
+            /** Report Address */
+            report_address: string;
+            /** Report Port */
+            report_port: number;
+            /** Team Ref */
+            team_ref: string;
+            /** Vmid */
+            vmid: number;
+            /** Workload Key */
+            workload_key: string;
+            /** Workload Version */
+            workload_version: string;
         };
         /**
          * ProxmoxGuestOut
@@ -5905,6 +6756,89 @@ export interface components {
             state: components["schemas"]["PlanState"];
         };
         /**
+         * ProxmoxReconciliationOut
+         * @description Whether reconciliation was asked for, and whether anything has answered.
+         *
+         *     TWO independent facts, and conflating them is the failure this shape exists to prevent. A
+         *     request being recorded says an operator asked; it says nothing about a worker having looked.
+         *     ``state`` is the OBSERVATION and stays ``undetermined`` until a worker records one.
+         */
+        ProxmoxReconciliationOut: {
+            /** Detail */
+            detail?: string | null;
+            /**
+             * Enqueued
+             * @default false
+             */
+            enqueued: boolean;
+            /** Findings */
+            findings?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Not Enqueued Reason */
+            not_enqueued_reason?: string | null;
+            /** Observed At */
+            observed_at?: string | null;
+            /** Requested */
+            requested: boolean;
+            /** Requested At */
+            requested_at?: string | null;
+            /** Requested By */
+            requested_by?: string | null;
+            state: components["schemas"]["RecordedStageState"];
+        };
+        /**
+         * ProxmoxReconciliationRequest
+         * @description Request reconciliation of the deployed range against its desired state.
+         *
+         *     Carries no hash: reconciliation compares what EXISTS against what the current plan describes,
+         *     so pinning it to a document the operator read would be pinning the wrong side of the comparison.
+         */
+        ProxmoxReconciliationRequest: {
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /** Expected Version */
+            expected_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Target Id */
+            target_id: string;
+        };
+        /**
+         * ProxmoxResetAuthorizationOut
+         * @description Whether a reset is authorized. Never satisfied by an apply or a destroy authorization.
+         *
+         *     ``reset_scope`` is published because that is what is being approved: the exact guests that will
+         *     be DESTROYED and rebuilt. Approving a reset without seeing them would be approving a deletion
+         *     sight unseen.
+         */
+        ProxmoxResetAuthorizationOut: {
+            approval?: components["schemas"]["ApprovalOut"] | null;
+            authorization?: components["schemas"]["ApprovalOut"] | null;
+            /** Blocked Reason */
+            blocked_reason?: string | null;
+            /** Preserved Subjects */
+            preserved_subjects?: string[];
+            /** Reset Hash */
+            reset_hash?: string | null;
+            reset_plan_state: components["schemas"]["PlanState"];
+            /** Reset Scope */
+            reset_scope?: components["schemas"]["ProxmoxResetScopeEntryOut"][] | null;
+            /** Reset Scope Size */
+            reset_scope_size?: number | null;
+            state: components["schemas"]["AuthorizationState"];
+        };
+        /**
+         * ProxmoxResetAuthorizationRequest
+         * @description Authorize a reset of an already-approved reset scope. ``reset_hash`` ONLY.
+         */
+        ProxmoxResetAuthorizationRequest: {
+            /** Reset Hash */
+            reset_hash: string;
+        };
+        /**
          * ProxmoxResetDispositionsOut
          * @description What a reset did to each guest, as the worker observed it.
          *
@@ -5921,6 +6855,104 @@ export interface components {
             /** Observed At */
             observed_at?: string | null;
             state: components["schemas"]["RecordedStageState"];
+        };
+        /**
+         * ProxmoxResetGuestOut
+         * @description What a reset WOULD do to one guest.
+         */
+        ProxmoxResetGuestOut: {
+            /** Guest Ref */
+            guest_ref: string;
+            /** Intended Action */
+            intended_action: string;
+            /** Name */
+            name: string;
+            /** Node Name */
+            node_name?: string | null;
+            /** Team Ref */
+            team_ref?: string | null;
+            /** Vmid */
+            vmid: number;
+        };
+        /**
+         * ProxmoxResetPlanApprovalRequest
+         * @description Approve the exact reset scope. Deliberately carries ``reset_hash`` ONLY.
+         *
+         *     A reset DESTROYS every guest in the range and rebuilds it, so it is approved by naming the
+         *     guests that will be destroyed — not by naming a creation plan. The field, the hash domain and
+         *     the required permission all differ from the apply family's, so an apply body cannot be posted
+         *     here and be accepted.
+         */
+        ProxmoxResetPlanApprovalRequest: {
+            /** Reset Hash */
+            reset_hash: string;
+        };
+        /**
+         * ProxmoxResetPlanOut
+         * @description What a reset would do — NOT what one did.
+         *
+         *     Deliberately a different endpoint and a different shape from
+         *     ``/proxmox/reset-dispositions``, which reports what the worker OBSERVED a reset doing. A plan
+         *     and an observation are different claims and the moment they share a surface a client starts
+         *     reading one as the other.
+         */
+        ProxmoxResetPlanOut: {
+            /** Blocked Reasons */
+            blocked_reasons?: components["schemas"]["BlockedReasonOut"][];
+            /** Guests */
+            guests?: components["schemas"]["ProxmoxResetGuestOut"][] | null;
+            last_observed: components["schemas"]["RecordedStageState"];
+            /** Plan Hash */
+            plan_hash?: string | null;
+            state: components["schemas"]["PlanState"];
+        };
+        /**
+         * ProxmoxResetRequest
+         * @description Request a reset of the authorized reset scope. ``reset_hash`` ONLY.
+         *
+         *     Not ``plan_hash``. A reset DESTROYS every guest in the range and rebuilds it, so it is
+         *     authorized by naming the guests that will be destroyed — a third hash domain, distinct from
+         *     both the creation plan and the destroy deletion set (a reset preserves the whole network).
+         */
+        ProxmoxResetRequest: {
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /** Expected Version */
+            expected_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Release Digest */
+            release_digest: string;
+            /** Reset Hash */
+            reset_hash: string;
+            /** Target Id */
+            target_id: string;
+            /** Worker Installation Id */
+            worker_installation_id: string;
+        };
+        /**
+         * ProxmoxResetScopeEntryOut
+         * @description One guest a reset would DESTROY and rebuild.
+         *
+         *     ``template_ref`` is carried because a reset rebuilds FROM it: if the reviewed base image
+         *     changed, the guest that comes back is not the guest that was approved, and an operator
+         *     approving the reset should be able to see which image each guest returns from.
+         */
+        ProxmoxResetScopeEntryOut: {
+            /** Kind */
+            kind: string;
+            /** Name */
+            name?: string | null;
+            /** Node */
+            node?: string | null;
+            /** Ref */
+            ref?: string | null;
+            /** Template Ref */
+            template_ref?: string | null;
+            /** Vmid */
+            vmid?: number | null;
         };
         /**
          * ProxmoxResidueOut
@@ -5954,6 +6986,24 @@ export interface components {
             unproven_count?: number | null;
             /** Verdict */
             verdict?: string | null;
+        };
+        /**
+         * ProxmoxSubmitPlanRequest
+         * @description Submit an exact generated plan for review. APPROVES NOTHING. ``plan_hash`` ONLY.
+         */
+        ProxmoxSubmitPlanRequest: {
+            /** Cluster Fingerprint */
+            cluster_fingerprint: string;
+            /** Expected Version */
+            expected_version: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Operation Generation */
+            operation_generation: number;
+            /** Plan Hash */
+            plan_hash: string;
+            /** Target Id */
+            target_id: string;
         };
         /**
          * ProxmoxTopologyOut
@@ -6011,6 +7061,61 @@ export interface components {
             /** Observed At */
             observed_at?: string | null;
             state: components["schemas"]["RecordedStageState"];
+        };
+        /**
+         * ProxmoxWorkerOut
+         * @description The enrolled worker bound to this range's organization and site, and whether it may execute.
+         *
+         *     ``eligible_for_execution`` is DERIVED from the fields below it, in one place, so the flag and
+         *     the reasons can never disagree. It is ``false`` with named blockers rather than the endpoint
+         *     404ing or omitting the worker: "no worker is enrolled" is an answer an operator needs, and it is
+         *     not the same answer as "a worker is enrolled but is not healthy".
+         */
+        ProxmoxWorkerOut: {
+            /** Blockers */
+            blockers?: string[];
+            /** Contract Version */
+            contract_version?: string | null;
+            /** Controller Installation Id */
+            controller_installation_id?: string | null;
+            /** Deployment Site Label */
+            deployment_site_label?: string | null;
+            /** Eligible For Execution */
+            eligible_for_execution: boolean;
+            /** Enrolled */
+            enrolled: boolean;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Refusal Reason */
+            refusal_reason?: string | null;
+            /** Release Digest */
+            release_digest?: string | null;
+            /** Revision */
+            revision?: number | null;
+            /** State */
+            state?: string | null;
+            /** Worker Installation Id */
+            worker_installation_id?: string | null;
+            /** Worker Key Id */
+            worker_key_id?: string | null;
+        };
+        /**
+         * ProxmoxWorkloadOut
+         * @description The workload and bootstrap plan, and what has been observed of it.
+         */
+        ProxmoxWorkloadOut: {
+            /** Blocked Reasons */
+            blocked_reasons?: components["schemas"]["BlockedReasonOut"][];
+            /** Challenge Keys */
+            challenge_keys?: string[] | null;
+            /** Guests */
+            guests?: components["schemas"]["ProxmoxGuestBootstrapOut"][] | null;
+            /** Materials */
+            materials?: components["schemas"]["MaterialRefOut"][] | null;
+            /** Plan Hash */
+            plan_hash?: string | null;
+            state: components["schemas"]["PlanState"];
+            verification: components["schemas"]["RecordedStageState"];
         };
         /** QueuePreflight */
         QueuePreflight: {
@@ -6423,6 +7528,19 @@ export interface components {
             proof_id: string;
             status: components["schemas"]["ResolverActivationEvidenceStatus"];
         };
+        /**
+         * RefusalCode
+         * @description Stable, machine-readable reasons a command is refused.
+         *
+         *     A client branches on these; the message beside them is for a human and may change. Every member
+         *     must have a test that provokes exactly it —
+         *     ``test_proxmox_operator_commands.py::test_every_refusal_code_has_a_test_that_provokes_it``
+         *     enumerates this enum FROM THE LIVE MODULE and fails on any member no test covers. It is
+         *     enumerated rather than listed because a hand-maintained list written by the same author cannot
+         *     notice a code that author forgot.
+         * @enum {string}
+         */
+        RefusalCode: "range_not_proxmox" | "target_mismatch" | "cluster_fingerprint_mismatch" | "ownership_scope_mismatch" | "plan_blocked" | "observation_absent" | "observation_stale" | "plan_not_generated" | "plan_not_submitted" | "plan_not_approved" | "apply_not_authorized" | "reset_plan_not_approved" | "reset_not_authorized" | "destroy_plan_not_generated" | "destroy_plan_not_approved" | "destroy_not_authorized" | "plan_identity_mismatch" | "destroy_plan_identity_mismatch" | "reset_plan_identity_mismatch" | "desired_state_changed" | "allocation_changed" | "version_conflict" | "operation_generation_mismatch" | "idempotency_key_reused" | "operation_in_flight" | "lifecycle_state_invalid" | "worker_mismatch" | "release_mismatch" | "worker_not_healthy" | "reconciliation_consumer_unavailable";
         /** RemoteStateReadinessOut */
         RemoteStateReadinessOut: {
             /** Adapter Contract Version */
@@ -6482,6 +7600,41 @@ export interface components {
             /** Toolchain Profile Hash */
             toolchain_profile_hash: string;
         };
+        /**
+         * RequirementFindingOut
+         * @description One requirement for one scenario on one provider.
+         */
+        RequirementFindingOut: {
+            /** Detail */
+            detail: string;
+            kind: components["schemas"]["RequirementKind"];
+            /** Reason Id */
+            reason_id?: string | null;
+            status: components["schemas"]["RequirementStatus"];
+        };
+        /**
+         * RequirementKind
+         * @description The requirement classes the catalog reports for every scenario/provider pair.
+         *
+         *     Every member is reported for every pair — a requirement that does not apply to a provider is
+         *     reported ``satisfied`` with a detail saying why it does not apply, rather than being omitted.
+         *     An omitted requirement is indistinguishable from a requirement nobody thought about.
+         * @enum {string}
+         */
+        RequirementKind: "source_template" | "network" | "storage" | "team_count" | "scoring" | "telemetry" | "controlled_egress";
+        /**
+         * RequirementStatus
+         * @description Whether one requirement is met. FOUR values, and the last two are the load-bearing ones.
+         *
+         *     Two of these mean "not satisfied" and they are deliberately not one member, because they lead
+         *     an operator to opposite actions. ``unsatisfied``/``undetermined`` mean *go and fix or check
+         *     something, then this scenario can run here*. ``not_provided`` means *this substrate will never
+         *     do that; deploy anyway if you do not need it*. Folding them together would either mark a
+         *     perfectly deployable laptop lab as blocked, or — far worse in the other direction — mark a
+         *     missing capability as an acceptable gap on a substrate where it is a hard requirement.
+         * @enum {string}
+         */
+        RequirementStatus: "satisfied" | "unsatisfied" | "undetermined" | "not_provided";
         /** ReservationOut */
         ReservationOut: {
             /** Cidr */
@@ -6684,6 +7837,32 @@ export interface components {
              * @default operator
              */
             reason_code: string;
+        };
+        /**
+         * ScenarioOut
+         * @description One lab, listed ONCE, with every provider it can run on.
+         *
+         *     The Web Breach Lab appears here a single time carrying two provider variants, not twice as two
+         *     templates. The components and challenges are the shared catalog definitions both variants are
+         *     built from, so the substrate changes and the content does not.
+         */
+        ScenarioOut: {
+            /** Blocked Everywhere */
+            blocked_everywhere: boolean;
+            /** Challenge Keys */
+            challenge_keys?: string[];
+            /** Component Keys */
+            component_keys?: string[];
+            /** Key */
+            key: string;
+            /** Name */
+            name: string;
+            /** Providers */
+            providers: components["schemas"]["ProviderCompatibilityOut"][];
+            /** Summary */
+            summary: string;
+            /** Total Points */
+            total_points: number;
         };
         /** ScoreboardEntryOut */
         ScoreboardEntryOut: {
@@ -7873,14 +9052,17 @@ export type BindingDescriptorOut = components['schemas']['BindingDescriptorOut']
 export type BlockedReasonOut = components['schemas']['BlockedReasonOut'];
 export type BootstrapAvailabilityOut = components['schemas']['BootstrapAvailabilityOut'];
 export type BootstrapCompleteRequest = components['schemas']['BootstrapCompleteRequest'];
+export type BootstrapOperationOut = components['schemas']['BootstrapOperationOut'];
 export type BootstrapScriptOut = components['schemas']['BootstrapScriptOut'];
 export type BootstrapSessionCreate = components['schemas']['BootstrapSessionCreate'];
 export type BootstrapSessionOut = components['schemas']['BootstrapSessionOut'];
 export type BundleDescriptorOut = components['schemas']['BundleDescriptorOut'];
 export type CandidatePlanOut = components['schemas']['CandidatePlanOut'];
 export type CandidatePlanResourceOut = components['schemas']['CandidatePlanResourceOut'];
+export type CapabilityState = components['schemas']['CapabilityState'];
 export type ChallengeOut = components['schemas']['ChallengeOut'];
 export type ChangeSetApprovalOut = components['schemas']['ChangeSetApprovalOut'];
+export type CommandKind = components['schemas']['CommandKind'];
 export type CompetitionCreate = components['schemas']['CompetitionCreate'];
 export type CompetitionOut = components['schemas']['CompetitionOut'];
 export type CompetitionState = components['schemas']['CompetitionState'];
@@ -7912,6 +9094,7 @@ export type EnrollmentListOut = components['schemas']['EnrollmentListOut'];
 export type EnrollmentOut = components['schemas']['EnrollmentOut'];
 export type EnrollmentStatusOut = components['schemas']['EnrollmentStatusOut'];
 export type EnvironmentPublicationRequest = components['schemas']['EnvironmentPublicationRequest'];
+export type EvidenceReferenceOut = components['schemas']['EvidenceReferenceOut'];
 export type ExerciseCreate = components['schemas']['ExerciseCreate'];
 export type ExerciseOut = components['schemas']['ExerciseOut'];
 export type HttpValidationError = components['schemas']['HTTPValidationError'];
@@ -7920,11 +9103,13 @@ export type IsolationFindingOut = components['schemas']['IsolationFindingOut'];
 export type IsolationModel = components['schemas']['IsolationModel'];
 export type ManifestOut = components['schemas']['ManifestOut'];
 export type MarkRecoveryRequired = components['schemas']['MarkRecoveryRequired'];
+export type MaterialRefOut = components['schemas']['MaterialRefOut'];
 export type ObservationFreshness = components['schemas']['ObservationFreshness'];
 export type OnboardingCreate = components['schemas']['OnboardingCreate'];
 export type OnboardingDecision = components['schemas']['OnboardingDecision'];
 export type OnboardingMode = components['schemas']['OnboardingMode'];
 export type OnboardingOut = components['schemas']['OnboardingOut'];
+export type OperationCapabilityOut = components['schemas']['OperationCapabilityOut'];
 export type OperationOut = components['schemas']['OperationOut'];
 export type OwnershipClassOut = components['schemas']['OwnershipClassOut'];
 export type PlanEnvironmentVersionBindingOut = components['schemas']['PlanEnvironmentVersionBindingOut'];
@@ -7946,16 +9131,28 @@ export type PreflightAuthorizationOut = components['schemas']['PreflightAuthoriz
 export type PreflightOut = components['schemas']['PreflightOut'];
 export type PreflightSubstrateOut = components['schemas']['PreflightSubstrateOut'];
 export type PrincipalOut = components['schemas']['PrincipalOut'];
+export type ProviderCapabilitiesOut = components['schemas']['ProviderCapabilitiesOut'];
+export type ProviderCapabilityOut = components['schemas']['ProviderCapabilityOut'];
+export type ProviderCompatibilityOut = components['schemas']['ProviderCompatibilityOut'];
+export type ProviderSupport = components['schemas']['ProviderSupport'];
 export type ProvisioningReadinessOut = components['schemas']['ProvisioningReadinessOut'];
 export type ProxmoxAllocationOut = components['schemas']['ProxmoxAllocationOut'];
 export type ProxmoxAllocationsOut = components['schemas']['ProxmoxAllocationsOut'];
 export type ProxmoxApplyAuthorizationOut = components['schemas']['ProxmoxApplyAuthorizationOut'];
 export type ProxmoxApplyAuthorizationRequest = components['schemas']['ProxmoxApplyAuthorizationRequest'];
+export type ProxmoxCommandOut = components['schemas']['ProxmoxCommandOut'];
+export type ProxmoxCompileTopologyRequest = components['schemas']['ProxmoxCompileTopologyRequest'];
 export type ProxmoxDestroyAuthorizationOut = components['schemas']['ProxmoxDestroyAuthorizationOut'];
 export type ProxmoxDestroyAuthorizationRequest = components['schemas']['ProxmoxDestroyAuthorizationRequest'];
+export type ProxmoxDestroyExecutionRequest = components['schemas']['ProxmoxDestroyExecutionRequest'];
 export type ProxmoxDestroyPlanApprovalRequest = components['schemas']['ProxmoxDestroyPlanApprovalRequest'];
+export type ProxmoxDestroyPlanGenerateRequest = components['schemas']['ProxmoxDestroyPlanGenerateRequest'];
 export type ProxmoxDestroyPlanOut = components['schemas']['ProxmoxDestroyPlanOut'];
+export type ProxmoxEvidenceOut = components['schemas']['ProxmoxEvidenceOut'];
+export type ProxmoxExecutionRequest = components['schemas']['ProxmoxExecutionRequest'];
+export type ProxmoxGeneratePlanRequest = components['schemas']['ProxmoxGeneratePlanRequest'];
 export type ProxmoxGuestAddressOut = components['schemas']['ProxmoxGuestAddressOut'];
+export type ProxmoxGuestBootstrapOut = components['schemas']['ProxmoxGuestBootstrapOut'];
 export type ProxmoxGuestOut = components['schemas']['ProxmoxGuestOut'];
 export type ProxmoxLifecycleOut = components['schemas']['ProxmoxLifecycleOut'];
 export type ProxmoxObservationOut = components['schemas']['ProxmoxObservationOut'];
@@ -7963,10 +9160,22 @@ export type ProxmoxOwnershipOut = components['schemas']['ProxmoxOwnershipOut'];
 export type ProxmoxPlanApprovalRequest = components['schemas']['ProxmoxPlanApprovalRequest'];
 export type ProxmoxPlanOut = components['schemas']['ProxmoxPlanOut'];
 export type ProxmoxReadinessOut = components['schemas']['ProxmoxReadinessOut'];
+export type ProxmoxReconciliationOut = components['schemas']['ProxmoxReconciliationOut'];
+export type ProxmoxReconciliationRequest = components['schemas']['ProxmoxReconciliationRequest'];
+export type ProxmoxResetAuthorizationOut = components['schemas']['ProxmoxResetAuthorizationOut'];
+export type ProxmoxResetAuthorizationRequest = components['schemas']['ProxmoxResetAuthorizationRequest'];
 export type ProxmoxResetDispositionsOut = components['schemas']['ProxmoxResetDispositionsOut'];
+export type ProxmoxResetGuestOut = components['schemas']['ProxmoxResetGuestOut'];
+export type ProxmoxResetPlanApprovalRequest = components['schemas']['ProxmoxResetPlanApprovalRequest'];
+export type ProxmoxResetPlanOut = components['schemas']['ProxmoxResetPlanOut'];
+export type ProxmoxResetRequest = components['schemas']['ProxmoxResetRequest'];
+export type ProxmoxResetScopeEntryOut = components['schemas']['ProxmoxResetScopeEntryOut'];
 export type ProxmoxResidueOut = components['schemas']['ProxmoxResidueOut'];
+export type ProxmoxSubmitPlanRequest = components['schemas']['ProxmoxSubmitPlanRequest'];
 export type ProxmoxTopologyOut = components['schemas']['ProxmoxTopologyOut'];
 export type ProxmoxVerificationOut = components['schemas']['ProxmoxVerificationOut'];
+export type ProxmoxWorkerOut = components['schemas']['ProxmoxWorkerOut'];
+export type ProxmoxWorkloadOut = components['schemas']['ProxmoxWorkloadOut'];
 export type QueuePreflight = components['schemas']['QueuePreflight'];
 export type RangeComponentOut = components['schemas']['RangeComponentOut'];
 export type RangeCreate = components['schemas']['RangeCreate'];
@@ -7992,7 +9201,11 @@ export type RecordDossierEvidenceIn = components['schemas']['RecordDossierEviden
 export type RecordedStageState = components['schemas']['RecordedStageState'];
 export type RecordPlanSecretEvidenceIn = components['schemas']['RecordPlanSecretEvidenceIn'];
 export type RecordResolverActivationEvidence = components['schemas']['RecordResolverActivationEvidence'];
+export type RefusalCode = components['schemas']['RefusalCode'];
 export type RemoteStateReadinessOut = components['schemas']['RemoteStateReadinessOut'];
+export type RequirementFindingOut = components['schemas']['RequirementFindingOut'];
+export type RequirementKind = components['schemas']['RequirementKind'];
+export type RequirementStatus = components['schemas']['RequirementStatus'];
 export type ReservationOut = components['schemas']['ReservationOut'];
 export type ResidueVerdict = components['schemas']['ResidueVerdict'];
 export type ResolverActivationEvidenceKind = components['schemas']['ResolverActivationEvidenceKind'];
@@ -8006,6 +9219,7 @@ export type RevokeDossierIn = components['schemas']['RevokeDossierIn'];
 export type RevokeEnrollment = components['schemas']['RevokeEnrollment'];
 export type RevokePlanGenerationAuthorizationIn = components['schemas']['RevokePlanGenerationAuthorizationIn'];
 export type RevokePlanSecretAuthorizationIn = components['schemas']['RevokePlanSecretAuthorizationIn'];
+export type ScenarioOut = components['schemas']['ScenarioOut'];
 export type ScoreboardEntryOut = components['schemas']['ScoreboardEntryOut'];
 export type ScoreboardOut = components['schemas']['ScoreboardOut'];
 export type SealedApplyNoticeOut = components['schemas']['SealedApplyNoticeOut'];
@@ -10303,9 +11517,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ProviderCapabilitiesOut"];
                 };
             };
         };
@@ -10778,6 +11990,57 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RangeOperationOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_range_scenarios_api_v1_range_scenarios_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScenarioOut"][];
+                };
+            };
+        };
+    };
+    get_range_scenario_api_v1_range_scenarios__key__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScenarioOut"];
                 };
             };
             /** @description Validation Error */
@@ -11289,6 +12552,37 @@ export interface operations {
             };
         };
     };
+    list_proxmox_commands_api_v1_ranges__range_id__proxmox_commands_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_proxmox_destroy_authorization_api_v1_ranges__range_id__proxmox_destroy_authorization_get: {
         parameters: {
             query?: never;
@@ -11355,6 +12649,41 @@ export interface operations {
             };
         };
     };
+    request_proxmox_destroy_execution_api_v1_ranges__range_id__proxmox_destroy_execution_request_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxDestroyExecutionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_proxmox_destroy_plan_api_v1_ranges__range_id__proxmox_destroy_plan_get: {
         parameters: {
             query?: never;
@@ -11408,6 +12737,107 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProxmoxDestroyPlanOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    generate_proxmox_destroy_plan_api_v1_ranges__range_id__proxmox_destroy_plan_generation_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxDestroyPlanGenerateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_proxmox_evidence_api_v1_ranges__range_id__proxmox_evidence_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxEvidenceOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    request_proxmox_execution_api_v1_ranges__range_id__proxmox_execution_request_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxExecutionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"];
                 };
             };
             /** @description Validation Error */
@@ -11549,6 +12979,76 @@ export interface operations {
             };
         };
     };
+    generate_proxmox_plan_api_v1_ranges__range_id__proxmox_plan_generation_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxGeneratePlanRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_proxmox_plan_for_review_api_v1_ranges__range_id__proxmox_plan_review_submission_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxSubmitPlanRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_proxmox_readiness_api_v1_ranges__range_id__proxmox_readiness_get: {
         parameters: {
             query?: never;
@@ -11580,6 +13080,138 @@ export interface operations {
             };
         };
     };
+    get_proxmox_reconciliation_api_v1_ranges__range_id__proxmox_reconciliation_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxReconciliationOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    request_proxmox_reconciliation_api_v1_ranges__range_id__proxmox_reconciliation_request_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxReconciliationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_proxmox_reset_authorization_api_v1_ranges__range_id__proxmox_reset_authorization_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxResetAuthorizationOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    authorize_proxmox_reset_api_v1_ranges__range_id__proxmox_reset_authorization_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxResetAuthorizationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxResetAuthorizationOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_proxmox_reset_dispositions_api_v1_ranges__range_id__proxmox_reset_dispositions_get: {
         parameters: {
             query?: never;
@@ -11598,6 +13230,107 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProxmoxResetDispositionsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_proxmox_reset_plan_api_v1_ranges__range_id__proxmox_reset_plan_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxResetPlanOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_proxmox_reset_plan_api_v1_ranges__range_id__proxmox_reset_plan_approval_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxResetPlanApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxResetAuthorizationOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    request_proxmox_reset_api_v1_ranges__range_id__proxmox_reset_request_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxResetRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"];
                 };
             };
             /** @description Validation Error */
@@ -11673,6 +13406,41 @@ export interface operations {
             };
         };
     };
+    compile_proxmox_topology_api_v1_ranges__range_id__proxmox_topology_compilation_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxmoxCompileTopologyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxCommandOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_proxmox_verification_api_v1_ranges__range_id__proxmox_verification_get: {
         parameters: {
             query?: never;
@@ -11691,6 +13459,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProxmoxVerificationOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_proxmox_worker_api_v1_ranges__range_id__proxmox_worker_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxWorkerOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_proxmox_workload_api_v1_ranges__range_id__proxmox_workload_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxmoxWorkloadOut"];
                 };
             };
             /** @description Validation Error */
@@ -11753,6 +13583,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RangeResourceOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_range_scenario_for_range_api_v1_ranges__range_id__scenario_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                range_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScenarioOut"];
                 };
             };
             /** @description Validation Error */

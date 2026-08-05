@@ -57,6 +57,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+from typing import assert_never
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -65,7 +66,7 @@ from secp_api.auth import Principal
 from secp_api.enums import Permission
 from secp_api.errors import DomainError
 from secp_api.range_catalog import CatalogTemplate, get_template
-from secp_api.range_enums import RangeResourceKind
+from secp_api.range_enums import RangeOperationKind, RangeResourceKind
 from secp_api.range_models import RangeInstance, RangeLifecycleEvent, RangeTemplate
 from secp_api.range_providers.proxmox_ipam import (
     AllocationKind,
@@ -126,12 +127,34 @@ EVENT_APPLY_AUTHORIZED = "proxmox_apply_authorized"
 EVENT_DESTROY_PLAN_APPROVED = "proxmox_destroy_plan_approved"
 #: Written by an operator authorizing destroy of an already-approved destroy plan.
 EVENT_DESTROY_AUTHORIZED = "proxmox_destroy_authorized"
+#: Written by an operator approving the exact reset plan, by its own distinct hash.
+#:
+#: A RESET DESTROYS GUESTS. ``secp_worker.provisioning.proxmox_reset`` gives
+#: ``ResetSubject.guests`` the disposition ``ResetDisposition.recreated``, which that module defines
+#: as "Destroyed and rebuilt from the reviewed base image", and ``ResetPlan.recreated_guest_refs``
+#: is documented as "Guest refs that will be destroyed and rebuilt". Every guest in the range — and
+#: with it every disk — is deleted and made again.
+#:
+#: So an APPLY authorization must not authorize a reset. An apply approval says "create these
+#: guests"; it cannot also mean "destroy the guests currently running and build them again", which
+#: on a live range discards every team's working state mid-event. That is the same structural
+#: collapse the two existing hash domains exist to prevent, and it needs its own third domain.
+EVENT_RESET_PLAN_APPROVED = "proxmox_reset_plan_approved"
+#: Written by an operator authorizing a reset of an already-approved reset plan.
+EVENT_RESET_AUTHORIZED = "proxmox_reset_authorized"
 #: Written by the WORKER from an observed deployment.
 EVENT_VERIFICATION = "proxmox_verification_recorded"
 #: Written by the WORKER from an observed reset.
 EVENT_RESET_DISPOSITIONS = "proxmox_reset_dispositions_recorded"
 #: Written by the WORKER from an observed teardown.
 EVENT_RESIDUE = "proxmox_residue_recorded"
+#: Written by the WORKER from an observed reconciliation — a comparison of what EXISTS against the
+#: desired state. Nothing writes it yet: ``secp_worker.provisioning.proxmox_reconcile`` supplies the
+#: pure decision function but no operation kind carries it (see
+#: :func:`~secp_api.services.proxmox_commands.request_reconciliation`). The constant exists so the
+#: read surface can report ``undetermined`` from the same fold as every other worker-recorded stage,
+#: rather than inventing a fourth way of saying "nobody has looked".
+EVENT_RECONCILIATION = "proxmox_reconciliation_recorded"
 
 #: How long a recorded observation may be relied on before the surface calls it stale.
 #:
@@ -148,6 +171,13 @@ OBSERVATION_FRESHNESS_SECONDS = 3600
 #: destroy hash for the same range even when the underlying document is byte-identical.
 _PLAN_HASH_DOMAIN = b"secp-proxmox/plan/v1"
 _DESTROY_HASH_DOMAIN = b"secp-proxmox/destroy/v1"
+#: THREE domains, not two. A reset destroys every guest and rebuilds it, so it is a destructive act
+#: over its own scope: the guest set, and nothing else — a reset never touches the SDN zone, the
+#: VNets, the subnets, the VLANs, the firewall objects or the sealed ledger, all of which
+#: ``proxmox_reset.plan_reset`` marks ``preserved``. Its scope is therefore neither the creation
+#: manifest (which includes the network) nor the destroy deletion set (which removes the network
+#: too), and a digest from either of those must not satisfy it.
+_RESET_HASH_DOMAIN = b"secp-proxmox/reset/v1"
 
 #: The document version this API publishes. Deliberately NOT
 #: ``secp-proxmox/plan-document/v1``, which is the worker's OpenTofu plan document
@@ -202,10 +232,17 @@ class ProxmoxApprovalMissingError(DomainError):
 
 
 class ApprovalKind(str, Enum):
-    """Which of the four authorization acts a recorded approval is."""
+    """Which of the six authorization acts a recorded approval is.
+
+    Three families — apply, reset, destroy — each with an approve step and an authorize step, each
+    over a digest from its own hash domain. No member stands for more than one family, so a record
+    read out of its response is still unambiguous about what was authorized.
+    """
 
     plan_approval = "plan_approval"
     apply_authorization = "apply_authorization"
+    reset_plan_approval = "reset_plan_approval"
+    reset_authorization = "reset_authorization"
     destroy_plan_approval = "destroy_plan_approval"
     destroy_authorization = "destroy_authorization"
 
@@ -526,6 +563,11 @@ class CompiledRangePlan:
     #: exactly this — a deletion scope, never the creation plan reversed.
     deletion_set: list[dict]
     destroy_hash: str
+    #: The bounded set of guests a RESET would destroy and rebuild. Narrower than the deletion set
+    #: by construction: it contains guests only, because a reset preserves the SDN zone, the VNets,
+    #: the subnets, the VLANs, the firewall objects and the sealed ledger.
+    reset_scope: list[dict]
+    reset_hash: str
 
 
 def _no_observation_block(instance: RangeInstance) -> BlockedPlan:
@@ -630,6 +672,7 @@ def compile_plan(session: Session, instance: RangeInstance) -> CompiledRangePlan
     assert_no_durable_secrets(manifest, forbidden_values=_flag_values(template))
 
     deletion_set = _deletion_set(manifest)
+    reset_scope = _reset_scope(manifest)
     return CompiledRangePlan(
         template=template,
         binding=binding,
@@ -641,6 +684,8 @@ def compile_plan(session: Session, instance: RangeInstance) -> CompiledRangePlan
         plan_hash=_hash(_PLAN_HASH_DOMAIN, manifest),
         deletion_set=deletion_set,
         destroy_hash=_hash(_DESTROY_HASH_DOMAIN, deletion_set),
+        reset_scope=reset_scope,
+        reset_hash=_hash(_RESET_HASH_DOMAIN, reset_scope),
     )
 
 
@@ -735,6 +780,41 @@ def _deletion_set(manifest: dict) -> list[dict]:
     return sorted(entries, key=lambda item: (str(item["kind"]), str(item.get("ref") or "")))
 
 
+def _reset_scope(manifest: dict) -> list[dict]:
+    """The guests a reset would DESTROY and rebuild, as its own document.
+
+    Guests only. ``secp_worker.provisioning.proxmox_reset.plan_reset`` gives every network subject —
+    the SDN zone, the VNets, the subnets and VLANs, the firewall objects — and the sealed allocation
+    ledger the disposition ``preserved``, with the reason stated in that module: recreating the zone
+    would detach every guest, and reissuing addressing would renumber a range that is supposed to
+    come back as itself. Only ``ResetSubject.guests`` is ``recreated``, which that module defines as
+    "Destroyed and rebuilt from the reviewed base image".
+
+    So this is a strictly narrower scope than :func:`_deletion_set`, and it is hashed on its own so
+    approving a reset approves exactly the guests that will be destroyed — not a creation plan, and
+    not a teardown that would also remove the network the range is built on.
+    """
+    entries: list[dict] = []
+    for guest in manifest.get("guests") or ():
+        entries.append(
+            {
+                "kind": (
+                    RangeResourceKind.lxc_container.value
+                    if guest.get("kind") == GuestKind.lxc.value
+                    else RangeResourceKind.virtual_machine.value
+                ),
+                "ref": guest.get("guest_ref"),
+                "name": guest.get("name"),
+                "vmid": guest.get("vmid"),
+                "node": guest.get("node_name"),
+                # Recorded because a reset rebuilds FROM it; a changed base image means the guest
+                # that comes back is not the guest that was approved.
+                "template_ref": guest.get("template_ref"),
+            }
+        )
+    return sorted(entries, key=lambda item: (str(item["kind"]), str(item.get("ref") or "")))
+
+
 # --------------------------------------------------------------------------------------
 # Allocation projection
 # --------------------------------------------------------------------------------------
@@ -812,6 +892,18 @@ def apply_authorization(session: Session, instance: RangeInstance) -> ApprovalRe
     )
 
 
+def reset_plan_approval(session: Session, instance: RangeInstance) -> ApprovalRecord | None:
+    return _read_approval(
+        session, instance, EVENT_RESET_PLAN_APPROVED, "reset_hash", ApprovalKind.reset_plan_approval
+    )
+
+
+def reset_authorization(session: Session, instance: RangeInstance) -> ApprovalRecord | None:
+    return _read_approval(
+        session, instance, EVENT_RESET_AUTHORIZED, "reset_hash", ApprovalKind.reset_authorization
+    )
+
+
 def destroy_plan_approval(session: Session, instance: RangeInstance) -> ApprovalRecord | None:
     return _read_approval(
         session,
@@ -840,6 +932,18 @@ def plan_state(
     if approval is None:
         return PlanState.compiled
     if approval.approved_hash == compiled.plan_hash:
+        return PlanState.approved
+    return PlanState.superseded
+
+
+def reset_plan_state(
+    compiled: CompiledRangePlan | BlockedPlan, approval: ApprovalRecord | None
+) -> PlanState:
+    if isinstance(compiled, BlockedPlan):
+        return PlanState.blocked
+    if approval is None:
+        return PlanState.compiled
+    if approval.approved_hash == compiled.reset_hash:
         return PlanState.approved
     return PlanState.superseded
 
@@ -986,6 +1090,98 @@ def authorize_apply(
     )
 
 
+def approve_reset_plan(
+    session: Session,
+    principal: Principal,
+    range_id: uuid.UUID,
+    *,
+    reset_hash: str,
+) -> tuple[RangeInstance, CompiledRangePlan, ApprovalRecord]:
+    """Approve the exact reset scope, by its own hash. Starts nothing.
+
+    Takes ``reset_hash`` and never ``plan_hash`` or ``destroy_hash``. The field name differs, the
+    hash domain differs, and the permission is ``exercise:reset`` — so neither an apply body nor a
+    destroy body validates here, and neither an apply nor a destroy authorization can stand in.
+
+    This exists because a reset is DESTRUCTIVE. It destroys every guest in the range and rebuilds
+    it; on a live range that discards every team's working state. Approving "create these guests"
+    is a different decision from approving "destroy the guests that are running".
+    """
+    instance = range_service.get_range(session, principal, range_id)
+    require_proxmox(instance)
+    principal.require(Permission.exercise_reset)
+    compiled = _require_compiled(session, instance)
+    if reset_hash != compiled.reset_hash:
+        raise ProxmoxHashMismatchError(
+            f"the reset scope has changed since it was read: you approved {reset_hash}, the "
+            f"current reset scope is {compiled.reset_hash}"
+        )
+    range_service.record_event(
+        session,
+        instance,
+        kind=EVENT_RESET_PLAN_APPROVED,
+        message=f"Proxmox reset plan {compiled.reset_hash} approved",
+        level="warning",
+        data={"reset_hash": compiled.reset_hash, "approved_by": str(principal.user_id)},
+    )
+    return (
+        instance,
+        compiled,
+        ApprovalRecord(
+            operation_kind=ApprovalKind.reset_plan_approval,
+            approved_hash=compiled.reset_hash,
+            approved_by=principal.user_id,
+            at=datetime.now(UTC),
+            sequence=instance.event_sequence,
+        ),
+    )
+
+
+def authorize_reset(
+    session: Session,
+    principal: Principal,
+    range_id: uuid.UUID,
+    *,
+    reset_hash: str,
+) -> tuple[RangeInstance, CompiledRangePlan, ApprovalRecord]:
+    """Authorize a reset of an already-approved reset scope. Starts nothing; enqueues nothing."""
+    instance = range_service.get_range(session, principal, range_id)
+    require_proxmox(instance)
+    principal.require(Permission.exercise_reset)
+    compiled = _require_compiled(session, instance)
+    if reset_hash != compiled.reset_hash:
+        raise ProxmoxHashMismatchError(
+            f"the reset scope has changed since it was approved: you authorized {reset_hash}, the "
+            f"current reset scope is {compiled.reset_hash}"
+        )
+    approval = reset_plan_approval(session, instance)
+    if approval is None or approval.approved_hash != compiled.reset_hash:
+        raise ProxmoxApprovalMissingError(
+            "this reset plan has not been approved, so a reset cannot be authorized. Approve the "
+            f"reset scope ({compiled.reset_hash}) first; it names the guests that will be "
+            "destroyed."
+        )
+    range_service.record_event(
+        session,
+        instance,
+        kind=EVENT_RESET_AUTHORIZED,
+        message=f"Reset authorized for Proxmox reset plan {compiled.reset_hash}",
+        level="warning",
+        data={"reset_hash": compiled.reset_hash, "approved_by": str(principal.user_id)},
+    )
+    return (
+        instance,
+        compiled,
+        ApprovalRecord(
+            operation_kind=ApprovalKind.reset_authorization,
+            approved_hash=compiled.reset_hash,
+            approved_by=principal.user_id,
+            at=datetime.now(UTC),
+            sequence=instance.event_sequence,
+        ),
+    )
+
+
 def approve_destroy_plan(
     session: Session,
     principal: Principal,
@@ -1076,12 +1272,41 @@ def authorize_destroy(
 # --------------------------------------------------------------------------------------
 
 
-def require_operation_authorized(session: Session, instance: RangeInstance, kind: str) -> None:
-    """Refuse to enqueue a Proxmox deploy/destroy without its current, matching authorization.
+def require_operation_authorized(
+    session: Session, instance: RangeInstance, kind: RangeOperationKind
+) -> None:
+    """Refuse to enqueue a Proxmox operation without its own current, matching authorization.
 
     This is what makes the authorization surfaces load-bearing rather than decorative: without it,
     ``POST /ranges/{id}/deploy`` would still enqueue an apply that nobody authorized, and the whole
     approval chain would be an unenforced convention.
+
+    THREE THINGS ABOUT THE SHAPE OF THIS FUNCTION ARE LOAD-BEARING.
+
+    **It takes the enum, not a string.** It used to take ``kind: str`` and select the destroy branch
+    with ``if kind == "destroy"``, while its only caller passed ``kind.value``. The destroy gate
+    therefore held only while ``RangeOperationKind.destroy.value`` was literally ``"destroy"`` — a
+    coupling across two modules with nothing enforcing it. Rename that member in an ordinary
+    refactor and destroy silently selects the apply branch: a destroy authorized by an apply
+    approval, with no compiler error and no failing test. Taking the enum removes the coupling
+    entirely, because there is no string left to drift.
+
+    **Every member is matched and the default is** :func:`~typing.assert_never`. There is no
+    fall-through. A new :class:`~secp_api.range_enums.RangeOperationKind` member fails type checking
+    here until somebody states which authorization gates it — the one moment at which that decision
+    is cheap to make. The previous shape sent every unmatched kind to the apply branch, so adding an
+    operation kind silently granted it the apply gate.
+
+    **Reset has its own authorization, and this is why.** A reset is not a re-apply: it DESTROYS
+    every guest in the range. ``secp_worker.provisioning.proxmox_reset.plan_reset`` gives
+    ``ResetSubject.guests`` the disposition ``ResetDisposition.recreated``, which that module
+    defines as "Destroyed and rebuilt from the reviewed base image", and
+    ``ResetPlan.recreated_guest_refs`` is documented as "Guest refs that will be destroyed and
+    rebuilt". Gating that on the apply authorization would mean an approval to CREATE guests also
+    authorized deleting the guests currently running — on a live range, discarding every team's work
+    mid-event. So a reset carries its own approval and its own authorization over
+    :attr:`CompiledRangePlan.reset_hash`, in its own domain. Every network subject is ``preserved``
+    by a reset, which is exactly why the reset scope is not the destroy deletion set either.
 
     Non-Proxmox ranges are untouched — the local Docker lifecycle keeps its existing behaviour.
     """
@@ -1090,25 +1315,42 @@ def require_operation_authorized(session: Session, instance: RangeInstance, kind
     compiled = compile_plan(session, instance)
     if isinstance(compiled, BlockedPlan):
         raise ProxmoxPlanBlockedError(
-            f"this Proxmox range has no compilable plan, so no {kind} can be enqueued: "
+            f"this Proxmox range has no compilable plan, so no {kind.value} can be enqueued: "
             f"{compiled.describe()}"
         )
-    if kind == "destroy":
+
+    if kind is RangeOperationKind.deploy:
+        record = apply_authorization(session, instance)
+        if record is None or record.approved_hash != compiled.plan_hash:
+            raise ProxmoxApprovalMissingError(
+                f"apply is not authorized for this range's current plan ({compiled.plan_hash}). "
+                "Approving a plan and authorizing its apply are separate acts. Neither a reset nor "
+                "a destroy authorization authorizes an apply."
+            )
+        return
+
+    if kind is RangeOperationKind.reset:
+        record = reset_authorization(session, instance)
+        if record is None or record.approved_hash != compiled.reset_hash:
+            raise ProxmoxApprovalMissingError(
+                "reset is not authorized for this range's current reset scope "
+                f"({compiled.reset_hash}). A reset DESTROYS every guest in this range and rebuilds "
+                "it, so it needs an approval naming the guests that will be destroyed. An apply "
+                "authorization permits creating them; it does not permit destroying them."
+            )
+        return
+
+    if kind is RangeOperationKind.destroy:
         record = destroy_authorization(session, instance)
         if record is None or record.approved_hash != compiled.destroy_hash:
             raise ProxmoxApprovalMissingError(
                 "destroy is not authorized for this range's current destroy plan "
                 f"({compiled.destroy_hash}). Approve the destroy plan and then authorize destroy; "
-                "an apply authorization does not authorize a destroy."
+                "neither an apply nor a reset authorization authorizes a destroy."
             )
         return
-    record = apply_authorization(session, instance)
-    if record is None or record.approved_hash != compiled.plan_hash:
-        raise ProxmoxApprovalMissingError(
-            f"apply is not authorized for this range's current plan ({compiled.plan_hash}). "
-            "Approve the plan and then authorize apply; a destroy authorization does not "
-            "authorize an apply."
-        )
+
+    assert_never(kind)
 
 
 # --------------------------------------------------------------------------------------

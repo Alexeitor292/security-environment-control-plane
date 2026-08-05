@@ -19,6 +19,7 @@ import type {
   PlanState,
   ProxmoxApplyAuthorizationRequest,
   ProxmoxDestroyAuthorizationRequest,
+  ProxmoxResetAuthorizationRequest,
   ProxmoxDestroyPlanOut,
   ProxmoxGuestAddressOut,
   ProxmoxGuestOut,
@@ -67,24 +68,48 @@ describe("three addresses stay three", () => {
 describe("operation_kind survives to the client", () => {
   it("is a required, enum-valued member of every recorded approval", () => {
     expectTypeOf<ApprovalOut["operation_kind"]>().toEqualTypeOf<ApprovalKind>();
-    // Not `string`. A four-member union is what makes an apply approval structurally unable to
-    // read as a destroy authorization once it has been taken out of the response that carried it.
+    // Not `string`. A closed union is what makes an apply approval structurally unable to read as
+    // a destroy authorization once it has been taken out of the response that carried it.
+    //
+    // SIX members, not four: SECP-P7-A gave RESET its own approval and authorization. A reset
+    // destroys every guest in the range and rebuilds it (`proxmox_reset.plan_reset` marks
+    // `ResetSubject.guests` as `recreated` — "Destroyed and rebuilt from the reviewed base
+    // image"), so it cannot ride on the apply authorization: approving the CREATION of guests
+    // would otherwise have authorized deleting the ones currently running.
     expectTypeOf<ApprovalKind>().toEqualTypeOf<
-      "plan_approval" | "apply_authorization" | "destroy_plan_approval" | "destroy_authorization"
+      | "plan_approval"
+      | "apply_authorization"
+      | "reset_plan_approval"
+      | "reset_authorization"
+      | "destroy_plan_approval"
+      | "destroy_authorization"
     >();
   });
 
-  it("keeps the apply and destroy authorization request bodies non-interchangeable", () => {
-    // `extra="forbid"` on both models plus disjoint required fields: neither body validates as the
-    // other, so posting an apply authorization to the destroy endpoint is a 422 and not a
-    // destroyed range. In TypeScript that shows up as mutual non-assignability.
+  it("keeps the three authorization request bodies mutually non-interchangeable", () => {
+    // `extra="forbid"` on every model plus disjoint required fields: no body validates as another,
+    // so posting an apply authorization to the destroy endpoint is a 422 and not a destroyed
+    // range. In TypeScript that shows up as mutual non-assignability — checked in both directions
+    // for all three families, because a one-way check passes for a body that merely has extra
+    // fields.
     expectTypeOf<ProxmoxApplyAuthorizationRequest>().toEqualTypeOf<{ plan_hash: string }>();
+    expectTypeOf<ProxmoxResetAuthorizationRequest>().toEqualTypeOf<{ reset_hash: string }>();
     expectTypeOf<ProxmoxDestroyAuthorizationRequest>().toEqualTypeOf<{ destroy_hash: string }>();
 
     const applyBody: ProxmoxApplyAuthorizationRequest = { plan_hash: "sha256:aaa" };
+    const resetBody: ProxmoxResetAuthorizationRequest = { reset_hash: "sha256:bbb" };
+    const destroyBody: ProxmoxDestroyAuthorizationRequest = { destroy_hash: "sha256:ccc" };
+
     // @ts-expect-error an apply authorization body is not a destroy authorization body
-    const destroyBody: ProxmoxDestroyAuthorizationRequest = applyBody;
-    expect(destroyBody).toBeDefined();
+    const applyAsDestroy: ProxmoxDestroyAuthorizationRequest = applyBody;
+    // @ts-expect-error an apply authorization body is not a reset authorization body
+    const applyAsReset: ProxmoxResetAuthorizationRequest = applyBody;
+    // @ts-expect-error a reset authorization body is not a destroy authorization body
+    const resetAsDestroy: ProxmoxDestroyAuthorizationRequest = resetBody;
+    // @ts-expect-error a destroy authorization body is not a reset authorization body
+    const destroyAsReset: ProxmoxResetAuthorizationRequest = destroyBody;
+
+    expect([applyAsDestroy, applyAsReset, resetAsDestroy, destroyAsReset]).toHaveLength(4);
   });
 });
 

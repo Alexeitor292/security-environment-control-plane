@@ -416,7 +416,9 @@ def test_an_apply_authorization_never_authorizes_a_destroy(session, principal):
     assert proxmox_lifecycle.destroy_plan_approval(session, instance) is None
     assert proxmox_lifecycle.destroy_authorization(session, instance) is None
     with pytest.raises(proxmox_lifecycle.ProxmoxApprovalMissingError):
-        proxmox_lifecycle.require_operation_authorized(session, instance, "destroy")
+        proxmox_lifecycle.require_operation_authorized(
+            session, instance, RangeOperationKind.destroy
+        )
 
 
 def test_a_destroy_authorization_never_authorizes_an_apply(session, principal):
@@ -430,7 +432,7 @@ def test_a_destroy_authorization_never_authorizes_an_apply(session, principal):
     )
     assert proxmox_lifecycle.apply_authorization(session, instance) is None
     with pytest.raises(proxmox_lifecycle.ProxmoxApprovalMissingError):
-        proxmox_lifecycle.require_operation_authorized(session, instance, "deploy")
+        proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.deploy)
 
 
 def test_the_plan_hash_is_not_accepted_as_a_destroy_hash(session, principal):
@@ -497,7 +499,7 @@ def test_approving_and_authorizing_create_no_operation(session, principal):
 def test_deploy_is_refused_without_an_apply_authorization(session, principal):
     instance = make_range(session, principal)
     with pytest.raises(proxmox_lifecycle.ProxmoxApprovalMissingError):
-        proxmox_lifecycle.require_operation_authorized(session, instance, "deploy")
+        proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.deploy)
 
 
 def test_deploy_is_permitted_once_apply_is_authorized(session, principal):
@@ -505,19 +507,21 @@ def test_deploy_is_permitted_once_apply_is_authorized(session, principal):
     compiled = proxmox_lifecycle.compile_plan(session, instance)
     proxmox_lifecycle.approve_plan(session, principal, instance.id, plan_hash=compiled.plan_hash)
     proxmox_lifecycle.authorize_apply(session, principal, instance.id, plan_hash=compiled.plan_hash)
-    proxmox_lifecycle.require_operation_authorized(session, instance, "deploy")  # no raise
+    # No raise is the assertion.
+    proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.deploy)
 
 
 def test_a_blocked_plan_cannot_enqueue_anything(session, principal):
     instance = make_range(session, principal, record_observation=False)
     with pytest.raises(proxmox_lifecycle.ProxmoxPlanBlockedError):
-        proxmox_lifecycle.require_operation_authorized(session, instance, "deploy")
+        proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.deploy)
 
 
 def test_the_docker_lifecycle_is_untouched(session, principal):
     """The gate applies to Proxmox ranges only; the local Docker lifecycle keeps its behaviour."""
     instance = ranges.create_range(session, principal, template_slug="web-breach-lab")
-    proxmox_lifecycle.require_operation_authorized(session, instance, "deploy")  # no raise
+    # No raise is the assertion.
+    proxmox_lifecycle.require_operation_authorized(session, instance, RangeOperationKind.deploy)
     _, operation = ranges.start_operation(
         session, principal, instance.id, RangeOperationKind.deploy
     )

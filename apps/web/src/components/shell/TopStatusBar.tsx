@@ -44,14 +44,16 @@ export function TopStatusBar({
         </span>
       </div>
       {capabilities && (
+        /* This chip used to read "provisioning enabled"/"provisioning disabled" from a single
+         * backend boolean that had been hardcoded false since before provisioning shipped. The
+         * backend now reports per-operation capability, so the chip states what this operator can
+         * actually do — and it counts rather than claiming, so it cannot go stale the same way. */
         <span className="shell-topbar__milestone mono">
-          {capabilities.milestone}
+          {`${capabilities.authorized_operations.length}/${capabilities.operations.length} operations`}
           <span className="shell-topbar__sep" aria-hidden>
             ·
           </span>
-          {capabilities.provisioning_enabled
-            ? "provisioning enabled"
-            : "provisioning disabled"}
+          {`discovery ${capabilities.discovery}`}
         </span>
       )}
     </header>

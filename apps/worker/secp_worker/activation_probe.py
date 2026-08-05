@@ -239,7 +239,13 @@ def _default_seals() -> dict[str, bool]:
         "generic_activation_subprocess_sealed": activation._B1A_SUBPROCESS_SEALED,
         "generic_executor_subprocess_sealed": process_executor._B1A_SUBPROCESS_SEALED,
         "plan_only_process_sealed": process_boundary._PLAN_ONLY_PROCESS_SEALED,
-        "real_provisioning_disabled": not providers.PROVISIONING_ENABLED,
+        # Reads the SEAL constant, not the API's capability surface. These were the same symbol
+        # until SECP-P7-A: `providers.PROVISIONING_ENABLED` served double duty as this seal input
+        # AND as the value `GET /providers/capabilities` reported to operators. The capability
+        # surface is now derived (`secp_api.provider_capabilities`); this stays a reviewed constant,
+        # with the same value it has always had, because it answers a different question — whether
+        # the worker's execution boundary is sealed, alongside the three seals above it.
+        "real_provisioning_disabled": providers.REAL_PROVISIONING_SEALED,
     }
 
 

@@ -239,10 +239,12 @@
         "type": "object"
       },
       "ApprovalKind": {
-        "description": "Which of the four authorization acts a recorded approval is.",
+        "description": "Which of the six authorization acts a recorded approval is.\n\nThree families — apply, reset, destroy — each with an approve step and an authorize step, each\nover a digest from its own hash domain. No member stands for more than one family, so a record\nread out of its response is still unambiguous about what was authorized.",
         "enum": [
           "plan_approval",
           "apply_authorization",
+          "reset_plan_approval",
+          "reset_authorization",
           "destroy_plan_approval",
           "destroy_authorization"
         ],
@@ -579,6 +581,29 @@
           "host_key_fingerprint"
         ],
         "title": "BootstrapCompleteRequest",
+        "type": "object"
+      },
+      "BootstrapOperationOut": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "description",
+          "timeout_seconds"
+        ],
+        "title": "BootstrapOperationOut",
         "type": "object"
       },
       "BootstrapScriptOut": {
@@ -948,6 +973,17 @@
         "title": "CandidatePlanResourceOut",
         "type": "object"
       },
+      "CapabilityState": {
+        "description": "Whether this build can do something, and whether this caller may.\n\n``supported_unauthorized`` and ``not_supported`` were the same value before, and they are the\ntwo an operator most needs to tell apart: one is fixed by granting a permission, the other\ncannot be fixed at all in this build.",
+        "enum": [
+          "not_supported",
+          "supported_unauthorized",
+          "supported_authorized",
+          "undetermined"
+        ],
+        "title": "CapabilityState",
+        "type": "string"
+      },
       "ChallengeOut": {
         "description": "NOTE: there is deliberately no flag field. Adding one would leak solutions.",
         "properties": {
@@ -1146,6 +1182,21 @@
         ],
         "title": "ChangeSetApprovalOut",
         "type": "object"
+      },
+      "CommandKind": {
+        "description": "Which operator act a durable command record is.\n\nEach member is its own act with its own permission, its own preconditions and its own request\nschema. There is deliberately no ``approve`` or ``execute`` member that could stand for either\nan apply or a destroy — see the module docstring. ``operation_kind`` on the wire is exactly one\nof these, never derived by a client from the path it called.",
+        "enum": [
+          "compile_topology",
+          "generate_plan",
+          "submit_plan_for_review",
+          "request_execution",
+          "request_reset",
+          "request_reconciliation",
+          "generate_destroy_plan",
+          "request_destroy_execution"
+        ],
+        "title": "CommandKind",
+        "type": "string"
       },
       "CompetitionCreate": {
         "properties": {
@@ -2418,6 +2469,59 @@
         "title": "EnvironmentPublicationRequest",
         "type": "object"
       },
+      "EvidenceReferenceOut": {
+        "description": "One pointer to evidence. A reference and a timestamp, never a payload.\n\n``present`` is false with ``reference: null`` when this class of evidence does not exist yet —\nwhich is a different fact from evidence that exists and could not be read, and both are\ndifferent from evidence that exists and is clean.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "present": {
+            "title": "Present",
+            "type": "boolean"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          }
+        },
+        "required": [
+          "kind",
+          "present"
+        ],
+        "title": "EvidenceReferenceOut",
+        "type": "object"
+      },
       "ExerciseCreate": {
         "properties": {
           "execution_target_id": {
@@ -2728,6 +2832,35 @@
         "title": "MarkRecoveryRequired",
         "type": "object"
       },
+      "MaterialRefOut": {
+        "description": "A REFERENCE to post-provisioning material. Never the material.\n\nThe reference names where something lives and on which channel it travels. Publishing the\nreference lets an operator reason about a stuck bootstrap; publishing the material would put\nit in a response, a log and a browser cache.",
+        "properties": {
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "scope",
+          "purpose",
+          "channel"
+        ],
+        "title": "MaterialRefOut",
+        "type": "object"
+      },
       "ObservationFreshness": {
         "description": "How much the recorded cluster observation can still be relied on.",
         "enum": [
@@ -2955,6 +3088,34 @@
           "isolation_profile"
         ],
         "title": "OnboardingOut",
+        "type": "object"
+      },
+      "OperationCapabilityOut": {
+        "description": "One operator verb and whether this caller can use it.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "required_permission": {
+            "title": "Required Permission",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CapabilityState"
+          }
+        },
+        "required": [
+          "operation",
+          "state",
+          "required_permission",
+          "detail"
+        ],
+        "title": "OperationCapabilityOut",
         "type": "object"
       },
       "OperationOut": {
@@ -4141,6 +4302,182 @@
         "title": "PrincipalOut",
         "type": "object"
       },
+      "ProviderCapabilitiesOut": {
+        "description": "Derived capability. No field here is a constant somebody chose.",
+        "properties": {
+          "authorized_operations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Authorized Operations",
+            "type": "array"
+          },
+          "discovery": {
+            "title": "Discovery",
+            "type": "string"
+          },
+          "discovery_detail": {
+            "title": "Discovery Detail",
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/OperationCapabilityOut"
+            },
+            "title": "Operations",
+            "type": "array"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderCapabilityOut"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "unauthorized_operations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unauthorized Operations",
+            "type": "array"
+          },
+          "unsupported_operations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unsupported Operations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "operations",
+          "providers",
+          "discovery",
+          "discovery_detail"
+        ],
+        "title": "ProviderCapabilitiesOut",
+        "type": "object"
+      },
+      "ProviderCapabilityOut": {
+        "description": "What one provider substrate can do in this build.",
+        "properties": {
+          "deployable": {
+            "title": "Deployable",
+            "type": "boolean"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "lifecycle_operations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Lifecycle Operations",
+            "type": "array"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "deployable",
+          "detail"
+        ],
+        "title": "ProviderCapabilityOut",
+        "type": "object"
+      },
+      "ProviderCompatibilityOut": {
+        "description": "How one scenario stands on one provider — including when the answer is \"it cannot run\".",
+        "properties": {
+          "blocked": {
+            "title": "Blocked",
+            "type": "boolean"
+          },
+          "blockers": {
+            "items": {
+              "$ref": "#/components/schemas/RequirementFindingOut"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "max_teams": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Teams"
+          },
+          "min_teams": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Teams"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/RequirementFindingOut"
+            },
+            "title": "Requirements",
+            "type": "array"
+          },
+          "support": {
+            "$ref": "#/components/schemas/ProviderSupport"
+          },
+          "template_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Slug"
+          },
+          "unmet_capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/RequirementFindingOut"
+            },
+            "title": "Unmet Capabilities",
+            "type": "array"
+          }
+        },
+        "required": [
+          "provider",
+          "support",
+          "blocked",
+          "requirements",
+          "blockers",
+          "unmet_capabilities"
+        ],
+        "title": "ProviderCompatibilityOut",
+        "type": "object"
+      },
+      "ProviderSupport": {
+        "description": "Whether a scenario can run on a provider at all — a property of the shipped catalog.",
+        "enum": [
+          "supported",
+          "unsupported"
+        ],
+        "title": "ProviderSupport",
+        "type": "string"
+      },
       "ProvisioningReadinessOut": {
         "additionalProperties": false,
         "description": "The derived combined current-readiness view. It is NOT plan approval and launches nothing.",
@@ -4417,6 +4754,165 @@
         "title": "ProxmoxApplyAuthorizationRequest",
         "type": "object"
       },
+      "ProxmoxCommandOut": {
+        "description": "One durable command record, as it was accepted.",
+        "properties": {
+          "accepted_version": {
+            "title": "Accepted Version",
+            "type": "integer"
+          },
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "cluster_fingerprint": {
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "deduplicated": {
+            "default": false,
+            "title": "Deduplicated",
+            "type": "boolean"
+          },
+          "enqueued": {
+            "default": false,
+            "title": "Enqueued",
+            "type": "boolean"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "not_enqueued_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RefusalCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operation_generation": {
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
+          },
+          "operation_kind": {
+            "$ref": "#/components/schemas/CommandKind"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "range_id": {
+            "format": "uuid",
+            "title": "Range Id",
+            "type": "string"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "subject_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Hash"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_kind",
+          "range_id",
+          "organization_id",
+          "idempotency_key",
+          "accepted_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint",
+          "at",
+          "sequence"
+        ],
+        "title": "ProxmoxCommandOut",
+        "type": "object"
+      },
+      "ProxmoxCompileTopologyRequest": {
+        "additionalProperties": false,
+        "description": "Recompile the topology from the observation of record.\n\nDeliberately carries NO hash: this is the act that produces one. Requiring the caller to name\nthe hash they expect would make it impossible to refresh after the observation changed, which\nis the only case in which refreshing is interesting.",
+        "properties": {
+          "cluster_fingerprint": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_generation": {
+            "minimum": 0.0,
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "target_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint"
+        ],
+        "title": "ProxmoxCompileTopologyRequest",
+        "type": "object"
+      },
       "ProxmoxDestroyAuthorizationOut": {
         "description": "Whether destroy is authorized. Never satisfied by an apply authorization.",
         "properties": {
@@ -4493,6 +4989,70 @@
         "title": "ProxmoxDestroyAuthorizationRequest",
         "type": "object"
       },
+      "ProxmoxDestroyExecutionRequest": {
+        "additionalProperties": false,
+        "description": "Request execution of the authorized destroy. ``destroy_hash`` ONLY.",
+        "properties": {
+          "cluster_fingerprint": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "destroy_hash": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Destroy Hash",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_generation": {
+            "minimum": 0.0,
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "release_digest": {
+            "maxLength": 80,
+            "minLength": 8,
+            "title": "Release Digest",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          },
+          "worker_installation_id": {
+            "maxLength": 64,
+            "minLength": 8,
+            "title": "Worker Installation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_installation_id",
+          "release_digest",
+          "idempotency_key",
+          "expected_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint",
+          "destroy_hash"
+        ],
+        "title": "ProxmoxDestroyExecutionRequest",
+        "type": "object"
+      },
       "ProxmoxDestroyPlanApprovalRequest": {
         "additionalProperties": false,
         "description": "Approve the exact destroy plan. Deliberately carries ``destroy_hash`` ONLY.",
@@ -4508,6 +5068,56 @@
           "destroy_hash"
         ],
         "title": "ProxmoxDestroyPlanApprovalRequest",
+        "type": "object"
+      },
+      "ProxmoxDestroyPlanGenerateRequest": {
+        "additionalProperties": false,
+        "description": "Materialise the deletion scope. ``destroy_hash`` ONLY.\n\nAn apply body cannot validate here: ``plan_hash`` is rejected as an unknown field and the\nrequired ``destroy_hash`` is absent.",
+        "properties": {
+          "cluster_fingerprint": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "destroy_hash": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Destroy Hash",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_generation": {
+            "minimum": 0.0,
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "target_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint",
+          "destroy_hash"
+        ],
+        "title": "ProxmoxDestroyPlanGenerateRequest",
         "type": "object"
       },
       "ProxmoxDestroyPlanOut": {
@@ -4588,6 +5198,151 @@
         "title": "ProxmoxDestroyPlanOut",
         "type": "object"
       },
+      "ProxmoxEvidenceOut": {
+        "description": "Every evidence reference this range has, in one place.\n\nReferences only. The verification report, the residue proof and the discovery snapshot are each\nreachable through their own endpoints; this says WHICH of them exist and what identifies them,\nso an operator assembling a record for an event knows what they have before they fetch it.",
+        "properties": {
+          "range_id": {
+            "format": "uuid",
+            "title": "Range Id",
+            "type": "string"
+          },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceReferenceOut"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "teardown_evidence_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Teardown Evidence Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "range_id",
+          "references"
+        ],
+        "title": "ProxmoxEvidenceOut",
+        "type": "object"
+      },
+      "ProxmoxExecutionRequest": {
+        "additionalProperties": false,
+        "description": "Request execution of the authorized apply. ``plan_hash`` ONLY — never ``destroy_hash``.",
+        "properties": {
+          "cluster_fingerprint": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_generation": {
+            "minimum": 0.0,
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "plan_hash": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Plan Hash",
+            "type": "string"
+          },
+          "release_digest": {
+            "maxLength": 80,
+            "minLength": 8,
+            "title": "Release Digest",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          },
+          "worker_installation_id": {
+            "maxLength": 64,
+            "minLength": 8,
+            "title": "Worker Installation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_installation_id",
+          "release_digest",
+          "idempotency_key",
+          "expected_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint",
+          "plan_hash"
+        ],
+        "title": "ProxmoxExecutionRequest",
+        "type": "object"
+      },
+      "ProxmoxGeneratePlanRequest": {
+        "additionalProperties": false,
+        "description": "Materialise the compiled plan as a durable record. Carries ``plan_hash`` ONLY.",
+        "properties": {
+          "cluster_fingerprint": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_generation": {
+            "minimum": 0.0,
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "plan_hash": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Plan Hash",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint",
+          "plan_hash"
+        ],
+        "title": "ProxmoxGeneratePlanRequest",
+        "type": "object"
+      },
       "ProxmoxGuestAddressOut": {
         "description": "A guest's addresses, kept strictly separate — THREE concepts, never one.\n\nThis repository has already paid for conflating them. A worker probed the address the range\nhad *published* — a loopback address, from inside a container where the port was not — so\nreadiness could never be observed and the range hung. #103 fixed it by separating the two, and\n:class:`~secp_api.range_providers.proxmox_model.GuestAddress` refuses to fall back from one to\nthe other for the same reason: a readiness check that quietly probes the published address\nproves the address was published, not that the guest is reachable.\n\nThe wire has to keep them apart too, or a client re-derives the same wrong conclusion:\n\n``published_address``  what a scoreboard or a participant is told to use. NOT NECESSARILY\n                       REACHABLE from the worker.\n``probe_address``      what readiness verification actually connects to. ``None`` means no\n                       distinct probe address was assigned — never \"use the published one\".\n``observed_address``   what the provider actually reported for this guest after apply.\n                       ``None`` means not observed, which is not an address and not a failure.",
         "properties": {
@@ -4632,6 +5387,109 @@
           "probe_is_distinct"
         ],
         "title": "ProxmoxGuestAddressOut",
+        "type": "object"
+      },
+      "ProxmoxGuestBootstrapOut": {
+        "description": "One guest's bootstrap contract — the WORKER's view, kept apart from the topology's.\n\n``probe_address`` here is what the worker connects to in order to check this guest came up. It\nis NOT the topology's ``published_address`` (what a participant is told to use) and NOT the\ntopology's own ``probe_address``, and there is no fallback between any of them. A readiness\ncheck that quietly probes the published address proves the address was published.\n\n``report_address`` is a fourth thing again: where the guest reports its own bootstrap result.",
+        "properties": {
+          "attestation_ref": {
+            "$ref": "#/components/schemas/MaterialRefOut"
+          },
+          "deadline_seconds": {
+            "title": "Deadline Seconds",
+            "type": "integer"
+          },
+          "guest_ref": {
+            "title": "Guest Ref",
+            "type": "string"
+          },
+          "image_digest": {
+            "title": "Image Digest",
+            "type": "string"
+          },
+          "observed": {
+            "default": false,
+            "title": "Observed",
+            "type": "boolean"
+          },
+          "observed_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Address"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/BootstrapOperationOut"
+            },
+            "title": "Operations",
+            "type": "array"
+          },
+          "probe_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probe Address"
+          },
+          "probe_port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probe Port"
+          },
+          "report_address": {
+            "title": "Report Address",
+            "type": "string"
+          },
+          "report_port": {
+            "title": "Report Port",
+            "type": "integer"
+          },
+          "team_ref": {
+            "title": "Team Ref",
+            "type": "string"
+          },
+          "vmid": {
+            "title": "Vmid",
+            "type": "integer"
+          },
+          "workload_key": {
+            "title": "Workload Key",
+            "type": "string"
+          },
+          "workload_version": {
+            "title": "Workload Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "guest_ref",
+          "vmid",
+          "team_ref",
+          "workload_key",
+          "workload_version",
+          "image_digest",
+          "attestation_ref",
+          "report_address",
+          "report_port",
+          "deadline_seconds"
+        ],
+        "title": "ProxmoxGuestBootstrapOut",
         "type": "object"
       },
       "ProxmoxGuestOut": {
@@ -5254,6 +6112,253 @@
         "title": "ProxmoxReadinessOut",
         "type": "object"
       },
+      "ProxmoxReconciliationOut": {
+        "description": "Whether reconciliation was asked for, and whether anything has answered.\n\nTWO independent facts, and conflating them is the failure this shape exists to prevent. A\nrequest being recorded says an operator asked; it says nothing about a worker having looked.\n``state`` is the OBSERVATION and stays ``undetermined`` until a worker records one.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "enqueued": {
+            "default": false,
+            "title": "Enqueued",
+            "type": "boolean"
+          },
+          "findings": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Findings"
+          },
+          "not_enqueued_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Not Enqueued Reason"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "requested": {
+            "title": "Requested",
+            "type": "boolean"
+          },
+          "requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested At"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RecordedStageState"
+          }
+        },
+        "required": [
+          "state",
+          "requested"
+        ],
+        "title": "ProxmoxReconciliationOut",
+        "type": "object"
+      },
+      "ProxmoxReconciliationRequest": {
+        "additionalProperties": false,
+        "description": "Request reconciliation of the deployed range against its desired state.\n\nCarries no hash: reconciliation compares what EXISTS against what the current plan describes,\nso pinning it to a document the operator read would be pinning the wrong side of the comparison.",
+        "properties": {
+          "cluster_fingerprint": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_generation": {
+            "minimum": 0.0,
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "target_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint"
+        ],
+        "title": "ProxmoxReconciliationRequest",
+        "type": "object"
+      },
+      "ProxmoxResetAuthorizationOut": {
+        "description": "Whether a reset is authorized. Never satisfied by an apply or a destroy authorization.\n\n``reset_scope`` is published because that is what is being approved: the exact guests that will\nbe DESTROYED and rebuilt. Approving a reset without seeing them would be approving a deletion\nsight unseen.",
+        "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "authorization": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked Reason"
+          },
+          "preserved_subjects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Preserved Subjects",
+            "type": "array"
+          },
+          "reset_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reset Hash"
+          },
+          "reset_plan_state": {
+            "$ref": "#/components/schemas/PlanState"
+          },
+          "reset_scope": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ProxmoxResetScopeEntryOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reset Scope"
+          },
+          "reset_scope_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reset Scope Size"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AuthorizationState"
+          }
+        },
+        "required": [
+          "state",
+          "reset_plan_state"
+        ],
+        "title": "ProxmoxResetAuthorizationOut",
+        "type": "object"
+      },
+      "ProxmoxResetAuthorizationRequest": {
+        "additionalProperties": false,
+        "description": "Authorize a reset of an already-approved reset scope. ``reset_hash`` ONLY.",
+        "properties": {
+          "reset_hash": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Reset Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reset_hash"
+        ],
+        "title": "ProxmoxResetAuthorizationRequest",
+        "type": "object"
+      },
       "ProxmoxResetDispositionsOut": {
         "description": "What a reset did to each guest, as the worker observed it.\n\n``state`` is ``undetermined`` when no reset has been recorded — distinct from a reset that ran\nand reported every guest as ``recovery_required``.",
         "properties": {
@@ -5303,6 +6408,256 @@
           "state"
         ],
         "title": "ProxmoxResetDispositionsOut",
+        "type": "object"
+      },
+      "ProxmoxResetGuestOut": {
+        "description": "What a reset WOULD do to one guest.",
+        "properties": {
+          "guest_ref": {
+            "title": "Guest Ref",
+            "type": "string"
+          },
+          "intended_action": {
+            "title": "Intended Action",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "node_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Name"
+          },
+          "team_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Ref"
+          },
+          "vmid": {
+            "title": "Vmid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "guest_ref",
+          "name",
+          "vmid",
+          "intended_action"
+        ],
+        "title": "ProxmoxResetGuestOut",
+        "type": "object"
+      },
+      "ProxmoxResetPlanApprovalRequest": {
+        "additionalProperties": false,
+        "description": "Approve the exact reset scope. Deliberately carries ``reset_hash`` ONLY.\n\nA reset DESTROYS every guest in the range and rebuilds it, so it is approved by naming the\nguests that will be destroyed — not by naming a creation plan. The field, the hash domain and\nthe required permission all differ from the apply family's, so an apply body cannot be posted\nhere and be accepted.",
+        "properties": {
+          "reset_hash": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Reset Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reset_hash"
+        ],
+        "title": "ProxmoxResetPlanApprovalRequest",
+        "type": "object"
+      },
+      "ProxmoxResetPlanOut": {
+        "description": "What a reset would do — NOT what one did.\n\nDeliberately a different endpoint and a different shape from\n``/proxmox/reset-dispositions``, which reports what the worker OBSERVED a reset doing. A plan\nand an observation are different claims and the moment they share a surface a client starts\nreading one as the other.",
+        "properties": {
+          "blocked_reasons": {
+            "items": {
+              "$ref": "#/components/schemas/BlockedReasonOut"
+            },
+            "title": "Blocked Reasons",
+            "type": "array"
+          },
+          "guests": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ProxmoxResetGuestOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guests"
+          },
+          "last_observed": {
+            "$ref": "#/components/schemas/RecordedStageState"
+          },
+          "plan_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Hash"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PlanState"
+          }
+        },
+        "required": [
+          "state",
+          "last_observed"
+        ],
+        "title": "ProxmoxResetPlanOut",
+        "type": "object"
+      },
+      "ProxmoxResetRequest": {
+        "additionalProperties": false,
+        "description": "Request a reset of the authorized reset scope. ``reset_hash`` ONLY.\n\nNot ``plan_hash``. A reset DESTROYS every guest in the range and rebuilds it, so it is\nauthorized by naming the guests that will be destroyed — a third hash domain, distinct from\nboth the creation plan and the destroy deletion set (a reset preserves the whole network).",
+        "properties": {
+          "cluster_fingerprint": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_generation": {
+            "minimum": 0.0,
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "release_digest": {
+            "maxLength": 80,
+            "minLength": 8,
+            "title": "Release Digest",
+            "type": "string"
+          },
+          "reset_hash": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Reset Hash",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          },
+          "worker_installation_id": {
+            "maxLength": 64,
+            "minLength": 8,
+            "title": "Worker Installation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_installation_id",
+          "release_digest",
+          "idempotency_key",
+          "expected_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint",
+          "reset_hash"
+        ],
+        "title": "ProxmoxResetRequest",
+        "type": "object"
+      },
+      "ProxmoxResetScopeEntryOut": {
+        "description": "One guest a reset would DESTROY and rebuild.\n\n``template_ref`` is carried because a reset rebuilds FROM it: if the reviewed base image\nchanged, the guest that comes back is not the guest that was approved, and an operator\napproving the reset should be able to see which image each guest returns from.",
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "template_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Ref"
+          },
+          "vmid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vmid"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "ProxmoxResetScopeEntryOut",
         "type": "object"
       },
       "ProxmoxResidueOut": {
@@ -5434,6 +6789,56 @@
           "state"
         ],
         "title": "ProxmoxResidueOut",
+        "type": "object"
+      },
+      "ProxmoxSubmitPlanRequest": {
+        "additionalProperties": false,
+        "description": "Submit an exact generated plan for review. APPROVES NOTHING. ``plan_hash`` ONLY.",
+        "properties": {
+          "cluster_fingerprint": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Cluster Fingerprint",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation_generation": {
+            "minimum": 0.0,
+            "title": "Operation Generation",
+            "type": "integer"
+          },
+          "plan_hash": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Plan Hash",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_version",
+          "operation_generation",
+          "target_id",
+          "cluster_fingerprint",
+          "plan_hash"
+        ],
+        "title": "ProxmoxSubmitPlanRequest",
         "type": "object"
       },
       "ProxmoxTopologyOut": {
@@ -5630,6 +7035,219 @@
           "state"
         ],
         "title": "ProxmoxVerificationOut",
+        "type": "object"
+      },
+      "ProxmoxWorkerOut": {
+        "description": "The enrolled worker bound to this range's organization and site, and whether it may execute.\n\n``eligible_for_execution`` is DERIVED from the fields below it, in one place, so the flag and\nthe reasons can never disagree. It is ``false`` with named blockers rather than the endpoint\n404ing or omitting the worker: \"no worker is enrolled\" is an answer an operator needs, and it is\nnot the same answer as \"a worker is enrolled but is not healthy\".",
+        "properties": {
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "contract_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Version"
+          },
+          "controller_installation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Controller Installation Id"
+          },
+          "deployment_site_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Site Label"
+          },
+          "eligible_for_execution": {
+            "title": "Eligible For Execution",
+            "type": "boolean"
+          },
+          "enrolled": {
+            "title": "Enrolled",
+            "type": "boolean"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "refusal_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refusal Reason"
+          },
+          "release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Digest"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "worker_installation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker Installation Id"
+          },
+          "worker_key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker Key Id"
+          }
+        },
+        "required": [
+          "enrolled",
+          "eligible_for_execution"
+        ],
+        "title": "ProxmoxWorkerOut",
+        "type": "object"
+      },
+      "ProxmoxWorkloadOut": {
+        "description": "The workload and bootstrap plan, and what has been observed of it.",
+        "properties": {
+          "blocked_reasons": {
+            "items": {
+              "$ref": "#/components/schemas/BlockedReasonOut"
+            },
+            "title": "Blocked Reasons",
+            "type": "array"
+          },
+          "challenge_keys": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Challenge Keys"
+          },
+          "guests": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ProxmoxGuestBootstrapOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guests"
+          },
+          "materials": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MaterialRefOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Materials"
+          },
+          "plan_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Hash"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PlanState"
+          },
+          "verification": {
+            "$ref": "#/components/schemas/RecordedStageState"
+          }
+        },
+        "required": [
+          "state",
+          "verification"
+        ],
+        "title": "ProxmoxWorkloadOut",
         "type": "object"
       },
       "QueuePreflight": {
@@ -6681,6 +8299,43 @@
         "title": "RecordedStageState",
         "type": "string"
       },
+      "RefusalCode": {
+        "description": "Stable, machine-readable reasons a command is refused.\n\nA client branches on these; the message beside them is for a human and may change. Every member\nmust have a test that provokes exactly it —\n``test_proxmox_operator_commands.py::test_every_refusal_code_has_a_test_that_provokes_it``\nenumerates this enum FROM THE LIVE MODULE and fails on any member no test covers. It is\nenumerated rather than listed because a hand-maintained list written by the same author cannot\nnotice a code that author forgot.",
+        "enum": [
+          "range_not_proxmox",
+          "target_mismatch",
+          "cluster_fingerprint_mismatch",
+          "ownership_scope_mismatch",
+          "plan_blocked",
+          "observation_absent",
+          "observation_stale",
+          "plan_not_generated",
+          "plan_not_submitted",
+          "plan_not_approved",
+          "apply_not_authorized",
+          "reset_plan_not_approved",
+          "reset_not_authorized",
+          "destroy_plan_not_generated",
+          "destroy_plan_not_approved",
+          "destroy_not_authorized",
+          "plan_identity_mismatch",
+          "destroy_plan_identity_mismatch",
+          "reset_plan_identity_mismatch",
+          "desired_state_changed",
+          "allocation_changed",
+          "version_conflict",
+          "operation_generation_mismatch",
+          "idempotency_key_reused",
+          "operation_in_flight",
+          "lifecycle_state_invalid",
+          "worker_mismatch",
+          "release_mismatch",
+          "worker_not_healthy",
+          "reconciliation_consumer_unavailable"
+        ],
+        "title": "RefusalCode",
+        "type": "string"
+      },
       "RegisterWorkerIdentity": {
         "additionalProperties": false,
         "properties": {
@@ -6871,6 +8526,64 @@
         ],
         "title": "RemoteStateReadinessOut",
         "type": "object"
+      },
+      "RequirementFindingOut": {
+        "description": "One requirement for one scenario on one provider.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RequirementKind"
+          },
+          "reason_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RequirementStatus"
+          }
+        },
+        "required": [
+          "kind",
+          "status",
+          "detail"
+        ],
+        "title": "RequirementFindingOut",
+        "type": "object"
+      },
+      "RequirementKind": {
+        "description": "The requirement classes the catalog reports for every scenario/provider pair.\n\nEvery member is reported for every pair — a requirement that does not apply to a provider is\nreported ``satisfied`` with a detail saying why it does not apply, rather than being omitted.\nAn omitted requirement is indistinguishable from a requirement nobody thought about.",
+        "enum": [
+          "source_template",
+          "network",
+          "storage",
+          "team_count",
+          "scoring",
+          "telemetry",
+          "controlled_egress"
+        ],
+        "title": "RequirementKind",
+        "type": "string"
+      },
+      "RequirementStatus": {
+        "description": "Whether one requirement is met. FOUR values, and the last two are the load-bearing ones.\n\nTwo of these mean \"not satisfied\" and they are deliberately not one member, because they lead\nan operator to opposite actions. ``unsatisfied``/``undetermined`` mean *go and fix or check\nsomething, then this scenario can run here*. ``not_provided`` means *this substrate will never\ndo that; deploy anyway if you do not need it*. Folding them together would either mark a\nperfectly deployable laptop lab as blocked, or — far worse in the other direction — mark a\nmissing capability as an acceptable gap on a substrate where it is a hard requirement.",
+        "enum": [
+          "satisfied",
+          "unsatisfied",
+          "undetermined",
+          "not_provided"
+        ],
+        "title": "RequirementStatus",
+        "type": "string"
       },
       "ReservationOut": {
         "properties": {
@@ -7271,6 +8984,62 @@
           }
         },
         "title": "RevokePlanSecretAuthorizationIn",
+        "type": "object"
+      },
+      "ScenarioOut": {
+        "description": "One lab, listed ONCE, with every provider it can run on.\n\nThe Web Breach Lab appears here a single time carrying two provider variants, not twice as two\ntemplates. The components and challenges are the shared catalog definitions both variants are\nbuilt from, so the substrate changes and the content does not.",
+        "properties": {
+          "blocked_everywhere": {
+            "title": "Blocked Everywhere",
+            "type": "boolean"
+          },
+          "challenge_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Challenge Keys",
+            "type": "array"
+          },
+          "component_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Component Keys",
+            "type": "array"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderCompatibilityOut"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "total_points": {
+            "title": "Total Points",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "summary",
+          "providers",
+          "total_points",
+          "blocked_everywhere"
+        ],
+        "title": "ScenarioOut",
         "type": "object"
       },
       "ScoreboardEntryOut": {
@@ -13730,16 +15499,14 @@
     },
     "/api/v1/providers/capabilities": {
       "get": {
-        "description": "Tells the UI that provisioning is NOT enabled in SECP-002A.",
+        "description": "What this build can actually do, derived from the live modules that implement it.\n\nThis endpoint used to return a hardcoded ``provisioning_enabled: False`` with the note\n\"Proxmox provisioning is deferred to SECP-002B\", and a docstring saying its purpose was to tell\nthe UI provisioning was not enabled. It had been false for six merges: #105-#110 shipped\ndesired-state compilation, plan generation, apply authorization, observed verification, destroy\nauthorization and the residue proof.\n\nA capability endpoint that reads a constant is a restatement — it cannot notice the capability\nchanging, which is the one thing it exists to do. Every value here is now derived, and\n``supported_unauthorized`` is distinguished from ``not_supported`` because the old single flag\nconflated them (along with \"not for this target\"), and they call for different actions.",
         "operationId": "provider_capabilities_api_v1_providers_capabilities_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Provider Capabilities Api V1 Providers Capabilities Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ProviderCapabilitiesOut"
                 }
               }
             },
@@ -14547,6 +16314,84 @@
           }
         ],
         "summary": "Abandon Range Operation",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/range-scenarios": {
+      "get": {
+        "description": "Every shipped scenario ONCE, with every provider it can run on.\n\nThis is the provider-compatibility view of the same catalog ``/range-templates`` lists. The\ntemplates endpoint is unchanged and still lists concrete deployable definitions — three of them,\ntwo of which are the Web Breach Lab on two substrates. Here that lab appears a single time with\ntwo provider variants, because an operator choosing a scenario is choosing a lab and then a\nsubstrate, not choosing between two labs.\n\nA scenario that cannot run on a provider is RETURNED, marked ``blocked``, with its blockers\nnamed. It is never omitted and never marked eligible. The substrate-dependent Proxmox\nrequirements are ``undetermined`` here — this endpoint names no range, so no cluster observation\nis in scope and nothing has been checked. ``GET /ranges/{id}/scenario`` answers them against the\nobservation actually recorded for that range.",
+        "operationId": "list_range_scenarios_api_v1_range_scenarios_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ScenarioOut"
+                  },
+                  "title": "Response List Range Scenarios Api V1 Range Scenarios Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Range Scenarios",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/range-scenarios/{key}": {
+      "get": {
+        "operationId": "get_range_scenario_api_v1_range_scenarios__key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Range Scenario",
         "tags": [
           "ranges"
         ]
@@ -15363,6 +17208,59 @@
         ]
       }
     },
+    "/api/v1/ranges/{range_id}/proxmox/commands": {
+      "get": {
+        "description": "The most recent record of each command kind for this range — the audit read.\n\nOne row per kind rather than the full history, because this answers \"where is this range in the\noperator workflow\". The complete, ordered history is already published by\n``GET /ranges/{id}/events``, which is the same log these are folded from.",
+        "operationId": "list_proxmox_commands_api_v1_ranges__range_id__proxmox_commands_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProxmoxCommandOut"
+                  },
+                  "title": "Response List Proxmox Commands Api V1 Ranges  Range Id  Proxmox Commands Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Proxmox Commands",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
     "/api/v1/ranges/{range_id}/proxmox/destroy-authorization": {
       "get": {
         "description": "Whether destroy is authorized. An apply authorization never satisfies this.",
@@ -15464,6 +17362,65 @@
           }
         ],
         "summary": "Authorize Proxmox Destroy",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/destroy-execution-request": {
+      "post": {
+        "description": "Request execution of the AUTHORIZED destroy. DESTROYS NOTHING HERE.\n\nStructurally incapable of being satisfied by anything from the apply family: its own path, its\nown required field, its own hash domain, its own generation record, its own approval, its own\nauthorization and its own permission. There is no apply artifact that reaches any of them.",
+        "operationId": "request_proxmox_destroy_execution_api_v1_ranges__range_id__proxmox_destroy_execution_request_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxDestroyExecutionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxCommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Request Proxmox Destroy Execution",
         "tags": [
           "ranges"
         ]
@@ -15572,6 +17529,173 @@
           }
         ],
         "summary": "Approve Proxmox Destroy Plan",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/destroy-plan-generation": {
+      "post": {
+        "description": "Materialise the deletion scope as its own durable record. DESTROYS NOTHING.\n\nTakes ``destroy_hash`` and requires ``exercise:destroy``. Holding ``exercise:apply`` does not\nlet you enumerate a deletion, and an apply body does not validate against this schema.",
+        "operationId": "generate_proxmox_destroy_plan_api_v1_ranges__range_id__proxmox_destroy_plan_generation_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxDestroyPlanGenerateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxCommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Generate Proxmox Destroy Plan",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/evidence": {
+      "get": {
+        "description": "Which evidence exists for this range and what identifies it. REFERENCES, never payloads.\n\nEvery class is listed whether or not it exists. Omitting the absent ones would make \"we have no\nresidue proof\" indistinguishable from \"nobody asked about residue\".",
+        "operationId": "get_proxmox_evidence_api_v1_ranges__range_id__proxmox_evidence_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxEvidenceOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Proxmox Evidence",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/execution-request": {
+      "post": {
+        "description": "Request execution of the AUTHORIZED apply. APPLIES NOTHING HERE.\n\nRequires the whole chain, each link refusing with its own stable code: generated, submitted,\napproved by hash, and apply authorized against that same hash. ``202`` because what it produced\nis a queued operation, not a finished apply.",
+        "operationId": "request_proxmox_execution_api_v1_ranges__range_id__proxmox_execution_request_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxExecutionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxCommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Request Proxmox Execution",
         "tags": [
           "ranges"
         ]
@@ -15783,6 +17907,124 @@
         ]
       }
     },
+    "/api/v1/ranges/{range_id}/proxmox/plan-generation": {
+      "post": {
+        "description": "Materialise the compiled plan as a durable, hash-identified record. STARTS NOTHING.",
+        "operationId": "generate_proxmox_plan_api_v1_ranges__range_id__proxmox_plan_generation_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxGeneratePlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxCommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Generate Proxmox Plan",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/plan-review-submission": {
+      "post": {
+        "description": "Put an exact generated plan in front of a reviewer. APPROVES NOTHING.\n\nA separate act from approval and a separate permission (``plan:approve`` here,\n``exercise:apply`` to approve). Submitting says \"this is ready to be looked at\"; approving says\n\"I looked at it and it is right\". Collapsing them lets whoever prepared a plan sign it off.",
+        "operationId": "submit_proxmox_plan_for_review_api_v1_ranges__range_id__proxmox_plan_review_submission_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxSubmitPlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxCommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Submit Proxmox Plan For Review",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
     "/api/v1/ranges/{range_id}/proxmox/readiness": {
       "get": {
         "description": "Whether the PLAN would constitute a runnable two-team competition.\n\nSays nothing about a deployed range — for that, read the verification report.",
@@ -15832,6 +18074,220 @@
         ]
       }
     },
+    "/api/v1/ranges/{range_id}/proxmox/reconciliation": {
+      "get": {
+        "description": "Whether reconciliation was asked for, and whether anything has answered.\n\nTwo independent facts. ``requested`` says an operator asked; ``state`` says whether a worker\nrecorded an observation, and stays ``undetermined`` until one does. Neither implies the other.",
+        "operationId": "get_proxmox_reconciliation_api_v1_ranges__range_id__proxmox_reconciliation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxReconciliationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Proxmox Reconciliation",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/reconciliation-request": {
+      "post": {
+        "description": "Request reconciliation of the deployed range against its desired state.\n\n``201`` and not ``202``, because ``202`` would claim the work was accepted for processing and\nnothing has taken it: the response carries ``enqueued: false`` with\n``not_enqueued_reason: reconciliation_consumer_unavailable``. The intent is durable and\nauditable; a worker picking it up is a separate, later fact. See\n:func:`secp_api.services.proxmox_commands.request_reconciliation` for why enqueueing it as a\nrange operation would run a deploy.",
+        "operationId": "request_proxmox_reconciliation_api_v1_ranges__range_id__proxmox_reconciliation_request_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxReconciliationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxCommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Request Proxmox Reconciliation",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/reset-authorization": {
+      "get": {
+        "description": "Whether a reset is authorized, and exactly which guests it would DESTROY.\n\nNeither an apply nor a destroy authorization satisfies this. The scope is published because\nthat is what is being approved: approving a reset without seeing the guests that will be\ndeleted would be approving a deletion sight unseen.",
+        "operationId": "get_proxmox_reset_authorization_api_v1_ranges__range_id__proxmox_reset_authorization_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxResetAuthorizationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Proxmox Reset Authorization",
+        "tags": [
+          "ranges"
+        ]
+      },
+      "post": {
+        "description": "Authorize a reset of an already-approved reset scope. ENQUEUES NOTHING, RESETS NOTHING.\n\nStructurally distinct from the apply and destroy authorizations at every level: its own path,\nits own required field, its own hash domain, its own event kind and its own permission. There\nis no body that satisfies more than one of the three.",
+        "operationId": "authorize_proxmox_reset_api_v1_ranges__range_id__proxmox_reset_authorization_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxResetAuthorizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxResetAuthorizationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Authorize Proxmox Reset",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
     "/api/v1/ranges/{range_id}/proxmox/reset-dispositions": {
       "get": {
         "description": "What a reset did to each guest, as the worker observed it.\n\n``undetermined`` (no reset recorded) is distinct from a reset that ran and reported guests as\n``recovery_required``.",
@@ -15876,6 +18332,173 @@
           }
         ],
         "summary": "Get Proxmox Reset Dispositions",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/reset-plan": {
+      "get": {
+        "description": "What a reset WOULD do to each guest.\n\nA different endpoint and a different shape from ``/proxmox/reset-dispositions``, which reports\nwhat the worker OBSERVED a reset doing. A plan and an observation are different claims, and the\nmoment they share a surface a client starts reading one as the other.",
+        "operationId": "get_proxmox_reset_plan_api_v1_ranges__range_id__proxmox_reset_plan_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxResetPlanOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Proxmox Reset Plan",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/reset-plan-approval": {
+      "post": {
+        "description": "Approve the exact reset scope, by its own hash. STARTS NOTHING.\n\nTakes ``reset_hash`` and rejects unknown fields, so neither an apply nor a destroy body\nvalidates here. Requires ``exercise:reset``.",
+        "operationId": "approve_proxmox_reset_plan_api_v1_ranges__range_id__proxmox_reset_plan_approval_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxResetPlanApprovalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxResetAuthorizationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Approve Proxmox Reset Plan",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/reset-request": {
+      "post": {
+        "description": "Request a reset of the authorized reset scope. RESETS NOTHING HERE.\n\nGated on the RESET authorization, not the apply one. A reset DESTROYS every guest in the range\nand rebuilds it — ``proxmox_reset.plan_reset`` gives ``ResetSubject.guests`` the disposition\n``recreated``, defined there as \"Destroyed and rebuilt from the reviewed base image\" — so an\napproval to create those guests does not authorize deleting the ones currently running.",
+        "operationId": "request_proxmox_reset_api_v1_ranges__range_id__proxmox_reset_request_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxCommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Request Proxmox Reset",
         "tags": [
           "ranges"
         ]
@@ -15979,6 +18602,65 @@
         ]
       }
     },
+    "/api/v1/ranges/{range_id}/proxmox/topology-compilation": {
+      "post": {
+        "description": "Recompile the topology from the observation of record. CONTACTS NOTHING.\n\n\"Refresh\" means recompile against the newest observation the WORKER recorded. This process\ncannot go and look at a cluster, and an observation the control plane invented would be\nindistinguishable downstream from one discovery proved — which is the assumption the entire\ncompiler safety argument rests on not being made.",
+        "operationId": "compile_proxmox_topology_api_v1_ranges__range_id__proxmox_topology_compilation_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProxmoxCompileTopologyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxCommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Compile Proxmox Topology",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
     "/api/v1/ranges/{range_id}/proxmox/verification": {
       "get": {
         "description": "What was OBSERVED after an apply, with infrastructure and isolation reported separately.\n\n``state`` is ``undetermined`` until the worker records a report. Undetermined is not a pass:\nnobody has looked yet.",
@@ -16023,6 +18705,104 @@
           }
         ],
         "summary": "Get Proxmox Verification",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/worker": {
+      "get": {
+        "description": "The enrolled worker that would execute for this range, and whether it may.\n\nInstallation, enrollment state, identity, release and eligibility in one answer. ``enrolled:\nfalse`` is a real response rather than a 404 — \"nobody is enrolled\" is something an operator\nneeds to be told, and it is a different answer from \"a worker is enrolled but is not healthy\".\n\nPublishes public identity only: no transaction id, no compare-and-swap digests, no key material.",
+        "operationId": "get_proxmox_worker_api_v1_ranges__range_id__proxmox_worker_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxWorkerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Proxmox Worker",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/proxmox/workload": {
+      "get": {
+        "description": "The per-guest workload and bootstrap contracts — including the WORKER's own addresses.\n\n``/proxmox/topology`` publishes the topology's ``published_address`` and ``probe_address`` plus\nthe observed one. This publishes the bootstrap contract's ``probe_address``/``probe_port`` (what\nthe worker connects to when it checks a guest came up) and ``report_address``/``report_port``\n(where the guest reports back), which had no route at all. They are separate concepts from the\ntopology's addresses, none is ever substituted for another, and an absent one stays null.\n\nBootstrap material appears as a REFERENCE and never as material.",
+        "operationId": "get_proxmox_workload_api_v1_ranges__range_id__proxmox_workload_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxWorkloadOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Proxmox Workload",
         "tags": [
           "ranges"
         ]
@@ -16123,6 +18903,55 @@
           }
         ],
         "summary": "List Range Resources",
+        "tags": [
+          "ranges"
+        ]
+      }
+    },
+    "/api/v1/ranges/{range_id}/scenario": {
+      "get": {
+        "description": "This range's scenario, with compatibility answered against ITS recorded observation.\n\nThe difference from the catalog read matters: there, every substrate-dependent Proxmox\nrequirement is ``undetermined`` because no cluster is in scope. Here the requirements are\nanswered from the observation the worker recorded for this range — so a missing management CIDR\nor an unobserved VLAN list becomes a NAMED blocker with the same ``reason_id`` the plan compiler\nwould block on, rather than a generic \"not ready\".\n\nA non-Proxmox range still gets an answer: its own provider's requirements are decidable from the\ncatalog, and the Proxmox column stays ``undetermined`` because this range records no cluster\nobservation.",
+        "operationId": "get_range_scenario_for_range_api_v1_ranges__range_id__scenario_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "range_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Range Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Range Scenario For Range",
         "tags": [
           "ranges"
         ]

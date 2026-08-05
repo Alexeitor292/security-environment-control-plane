@@ -62,7 +62,15 @@ def test_discovery_refused_in_inline_mode(client):
     assert any(e["action"] == "provider.operation_refused" for e in audit)
 
 
-def test_capabilities_shows_provisioning_disabled(client):
+def test_capabilities_reports_derived_capability_not_a_constant(client):
+    """This test used to assert ``provisioning_enabled is False``.
+
+    It passed for six merges after provisioning shipped, because it restated the constant the
+    endpoint returned — the test and the subject were the same fact written twice, so neither could
+    notice the world had moved. The capability surface is now derived, and the detailed proofs live
+    in ``test_provider_capabilities.py``; this keeps the smoke check the rest of this module wants.
+    """
     caps = client.get("/api/v1/providers/capabilities").json()
-    assert caps["provisioning_enabled"] is False
+    assert "provisioning_enabled" not in caps
     assert caps["discovery"] == "read-only"
+    assert caps["operations"], "the capability surface must report the operations this build has"
