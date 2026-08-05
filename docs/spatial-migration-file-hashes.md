@@ -5,55 +5,74 @@ both sides.
 
 ## What this does and does not prove
 
-It proves that the bytes in this repository are the bytes in the donor tree at
-the moment of migration, for every file rather than just the binaries. It catches
-the class of drift that review cannot see: a dropped or doubled UTF-8 BOM, a
-CRLF/LF rewrite, an editor re-encoding, a partial copy. None of those appear in a
-diff and none of them fail a typecheck.
+It proves the bytes in this repository are the bytes in the donor tree, for every
+file rather than just the binaries. It catches the class of drift that review
+cannot see: a dropped or doubled UTF-8 BOM, a CRLF/LF rewrite, an editor
+re-encoding, a partial copy. None of those appear in a diff or fail a typecheck.
 
-It does **not** prove the files are correct, and it is not a standing guard — it
-was produced once and nothing re-runs it. The standing guards are
-`src/spatial/scene/model-integrity.test.ts` (the 3D asset, which fails for
-anybody, at any time) and `src/spatial/migration-completeness.test.ts` (no page
-orphaned, no route lost).
+It does **not** prove the files are correct, and it is **not** a standing guard —
+it was produced once and nothing re-runs it. The standing guards are:
+
+| Guard | Protects |
+| --- | --- |
+| `src/spatial/scene/model-integrity.test.ts` | the glTF model is a real, whole glTF binary |
+| `src/spatial/migration-completeness.test.ts` | no page orphaned, no route lost |
+| `src/spatial/security-claims.test.ts` | no page asserts an unobserved security property |
+| `src/spatial/authorization-boundary.test.ts` | no mutating adapter method reachable without a gate |
+| `src/spatial/route-guard.test.ts` | the spatial workspace mounts only inside the auth boundary |
 
 ## Summary
 
 | | Count |
 | --- | ---: |
 | Migrated files hashed | 211 |
-| **Identical to donor** | **205** |
-| Intentionally modified (listed below, with reason) | 6 |
-| Added by this branch (no donor counterpart) | 7 |
+| **Identical to donor** | **200** |
+| Intentionally modified (all listed below, with reason) | 11 |
+| Added by this branch | 9 |
 
 Line endings: all 202 migrated text files are LF-only on both sides.
-UTF-8 BOMs: 9 donor files carry one; all 9 are preserved byte-for-byte.
+UTF-8 BOMs: 9 donor files carry one; all 9 preserved byte-for-byte.
 
-## The 6 files that differ, and why
+## The 11 files that differ, and why
 
-All six are the adapter boundary, modified in `SECP-P7-C.2` to make fixture data
-observable at runtime. Each was edited in place from the donor original; nothing
-was regenerated or reformatted. The two copies of the boundary
-(`prototype-suite/core` and the `deployments/prototype` fork) received identical
-edits, which is why their hashes match each other on both sides.
+Every one was edited in place from the donor original. Nothing was regenerated,
+reformatted, renamed, lint-fixed or prettier-run. Donor source was landed
+byte-identical first (commit P7-C.1); all modification came afterwards in
+separate, reviewable commits.
 
-| File | Donor | Repo |
-| --- | --- | --- |
-| `apps/prototype-suite/core/integrations/adapter.ts` | `78822d29…3c020b1f` | `a4e2cdeb…dbad3b42` |
-| `apps/prototype-suite/core/integrations/AdapterContext.tsx` | `d3b56542…55186905` | `16c4a868…3ae88e1` |
-| `apps/prototype-suite/core/integrations/mock-adapter.ts` | `7e084dd1…1bc62d14` | `6ea9a127…57ff3e3a` |
-| `apps/deployments/prototype/integrations/adapter.ts` | `78822d29…3c020b1f` | `a4e2cdeb…dbad3b42` |
-| `apps/deployments/prototype/integrations/AdapterContext.tsx` | `d3b56542…55186905` | `16c4a868…3ae88e1` |
-| `apps/deployments/prototype/integrations/mock-adapter.ts` | `7e084dd1…1bc62d14` | `6ea9a127…57ff3e3a` |
+**Adapter boundary (6 files) — `SECP-P7-C.2`.** Made fixture data observable at
+runtime. The two copies of the boundary (`prototype-suite/core` and the
+`deployments/prototype` fork) received identical edits, which is why their hashes
+match each other on both sides.
 
-None of the six carries a BOM in the donor, so the in-place edit could not have
+**Security claims (5 files) — `SECP-P7-C.8`.** Removed assertions about
+enforcement that no page can observe, and that were in several cases already
+false. See §4.1 of the migration matrix.
+
+| File | Reason | Donor | Repo |
+| --- | --- | --- | --- |
+| `apps/prototype-suite/core/integrations/adapter.ts` | adapter boundary | `78822d29…` | `a4e2cdeb…` |
+| `apps/prototype-suite/core/integrations/AdapterContext.tsx` | adapter boundary | `d3b56542…` | `16c4a868…` |
+| `apps/prototype-suite/core/integrations/mock-adapter.ts` | adapter boundary | `7e084dd1…` | `6ea9a127…` |
+| `apps/deployments/prototype/integrations/adapter.ts` | adapter boundary | `78822d29…` | `a4e2cdeb…` |
+| `apps/deployments/prototype/integrations/AdapterContext.tsx` | adapter boundary | `d3b56542…` | `16c4a868…` |
+| `apps/deployments/prototype/integrations/mock-adapter.ts` | adapter boundary | `7e084dd1…` | `6ea9a127…` |
+| `apps/prototype-suite/core/features/infrastructure/ProvidersPage.tsx` | security claims | `71100a0b…` | `fa8b2b85…` |
+| `apps/prototype-suite/core/features/infrastructure/InventoryPage.tsx` | security claims | `2321b156…` | `384ecb31…` |
+| `apps/prototype-suite/core/features/infrastructure/TargetsPage.tsx` | security claims | `7f366524…` | `855c2c6b…` |
+| `apps/prototype-suite/core/features/deployments/DeploymentAdvancedPage.tsx` | security claims | `b39da4e2…` | `943b2f2a…` |
+| `apps/deployments/prototype/features/deployments/DeploymentAdvancedPage.tsx` | security claims | `b39da4e2…` | `943b2f2a…` |
+
+None of the 11 carries a UTF-8 BOM in the donor, so no in-place edit could have
 disturbed one.
 
-## The 7 files added by this branch
+## The 9 files added by this branch
 
 `integrations/provenance.tsx`, `integrations/provenance.css`,
-`integrations/provenance.render.test.tsx`, `migration-completeness.test.ts`,
-`route-guard.test.ts`, `scene/model-integrity.test.ts`, `SpatialWorkspace.tsx`.
+`integrations/provenance.render.test.tsx`, `SpatialWorkspace.tsx`,
+`migration-completeness.test.ts`, `route-guard.test.ts`,
+`security-claims.test.ts`, `authorization-boundary.test.ts`,
+`scene/model-integrity.test.ts`.
 
 ## Excluded from migration
 
@@ -65,7 +84,13 @@ disturbed one.
   backup directory names the other model. Excluded so a permanent 22.6 MB blob
   does not enter every future clone for an asset no code path reaches. The model
   the donor actually renders is migrated byte-identical, so the scene is
-  unchanged.
+  unchanged. Git LFS was considered and rejected: at 6.1 MB it is unwarranted,
+  and a misconfigured LFS checkout leaves a ~130-byte pointer that fails silently
+  at runtime as an empty scene.
+
+`hero.png` is referenced by nothing but IS kept: 13 KB is a negligible permanent
+cost and byte-level traceability is worth more. The same cost-weighted rule
+points the other way at 22.6 MB.
 
 ## Binary assets
 
@@ -74,20 +99,16 @@ stored by git (`git cat-file blob`), and the `dist/` output of a production
 build — all matching.
 
 ```
-668dd1e44e02df1146dc324454093caaca7153865a390fa264b4e4332b98a1ae  public/models/server-rack.glb   (6,148,672 B)
-b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a  public/icons.svg                (    5,031 B)
-61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66  public/favicon.svg              (    9,522 B)
-881ffbcaafc212e49addad08846a5b82761355fa20624253af3477ba33262c5c  src/spatial/assets/hero.png     (   13,057 B)
+668dd1e44e02df1146dc324454093caaca7153865a390fa264b4e4332b98a1ae  public/models/server-rack.glb
+b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a  public/icons.svg
+61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66  public/favicon.svg
+881ffbcaafc212e49addad08846a5b82761355fa20624253af3477ba33262c5c  src/spatial/assets/hero.png
 ```
-
-`hero.png` is referenced by nothing in the source. It is kept because 13 KB is a
-negligible permanent cost and byte-level traceability is worth more; the 22.6 MB
-model was excluded under the same cost-weighted rule pointing the other way.
 
 ## Full table
 
-`OK` = repo byte-identical to donor. Paths are relative to
-`apps/web/src/spatial/` (source) and `apps/web/` (assets).
+`OK` = repo byte-identical to donor. Source paths are relative to
+`apps/web/src/spatial/`.
 
 | Status | SHA-256 | Path |
 | --- | --- | --- |
@@ -124,7 +145,7 @@ model was excluded under the same cost-weighted rule pointing the other way.
 | OK | `04f13988f59ee4e5beab6224523c6a6e5916bee57d331aad2150bb84f1d7bd0f` | `src/spatial/apps/deployments/prototype/components/Timeline.tsx` |
 | OK | `9e75f5cdaff4827f776a47b878b41470845540ad347c8200dbdb84992bb8ddcc` | `src/spatial/apps/deployments/prototype/components/TopologyCanvas.tsx` |
 | OK | `63ef7f7f3af6edb50a6a160358f76d8d14e54804c78beccb0b43eb8a3b5ea738` | `src/spatial/apps/deployments/prototype/features/deployments/DeploymentActivityPage.tsx` |
-| OK | `b39da4e2f961cf2ffa9fae6236146ae185e862001e5e196f8f1c929cee9dd568` | `src/spatial/apps/deployments/prototype/features/deployments/DeploymentAdvancedPage.tsx` |
+| MODIFIED | `943b2f2a656fdbfd8a4a7b1c69c49efe59759098d93fd195305f5e95eeb7896a` | `src/spatial/apps/deployments/prototype/features/deployments/DeploymentAdvancedPage.tsx` |
 | OK | `dbead89dfee8616a3417bc151984accc1d187e5043040b9997c590f3c561a9e0` | `src/spatial/apps/deployments/prototype/features/deployments/DeploymentCard.tsx` |
 | OK | `861f45d980977ceacec44c5713c92617f069ea24d80ae8ebc536a3b5ac0f057d` | `src/spatial/apps/deployments/prototype/features/deployments/DeploymentMonitoringPage.tsx` |
 | OK | `b75540380d27d880c0dee5669eaa977d0081d2544661e621d48171744fd76a09` | `src/spatial/apps/deployments/prototype/features/deployments/DeploymentOperationsPage.tsx` |
@@ -180,7 +201,7 @@ model was excluded under the same cost-weighted rule pointing the other way.
 | OK | `a48537efc274ce76528985f2043452543c88ccd59ed23784b0d0847adf2a7e2d` | `src/spatial/apps/prototype-suite/core/components/Wizard.tsx` |
 | OK | `3a46b132e87d91b42a3943889c9117cd4264b607feb3810461263a4d8c567da9` | `src/spatial/apps/prototype-suite/core/features/command-center/CommandCenterPage.tsx` |
 | OK | `63ef7f7f3af6edb50a6a160358f76d8d14e54804c78beccb0b43eb8a3b5ea738` | `src/spatial/apps/prototype-suite/core/features/deployments/DeploymentActivityPage.tsx` |
-| OK | `b39da4e2f961cf2ffa9fae6236146ae185e862001e5e196f8f1c929cee9dd568` | `src/spatial/apps/prototype-suite/core/features/deployments/DeploymentAdvancedPage.tsx` |
+| MODIFIED | `943b2f2a656fdbfd8a4a7b1c69c49efe59759098d93fd195305f5e95eeb7896a` | `src/spatial/apps/prototype-suite/core/features/deployments/DeploymentAdvancedPage.tsx` |
 | OK | `dbead89dfee8616a3417bc151984accc1d187e5043040b9997c590f3c561a9e0` | `src/spatial/apps/prototype-suite/core/features/deployments/DeploymentCard.tsx` |
 | OK | `861f45d980977ceacec44c5713c92617f069ea24d80ae8ebc536a3b5ac0f057d` | `src/spatial/apps/prototype-suite/core/features/deployments/DeploymentMonitoringPage.tsx` |
 | OK | `b75540380d27d880c0dee5669eaa977d0081d2544661e621d48171744fd76a09` | `src/spatial/apps/prototype-suite/core/features/deployments/DeploymentOperationsPage.tsx` |
@@ -199,10 +220,10 @@ model was excluded under the same cost-weighted rule pointing the other way.
 | OK | `d68a02e780ee1e1f98b8d513ecd8919019efbc15f2b08f8e7f572c68f3246320` | `src/spatial/apps/prototype-suite/core/features/events/NewEventWizardPage.tsx` |
 | OK | `c04df5c07d2b923a5cd84ed5d588c44411f76ffd8bd8604cb33e77c778ce5a5d` | `src/spatial/apps/prototype-suite/core/features/events/PhaseTransitionPreview.tsx` |
 | OK | `54973bc69188a9b76539a949cd228ada28ec6e4c3e78f71f5e058ab4aac14b08` | `src/spatial/apps/prototype-suite/core/features/events/TeamsAccessPage.tsx` |
-| OK | `2321b156b188fc94844fbb03ee834b37ce975a94c8799e9288a344696da3e3bf` | `src/spatial/apps/prototype-suite/core/features/infrastructure/InventoryPage.tsx` |
+| MODIFIED | `384ecb31b72b40e1c32c2380ab8327a1eeb2c035a79faa8d3d2456d75aadc315` | `src/spatial/apps/prototype-suite/core/features/infrastructure/InventoryPage.tsx` |
 | OK | `0ea673503381fb714c365210642ab8326483fc5d4ba9481185acd4d0edbd3d8b` | `src/spatial/apps/prototype-suite/core/features/infrastructure/PlacementPage.tsx` |
-| OK | `71100a0bb087ffb277865a59ae07d5ac802c1d5258b6d204b1a91c849583198b` | `src/spatial/apps/prototype-suite/core/features/infrastructure/ProvidersPage.tsx` |
-| OK | `7f366524cb360fbc24952f191d8a3f77c9cd1a2690c973d797a3e7c59fb3c7a7` | `src/spatial/apps/prototype-suite/core/features/infrastructure/TargetsPage.tsx` |
+| MODIFIED | `fa8b2b8574dd40e9e2adff675abf570f66b76a7cd029f21e4055fa62437bdfc6` | `src/spatial/apps/prototype-suite/core/features/infrastructure/ProvidersPage.tsx` |
+| MODIFIED | `855c2c6b3d8d2661b158fb44f12a04bf6ef242e977b08763736584d38e4b5653` | `src/spatial/apps/prototype-suite/core/features/infrastructure/TargetsPage.tsx` |
 | OK | `d13e777715b45576b5bb12ff8d2e6a64bccf461f4e7eb4c68f2bf5878c0a20cb` | `src/spatial/apps/prototype-suite/core/features/infrastructure/WorkersPage.tsx` |
 | OK | `309ed08a5ec51a1afaf419d785e5bd4f866c5153e3baa20e54e3a4ff74c4d6f3` | `src/spatial/apps/prototype-suite/core/features/platform/AuditPage.tsx` |
 | OK | `6a225d52e239c4f3919e03c87f0f1db4b73352be757afe63d7c52121cf010a37` | `src/spatial/apps/prototype-suite/core/features/platform/IdentityPage.tsx` |
@@ -246,6 +267,7 @@ model was excluded under the same cost-weighted rule pointing the other way.
 | OK | `881ffbcaafc212e49addad08846a5b82761355fa20624253af3477ba33262c5c` | `src/spatial/assets/hero.png` |
 | OK | `35ef61ed53b323ae94a16a8ec659b3d0af3880698791133f23b084085ab1c2e5` | `src/spatial/assets/react.svg` |
 | OK | `5be21acd42eb7b896e517f4e0f0f11eb5c5d9e54fbbcebe9453f033008fcca6f` | `src/spatial/assets/vite.svg` |
+| NEW | `7dd4e0ebd3cb046f120c7380861865e30d053d2abba08045448fc2171664933d` | `src/spatial/authorization-boundary.test.ts` |
 | OK | `eebea67b9dfcaa3ae582edaaffd49210fc6561359f662c18b7b1d445b01ba5cb` | `src/spatial/components/ai-core/AiCoreButton.css` |
 | OK | `c3bb5384e727c2b4fd8f02e053d014d462b10197f93d16b782da3679acc4f3dd` | `src/spatial/components/ai-core/AiCoreButton.tsx` |
 | OK | `61807efaad9ed6498a62312d5dba331f83e94bb15c1ead91fafe4ccd176f5fc5` | `src/spatial/components/ai-core/AiCoreOrb.css` |
@@ -286,6 +308,7 @@ model was excluded under the same cost-weighted rule pointing the other way.
 | NEW | `3948272b32b024b69a2db80fc02112b52675a92136c05008394bf064037774d9` | `src/spatial/scene/model-integrity.test.ts` |
 | OK | `cdff56193ffef3c5e8e5db49a6b6e49ec46afdd8d3068e45051b1b241cb90ff7` | `src/spatial/scene/SceneIntroCompletionProbe.tsx` |
 | OK | `31944a69443ecbece5b8ee4a1fd83c07e742db02e200d40e82f4f49b0be387de` | `src/spatial/scene/SceneReadyProbe.tsx` |
+| NEW | `048eab361c36caafa44ea953f54bfaf8c0777498307dfe6c11506f1b7e196967` | `src/spatial/security-claims.test.ts` |
 | OK | `2d13cc066648adf326d0a644f110f363347a341fa8bbe7bb0d8cdf17e0de00f3` | `src/spatial/shell/appRegistry.ts` |
 | OK | `1a253a2a4801c44fdd16b706c047acef8a603637c2d12bb67a54f5f20b03417b` | `src/spatial/shell/DynamicIsland.css` |
 | OK | `56c357810b0504f700ec55c54991c63895df841e0d4fa3474dc87eeeb04ac7fb` | `src/spatial/shell/DynamicIsland.tsx` |

@@ -119,9 +119,14 @@ export default function DeploymentAdvancedPage() {
 
       <AccordionSection title="OpenTofu plan & state references" hint="plan-only">
         <p className="u-secondary u-small">
-          Plan generation is real and hash-pinned; the apply subprocess is hard-sealed (
-          <span className="u-mono u-xs">_B1A_SUBPROCESS_SEALED = True</span>) — no real host has
-          ever been contacted. <CapabilityTag status="plan-only" />
+          {/* This previously read "the apply subprocess is hard-sealed ... no real host has
+              ever been contacted". That was an absolute safety assertion the page cannot
+              observe, and it had already been falsified by the time it was migrated: the
+              Proxmox apply and destroy paths shipped in SECP-PROXMOX. Whether an apply can
+              reach a host is a property of the running control plane, not of this component. */}
+          Plan generation is hash-pinned. Whether an apply can execute against a real host, and
+          under what authorization, is determined by the control plane — this page does not
+          observe it and does not assert it either way.
         </p>
         <KeyValueGrid
           columns={1}

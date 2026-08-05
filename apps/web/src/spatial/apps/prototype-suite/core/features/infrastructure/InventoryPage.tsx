@@ -91,13 +91,27 @@ const MOCK_INVENTORY: MockResource[] = [
   },
 ]
 
+/**
+ * The discovery pipeline, described as a SEQUENCE OF STEPS rather than as a set
+ * of guarantees.
+ *
+ * The earlier wording asserted enforcement this page cannot observe: that
+ * collection is "GET-only ... read-only by construction", that the control plane
+ * "never contacts endpoints", and that "today only fake-mode collection runs".
+ * That last one is the same claim as the "Simulated execution only" banner that
+ * stayed green in tests for months after it became false -- and live Proxmox
+ * discovery has since shipped, so it was on its way to being false here too.
+ *
+ * What each step DOES is stable and safe to state. What the platform will refuse
+ * is a runtime property, and belongs to whatever observes it, not to this list.
+ */
 const DISCOVERY_STEPS = [
-  'An operator enqueues a discovery request — queue-only, never direct execution.',
-  'A worker bound to the target picks the task up; the control plane never contacts endpoints.',
-  'The collector performs GET-only reads against the provider API (read-only by construction).',
-  'The live path is sealed by default behind an 8-gate activation chain; today only fake-mode collection runs.',
+  'An operator enqueues a discovery request; execution is dispatched through the queue.',
+  'A worker bound to the target picks the task up and performs the collection.',
+  'The collector reads inventory from the provider API.',
+  'Whether the live path is available depends on the activation chain configured for the target.',
   'Observations are hashed and recorded as discovery-snapshot evidence.',
-  'Candidate plans derived from observations are non-executable — review material only.',
+  'Candidate plans derived from observations are review material, not an execution artifact.',
 ]
 
 export default function InventoryPage() {

@@ -13,84 +13,87 @@ import { useQuery } from '../../integrations/AdapterContext'
 import type { IntegrationInfo } from '../../models/types'
 
 /**
- * Provider plugins. Grounded in the repo: the simulator is the only complete
- * lifecycle; the Proxmox plugin is read-only with sealed provisioning; cloud
- * plugins (AWS/Azure/GCP/Kubernetes) do not exist.
+ * Provider plugins.
+ *
+ * THIS PAGE DELIBERATELY ASSERTS NOTHING ABOUT WHAT ANY PROVIDER WILL REFUSE OR
+ * PERMIT.
+ *
+ * It used to. It carried a hand-written table stating that for Proxmox every
+ * mutating operation -- plan, apply, reset, destroy -- was `refused`, that
+ * discovery was GET-only, and that refusals were audited. Nothing verified any
+ * of that; it was frontend copy about a security control. By the time this was
+ * migrated it had already gone stale: the Proxmox apply, destroy, verification
+ * and residue-proof paths shipped in SECP-PROXMOX #105-#110, so the page was
+ * telling operators that operations were refused while the endpoints to perform
+ * them existed.
+ *
+ * The obvious repair -- source the table from `GET /api/v1/providers/capabilities`
+ * -- is worse, not better. That endpoint returns a hardcoded constant
+ * (`PROVISIONING_ENABLED = False`, "Proxmox provisioning is deferred") and is
+ * stale in exactly the same way. Wiring the page to it would relocate the false
+ * claim from the frontend to the backend and make it look observed, because a
+ * claim sourced from an API reads as verified. That is a harder lie to catch.
+ *
+ * So every capability cell renders `unverified` until something actually
+ * observes provider behaviour. This is not a hedge for tidiness. A fixture label
+ * is an adequate caveat for a deployment count; it is NOT adequate for "every
+ * mutating operation is refused", because an operator may act on that and the
+ * error is in the direction where someone gets hurt. Under-claiming is
+ * recoverable; over-claiming safety is not.
+ *
+ * Wiring lands in P7-D, once the capability endpoint reports observed capability
+ * rather than a constant.
  */
 
 const PROVIDER_NOTES: Record<string, string> = {
   'int-proxmox':
-    'Advertises validate, health, discover, and status only. Every mutating operation (plan, apply, reset, destroy) is refused, and the refusal is audited. Live discovery is GET-only and sealed behind activation gates.',
+    'This page does not determine which operations the Proxmox plugin permits or refuses. That is a property of the running control plane, and nothing here observes it.',
   'int-aws':
-    'Planned provider plugin (SECP-006 future work). AWS deployments in this prototype are mock data.',
+    'No AWS provider plugin exists in this repository. AWS deployments shown in this prototype are fixture data.',
   'int-azure':
-    'Planned provider plugin (SECP-006 future work). Azure deployments in this prototype are mock data.',
+    'No Azure provider plugin exists in this repository. Azure deployments shown in this prototype are fixture data.',
   'int-gcp':
-    'Planned provider plugin (SECP-006 future work). GCP deployments in this prototype are mock data.',
+    'No GCP provider plugin exists in this repository. GCP deployments shown in this prototype are fixture data.',
   'int-k8s':
-    'Planned provider plugin; today Kubernetes appears only as a local/dev execution substrate.',
+    'No Kubernetes provider plugin exists in this repository; Kubernetes appears only as a local/dev execution substrate.',
 }
 
-type OpSupport = 'simulated' | 'advertised' | 'refused' | 'planned'
+/**
+ * The only value this column can honestly take today.
+ *
+ * Kept as a union rather than collapsed to a bare string so that adding an
+ * observed value later is a typed change with a visible diff, rather than a
+ * string quietly appearing in a cell.
+ */
+type OpSupport = 'unverified'
 
 interface TaxonomyRow {
   op: string
-  simulator: OpSupport
-  proxmox: OpSupport
-  cloud: OpSupport
+  /** What the plugin contract defines. NOT what any provider does with it. */
   note: string
 }
 
+/**
+ * The operations defined by plugin API v1.
+ *
+ * This list is a contract fact -- it is what `contracts/plugin-api` declares --
+ * and is safe to state. What each provider DOES with each operation is a
+ * runtime property and is not stated anywhere on this page.
+ */
 const TAXONOMY: TaxonomyRow[] = [
-  {
-    op: 'validate',
-    simulator: 'simulated',
-    proxmox: 'advertised',
-    cloud: 'planned',
-    note: 'Definition + provider-config checks',
-  },
-  {
-    op: 'plan',
-    simulator: 'simulated',
-    proxmox: 'refused',
-    cloud: 'planned',
-    note: 'Deterministic change-set; approval pins the content hash',
-  },
-  {
-    op: 'apply',
-    simulator: 'simulated',
-    proxmox: 'refused',
-    cloud: 'planned',
-    note: 'Real provisioning sealed (OpenTofu subprocess hard-sealed)',
-  },
-  {
-    op: 'discover',
-    simulator: 'simulated',
-    proxmox: 'advertised',
-    cloud: 'planned',
-    note: 'Read-only, GET-only inventory collection',
-  },
-  {
-    op: 'reset',
-    simulator: 'simulated',
-    proxmox: 'refused',
-    cloud: 'planned',
-    note: 'Simulator-only today (SECP-002C not implemented)',
-  },
-  {
-    op: 'destroy',
-    simulator: 'simulated',
-    proxmox: 'refused',
-    cloud: 'planned',
-    note: 'Simulator-only today (SECP-002C not implemented)',
-  },
+  { op: 'validate', note: 'Definition + provider-config checks' },
+  { op: 'plan', note: 'Deterministic change-set; approval pins the content hash' },
+  { op: 'apply', note: 'Provisioning against the provider' },
+  { op: 'discover', note: 'Inventory collection' },
+  { op: 'reset', note: 'Return resources to a known baseline' },
+  { op: 'destroy', note: 'Tear resources down' },
 ]
 
 const SUPPORT_META: Record<OpSupport, { tone: StatusTone; label: string }> = {
-  simulated: { tone: 'info', label: 'simulated' },
-  advertised: { tone: 'ok', label: 'advertised' },
-  refused: { tone: 'error', label: 'refused' },
-  planned: { tone: 'neutral', label: 'planned' },
+  // `unknown` tone, never `ok` and never `error`: the point is that this is not
+  // determined. An `ok` would read as permitted and an `error` would read as
+  // refused, and both would be assertions this page cannot make.
+  unverified: { tone: 'unknown', label: 'not determined' },
 }
 
 function SupportBadge({ support }: { support: OpSupport }) {
@@ -129,14 +132,14 @@ export default function ProvidersPage() {
     {
       key: 'simulator',
       header: 'Simulator',
-      render: (r) => <SupportBadge support={r.simulator} />,
+      render: () => <SupportBadge support="unverified" />,
     },
     {
       key: 'proxmox',
       header: 'Proxmox plugin',
-      render: (r) => <SupportBadge support={r.proxmox} />,
+      render: () => <SupportBadge support="unverified" />,
     },
-    { key: 'cloud', header: 'Cloud plugins', render: (r) => <SupportBadge support={r.cloud} /> },
+    { key: 'cloud', header: 'Cloud plugins', render: () => <SupportBadge support="unverified" /> },
     {
       key: 'note',
       header: 'Notes',
@@ -149,9 +152,11 @@ export default function ProvidersPage() {
       key={integration.id}
       heading={integration.name}
       actions={
+        // No `sealed` tag for Proxmox. "Sealed" is a claim that provisioning
+        // cannot happen, and this page has no way to observe whether that is
+        // true -- it was not true by the time this was migrated.
         <span className="u-row">
           <CapabilityTag status={integration.status} />
-          {integration.id === 'int-proxmox' && <CapabilityTag status="sealed" />}
         </span>
       }
     >
@@ -171,9 +176,8 @@ export default function ProvidersPage() {
       <CapabilityNotice capKey="infrastructure.cloud" />
       <p className="u-secondary u-small" style={{ margin: 0 }}>
         Providers integrate through a versioned plugin contract (plugin API v1). A plugin declares
-        which operations it advertises; the control plane refuses anything not advertised and
-        records the refusal in the audit ledger. The simulator is the reference implementation of
-        the contract.
+        which operations it advertises. The simulator is the reference implementation of the
+        contract.
       </p>
 
       <CardGrid min={320}>
@@ -187,8 +191,8 @@ export default function ProvidersPage() {
           }
         >
           <p className="u-secondary u-small" style={{ margin: 0 }}>
-            The only complete lifecycle in the platform: validate → plan → apply → discover → reset
-            → destroy. Its effects are database records, not real infrastructure.
+            Implements the full contract lifecycle: validate → plan → apply → discover → reset →
+            destroy.
           </p>
           <p className="u-muted u-xs" style={{ marginTop: 'var(--sp-2)' }}>
             Reference implementation of plugin API v1 — new plugins are held to its contract and
@@ -206,9 +210,11 @@ export default function ProvidersPage() {
           label="Plugin capability taxonomy"
         />
         <p className="u-muted u-xs" style={{ marginTop: 'var(--sp-2)' }}>
-          The Proxmox plugin additionally advertises health and status probes. &ldquo;Refused&rdquo;
-          means the plugin rejects the operation at the contract boundary and the control plane
-          records an audited refusal — the operation is never attempted against a real endpoint.
+          These are the operations the plugin contract defines. Whether a given provider permits or
+          refuses any of them is a property of the running control plane, and this page does not
+          observe it — so it is shown as <strong>not determined</strong> rather than guessed in
+          either direction. Do not read a cell here as authorization to run an operation, or as an
+          assurance that one cannot run.
         </p>
       </Card>
     </div>

@@ -347,7 +347,12 @@ export default function TargetsPage() {
           onClose={() => setDisabling(undefined)}
           preview={
             <ul style={{ margin: 0, paddingLeft: 18 }} className="u-small u-secondary">
-              <li>New plans and applies for this target are refused</li>
+              {/* Phrased as the request this dialog makes, not as a guarantee about what the
+                  control plane will then enforce. This page cannot observe enforcement, and a
+                  confirmation dialog promising that operations "are refused" is exactly the kind
+                  of assurance an operator acts on. */}
+              <li>Marks the target disabled, so the control plane stops accepting new plans and
+                applies for it</li>
               <li>
                 {disabling.deploymentCount} existing deployment
                 {disabling.deploymentCount === 1 ? '' : 's'} keep running but cannot be reset or

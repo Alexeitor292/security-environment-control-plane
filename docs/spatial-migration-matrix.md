@@ -160,7 +160,7 @@ document is meant to prevent.
 | `/reports` | yes | no | yes | **none modeled** | **none** | badge | not wired | provenance only | not yet verified |
 | `/platform/*` (9) | 7 of 9 | no | 7 of 9 | **none modeled** | **none** | badge | not wired | provenance only | not yet verified |
 
-### Authorization is the largest single gap
+### Authorization is the largest single gap — now mechanically enforced
 
 The destination enforces permissions: `Sidebar` gates entries on the
 principal's `permissions`, and the API declares a vocabulary including
@@ -172,10 +172,32 @@ permission check, no capability gate, no principal-aware rendering. Every screen
 renders every control for everyone — including `DangerousOperationDialog` on
 `/deployments/:id/advanced`.
 
-This is safe today only because nothing is wired to a mutating endpoint. It
-stops being safe the moment any page is connected to a real one. Wiring a page
-to production must therefore include its permission gate in the same change,
-not as a follow-up.
+This is survivable today only because the adapter is entirely read-only: all 22
+methods are `list*`/`get*`. It stops being survivable the moment somebody adds
+`approvePlan()` or `destroyRange()` and wires a button to it.
+
+**Standing rule, from P7-D onward.** No page may be wired to a mutating
+production endpoint without its permission gate landing in the *same* change. And
+**hiding or disabling a control is not an authorization boundary** — the server
+refuses; the UI merely reflects. `DangerousOperationDialog` is a confirmation
+step, not a permission check, and must never be the only thing between an
+operator and a mutation.
+
+`src/spatial/authorization-boundary.test.ts` makes that mechanical rather than
+remembered. The classification is **inverted** on purpose: every method on the
+live interface must be explicitly acknowledged as read-only, and anything not
+acknowledged is treated as mutating and must be gated at every call site. A guard
+phrased the other way round — "the mutating methods we know about are gated" —
+would pass vacuously forever, since there are currently no mutating methods, and
+would go red only when someone removed a gate that does not yet exist.
+
+So **adding a method is what turns it red**, which is the moment the decision
+actually gets made. Mutation-verified:
+
+| Simulated change | Result |
+| --- | --- |
+| Add `destroyRange()` to the interface | fails, naming the method and the rule |
+| …and call it from a page with no gate | fails again, naming the file |
 
 ---
 
@@ -210,23 +232,64 @@ donor behaviour, migrated unchanged.
 
 ## 4. Findings that need a decision
 
-### 4.1 `ProvidersPage` hardcodes security claims about Proxmox
+### 4.1 RESOLVED — unobserved security claims removed from five pages
 
-`ProvidersPage.tsx` contains a static, hand-written capability table asserting
-that for Proxmox every mutating operation — plan, apply, reset, destroy — is
-`'refused'`, that discovery is GET-only, and that refusals are audited.
+`ProvidersPage.tsx` carried a hand-written table asserting that for Proxmox every
+mutating operation — plan, apply, reset, destroy — was `'refused'`, that
+discovery was GET-only, and that refusals were audited. Nothing verified any of
+it, and it had already been falsified: the Proxmox apply, destroy, verification
+and residue-proof paths shipped in SECP-PROXMOX #105–#110, so the page told
+operators operations were refused while the endpoints to perform them existed.
 
-Nothing verifies any of that. It is frontend copy, not an observation, and it is
-a claim about a security control. It is the same failure shape as the
-"Simulated execution only — no real infrastructure" banner that stayed green in
-tests for months after it became false.
+**Sourcing the table from `GET /api/v1/providers/capabilities` was considered and
+rejected.** That endpoint returns a hardcoded constant — `PROVISIONING_ENABLED =
+False`, *"Proxmox provisioning is deferred to SECP-002B"* — and is stale in
+exactly the same way. Wiring the page to it would have **relocated the false
+claim from the frontend to the backend and made it look observed**, because a
+claim sourced from an API reads as verified. That is a harder lie to catch than a
+visibly hand-written one. Wiring waits for P7-D, once the endpoint reports
+observed capability rather than a constant.
 
-It is also **actively becoming false**: other streams are building real Proxmox
-plan, apply and destroy paths (`/api/v1/ranges/{id}/proxmox/apply-authorization`,
-`…/destroy-plan`, `…/verification` are registered today). This table should be
-driven from `GET /api/v1/providers/capabilities` — which exists — or removed.
-It should not be migrated forward as prose. Flagged, not changed: rewriting it
-is a product decision, and it is fixture-labelled in the meantime.
+Every capability cell now renders **not determined** in the `unknown` tone —
+never `ok` (which reads as permitted) and never `error` (which reads as refused).
+
+**A guard found the same defect on four more pages**, which is why it was written
+to scan every page rather than the one named:
+
+| Page | Claim removed |
+| --- | --- |
+| `ProvidersPage` | "every mutating operation … is refused, and the refusal is audited"; "GET-only"; the `sealed` tag |
+| `DeploymentAdvancedPage` (both forks) | "the apply subprocess is hard-sealed … **no real host has ever been contacted**" |
+| `InventoryPage` | "GET-only reads … read-only by construction"; "today only fake-mode collection runs" |
+| `TargetsPage` | a confirmation dialog promising "new plans and applies for this target **are refused**" |
+
+The `DeploymentAdvancedPage` line was the worst of them: an absolute safety
+assertion, already false, on a page with a destructive-operation dialog. The
+`InventoryPage` line is the "Simulated execution only" claim in another costume.
+
+Enforced by `src/spatial/security-claims.test.ts`. Mutation-verified: restoring
+the refusal tone fails it, and restoring the "hard-sealed" prose fails it.
+
+### 4.1a Security-property claims are a distinct class
+
+The general rule, recorded because it is the thing most likely to be forgotten:
+
+> **A fixture label does not make a false security claim safe.**
+
+"This data is illustrative" is an adequate hedge for a deployment count. It is
+**not** adequate for "every mutating operation is refused", because an operator
+may act on that, and the error runs in the direction where someone gets hurt.
+Under-claiming is recoverable; over-claiming safety is not.
+
+So the matrix treats these as a separate column class from ordinary fixture data:
+
+| Claim class | Fixture label sufficient? | Permitted rendering when unobserved |
+| --- | --- | --- |
+| Counts, names, timestamps, status text | yes | fixture badge + the value |
+| **Enforcement / refusal / isolation / "cannot happen"** | **no** | **`unknown` only — never a comforting default** |
+
+An unobserved security property may render as *unknown*. It may never render as
+*safe*.
 
 ### 4.2 The deployments sub-app is a fork, not a duplicate
 
