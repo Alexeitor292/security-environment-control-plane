@@ -388,7 +388,38 @@ There is **no credential-entry field anywhere** in the migrated tree: a scan
 wider than the guards' own (covering `type={...}`, `autocomplete="…-password"`,
 `passphrase`, `private_key`) found nothing.
 
-### 4.6 What the frontend suite structurally could not catch
+### 4.6 Nine backend tests read the frontend tree
+
+**Standing number: nine.** These Python tests scan `apps/web/src/**/*.{ts,tsx}`
+and can fail a frontend change for a reason no frontend test can express:
+
+| Test | Enforces |
+| --- | --- |
+| `test_openbao_resolver.py` | no secret-reading/resolution route or credential field |
+| `test_resolver_activation_security.py` | no secret backend or activation toggle |
+| `test_resolution_lease_boundary.py` | no lease/activation **control indicator** (own matcher, not the token list) |
+| `test_readonly_preflight_security.py` | no credential entry or secret-resolution route |
+| `test_worker_identity_security.py` | no identity verifier or attestation surface |
+| `test_live_preflight_evidence_security.py` | no live-evidence interface |
+| `test_web_api_contract_guard.py` | frontend/API contract agreement |
+| `tests/test_ci_workflow.py` | CI wiring |
+| `tests/test_openapi_artifact.py` | committed artifact matches a fresh export |
+
+Two properties that cost real time to learn:
+
+1. **They `assert` inside their loop**, so pytest reports only the *first*
+   violating file. The reported filename is never the complete set. Replicate the
+   scan yourself before changing anything.
+2. **They do not share a token list.** `test_resolution_lease_boundary.py` uses
+   its own `_forbidden_frontend_hits` matcher, which is why a sweep of the other
+   guards' 13 tokens missed it entirely.
+
+The general form, learned twice here at a cost: **two independent enumerations,
+both thorough, both scoped to the guards their author already knew about.** An
+include list of *guards* fails the same way an include list of *files* does. The
+tree tells you what it forbids only when you ask the tree.
+
+### 4.7 What the frontend suite structurally could not catch
 
 The backend guards found a real boundary violation that **1058 passing frontend
 tests did not**. That is not a gap in those tests; it is the shape of the
