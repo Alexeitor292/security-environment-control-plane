@@ -34,7 +34,6 @@ import IntegrationsPage from './core/features/platform/IntegrationsPage'
 import OrganizationsPage from './core/features/platform/OrganizationsPage'
 import PlatformOverviewPage from './core/features/platform/PlatformOverviewPage'
 import RetentionPage from './core/features/platform/RetentionPage'
-import SecretsPage from './core/features/platform/SecretsPage'
 import PlatformSettingsPage from './core/features/platform/SettingsPage'
 import WorkflowsPage from './core/features/platform/WorkflowsPage'
 import ReportsPage from './core/features/reports/ReportsPage'
@@ -119,7 +118,6 @@ export function PrototypeSuiteApp({ initialEntry, onAddInfrastructure }: Prototy
                 <Route index element={<PlatformOverviewPage />} />
                 <Route path="organizations" element={<OrganizationsPage />} />
                 <Route path="identity" element={<IdentityPage />} />
-                <Route path="secrets" element={<SecretsPage />} />
                 <Route path="workflows" element={<WorkflowsPage />} />
                 <Route path="integrations" element={<IntegrationsPage />} />
                 <Route path="audit" element={<AuditPage />} />

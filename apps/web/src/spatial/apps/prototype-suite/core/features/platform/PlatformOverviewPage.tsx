@@ -34,13 +34,6 @@ const SECTIONS: SectionLink[] = [
     status: 'partial',
   },
   {
-    to: '/platform/secrets',
-    title: 'Secrets & Credentials',
-    description:
-      'Secret references and rotation metadata. Values resolve worker-side only; the OpenBao adapter is committed but sealed.',
-    status: 'sealed',
-  },
-  {
     to: '/platform/workflows',
     title: 'Workflow Engine',
     description:

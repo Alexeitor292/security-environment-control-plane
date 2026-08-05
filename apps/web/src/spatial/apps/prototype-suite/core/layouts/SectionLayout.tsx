@@ -84,10 +84,6 @@ export function PlatformLayout() {
           label: 'Identity & Access',
         },
         {
-          to: '/platform/secrets',
-          label: 'Secrets & Credentials',
-        },
-        {
           to: '/platform/workflows',
           label: 'Workflow Engine',
         },

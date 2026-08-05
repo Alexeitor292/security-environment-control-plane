@@ -115,7 +115,7 @@ Adapter status is **fixture** for every row: the live adapter does not exist yet
 | `/platform` | PlatformOverviewPage | MetricTile, Card | users, workers, integrations, approvals | `/api/v1/plugins` | users, approvals | partial |
 | `/platform/organizations` | OrganizationsPage | DataTable | users | — | organizations, users | **missing** |
 | `/platform/identity` | IdentityPage | DataTable | users | `GET /api/v1/me` (self only) | user list | **missing** |
-| `/platform/secrets` | SecretsPage | DataTable, StatusBadge | secretRefs | — | secrets | **missing** |
+| ~~`/platform` → secrets~~ | ~~SecretsPage~~ | — | — | — | — | **REMOVED — see §4.5** |
 | `/platform/workflows` | WorkflowsPage | Timeline, DataTable | workflowRuns, workers | `/api/v1/ranges/{id}/operations` | cross-cutting runs | partial |
 | `/platform/integrations` | IntegrationsPage | DataTable | integrations | `GET /api/v1/plugins` | — | partial |
 | `/platform/audit` | AuditPage | DataTable, FilterBar | auditEvents, evidence | **`GET /api/v1/audit`** | evidence list | **wireable now** |
@@ -346,6 +346,65 @@ self-consistency check is what catches it.
 A hash table in a pull request cannot do this job — whoever writes the migration
 produces both sides of it, so it can only restate itself, and nothing re-runs it.
 This test lives in the repository and fails for anybody.
+
+### 4.5 One route and one page were REMOVED — secrets management
+
+**This is the only donor surface that does not exist in the repository, and it is
+recorded here because a missing page must never be silently missing.**
+
+The donor ships a secrets-management page under Platform: a table of secret
+references, rotation posture, and a card describing the OpenBao adapter. Two
+**backend** guards — `apps/api/tests/test_openbao_resolver.py` and
+`apps/api/tests/test_resolver_activation_security.py` — scan every frontend
+`.ts`/`.tsx` for thirteen forbidden strings and fail the build on any hit. The
+route and the page tripped them.
+
+**The guard is right and the donor is wrong.** Secret resolution in this product
+is sealed and worker-side, and deliberately has no browser surface at all. The
+donor was drawn as a mock without that constraint, so the page is a *technically
+false mock assumption* with no truthful production meaning — not a real surface
+whose data happens to be mocked. Removed, with everything that pointed at it:
+
+| Removed | Why |
+| --- | --- |
+| `SecretsPage.tsx` | the surface itself |
+| its route in `PrototypeSuiteApp.tsx` | a reachable route is the thing forbidden |
+| the nav entry in `SectionLayout.tsx` | a link to nothing |
+| the card in `PlatformOverviewPage.tsx` | same |
+| the `SpatialGlobalSearch` index entry | a search result leading nowhere is worse than an absent one |
+
+**Renaming the route to evade the substring was available and was not done.**
+`/secret-store` or `/vault` would have gone green while shipping the surface the
+guard forbids. That is the cheapest repair and the worst one.
+
+`SecretRef` and `listSecretRefs` remain, because they are still used by
+`DeploymentAdvancedPage` and because the model carries no secret value — only
+name, purpose, provider, rotation schedule and health. The guards permit opaque
+references by design; what they forbid is a credential-entry field or a
+secret-reading route. **That embedded table is flagged for a decision, not
+removed unilaterally** — it is a different surface from the one that was ruled on.
+
+There is **no credential-entry field anywhere** in the migrated tree: a scan
+wider than the guards' own (covering `type={...}`, `autocomplete="…-password"`,
+`passphrase`, `private_key`) found nothing.
+
+### 4.6 What the frontend suite structurally could not catch
+
+The backend guards found a real boundary violation that **1058 passing frontend
+tests did not**. That is not a gap in those tests; it is the shape of the
+problem. A frontend suite can only confirm that the frontend renders what the
+frontend says. The constraint being violated — *secret resolution has no browser
+surface* — is a property of the product, and it is held where the product
+defines it.
+
+A frontend mirror of the scan was considered and **deliberately not written**.
+It would have to obfuscate the forbidden tokens to avoid tripping the backend
+scan on its own source, and it would replace an independent check with a copy
+that can drift. The independence is the value.
+
+The general form for this matrix: **when a donor surface encodes an assumption
+the product contradicts, the product's guard wins and the surface goes.** The
+matrix records the removal; it does not quietly reduce a count.
 
 ### 4.4 Two model files for one product
 

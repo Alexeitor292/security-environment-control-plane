@@ -191,15 +191,6 @@ const destinations: SearchDocument[] = [
     keywords: ['identity', 'access', 'roles', 'users'],
   },
   {
-    id: 'destination:platform-secrets',
-    label: 'Secrets and credentials',
-    category: 'destination',
-    appId: 'administration',
-    entry: '/platform/secrets',
-    context: 'Opaque references and rotation posture',
-    keywords: ['secrets', 'credentials', 'rotation'],
-  },
-  {
     id: 'destination:platform-workflows',
     label: 'Workflow engine',
     category: 'destination',

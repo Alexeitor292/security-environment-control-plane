@@ -91,7 +91,18 @@ describe("spatial migration completeness", () => {
     // the restatement this file is built to avoid. What a count adds is a
     // tripwire on silent REMOVAL -- deleting a route together with its page
     // keeps both sets equal above, and only the count notices.
-    expect(declaredRoutes(RAW_SUITE_ROUTER).length).toBe(42);
+    //
+    // 41, not the donor's 42. The donor's secrets-management route under
+    // `/platform`, and the page behind it, were removed deliberately: two
+    // backend guards
+    // (`test_openbao_resolver.py`, `test_resolver_activation_security.py`)
+    // forbid any frontend reference to a secret-reading route, because secret
+    // resolution in this product is sealed and worker-side and must not have a
+    // browser surface at all. The donor was drawn as a mock without that
+    // constraint. This count was lowered by one BECAUSE of that removal -- if it
+    // ever needs lowering again, the reason must be equally explicit, since a
+    // silently decremented number is how a missing page stops being noticed.
+    expect(declaredRoutes(RAW_SUITE_ROUTER).length).toBe(41);
     expect(declaredRoutes(RAW_DEPLOY_ROUTER).length).toBe(11);
   });
 
