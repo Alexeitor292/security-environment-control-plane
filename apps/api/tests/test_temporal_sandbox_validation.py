@@ -20,32 +20,34 @@ from __future__ import annotations
 import subprocess
 import sys
 
-import pytest
 
-# --- the worker extra must be PRESENT, not optional, for this file -------------------------------
-#
-# Every seal assertion below is gated on ``temporalio``. Without the ``worker`` extra installed they
-# do not fail — they SKIP, and a skipped seal check reads exactly like a passing one. That is not
-# hypothetical here: this repository already lost ``temporalio`` for months while seven tests
-# reported as passing without ever executing, and the sealed-set assertions in this file were
-# verified by hand in a worktree where they were silently skipping.
-#
-# CI proves the extra is present for the shards ("Prove the worker extra is actually present (no
-# silent re-skip)") and fails any shard skip whose reason is ``could not import 'x'``. Nothing
-# enforced it for someone running THIS FILE by hand, which is the exact path that nearly reported a
-# pass. So the import is hard: an absent extra fails loudly at collection instead of shrinking the
-# run. The fix is one command — ``uv sync --frozen --extra dev --extra worker``.
-#
-# The per-test ``pytest.importorskip("temporalio")`` calls below can therefore no longer mask an
-# absent extra; they are left in place as belt-and-braces, not as a live skip path.
-try:
-    import temporalio as _require_worker_extra  # noqa: F401
-except ModuleNotFoundError as _exc:  # pragma: no cover - the whole point is that this is loud
-    raise RuntimeError(
-        "the 'worker' extra is not installed, so the sealed-set assertions in this file would "
-        "SKIP rather than run — and a skipped seal check is indistinguishable from a passing one. "
-        "Install it with: uv sync --frozen --extra dev --extra worker"
-    ) from _exc
+def _require_worker_extra() -> None:
+    """Fail loudly when the ``worker`` extra is absent, instead of skipping.
+
+    Every seal assertion in this file is gated on ``temporalio``. Without the extra installed they
+    do not fail — they SKIP, and a skipped seal check reads exactly like a passing one. That is not
+    hypothetical: this repository already lost ``temporalio`` for months while seven tests reported
+    as passing without ever executing, and the sealed-set assertions here were verified by hand in a
+    worktree where they were silently skipping.
+
+    CI proves the extra is present for the shards and fails any shard skip whose reason is
+    ``could not import 'x'``. Nothing enforced it for someone running THIS FILE by hand, which is
+    the exact path that nearly produced a false pass.
+
+    Deliberately checked at RUN time rather than import time. An import-site guard also breaks
+    COLLECTION, and ``backend-test-inventory`` collects the whole corpus with only ``.[dev]``
+    installed — so a hard import there fails a job that has no need of the extra. Collection is not
+    a hand-run; execution is, and execution is what must not silently shrink.
+    """
+    try:
+        import temporalio  # noqa: F401
+    except ModuleNotFoundError as exc:  # pragma: no cover - the whole point is that this is loud
+        raise AssertionError(
+            "the 'worker' extra is not installed, so this sealed-set assertion would SKIP rather "
+            "than run — and a skipped seal check is indistinguishable from a passing one. "
+            "Install it with: uv sync --frozen --extra dev --extra worker"
+        ) from exc
+
 
 WORKFLOW_NAMES = (
     "DeployWorkflow",
@@ -91,7 +93,7 @@ def test_workflow_module_import_is_clean_in_a_fresh_process():
 def test_every_production_workflow_validates_under_the_default_sandbox():
     """The exact production registration list validates under the DEFAULT sandbox — DeployWorkflow
     (which raised at base) and every later workflow."""
-    pytest.importorskip("temporalio")
+    _require_worker_extra()
     import asyncio
 
     from secp_worker.main import SHIPPED_WORKFLOWS
