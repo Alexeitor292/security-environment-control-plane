@@ -182,9 +182,37 @@ export function asCheckFindings(
     if (isRefusal(check)) return check;
     const observed = readBoolean(raw, "observed");
     if (isRefusal(observed)) return observed;
-    const ok = readBoolean(raw, "ok");
-    if (isRefusal(ok)) return ok;
-    return { check, observed, ok, detail: readDetail(raw) };
+
+    // `ok` is a TRIPLE, not a boolean. The worker's `CheckFinding.ok` is `bool | None` and
+    // `verification_evidence` emits `ok: null` explicitly rather than omitting the key:
+    //
+    //     observed=false, ok=null    the check could not be made
+    //     observed=true,  ok=false   the check was made and failed
+    //     observed=true,  ok=true    the check was made and passed
+    //
+    // The key must still be PRESENT. Absent is not null: a payload with no `ok` at all is a
+    // payload this reader cannot interpret, and defaulting it is how "nobody could look" becomes
+    // "this failed".
+    if (!("ok" in raw)) return refuse('missing "ok" (null is a value; absent is not)');
+    const rawOk = raw["ok"];
+    if (rawOk !== null && typeof rawOk !== "boolean") {
+      return refuse('"ok" is neither a boolean nor null');
+    }
+
+    // The contradiction, refused. "The check ran and produced no verdict" is not a state the
+    // worker can emit — its `__post_init__` rejects it — so seeing it here means the payload is
+    // not what it claims to be. Resolving it silently is how it would become a pass.
+    if (observed && rawOk === null) {
+      return refuse('"observed" is true but "ok" is null, which is not an outcome');
+    }
+
+    // The other direction is NOT refused, deliberately. Two producer sites emitted
+    // `observed=false, ok=false` before `ok` became nullable, and those events are already
+    // recorded and durable. Refusing them would discard evidence that was legitimately written,
+    // to enforce a rule that did not exist when it was written. `checkStatus` reads the pair and
+    // maps any unobserved check to `not_observed` regardless of `ok`, so nothing downstream can
+    // mistake the legacy shape for a verdict.
+    return { check, observed, ok: rawOk, detail: readDetail(raw) };
   });
 }
 
@@ -198,6 +226,12 @@ export type CheckStatus = "passed" | "failed" | "not_observed";
 
 export function checkStatus(finding: CheckFinding): CheckStatus {
   if (!finding.observed) return "not_observed";
+  // `ok === null` cannot reach here through `asCheckFindings`, which refuses the combination. It
+  // is handled explicitly anyway rather than left to falsiness: `null ? a : b` takes the `false`
+  // branch, so a `CheckFinding` built by hand with the contradiction would silently render as a
+  // FAILURE — the exact substitution this module exists to prevent, arriving through the one path
+  // that skips the reader.
+  if (finding.ok === null) return "not_observed";
   return finding.ok ? "passed" : "failed";
 }
 

@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:live": "vitest run --config vitest.live.config.ts",
     "generate:api": "node scripts/generate-api-types.mjs",
-    "generate:api:check": "node scripts/generate-api-types.mjs --check"
+    "generate:api:check": "node scripts/generate-api-types.mjs --check",
+    "generate:unsourced-fields": "node --experimental-strip-types scripts/generate-unsourced-fields.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",

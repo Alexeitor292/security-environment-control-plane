@@ -483,7 +483,14 @@ export type ProbeVerdict = (typeof PROBE_VERDICTS)[number];
 export interface CheckFinding {
   check: VerificationCheck;
   observed: boolean;
-  ok: boolean;
+  /**
+   * `null` is the THIRD value, and the one that carries the meaning: the check could not be made,
+   * so there is no verdict. It is not `false`.
+   *
+   * `observed=true, ok=null` is a contradiction the worker's `__post_init__` refuses and
+   * `asCheckFindings` refuses again on the way in, so a value of this type never holds it.
+   */
+  ok: boolean | null;
   detail: string;
 }
 
