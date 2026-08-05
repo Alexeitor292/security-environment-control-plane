@@ -201,6 +201,15 @@ class ProxmoxApprovalMissingError(DomainError):
 # --------------------------------------------------------------------------------------
 
 
+class ApprovalKind(str, Enum):
+    """Which of the four authorization acts a recorded approval is."""
+
+    plan_approval = "plan_approval"
+    apply_authorization = "apply_authorization"
+    destroy_plan_approval = "destroy_plan_approval"
+    destroy_authorization = "destroy_authorization"
+
+
 class ObservationFreshness(str, Enum):
     """How much the recorded cluster observation can still be relied on."""
 
@@ -756,6 +765,10 @@ class ApprovalRecord:
     ``superseded``, but it can never make it untrue that this principal approved this hash.
     """
 
+    #: WHICH of the four acts this was. Carried on the record rather than inferred from the
+    #: endpoint that returned it, so an apply approval stays distinguishable from a destroy
+    #: approval wherever it travels.
+    operation_kind: ApprovalKind
     #: The exact digest the principal approved. Compared, never recomputed.
     approved_hash: str
     approved_by: uuid.UUID | None
@@ -764,7 +777,11 @@ class ApprovalRecord:
 
 
 def _read_approval(
-    session: Session, instance: RangeInstance, kind: str, field: str
+    session: Session,
+    instance: RangeInstance,
+    kind: str,
+    field: str,
+    act: ApprovalKind,
 ) -> ApprovalRecord | None:
     event = _latest_event(session, instance, kind)
     if event is None:
@@ -775,6 +792,7 @@ def _read_approval(
         return None
     approved_by = data.get("approved_by")
     return ApprovalRecord(
+        operation_kind=act,
         approved_hash=approved_hash,
         approved_by=uuid.UUID(approved_by) if isinstance(approved_by, str) else None,
         at=event.occurred_at,
@@ -783,19 +801,35 @@ def _read_approval(
 
 
 def plan_approval(session: Session, instance: RangeInstance) -> ApprovalRecord | None:
-    return _read_approval(session, instance, EVENT_PLAN_APPROVED, "plan_hash")
+    return _read_approval(
+        session, instance, EVENT_PLAN_APPROVED, "plan_hash", ApprovalKind.plan_approval
+    )
 
 
 def apply_authorization(session: Session, instance: RangeInstance) -> ApprovalRecord | None:
-    return _read_approval(session, instance, EVENT_APPLY_AUTHORIZED, "plan_hash")
+    return _read_approval(
+        session, instance, EVENT_APPLY_AUTHORIZED, "plan_hash", ApprovalKind.apply_authorization
+    )
 
 
 def destroy_plan_approval(session: Session, instance: RangeInstance) -> ApprovalRecord | None:
-    return _read_approval(session, instance, EVENT_DESTROY_PLAN_APPROVED, "destroy_hash")
+    return _read_approval(
+        session,
+        instance,
+        EVENT_DESTROY_PLAN_APPROVED,
+        "destroy_hash",
+        ApprovalKind.destroy_plan_approval,
+    )
 
 
 def destroy_authorization(session: Session, instance: RangeInstance) -> ApprovalRecord | None:
-    return _read_approval(session, instance, EVENT_DESTROY_AUTHORIZED, "destroy_hash")
+    return _read_approval(
+        session,
+        instance,
+        EVENT_DESTROY_AUTHORIZED,
+        "destroy_hash",
+        ApprovalKind.destroy_authorization,
+    )
 
 
 def plan_state(
@@ -895,6 +929,7 @@ def approve_plan(
         instance,
         compiled,
         ApprovalRecord(
+            operation_kind=ApprovalKind.plan_approval,
             approved_hash=compiled.plan_hash,
             approved_by=principal.user_id,
             at=datetime.now(UTC),
@@ -942,6 +977,7 @@ def authorize_apply(
         instance,
         compiled,
         ApprovalRecord(
+            operation_kind=ApprovalKind.apply_authorization,
             approved_hash=compiled.plan_hash,
             approved_by=principal.user_id,
             at=datetime.now(UTC),
@@ -982,6 +1018,7 @@ def approve_destroy_plan(
         instance,
         compiled,
         ApprovalRecord(
+            operation_kind=ApprovalKind.destroy_plan_approval,
             approved_hash=compiled.destroy_hash,
             approved_by=principal.user_id,
             at=datetime.now(UTC),
@@ -1025,6 +1062,7 @@ def authorize_destroy(
         instance,
         compiled,
         ApprovalRecord(
+            operation_kind=ApprovalKind.destroy_authorization,
             approved_hash=compiled.destroy_hash,
             approved_by=principal.user_id,
             at=datetime.now(UTC),

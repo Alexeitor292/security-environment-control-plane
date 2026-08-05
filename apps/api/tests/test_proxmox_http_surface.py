@@ -738,3 +738,135 @@ def test_a_docker_range_is_refused_by_the_proxmox_surface(client):
     response = client.get(f"/api/v1/ranges/{range_id}/proxmox/plan")
     assert response.status_code == 409
     assert "proxmox" in response.text.lower()
+
+
+# --- the serialization boundary is where distinctions die quietly -------------
+
+
+def test_a_blocked_plan_reports_null_not_empty(session, principal):
+    """An UNCOMPUTED deletion set and an EMPTY one are different facts.
+
+    A blocked destroy plan that serialised ``deletion_set: [], deletion_set_size: 0`` would read as
+    "a destroy would remove nothing because this range owns nothing" — which makes a destroy look
+    safe when in truth nothing has been enumerated.
+    """
+    from secp_api.proxmox_projection import (
+        allocations_out,
+        destroy_plan_out,
+        plan_out,
+        readiness_out,
+        topology_out,
+    )
+
+    instance = make_range(session, principal, record_observation=False)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    blocked = proxmox_lifecycle.PlanState.blocked
+
+    destroy = destroy_plan_out(compiled, None, blocked)
+    assert destroy.deletion_set is None
+    assert destroy.deletion_set_size is None
+    assert destroy.approved_hash_is_current is None
+
+    readiness = readiness_out(compiled, blocked)
+    assert readiness.satisfied is None, "not assessed is not 'assessed and found wanting'"
+    assert readiness.findings is None
+    assert readiness.challenge_keys is None
+
+    plan = plan_out(compiled, None, blocked)
+    assert plan.isolation is None
+    assert plan.isolation_holds is None
+    assert plan.approved_hash_is_current is None
+    assert plan.unguardable_flag_values is None
+
+    assert allocations_out(compiled, blocked).allocations is None
+    assert topology_out(compiled, None, blocked).team_refs is None
+
+    # The blockers themselves are always present — that list IS the answer.
+    assert destroy.blocked_reasons and readiness.blocked_reasons
+
+
+def test_a_missing_key_in_a_recorded_report_stays_unknown(session, principal):
+    """``list(x or [])`` would turn "never probed" into "nothing found". It must not."""
+    from secp_api.proxmox_projection import (
+        reset_dispositions_out,
+        residue_out,
+        verification_out,
+    )
+
+    # Recorded, but the worker wrote no check lists at all.
+    verification = verification_out({"infrastructure_outcome": "passed"})
+    assert verification.state is proxmox_lifecycle.RecordedStageState.recorded
+    assert verification.infrastructure_checks is None
+    assert verification.isolation_checks is None
+
+    # An EMPTY list is the strong claim and must survive as itself.
+    covered = residue_out({"verdict": "clean", "uncovered_classes": []})
+    assert covered.uncovered_classes == [], "every residue class probed is a real finding"
+    unprobed = residue_out({"verdict": "unproven"})
+    assert unprobed.uncovered_classes is None, "not computed is not 'nothing uncovered'"
+
+    assert reset_dispositions_out({"detail": "x"}).dispositions is None
+
+
+def test_a_check_findings_observed_ok_pair_is_never_flattened(session, principal):
+    """A check that could not be observed must stay distinguishable from one that failed."""
+    from secp_api.proxmox_projection import verification_out
+
+    recorded = verification_out(
+        {
+            "infrastructure_outcome": "verified",
+            "isolation_outcome": "unobserved",
+            "isolation_checks": [
+                {"check": "cross_team", "observed": False, "ok": False, "detail": "no prober"},
+                {"check": "management_plane", "observed": True, "ok": False, "detail": "reached"},
+            ],
+        }
+    )
+    unobserved, failed = recorded.isolation_checks
+    # Both have ok=False; only `observed` tells them apart, and it survived.
+    assert unobserved["observed"] is False and unobserved["ok"] is False
+    assert failed["observed"] is True and failed["ok"] is False
+    assert unobserved != failed
+
+
+def test_an_approval_record_names_which_act_it_was(session, principal):
+    """A bare hash plus a principal cannot say whether an apply or a destroy was approved."""
+    instance = make_range(session, principal)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    proxmox_lifecycle.approve_plan(session, principal, instance.id, plan_hash=compiled.plan_hash)
+    proxmox_lifecycle.approve_destroy_plan(
+        session, principal, instance.id, destroy_hash=compiled.destroy_hash
+    )
+    assert (
+        proxmox_lifecycle.plan_approval(session, instance).operation_kind
+        is proxmox_lifecycle.ApprovalKind.plan_approval
+    )
+    assert (
+        proxmox_lifecycle.destroy_plan_approval(session, instance).operation_kind
+        is proxmox_lifecycle.ApprovalKind.destroy_plan_approval
+    )
+
+
+def test_probe_and_published_addresses_stay_distinct_on_the_wire(session, principal):
+    """#103 was caused by conflating them. The serializer must not reintroduce it."""
+    instance = make_range(session, principal)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    guests = compiled.manifest["guests"]
+    assert guests
+    for guest in guests:
+        assert "published_address" in guest["address"]
+        assert "probe_address" in guest["address"]
+
+
+def test_operation_generation_survives_serialization(session, principal):
+    """It distinguishes a reset's objects from the deploy's; dropping it loses the generation."""
+    from secp_api.proxmox_projection import ownership_out
+
+    instance = make_range(session, principal)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    out = ownership_out(compiled, proxmox_lifecycle.PlanState.compiled)
+    assert out.ownership.operation_generation is not None
+    assert out.ownership.generation is not None
+    # And on every object in the desired state.
+    for guest in compiled.manifest["guests"]:
+        assert "operation_generation" in guest["ownership"]

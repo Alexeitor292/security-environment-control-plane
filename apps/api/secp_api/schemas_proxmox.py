@@ -39,6 +39,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from secp_api.services.proxmox_lifecycle import (
+    ApprovalKind,
     AuthorizationState,
     ObservationFreshness,
     PlanState,
@@ -96,8 +97,16 @@ class BlockedReasonOut(BaseModel):
 
 
 class ApprovalOut(BaseModel):
-    """A recorded approval or authorization, as it was made."""
+    """A recorded approval or authorization, as it was made.
 
+    ``operation_kind`` names WHICH act this was, in the payload rather than only in the URL
+    that returned it. Without it an approval record is a bare hash plus a principal, and an
+    apply approval is indistinguishable from a destroy approval once it has been read out of
+    its response. The hash domains already make one unusable as the other; this makes the
+    difference legible as well.
+    """
+
+    operation_kind: ApprovalKind
     approved_hash: str
     approved_by: uuid.UUID | None
     at: datetime
@@ -119,8 +128,10 @@ class ProxmoxObservationOut(BaseModel):
     target_id: str | None = None
     cluster_name: str | None = None
     cluster_fingerprint: str | None = None
-    management_cidrs: list[str] = Field(default_factory=list)
-    management_bridges: list[str] = Field(default_factory=list)
+    #: ``None`` when no observation was recorded — NOT "this cluster declares no management
+    #: network", which is a claim no compiled plan may ever be built on.
+    management_cidrs: list[str] | None = None
+    management_bridges: list[str] | None = None
     online_node_count: int | None = None
     #: ``None`` means the fact was never observed — it does NOT mean "no" and never means zero.
     sdn_supported: bool | None = None
@@ -192,7 +203,9 @@ class ProxmoxTopologyOut(BaseModel):
     observation: ProxmoxObservationOut
     #: The canonical desired-state document. Same content the plan hash is taken over.
     topology: dict[str, Any] | None = None
-    team_refs: list[str] = Field(default_factory=list)
+    #: ``None`` when the plan did not compile. An empty list would read as "a lab with no
+    #: teams", which is a shape the compiler refuses to produce.
+    team_refs: list[str] | None = None
     guest_count: int | None = None
     vnet_count: int | None = None
 
@@ -203,7 +216,9 @@ class ProxmoxAllocationsOut(BaseModel):
     state: PlanState
     plan_hash: str | None = None
     blocked_reasons: list[BlockedReasonOut] = Field(default_factory=list)
-    allocations: list[ProxmoxAllocationOut] = Field(default_factory=list)
+    #: ``None`` when the plan did not compile — no identifiers were reserved because none
+    #: could be computed, which is not the same as a plan that reserves nothing.
+    allocations: list[ProxmoxAllocationOut] | None = None
     #: Content hash of the allocation ledger alone, stable across recompiles of the same binding.
     ledger_hash: str | None = None
 
@@ -225,11 +240,17 @@ class ProxmoxPlanOut(BaseModel):
     document: dict[str, Any] | None = None
     approval: ApprovalOut | None = None
     #: True only when a live approval names exactly the current ``plan_hash``.
-    approved_hash_is_current: bool = False
-    isolation: list[IsolationFindingOut] = Field(default_factory=list)
+    #: ``None`` when there is no current hash to compare against, so the question is
+    #: unanswerable rather than answered "no".
+    approved_hash_is_current: bool | None = None
+    #: ``None`` when nothing was compiled. An empty list would read as "no isolation
+    #: properties were claimed", the opposite of what a blocked plan means.
+    isolation: list[IsolationFindingOut] | None = None
     isolation_holds: bool | None = None
     #: Flag values no substring guard can prove absent. Being listed is itself the finding.
-    unguardable_flag_values: list[str] = Field(default_factory=list)
+    #: ``None`` when no plan was compiled. An empty list is a real and different finding:
+    #: every flag this template ships CAN be guarded by the substring scan.
+    unguardable_flag_values: list[str] | None = None
 
 
 class ProxmoxApplyAuthorizationOut(BaseModel):
@@ -251,10 +272,15 @@ class ProxmoxDestroyPlanOut(BaseModel):
     destroy_hash: str | None = None
     blocked_reasons: list[BlockedReasonOut] = Field(default_factory=list)
     #: The bounded set of owned objects a destroy would remove.
-    deletion_set: list[dict[str, Any]] = Field(default_factory=list)
-    deletion_set_size: int = 0
+    #: ``None`` when the destroy plan did not compile. An UNCOMPUTED deletion set and an
+    #: EMPTY one are different facts and must not share a representation: an empty set says
+    #: "a destroy would remove nothing because this range owns nothing", which makes a
+    #: destroy look safe when in truth nothing has been enumerated.
+    deletion_set: list[dict[str, Any]] | None = None
+    #: ``None``, never ``0``, when the deletion set was not computed.
+    deletion_set_size: int | None = None
     approval: ApprovalOut | None = None
-    approved_hash_is_current: bool = False
+    approved_hash_is_current: bool | None = None
 
 
 class ProxmoxDestroyAuthorizationOut(BaseModel):
@@ -284,8 +310,13 @@ class ProxmoxVerificationOut(BaseModel):
     #: The worker's outcome, verbatim. Absent when nothing was recorded.
     infrastructure_outcome: str | None = None
     isolation_outcome: str | None = None
-    infrastructure_checks: list[dict[str, Any]] = Field(default_factory=list)
-    isolation_checks: list[dict[str, Any]] = Field(default_factory=list)
+    #: ``None`` when nothing was recorded, and ``None`` also when a recorded report carried
+    #: no such key. Each finding keeps whatever the worker wrote — in particular a check's
+    #: observed/ok PAIR, never flattened to one boolean: a check that could not be observed
+    #: and a check that ran and failed are different outcomes, and one boolean makes them
+    #: indistinguishable to every client downstream.
+    infrastructure_checks: list[dict[str, Any]] | None = None
+    isolation_checks: list[dict[str, Any]] | None = None
     observed_at: datetime | None = None
     detail: str | None = None
 
@@ -299,11 +330,13 @@ class ProxmoxReadinessOut(BaseModel):
 
     state: PlanState
     plan_hash: str | None = None
-    satisfied: bool = False
+    #: ``None`` when the plan did not compile: readiness was not assessed, which is not the
+    #: same as assessed and found wanting.
+    satisfied: bool | None = None
     blocked_reasons: list[BlockedReasonOut] = Field(default_factory=list)
-    findings: list[ReadinessFindingOut] = Field(default_factory=list)
-    challenge_keys: list[str] = Field(default_factory=list)
-    scoring_endpoints: list[dict[str, Any]] = Field(default_factory=list)
+    findings: list[ReadinessFindingOut] | None = None
+    challenge_keys: list[str] | None = None
+    scoring_endpoints: list[dict[str, Any]] | None = None
 
 
 class ProxmoxResetDispositionsOut(BaseModel):
@@ -314,7 +347,9 @@ class ProxmoxResetDispositionsOut(BaseModel):
     """
 
     state: RecordedStageState
-    dispositions: list[dict[str, Any]] = Field(default_factory=list)
+    #: ``None`` when no reset was recorded. An empty list would say "a reset ran and touched
+    #: no guest", which is a real and very different observation.
+    dispositions: list[dict[str, Any]] | None = None
     observed_at: datetime | None = None
     detail: str | None = None
 
@@ -335,8 +370,10 @@ class ProxmoxResidueOut(BaseModel):
     still_present: int | None = None
     unproven_count: int | None = None
     #: Residue classes no probe covered. A non-empty list means the proof is incomplete.
-    uncovered_classes: list[str] = Field(default_factory=list)
-    resources: list[dict[str, Any]] = Field(default_factory=list)
+    #: ``None`` when not computed. An EMPTY list is the STRONG claim — every residue class
+    #: was probed — and must never be produced by a missing key.
+    uncovered_classes: list[str] | None = None
+    resources: list[dict[str, Any]] | None = None
     reason: str | None = None
     observed_at: datetime | None = None
 
@@ -368,6 +405,6 @@ class ProxmoxLifecycleOut(BaseModel):
     verification: RecordedStageState
     reset_dispositions: RecordedStageState
     residue: RecordedStageState
-    readiness_satisfied: bool = False
+    readiness_satisfied: bool | None = None
     isolation_holds: bool | None = None
     blocked_reasons: list[BlockedReasonOut] = Field(default_factory=list)

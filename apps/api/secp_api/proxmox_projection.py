@@ -66,6 +66,19 @@ _OBSERVATION_FIELDS = (
 )
 
 
+def _maybe_list(value: object) -> list | None:
+    """Keep ``None`` (the worker recorded no such key) distinct from ``[]`` (it recorded none).
+
+    ``list(x or [])`` would map both onto ``[]``, which is how "residue was never probed"
+    becomes "no residue found" and how "isolation was not observed" becomes "no isolation
+    checks failed". The two facts are not interchangeable and this is the only place the
+    difference could be lost.
+    """
+    if value is None:
+        return None
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
 def blocked_reasons_out(compiled: CompiledRangePlan | BlockedPlan) -> list[BlockedReasonOut]:
     if not isinstance(compiled, BlockedPlan):
         return []
@@ -92,7 +105,10 @@ def approval_out(record: ApprovalRecord | None) -> ApprovalOut | None:
     if record is None:
         return None
     return ApprovalOut(
-        approved_hash=record.approved_hash, approved_by=record.approved_by, at=record.at
+        operation_kind=record.operation_kind,
+        approved_hash=record.approved_hash,
+        approved_by=record.approved_by,
+        at=record.at,
     )
 
 
@@ -305,8 +321,8 @@ def verification_out(recorded: dict | None) -> ProxmoxVerificationOut:
         state=RecordedStageState.recorded,
         infrastructure_outcome=recorded.get("infrastructure_outcome"),
         isolation_outcome=recorded.get("isolation_outcome"),
-        infrastructure_checks=list(recorded.get("infrastructure_checks") or []),
-        isolation_checks=list(recorded.get("isolation_checks") or []),
+        infrastructure_checks=_maybe_list(recorded.get("infrastructure_checks")),
+        isolation_checks=_maybe_list(recorded.get("isolation_checks")),
         observed_at=_moment(recorded.get("observed_at")),
         detail=recorded.get("detail"),
     )
@@ -340,7 +356,7 @@ def reset_dispositions_out(recorded: dict | None) -> ProxmoxResetDispositionsOut
         return ProxmoxResetDispositionsOut(state=RecordedStageState.undetermined)
     return ProxmoxResetDispositionsOut(
         state=RecordedStageState.recorded,
-        dispositions=list(recorded.get("dispositions") or []),
+        dispositions=_maybe_list(recorded.get("dispositions")),
         observed_at=_moment(recorded.get("observed_at")),
         detail=recorded.get("detail"),
     )
@@ -357,8 +373,8 @@ def residue_out(recorded: dict | None) -> ProxmoxResidueOut:
         removed_confirmed=recorded.get("removed_confirmed"),
         still_present=recorded.get("still_present"),
         unproven_count=recorded.get("unproven_count"),
-        uncovered_classes=list(recorded.get("uncovered_classes") or []),
-        resources=list(recorded.get("resources") or []),
+        uncovered_classes=_maybe_list(recorded.get("uncovered_classes")),
+        resources=_maybe_list(recorded.get("resources")),
         reason=recorded.get("reason"),
         observed_at=_moment(recorded.get("observed_at")),
     )
@@ -415,7 +431,7 @@ def lifecycle_out(
         verification=verification,
         reset_dispositions=reset_state,
         residue=residue,
-        readiness_satisfied=(False if blocked else readiness_is_satisfied(compiled.readiness)),
+        readiness_satisfied=(None if blocked else readiness_is_satisfied(compiled.readiness)),
         isolation_holds=(None if blocked else all(finding.holds for finding in compiled.isolation)),
         blocked_reasons=blocked_reasons_out(compiled),
     )
