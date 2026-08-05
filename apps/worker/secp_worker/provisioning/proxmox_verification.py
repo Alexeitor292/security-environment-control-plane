@@ -149,19 +149,155 @@ class ObservedInfrastructure:
     observed_addresses: tuple[str, ...] | None = None
 
 
+class CheckFindingInvalid(ValueError):
+    """A finding was constructed in a state that cannot describe a real observation."""
+
+
 @dataclass(frozen=True)
 class CheckFinding:
-    """One check's result. ``observed`` and ``ok`` are independent on purpose."""
+    """One check's result, as a PAIR with exactly three legal states.
+
+        observed=False, ok=None    the check could not be run; nothing is known
+        observed=True,  ok=False   the check ran and failed
+        observed=True,  ok=True    the check ran and passed
+
+    ``ok`` is ``bool | None`` because "unknown" needs a representation of its own. It used to be
+    ``bool``, which meant the only way to express "could not run" was ``ok=False`` — and that is
+    the exact substitution this pair exists to prevent: a check nobody could make became
+    indistinguishable from a check that failed, everywhere downstream. Two producers were doing
+    precisely that.
+
+    The other two combinations are REFUSED at construction rather than merely discouraged:
+
+    * ``observed=False, ok=True`` would be a pass nobody observed. It was reachable before, because
+      several call sites computed ``observed`` and ``ok`` from independent expressions and nothing
+      cross-checked them — "no problems were found" is trivially true when nothing was looked at.
+    * ``observed=True, ok=None`` is a contradiction: the check ran and has no verdict. Left legal,
+      it would eventually be resolved to a pass or a fail by whoever read it next.
+
+    Use :meth:`unobserved` and :meth:`observed_result` rather than the constructor, so each site
+    says which of the three it means instead of computing two fields and hoping they agree.
+    """
 
     check: VerificationCheck
     #: False when the check could not be run. Never treated as a pass.
     observed: bool
-    ok: bool
+    #: ``None`` exactly when ``observed`` is False. A verdict requires an observation.
+    ok: bool | None
     detail: str
+
+    def __post_init__(self) -> None:
+        if self.observed and self.ok is None:
+            raise CheckFindingInvalid(
+                f"{self.check.value}: observed=True with ok=None is a contradiction — the check "
+                "ran and produced no verdict. Report it as unobserved, or give it a verdict."
+            )
+        if not self.observed and self.ok is not None:
+            raise CheckFindingInvalid(
+                f"{self.check.value}: observed=False with ok={self.ok!r} claims a verdict for a "
+                "check that was never run. An unobserved check has ok=None."
+            )
+
+    @classmethod
+    def unobserved(cls, check: VerificationCheck, detail: str) -> CheckFinding:
+        """The check could not be run. NOT a failure and not a pass — nobody looked."""
+        return cls(check=check, observed=False, ok=None, detail=detail)
+
+    @classmethod
+    def observed_result(cls, check: VerificationCheck, *, ok: bool, detail: str) -> CheckFinding:
+        """The check ran and reached ``ok``."""
+        return cls(check=check, observed=True, ok=bool(ok), detail=detail)
 
     @property
     def counts_as_failure(self) -> bool:
-        return not (self.observed and self.ok)
+        """Unobserved counts as a failure. ``ok is None`` is never a pass.
+
+        Written against ``self.ok is True`` rather than truthiness so that the tri-state is read
+        explicitly: with ``ok`` now nullable, ``not (observed and ok)`` would still be correct but
+        would rely on ``None`` being falsey, which is how the distinction gets lost again.
+        """
+        return not (self.observed and self.ok is True)
+
+
+def finding_payload(finding: CheckFinding) -> dict:
+    """One finding as the durable record the control plane reads back.
+
+    ``ok`` is emitted as ``None`` for an unobserved check rather than omitted, because an absent
+    key and an explicit null are different facts downstream and only one of them says "no verdict".
+    """
+    return {
+        "check": finding.check.value,
+        "observed": finding.observed,
+        "ok": finding.ok,
+        "detail": finding.detail,
+    }
+
+
+def verification_evidence(report: VerificationReport) -> dict:
+    """Serialize a report into the ``proxmox_verification_recorded`` event payload.
+
+    THIS DID NOT EXIST. The API published ``infrastructure_checks`` and ``isolation_checks``, the
+    projection carried them, the frontend read them and two separate tests asserted their shape —
+    and nothing in the worker ever produced one. The two tests did not even agree with each other
+    (``{check, outcome}`` in one, ``{check, observed, ok, detail}`` in the other), which is the
+    proof that both were describing a payload they had invented rather than one the system emits.
+
+    So the shape is now derived from :class:`CheckFinding`, the type the verification actually
+    produces, and this is the single place it is written. The split between the two arrays is
+    :data:`ISOLATION_CHECKS`, the same set :func:`decide_outcome` uses — so a check cannot be
+    classified one way for the verdict and the other way for the record.
+
+    The two outcomes are reported SEPARATELY and neither is derived from the other: a deployment
+    can be structurally perfect and still let one team reach another, and a combined verdict would
+    let the first mask the second.
+    """
+    isolation = tuple(f for f in report.findings if f.check in ISOLATION_CHECKS)
+    infrastructure = tuple(f for f in report.findings if f.check not in ISOLATION_CHECKS)
+    return {
+        "outcome": report.outcome.value,
+        # Each half reports its own worst state. `unproven` is a third value, never folded into
+        # either of the other two: it is what an unobserved check leaves behind.
+        "infrastructure_outcome": _half_outcome(infrastructure),
+        "isolation_outcome": _half_outcome(isolation),
+        "infrastructure_checks": [finding_payload(f) for f in infrastructure],
+        "isolation_checks": [finding_payload(f) for f in isolation],
+    }
+
+
+def _half_outcome(findings: tuple[CheckFinding, ...]) -> str:
+    """The verdict for one half of the report, keeping "nobody looked" as its own answer.
+
+    ``unproven`` outranks ``passed`` and is distinct from ``failed``: a half in which every check
+    that RAN passed, but some check could not be run, has not been proved and has not failed.
+    Collapsing it into either is the substitution the whole finding type exists to prevent.
+    """
+    if not findings:
+        return "unproven"
+    if any(f.observed and f.ok is False for f in findings):
+        return "failed"
+    if any(not f.observed for f in findings):
+        return "unproven"
+    return "passed"
+
+
+def finding_from(
+    check: VerificationCheck, *, observed: bool, ok: bool, detail: str
+) -> CheckFinding:
+    """Build a finding from a separately-computed ``observed`` flag and verdict.
+
+    When ``observed`` is False the verdict is DISCARDED and the finding is unobserved. That is the
+    correction, not a convenience: several call sites here computed the two from independent
+    expressions — ``observed=unobserved == 0`` beside ``ok=not problems`` — and "no problems were
+    found" is trivially true when nothing was examined. So an unobservable check could report
+    ``ok=True``, a pass nobody made, and ``counts_as_failure`` was the only thing standing between
+    that and a green verification.
+
+    Call sites that already know which of the three states they mean should use
+    :meth:`CheckFinding.unobserved` or :meth:`CheckFinding.observed_result` directly.
+    """
+    if not observed:
+        return CheckFinding.unobserved(check, detail)
+    return CheckFinding.observed_result(check, ok=ok, detail=detail)
 
 
 @dataclass(frozen=True)
@@ -239,7 +375,7 @@ def verify_deployment(
         return VerificationReport(
             outcome=VerificationOutcome.recovery_required,
             findings=(
-                CheckFinding(
+                finding_from(
                     check=VerificationCheck.guest_inventory,
                     observed=False,
                     ok=False,
@@ -284,7 +420,7 @@ def _check_guests(
     missing = sorted(expected_vmids - set(by_vmid))
     unexpected = sorted(set(by_vmid) - expected_vmids)
     findings = [
-        CheckFinding(
+        finding_from(
             check=VerificationCheck.guest_inventory,
             observed=True,
             ok=not missing and not unexpected,
@@ -309,7 +445,7 @@ def _check_guests(
                 continue
             if actual != guest[expected_key]:
                 problems.append(f"vmid {guest['vmid']}: {actual!r} != {guest[expected_key]!r}")
-        return CheckFinding(
+        return finding_from(
             check=check,
             observed=unobserved == 0,
             ok=not problems,
@@ -350,7 +486,7 @@ def _check_guests(
                     f"{disk['size_gb']}"
                 )
     findings.append(
-        CheckFinding(
+        finding_from(
             check=VerificationCheck.disks_and_storage,
             observed=disk_unobserved == 0,
             ok=not disk_problems,
@@ -379,7 +515,7 @@ def _check_guests(
                 f"vmid {guest['vmid']}: {sorted(actual_macs)} != {sorted(expected_macs)}"
             )
     findings.append(
-        CheckFinding(
+        finding_from(
             check=VerificationCheck.nics_and_macs,
             observed=mac_unobserved == 0,
             ok=not mac_problems,
@@ -406,7 +542,7 @@ def _check_guests(
             if live.tags.get(key) != value:
                 tag_problems.append(f"vmid {guest['vmid']}: {key}={live.tags.get(key)!r}")
     findings.append(
-        CheckFinding(
+        finding_from(
             check=VerificationCheck.ownership_tags,
             observed=tag_unobserved == 0,
             ok=not tag_problems,
@@ -442,7 +578,7 @@ def _check_guests(
             elif attribute == "ready" and actual is not True:
                 problems.append(f"vmid {guest['vmid']}: not ready")
         findings.append(
-            CheckFinding(
+            finding_from(
                 check=check,
                 observed=unobserved == 0,
                 ok=not problems,
@@ -480,7 +616,7 @@ def _check_network(
         if live.cidr != vnet["subnet"]["cidr"]:
             problems.append(f"VNet {vnet['name']}: cidr {live.cidr} != {vnet['subnet']['cidr']}")
     return [
-        CheckFinding(
+        finding_from(
             check=VerificationCheck.network_objects,
             observed=unobserved == 0,
             ok=not problems,
@@ -507,7 +643,7 @@ def _check_firewall(network: dict, observed: ObservedInfrastructure) -> CheckFin
     expected_sets = {str(i["name"]) for i in network.get("ip_sets", [])}
     missing_groups = sorted(expected_groups - set(observed.security_groups))
     missing_sets = sorted(expected_sets - set(observed.ip_sets))
-    return CheckFinding(
+    return finding_from(
         check=VerificationCheck.firewall_objects,
         observed=True,
         ok=not missing_groups and not missing_sets,
@@ -521,7 +657,7 @@ def _check_firewall(network: dict, observed: ObservedInfrastructure) -> CheckFin
 
 def _check_state_agreement(observed: ObservedInfrastructure) -> CheckFinding:
     if observed.tofu_state_addresses is None or observed.observed_addresses is None:
-        return CheckFinding(
+        return finding_from(
             check=VerificationCheck.state_agreement,
             observed=False,
             ok=False,
@@ -531,7 +667,7 @@ def _check_state_agreement(observed: ObservedInfrastructure) -> CheckFinding:
     in_provider = set(observed.observed_addresses)
     only_state = sorted(in_state - in_provider)
     only_provider = sorted(in_provider - in_state)
-    return CheckFinding(
+    return finding_from(
         check=VerificationCheck.state_agreement,
         observed=True,
         ok=not only_state and not only_provider,
@@ -563,7 +699,7 @@ def _check_reachability(
     )
     if prober is None:
         return [
-            CheckFinding(
+            finding_from(
                 check=check,
                 observed=False,
                 ok=False,
@@ -624,7 +760,7 @@ def _check_reachability(
                     f"{source['name']} cannot reach scoring {address}:{scoring_port}"
                 )
     findings.append(
-        CheckFinding(
+        finding_from(
             check=VerificationCheck.required_reachability,
             observed=not required_unknown,
             ok=not required_failures,
@@ -652,7 +788,7 @@ def _check_reachability(
                 unknown.append(f"{segment} -> {address}:{port}")
             elif verdict is ProbeVerdict.reachable:
                 violations.append(f"{segment} REACHED {address}:{port}")
-        return CheckFinding(
+        return finding_from(
             check=check,
             observed=not unknown,
             ok=not violations,

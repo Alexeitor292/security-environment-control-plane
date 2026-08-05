@@ -605,12 +605,10 @@ OPAQUE_MEMBERS: dict[tuple[str, str], str] = {
     ),
     ("ProxmoxResidueOut", "resources"): "recorded verbatim; narrowed by asAbsenceFindings",
     ("ProxmoxTopologyOut", "topology"): "the canonical document the plan hash is taken over",
-    ("ProxmoxVerificationOut", "infrastructure_checks"): (
-        "recorded verbatim; the (observed, ok) pair is narrowed by asCheckFindings"
-    ),
-    ("ProxmoxVerificationOut", "isolation_checks"): (
-        "recorded verbatim; the (observed, ok) pair is narrowed by asCheckFindings"
-    ),
+    # ProxmoxVerificationOut.infrastructure_checks / .isolation_checks were declared here and are
+    # now TYPED as CheckFindingOut — the (observed, ok) pair is in the contract rather than being
+    # narrowed on the client. CheckFindingOut sets extra="allow", so the worker's additional keys
+    # still travel; typing the shape did not become a reason to discard evidence.
     ("RangeEventOut", "data"): "range event payloads are per-event",
     ("RangeResourceOut", "detail"): "provider-shaped resource detail",
     ("ReadonlyPreflightOut", "readiness_facts"): "preflight facts are per-provider",
@@ -683,10 +681,39 @@ def test_the_opaque_guard_can_actually_see_an_opaque_member(document: dict[str, 
     member we know is opaque, and does NOT fire on one we know is typed.
     """
     live = live_opaque_members(document)
-    assert ("ProxmoxVerificationOut", "infrastructure_checks") in live
+    # Still genuinely opaque: the desired-state document is what the plan hash is taken over, and a
+    # model over it would drop keys the hash covers.
     assert ("ProxmoxTopologyOut", "topology") in live
     assert ("ProxmoxTopologyOut", "guests") not in live
     assert ("ProxmoxPlanOut", "isolation") not in live
+    # The check arrays used to be the example here. They are typed now, which is the outcome this
+    # guard exists to make visible — so it points at a member that is still opaque instead.
+    assert ("ProxmoxVerificationOut", "infrastructure_checks") not in live
+
+
+def test_the_check_findings_carry_the_observed_ok_pair_in_the_contract(
+    document: dict[str, Any],
+) -> None:
+    """The pair must be in the DOCUMENT, not merely preserved by the projection.
+
+    These arrays were ``list[dict[str, Any]]``, so the generated TypeScript was
+    ``{ [key: string]: unknown }[]`` and a client had no typed guarantee that ``observed`` was even
+    present — "unknown is not false" was enforced by frontend convention rather than by the schema,
+    in the one place the per-check tri-state actually lives.
+    """
+    for member in ("infrastructure_checks", "isolation_checks"):
+        prop_schema = prop(document, "ProxmoxVerificationOut", member)
+        assert "CheckFindingOut" in str(prop_schema), f"{member} is not typed"
+
+    finding = schema(document, "CheckFindingOut")
+    assert set(finding["required"]) >= {"check", "observed"}
+    # `ok` is nullable and defaults to null: an unobserved check has NO verdict, and null is how
+    # that is said. A non-nullable boolean here would force "could not run" to be reported as
+    # "failed", which is the substitution the pair exists to prevent.
+    assert is_nullable(finding["properties"]["ok"])
+    assert not is_nullable(finding["properties"]["observed"])
+    # Extra keys the worker records still travel; typing must not silently drop evidence.
+    assert finding.get("additionalProperties") is not False
 
 
 # --- no secret has a field to travel in ---------------------------------------------------------
