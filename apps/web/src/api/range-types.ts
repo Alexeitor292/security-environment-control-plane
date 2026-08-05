@@ -234,3 +234,116 @@ export interface RangeCreate {
   /** Optional; defaults to the template name server-side. */
   name?: string;
 }
+
+// --- competition -----------------------------------------------------------------------------
+
+export const COMPETITION_STATES = ["draft", "running", "stopped"] as const;
+export type CompetitionState = (typeof COMPETITION_STATES)[number];
+
+export const SUBMISSION_VERDICTS = [
+  "accepted",
+  "incorrect",
+  "duplicate",
+  "already_solved",
+  "not_open",
+  "attempts_exhausted",
+] as const;
+export type SubmissionVerdict = (typeof SUBMISSION_VERDICTS)[number];
+
+export interface Competition {
+  id: string;
+  range_id: string;
+  name: string;
+  state: CompetitionState;
+  started_at: string | null;
+  stopped_at: string | null;
+  team_count: number;
+  challenge_count: number;
+  total_points: number;
+  created_at: string;
+}
+
+export interface CompetitionTeam {
+  id: string;
+  competition_id: string;
+  name: string;
+  slug: string;
+  join_code: string;
+  /** Server-computed. Never derived, summed or adjusted in the browser. */
+  score: number;
+  solved_count: number;
+  created_at: string;
+}
+
+/**
+ * A roster entry. Carries NO permission, does not affect org scoping, and is NOT consulted when
+ * a submission is judged — the TEAM scores and the authenticated principal authorizes. Removing a
+ * member therefore never retracts their team's solves.
+ */
+export interface TeamMember {
+  id: string;
+  competition_id: string;
+  team_id: string;
+  display_name: string;
+  /** Optional link to a provisioned SECP user. Competitors usually are not users. */
+  user_id: string | null;
+  created_at: string;
+}
+
+export interface Challenge {
+  id: string;
+  competition_id: string;
+  key: string;
+  title: string;
+  description: string;
+  category: string;
+  points: number;
+  component_key: string | null;
+  hint: string | null;
+  max_attempts: number;
+  solve_count: number;
+  solved_by_team_ids: string[];
+  // NOTE: there is deliberately no flag field, mirroring the backend schema. Adding one would
+  // create a serialisation path by which a solution could reach a browser.
+}
+
+export interface Submission {
+  id: string;
+  competition_id: string;
+  team_id: string;
+  team_name: string;
+  challenge_id: string;
+  challenge_title: string;
+  verdict: SubmissionVerdict;
+  /** What the server RECORDED. Never an instruction to add points locally. */
+  points_awarded: number;
+  attempts_remaining: number;
+  submitted_at: string;
+}
+
+export interface ScoreboardEntry {
+  /** Server-assigned. Ties share a rank; the tie key is (score, last_solve_at) TOGETHER. */
+  rank: number;
+  team_id: string;
+  team_name: string;
+  score: number;
+  solved_count: number;
+  last_solve_at: string | null;
+  solved_challenge_ids: string[];
+}
+
+export interface Scoreboard {
+  competition_id: string;
+  state: CompetitionState;
+  /** The server's own generation time — shown as-is, never a client clock reading. */
+  generated_at: string;
+  total_points: number;
+  entries: ScoreboardEntry[];
+}
+
+export interface TeamMemberCreate {
+  /** Free text. A competitor is a display name, not necessarily a SECP user. */
+  display_name: string;
+  /** Optional; when given must be a user in the caller's own organization. */
+  user_id?: string;
+}

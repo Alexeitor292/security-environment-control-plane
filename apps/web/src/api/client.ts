@@ -62,12 +62,19 @@ import type {
   SubstrateEligibilityGrant,
 } from "./types";
 import type {
+  Challenge,
+  Competition,
+  CompetitionTeam,
   Range,
   RangeCreate,
   RangeEvent,
   RangeOperation,
   RangeResource,
   RangeTemplate,
+  Scoreboard,
+  Submission,
+  TeamMember,
+  TeamMemberCreate,
   TeardownEvidence,
 } from "./range-types";
 
@@ -360,6 +367,61 @@ export const api = {
   /** `[]` if the range was never destroyed. Newest first. */
   listTeardownEvidence: (rangeId: string) =>
     request<TeardownEvidence[]>("GET", `/api/v1/ranges/${rangeId}/teardown-evidence`),
+
+  // --- Competition ---------------------------------------------------------------------------
+  //
+  // The range-scoped spellings are used throughout: they resolve the range's single competition
+  // and delegate to the same service as their `/competitions/{id}/…` twins, so there is one code
+  // path on the server and one fewer id for the UI to carry. The competition-scoped routes remain
+  // available; `start`/`stop`/`reset-scores` and `submissions` exist ONLY in that form, so those
+  // take the competition id from `range.competition_id`.
+  createCompetition: (rangeId: string, body: { name?: string }) =>
+    request<Competition>("POST", `/api/v1/ranges/${rangeId}/competition`, body),
+  getCompetition: (rangeId: string) =>
+    request<Competition>("GET", `/api/v1/ranges/${rangeId}/competition`),
+  // Refused unless the range is `ready` and at least one team exists. Moves the range to `active`.
+  startCompetition: (competitionId: string) =>
+    request<Competition>("POST", `/api/v1/competitions/${competitionId}/start`),
+  // Moves the range back to `ready`. Submissions are refused while stopped.
+  stopCompetition: (competitionId: string) =>
+    request<Competition>("POST", `/api/v1/competitions/${competitionId}/stop`),
+  // Clears submissions and scores; keeps teams and challenges. Does not touch containers.
+  resetCompetitionScores: (competitionId: string) =>
+    request<Competition>("POST", `/api/v1/competitions/${competitionId}/reset-scores`),
+
+  listTeams: (rangeId: string) =>
+    request<CompetitionTeam[]>("GET", `/api/v1/ranges/${rangeId}/teams`),
+  createTeam: (rangeId: string, body: { name: string }) =>
+    request<CompetitionTeam>("POST", `/api/v1/ranges/${rangeId}/teams`, body),
+  deleteTeam: (competitionId: string, teamId: string) =>
+    request<void>("DELETE", `/api/v1/competitions/${competitionId}/teams/${teamId}`),
+
+  // Membership is a roster only: it grants no permission and is not consulted when a submission
+  // is judged, so removing a member never retracts their team's solves.
+  listTeamMembers: (rangeId: string, teamId: string) =>
+    request<TeamMember[]>("GET", `/api/v1/ranges/${rangeId}/teams/${teamId}/members`),
+  addTeamMember: (rangeId: string, teamId: string, body: TeamMemberCreate) =>
+    request<TeamMember>("POST", `/api/v1/ranges/${rangeId}/teams/${teamId}/members`, body),
+  removeTeamMember: (rangeId: string, teamId: string, memberId: string) =>
+    request<void>("DELETE", `/api/v1/ranges/${rangeId}/teams/${teamId}/members/${memberId}`),
+
+  listChallenges: (rangeId: string) =>
+    request<Challenge[]>("GET", `/api/v1/ranges/${rangeId}/challenges`),
+  // Always 200 with a verdict — a wrong flag is a normal outcome, not an HTTP error.
+  submitFlag: (
+    competitionId: string,
+    body: { team_id: string; challenge_id: string; value: string },
+  ) => request<Submission>("POST", `/api/v1/competitions/${competitionId}/submissions`, body),
+  listSubmissions: (competitionId: string, limit = 100) =>
+    request<Submission[]>(
+      "GET",
+      `/api/v1/competitions/${competitionId}/submissions`,
+      undefined,
+      { limit: String(limit) },
+    ),
+  /** The authoritative standings. Poll every 3s while the competition is running. */
+  getScoreboard: (rangeId: string) =>
+    request<Scoreboard>("GET", `/api/v1/ranges/${rangeId}/scoreboard`),
 
   // Public browser auth configuration (ADR-018). Sent WITHOUT an Authorization header.
   authConfig: () =>

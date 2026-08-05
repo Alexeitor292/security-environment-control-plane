@@ -124,11 +124,26 @@ asserts the server's own audit ledger recorded every step.
 VITE_API_BASE_URL=http://localhost:8099 npm run test:live
 ```
 
-It is **not** part of `npm test` (the Frontend CI job has no control plane to point
-it at) and it is **not** skipped when the API is absent — without a reachable server
-it fails with an actionable message and a non-zero exit. The same step definition
-(`src/pages/range/range-flow.ts`) also runs on every PR inside `npm test` against a
-fetch-level fake, so the two can never describe different flows.
+It is **not** part of `npm test` (the Frontend CI job has no control plane, worker
+or Docker socket to point it at) and it is **not** skipped when the API is absent —
+without a reachable server it fails with an actionable message and a non-zero exit.
+The same step definition (`src/pages/range/range-flow.ts`) also runs on every PR
+inside `npm test` against a fetch-level fake, so the two can never describe
+different flows.
+
+> **If you wire this into CI, gate on the exit code, not the test counts.** When the
+> API is unreachable the failure happens in `beforeAll`, so the five tests are
+> reported as **skipped** while the file fails and the process exits non-zero. A
+> runner that reads exit status fails correctly; one that only counts test outcomes
+> sees `0 passed / 5 skipped` and calls that fine — which is indistinguishable from
+> a run where the acceptance never executed at all.
+
+**What each half proves.** The in-gate half proves the client drives the recorded
+lifecycle correctly — the right calls in the right order, polling rather than
+trusting a `202`, and handling an operation whose steps are not planned yet. It
+proves *nothing* about a real container: the fake is this repository's belief about
+the server, so it cannot detect the server changing. Only the live half touches
+infrastructure, and only it can.
 
 > **Two ports, deliberately.** Other worktrees' dev servers commonly hold `:5173`
 > and `:8080`. Vite will report binding a port it did not get and silently serve
