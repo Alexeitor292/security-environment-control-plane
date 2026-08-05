@@ -2,9 +2,20 @@ import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { ControlPlaneAdapter } from './adapter'
 import { mockAdapter } from './mock-adapter'
+import { ProvenanceBoundary } from '../../../../integrations/provenance'
 
 const AdapterContext = createContext<ControlPlaneAdapter>(mockAdapter)
 
+/**
+ * Supplies the adapter AND publishes where its data comes from.
+ *
+ * The `adapter = mockAdapter` default is retained so that every migrated screen
+ * keeps rendering, but it is no longer silent: `ProvenanceBoundary` stamps
+ * `data-secp-data-provenance` onto the subtree and renders a standing badge
+ * whenever the active adapter declares itself fixture-backed. Passing a real
+ * adapter removes the badge, because the adapter says `live` -- no flag, no
+ * build-mode check, and nothing for a caller to forget to turn off.
+ */
 export function AdapterProvider({
   adapter = mockAdapter,
   children,
@@ -12,7 +23,11 @@ export function AdapterProvider({
   adapter?: ControlPlaneAdapter
   children: ReactNode
 }) {
-  return <AdapterContext.Provider value={adapter}>{children}</AdapterContext.Provider>
+  return (
+    <AdapterContext.Provider value={adapter}>
+      <ProvenanceBoundary source={adapter}>{children}</ProvenanceBoundary>
+    </AdapterContext.Provider>
+  )
 }
 
 export function useAdapter(): ControlPlaneAdapter {

@@ -28,6 +28,13 @@ function respond<T>(value: T, delayMs = 120): Promise<T> {
 
 /** Fixture-backed adapter. All data is mock; nothing contacts infrastructure. */
 export class MockControlPlaneAdapter implements ControlPlaneAdapter {
+  /**
+   * Every row this class returns is a literal from `../mocks`. Nothing it
+   * serves has ever been near infrastructure, so it says so, and the UI
+   * reads this field rather than assuming.
+   */
+  readonly provenance = 'fixture' as const
+
   listEvents() {
     return respond(events)
   }

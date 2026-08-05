@@ -19,6 +19,7 @@ import type {
   WorkerNode,
   WorkflowRun,
 } from '../models/types'
+import type { ProvenanceDeclaring } from '../../../../integrations/provenance'
 
 /**
  * Provider-independent adapter boundary.
@@ -28,7 +29,11 @@ import type {
  * control-plane API. Method names deliberately mirror the product model, not
  * the current backend routes.
  */
-export interface ControlPlaneAdapter {
+export interface ControlPlaneAdapter extends ProvenanceDeclaring {
+  /**
+   * Where this adapter's rows come from. Required by `ProvenanceDeclaring`,
+   * so an implementation cannot omit it and silently look real.
+   */
   listEvents(): Promise<EventItem[]>
   getEvent(id: string): Promise<EventItem | undefined>
   listScenarios(): Promise<Scenario[]>

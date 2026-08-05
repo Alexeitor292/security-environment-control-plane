@@ -1,0 +1,86 @@
+/**
+ * Fixture-provenance badge.
+ *
+ * Styled to sit inside the spatial glass language (dark-only, like the rest of
+ * the product) while still being genuinely hard to overlook: warm amber against
+ * a UI that is otherwise entirely cyan/violet, so it never reads as chrome.
+ *
+ * It is pinned to the viewport rather than to a scroll container on purpose --
+ * a marker that scrolls out of view is a marker that is absent for most of the
+ * session.
+ */
+
+.secp-provenance {
+  display: contents;
+}
+
+.secp-fixture-badge {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  z-index: 2147483000;
+
+  display: inline-flex;
+  gap: 9px;
+  align-items: center;
+
+  max-width: min(680px, calc(100vw - 32px));
+  padding: 7px 15px 7px 12px;
+
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  color: #ffe6b8;
+
+  pointer-events: none;
+
+  background: rgba(58, 36, 4, 0.82);
+  border: 1px solid rgba(255, 183, 71, 0.42);
+  border-radius: 999px;
+  box-shadow:
+    0 8px 26px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 214, 150, 0.16);
+
+  transform: translateX(-50%);
+
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+
+.secp-fixture-badge__dot {
+  flex: none;
+
+  width: 7px;
+  height: 7px;
+
+  background: #ffb347;
+  border-radius: 50%;
+  box-shadow: 0 0 10px rgba(255, 179, 71, 0.9);
+}
+
+.secp-fixture-badge__text {
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * The badge must survive reduced-motion and print. It has no animation to
+ * disable, but printing a fixture-backed screen without the marker is exactly
+ * how a screenshot ends up in a slide deck presented as real.
+ */
+@media print {
+  .secp-fixture-badge {
+    position: static;
+
+    color: #000;
+
+    background: #fff3d6;
+    border: 1px solid #a06a00;
+    box-shadow: none;
+
+    transform: none;
+  }
+}
