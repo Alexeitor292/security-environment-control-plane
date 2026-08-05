@@ -241,28 +241,48 @@ P7-C is a migration. The provenance work in P7-C.2 was applied to **both** and
 shares one module, so the two cannot diverge on data honesty. Consolidation
 should be a deliberate follow-up.
 
-### 4.3 `server-rack-new.glb` is 22.6 MB that nothing loads
+### 4.3 One model migrated, one excluded — and how the survivor is guarded
 
-The donor ships two glTF binaries. The scene loads exactly one of them:
+The donor ships two glTF binaries. The scene loads exactly one:
 `scene/config/scene.ts` sets `url: '/models/server-rack.glb'` — the **6.1 MB**
-model. `server-rack-new.glb` (**22,615,248 bytes**) is referenced by nothing:
-not by any `.ts`/`.tsx`/`.css` in the donor source, not by `index.html`, and not
-by any of the donor's ~37 backup directories either, so it was not a
-recently-superseded reference. It appears to be an intended replacement that was
-never wired up.
+model — and `ServerRack.tsx` holds the only `useGLTF` call site.
+`server-rack-new.glb` (**22,615,248 bytes**) is referenced by nothing: no
+`.ts`/`.tsx`/`.css` in the donor source, not `index.html`, and none of the
+donor's ~37 backup directories, so it was not a recently-superseded reference —
+an intended replacement that was never wired up.
 
-It has been migrated, because the migration brief named it explicitly and
-dropping a named asset unilaterally is not this slice's call. But it is worth an
-explicit decision, because git blobs are forever: **22.6 MB is added to every
-future clone of this repository for an asset no code path reaches.** Removing it
-is cheap now — the branch is unmerged and the history rewrite touches only my
-commits — and expensive later.
+**It is excluded.** A git blob is permanent, so carrying it would add 22.6 MB to
+every future clone of this repository forever for an asset no code path reaches.
+This is not a simplification of the scene: the model the donor actually renders
+is here byte-identical, so what a user sees is exactly what the donor showed. The
+donor is untouched and read-only, so the file is one copy away if anyone wires it
+up. Git LFS was considered and rejected — at 6.1 MB it is unwarranted, and a
+misconfigured LFS checkout substitutes a **~130-byte pointer file** for the
+binary, which fails silently at runtime as an empty scene.
 
-`migration-completeness.test.ts` now resolves the configured model URL to the
-file on disk and pins its exact byte count. That is deliberately stronger than
-checking a `.glb` string appears somewhere: a missing, renamed, truncated or
-LFS-stub model produces an **empty scene at runtime and no other symptom** — no
-build error, no type error, nothing a conventional test would observe.
+**The survivor is guarded by `src/spatial/scene/model-integrity.test.ts`**, which
+asserts the glTF magic number (`67 6C 54 46`), container version 2, a JSON first
+chunk, and the exact byte count. Its strongest assertion is none of those: the
+glTF header **declares its own total length** at bytes 8–12, so the file is
+checked against itself and any truncation fails without anyone needing to know
+the right size.
+
+That distinction is not theoretical. Mutation-verified against the three
+realistic corruptions:
+
+| Simulated failure | Result |
+| --- | --- |
+| Git LFS pointer stub in place of the binary | all 4 assertions fail |
+| Truncated copy (first 1 MB) | header-length + byte-count fail |
+| Text-mode corruption (LF → CRLF) | header-length + byte-count fail |
+
+The CRLF case is the instructive one: **the magic bytes survive it**, so a test
+that checked only the magic number would have passed on a corrupt model. The
+self-consistency check is what catches it.
+
+A hash table in a pull request cannot do this job — whoever writes the migration
+produces both sides of it, so it can only restate itself, and nothing re-runs it.
+This test lives in the repository and fails for anybody.
 
 ### 4.4 Two model files for one product
 
