@@ -169,6 +169,31 @@ def test_an_unreadable_record_is_undetermined_not_absent(monkeypatch):
     assert "is unknown" in seal.detail
 
 
+def test_the_apply_history_is_actually_published_in_the_seal_posture(session):
+    """The fact the hold point needs must be IN the payload, not merely available.
+
+    This test exists because it very nearly was not. ``observe_apply_history`` was written, tested
+    and reachable — and nothing called it: the probe's payload carried the three code seals only.
+    A tested function with no caller is the same defect as a payload key with no producer, which is
+    the shape this whole slice was opened to fix. So the posture's key set is asserted against the
+    probe's own required set, and the required set includes the apply history.
+    """
+    from secp_worker.activation_probe import REQUIRED_SEALS, _default_seals
+    from secp_worker.safety_seal_probe import REQUIRED_SEAL_NAMES
+
+    assert "apply_execution_absent" in REQUIRED_SEAL_NAMES, (
+        "the apply history must be part of the posture, not reported beside it — a posture about "
+        "the executor boundary alone says nothing about whether this deployment has applied"
+    )
+    payload = _default_seals()
+    assert set(payload) == set(REQUIRED_SEALS)
+    assert payload["apply_execution_absent"] in {"sealed", "unsealed", "undetermined"}
+    # And every code seal still holds, so this test fails loudly if the wiring broke a derivation
+    # rather than only checking the key is present.
+    for name in ("generic_executor_subprocess_sealed", "plan_only_process_gated"):
+        assert payload[name] == "sealed", payload
+
+
 # --- the capability is reported honestly and is NOT a seal ------------------------
 
 

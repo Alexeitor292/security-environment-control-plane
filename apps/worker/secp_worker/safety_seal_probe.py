@@ -193,6 +193,10 @@ REQUIRED_SEAL_NAMES: frozenset[str] = frozenset(
         "generic_activation_subprocess_sealed",
         "generic_executor_subprocess_sealed",
         "plan_only_process_gated",
+        # The fact the hold point actually needs: "no apply has occurred". It is in the REQUIRED
+        # set rather than reported alongside it, because a posture that does not include it would
+        # be a posture about code alone — and the question being asked is about this deployment.
+        "apply_execution_absent",
     }
 )
 
@@ -293,6 +297,32 @@ PROVISIONING_CAPABILITY = {
         "gates are the safety property, not the absence of the capability."
     ),
 }
+
+
+def default_apply_history() -> SealObservation:
+    """Open a short read-only session and observe the apply history.
+
+    Its own session, opened and rolled back like every other reader in the probe: the probe holds
+    no long-lived session and commits nothing. A session that cannot be opened is
+    ``undetermined`` — :func:`observe_apply_history` already turns any failure into that, and
+    "we could not look" must never render as "it did not happen".
+    """
+    try:
+        from secp_api.db import get_sessionmaker
+    except Exception as exc:  # noqa: BLE001 - the type is reported, never the message
+        return SealObservation(
+            name="apply_execution_absent",
+            state=SealState.undetermined,
+            detail=(
+                f"the durable record could not be reached ({type(exc).__name__}); whether an "
+                "apply has occurred is unknown"
+            ),
+        )
+    factory = get_sessionmaker()
+    with factory() as session:
+        observation = observe_apply_history(session)
+        session.rollback()
+    return observation
 
 
 def seal_payload(observations: tuple[SealObservation, ...]) -> dict[str, str]:

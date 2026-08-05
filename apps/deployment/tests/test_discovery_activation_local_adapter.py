@@ -283,6 +283,7 @@ def _probe(*, published: bool = True, enabled: bool = True) -> str:
                 "generic_activation_subprocess_sealed": "sealed",
                 "generic_executor_subprocess_sealed": "sealed",
                 "plan_only_process_gated": "sealed",
+                "apply_execution_absent": "sealed",
             },
             "worker_keys": {
                 "metadata_safe": True,

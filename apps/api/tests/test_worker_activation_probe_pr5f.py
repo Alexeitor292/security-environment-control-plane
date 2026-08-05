@@ -69,6 +69,10 @@ def _seals(**updates):
         "generic_activation_subprocess_sealed": "sealed",
         "generic_executor_subprocess_sealed": "sealed",
         "plan_only_process_gated": "sealed",
+        # The fact the hold point asks for: no apply has been observed executing. Part of the
+        # posture rather than reported beside it — a report about the executor boundary alone
+        # says nothing about whether this deployment has already applied.
+        "apply_execution_absent": "sealed",
     }
     values.update(updates)
     return values
@@ -774,6 +778,8 @@ def test_unhealthy_or_wrong_queue_refuses_before_seals_and_database(readiness):
         {"generic_executor_subprocess_sealed": "undetermined"},
         {"plan_only_process_gated": "unsealed"},
         {"plan_only_process_gated": "undetermined"},
+        {"apply_execution_absent": "unsealed"},
+        {"apply_execution_absent": "undetermined"},
         # A seal that vanishes is drift, not a smaller-but-passing report.
         {"generic_executor_subprocess_sealed": None},
         # And a seal nobody considered is drift too.

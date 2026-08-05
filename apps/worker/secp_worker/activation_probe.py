@@ -247,9 +247,17 @@ def _default_seals() -> dict[str, str]:
     Still constructs no operator and contacts nothing: every derivation is a call that is EXPECTED
     to refuse. See :mod:`secp_worker.safety_seal_probe`.
     """
-    from secp_worker.safety_seal_probe import derive_seals, seal_payload
+    from secp_worker.safety_seal_probe import (
+        default_apply_history,
+        derive_seals,
+        seal_payload,
+    )
 
-    return seal_payload(derive_seals())
+    # The apply history is observed here rather than inside ``derive_seals`` because it needs a
+    # database session and the three code seals do not. It is part of the SAME posture: a report
+    # about the executor boundary alone would say nothing about whether this deployment has
+    # already applied, which is the question a hold point asks.
+    return seal_payload((*derive_seals(), default_apply_history()))
 
 
 def _module_loaded_from_overlay(module: object, relative_path: str) -> bool:
