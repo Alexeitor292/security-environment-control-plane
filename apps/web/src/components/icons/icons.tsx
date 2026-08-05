@@ -1,3 +1,8 @@
+// React 19 removed the GLOBAL `JSX` namespace; it is exported from "react" instead. Importing the
+// name keeps every `JSX.Element` below unchanged, which is the point — the alternative is rewriting
+// each use site to `React.JSX.Element` and pulling a value import into a file that needs none.
+import type { JSX } from "react";
+
 import { SecpIcon, type SecpIconProps } from "./SecpIcon";
 
 // Custom SECP icon set. Shared hex/cube language: a hexagon or cube frame

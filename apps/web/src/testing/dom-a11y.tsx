@@ -19,6 +19,18 @@ export interface Mounted {
   root: Root;
   /** Run an interaction with React's batching and passive effects flushed before it returns. */
   run(fn: () => void): void;
+  /**
+   * Run an interaction and let React settle work that arrives ASYNCHRONOUSLY — a resolved fetch,
+   * a promise a click kicked off — before returning.
+   *
+   * React 19 needs the await to happen INSIDE the act scope. `act(() => {})`, the synchronous
+   * form, flushes work already queued, so under React 18 draining a microtask or two beforehand
+   * and then calling it happened to be enough. Under React 19 the update lands outside act: it
+   * warns "an update was not wrapped in act(...)", and the render an assertion is about has not
+   * happened when the assertion runs. That failure reads as a missing element, not as a timing
+   * problem, which is what makes it worth a named helper rather than a comment at each call site.
+   */
+  runAsync(fn?: () => void | Promise<void>): Promise<void>;
   unmount(): void;
 }
 
@@ -48,6 +60,17 @@ export function mount(element: ReactElement): Mounted {
     run(fn: () => void) {
       act(() => {
         fn();
+      });
+    },
+    async runAsync(fn?: () => void | Promise<void>) {
+      // Two microtask turns inside the scope: one for the promise the interaction resolved, one
+      // for the continuation React schedules off it. Deliberately not a timer — a real clock would
+      // make the suite slow AND flaky, and there is nothing here that a timer settles and a
+      // microtask does not.
+      await act(async () => {
+        await fn?.();
+        await Promise.resolve();
+        await Promise.resolve();
       });
     },
     unmount() {
