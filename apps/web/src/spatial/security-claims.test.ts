@@ -236,8 +236,16 @@ const PAGES_ENTRIES_AT_PIN = 52;
  * becoming false.
  */
 const DOCUMENTATION_MODULES: [file: string, importers: string[]][] = [
-  // Empty: its only mention anywhere is inside a comment in control-plane-reader.ts.
-  ["api/adapter-endpoint-map.ts", []],
+  // Re-decided 2026-08-05, which is what this pin is for. It was empty; `unsourced-fields-doc.ts`
+  // now imports it, and the pin broke exactly as designed.
+  //
+  // The exemption still holds, and for the original reason rather than a new one: the importer
+  // renders the map into `docs/product/unsourced-fields.md` — a markdown file written to disk by
+  // a CLI script — and nothing renders it into a UI surface. The claims stay developer-facing.
+  //
+  // If a component ever imports either module, this breaks again and the answer will be different:
+  // at that point the prose IS user-facing and has to be reworded or acknowledged, not exempted.
+  ["api/adapter-endpoint-map.ts", ["api/unsourced-fields-doc.ts"]],
 ];
 
 /** Files that import `target`, resolved rather than string-matched. */

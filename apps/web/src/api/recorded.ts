@@ -3,28 +3,31 @@
 // WHY THIS FILE EXISTS, AND WHY IT IS THE ONLY HAND-WRITTEN TRANSPORT CODE
 //
 // `./generated/openapi.ts` is generated from `contracts/openapi/openapi.json` and is the single
-// source of truth for every shape that crosses the wire. Seven Proxmox members resist that,
-// because `secp_api.schemas_proxmox` declares them `dict[str, Any]` / `list[dict[str, Any]]` and
-// OpenAPI can only publish `{ [key: string]: unknown }`:
+// source of truth for every shape that crosses the wire. Five Proxmox members resist that, because
+// `secp_api.schemas_proxmox` declares them `dict[str, Any]` / `list[dict[str, Any]]` and OpenAPI
+// can only publish `{ [key: string]: unknown }`:
 //
-//   ProxmoxVerificationOut.infrastructure_checks   ProxmoxVerificationOut.isolation_checks
 //   ProxmoxResetDispositionsOut.dispositions       ProxmoxResidueOut.resources
 //   ProxmoxDestroyPlanOut.deletion_set             ProxmoxTopologyOut.topology
 //   ProxmoxPlanOut.document
+//
+// It was SEVEN. `ProxmoxVerificationOut.infrastructure_checks` and `.isolation_checks` are now
+// typed as `CheckFindingOut` with `extra="allow"`, so the `(observed, ok)` pair reaches a client
+// through the contract and the worker's extra keys still travel. The reader that recovered that
+// pair by hand is deleted below rather than left to rot — a narrowing kept past the day the
+// contract carries the thing it narrows is code nobody dares remove and nobody reads.
 //
 // The API is right to keep them opaque: `secp_api.proxmox_projection` copies them verbatim out of
 // what the worker recorded, and a Pydantic model over them would silently drop any key the model
 // did not know. But "opaque on the wire" must not become "unchecked in the client", and one
 // consequence is severe enough to name:
 //
-//   **`CheckFinding`'s `(observed, ok)` pair does not survive generation.** In Python the pair is
-//   two typed booleans on `proxmox_verification.CheckFinding`. On the wire it sits inside an
-//   opaque dict, so the generated TypeScript for `infrastructure_checks` is
-//   `{ [key: string]: unknown }[] | null` and the distinction between "the check could not be
-//   observed" and "the check ran and failed" is available to a client only if the client goes and
-//   gets it. That is what `asCheckFindings` does, and why it REFUSES an entry missing either
-//   boolean rather than defaulting: a missing `observed` defaulted to `true` turns every
-//   unobservable check into a reported failure, which is the exact confusion the pair prevents.
+//   The `(observed, ok)` pair used to be the worst of these and is now the best. It was recovered
+//   here by hand against a payload that, it turned out, NOTHING IN THE WORKER EVER WROTE — the key
+//   existed in the API schema, the projection, this reader, the fixtures and two tests, and in no
+//   producer, with the two tests inventing different shapes for it. It has a contract and a
+//   producer now (`verification_evidence`), so the hand-written reader is gone and `checkStatus`
+//   below reads the generated type directly.
 //
 // The rules every reader here follows:
 //
@@ -40,9 +43,9 @@
 //     arrays in `./recorded-documents.ts`, so a worker that records a member this build has never
 //     heard of is reported as unreadable rather than rendered as an unstyled tone.
 
+import type { CheckFindingOut } from "./generated/openapi";
 import {
   type AbsenceFinding,
-  type CheckFinding,
   type DeletionSet,
   type ObjectProvenance,
   type OwnedResource,
@@ -52,13 +55,11 @@ import {
   type ResetSubject,
   type ResidueClass,
   type TeardownOutcome,
-  type VerificationCheck,
   OBJECT_PROVENANCES,
   RESET_DISPOSITIONS,
   RESET_SUBJECTS,
   RESIDUE_CLASSES,
   TEARDOWN_OUTCOMES,
-  VERIFICATION_CHECKS,
 } from "./recorded-documents";
 
 // ------------------------------------------------------------------------------ failure carrier
@@ -168,55 +169,6 @@ function readMember<T extends string>(
 // ------------------------------------------------------------------------ verification checks
 
 /**
- * Read `ProxmoxVerificationOut.infrastructure_checks` / `.isolation_checks`.
- *
- * BOTH booleans are required. An entry carrying only `ok` is unreadable, because there is no
- * honest way to render it: `ok: false` from an unobserved check is not a failure, and nothing in
- * the entry says which it was.
- */
-export function asCheckFindings(
-  recorded: readonly unknown[] | null | undefined,
-): RecordedList<CheckFinding> {
-  return readList<CheckFinding>(recorded, (raw) => {
-    const check = readMember<VerificationCheck>(raw, "check", VERIFICATION_CHECKS);
-    if (isRefusal(check)) return check;
-    const observed = readBoolean(raw, "observed");
-    if (isRefusal(observed)) return observed;
-
-    // `ok` is a TRIPLE, not a boolean. The worker's `CheckFinding.ok` is `bool | None` and
-    // `verification_evidence` emits `ok: null` explicitly rather than omitting the key:
-    //
-    //     observed=false, ok=null    the check could not be made
-    //     observed=true,  ok=false   the check was made and failed
-    //     observed=true,  ok=true    the check was made and passed
-    //
-    // The key must still be PRESENT. Absent is not null: a payload with no `ok` at all is a
-    // payload this reader cannot interpret, and defaulting it is how "nobody could look" becomes
-    // "this failed".
-    if (!("ok" in raw)) return refuse('missing "ok" (null is a value; absent is not)');
-    const rawOk = raw["ok"];
-    if (rawOk !== null && typeof rawOk !== "boolean") {
-      return refuse('"ok" is neither a boolean nor null');
-    }
-
-    // The contradiction, refused. "The check ran and produced no verdict" is not a state the
-    // worker can emit — its `__post_init__` rejects it — so seeing it here means the payload is
-    // not what it claims to be. Resolving it silently is how it would become a pass.
-    if (observed && rawOk === null) {
-      return refuse('"observed" is true but "ok" is null, which is not an outcome');
-    }
-
-    // The other direction is NOT refused, deliberately. Two producer sites emitted
-    // `observed=false, ok=false` before `ok` became nullable, and those events are already
-    // recorded and durable. Refusing them would discard evidence that was legitimately written,
-    // to enforce a rule that did not exist when it was written. `checkStatus` reads the pair and
-    // maps any unobserved check to `not_observed` regardless of `ok`, so nothing downstream can
-    // mistake the legacy shape for a verdict.
-    return { check, observed, ok: rawOk, detail: readDetail(raw) };
-  });
-}
-
-/**
  * Per-check status, derived from the `(observed, ok)` pair rather than from `ok` alone.
  *
  * `observed: false` means the check could not be run and `ok` carries no information. Reading only
@@ -224,14 +176,14 @@ export function asCheckFindings(
  */
 export type CheckStatus = "passed" | "failed" | "not_observed";
 
-export function checkStatus(finding: CheckFinding): CheckStatus {
+export function checkStatus(finding: CheckFindingOut): CheckStatus {
   if (!finding.observed) return "not_observed";
-  // `ok === null` cannot reach here through `asCheckFindings`, which refuses the combination. It
+  // The worker cannot emit `observed=true, ok=null` — its __post_init__ refuses it. It
   // is handled explicitly anyway rather than left to falsiness: `null ? a : b` takes the `false`
   // branch, so a `CheckFinding` built by hand with the contradiction would silently render as a
   // FAILURE — the exact substitution this module exists to prevent, arriving through the one path
   // that skips the reader.
-  if (finding.ok === null) return "not_observed";
+  if (finding.ok === null || finding.ok === undefined) return "not_observed";
   return finding.ok ? "passed" : "failed";
 }
 
