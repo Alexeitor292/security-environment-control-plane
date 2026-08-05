@@ -18,7 +18,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { analyseReachability, REASON_OWNER, type ContractDocument } from "./reachability";
+import {
+  ReachabilityUnmeasurable,
+  analyseReachability,
+  REASON_OWNER,
+  type ContractDocument,
+} from "./reachability";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 const document = JSON.parse(
@@ -103,3 +108,56 @@ describe("owners", () => {
     expect(REASON_OWNER["parent-not-selected"]).toBe("frontend");
   });
 });
+
+describe("it refuses to answer rather than reporting a confident nothing", () => {
+  // The property none of the guards that bit this program today had. A traversal that stops
+  // finding edges reports EVERY space as unreachable — indistinguishable from a real finding, and
+  // this module's output decides whether backend routes get built. A confident wrong answer here
+  // is a queue of gaps that are not gaps.
+
+  it("refuses when no rule matches, instead of reporting the whole API unreachable", () => {
+    // A contract whose schemas carry no identifier of any kind. Without the guard this returns a
+    // perfectly well-formed result in which nothing is reachable, and every entry in the map
+    // becomes `parent-unreachable` — seven fabricated backend tickets.
+    const blind: ContractDocument = {
+      paths: {
+        "/api/v1/ranges": { get: okReturning("Thing") },
+        "/api/v1/ranges/{range_id}": { get: okReturning("Thing") },
+      },
+      components: { schemas: { Thing: { properties: { name: {} } } } },
+    };
+    expect(() => analyseReachability(blind)).toThrow(ReachabilityUnmeasurable);
+    expect(() => analyseReachability(blind)).toThrow(/matched nothing/);
+  });
+
+  it("refuses when there is nowhere to start", () => {
+    const noSeed: ContractDocument = {
+      paths: { "/api/v1/ranges/{range_id}": { get: okReturning("RangeOut") } },
+      components: { schemas: { RangeOut: { properties: { id: {} } } } },
+    };
+    expect(() => analyseReachability(noSeed)).toThrow(/parameter-free GET route/);
+  });
+
+  it("refuses on a document shape it does not recognise", () => {
+    expect(() => analyseReachability({ paths: {} })).toThrow(/declares no paths/);
+    expect(() =>
+      analyseReachability({ paths: { "/a": { get: {} } }, components: { schemas: {} } }),
+    ).toThrow(/no component schemas/);
+  });
+
+  it("still answers for the real contract", () => {
+    // The other half: a guard that refused everything would also be useless.
+    expect(() => analyseReachability(document)).not.toThrow();
+  });
+});
+
+/** A minimal 200-JSON operation returning `$ref` to `name`. */
+function okReturning(name: string) {
+  return {
+    responses: {
+      "200": {
+        content: { "application/json": { schema: { $ref: `#/components/schemas/${name}` } } },
+      },
+    },
+  };
+}

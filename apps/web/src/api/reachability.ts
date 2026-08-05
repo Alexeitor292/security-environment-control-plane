@@ -80,6 +80,28 @@ function responseSchemaName(operation: unknown): string | null {
   return null;
 }
 
+/**
+ * Raised when the analysis cannot honestly answer.
+ *
+ * A traversal that silently stops finding edges reports EVERYTHING as unreachable, with total
+ * confidence and no indication that anything went wrong — and the output of this module decides
+ * whether backend routes get built, so a confident wrong answer here becomes a queue of gaps that
+ * are not gaps. The failure mode is not "slightly off"; it is a document full of fabricated work.
+ *
+ * So the analysis refuses rather than guesses. Borrowed from #127's audit guard, which raised
+ * rather than reporting green when its two counting methods disagreed: a verifier willing to say
+ * "I cannot measure this" is worth more than one that always produces a number.
+ */
+export class ReachabilityUnmeasurable extends Error {
+  constructor(reason: string) {
+    super(
+      `reachability cannot be measured: ${reason}. Refusing to report — every space would read ` +
+        "as unreachable, which is indistinguishable from a real finding and would be acted on.",
+    );
+    this.name = "ReachabilityUnmeasurable";
+  }
+}
+
 export function analyseReachability(document: ContractDocument): Reachability {
   const paths = Object.keys(document.paths);
   const schemas = document.components?.schemas ?? {};
@@ -173,6 +195,32 @@ export function analyseReachability(document: ContractDocument): Reachability {
         changed = true;
       }
     }
+  }
+
+  // --- refuse rather than report a confident nothing -----------------------------------------
+  //
+  // Each of these means the analysis is not looking at what it thinks it is. None can be true of
+  // a healthy contract, and all of them would otherwise produce "everything is unreachable".
+  if (paths.length === 0) throw new ReachabilityUnmeasurable("the document declares no paths");
+  if (Object.keys(schemas).length === 0) {
+    throw new ReachabilityUnmeasurable("the document declares no component schemas");
+  }
+  if (spaces.size === 0) {
+    throw new ReachabilityUnmeasurable("no path takes a parameter, so there are no id spaces");
+  }
+  // The seed. Every chain has to start at a route needing nothing; if not one of them yields an
+  // identifier, no rule matched anything and the traversal never began.
+  const seeds = paths.filter(
+    (path) => "get" in (document.paths[path] ?? {}) && consumedSpaces(path).length === 0,
+  );
+  if (seeds.length === 0) {
+    throw new ReachabilityUnmeasurable("no parameter-free GET route exists to start from");
+  }
+  if (producedBy.size === 0) {
+    throw new ReachabilityUnmeasurable(
+      `${seeds.length} parameter-free GET routes exist and none yields an identifier — the ` +
+        "producer rules matched nothing, which is a rule failure and not an API without ids",
+    );
   }
 
   return {
