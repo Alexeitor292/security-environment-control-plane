@@ -95,15 +95,72 @@ wiring change before its cost is judged.
 | --- | --- | --- |
 | `ReportsPage`, `EventReportsPage` | `listReports` | **absent** |
 | `IdentityPage`, `OrganizationsPage` | `listUsers` | **absent** — `/api/v1/me` is the current principal only |
-| `CommandCenterPage`, `ControlRoomPage` | `listAlerts`, `listApprovals` | **absent** ×2 |
+| `CommandCenterPage`, `ControlRoomPage` | `listAlerts` (`no-endpoint`), `listApprovals` (**`parent-unreachable`**) | see the taxonomy above |
 | `EventsListPage`, `ScenarioOverviewPage` | `listEvents` | **absent** |
-| `PlatformOverviewPage` | `listUsers`, `listApprovals` | **absent** ×2 |
+| `PlatformOverviewPage` | `listUsers` (`no-endpoint`), `listApprovals` (**`parent-unreachable`**) | see the taxonomy above |
 | `DeploymentAdvancedPage` | `listSecretRefs` | **withheld — must stay that way** |
-| `AuditPage` (evidence table only) | org-wide `listEvidence` | **absent** — the reader's `listEvidence(rangeId)` is range-scoped and there is no org-wide evidence route |
+| `AuditPage` (evidence table only) | `listEvidence` | **`parent-not-selected`** — range-scoped, and `GET /api/v1/ranges` exists, so it is buildable behind a range selection |
 
 These are an **input to P7-A**, not a frontend problem to work around. A page
 that cannot be wired keeps its fixture badge and its `not determined` states; it
 does not get a plausible-looking placeholder.
+
+## Absent is three categories, not one
+
+Verifying one entry that had been reported as "no longer absent" produced a
+distinction the binary absent/present cannot express. The fix differs per
+category, and only one of them is backend work.
+
+| Category | Meaning | Buildable? | Fix |
+| --- | --- | --- | --- |
+| `no-endpoint` | nothing serves the concept | no | a new route |
+| `parent-unreachable` | a route exists, but nothing yields the id it needs | no | **a new collection route — real backend work** |
+| `parent-not-selected` | a route exists and the operator has not chosen the parent yet | **yes** | a selection step in the UI |
+
+Encoded in the seam as `UnavailableReason`, so a page consuming a
+`parent-unreachable` query renders differently from one awaiting a selection.
+That distinction belongs in the bridge rather than in each page.
+
+**Method: a route is reachable only if something enumerates its parent.** Of 218
+paths, **25 are collection routes** (a `GET` on a bare plural with no `{id}`).
+Checking a parameterised route against that list is what separates the second
+category from the third, and it is mechanical rather than a judgement.
+
+### `listApprovals` — corrected twice, and the second correction narrowed it
+
+Reported as `absent`; corrected to "no longer absent" because
+`GET /api/v1/manifests/{manifest_id}/change-sets` exists; then corrected again by
+tracing the chain rather than stopping at the first missing collection:
+
+```
+GET  /api/v1/exercises                       COLLECTION — enumerable
+GET  /api/v1/exercises/{exercise_id}/plan → PlanOut.id  — plan_id IS obtainable
+POST /api/v1/plans/{plan_id}/manifest        CREATES a manifest
+GET  /api/v1/manifests                       DOES NOT EXIST
+GET  /api/v1/manifests/{manifest_id}/change-sets   needs an id nothing yields
+```
+
+**The chain breaks at exactly one level — the manifest — and plans are fine.**
+An intermediate claim that "nothing enumerates plans either" was wrong: plans are
+reachable through exercises. So an operator sees approvals only for a manifest
+they created this session, and the backend gap is **one route**
+(`GET /api/v1/manifests`, or a manifest list under a plan), not two.
+
+Status: **`parent-unreachable`**. A P7-A item, and a smaller one than the
+escalated version suggested.
+
+### `listEvidence` — genuinely `parent-not-selected`
+
+Its parent is `range_id`, and `GET /api/v1/ranges` **is** a collection route. So
+the evidence table is buildable once a range is chosen, and needs no backend
+work — a different category and a different fix from `listApprovals`, which the
+old binary had merged with it.
+
+### Audit outcome facets — `no-endpoint`
+
+No route serves the distinct set of audit outcomes, so a filter cannot offer the
+ledger's vocabulary; it can only offer what the loaded page happens to contain,
+and must say so. Adding a facet surface is a P7-A item.
 
 ## Three traps, named so nobody walks into them
 
