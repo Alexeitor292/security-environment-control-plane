@@ -348,8 +348,15 @@ export const api = {
   },
 
   listExercises: () => request<Exercise[]>("GET", "/api/v1/exercises"),
-  createExercise: (body: { template_id: string; version_id: string; name: string }) =>
-    request<Exercise>("POST", "/api/v1/exercises", body),
+  // `execution_target_id` is optional server-side (ExerciseCreate). Omitted, the control plane
+  // picks the placement; supplied, it pins the range to one registered execution target. It is only
+  // ever an id the operator selected from the live target list — never a typed or inferred value.
+  createExercise: (body: {
+    template_id: string;
+    version_id: string;
+    name: string;
+    execution_target_id?: string;
+  }) => request<Exercise>("POST", "/api/v1/exercises", body),
   getExercise: (id: string) => request<Exercise>("GET", `/api/v1/exercises/${id}`),
   listInstances: (id: string) =>
     request<Instance[]>("GET", `/api/v1/exercises/${id}/instances`),

@@ -11,6 +11,7 @@ import type {
   LifecycleState,
   OnboardingStatus,
   PlanStatus,
+  RangePhase,
   ReadonlyPreflightOutcome,
   ReadonlyPreflightStatus,
   StagingDeploymentStatus,
@@ -44,7 +45,8 @@ export type StatusDomain =
   | "audit"
   | "eligibility"
   | "plan-decision"
-  | "enrollment";
+  | "enrollment"
+  | "range";
 
 export const LIFECYCLE_TONE: Record<LifecycleState, StatusTone> = {
   draft: "pending",
@@ -234,9 +236,27 @@ export const ENROLLMENT_TONE: Record<EnrollmentLifecycleState, StatusTone> = {
   recovery_required: "danger",
 };
 
+/** The product-level range lifecycle (pages/range/range-lifecycle.ts owns the projection onto it).
+ *  `ready` and `active` are both green because both mean a usable range; the difference between
+ *  them is whether a competition is running, which the label carries, not the tone.
+ *  `recovery_required` is red for the same reason it is in the enrollment map — it means automatic
+ *  progress stopped and nothing is going to fix itself. */
+export const RANGE_TONE: Record<RangePhase, StatusTone> = {
+  draft: "pending",
+  deploying: "warn",
+  ready: "ok",
+  active: "ok",
+  resetting: "warn",
+  recovery_required: "danger",
+  failed: "danger",
+  destroying: "warn",
+  destroyed: "danger",
+};
+
 // Deliberately NOT added to DEFAULT_ORDER: every enrollment call site passes
-// domain="enrollment", so these keys can never shadow (or be shadowed by) an
-// identically-named state in another domain.
+// domain="enrollment", and every range call site passes domain="range", so
+// these keys can never shadow (or be shadowed by) an identically-named state
+// in another domain. Six range phases share a name with a LifecycleState.
 const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   lifecycle: LIFECYCLE_TONE,
   plan: PLAN_TONE,
@@ -255,6 +275,7 @@ const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   eligibility: ELIGIBILITY_TONE,
   "plan-decision": PLAN_DECISION_TONE,
   enrollment: ENROLLMENT_TONE,
+  range: RANGE_TONE,
 };
 
 /** Resolution order for domain-less lookups. Lifecycle then plan first, which

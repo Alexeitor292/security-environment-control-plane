@@ -18,6 +18,16 @@ import { Login } from "./pages/Login";
 import { OnboardingWizard } from "./pages/OnboardingWizard";
 import { PlanApproval } from "./pages/PlanApproval";
 import { ProviderTargets } from "./pages/ProviderTargets";
+import { CompetitionControl } from "./pages/range/CompetitionControl";
+import { CreateRange } from "./pages/range/CreateRange";
+import { DeploymentProgress } from "./pages/range/DeploymentProgress";
+import { RangeCatalog } from "./pages/range/RangeCatalog";
+import { RangeLayout } from "./pages/range/RangeLayout";
+import { RangeLifecycleActions } from "./pages/range/RangeLifecycleActions";
+import { RangeOverview } from "./pages/range/RangeOverview";
+import { RangeTimeline } from "./pages/range/RangeTimeline";
+import { Scoreboard } from "./pages/range/Scoreboard";
+import { TeamManagement } from "./pages/range/TeamManagement";
 import { ReadOnlyBootstrap } from "./pages/ReadOnlyBootstrap";
 import { ReadonlyPreflight } from "./pages/ReadonlyPreflight";
 import { ResolverActivation } from "./pages/ResolverActivation";
@@ -63,6 +73,26 @@ const router = createBrowserRouter([
             <TopologyView />
           </React.Suspense>
         ),
+      },
+      // RANGE surfaces. `/ranges/new` is declared BEFORE `/ranges/:rangeId` so the literal wins:
+      // react-router ranks static segments above dynamic ones, but the explicit ordering also
+      // documents the intent for anyone adding a sibling route later.
+      { path: "ranges", element: <RangeCatalog /> },
+      { path: "ranges/new", element: <CreateRange /> },
+      {
+        // One layout owns the range load and the lifecycle poll for all seven single-range tabs,
+        // so the phase badge advances no matter which tab is open.
+        path: "ranges/:rangeId",
+        element: <RangeLayout />,
+        children: [
+          { index: true, element: <RangeOverview /> },
+          { path: "deployment", element: <DeploymentProgress /> },
+          { path: "competition", element: <CompetitionControl /> },
+          { path: "teams", element: <TeamManagement /> },
+          { path: "scoreboard", element: <Scoreboard /> },
+          { path: "timeline", element: <RangeTimeline /> },
+          { path: "lifecycle", element: <RangeLifecycleActions /> },
+        ],
       },
       { path: "provider-targets", element: <ProviderTargets /> },
       { path: "onboarding", element: <OnboardingWizard /> },

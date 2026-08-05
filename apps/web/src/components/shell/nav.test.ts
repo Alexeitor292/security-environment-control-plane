@@ -24,13 +24,19 @@ const KNOWN_ROUTES = [
   "/worker-enrollment",
   "/enrollment-inventory",
   "/audit",
+  "/ranges",
+  "/ranges/new",
 ];
 
 /** Every route the previous sidebar linked to — nothing may become unreachable.
  *  Frozen at the pre-approvals-queue set; /approvals is a new route, not a
- *  previously navigable one. */
+ *  previously navigable one, and neither are the range surfaces. */
 const PREVIOUS_NAV_ROUTES = KNOWN_ROUTES.filter(
-  (r) => r !== "/approvals" && r !== "/exercises" && r !== "/enrollment-inventory",
+  (r) =>
+    r !== "/approvals" &&
+    r !== "/exercises" &&
+    r !== "/enrollment-inventory" &&
+    !r.startsWith("/ranges"),
 );
 
 const allItems = NAV_GROUPS.flatMap((g) => g.items);
@@ -49,6 +55,12 @@ describe("shell navigation model", () => {
 
   it("links the new exercise inventory", () => {
     expect(allItems.map((i) => i.href)).toContain("/exercises");
+  });
+
+  it("links the range catalog and range creation", () => {
+    const hrefs = allItems.map((i) => i.href);
+    expect(hrefs).toContain("/ranges");
+    expect(hrefs).toContain("/ranges/new");
   });
 
   it("only links routes that exist in the router", () => {
