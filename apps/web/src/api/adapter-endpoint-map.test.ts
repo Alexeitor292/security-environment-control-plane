@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   ADAPTER_ENDPOINT_MAP,
   ADAPTER_METHODS,
+  UNSERVED_METHOD_PROBES,
   CREDENTIAL_INVENTORY_SEGMENTS,
   hasCredentialInventorySegment,
   servedMethods,
@@ -114,6 +115,46 @@ describe("absent means absent", () => {
     // And the splitting works: an ordinary route is not matched by accident.
     expect(hasCredentialInventorySegment("/api/v1/ranges")).toBe(false);
     expect(hasCredentialInventorySegment([".", "api", "vault"].join("/"))).toBe(true);
+  });
+});
+
+describe("absent is checked, not asserted", () => {
+  // The direction the map did NOT verify, and the reason it needed to. `listApprovals` said
+  // `absent` while `GET /manifests/{id}/change-sets` had started enumerating change-set
+  // approvals. Verifying only that claimed endpoints EXIST leaves the optimistic error
+  // unguarded: a gap that has since closed, still recorded as open, with a frontend working
+  // around it.
+  const unserved = unservedMethods().map((m) => m.method);
+
+  it("has a probe for every unserved method", () => {
+    // Set equality, so adding an `absent` method without a probe fails rather than being
+    // silently exempt from the check.
+    expect([...unserved].sort()).toEqual(Object.keys(UNSERVED_METHOD_PROBES).sort());
+  });
+
+  it.each(unserved)("%s: no registered route looks like it serves this", (method) => {
+    const probe = UNSERVED_METHOD_PROBES[method];
+    const matches = [...REGISTERED].filter(probe);
+    expect(
+      matches,
+      `${method} is recorded as unserved, but these routes now exist: ${matches.join(", ")}. ` +
+        "Re-decide the entry — either they serve it and the status changes, or they do not and " +
+        "the probe is too broad. Do not delete the assertion.",
+    ).toEqual([]);
+  });
+
+  it("uses probes that can actually match something", () => {
+    // A predicate that matched nothing would pass over any API forever. Each is exercised
+    // against a path shaped like the route it is watching for.
+    expect(UNSERVED_METHOD_PROBES.listEvents("/api/v1/competitions")).toBe(true);
+    expect(UNSERVED_METHOD_PROBES.listAlerts("/api/v1/alerts")).toBe(true);
+    expect(UNSERVED_METHOD_PROBES.listReports("/api/v1/reports")).toBe(true);
+    expect(UNSERVED_METHOD_PROBES.listUsers("/api/v1/users")).toBe(true);
+    expect(UNSERVED_METHOD_PROBES.listAccessProfiles("/api/v1/access-profiles")).toBe(true);
+    // And none of them fires on an ordinary route.
+    for (const probe of Object.values(UNSERVED_METHOD_PROBES)) {
+      expect(probe("/api/v1/ranges/{range_id}/proxmox/plan")).toBe(false);
+    }
   });
 });
 

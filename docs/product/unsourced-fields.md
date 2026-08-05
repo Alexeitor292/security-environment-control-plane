@@ -8,11 +8,11 @@ The spatial frontend talks to the control plane through one interface of **22 me
 | | methods |
 | --- | --- |
 | Served, and complete | 0 |
-| Served, with fields the platform does not produce | 15 |
-| No endpoint at all | 6 |
+| Served, with fields the platform does not produce | 16 |
+| No endpoint at all | 5 |
 | Deliberately not served | 1 |
 
-Across them, **115 distinct product fields have no source on the wire**. They are not bugs and they are not oversights in the frontend: they are places where the designed experience describes something the platform does not measure.
+Across them, **120 distinct product fields have no source on the wire**. They are not bugs and they are not oversights in the frontend: they are places where the designed experience describes something the platform does not measure.
 
 **Why this matters at the pixel.** A `0` for a cost and a `—` for "not supplied" look identical on a screen and mean opposite things. Every field below has to render as an absence, or be produced by the backend, or be dropped from the design. Rendering it as a plausible default is the one option that is not available.
 
@@ -211,6 +211,22 @@ Fields with no source:
 - `name`
 - `steps[].detail`
 
+### `listApprovals`
+
+`/api/v1/manifests/{manifest_id}/change-sets`
+
+CORRECTED 2026-08-05: this said `absent`, and it had stopped being true. GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals — but PER MANIFEST, so an operator must already know which manifest to ask about. The other five approval families (plan-secret, plan-generation, activation-dossier, readonly-preflight, resolver-activation) remain GET-by-id only; the manifest-scoped routes that mention them are POSTs that CREATE an authorization, not lists. So an approvals inbox — 'what is waiting on me' — still cannot be built.
+
+**What it would take:** A pending-approval query that is not scoped to a parent the operator has to know first. Whatever is added must keep the six families DISTINCT rather than flattening them into one queue: they authorize different acts, and a single 'approval' list is how an approval for one operation gets read as authorizing another — the same property `operation_kind` protects on the Proxmox side.
+
+Fields with no source:
+
+- `title`
+- `requestedBy`
+- `riskLevel`
+- `scope`
+- `operation`
+
 ### `listAuditEvents`
 
 `/api/v1/audit`
@@ -287,14 +303,6 @@ _No registered endpoint._
 No gateway, VPN, or participant-access surface is registered. Nothing in the 230 operations returns a WireGuard/OpenVPN/Guacamole profile or an endpoint fingerprint.
 
 **What it would take:** An access-profile read surface. NOTE the shape carefully if it is ever added: the domain type carries `publicKeyFingerprint` and no private material, which is the right line — a profile a browser can render must never be a profile a browser could use.
-
-### `listApprovals`
-
-_No registered endpoint._
-
-Six approval families are registered — change-sets, plan-secret-authorizations, plan-generation-authorizations, activation-dossiers, readonly-preflight authorizations, resolver-activation authorizations — and EVERY one is GET-by-id only. Nothing enumerates pending approvals, so an approvals inbox cannot be built from the current surface.
-
-**What it would take:** A list route per approval family, or one cross-family queue. Whatever is added must keep the families distinct: they authorize different acts, and a single flattened 'approval' list is how an approval for one operation gets read as authorizing another.
 
 ### `listAlerts`
 

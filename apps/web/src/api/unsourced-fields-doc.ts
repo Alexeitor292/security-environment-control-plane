@@ -10,7 +10,7 @@
 // The document is written by `scripts/generate-unsourced-fields.mjs` and held in step by
 // `unsourced-fields-doc.test.ts`, which imports from HERE.
 
-import { ADAPTER_ENDPOINT_MAP } from "./adapter-endpoint-map.ts";
+import { ADAPTER_ENDPOINT_MAP, MISSING_SURFACES } from "./adapter-endpoint-map.ts";
 import type { MappingStatus } from "./adapter-endpoint-map.ts";
 // The .ts extension is explicit because this module is imported by BOTH vitest (bundler
 // resolution, extension optional) and node (ESM, extension required). tsconfig sets
@@ -102,6 +102,67 @@ export function renderUnsourcedFieldsDoc(): string {
         for (const field of mapping.unsourcedFields) lines.push(`- \`${field}\``);
         lines.push("");
       }
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Render the specification of the surfaces that do not exist.
+ *
+ * A separate document from the unsourced-field inventory because it has a different reader and a
+ * different decision attached. The inventory asks "what should the platform measure"; this asks
+ * "what should the API serve", and it goes to whoever owns the API rather than to product.
+ *
+ * Pure, like its neighbour, and for the reason recorded there: a renderer that wrote its own
+ * output could only ever agree with itself.
+ */
+export function renderAbsentEndpointsDoc(): string {
+  const lines: string[] = [];
+  lines.push("# Surfaces the frontend needs and the control plane does not serve");
+  lines.push("");
+  lines.push("<!-- GENERATED FILE - DO NOT EDIT. Source: apps/web/src/api/adapter-endpoint-map.ts");
+  lines.push("     Regenerate: cd apps/web && npm run generate:api-docs -->");
+  lines.push("");
+  lines.push(
+    "Seven gaps, resolved against the routes the live application registers rather than against " +
+      "anyone's recollection. Each is verified continuously: `adapter-endpoint-map.test.ts` " +
+      "carries a probe per gap and fails if a route appears that looks like it closes one, so " +
+      "this document cannot quietly describe an API that has moved on.",
+  );
+  lines.push("");
+  lines.push(
+    "**Scoping is the recurring problem, not a detail.** Six of these are not \"the concept does " +
+      "not exist\" — they are \"the concept exists, but only under a parent the operator has to " +
+      "name first\". An audit page cannot ask for evidence across an organization, and an " +
+      "approvals inbox cannot ask what is waiting, because every route demands an id the screen " +
+      "is trying to discover.",
+  );
+  lines.push("");
+  lines.push("| method | sketch | unblocks |");
+  lines.push("| --- | --- | --- |");
+  for (const surface of MISSING_SURFACES) {
+    const first = surface.unblocks.split(". ")[0];
+    lines.push(`| \`${surface.method}\` | \`${surface.sketch}\` | ${first} |`);
+  }
+  lines.push("");
+  for (const surface of MISSING_SURFACES) {
+    const mapping = ADAPTER_ENDPOINT_MAP.find((m) => m.method === surface.method);
+    lines.push(`## \`${surface.method}\``);
+    lines.push("");
+    lines.push(`**Sketch** — \`${surface.sketch}\``);
+    lines.push("");
+    lines.push(`**Scoping** — ${surface.scoping}`);
+    lines.push("");
+    lines.push(`**Unblocks** — ${surface.unblocks}`);
+    lines.push("");
+    if (mapping) {
+      lines.push(`**What exists today** — ${mapping.status === "shaped" && mapping.endpoints.length > 0
+        ? mapping.endpoints.map((e) => `\`${e}\``).join(" · ")
+        : "nothing"}`);
+      lines.push("");
+      lines.push(mapping.note);
+      lines.push("");
     }
   }
   return lines.join("\n") + "\n";
