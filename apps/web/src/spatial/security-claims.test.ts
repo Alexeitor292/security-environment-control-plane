@@ -214,6 +214,49 @@ const PRE_EXISTING: [file: string, phrase: string, count: number][] = [
  */
 const PAGES_ENTRIES_AT_PIN = 52;
 
+
+/**
+ * Modules DECLARED out of scope: developer-facing documentation whose strings
+ * cannot reach a screen.
+ *
+ * A THIRD list, deliberately not folded into either of the two above, because
+ * they mean three different things -- reviewed, pinned-but-unreviewed, and
+ * out-of-scope -- and this repository has been bitten repeatedly by one name
+ * carrying two concepts.
+ *
+ * `api/adapter-endpoint-map.ts` is a mapping table whose `note:` fields explain
+ * API shape to developers. Its seven absolute claims are all TRUE and none is
+ * user-facing. Asking its author to reword accurate prose so a heuristic goes
+ * quiet would be "tune it until it passes" applied to English.
+ *
+ * EACH ENTRY PINS ITS IMPORTER SET, because a bare exemption is a claim that
+ * decays. The exemption holds *because nothing renders the module* -- so the
+ * dependency is encoded, not the conclusion. The day anyone imports it, the pin
+ * breaks and the exemption is re-decided deliberately instead of silently
+ * becoming false.
+ */
+const DOCUMENTATION_MODULES: [file: string, importers: string[]][] = [
+  // Empty: its only mention anywhere is inside a comment in control-plane-reader.ts.
+  ["api/adapter-endpoint-map.ts", []],
+];
+
+/** Files that import `target`, resolved rather than string-matched. */
+function importersOf(target: string): string[] {
+  const files = new Set(Object.keys(SOURCES));
+  const found: string[] = [];
+
+  for (const [path, src] of Object.entries(SOURCES)) {
+    if (path === target || path.includes(".test.")) continue;
+    for (const m of src.matchAll(IMPORT_SPECIFIER)) {
+      if (resolveSpecifier(path, m[1], files) === target) {
+        found.push(path);
+        break;
+      }
+    }
+  }
+  return found.sort();
+}
+
 function acknowledgedCount(file: string, phrase: string): number | undefined {
   return [...ACKNOWLEDGED, ...PRE_EXISTING].find(([f, p]) => f === file && p === phrase)?.[2];
 }
@@ -371,6 +414,31 @@ describe("security-property claims", () => {
           "must be deleted from this list. If a claim survived the retirement it was PORTED, " +
           "not resolved -- find where it landed and remove the claim itself.",
       ).toEqual([]);
+    }
+  });
+
+  it("keeps each declared documentation module unimported and unrenderable", () => {
+    // TWO INDEPENDENT CHECKS of the same property, because an exemption that
+    // rests on one measurement is an exemption that rests on that measurement
+    // being right. (a) is exact -- who imports this precise path. (b) is the
+    // general graph. They can only agree if the module genuinely cannot render.
+    const renderable = reachableFromComponents();
+
+    for (const [file, expectedImporters] of DOCUMENTATION_MODULES) {
+      expect(Object.keys(SOURCES), `${file} must exist to be exempted`).toContain(file);
+
+      expect(
+        importersOf(file),
+        `${file} is exempted BECAUSE nothing imports it. Its importer set changed, so the ` +
+          "exemption is now a claim rather than a fact -- re-decide it deliberately: either the " +
+          "new importer does not render it (update the pin), or it does and the module's " +
+          "absolute claims must be removed or acknowledged.",
+      ).toEqual(expectedImporters);
+
+      expect(
+        renderable.has(file),
+        `${file} became reachable from a component; it can no longer be treated as documentation.`,
+      ).toBe(false);
     }
   });
 
