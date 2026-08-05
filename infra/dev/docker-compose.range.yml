@@ -56,6 +56,22 @@ services:
       # deploy fail at dispatch, before the worker is ever consulted.
       SECP_WORKFLOW_DISPATCH_MODE: temporal
 
+  # Build-only. It exists solely to produce the ordinary worker image so the range image can layer
+  # on it; `scale: 0` keeps it out of every `up`, and it is never started. `profiles:` does NOT work
+  # here — a profile-gated service is outside the active set, and Compose then refuses the named
+  # context with "declares unknown service worker-base". It CANNOT be folded into
+  # the `worker` service below: that service's build is the one being overridden, and a named
+  # context pointing at it resolves to itself — Compose refuses with "target worker cannot link to
+  # itself". The build inputs are the same `Dockerfile.python` the base stack uses, so the install
+  # steps still live in exactly one file.
+  worker-base:
+    scale: 0
+    image: secp-dev-worker-base
+    build:
+      context: ../..
+      dockerfile: infra/dev/Dockerfile.python
+    command: ["true"]
+
   worker:
     build:
       context: ../..
@@ -63,7 +79,7 @@ services:
       additional_contexts:
         # Layer on the very worker image this stack builds, so the range worker can never drift
         # from the ordinary one. Requires Compose v2.24+ (`service:` named contexts).
-        base: service:worker
+        base: service:worker-base
     environment:
       SECP_WORKFLOW_DISPATCH_MODE: temporal
       # The seal. Without this the provider refuses to be constructed at all, socket or no socket.
