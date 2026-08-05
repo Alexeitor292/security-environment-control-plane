@@ -68,9 +68,15 @@ independent of `src/api/types.ts`. Reconciling the two is not in P7-C.
 
 ## 1. Routes — data and API status
 
-40 routes across the `prototype-suite` router (the app the shell mounts for
-Infrastructure, Ranges, Scenarios, Reports and Platform). Adapter status is
-**fixture** for every row: the live adapter does not exist yet.
+The `prototype-suite` router (the app the shell mounts for Infrastructure,
+Ranges, Scenarios, Reports and Platform) declares **42 `<Route path=…>`
+entries** — 40 content paths, one redirect (`/infrastructure/enroll`) and the
+catch-all — plus **5 `index` routes** that render a default child at a parent
+path. The `deployments` sub-app declares 11 more with 1 index route. These
+counts are pinned by `src/spatial/migration-completeness.test.ts`, so a route
+disappearing is a test failure rather than a silent regression.
+
+Adapter status is **fixture** for every row: the live adapter does not exist yet.
 
 | Route | Page | Major components | Mock fields | Existing endpoint | Missing endpoint | API status |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -235,7 +241,30 @@ P7-C is a migration. The provenance work in P7-C.2 was applied to **both** and
 shares one module, so the two cannot diverge on data honesty. Consolidation
 should be a deliberate follow-up.
 
-### 4.3 Two model files for one product
+### 4.3 `server-rack-new.glb` is 22.6 MB that nothing loads
+
+The donor ships two glTF binaries. The scene loads exactly one of them:
+`scene/config/scene.ts` sets `url: '/models/server-rack.glb'` — the **6.1 MB**
+model. `server-rack-new.glb` (**22,615,248 bytes**) is referenced by nothing:
+not by any `.ts`/`.tsx`/`.css` in the donor source, not by `index.html`, and not
+by any of the donor's ~37 backup directories either, so it was not a
+recently-superseded reference. It appears to be an intended replacement that was
+never wired up.
+
+It has been migrated, because the migration brief named it explicitly and
+dropping a named asset unilaterally is not this slice's call. But it is worth an
+explicit decision, because git blobs are forever: **22.6 MB is added to every
+future clone of this repository for an asset no code path reaches.** Removing it
+is cheap now — the branch is unmerged and the history rewrite touches only my
+commits — and expensive later.
+
+`migration-completeness.test.ts` now resolves the configured model URL to the
+file on disk and pins its exact byte count. That is deliberately stronger than
+checking a `.glb` string appears somewhere: a missing, renamed, truncated or
+LFS-stub model produces an **empty scene at runtime and no other symptom** — no
+build error, no type error, nothing a conventional test would observe.
+
+### 4.4 Two model files for one product
 
 `spatial/apps/**/models/types.ts` (hand-written, prototype) and
 `src/api/types.ts` (the real transport types) describe overlapping concepts with
