@@ -395,6 +395,149 @@ def test_a_blocked_plan_still_answers_the_evidence_read(client, session, princip
     assert kinds["desired_state_plan"]["reference"] is None
 
 
+# --- the secret sweep, enumerated from the live app --------------------------------
+
+
+def test_no_proxmox_read_carries_a_secret(client, session, principal):
+    """Every GET under ``/proxmox/``, DISCOVERED FROM THE LIVE ROUTER, swept for forbidden values.
+
+    ``test_proxmox_http_surface`` has a sweep like this over a hand-written list of thirteen
+    suffixes. That list was correct when it was written and cannot notice a route added afterwards —
+    the five reads in this slice were invisible to it, and so would be the next one. A closed set
+    maintained by hand is not an exhaustive guard; it is a guard over whatever its author
+    remembered.
+
+    So this one inverts it: it enumerates the served paths from the OpenAPI, requires that it found
+    MORE than the old list covered (otherwise the enumeration silently degraded to nothing), and
+    sweeps every one.
+    """
+    instance = proxmox_range(session, principal)
+    # Give every surface something real to render, so the sweep is not passing over empty bodies.
+    ranges.record_event(
+        session,
+        instance,
+        kind=proxmox_lifecycle.EVENT_VERIFICATION,
+        message="verification observed",
+        data={
+            "infrastructure_outcome": "verified",
+            "isolation_outcome": "verified",
+            "guests": [{"vmid": 100, "address": "10.60.0.11"}],
+            "observed_at": "2026-08-05T12:00:00+00:00",
+        },
+    )
+    proxmox_commands.compile_topology(
+        session, principal, instance.id, envelope=envelope(session, instance)
+    )
+    session.commit()
+
+    paths = client.get("/openapi.json").json()["paths"]
+    reads = sorted(
+        path
+        for path, methods in paths.items()
+        if "/proxmox" in path and "get" in methods and "{range_id}" in path
+    )
+    assert len(reads) >= 18, (
+        f"the enumeration found only {len(reads)} Proxmox read routes, fewer than the surface is "
+        "known to have — it has degraded and would sweep almost nothing"
+    )
+
+    from secp_api.range_catalog import PROXMOX_WEB_BREACH_LAB
+
+    forbidden = [
+        flag.value
+        for challenge in PROXMOX_WEB_BREACH_LAB.challenges
+        for flag in challenge.flags
+        if flag.value not in proxmox_lifecycle.unguardable_flag_values(PROXMOX_WEB_BREACH_LAB)
+    ]
+    assert forbidden, "the guard would be vacuous if every flag were unguardable"
+    # Markers for the material that must never travel. Public SSH keys ARE published (cloud-init
+    # carries them and CloudInitSpec refuses private material), so the marker is the PRIVATE one.
+    markers = [
+        "PRIVATE KEY-----",
+        "SECP_PROVIDER_SECRET",
+        "password=",
+        "transaction_id",
+        "state_digest",
+    ]
+
+    swept = 0
+    for path in reads:
+        url = path.replace("{range_id}", str(instance.id))
+        response = client.get(url)
+        assert response.status_code == 200, f"{path}: {response.status_code} {response.text[:200]}"
+        text = response.text
+        for value in forbidden:
+            assert value not in text, f"a flag value reached {path}"
+        for marker in markers:
+            assert marker not in text, f"{marker!r} reached {path}"
+        swept += 1
+    assert swept == len(reads)
+
+
+# --- the (observed, ok) pair, end to end over JSON ---------------------------------
+
+
+def test_the_observed_ok_pair_keeps_all_three_states_over_the_wire(client, session, principal):
+    """``ok: null`` must survive JSON serialization. Unknown is not false.
+
+    ``test_proxmox_http_surface`` already proves the pair is not FLATTENED, but it does so with
+    ``observed=false, ok=false`` — which is itself the substitution this invariant forbids, so it
+    cannot show that the unknown state has a representation. The canonical triple is:
+
+        observed=false, ok=null   the check could not be made
+        observed=true,  ok=false  the check was made and failed
+        observed=true,  ok=true   the check was made and passed
+
+    Asserted through the real HTTP layer rather than on the projection, because that is where a
+    ``null`` is most easily lost: a response model that defaulted ``ok`` to ``False``, or a client
+    reading a missing key as falsey, turns "nobody could look" into "this failed" — and, in the
+    other direction, an operator who sees a definite failure where there was only silence stops
+    looking for the prober that is down.
+    """
+    instance = proxmox_range(session, principal)
+    ranges.record_event(
+        session,
+        instance,
+        kind=proxmox_lifecycle.EVENT_VERIFICATION,
+        message="verification observed",
+        data={
+            "infrastructure_outcome": "verified",
+            "isolation_outcome": "state_disagreement",
+            "isolation_checks": [
+                {"check": "cross_team", "observed": False, "ok": None, "detail": "no prober"},
+                {"check": "management_plane", "observed": True, "ok": False, "detail": "reached"},
+                {"check": "scoring_path", "observed": True, "ok": True, "detail": "permitted"},
+            ],
+        },
+    )
+    session.commit()
+    body = client.get(f"/api/v1/ranges/{instance.id}/proxmox/verification").json()
+    checks = {item["check"]: item for item in body["isolation_checks"]}
+
+    unknown = checks["cross_team"]
+    assert unknown["observed"] is False
+    assert unknown["ok"] is None, (
+        "an unobserved check must serialize ok=null. Coercing it to false makes 'nobody could "
+        "look' indistinguishable from 'this failed', which is the substitution that has already "
+        "cost this program twice."
+    )
+    assert "ok" in unknown, "the key must be PRESENT and null, not dropped"
+
+    assert checks["management_plane"] == {
+        "check": "management_plane",
+        "observed": True,
+        "ok": False,
+        "detail": "reached",
+    }
+    assert checks["scoring_path"]["observed"] is True
+    assert checks["scoring_path"]["ok"] is True
+    # Three distinct states, and none collapses onto another.
+    assert len({(c["observed"], c["ok"]) for c in checks.values()}) == 3
+    # The lifecycle outcome is likewise not reduced to success-or-failure.
+    assert body["isolation_outcome"] == "state_disagreement"
+    assert body["infrastructure_outcome"] == "verified"
+
+
 # --- the reset gate is explicit, not a fall-through -------------------------------
 
 
