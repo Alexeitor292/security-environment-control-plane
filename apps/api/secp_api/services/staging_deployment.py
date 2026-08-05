@@ -30,6 +30,7 @@ from secp_api.deployment_contract import (
 )
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     DeploymentOperationKind,
     DeploymentOperationStatus,
     OnboardingStatus,
@@ -382,7 +383,7 @@ def reject_deployment(
         resource_id=dep.id,
         organization_id=dep.organization_id,
         actor=str(actor.user_id),
-        outcome="denied",
+        outcome=AuditOutcome.denied,
         data=_safe_audit(dep),
     )
     return dep

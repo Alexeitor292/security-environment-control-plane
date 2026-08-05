@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 from secp_api import audit
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     ReadinessReason,
     ToolchainAttestationOutcome,
     ToolchainProfileStatus,
@@ -165,7 +166,7 @@ def run_toolchain_attestation(
             resource_id=toolchain_profile_id,
             organization_id=organization_id,
             actor="worker",
-            outcome="refused",
+            outcome=AuditOutcome.refused,
             data={
                 "toolchain_profile_id": str(toolchain_profile_id),
                 "reason_code": reason.value,

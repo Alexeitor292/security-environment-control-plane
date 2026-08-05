@@ -32,6 +32,7 @@ from secp_api import audit
 from secp_api.eligibility_policy import ELIGIBILITY_EVIDENCE_TTL, EligibilityEvaluation
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     CollectorKind,
     EligibilityOutcome,
     PreflightCheckStatus,
@@ -229,7 +230,7 @@ def record_live_eligibility_evidence(
         resource_id=pf.id,
         organization_id=onboarding.organization_id,
         actor="worker" if created_by is None else str(created_by),
-        outcome=evaluation.outcome,
+        outcome=AuditOutcome.success,
         data={
             "onboarding_id": str(onboarding.id),
             "execution_target_id": str(target.id),

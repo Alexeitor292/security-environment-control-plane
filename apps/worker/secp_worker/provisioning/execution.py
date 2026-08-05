@@ -28,6 +28,7 @@ from secp_api import audit
 from secp_api.config import Settings, get_settings
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     PlanStatus,
     ProvisioningApplicationMode,
     ProvisioningOperationKind,
@@ -74,7 +75,7 @@ def _refuse(
         resource_id=operation.id,
         organization_id=operation.organization_id,
         actor="worker",
-        outcome="denied",
+        outcome=AuditOutcome.denied,
         data={"reason": reason},
     )
     # Best effort: reflect the refusal on the operation (manifest_generated -> failed).

@@ -24,6 +24,7 @@ from secp_api.effective_boundary import (
 )
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     Permission,
     PlanStatus,
     ProvisioningOperationKind,
@@ -61,7 +62,7 @@ def _audit_refusal(actor: Principal, plan: DeploymentPlan, reason: str) -> None:
             resource_id=plan.id,
             organization_id=plan.organization_id,
             actor=str(actor.user_id),
-            outcome="denied",
+            outcome=AuditOutcome.denied,
             data={"reason": reason},
         )
 

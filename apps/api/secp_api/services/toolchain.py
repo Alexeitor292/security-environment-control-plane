@@ -17,7 +17,13 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
-from secp_api.enums import AuditAction, Permission, TargetStatus, ToolchainProfileStatus
+from secp_api.enums import (
+    AuditAction,
+    AuditOutcome,
+    Permission,
+    TargetStatus,
+    ToolchainProfileStatus,
+)
 from secp_api.errors import DomainError, NotFoundError, ValidationFailedError
 from secp_api.models import ExecutionTarget, ToolchainProfile
 from secp_api.toolchain_profile import validate_toolchain_profile
@@ -38,7 +44,7 @@ def _refuse(actor: Principal, target_id: uuid.UUID, org_id: uuid.UUID, reason: s
             resource_id=target_id,
             organization_id=org_id,
             actor=str(actor.user_id),
-            outcome="denied",
+            outcome=AuditOutcome.denied,
             data={"reason": reason},
         )
     raise ValidationFailedError(reason)
