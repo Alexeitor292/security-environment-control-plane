@@ -536,6 +536,177 @@ def test_the_observed_ok_pair_keeps_all_three_states_over_the_wire(client, sessi
     assert body["infrastructure_outcome"] == "verified"
 
 
+def test_the_observed_ok_pair_has_a_real_producer(session, principal):
+    """The payload under test is built by the WORKER, not by this test.
+
+    ``97bae71`` pinned the tri-state over a hand-written payload, and at the time nothing in the
+    system could emit it: ``CheckFinding.ok`` was ``bool``, so ``ok=null`` was unconstructible.
+    That is a self-restating assertion — green forever, describing a wire state that cannot occur.
+    Worse, nothing wrote ``infrastructure_checks`` at ALL: the key existed in the API schema, the
+    projection, the frontend reader and two tests that invented two DIFFERENT shapes for it.
+
+    So this drives ``verification_evidence`` — the serializer that now exists — and asserts the
+    three states survive from the worker's own type, through the event log, to the wire.
+    """
+    from secp_worker.provisioning.proxmox_verification import (
+        CheckFinding,
+        VerificationCheck,
+        VerificationOutcome,
+        VerificationReport,
+        verification_evidence,
+    )
+
+    report = VerificationReport(
+        outcome=VerificationOutcome.verification_failed,
+        findings=(
+            # could not be run
+            CheckFinding.unobserved(VerificationCheck.cross_team_denial, "no prober was supplied"),
+            # ran and failed
+            CheckFinding.observed_result(
+                VerificationCheck.management_denial, ok=False, detail="reached the management CIDR"
+            ),
+            # ran and passed
+            CheckFinding.observed_result(
+                VerificationCheck.guest_inventory, ok=True, detail="all guests present"
+            ),
+        ),
+    )
+    payload = verification_evidence(report)
+    # The serializer emits ok=None explicitly rather than omitting the key: an absent key and an
+    # explicit null are different facts, and only one of them says "no verdict".
+    unobserved = next(c for c in payload["isolation_checks"] if c["check"] == "cross_team_denial")
+    assert "ok" in unobserved and unobserved["ok"] is None
+
+    instance = proxmox_range(session, principal)
+    ranges.record_event(
+        session,
+        instance,
+        kind=proxmox_lifecycle.EVENT_VERIFICATION,
+        message="verification observed",
+        data=payload,
+    )
+    session.commit()
+
+    body = client_get(session, principal, instance, "verification")
+    checks = {
+        item["check"]: item
+        for item in (body["isolation_checks"] or []) + (body["infrastructure_checks"] or [])
+    }
+    assert checks["cross_team_denial"]["observed"] is False
+    assert checks["cross_team_denial"]["ok"] is None
+    assert checks["management_denial"] == {
+        "check": "management_denial",
+        "observed": True,
+        "ok": False,
+        "detail": "reached the management CIDR",
+    }
+    assert checks["guest_inventory"]["ok"] is True
+    assert len({(c["observed"], c["ok"]) for c in checks.values()}) == 3
+
+    # The two halves keep their own outcomes and neither is derived from the other. The isolation
+    # half contains BOTH an unobserved check and a proved violation, and a proved violation
+    # outranks an unproved one — "failed" is correct here, not "unproven".
+    assert body["isolation_outcome"] == "failed"
+    assert body["infrastructure_outcome"] == "passed"
+
+
+def test_a_half_with_nothing_failed_but_something_unobserved_is_unproven():
+    """The third outcome, which must not collapse into either neighbour.
+
+    Every check that RAN passed, and one could not be run. That is neither a pass — nothing proved
+    the missing one — nor a failure, since nothing was observed to be wrong. ``unproven`` is the
+    only honest answer and it is the one an operator needs, because it says "go and make the check
+    runnable" rather than "go and fix a violation".
+    """
+    from secp_worker.provisioning.proxmox_verification import (
+        CheckFinding,
+        VerificationCheck,
+        VerificationOutcome,
+        VerificationReport,
+        verification_evidence,
+    )
+
+    payload = verification_evidence(
+        VerificationReport(
+            outcome=VerificationOutcome.verification_failed,
+            findings=(
+                CheckFinding.observed_result(
+                    VerificationCheck.management_denial, ok=True, detail="blocked"
+                ),
+                CheckFinding.unobserved(VerificationCheck.cross_team_denial, "no prober"),
+            ),
+        )
+    )
+    assert payload["isolation_outcome"] == "unproven"
+
+    all_passed = verification_evidence(
+        VerificationReport(
+            outcome=VerificationOutcome.verified,
+            findings=(
+                CheckFinding.observed_result(
+                    VerificationCheck.management_denial, ok=True, detail="blocked"
+                ),
+                CheckFinding.observed_result(
+                    VerificationCheck.cross_team_denial, ok=True, detail="blocked"
+                ),
+            ),
+        )
+    )
+    assert all_passed["isolation_outcome"] == "passed"
+    # An EMPTY half is unproven, never vacuously passed: no checks ran, so nothing was established.
+    assert all_passed["infrastructure_outcome"] == "unproven"
+
+
+def client_get(session, principal, instance, suffix: str) -> dict:
+    """Issue a real HTTP GET for this range against a fresh app bound to the test session."""
+    from fastapi.testclient import TestClient
+    from secp_api.deps import current_principal
+    from secp_api.main import create_app
+
+    app = create_app()
+    app.router.on_startup.clear()
+    app.dependency_overrides[current_principal] = lambda: principal
+    with TestClient(app) as http:
+        response = http.get(f"/api/v1/ranges/{instance.id}/proxmox/{suffix}")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_an_unknown_worker_key_is_not_dropped_by_the_typed_model(session, principal):
+    """``extra="allow"`` — typing the shape must not become a reason to discard evidence.
+
+    A strict model would silently drop keys the worker went to the trouble of recording, which is
+    a worse defect than the untyped array it replaced: the contract would gain a guarantee and the
+    system would lose data.
+    """
+    instance = proxmox_range(session, principal)
+    ranges.record_event(
+        session,
+        instance,
+        kind=proxmox_lifecycle.EVENT_VERIFICATION,
+        message="verification observed",
+        data={
+            "infrastructure_outcome": "passed",
+            "isolation_outcome": "passed",
+            "isolation_checks": [
+                {
+                    "check": "cross_team_denial",
+                    "observed": True,
+                    "ok": True,
+                    "detail": "blocked",
+                    "probe_samples": 12,
+                    "prober_release": "sha256:abc",
+                }
+            ],
+        },
+    )
+    session.commit()
+    body = client_get(session, principal, instance, "verification")
+    check = body["isolation_checks"][0]
+    assert check["probe_samples"] == 12
+    assert check["prober_release"] == "sha256:abc"
+
+
 # --- the reset gate is explicit, not a fall-through -------------------------------
 
 

@@ -222,22 +222,42 @@ describe("unknown is a first-class member of every state enum", () => {
   });
 });
 
-describe("the opaque members are opaque, and that is a fact about the CONTRACT", () => {
-  // This is the delta the reconciliation turned up, pinned so it cannot regress silently in either
-  // direction. `infrastructure_checks` is `{ [key: string]: unknown }[]` because
-  // `secp_api.schemas_proxmox` declares it `list[dict[str, Any]]` and copies it verbatim from what
-  // the worker recorded. The (observed, ok) PAIR therefore does NOT survive generation, and is
-  // recovered at runtime by `asCheckFindings` in ./recorded.ts.
+describe("the check findings carry the (observed, ok) pair in the CONTRACT", () => {
+  // This test previously asserted the OPPOSITE — that these arrays were
+  // `{ [key: string]: unknown }[]` — with a note saying it should fail the day they were typed in
+  // Pydantic, because at that point the runtime narrowing is redundant. That day is this commit.
+  // SECP-P7-A declared `CheckFindingOut`, so the pair is in the contract and the generated types
+  // carry it.
   //
-  // If a future change types these in Pydantic, this test fails — and it SHOULD, because at that
-  // point the narrowing layer is redundant and should be deleted rather than left to rot.
-  it("leaves the verification check findings untyped on the wire", () => {
+  // The intersection with `{ [key: string]: unknown }` is `extra="allow"` on the Pydantic model,
+  // and it is deliberate: the worker writes the finding and may record keys the model does not
+  // name. A strict model would silently DROP them, which is a worse defect than the untyped array
+  // it replaced — the contract would gain a guarantee and the system would lose evidence.
+  it("types the pair while still passing unknown worker keys through", () => {
+    type Finding = {
+      check: string;
+      detail?: string | null | undefined;
+      observed: boolean;
+      ok?: boolean | null | undefined;
+    } & { [key: string]: unknown };
+
     expectTypeOf<ProxmoxVerificationOut["infrastructure_checks"]>().toEqualTypeOf<
-      { [key: string]: unknown }[] | null | undefined
+      Finding[] | null | undefined
     >();
     expectTypeOf<ProxmoxVerificationOut["isolation_checks"]>().toEqualTypeOf<
-      { [key: string]: unknown }[] | null | undefined
+      Finding[] | null | undefined
     >();
+  });
+
+  it("keeps ok nullable so 'could not run' is not reported as 'failed'", () => {
+    // THE THREE STATES: observed=false/ok=null, observed=true/ok=false, observed=true/ok=true.
+    // A non-nullable `ok` would force the first to be spelled as the second, which is the exact
+    // substitution the pair exists to prevent. The producer refuses the combination too:
+    // `secp_worker.provisioning.proxmox_verification.CheckFinding` cannot be constructed with
+    // observed=false and a non-null verdict.
+    type Finding = NonNullable<ProxmoxVerificationOut["infrastructure_checks"]>[number];
+    expectTypeOf<Finding["ok"]>().toEqualTypeOf<boolean | null | undefined>();
+    expectTypeOf<Finding["observed"]>().toEqualTypeOf<boolean>();
   });
 
   it("reports the two outcomes separately, so neither can mask the other", () => {

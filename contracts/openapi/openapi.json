@@ -1183,6 +1183,48 @@
         "title": "ChangeSetApprovalOut",
         "type": "object"
       },
+      "CheckFindingOut": {
+        "additionalProperties": true,
+        "description": "One check the worker recorded, with the ``(observed, ok)`` PAIR on the contract.\n\nThese arrays used to be published as ``list[dict[str, Any]]``, so the generated TypeScript was\n``{ [key: string]: unknown }[]`` and the pair did not exist in the contract at all. The\nprojection preserved it faithfully and every client received it as ``unknown`` — which meant\n\"unknown is not false\" was enforced by convention on the frontend rather than by the schema, in\nthe one place the per-check tri-state actually lives.\n\n``extra=\"allow\"`` is what makes typing these safe. The worker writes the finding and may write\nkeys this model does not name; a strict model would silently DROP them, which is a worse defect\nthan the one being fixed — it would discard evidence a worker went to the trouble of recording.\nSo the four fields the contract guarantees are declared, and anything else the worker wrote\npasses through untouched.\n\nTHE THREE LEGAL STATES, and the fourth that is not:\n\n    observed=false, ok=null    the check could not be run; nothing is known\n    observed=true,  ok=false   the check ran and failed\n    observed=true,  ok=true    the check ran and passed\n\n``observed=false, ok=false`` is the substitution this pair exists to prevent — a check nobody\ncould make reading as a check that failed. It is now unconstructible upstream:\n``secp_worker.provisioning.proxmox_verification.CheckFinding`` refuses it.",
+        "properties": {
+          "check": {
+            "title": "Check",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "observed": {
+            "title": "Observed",
+            "type": "boolean"
+          },
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          }
+        },
+        "required": [
+          "check",
+          "observed"
+        ],
+        "title": "CheckFindingOut",
+        "type": "object"
+      },
       "CommandKind": {
         "description": "Which operator act a durable command record is.\n\nEach member is its own act with its own permission, its own preconditions and its own request\nschema. There is deliberately no ``approve`` or ``execute`` member that could stand for either\nan apply or a destroy — see the module docstring. ``operation_kind`` on the wire is exactly one\nof these, never derived by a client from the path it called.",
         "enum": [
@@ -6967,8 +7009,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CheckFindingOut"
                 },
                 "type": "array"
               },
@@ -6993,8 +7034,7 @@
             "anyOf": [
               {
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CheckFindingOut"
                 },
                 "type": "array"
               },

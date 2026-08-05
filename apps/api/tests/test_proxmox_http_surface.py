@@ -247,6 +247,13 @@ def test_an_unproven_residue_verdict_survives_to_the_wire(session, principal):
 def test_verification_reports_infrastructure_and_isolation_separately(session, principal):
     """A passing infrastructure check must never be able to mask an isolation violation."""
     from secp_api.proxmox_projection import verification_out
+    from secp_worker.provisioning.proxmox_verification import (
+        CheckFinding,
+        VerificationCheck,
+        VerificationOutcome,
+        VerificationReport,
+        verification_evidence,
+    )
 
     instance = make_range(session, principal)
     ranges.record_event(
@@ -254,20 +261,37 @@ def test_verification_reports_infrastructure_and_isolation_separately(session, p
         instance,
         kind=proxmox_lifecycle.EVENT_VERIFICATION,
         message="apply verified",
-        data={
-            "infrastructure_outcome": "passed",
-            "isolation_outcome": "violated",
-            "infrastructure_checks": [{"check": "guests_present", "outcome": "passed"}],
-            "isolation_checks": [{"check": "cross_team", "outcome": "violated"}],
-        },
+        # Built by the WORKER's own serializer, not by hand. This fixture used to invent
+        # ``{"check": ..., "outcome": ...}`` — a shape nothing in the system produced, and one
+        # that did not even match the shape the sibling test in this file invented. Two tests
+        # describing two different payloads is how you can tell neither was describing the system.
+        data=verification_evidence(
+            VerificationReport(
+                outcome=VerificationOutcome.isolation_failed,
+                findings=(
+                    CheckFinding.observed_result(
+                        VerificationCheck.guest_inventory, ok=True, detail="all guests present"
+                    ),
+                    CheckFinding.observed_result(
+                        VerificationCheck.cross_team_denial,
+                        ok=False,
+                        detail="red reached blue on 443",
+                    ),
+                ),
+            )
+        ),
     )
     out = verification_out(
         proxmox_lifecycle.recorded_stage(session, instance, proxmox_lifecycle.EVENT_VERIFICATION)
     )
     assert out.infrastructure_outcome == "passed"
-    assert out.isolation_outcome == "violated"
-    # There is no combined field that could have hidden the violation.
+    assert out.isolation_outcome == "failed"
+    # There is no combined field on the projection that could have hidden the violation: the
+    # report's own overall outcome is recorded, but the API surface reports the two halves.
     assert not hasattr(out, "outcome")
+    assert [check.check for check in out.isolation_checks] == ["cross_team_denial"]
+    assert out.isolation_checks[0].observed is True
+    assert out.isolation_checks[0].ok is False
 
 
 # --- the compiled plan --------------------------------------------------------
@@ -818,18 +842,32 @@ def test_a_check_findings_observed_ok_pair_is_never_flattened(session, principal
 
     recorded = verification_out(
         {
-            "infrastructure_outcome": "verified",
-            "isolation_outcome": "unobserved",
+            "infrastructure_outcome": "passed",
+            "isolation_outcome": "unproven",
             "isolation_checks": [
-                {"check": "cross_team", "observed": False, "ok": False, "detail": "no prober"},
-                {"check": "management_plane", "observed": True, "ok": False, "detail": "reached"},
+                # ``ok: null``, not ``ok: false``. This fixture used to write ``ok=False`` for the
+                # unobserved check — the very substitution the pair exists to prevent, written into
+                # the test guarding against it, so nothing ever pinned that "no verdict" has a
+                # representation. The worker can no longer construct that combination at all.
+                {
+                    "check": "cross_team_denial",
+                    "observed": False,
+                    "ok": None,
+                    "detail": "no prober",
+                },
+                {
+                    "check": "management_denial",
+                    "observed": True,
+                    "ok": False,
+                    "detail": "reached",
+                },
             ],
         }
     )
     unobserved, failed = recorded.isolation_checks
-    # Both have ok=False; only `observed` tells them apart, and it survived.
-    assert unobserved["observed"] is False and unobserved["ok"] is False
-    assert failed["observed"] is True and failed["ok"] is False
+    # Typed on the wire now, so a client branches on the pair rather than on `unknown`.
+    assert unobserved.observed is False and unobserved.ok is None
+    assert failed.observed is True and failed.ok is False
     assert unobserved != failed
 
 
