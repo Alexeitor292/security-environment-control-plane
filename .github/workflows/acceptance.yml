@@ -83,7 +83,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev --python 3.11
 
       - name: Verify the outer runtime can actually host the fleet
         # Fail here, with a readable cause, rather than forty confusing lines into an image build.
@@ -199,7 +199,7 @@ jobs:
       - name: Create venv and install project
         run: |
           uv venv --python 3.11
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev --python 3.11
 
       - name: A declared tier with an unreachable daemon must FAIL, with zero skips
         # DOCKER_HOST points at a closed port, so every docker invocation fails while the runner's

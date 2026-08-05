@@ -63,8 +63,12 @@ inline workflow dispatch).
 
 ```bash
 # 1. Create the environment and install the project (editable) with dev tools.
+#    `uv sync` installs the exact versions recorded in uv.lock, which is what CI installs.
+#    `uv pip install` is the pip-compatible interface and IGNORES uv.lock by design, so it
+#    re-resolves every open floor in pyproject.toml and can give you a different dependency
+#    set from the one the gate runs on. Use `uv sync`.
 uv venv --python 3.11
-uv pip install -e ".[dev]"
+uv sync --frozen --extra dev
 
 # 2. Run the test suite.
 uv run pytest
