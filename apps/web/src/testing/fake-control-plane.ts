@@ -176,7 +176,6 @@ export function createFakeRangeApi(opts: FakeRangeApiOptions = {}): FakeRangeApi
       at: null,
     }));
     planned = true;
-    emit(`${kind}_planned`, `${labels.length} steps planned`);
   };
 
   const finishOperation = (kind: string) => {
@@ -204,6 +203,7 @@ export function createFakeRangeApi(opts: FakeRangeApiOptions = {}): FakeRangeApi
         range.state_reason = "The provider could not be reached.";
         emit("deploy_failed", "Deployment failed", "error");
       } else {
+        emit("network_created", "Created the isolated network secp-range-fake");
         resources = [
           { id: nextId("res"), kind: "network", provider: "local_docker", component_key: null, name: "secp-range-net", external_id: "net123", image: null, image_digest: null, state: "verified", host_port: null, created_at: now(), removed_at: null, detail: {} },
           ...COMPONENTS.filter((c) => c.container_port !== null).map((c, i) => ({
@@ -234,11 +234,15 @@ export function createFakeRangeApi(opts: FakeRangeApiOptions = {}): FakeRangeApi
           reachable: true,
           observed_at: now(),
         }));
-        emit("deploy_completed", "Deployment completed");
+        for (const c of COMPONENTS.filter((x) => x.container_port !== null)) {
+          emit("container_started", `Started ${c.name} as secp-range-fake-${c.key}`);
+          emit("resource_verified", `${c.name} responded (HTTP 200)`);
+        }
+        emit("range_ready", "Range deployed; every component was observed responding");
       }
     } else if (kind === "reset") {
       range.state = "ready";
-      emit("reset_completed", "Reset completed");
+      emit("range_ready", "Range reset complete; every component was observed responding");
     } else {
       // Destroy. `unproven` lands in recovery_required, NOT destroyed — nobody proved it is gone.
       for (const r of resources) {
@@ -272,9 +276,16 @@ export function createFakeRangeApi(opts: FakeRangeApiOptions = {}): FakeRangeApi
           detail: null,
         })),
       });
+      // `range_destroyed` is a kind captured from a real run. The unproven kind is NOT — that path
+      // has not been observed against a live server, so nothing asserts on its name; the unproven
+      // tests assert on STATE (`recovery_required`) and `residue_verdict`, which the contract does
+      // pin. Naming an unverified kind here and then asserting it would rebuild the exact fiction
+      // the live run just caught.
       emit(
-        unproven ? "teardown_unproven" : "destroy_completed",
-        unproven ? "Teardown could not be verified" : "Destroy completed",
+        unproven ? "range_teardown_unproven" : "range_destroyed",
+        unproven
+          ? "Teardown could not be verified"
+          : `Range destroyed; all ${resources.length} owned resource(s) confirmed absent`,
         unproven ? "warning" : "info",
       );
     }
@@ -399,7 +410,8 @@ export function createFakeRangeApi(opts: FakeRangeApiOptions = {}): FakeRangeApi
         const op = startOperation(kind);
         range.state = kind === "deploy" ? "deploying" : kind === "reset" ? "resetting" : "destroying";
         range.updated_at = now();
-        emit(`${kind}_started`, `${kind} started`);
+        // Verified kinds: deploy_requested / reset_requested / destroy_requested.
+        emit(`${kind}_requested`, `${kind} requested`);
         return json(op, 202);
       }
     }

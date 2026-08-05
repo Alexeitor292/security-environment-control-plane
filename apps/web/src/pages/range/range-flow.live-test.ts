@@ -22,7 +22,13 @@
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { API_BASE, api } from "../../api/client";
-import { FLOW_STEPS, firstMissingInOrder, runRangeFlow, type FlowResult } from "./range-flow";
+import {
+  EXPECTED_EVENT_KIND_ORDER,
+  FLOW_STEPS,
+  firstMissingInOrder,
+  runRangeFlow,
+  type FlowResult,
+} from "./range-flow";
 
 const RANGE_NAME = `Acceptance ${new Date().toISOString().slice(0, 19)}`;
 
@@ -76,9 +82,10 @@ describe("range vertical slice — against a real control plane", () => {
   });
 
   it("records the lifecycle in the server's own event log", () => {
-    expect(
-      firstMissingInOrder(result.eventKinds, ["deploy_started", "reset_started", "destroy_started"]),
-    ).toBeNull();
+    // These kinds were captured from a real run, not assumed. The first version of this assertion
+    // used the test fake's invented names and failed here — which is the whole point of having a
+    // live half: only it can discover that the fake and the server disagree.
+    expect(firstMissingInOrder(result.eventKinds, EXPECTED_EVENT_KIND_ORDER)).toBeNull();
   });
 
   it("ends destroyed with a proved-clean teardown, not merely requested", () => {

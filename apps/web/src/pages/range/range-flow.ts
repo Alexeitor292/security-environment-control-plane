@@ -213,6 +213,29 @@ export const FLOW_STEPS: readonly string[] = [
 ];
 
 /**
+ * Range event `kind` values for a complete happy-path run, in order.
+ *
+ * CAPTURED FROM A REAL CONTROL PLANE on 2026-08-05, not invented. An earlier version of this list
+ * held `deploy_started` / `reset_started` / `destroy_started`, which were names the TEST FAKE made
+ * up; the live run failed against the real server and that is how the drift was found. The fake now
+ * emits these same values, so the in-gate suite is checked against observed reality rather than
+ * against its own invention.
+ *
+ * `range_ready` legitimately appears twice — once after deploy, once after reset — and
+ * `firstMissingInOrder` matches repeats separately, so the duplication is meaningful rather than a
+ * transcription slip.
+ */
+export const EXPECTED_EVENT_KIND_ORDER: readonly string[] = [
+  "range_created",
+  "deploy_requested",
+  "range_ready",
+  "reset_requested",
+  "range_ready",
+  "destroy_requested",
+  "range_destroyed",
+];
+
+/**
  * Check that `expected` appears within `actual` in order (extra entries between are fine).
  * Returns the first expected entry that could not be found, or null when all matched.
  */
