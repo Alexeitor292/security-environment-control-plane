@@ -37,6 +37,8 @@
 //   secp_worker.provisioning.proxmox_destroy_gate — destroy authorization and refusal codes
 //   secp_worker.provisioning.proxmox_residue    — deletion set, absence findings, zero-residue
 //
+import type { CheckFindingOut } from "./generated/openapi";
+
 // Enums are `as const` arrays with types derived from them. A bare union is erased at build time
 // and can prove nothing at runtime; the arrays let the tone maps be checked exhaustive AND let the
 // narrowing functions in `./recorded.ts` validate a recorded value against the real member set.
@@ -467,37 +469,15 @@ export const PROBE_VERDICTS = ["reachable", "blocked", "unknown"] as const;
 export type ProbeVerdict = (typeof PROBE_VERDICTS)[number];
 
 /**
- * `proxmox_verification.CheckFinding` — the shape inside `ProxmoxVerificationOut`'s
- * `infrastructure_checks` and `isolation_checks`, which OpenAPI publishes as
- * `{ [key: string]: unknown }[]`.
+ * `proxmox_verification.VerificationReport`.
  *
- * `observed` and `ok` are two independent booleans and the pair is the whole point: `observed:
- * false` means the check could not be run, and `ok` carries no meaning in that case. A renderer
- * that reads only `ok` reports an unobserved check as a failure.
- *
- * Because the wire type is opaque, the pair cannot be recovered by a cast — `asCheckFinding` in
- * `./recorded.ts` checks BOTH booleans are present and refuses the entry otherwise. A missing
- * `observed` must never default to `true`: that is precisely how an unobserved check becomes a
- * reported failure.
+ * `findings` is the GENERATED `CheckFindingOut`, not a hand-written twin. The pair used to be
+ * transcribed here because the wire published an opaque dict; it is typed on the contract now, so
+ * a second declaration would be exactly the divergent copy this file exists to avoid.
  */
-export interface CheckFinding {
-  check: VerificationCheck;
-  observed: boolean;
-  /**
-   * `null` is the THIRD value, and the one that carries the meaning: the check could not be made,
-   * so there is no verdict. It is not `false`.
-   *
-   * `observed=true, ok=null` is a contradiction the worker's `__post_init__` refuses and
-   * `asCheckFindings` refuses again on the way in, so a value of this type never holds it.
-   */
-  ok: boolean | null;
-  detail: string;
-}
-
-/** `proxmox_verification.VerificationReport`. */
 export interface VerificationReport {
   outcome: VerificationOutcome;
-  findings: CheckFinding[];
+  findings: CheckFindingOut[];
 }
 
 // --- reset and reconcile (proxmox_reset / proxmox_reconcile) -----------------------------------

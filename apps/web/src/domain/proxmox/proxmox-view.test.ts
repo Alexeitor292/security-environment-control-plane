@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import type { CheckFindingOut } from "../../api/generated/openapi";
+
 import {
   APPLY_REFUSAL_CODES,
   DESTROY_REFUSAL_CODES,
@@ -7,7 +9,6 @@ import {
   RECONCILE_ACTIONS,
   RESET_DISPOSITIONS,
   VERIFICATION_OUTCOMES,
-  type CheckFinding,
   type PlanDocument,
 } from "../../api/recorded-documents";
 import {
@@ -94,7 +95,7 @@ describe("unproven is a third outcome", () => {
 });
 
 describe("checkStatus reads the (observed, ok) pair, not ok alone", () => {
-  const finding = (observed: boolean, ok: boolean): CheckFinding => ({
+  const finding = (observed: boolean, ok: boolean): CheckFindingOut => ({
     check: "cross_team_denial",
     observed,
     ok,

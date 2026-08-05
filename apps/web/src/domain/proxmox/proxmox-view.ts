@@ -23,7 +23,6 @@ import type {
   ReconcileAction,
   ResetDisposition,
   SegregatedNetworkPlan,
-  VerificationCheck,
   VerificationOutcome,
   VerificationReport,
   VNetSpec,
@@ -587,22 +586,32 @@ export interface VerificationSummary {
   passed: number;
   failed: number;
   notObserved: number;
-  /** Isolation checks that were not observed. Called out separately: unproved segmentation. */
-  isolationNotObserved: VerificationCheck[];
+  /**
+   * Isolation checks that were not observed. Called out separately: unproved segmentation.
+   *
+   * `string`, not the closed `VerificationCheck` union, because the contract publishes
+   * `CheckFindingOut.check` as a string. A client that narrowed it to the union would be asserting
+   * a guarantee the wire does not make, and would have to either cast or drop a check name this
+   * build has not heard of — dropping an UNOBSERVED isolation check is the worst possible thing to
+   * do silently.
+   */
+  isolationNotObserved: string[];
 }
 
 export function verificationSummary(report: VerificationReport): VerificationSummary {
   let passed = 0;
   let failed = 0;
   let notObserved = 0;
-  const isolationNotObserved: VerificationCheck[] = [];
+  const isolationNotObserved: string[] = [];
   for (const f of report.findings) {
     const status = checkStatus(f);
     if (status === "passed") passed += 1;
     else if (status === "failed") failed += 1;
     else {
       notObserved += 1;
-      if (ISOLATION_CHECK_KEYS.includes(f.check)) isolationNotObserved.push(f.check);
+      if ((ISOLATION_CHECK_KEYS as readonly string[]).includes(f.check)) {
+        isolationNotObserved.push(f.check);
+      }
     }
   }
   return { outcome: report.outcome, passed, failed, notObserved, isolationNotObserved };

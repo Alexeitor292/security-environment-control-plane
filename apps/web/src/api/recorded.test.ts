@@ -7,123 +7,55 @@ import { describe, expect, it } from "vitest";
 
 import {
   asAbsenceFindings,
-  asCheckFindings,
   asDeletionSet,
   asResetActions,
   checkStatus,
   residueProvedClean,
 } from "./recorded";
 import type { AbsenceFinding } from "./recorded-documents";
+import type { CheckFindingOut } from "./generated/openapi";
 
-describe("asCheckFindings — the (observed, ok) pair", () => {
-  it("keeps an unobserved check distinguishable from a failed one", () => {
-    const read = asCheckFindings([
-      { check: "guest_inventory", observed: true, ok: true, detail: "12 guests" },
-      { check: "cross_team_denial", observed: true, ok: false, detail: "team a reached team b" },
-      { check: "power_state", observed: false, ok: false, detail: "node unreachable" },
-    ]);
-
-    expect(read.unreadable).toEqual([]);
-    expect(read.entries.map(checkStatus)).toEqual(["passed", "failed", "not_observed"]);
+describe("checkStatus reads the (observed, ok) pair, not `ok` alone", () => {
+  // The hand-written reader that used to recover this pair from an opaque dict is gone: the
+  // contract types it now. What survives is the RULE, which no type system enforces — reading
+  // `ok` alone reports an unobserved check as a failure, a finding nobody made.
+  const finding = (observed: boolean, ok: boolean | null): CheckFindingOut => ({
+    check: "cross_team_denial",
+    observed,
+    ok,
+    detail: "",
   });
 
-  it("refuses an entry with no `observed`, rather than assuming the check ran", () => {
-    // The whole defect in one payload: `ok: false` alone. Defaulting `observed` to true reports a
-    // failure the worker never claimed; defaulting it to false hides a failure the worker did.
-    const read = asCheckFindings([{ check: "guest_inventory", ok: false, detail: "" }]);
+  it("reports an unobserved check as not_observed whatever `ok` says", () => {
+    // Three shapes, and the THIRD is the one that matters. `ok: null` is what the worker writes
+    // now; `ok: false` is what producers emitted before the pair had a contract.
+    expect(checkStatus(finding(false, null))).toBe("not_observed");
+    expect(checkStatus(finding(false, false))).toBe("not_observed");
 
-    expect(read.entries).toEqual([]);
-    expect(read.unreadable).toHaveLength(1);
-    expect(read.unreadable[0].reason).toContain("observed");
+    // `observed=false, ok=TRUE` — a pass nobody made. Roughly thirteen sites computed the two
+    // from independent expressions before #120, and "no problems were found" is trivially true
+    // when nothing was examined, so durable events almost certainly carry this. The worker
+    // refuses to construct it now; the records already written cannot be un-written. This is the
+    // assertion that pins the `observed` short-circuit in `checkStatus` — remove that line and
+    // this test is what fails, which is the point of writing it separately from the other two.
+    expect(checkStatus(finding(false, true))).toBe("not_observed");
   });
 
-  it("refuses an entry with no `ok` — absent is not null", () => {
-    // `ok: null` is a VALUE, and the one that means "could not be made". A payload with no `ok`
-    // key at all is a different thing: uninterpretable, and defaulting it is how "nobody could
-    // look" becomes "this failed".
-    const read = asCheckFindings([{ check: "guest_inventory", observed: true, detail: "" }]);
-    expect(read.entries).toEqual([]);
-    expect(read.unreadable[0].reason).toContain('"ok"');
+  it("reports observed checks normally", () => {
+    expect(checkStatus(finding(true, true))).toBe("passed");
+    expect(checkStatus(finding(true, false))).toBe("failed");
   });
 
-  it("reads the canonical unknown, `observed=false, ok=null`, as not observed", () => {
-    // The shape `verification_evidence` emits. Before the worker's `ok` became `bool | None` this
-    // reader refused it outright, which would have rejected real payloads the day it landed.
-    const read = asCheckFindings([
-      { check: "cross_team_denial", observed: false, ok: null, detail: "no prober" },
-    ]);
-    expect(read.unreadable).toEqual([]);
-    expect(read.entries[0].ok).toBeNull();
-    expect(checkStatus(read.entries[0])).toBe("not_observed");
+  it("does not read a null verdict as a failure", () => {
+    // `null ? a : b` takes the false branch, so an `ok: null` that reached here through a
+    // hand-built value would render as FAILED without the explicit check. The worker cannot emit
+    // `observed=true, ok=null` — its __post_init__ refuses it — but the guard costs one line.
+    expect(checkStatus(finding(true, null))).toBe("not_observed");
   });
 
-  it("refuses `observed=true, ok=null` — a check cannot run and produce no verdict", () => {
-    // The worker's `__post_init__` refuses to construct this, so encountering it means the
-    // payload is not what it claims. Resolving it silently is how it would become a pass.
-    const read = asCheckFindings([
-      { check: "cross_team_denial", observed: true, ok: null, detail: "" },
-    ]);
-    expect(read.entries).toEqual([]);
-    expect(read.unreadable[0].reason).toContain("not an outcome");
-  });
-
-  it("still reads the legacy `observed=false, ok=false` shape recorded before the triple", () => {
-    // Two producer sites emitted this, and those events are durable. Refusing them now would
-    // discard evidence legitimately written under the rules of its time — and `checkStatus` maps
-    // any unobserved check to not_observed regardless of `ok`, so nothing can mistake it for a
-    // verdict.
-    const read = asCheckFindings([
-      { check: "power_state", observed: false, ok: false, detail: "node unreachable" },
-    ]);
-    expect(read.unreadable).toEqual([]);
-    expect(checkStatus(read.entries[0])).toBe("not_observed");
-  });
-
-  it("refuses an `ok` that is neither boolean nor null", () => {
-    const read = asCheckFindings([
-      { check: "power_state", observed: true, ok: "yes", detail: "" },
-    ]);
-    expect(read.entries).toEqual([]);
-    expect(read.unreadable[0].reason).toContain("neither a boolean nor null");
-  });
-
-  it("refuses a truthy non-boolean rather than coercing it", () => {
-    // `"false"` is a truthy string. `!!value` would read it as an observed check.
-    const read = asCheckFindings([
-      { check: "guest_inventory", observed: "false", ok: true, detail: "" },
-    ]);
-    expect(read.entries).toEqual([]);
-    expect(read.unreadable[0].reason).toContain("observed");
-  });
-
-  it("refuses a check name this build does not know, instead of rendering it untyped", () => {
-    const read = asCheckFindings([
-      { check: "quantum_entanglement_denial", observed: true, ok: true, detail: "" },
-    ]);
-    expect(read.entries).toEqual([]);
-    expect(read.unreadable[0].reason).toContain("not a member this build knows");
-  });
-
-  it("reports readable and unreadable entries side by side, dropping neither", () => {
-    const read = asCheckFindings([
-      { check: "guest_inventory", observed: true, ok: true, detail: "" },
-      { check: "guest_names", ok: true },
-      42,
-    ]);
-    expect(read.entries).toHaveLength(1);
-    expect(read.unreadable.map((u) => u.index)).toEqual([1, 2]);
-    expect(read.unreadable[1].reason).toBe("entry is not a JSON object");
-  });
-
-  it("separates a stage that has not run from a stage that recorded nothing", () => {
-    // `infrastructure_checks: null` is what ProxmoxVerificationOut carries before any verification
-    // is recorded. It is not an empty report; `state` is `undetermined`, which is not a pass.
-    expect(asCheckFindings(null).present).toBe(false);
-    expect(asCheckFindings(undefined).present).toBe(false);
-
-    const ran = asCheckFindings([]);
-    expect(ran.present).toBe(true);
-    expect(ran.entries).toEqual([]);
+  it("treats an absent `ok` as no verdict, since the contract marks it optional", () => {
+    const absent = { check: "power_state", observed: false, detail: "" } as CheckFindingOut;
+    expect(checkStatus(absent)).toBe("not_observed");
   });
 });
 
