@@ -23,6 +23,12 @@ PLAN_SECRET_READINESS_ACTIVITY_NAME = "plan_secret_readiness_activity"
 # task queue and is never registered on the controlled-live operator queue.
 ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME = "enrollment_recovery_sweep_activity"
 
+# SECP-RANGE: the durable, worker-owned range lifecycle operation (deploy/reset/destroy against
+# a real provider). It runs on the ORDINARY queue: it is not controlled-live operator work, it
+# touches no Proxmox/OpenTofu/credential path, and its only capability — a local container
+# runtime — is sealed off by default (SECP_RANGE_LOCAL_DOCKER) rather than by queue placement.
+RANGE_OPERATION_ACTIVITY_NAME = "range_operation_activity"
+
 # Legacy deploy/reset/destroy/discover activities. These MUST equal the original implicit function
 # names, so pinning ``@activity.defn(name=...)`` does not change any registration.
 DEPLOY_ACTIVITY_NAME = "deploy_activity"

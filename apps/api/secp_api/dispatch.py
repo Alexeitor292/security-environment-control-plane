@@ -82,6 +82,10 @@ class WorkflowDispatcher(Protocol):
         self, session: Session, manifest_id: uuid.UUID
     ) -> WorkflowRun: ...
 
+    def dispatch_range_operation(
+        self, session: Session, operation_id: uuid.UUID
+    ) -> WorkflowRun: ...
+
 
 class InlineDispatcher:
     """Runs orchestration synchronously in the caller's session/transaction."""
@@ -208,6 +212,20 @@ class InlineDispatcher:
             "real plan generation is not permitted via the inline dispatcher; it runs only on the "
             "durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). The API never runs a "
             "process; the operation stops at the sealed plan-only boundary in the worker."
+        )
+
+    def dispatch_range_operation(self, session: Session, operation_id: uuid.UUID) -> WorkflowRun:
+        # A range operation drives a real provider — for the local Docker provider, a socket that
+        # is root-equivalent on the host. That is exactly the privileged execution the inline
+        # dispatcher exists NOT to do: it is safe only for the Simulator, whose side effects are
+        # simulated rows. There is no inline-safe range provider, so there is no inline path, and
+        # no fallback — when Temporal is unavailable the operation simply does not run.
+        from secp_api.safety import InlineExecutionForbidden
+
+        raise InlineExecutionForbidden(
+            "range operations are not permitted via the inline dispatcher; they run only on the "
+            "durable worker path (set SECP_WORKFLOW_DISPATCH_MODE=temporal). The API never "
+            "contacts a container runtime."
         )
 
 
@@ -543,6 +561,31 @@ class TemporalDispatcher:
             kind=WorkflowKind.real_plan_generation,
             workflow="RealPlanGenerationWorkflow",
         )
+
+    def dispatch_range_operation(self, session: Session, operation_id: uuid.UUID) -> WorkflowRun:
+        # ENQUEUE-ONLY, same discipline as the readiness operations: durably queue a WorkflowRun +
+        # outbox row and stop. Nothing is submitted to Temporal until the API transaction commits.
+        # The RANGE OPERATION ID is the only identifier passed — the workflow argument carries no
+        # image reference, container id, network name, port, credential or provider configuration.
+        # The worker activity opens a fresh session and re-derives the spec from the template row
+        # itself, so a tampered or stale argument cannot redirect what gets deployed.
+        from secp_api.range_models import RangeDeploymentOperation
+
+        operation = session.get(RangeDeploymentOperation, operation_id)
+        if operation is None:
+            raise NotFoundError(f"range operation {operation_id} not found")
+        run = self._queue_run(
+            session,
+            kind=WorkflowKind.range_operation,
+            organization_id=operation.organization_id,
+        )
+        self._queue_outbox(
+            session,
+            run,
+            workflow="RangeOperationWorkflow",
+            args={"range_operation_id": str(operation_id), "workflow_run_id": str(run.id)},
+        )
+        return run
 
 
 def _utcnow() -> datetime:

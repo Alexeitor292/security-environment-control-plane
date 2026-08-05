@@ -17,7 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
-from secp_api import immutability  # noqa: F401  (registers ORM immutability guards)
+from secp_api import (
+    immutability,  # noqa: F401  (registers ORM immutability guards)
+    range_models,  # noqa: F401  (registers the range/competition tables)
+)
 from secp_api.config import get_settings
 from secp_api.db import get_engine, session_scope
 from secp_api.errors import DomainError, ValidationFailedError
@@ -32,11 +35,13 @@ from secp_api.routers import (
     providers,
     system,
 )
+from secp_api.routers import competitions as competitions_router
 from secp_api.routers import enrollment as enrollment_router
 from secp_api.routers import environment_publication as environment_publication_router
 from secp_api.routers import onboarding as onboarding_router
 from secp_api.routers import plan_activation as plan_activation_router
 from secp_api.routers import provisioning as provisioning_router
+from secp_api.routers import ranges as ranges_router
 from secp_api.routers import readiness as readiness_router
 from secp_api.routers import readonly_preflight as readonly_preflight_router
 from secp_api.routers import resolver_activation as resolver_activation_router
@@ -205,6 +210,9 @@ def create_app() -> FastAPI:
     app.include_router(observability.router)
     app.include_router(providers.router)
     app.include_router(provisioning_router.router)
+    # The range slice: catalog + provider-neutral lifecycle, and the native competition core.
+    app.include_router(ranges_router.router)
+    app.include_router(competitions_router.router)
     app.include_router(onboarding_router.router)
     app.include_router(staging_labs_router.router)
     app.include_router(staging_deployments_router.router)

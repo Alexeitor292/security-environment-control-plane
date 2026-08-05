@@ -154,6 +154,10 @@ class Settings(BaseSettings):
     app_env: Literal["dev", "test", "production"] = "dev"
     app_name: str = "Security Environment Control Platform"
 
+    # The local Docker range provider (development/demo only). OFF by default and refused in
+    # production regardless of this value — see ``range_local_docker_enabled``.
+    range_local_docker: bool = False
+
     # Database. Defaults to a local SQLite file so the app/tests run with zero
     # external services; the dev Docker stack overrides this with PostgreSQL.
     database_url: str = "sqlite+pysqlite:///./secp_dev.db"
@@ -344,6 +348,18 @@ class Settings(BaseSettings):
         # The dev fallback principal requires BOTH a non-production environment AND
         # explicit dev-auth mode. Production can never enable it (see validator).
         return self.auth_dev_mode and not self.is_production
+
+    @property
+    def range_local_docker_enabled(self) -> bool:
+        """Whether the local Docker range provider may actually touch a Docker daemon.
+
+        SEALED BY DEFAULT, and impossible in production. Access to a Docker socket is
+        root-equivalent on the host, so this is privileged execution in exactly the sense
+        Charter Invariants 6/7 are about. It is opt-in for a developer or demo host and
+        nothing else — see ``secp_api/range_providers/local_docker.py`` for the standing
+        architecture exception this provider is currently running under.
+        """
+        return self.range_local_docker and not self.is_production
 
     @model_validator(mode="after")
     def _reject_unsafe_production_config(self) -> Settings:

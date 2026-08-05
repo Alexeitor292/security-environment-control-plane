@@ -15,6 +15,34 @@ from unittest import mock
 import pytest
 
 
+def _require_worker_extra() -> None:
+    """Fail loudly when the ``worker`` extra is absent, instead of skipping.
+
+    Every seal assertion in this file is gated on ``temporalio``. Without the extra installed they
+    do not fail — they SKIP, and a skipped seal check reads exactly like a passing one. That is not
+    hypothetical: this repository already lost ``temporalio`` for months while seven tests reported
+    as passing without ever executing, and the sealed-set assertions here were verified by hand in a
+    worktree where they were silently skipping.
+
+    CI proves the extra is present for the shards and fails any shard skip whose reason is
+    ``could not import 'x'``. Nothing enforced it for someone running THIS FILE by hand, which is
+    the exact path that nearly produced a false pass.
+
+    Deliberately checked at RUN time rather than import time. An import-site guard also breaks
+    COLLECTION, and ``backend-test-inventory`` collects the whole corpus with only ``.[dev]``
+    installed — so a hard import there fails a job that has no need of the extra. Collection is not
+    a hand-run; execution is, and execution is what must not silently shrink.
+    """
+    try:
+        import temporalio  # noqa: F401
+    except ModuleNotFoundError as exc:  # pragma: no cover - the whole point is that this is loud
+        raise AssertionError(
+            "the 'worker' extra is not installed, so this sealed-set assertion would SKIP rather "
+            "than run — and a skipped seal check is indistinguishable from a passing one. "
+            "Install it with: uv sync --frozen --extra dev --extra worker"
+        ) from exc
+
+
 class _TemporalSettings:
     """Minimal settings selecting temporal mode (main only reads workflow_dispatch_mode here)."""
 
@@ -170,7 +198,7 @@ def main_source_path() -> str:
 def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
     monkeypatch, tmp_path
 ):
-    pytest.importorskip("temporalio")
+    _require_worker_extra()
     import asyncio
 
     import temporalio.client
@@ -255,6 +283,10 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
         W.RealPlanGenerationWorkflow,
         # WS-B R3: the scheduled enrollment expiry sweep is ORDINARY-queue work.
         W.EnrollmentRecoverySweepWorkflow,
+        # SECP-RANGE: the range lifecycle operation is ORDINARY-queue work. It contacts no provider
+        # credential and no infrastructure beyond a LOCAL container runtime that is itself sealed
+        # off by default (SECP_RANGE_LOCAL_DOCKER), so there is no controlled-live variant of it.
+        W.RangeOperationWorkflow,
     }
     registered_workflows = set(captured["workflows"])
     # Both directions, reported separately so a failure names the actual defect.
@@ -285,6 +317,12 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
         T.real_plan_generation_activity,
         # WS-B R3: the sweep activity has no sealed/controlled-live split — it contacts nothing.
         T.enrollment_recovery_sweep_activity,
+        # SECP-RANGE: the range lifecycle activity. Registered because RangeOperationWorkflow
+        # dispatches it BY NAME — a registered workflow whose activity is absent does not fail
+        # closed, it starts and then fails partway through a privileged operation. One capability,
+        # two registration points. It is a plain module-level function, not a composed instance, so
+        # the bound-method control below (len(owners) == 5) is unaffected.
+        T.range_operation_activity,
     }
     registered_activities = set(captured["activities"])
     assert not (expected_activities - registered_activities), "intended activity NOT registered"
@@ -342,7 +380,7 @@ def test_shipped_worker_polls_only_ordinary_queue_even_when_operator_queue_is_de
     kinds to the operator queue — proving the two queues are distinct and the ordinary worker never
     picks up controlled-live work.
     """
-    pytest.importorskip("temporalio")
+    _require_worker_extra()
     import asyncio
 
     import temporalio.client
