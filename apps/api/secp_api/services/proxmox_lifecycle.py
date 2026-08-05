@@ -132,6 +132,13 @@ EVENT_VERIFICATION = "proxmox_verification_recorded"
 EVENT_RESET_DISPOSITIONS = "proxmox_reset_dispositions_recorded"
 #: Written by the WORKER from an observed teardown.
 EVENT_RESIDUE = "proxmox_residue_recorded"
+#: Written by the WORKER from an observed reconciliation — a comparison of what EXISTS against the
+#: desired state. Nothing writes it yet: ``secp_worker.provisioning.proxmox_reconcile`` supplies the
+#: pure decision function but no operation kind carries it (see
+#: :func:`~secp_api.services.proxmox_commands.request_reconciliation`). The constant exists so the
+#: read surface can report ``undetermined`` from the same fold as every other worker-recorded stage,
+#: rather than inventing a fourth way of saying "nobody has looked".
+EVENT_RECONCILIATION = "proxmox_reconciliation_recorded"
 
 #: How long a recorded observation may be relied on before the surface calls it stale.
 #:
@@ -1102,12 +1109,33 @@ def require_operation_authorized(session: Session, instance: RangeInstance, kind
                 "an apply authorization does not authorize a destroy."
             )
         return
+
+    # DEPLOY AND RESET, both gated on the APPLY authorization, and now by an explicit decision
+    # rather than by falling out of the `destroy` check above.
+    #
+    # A reset re-materialises the SAME approved desired state, so the authorization that permitted
+    # creating those guests is the one that permits recreating them. That is the right gate — but
+    # reaching it by fall-through reads as an oversight, and it produced "apply is not authorized"
+    # as the refusal for a reset, which sends an operator to look for a problem with an apply they
+    # never requested. A reset is deliberately NOT gated on the destroy authorization and could not
+    # be: the destroy hash names a deletion scope in a different hash domain, not the state being
+    # restored.
+    #
+    # Any future operation kind lands here too, which is the safe direction: an unrecognised kind
+    # is refused unless an apply is authorized, rather than being waved through.
     record = apply_authorization(session, instance)
     if record is None or record.approved_hash != compiled.plan_hash:
+        act = "reset" if kind == "reset" else "apply"
+        because = (
+            "a reset recreates the guests this plan describes, so it needs the same authorization "
+            "creating them needed"
+            if kind == "reset"
+            else "approving a plan and authorizing its apply are separate acts"
+        )
         raise ProxmoxApprovalMissingError(
-            f"apply is not authorized for this range's current plan ({compiled.plan_hash}). "
-            "Approve the plan and then authorize apply; a destroy authorization does not "
-            "authorize an apply."
+            f"{act} is not authorized for this range's current plan ({compiled.plan_hash}): "
+            f"{because}. Approve the plan and then authorize apply; a destroy authorization does "
+            "not authorize an apply or a reset."
         )
 
 

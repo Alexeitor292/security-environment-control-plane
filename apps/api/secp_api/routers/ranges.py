@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
@@ -34,6 +35,13 @@ from secp_api.proxmox_projection import (
     residue_out,
     topology_out,
     verification_out,
+)
+from secp_api.proxmox_read_projection import (
+    evidence_out,
+    reconciliation_out,
+    reset_plan_out,
+    worker_out,
+    workload_out,
 )
 from secp_api.range_enums import RangeOperationKind, RangeState
 from secp_api.range_models import RangeTemplate
@@ -81,6 +89,13 @@ from secp_api.schemas_proxmox_commands import (
     ProxmoxResetRequest,
     ProxmoxSubmitPlanRequest,
 )
+from secp_api.schemas_proxmox_reads import (
+    ProxmoxEvidenceOut,
+    ProxmoxReconciliationOut,
+    ProxmoxResetPlanOut,
+    ProxmoxWorkerOut,
+    ProxmoxWorkloadOut,
+)
 from secp_api.schemas_range import (
     RangeCreate,
     RangeEventOut,
@@ -93,6 +108,8 @@ from secp_api.schemas_range import (
 )
 from secp_api.schemas_range_scenarios import ScenarioOut
 from secp_api.services import proxmox_commands, proxmox_lifecycle, ranges
+from secp_api.services.proxmox_lifecycle import EVENT_RECONCILIATION
+from secp_api.worker_enrollment_models import WorkerEnrollmentState
 
 router = APIRouter(prefix="/api/v1", tags=["ranges"])
 
@@ -665,6 +682,144 @@ def get_proxmox_residue(
 
 
 # --- authorization: four separate acts, none of which executes anything --------
+
+
+@router.get("/ranges/{range_id}/proxmox/worker", response_model=ProxmoxWorkerOut)
+def get_proxmox_worker(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxWorkerOut:
+    """The enrolled worker that would execute for this range, and whether it may.
+
+    Installation, enrollment state, identity, release and eligibility in one answer. ``enrolled:
+    false`` is a real response rather than a 404 — "nobody is enrolled" is something an operator
+    needs to be told, and it is a different answer from "a worker is enrolled but is not healthy".
+
+    Publishes public identity only: no transaction id, no compare-and-swap digests, no key material.
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    proxmox_lifecycle.require_proxmox(instance)
+    row = (
+        session.execute(
+            select(WorkerEnrollmentState)
+            .where(WorkerEnrollmentState.organization_id == instance.organization_id)
+            .order_by(WorkerEnrollmentState.observed_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    return worker_out(row)
+
+
+@router.get("/ranges/{range_id}/proxmox/workload", response_model=ProxmoxWorkloadOut)
+def get_proxmox_workload(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxWorkloadOut:
+    """The per-guest workload and bootstrap contracts — including the WORKER's own addresses.
+
+    ``/proxmox/topology`` publishes the topology's ``published_address`` and ``probe_address`` plus
+    the observed one. This publishes the bootstrap contract's ``probe_address``/``probe_port`` (what
+    the worker connects to when it checks a guest came up) and ``report_address``/``report_port``
+    (where the guest reports back), which had no route at all. They are separate concepts from the
+    topology's addresses, none is ever substituted for another, and an absent one stays null.
+
+    Bootstrap material appears as a REFERENCE and never as material.
+    """
+    instance, _, compiled = _resolve(session, principal, range_id)
+    state = proxmox_lifecycle.plan_state(
+        compiled, proxmox_lifecycle.plan_approval(session, instance)
+    )
+    return workload_out(
+        compiled,
+        state,
+        verification=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_VERIFICATION
+        ),
+    )
+
+
+@router.get("/ranges/{range_id}/proxmox/reset-plan", response_model=ProxmoxResetPlanOut)
+def get_proxmox_reset_plan(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxResetPlanOut:
+    """What a reset WOULD do to each guest.
+
+    A different endpoint and a different shape from ``/proxmox/reset-dispositions``, which reports
+    what the worker OBSERVED a reset doing. A plan and an observation are different claims, and the
+    moment they share a surface a client starts reading one as the other.
+    """
+    instance, _, compiled = _resolve(session, principal, range_id)
+    state = proxmox_lifecycle.plan_state(
+        compiled, proxmox_lifecycle.plan_approval(session, instance)
+    )
+    return reset_plan_out(
+        compiled,
+        state,
+        last_reset=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_RESET_DISPOSITIONS
+        ),
+    )
+
+
+@router.get("/ranges/{range_id}/proxmox/reconciliation", response_model=ProxmoxReconciliationOut)
+def get_proxmox_reconciliation(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxReconciliationOut:
+    """Whether reconciliation was asked for, and whether anything has answered.
+
+    Two independent facts. ``requested`` says an operator asked; ``state`` says whether a worker
+    recorded an observation, and stays ``undetermined`` until one does. Neither implies the other.
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    proxmox_lifecycle.require_proxmox(instance)
+    return reconciliation_out(
+        proxmox_commands.latest_command(
+            session, instance, proxmox_commands.CommandKind.request_reconciliation
+        ),
+        proxmox_lifecycle.recorded_stage(session, instance, EVENT_RECONCILIATION),
+    )
+
+
+@router.get("/ranges/{range_id}/proxmox/evidence", response_model=ProxmoxEvidenceOut)
+def get_proxmox_evidence(
+    range_id: uuid.UUID,
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> ProxmoxEvidenceOut:
+    """Which evidence exists for this range and what identifies it. REFERENCES, never payloads.
+
+    Every class is listed whether or not it exists. Omitting the absent ones would make "we have no
+    residue proof" indistinguishable from "nobody asked about residue".
+    """
+    instance = ranges.get_range(session, principal, range_id)
+    proxmox_lifecycle.require_proxmox(instance)
+    binding = proxmox_lifecycle.load_binding(session, instance)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    return evidence_out(
+        instance,
+        binding,
+        compiled,
+        verification=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_VERIFICATION
+        ),
+        residue=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_RESIDUE
+        ),
+        reset=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_RESET_DISPOSITIONS
+        ),
+        teardown_ids=[
+            row.id for row in ranges.list_teardown_evidence(session, principal, range_id)
+        ],
+    )
 
 
 # --- the operator command surface ----------------------------------------------
