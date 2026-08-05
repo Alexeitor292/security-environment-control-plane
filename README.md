@@ -110,6 +110,31 @@ docker compose up --build
 See [`infra/dev/README.md`](infra/dev/README.md) for credentials, health checks,
 and the workflow dispatch mode (`inline` default vs. `temporal`).
 
+### Range acceptance run (live)
+
+Executes the range vertical slice — create → validate → plan → submit → approve →
+deploy → inspect targets → reset → destroy — against a **real** control plane, and
+asserts the server's own audit ledger recorded every step.
+
+```bash
+# 1. start the API (a dev control plane — this run creates and DESTROYS a range)
+.venv/Scripts/python.exe -m uvicorn secp_api.main:app --port 8099
+
+# 2. from apps/web
+VITE_API_BASE_URL=http://localhost:8099 npm run test:live
+```
+
+It is **not** part of `npm test` (the Frontend CI job has no control plane to point
+it at) and it is **not** skipped when the API is absent — without a reachable server
+it fails with an actionable message and a non-zero exit. The same step definition
+(`src/pages/range/range-flow.ts`) also runs on every PR inside `npm test` against a
+fetch-level fake, so the two can never describe different flows.
+
+> **Two ports, deliberately.** Other worktrees' dev servers commonly hold `:5173`
+> and `:8080`. Vite will report binding a port it did not get and silently serve
+> another app, so use a private port with `--strictPort` and confirm the served
+> `<title>` before trusting anything you see in a browser.
+
 ## Current flows
 
 The platform has several **separate** lifecycle stages. An earlier stage passing never

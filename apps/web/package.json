@@ -10,7 +10,8 @@
     "preview": "vite preview --host --port 5173",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext ts,tsx",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:live": "vitest run --config vitest.live.config.ts"
   },
   "dependencies": {
     "@rive-app/react-webgl2": "^4.29.5",
