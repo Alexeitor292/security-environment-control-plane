@@ -472,6 +472,86 @@ reason. Reconciling them is the natural first step of any real wiring.
 
 ---
 
+## 4.9 Donor-versus-repository equivalence comparison
+
+Ran against the live donor prototype and the migrated shell, side by side.
+
+**Method, and its limits.** The donor was copied to a scratch directory and run
+there, never in place — a dev server writes `node_modules/.vite`, and the donor
+is read-only. The copy was verified byte-identical first (235 files, `cmp`, 0
+differing, 0 missing), which is what makes a copy an acceptable stand-in. Donor
+and repository ran on **distinct unusual ports with distinct document titles**,
+because a viewport capture contains no URL and two dev servers make an
+unattributable screenshot indistinguishable from an attributable one.
+
+**The repository side mounts `SpatialWorkspace` through a dev harness**, since
+`/spatial` sits behind `AuthBoundary` and would need a running control plane.
+**This comparison is therefore evidence about the shell and its apps, not about
+the auth composition** — that is covered structurally by `route-guard.test.ts`.
+
+### THREE authorized differences — and only these
+
+| # | Difference | Why |
+| --- | --- | --- |
+| 1 | The Secrets management surface is absent | Security boundary — §4.5 |
+| 2 | Security claims render as *not determined* | §4.1 |
+| 3 | **One extra `@media print` rule** | The fixture badge survives to paper. A printed screenshot of fixture data keeps its marker, which is the print-form answer to "a capture of the wrong thing looks like a capture of the right thing" |
+
+Every other measured difference resolved to one of these or to the provenance
+layer. Nothing else differs.
+
+### Measured identical
+
+| Property | Result |
+| --- | --- |
+| Route declarations | donor 53 / repo 52 — differ only by `path="secrets"` |
+| `*Page.tsx`, all source files, CSS files | differ only by `SecretsPage.tsx` |
+| `@keyframes` names | identical set |
+| Home shell DOM | **`totalElements` 418 on both**; same background, font, colour, shell classes, box, 4 wallpaper layers, 16 dock buttons at 24×24, 34 home items |
+| Per-app element counts | identical after subtracting the provenance layer (measured at exactly 4 elements, reproducing the donor's 367) |
+| Focusable elements & tab order | 34 both; first 14 identical in sequence |
+| `:hover` / `:focus` / `:focus-visible` rules | 56 / 8 / 18 on both |
+| Keyboard | `Ctrl+Shift+K` opens and `Escape` closes the command menu on both — the shell's own handler, dispatched live |
+| `@media` conditions | 23 distinct, identical counts, +1 `print` |
+| Layout at 640/760/900/1024/1280/1600 | every measured field identical |
+| **Animation & transition timing** | **55 distinct durations, identical counts; easings identical; 6 delay values; 33 `animation-name`s — zero difference** |
+
+The timing result is the strongest single measurement in this comparison. Every
+duration matches with its exact occurrence count, including the values most
+likely to be lost or rounded in a hand-port: `0.01ms` ×14 (the reduced-motion
+cancel), `18s`, `5.2s`, `3.25s`, `1.65s`, `2.15s`. A migration that had
+re-typed or "tidied" any easing curve or duration would show here.
+
+**Accessibility media coverage survived intact** and is worth naming, because it
+is what a migration loses silently — nobody browses in forced-colors mode and no
+reviewer notices its absence: `prefers-reduced-motion: reduce` **×25**,
+`prefers-reduced-transparency: reduce`, `prefers-contrast: more` ×4,
+`forced-colors: active`. Entry for entry on both sides.
+
+### What the comparison does NOT establish
+
+Recorded because an evidence set that does not state its boundary is read later
+as proving everything in it:
+
+- **Hover is inspected, not exercised.** Equal `:hover` rule counts with equal
+  selectors is strong; it is not pixels.
+- **Breakpoints are declared, not exercised.** Identical `@media` conditions do
+  not prove the layout reflows identically at 720px.
+- **The resize pass found little reflow to compare.** Only viewport-tracking
+  values varied across 640→1600; dock, widgets and font-size were constant. Either
+  the shell genuinely does not reflow in that range or the probes do not touch
+  where it does — those are not distinguished. One measure (`gridCols`) was
+  **withdrawn as uninformative**: it returned `1` at every width on both sides
+  because the selector fell through to a non-grid container.
+- **Focus styles were sampled on 4 of 34** focusable elements.
+- Element counts are structure, not pixels: two different layouts can share one.
+- **The animation result is DECLARED timing, not observed playback.** I also tried
+  to time a real app-open by listening for `transitionend`/`animationend`, and
+  **captured zero events in 2.6 s on the donor** — so that half measured nothing
+  and is reported as nothing rather than as agreement. Identical declarations are
+  strong evidence the same animations exist with the same timing; they are not
+  evidence that both sides actually played them at the same moment.
+
 ## 5. What P7-C delivers against this matrix
 
 - Every donor route and page **exists** in the repository — 40 routed + 12 shell
