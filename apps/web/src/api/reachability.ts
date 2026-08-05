@@ -189,12 +189,21 @@ export function analyseReachability(document: ContractDocument): Reachability {
  */
 export type UnavailableReason = "no-endpoint" | "parent-unreachable" | "parent-not-selected";
 
-/** Which side owns the fix. Mirrors `UNAVAILABLE_OWNER` in the spatial tree. */
-export const REASON_OWNER: Record<UnavailableReason, "backend" | "frontend"> = {
+/**
+ * Which side owns the fix. Mirrors `UNAVAILABLE_OWNER` in `spatial/integrations/query-state.ts`,
+ * down to the `as const satisfies` form.
+ *
+ * `satisfies` rather than a type annotation, so a new reason without an owner is a BUILD ERROR
+ * rather than a lookup that returns undefined at render time — and `as const` so the values stay
+ * literal instead of widening to `string`. Copied deliberately: a third spelling of these
+ * categories is the defect this program has hit repeatedly, and two modules that must agree
+ * should fail to compile when they stop agreeing.
+ */
+export const REASON_OWNER = {
   "no-endpoint": "backend",
   "parent-unreachable": "backend",
   "parent-not-selected": "frontend",
-};
+} as const satisfies Record<UnavailableReason, "backend" | "frontend">;
 
 export interface MethodAvailability {
   readonly method: AdapterMethod;
