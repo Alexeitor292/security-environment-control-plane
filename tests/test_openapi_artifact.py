@@ -113,6 +113,73 @@ def test_serialize_sorts_keys_so_an_unrelated_edit_moves_nothing() -> None:
     assert text == '{\n  "a": {\n    "y": 2,\n    "z": 1\n  },\n  "b": 1\n}\n'
 
 
+# --- the browser client is a NARROWER surface than the contract --------------------------------
+
+GENERATED_TS = REPO_ROOT / "apps" / "web" / "src" / "api" / "generated" / "openapi.ts"
+
+#: Route prefixes the browser client does not carry, and the boundary that says so.
+#:
+#: `/internal/` is registered by ``secp_api.main`` explicitly NOT under ``/api/v1`` and is spoken
+#: over internal CA-pinned transports by a worker or a root installer. ``/api/v1/worker-identity``
+#: is the registration / approval / evidence / revocation interface that
+#: ``apps/api/tests/test_resolution_lease_boundary.py`` and ``test_worker_identity_security.py``
+#: forbid frontend source from carrying — those two scan every ``.ts`` under ``apps/web/src`` and
+#: therefore scan the generated file, which is exactly why the generator filters rather than
+#: emitting the whole contract and hoping nobody imports the wrong half.
+BROWSER_EXCLUDED_PREFIXES = ("/internal/", "/api/v1/worker-identity")
+
+
+def test_the_excluded_surfaces_exist_in_the_contract_and_not_in_the_browser_client(
+    document: dict[str, Any],
+) -> None:
+    """Both halves matter.
+
+    Asserting only the absence would pass just as happily if the routes had been deleted from the
+    API, or if the generated file were empty — a filter that removes nothing and a contract that
+    contains nothing are indistinguishable from the far side. So this asserts the contract HAS each
+    excluded surface and the browser client does NOT.
+    """
+    generated = GENERATED_TS.read_text(encoding="utf-8")
+    for prefix in BROWSER_EXCLUDED_PREFIXES:
+        in_contract = [path for path in document["paths"] if path.startswith(prefix)]
+        assert in_contract, f"{prefix} is not in the contract at all; this exclusion is stale"
+        for path in in_contract:
+            assert f'"{path}"' not in generated, (
+                f"{path} is in the browser client. It is excluded by "
+                "BROWSER_EXCLUDED_PREFIXES in apps/web/scripts/generate-api-types.mjs."
+            )
+
+
+def test_the_browser_client_still_carries_the_surface_the_web_app_uses(
+    document: dict[str, Any],
+) -> None:
+    """The other direction: the filter must not have taken the product with it."""
+    generated = GENERATED_TS.read_text(encoding="utf-8")
+    for path in (
+        "/api/v1/ranges/{range_id}/proxmox/plan",
+        "/api/v1/ranges/{range_id}/proxmox/verification",
+        "/api/v1/target-discovery/read-only-bootstrap/worker-nodes",
+        "/api/v1/ranges",
+        "/health",
+    ):
+        assert path in document["paths"]
+        assert f'"{path}"' in generated, f"{path} is missing from the browser client"
+    # And the schemas those paths reach, which pruning could have taken with the excluded routes.
+    for name in ("ProxmoxPlanOut", "ProxmoxVerificationOut", "ApprovalOut", "WorkerNodeOut"):
+        assert f"        {name}:" in generated, f"{name} was pruned out of the browser client"
+
+
+def test_pruning_removed_the_schemas_only_the_excluded_routes_reached(
+    document: dict[str, Any],
+) -> None:
+    """A route filter that leaves the schemas behind excludes nothing that matters: the request and
+    response shapes are what a client would actually use."""
+    generated = GENERATED_TS.read_text(encoding="utf-8")
+    for name in ("RegisterWorkerIdentity", "WorkerIdentityEvidenceKind", "WorkerIdentityMechanism"):
+        assert name in document["components"]["schemas"], f"{name} is no longer in the contract"
+        assert f"        {name}:" not in generated, f"{name} survived pruning into the browser"
+
+
 # --- the surface is actually published ---------------------------------------------------------
 
 PROXMOX_PATHS = {

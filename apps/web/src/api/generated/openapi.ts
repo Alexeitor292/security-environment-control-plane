@@ -10,6 +10,11 @@
  * These are TRANSPORT types — the shapes that cross the wire. Presentation semantics (how an
  * operator should read a value) live in hand-written view models beside them, and the members
  * this document deliberately leaves opaque are narrowed in src/api/recorded.ts.
+ *
+ * This is the BROWSER surface, not the whole API. The internal worker/installer routes and the
+ * worker-identity registration interface are excluded by design and their schemas are pruned —
+ * see BROWSER_EXCLUDED_PREFIXES in scripts/generate-api-types.mjs for the boundary and the tests
+ * that enforce it. Read contracts/openapi/openapi.json for the complete contract.
  */
 
 /* eslint-disable */
@@ -3600,92 +3605,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/worker-identity/registrations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Registrations */
-        get: operations["list_registrations_api_v1_worker_identity_registrations_get"];
-        put?: never;
-        /** Register */
-        post: operations["register_api_v1_worker_identity_registrations_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/worker-identity/registrations/{registration_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Registration */
-        get: operations["get_registration_api_v1_worker_identity_registrations__registration_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/worker-identity/registrations/{registration_id}/approve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Approve */
-        post: operations["approve_api_v1_worker_identity_registrations__registration_id__approve_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/worker-identity/registrations/{registration_id}/evidence": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Record Evidence */
-        post: operations["record_evidence_api_v1_worker_identity_registrations__registration_id__evidence_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/worker-identity/registrations/{registration_id}/revoke": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Revoke */
-        post: operations["revoke_api_v1_worker_identity_registrations__registration_id__revoke_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/health": {
         parameters: {
             query?: never;
@@ -3706,152 +3625,10 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/internal/enrollment-signer/readiness": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Signer Readiness */
-        get: operations["signer_readiness_internal_enrollment_signer_readiness_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/internal/worker-discovery-admission/assert": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Assert Admission
-         * @description Pre-probe: confirm the admission is admitted, bound to THIS exact job/endpoint, and its
-         *     worker identity + live-read authorization still verify at the server clock. Does not consume.
-         */
-        post: operations["assert_admission_internal_worker_discovery_admission_assert_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/internal/worker-discovery-admission/begin": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Begin Admission */
-        post: operations["begin_admission_internal_worker_discovery_admission_begin_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/internal/worker-discovery-admission/complete": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Complete Admission */
-        post: operations["complete_admission_internal_worker_discovery_admission_complete_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/internal/worker-discovery-admission/consume": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Consume Admission
-         * @description Post-probe: re-assert validity at the server's clock, then atomically consume the one-time
-         *     admission (a replay/second consume fails closed). Returns the authoritative registration id +
-         *     version that the persisted candidate plan must bind.
-         */
-        post: operations["consume_admission_internal_worker_discovery_admission_consume_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** _BeginRequest */
-        _BeginRequest: {
-            /**
-             * Authorization Id
-             * Format: uuid
-             */
-            authorization_id: string;
-            /** Authorization Version */
-            authorization_version: number;
-            /**
-             * Discovery Job Id
-             * Format: uuid
-             */
-            discovery_job_id: string;
-            /** Endpoint Binding Hash */
-            endpoint_binding_hash: string;
-        };
-        /**
-         * _BindingRequest
-         * @description Shared shape for ``assert`` + ``consume``: the worker asserts only NON-secret IDs; the server
-         *     re-derives the enrollment from the job and reruns the authoritative verifier at the server.
-         */
-        _BindingRequest: {
-            /**
-             * Admission Id
-             * Format: uuid
-             */
-            admission_id: string;
-            /**
-             * Discovery Job Id
-             * Format: uuid
-             */
-            discovery_job_id: string;
-            /** Endpoint Binding Hash */
-            endpoint_binding_hash: string;
-        };
-        /** _CompleteRequest */
-        _CompleteRequest: {
-            /**
-             * Admission Id
-             * Format: uuid
-             */
-            admission_id: string;
-            /** Public Anchor */
-            public_anchor: string;
-            /** Signature */
-            signature: string;
-        };
         /** AccessTargetOut */
         AccessTargetOut: {
             /** Component Key */
@@ -6646,30 +6423,6 @@ export interface components {
             proof_id: string;
             status: components["schemas"]["ResolverActivationEvidenceStatus"];
         };
-        /** RecordWorkerIdentityEvidence */
-        RecordWorkerIdentityEvidence: {
-            /** Issuer */
-            issuer: string;
-            kind: components["schemas"]["WorkerIdentityEvidenceKind"];
-            /** Proof Id */
-            proof_id: string;
-            status: components["schemas"]["WorkerIdentityEvidenceStatus"];
-        };
-        /** RegisterWorkerIdentity */
-        RegisterWorkerIdentity: {
-            /** Deployment Binding */
-            deployment_binding: string;
-            /** Identity Label */
-            identity_label: string;
-            mechanism: components["schemas"]["WorkerIdentityMechanism"];
-            /**
-             * Ttl Seconds
-             * @default 3600
-             */
-            ttl_seconds: number;
-            /** Verification Anchor Fingerprint */
-            verification_anchor_fingerprint: string;
-        };
         /** RemoteStateReadinessOut */
         RemoteStateReadinessOut: {
             /** Adapter Contract Version */
@@ -7992,89 +7745,6 @@ export interface components {
          */
         WorkerEnrollmentStateName: "invited" | "worker_bound" | "offer_transported" | "result_transported" | "verified" | "healthy" | "refused" | "recovery_required";
         /**
-         * WorkerIdentityEvidenceKind
-         * @description Closed set of secret-free worker-identity evidence items (SECP-B2-4.3).
-         *
-         *     Each item is proof METADATA only — never a certificate, key, CSR, CA name, endpoint, token, or
-         *     secret. Approval requires every kind present + verified.
-         * @enum {string}
-         */
-        WorkerIdentityEvidenceKind: "deployment_binding_review" | "verification_anchor_review" | "rotation_revocation_review";
-        /** WorkerIdentityEvidenceOut */
-        WorkerIdentityEvidenceOut: {
-            /** Issuer */
-            issuer: string;
-            kind: components["schemas"]["WorkerIdentityEvidenceKind"];
-            /** Proof Id */
-            proof_id: string;
-            status: components["schemas"]["WorkerIdentityEvidenceStatus"];
-            /** Verified At */
-            verified_at: string | null;
-        };
-        /**
-         * WorkerIdentityEvidenceStatus
-         * @description Closed status of one worker-identity evidence item. Only ``verified`` counts for approval.
-         * @enum {string}
-         */
-        WorkerIdentityEvidenceStatus: "pending" | "verified" | "failed";
-        /**
-         * WorkerIdentityMechanism
-         * @description Closed set of worker-identity mechanisms (SECP-B2-4.3 / SECP-PR5F).
-         *
-         *     A label only — it stores/authorizes no certificate, key, CSR, CA, endpoint, or secret.
-         *     ``ed25519_signed_nonce`` truthfully names the B6/B8 worker-discovery proof-of-possession
-         *     mechanism. It is deliberately distinct from X.509 client-certificate mTLS.
-         * @enum {string}
-         */
-        WorkerIdentityMechanism: "mtls_workload_identity" | "ed25519_signed_nonce";
-        /** WorkerIdentityOut */
-        WorkerIdentityOut: {
-            /** Approved At */
-            approved_at: string | null;
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /** Deployment Binding */
-            deployment_binding: string;
-            /**
-             * Evidence
-             * @default []
-             */
-            evidence: components["schemas"]["WorkerIdentityEvidenceOut"][];
-            /** Evidence Fingerprint */
-            evidence_fingerprint: string;
-            /**
-             * Expiry
-             * Format: date-time
-             */
-            expiry: string;
-            /**
-             * Id
-             * Format: uuid
-             */
-            id: string;
-            /** Identity Label */
-            identity_label: string;
-            /** Identity Version */
-            identity_version: number;
-            mechanism: components["schemas"]["WorkerIdentityMechanism"];
-            /**
-             * Organization Id
-             * Format: uuid
-             */
-            organization_id: string;
-            /** Revision */
-            revision: number;
-            /** Revoked At */
-            revoked_at: string | null;
-            /** Status */
-            status: string;
-            /** Verification Anchor Fingerprint */
-            verification_anchor_fingerprint: string;
-        };
-        /**
          * WorkerNodeIdentityApprovalLinkRequest
          * @description Explicit, secret-free operator review that creates/approves/links one node identity.
          */
@@ -8185,9 +7855,6 @@ export interface components {
     headers: never;
     pathItems: never;
 }
-export type BeginRequest = components['schemas']['_BeginRequest'];
-export type BindingRequest = components['schemas']['_BindingRequest'];
-export type CompleteRequest = components['schemas']['_CompleteRequest'];
 export type AccessTargetOut = components['schemas']['AccessTargetOut'];
 export type ActivationDossierEvidenceKind = components['schemas']['ActivationDossierEvidenceKind'];
 export type ActivationDossierEvidenceStatus = components['schemas']['ActivationDossierEvidenceStatus'];
@@ -8325,8 +7992,6 @@ export type RecordDossierEvidenceIn = components['schemas']['RecordDossierEviden
 export type RecordedStageState = components['schemas']['RecordedStageState'];
 export type RecordPlanSecretEvidenceIn = components['schemas']['RecordPlanSecretEvidenceIn'];
 export type RecordResolverActivationEvidence = components['schemas']['RecordResolverActivationEvidence'];
-export type RecordWorkerIdentityEvidence = components['schemas']['RecordWorkerIdentityEvidence'];
-export type RegisterWorkerIdentity = components['schemas']['RegisterWorkerIdentity'];
 export type RemoteStateReadinessOut = components['schemas']['RemoteStateReadinessOut'];
 export type ReservationOut = components['schemas']['ReservationOut'];
 export type ResidueVerdict = components['schemas']['ResidueVerdict'];
@@ -8390,11 +8055,6 @@ export type VersionCreate = components['schemas']['VersionCreate'];
 export type VersionOut = components['schemas']['VersionOut'];
 export type VersionPublicationProvenanceOut = components['schemas']['VersionPublicationProvenanceOut'];
 export type WorkerEnrollmentStateName = components['schemas']['WorkerEnrollmentStateName'];
-export type WorkerIdentityEvidenceKind = components['schemas']['WorkerIdentityEvidenceKind'];
-export type WorkerIdentityEvidenceOut = components['schemas']['WorkerIdentityEvidenceOut'];
-export type WorkerIdentityEvidenceStatus = components['schemas']['WorkerIdentityEvidenceStatus'];
-export type WorkerIdentityMechanism = components['schemas']['WorkerIdentityMechanism'];
-export type WorkerIdentityOut = components['schemas']['WorkerIdentityOut'];
 export type WorkerNodeIdentityApprovalLinkRequest = components['schemas']['WorkerNodeIdentityApprovalLinkRequest'];
 export type WorkerNodeOut = components['schemas']['WorkerNodeOut'];
 export type WorkerNodeRegisterRequest = components['schemas']['WorkerNodeRegisterRequest'];
@@ -15254,187 +14914,6 @@ export interface operations {
             };
         };
     };
-    list_registrations_api_v1_worker_identity_registrations_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerIdentityOut"][];
-                };
-            };
-        };
-    };
-    register_api_v1_worker_identity_registrations_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RegisterWorkerIdentity"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerIdentityOut"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_registration_api_v1_worker_identity_registrations__registration_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                registration_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerIdentityOut"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    approve_api_v1_worker_identity_registrations__registration_id__approve_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                registration_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerIdentityOut"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    record_evidence_api_v1_worker_identity_registrations__registration_id__evidence_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                registration_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RecordWorkerIdentityEvidence"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerIdentityOut"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    revoke_api_v1_worker_identity_registrations__registration_id__revoke_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                registration_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerIdentityOut"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     health_health_get: {
         parameters: {
             query?: never;
@@ -15453,166 +14932,6 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
-                };
-            };
-        };
-    };
-    signer_readiness_internal_enrollment_signer_readiness_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    assert_admission_internal_worker_discovery_admission_assert_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["_BindingRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    begin_admission_internal_worker_discovery_admission_begin_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["_BeginRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    complete_admission_internal_worker_discovery_admission_complete_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["_CompleteRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    consume_admission_internal_worker_discovery_admission_consume_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["_BindingRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

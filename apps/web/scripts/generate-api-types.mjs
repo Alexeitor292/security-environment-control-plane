@@ -28,6 +28,32 @@ const REPO_ROOT = resolve(WEB_ROOT, "..", "..");
 const DOCUMENT = resolve(REPO_ROOT, "contracts", "openapi", "openapi.json");
 const OUTPUT = resolve(WEB_ROOT, "src", "api", "generated", "openapi.ts");
 
+/**
+ * Route prefixes the BROWSER CLIENT does not carry, and why.
+ *
+ * The committed document is the whole API and stays that way — the internal surfaces really are
+ * part of the contract, and the workers and installers that call them need it. What ships into a
+ * browser bundle is a narrower thing, and the line drawn here is one the repository already draws
+ * and already enforces:
+ *
+ *   `/internal/` — `secp_api.main` registers the worker-admission and enrollment-signer readiness
+ *   routers explicitly NOT under `/api/v1`. They are spoken over internal CA-pinned transports by
+ *   a worker or a root installer. A browser has no business holding their request shapes.
+ *
+ *   `/api/v1/worker-identity` — the worker-identity REGISTRATION, approval, evidence and
+ *   revocation interface. `apps/api/tests/test_resolution_lease_boundary.py` and
+ *   `test_worker_identity_security.py` make this a hard boundary on frontend source: the browser
+ *   may DISPLAY a `worker_identity_registration_id` (their pattern excepts exactly that field) but
+ *   must carry no control interface for minting, approving or revoking a worker identity, and no
+ *   `verification_anchor` surface. Those guards scan every `.ts` under `apps/web/src`, so they
+ *   cover this generated file too — filtering here is what keeps them satisfied honestly, rather
+ *   than shipping the types and hoping nobody imports them.
+ *
+ * Schemas become unreachable when their only referents are removed, and unreachable schemas are
+ * pruned: a type is not excluded from the bundle by having no route left to reach it.
+ */
+const BROWSER_EXCLUDED_PREFIXES = ["/internal/", "/api/v1/worker-identity"];
+
 const BANNER = `/**
  * GENERATED FILE — DO NOT EDIT.
  *
@@ -40,14 +66,66 @@ const BANNER = `/**
  * These are TRANSPORT types — the shapes that cross the wire. Presentation semantics (how an
  * operator should read a value) live in hand-written view models beside them, and the members
  * this document deliberately leaves opaque are narrowed in src/api/recorded.ts.
+ *
+ * This is the BROWSER surface, not the whole API. The internal worker/installer routes and the
+ * worker-identity registration interface are excluded by design and their schemas are pruned —
+ * see BROWSER_EXCLUDED_PREFIXES in scripts/generate-api-types.mjs for the boundary and the tests
+ * that enforce it. Read contracts/openapi/openapi.json for the complete contract.
  */
 
 /* eslint-disable */
 `;
 
+/** Every `$ref` target reachable from a value, transitively. */
+function reachableSchemas(root, schemas) {
+  const seen = new Set();
+  const queue = [root];
+  while (queue.length > 0) {
+    const node = queue.pop();
+    if (node === null || typeof node !== "object") continue;
+    if (Array.isArray(node)) {
+      queue.push(...node);
+      continue;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "$ref" && typeof value === "string") {
+        const name = value.replace("#/components/schemas/", "");
+        if (!seen.has(name) && name in schemas) {
+          seen.add(name);
+          queue.push(schemas[name]);
+        }
+        continue;
+      }
+      queue.push(value);
+    }
+  }
+  return seen;
+}
+
+/** The browser's slice of the contract: the permitted paths, and only the schemas they reach. */
+export function browserDocument(document) {
+  const paths = Object.fromEntries(
+    Object.entries(document.paths).filter(
+      ([path]) => !BROWSER_EXCLUDED_PREFIXES.some((prefix) => path.startsWith(prefix)),
+    ),
+  );
+  const schemas = document.components?.schemas ?? {};
+  const reachable = reachableSchemas(paths, schemas);
+  return {
+    ...document,
+    paths,
+    components: {
+      ...document.components,
+      schemas: Object.fromEntries(
+        Object.entries(schemas).filter(([name]) => reachable.has(name)),
+      ),
+    },
+  };
+}
+
 async function generate() {
   const raw = await readFile(DOCUMENT, "utf8");
-  const document = JSON.parse(raw);
+  const document = browserDocument(JSON.parse(raw));
   const ast = await openapiTS(document, {
     // Root-level aliases: \`ProxmoxPlanOut\` rather than \`components["schemas"]["ProxmoxPlanOut"]\`.
     // A call site that reads well is a call site that gets used instead of re-typed by hand.
