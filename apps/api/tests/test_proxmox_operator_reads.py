@@ -97,9 +97,7 @@ def test_no_enrolled_worker_is_an_answer_not_a_404(client, session, principal):
     assert body["worker_installation_id"] is None
 
 
-def test_a_healthy_worker_is_eligible_and_publishes_its_public_identity(
-    client, session, principal
-):
+def test_a_healthy_worker_is_eligible_and_publishes_its_public_identity(client, session, principal):
     instance = proxmox_range(session, principal)
     enroll_worker(session, principal)
     session.commit()

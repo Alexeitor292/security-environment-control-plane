@@ -227,9 +227,7 @@ def fixtures(pg_engine: Engine) -> dict:
         session.add(other_user)
         session.flush()
         session.add(
-            UserRoleAssignment(
-                organization_id=other_org.id, user_id=other_user.id, role_id=role.id
-            )
+            UserRoleAssignment(organization_id=other_org.id, user_id=other_user.id, role_id=role.id)
         )
         from secp_api.auth import Principal
         from secp_api.enums import Permission
@@ -463,9 +461,7 @@ def test_a_command_cannot_reach_another_organizations_range(live_base_url: str, 
 def test_a_read_cannot_reach_another_organizations_range(live_base_url: str, fixtures: dict):
     with _client(live_base_url) as client:
         for suffix in ("worker", "workload", "evidence", "commands"):
-            response = client.get(
-                f"/api/v1/ranges/{fixtures['foreign_range_id']}/proxmox/{suffix}"
-            )
+            response = client.get(f"/api/v1/ranges/{fixtures['foreign_range_id']}/proxmox/{suffix}")
             assert response.status_code == 403, (suffix, response.status_code)
 
 
