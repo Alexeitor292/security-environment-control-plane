@@ -182,23 +182,54 @@ def test_pruning_removed_the_schemas_only_the_excluded_routes_reached(
 
 # --- the surface is actually published ---------------------------------------------------------
 
-PROXMOX_PATHS = {
+#: Read surfaces. Nothing here records a decision.
+PROXMOX_READ_PATHS = {
     "/api/v1/ranges/{range_id}/proxmox",
     "/api/v1/ranges/{range_id}/proxmox/allocations",
     "/api/v1/ranges/{range_id}/proxmox/apply-authorization",
+    "/api/v1/ranges/{range_id}/proxmox/commands",
     "/api/v1/ranges/{range_id}/proxmox/destroy-authorization",
     "/api/v1/ranges/{range_id}/proxmox/destroy-plan",
-    "/api/v1/ranges/{range_id}/proxmox/destroy-plan-approval",
+    "/api/v1/ranges/{range_id}/proxmox/evidence",
     "/api/v1/ranges/{range_id}/proxmox/observation",
     "/api/v1/ranges/{range_id}/proxmox/ownership",
     "/api/v1/ranges/{range_id}/proxmox/plan",
-    "/api/v1/ranges/{range_id}/proxmox/plan-approval",
     "/api/v1/ranges/{range_id}/proxmox/readiness",
+    "/api/v1/ranges/{range_id}/proxmox/reconciliation",
     "/api/v1/ranges/{range_id}/proxmox/reset-dispositions",
+    "/api/v1/ranges/{range_id}/proxmox/reset-plan",
     "/api/v1/ranges/{range_id}/proxmox/residue",
     "/api/v1/ranges/{range_id}/proxmox/topology",
     "/api/v1/ranges/{range_id}/proxmox/verification",
+    "/api/v1/ranges/{range_id}/proxmox/workload",
+    "/api/v1/ranges/{range_id}/proxmox/worker",
 }
+
+#: The SIX authorization acts: approve and authorize, for each of apply, reset and destroy.
+#: Reset joined them in SECP-P7-A because a reset destroys every guest in the range and rebuilds
+#: it, so it cannot ride on the apply authorization.
+PROXMOX_AUTHORIZATION_PATHS = {
+    "/api/v1/ranges/{range_id}/proxmox/plan-approval",
+    "/api/v1/ranges/{range_id}/proxmox/apply-authorization",
+    "/api/v1/ranges/{range_id}/proxmox/reset-plan-approval",
+    "/api/v1/ranges/{range_id}/proxmox/reset-authorization",
+    "/api/v1/ranges/{range_id}/proxmox/destroy-plan-approval",
+    "/api/v1/ranges/{range_id}/proxmox/destroy-authorization",
+}
+
+#: The operator COMMAND surface. Each persists intent; three of them enqueue.
+PROXMOX_COMMAND_PATHS = {
+    "/api/v1/ranges/{range_id}/proxmox/topology-compilation",
+    "/api/v1/ranges/{range_id}/proxmox/plan-generation",
+    "/api/v1/ranges/{range_id}/proxmox/plan-review-submission",
+    "/api/v1/ranges/{range_id}/proxmox/execution-request",
+    "/api/v1/ranges/{range_id}/proxmox/reset-request",
+    "/api/v1/ranges/{range_id}/proxmox/reconciliation-request",
+    "/api/v1/ranges/{range_id}/proxmox/destroy-plan-generation",
+    "/api/v1/ranges/{range_id}/proxmox/destroy-execution-request",
+}
+
+PROXMOX_PATHS = PROXMOX_READ_PATHS | PROXMOX_AUTHORIZATION_PATHS | PROXMOX_COMMAND_PATHS
 
 
 def test_every_proxmox_route_is_published(document: dict[str, Any]) -> None:
@@ -206,19 +237,69 @@ def test_every_proxmox_route_is_published(document: dict[str, Any]) -> None:
     assert published == PROXMOX_PATHS
 
 
-def test_the_four_mutating_routes_are_posts_and_nothing_else(document: dict[str, Any]) -> None:
-    """Approval and authorization are POSTs. A GET that records a decision would make a decision
-    reachable from a link, a prefetch, or a browser history entry."""
-    mutating = {
+#: Three paths answer BOTH: a GET reporting whether the act is authorized, and a POST recording
+#: the authorization. That is deliberate — the state and the decision are the same resource — and
+#: it is why the check below tests for the presence of a POST rather than the absence of a GET.
+_AUTHORIZATION_PATHS_THAT_ALSO_READ = {
+    "/api/v1/ranges/{range_id}/proxmox/apply-authorization",
+    "/api/v1/ranges/{range_id}/proxmox/reset-authorization",
+    "/api/v1/ranges/{range_id}/proxmox/destroy-authorization",
+}
+
+
+def test_every_recording_route_is_a_post_and_pure_reads_answer_only_get(
+    document: dict[str, Any],
+) -> None:
+    """A decision must never be recorded by a GET: that makes it reachable from a link, a
+    prefetch, or a browser history entry. Enforced in both directions — everything that records
+    has a POST, and everything that only reports state accepts nothing but GET."""
+    for path in PROXMOX_AUTHORIZATION_PATHS | PROXMOX_COMMAND_PATHS:
+        assert "post" in document["paths"][path], f"{path} records a decision but has no POST"
+    for path in PROXMOX_COMMAND_PATHS:
+        assert "get" not in document["paths"][path], (
+            f"{path} records a command and also answers GET — reachable from a link"
+        )
+    for path in PROXMOX_READ_PATHS - _AUTHORIZATION_PATHS_THAT_ALSO_READ:
+        assert set(document["paths"][path]) == {"get"}, f"{path} publishes a non-GET method"
+
+
+#: The three families, named as PAIRS rather than matched by substring — "plan-approval" and
+#: "apply-authorization" share no word, so a substring rule would silently under-cover the apply
+#: family while looking like it checked something.
+_AUTHORIZATION_FAMILIES = {
+    "apply": (
         "/api/v1/ranges/{range_id}/proxmox/plan-approval",
         "/api/v1/ranges/{range_id}/proxmox/apply-authorization",
+    ),
+    "reset": (
+        "/api/v1/ranges/{range_id}/proxmox/reset-plan-approval",
+        "/api/v1/ranges/{range_id}/proxmox/reset-authorization",
+    ),
+    "destroy": (
         "/api/v1/ranges/{range_id}/proxmox/destroy-plan-approval",
         "/api/v1/ranges/{range_id}/proxmox/destroy-authorization",
-    }
-    for path in mutating:
-        assert "post" in document["paths"][path]
-    for path in PROXMOX_PATHS - mutating:
-        assert set(document["paths"][path]) == {"get"}, f"{path} publishes a non-GET method"
+    ),
+}
+
+
+def test_each_authorization_family_is_two_separate_acts(document: dict[str, Any]) -> None:
+    """Approve and authorize, for apply, reset and destroy — six paths, none shared.
+
+    A single generic approval path would let one recorded decision stand for any of the three,
+    which is the collapse the separate hash domains exist to prevent. Approving and authorizing are
+    also kept apart WITHIN a family: "this is the right document" and "do it now" are two
+    decisions, and the second is the one that touches real hardware.
+    """
+    declared = {path for pair in _AUTHORIZATION_FAMILIES.values() for path in pair}
+    assert declared == PROXMOX_AUTHORIZATION_PATHS, (
+        "every authorization path must belong to exactly one family; unassigned: "
+        f"{sorted(PROXMOX_AUTHORIZATION_PATHS - declared)}"
+    )
+    assert len(declared) == 6, "three families of two, with no path serving two families"
+    for family, (approve, authorize) in _AUTHORIZATION_FAMILIES.items():
+        assert approve != authorize, f"{family} collapsed its two acts into one path"
+        for path in (approve, authorize):
+            assert "post" in document["paths"][path], f"{family}: {path} records nothing"
 
 
 # --- three addresses stay three ----------------------------------------------------------------
@@ -261,12 +342,40 @@ def test_operation_kind_is_required_and_enum_valued(document: dict[str, Any]) ->
     approval = schema(document, "ApprovalOut")
     assert "operation_kind" in approval["required"]
     assert approval["properties"]["operation_kind"]["$ref"].endswith("/ApprovalKind")
+    # SIX, not four. SECP-P7-A gave reset its own approval and authorization: a reset destroys
+    # every guest in the range and rebuilds it, so an apply approval must not stand for it.
     assert schema(document, "ApprovalKind")["enum"] == [
         "plan_approval",
         "apply_authorization",
+        "reset_plan_approval",
+        "reset_authorization",
         "destroy_plan_approval",
         "destroy_authorization",
     ]
+
+
+def test_no_authorization_request_body_validates_as_another(document: dict[str, Any]) -> None:
+    """THREE families now, checked pairwise rather than as one pair.
+
+    Each requires exactly one field, the field names are disjoint, and every model forbids extras —
+    so no body posted to the wrong endpoint is accepted, in any of the six directions.
+    """
+    bodies = {
+        "apply": (schema(document, "ProxmoxApplyAuthorizationRequest"), "plan_hash"),
+        "reset": (schema(document, "ProxmoxResetAuthorizationRequest"), "reset_hash"),
+        "destroy": (schema(document, "ProxmoxDestroyAuthorizationRequest"), "destroy_hash"),
+    }
+    for family, (body, field) in bodies.items():
+        assert body["required"] == [field], f"{family} must require exactly {field}"
+        assert body.get("additionalProperties") is False, (
+            f"{family} does not publish extra='forbid'"
+        )
+    for left, (left_body, _) in bodies.items():
+        for right, (right_body, _) in bodies.items():
+            if left == right:
+                continue
+            shared = sorted(set(left_body["properties"]) & set(right_body["properties"]))
+            assert shared == [], f"{left} and {right} share {shared}"
 
 
 def test_the_apply_and_destroy_request_bodies_do_not_validate_as_each_other(
@@ -416,6 +525,11 @@ OPAQUE_MEMBERS: dict[tuple[str, str], str] = {
     ("ProxmoxReadinessOut", "scoring_endpoints"): "scenario-shaped scoring endpoints",
     ("ProxmoxResetDispositionsOut", "dispositions"): (
         "recorded verbatim; narrowed by asResetActions"
+    ),
+    ("ProxmoxReconciliationOut", "findings"): (
+        "recorded verbatim by the worker, whose reconcile decision vocabulary is its own; kept "
+        "open for the same reason the verification checks are, and null when nothing was recorded "
+        "rather than an empty list"
     ),
     ("ProxmoxResidueOut", "resources"): "recorded verbatim; narrowed by asAbsenceFindings",
     ("ProxmoxTopologyOut", "topology"): "the canonical document the plan hash is taken over",

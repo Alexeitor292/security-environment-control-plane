@@ -36,6 +36,7 @@ from secp_api.schemas_proxmox import (
     ProxmoxReadinessOut,
     ProxmoxResetAuthorizationOut,
     ProxmoxResetDispositionsOut,
+    ProxmoxResetScopeEntryOut,
     ProxmoxResidueOut,
     ProxmoxTopologyOut,
     ProxmoxVerificationOut,
@@ -348,7 +349,11 @@ def reset_authorization_out(
         approval=approval_out(approval),
         authorization=approval_out(authorization),
         blocked_reason=blocked,
-        reset_scope=None if isinstance(compiled, BlockedPlan) else list(compiled.reset_scope),
+        reset_scope=(
+            None
+            if isinstance(compiled, BlockedPlan)
+            else [ProxmoxResetScopeEntryOut(**entry) for entry in compiled.reset_scope]
+        ),
         reset_scope_size=None if isinstance(compiled, BlockedPlan) else len(compiled.reset_scope),
     )
 

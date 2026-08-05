@@ -357,6 +357,22 @@ class ProxmoxDestroyPlanOut(BaseModel):
     approved_hash_is_current: bool | None = None
 
 
+class ProxmoxResetScopeEntryOut(BaseModel):
+    """One guest a reset would DESTROY and rebuild.
+
+    ``template_ref`` is carried because a reset rebuilds FROM it: if the reviewed base image
+    changed, the guest that comes back is not the guest that was approved, and an operator
+    approving the reset should be able to see which image each guest returns from.
+    """
+
+    kind: str
+    ref: str | None = None
+    name: str | None = None
+    vmid: int | None = None
+    node: str | None = None
+    template_ref: str | None = None
+
+
 class ProxmoxResetAuthorizationOut(BaseModel):
     """Whether a reset is authorized. Never satisfied by an apply or a destroy authorization.
 
@@ -373,7 +389,11 @@ class ProxmoxResetAuthorizationOut(BaseModel):
     blocked_reason: str | None = None
     #: The guests a reset would destroy and rebuild. ``None`` when the plan did not compile — an
     #: empty list would say "a reset would destroy nothing", which makes a reset look inert.
-    reset_scope: list[dict[str, Any]] | None = None
+    #:
+    #: TYPED, not an open object. This is the list an operator reads before approving a deletion;
+    #: handing it to a client as ``unknown`` would mean the one surface whose whole job is to show
+    #: what will be destroyed cannot be rendered without the client inventing a shape for it.
+    reset_scope: list[ProxmoxResetScopeEntryOut] | None = None
     #: ``None``, never ``0``, when the scope was not computed.
     reset_scope_size: int | None = None
     #: What a reset leaves alone, named rather than implied. Every one of these is ``preserved`` by

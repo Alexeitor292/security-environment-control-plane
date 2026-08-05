@@ -41,6 +41,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from secp_api.schemas_proxmox import BlockedReasonOut
 from secp_api.services.proxmox_lifecycle import PlanState, RecordedStageState
 
 # --- the worker that would execute ---------------------------------------------
@@ -148,7 +149,9 @@ class ProxmoxWorkloadOut(BaseModel):
     challenge_keys: list[str] | None = None
     #: Whether a verification has been recorded at all. ``undetermined`` is not a pass.
     verification: RecordedStageState
-    blocked_reasons: list[dict[str, Any]] = Field(default_factory=list)
+    #: Typed, not an open object: these are the compiler's own named prerequisites, and a client
+    #: that receives them as `unknown` cannot branch on ``reason_id``.
+    blocked_reasons: list[BlockedReasonOut] = Field(default_factory=list)
 
 
 # --- the reset plan, as distinct from what a reset did --------------------------
@@ -184,7 +187,7 @@ class ProxmoxResetPlanOut(BaseModel):
     guests: list[ProxmoxResetGuestOut] | None = None
     #: Whether a reset has ever been observed on this range. ``undetermined`` means none has.
     last_observed: RecordedStageState
-    blocked_reasons: list[dict[str, Any]] = Field(default_factory=list)
+    blocked_reasons: list[BlockedReasonOut] = Field(default_factory=list)
 
 
 # --- reconciliation -------------------------------------------------------------
