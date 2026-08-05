@@ -9,6 +9,7 @@ aggregate gate depending on every backend job, and stable external check names.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -807,15 +808,43 @@ def test_the_temporalio_gated_modules_are_in_the_authoritative_corpus(suite):
 
 
 def test_the_worker_extra_is_not_quietly_added_everywhere(wf):
-    """The narrowest placement is deliberate: only the job that EXECUTES the corpus needs it.
+    """The placement is deliberate: the job that EXECUTES the corpus, and the job that CERTIFIES it.
 
     Recorded as a test so the choice is visible if someone later widens it -- widening is not
-    forbidden, but it should be a decision rather than a drift."""
+    forbidden, but it should be a decision rather than a drift.
+
+    This set was widened from `{backend-pytest}` deliberately. `backend-test-inventory` ran on `dev`
+    alone while claiming an environment identical to the shards, and
+    `tests/test_queue_contract_integration.py` gates on `temporalio` at MODULE level, so its nodes
+    were dropped at COLLECTION time from both sides of that job's canonical-vs-sharded comparison.
+    Both sides agreed and the proof passed, over a corpus smaller than the one the shards execute.
+    An install-site count cannot see that, which is why
+    `test_the_inventory_job_installs_the_same_extras_as_the_shards` states the coupling directly."""
     jobs = _jobs(wf)
     with_extra = {name for name, job in jobs.items() if "--extra worker" in _run_text(job)}
-    assert with_extra == {"backend-pytest"}, (
+    assert with_extra == {"backend-pytest", "backend-test-inventory"}, (
         f"the worker extra is installed in {sorted(with_extra)}; if that is intended, update this "
         "test deliberately"
+    )
+
+
+def test_the_inventory_job_installs_the_same_extras_as_the_shards(wf):
+    """The fail-closed proof must certify the corpus the shards actually run.
+
+    Keyed on equality of the extras the two jobs request, NOT on `worker` by name: a future extra
+    that carries another module-level `importorskip` would reopen the same hole, and a
+    `worker`-specific assertion would still pass while it did. The failure this closes was silent in
+    exactly that way -- both sides of the comparison shrank together, so the proof stayed green."""
+
+    def extras(job_name: str) -> set[str]:
+        return set(re.findall(r"--extra\s+([A-Za-z0-9_-]+)", _run_text(_jobs(wf)[job_name])))
+
+    inventory, shards = extras("backend-test-inventory"), extras("backend-pytest")
+    assert inventory, "backend-test-inventory requests no extras at all"
+    assert inventory == shards, (
+        f"backend-test-inventory installs {sorted(inventory)} but backend-pytest installs "
+        f"{sorted(shards)}; the inventory proof would certify a corpus that differs from the one "
+        "the shards execute, and a module-level importorskip makes that gap invisible"
     )
 
 

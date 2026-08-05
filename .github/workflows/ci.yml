@@ -84,7 +84,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SECP_APP_ENV: test
-      # Identical environment to the shard jobs so canonical vs. sharded collection match exactly.
       SECP_TEST_POSTGRES_URL: postgresql+psycopg://secp:secp@localhost:5432/secptest
     services:
       postgres:
@@ -109,9 +108,22 @@ jobs:
             uv.lock
             pyproject.toml
       - name: Create venv and install project
+        # The extras here MUST match `backend-pytest` exactly, because this job certifies the corpus
+        # that `backend-pytest` executes and a proof over a smaller corpus certifies nothing about
+        # the difference. This job previously installed `dev` alone while the shards installed
+        # `dev,worker`, and the gap was not theoretical: `tests/test_queue_contract_integration.py`
+        # calls `pytest.importorskip("temporalio")` at MODULE level, which skips at COLLECTION time,
+        # so its nodes were absent from this job's canonical enumeration AND from its sharded
+        # enumeration. The two sides agreed with each other and the proof passed green — over a
+        # corpus that omitted exactly the nodes the shards went on to run unwitnessed.
+        #
+        # A module-level `importorskip` is what makes this an environment-coupling problem rather
+        # than a skip-accounting one: an in-body `importorskip` still yields a collected node, so it
+        # cannot move the corpus, but a module-level one deletes nodes from collection outright.
+        # Any future extra added to `backend-pytest` must be mirrored here for the same reason.
         run: |
           uv venv --python 3.11
-          uv sync --frozen --extra dev --python 3.11
+          uv sync --frozen --extra dev --extra worker --python 3.11
       - name: Sharding planner/verifier unit tests
         run: uv run pytest tests/test_pytest_shards.py tests/test_ci_workflow.py -q
       - name: Prove sharded corpus == canonical corpus (node-level)
@@ -151,17 +163,22 @@ jobs:
             uv.lock
             pyproject.toml
       - name: Create venv and install project
-        # `worker` is installed HERE and only here. `temporalio` lives solely in that extra, and
-        # every install site in this workflow requested only the `dev` extra, so seven tests across
-        # test_temporal_sandbox_validation.py (1), test_worker_fail_closed.py (2) and
-        # test_worker_readiness_timing.py (4) hit `pytest.importorskip("temporalio")` and SKIPPED in
-        # CI while passing on any developer machine — including a fail-closed worker guard and the
-        # regression for a startup-fatal import bug. This is the only job that EXECUTES the shared
-        # corpus, so it is the narrowest placement that makes all seven actually run; every other
-        # install site is deliberately left on `dev` alone.
-        # It does not move the corpus: every `importorskip` is inside a test body, so all seven
-        # nodes were already COLLECTED either way and `backend-test-inventory`'s canonical-vs-
-        # sharded proof is unaffected.
+        # `temporalio` lives solely in the `worker` extra, and every install site in this workflow
+        # once requested only `dev`, so seven tests across test_temporal_sandbox_validation.py (1),
+        # test_worker_fail_closed.py (2) and test_worker_readiness_timing.py (4) hit
+        # `pytest.importorskip("temporalio")` and SKIPPED in CI while passing on any developer
+        # machine — including a fail-closed worker guard and the regression for a startup-fatal
+        # import bug. This is the only job that EXECUTES the shared corpus, so the extra is required
+        # here to make all seven actually run.
+        #
+        # It is also installed in `backend-test-inventory`, and that is NOT redundancy. The earlier
+        # claim here — "it does not move the corpus: every `importorskip` is inside a test body, so
+        # all seven nodes were already COLLECTED either way" — was true of those seven and false as
+        # a generalization: `tests/test_queue_contract_integration.py` gates at MODULE level, which
+        # skips at COLLECTION time and removes its nodes entirely. With the inventory job on `dev`
+        # alone, those nodes were missing from both sides of its canonical-vs-sharded comparison, so
+        # the proof passed while certifying a corpus smaller than the one these shards run.
+        # The two jobs' extras are therefore coupled: anything added here must be added there.
         run: |
           uv venv --python 3.11
           uv sync --frozen --extra dev --extra worker --python 3.11
