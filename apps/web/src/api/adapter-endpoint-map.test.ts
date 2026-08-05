@@ -101,19 +101,23 @@ describe("absent means absent", () => {
     // The clause that keeps the guard above honest: a predicate matching nothing would pass over
     // an empty set forever.
     //
-    // Checked against SEGMENTS rather than by composing a route path. `apps/api/tests/
-    // test_readonly_preflight_security.py` forbids frontend source from carrying any such route
-    // literal at all, and it is right to — a lexical guard cannot tell "references a route" from
-    // "asserts no such route exists", and the repair for a guard that catches you is never to
-    // weaken it. Nothing is lost here: the risk this clause addresses is a member set that is
-    // empty or populated with the wrong names, which is precisely what it asserts against.
+    // Checked against SEGMENTS, and NOT by composing a route path — not even one assembled at
+    // runtime to slip past a string match. `apps/api/tests/test_readonly_preflight_security.py`
+    // forbids frontend source from carrying such a route literal at all, and it is right for a
+    // better reason than string matching: a route this repo does not have, written down in
+    // frontend source, is a design proposal, and the next person implementing against this file
+    // would build it. Composing the same string from parts would defeat the guard while leaving
+    // the proposal exactly where it was.
+    //
+    // Nothing is lost. The risk this clause addresses is a member set that is empty or populated
+    // with the wrong names, and that is what it asserts against.
     expect(CREDENTIAL_INVENTORY_SEGMENTS.size).toBeGreaterThan(2);
     expect(CREDENTIAL_INVENTORY_SEGMENTS.has("vault")).toBe(true);
     expect(CREDENTIAL_INVENTORY_SEGMENTS.has("ranges")).toBe(false);
     expect(CREDENTIAL_INVENTORY_SEGMENTS.has("targets")).toBe(false);
     // And the splitting works: an ordinary route is not matched by accident.
     expect(hasCredentialInventorySegment("/api/v1/ranges")).toBe(false);
-    expect(hasCredentialInventorySegment([".", "api", "vault"].join("/"))).toBe(true);
+    expect(hasCredentialInventorySegment("/api/v1/targets/{target_id}")).toBe(false);
   });
 });
 
