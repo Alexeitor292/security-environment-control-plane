@@ -736,6 +736,23 @@ def build_installer_deps(enroller: WorkerEnroller | None = None) -> InstallerDep
     )
 
 
+def build_supported_installer_deps(enroller: WorkerEnroller | None = None) -> InstallerDeps:
+    """Compose the installer over the REAL host adapters, on a host that supports them.
+
+    This is the composition :func:`build_installer_deps` deliberately would not make while the host
+    seams had no reviewed adapter. It is a SEPARATE function rather than a change to that one so the
+    sealed default keeps its meaning exactly: anything that composes ``build_installer_deps`` still
+    gets sealed host seams and still refuses ``installer_service_manager_sealed``.
+
+    On an unsupported host it refuses ``installer_host_platform_unsupported`` — the platform, named
+    directly — instead of falling back to the sealed deps and reporting a seal that is not the real
+    reason. Both are refusals; only one is diagnostic.
+    """
+    from secp_management.worker_service_adapters import build_posix_installer_deps
+
+    return build_posix_installer_deps(enroller)
+
+
 __all__ = [
     "INSTALLATION_STEPS",
     "WORKER_PLANES",
@@ -751,6 +768,7 @@ __all__ = [
     "WorkerEnroller",
     "WorkerInstallerError",
     "build_installer_deps",
+    "build_supported_installer_deps",
     "install",
     "plan_installation",
     "validate_installation_request",

@@ -361,13 +361,20 @@ def _dispatch_worker_install(args: argparse.Namespace, enr: EnrollmentCliDeps) -
     """Build the installation request from parsed arguments and run the installer.
 
     The request is built here and validated inside the installer — never partially validated in the
-    parser, so one module owns every refusal. The installer's host seams stay SEALED in this
-    composition (see ``build_installer_deps``), so the write path refuses honestly on a host with no
-    reviewed service adapter rather than reporting an install that did not happen.
+    parser, so one module owns every refusal.
+
+    The host seams are composed from the REVIEWED POSIX adapters
+    (:mod:`~secp_management.worker_service_adapters`), so ``--write --confirm`` performs a real
+    installation on a supported host. On an unsupported host it refuses
+    ``installer_host_platform_unsupported`` — named directly — rather than reporting an install that
+    did not happen. A dry run never reaches this composition at all: ``worker_install`` returns the
+    plan before touching ``deps``, so ``secpctl worker install`` still plans on any platform.
     """
     from secp_management.worker_installer import (
         InstallationRequest,
+        _exit_for,
         build_installer_deps,
+        build_supported_installer_deps,
         worker_install,
     )
 
@@ -382,12 +389,31 @@ def _dispatch_worker_install(args: argparse.Namespace, enr: EnrollmentCliDeps) -
         service_name=args.service_name,
         target_association=args.target_association,
     )
+    gate = _gate(args)
+    # A DRY RUN must plan on ANY platform, so it is given the sealed deps — ``worker_install``
+    # returns the plan before it touches them. Composing the real host adapters here instead would
+    # make ``secpctl worker install`` (no ``--write``) raise on an unsupported host, turning a pure,
+    # host-free planning command into a platform-dependent one.
+    try:
+        deps = (
+            build_supported_installer_deps(enr.worker_enroller)
+            if getattr(gate, "is_write", False)
+            else build_installer_deps(enr.worker_enroller)
+        )
+    except ManagementError as exc:
+        # a composition refusal (unsupported platform, missing root-controlled production inputs)
+        # is mapped through the installer's OWN exit table, so an operator scripting secpctl sees
+        # one consistent set of categories whether the refusal came from composition or from a step
+        return _exit_for(exc.reason_code), {
+            "command": "worker install",
+            "reason_code": exc.reason_code,
+        }
     return worker_install(
         request,
-        build_installer_deps(enr.worker_enroller),
+        deps,
         ordinary_task_queue=args.ordinary_queue,
         operator_task_queue=args.operator_queue,
-        gate=_gate(args),
+        gate=gate,
     )
 
 
