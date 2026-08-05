@@ -4,20 +4,31 @@
 // deploying, it is ready to use, a competition is active on it, it is resetting, it needs recovery,
 // it failed, it is being destroyed, or it is destroyed.
 //
-// The control-plane API does NOT emit these nine values today. It emits `LifecycleState`
-// (api/types.ts) — eleven values with a different shape: FIVE distinct pre-deployment states that
-// the product calls one thing, ONE `running` state that cannot distinguish a deployed range from a
-// range with a competition running on it, and NO `recovery_required` at all.
+// TWO backends produce these phases, and `rangeLifecycle` is the single place both are read.
 //
-// `rangePhase` is the single place that projection happens. Every other module in the range UI
-// reads a phase and never a raw `LifecycleState`, so when the range backend emits phases natively
-// this adapter collapses toward identity and no page changes.
+// 1. The RANGE API (`RangeState` in the frozen range contract) emits these exact nine values. For
+//    it the projection is IDENTITY — the value passes through untouched.
 //
-// The projection is deliberately lossy in ONE direction only: it never reports a phase the recorded
-// state cannot support. In particular `running` projects to `ready`, NOT to `active` — "a
-// competition is running on this range" is a fact today's backend does not record, and inventing it
-// would put a claim on screen that nothing stands behind. `recorded` is carried alongside every
-// phase so the UI can always show the precise server-recorded state next to the product phase.
+// 2. The legacy EXERCISE API emits `LifecycleState` (api/types.ts): eleven values with a different
+//    shape — five distinct pre-deployment states the product calls one thing, and no
+//    `recovery_required` at all. Those are projected by the table below.
+//
+// Everything else in the range UI reads a phase and never a raw state, so a page does not know or
+// care which backend it came from.
+//
+// The projection never reports a phase the recorded state cannot support. Two consequences worth
+// naming, because both were got wrong first time:
+//
+//  - `running` projects to `active`, NOT to `ready` (lead ruling, 2026-08-04). In the range
+//    contract `ready` specifically means "deployed AND OBSERVED REACHABLE". The exercise surface
+//    observes nothing, so it cannot produce `ready`; claiming it would assert a probe that never
+//    ran.
+//  - `recovery_required` is NOT a flavour of `failed`. It means an operation could not be OBSERVED
+//    to completion — canonically, teardown could not prove the residue is gone. "It broke" and "we
+//    cannot prove what happened" are different facts and are rendered differently everywhere.
+//
+// `recorded` is carried alongside every phase so the UI can always show the precise server-recorded
+// state next to the product phase.
 
 import type { LifecycleState, RangePhase } from "../../api/types";
 import { RANGE_TONE } from "../../components/ui";
@@ -41,7 +52,11 @@ export const RANGE_PHASE_LABEL: Record<RangePhase, string> = {
   draft: "Draft",
   deploying: "Deploying",
   ready: "Ready",
-  active: "Competition active",
+  // "Active", not "Competition active" (lead ruling). Two backends land here: the range API, where
+  // `active` does mean a competition is running, and the exercise API, whose `running` projects
+  // here with no competition anywhere in the system. A label naming a competition would be a false
+  // claim on every exercise-backed range.
+  active: "Active",
   resetting: "Resetting",
   recovery_required: "Recovery required",
   failed: "Failed",
@@ -57,8 +72,9 @@ export const RANGE_PHASE_TONE = RANGE_TONE;
 export const RANGE_PHASE_HELP: Record<RangePhase, string> = {
   draft: "Defined but not deployed. No infrastructure exists yet.",
   deploying: "Infrastructure is being created. Targets are not reachable yet.",
-  ready: "Deployed and reachable. No competition is running.",
-  active: "A competition is running against this range.",
+  ready: "Deployed and observed reachable. No competition is running.",
+  // Deliberately does not assert a competition — see the label comment above.
+  active: "Deployed and in use. A competition, if one exists, runs in this phase.",
   resetting: "Targets are being returned to their initial state.",
   recovery_required: "Automatic progress stopped. An operator has to intervene.",
   failed: "The last operation failed. Inspect the timeline before retrying.",
@@ -83,9 +99,12 @@ const PHASE_BY_RECORDED_STATE: Record<LifecycleState, RangePhase> = {
   approved: "draft",
 
   deploying: "deploying",
-  // NOT "active" — see the module header. The backend records that the range is up, not that a
-  // competition is running on it.
-  running: "ready",
+  // `running` IS `active` (lead ruling, 2026-08-04), and the range contract agrees: `RangeState`
+  // has BOTH `ready` and `active` as distinct values, where `ready` means "deployed AND observed
+  // reachable, competition not started". The legacy exercise surface never observes reachability,
+  // so it cannot produce `ready` — it can only say the workflow reached its running state. Mapping
+  // `running` to `ready` would therefore have claimed an observation nothing performed.
+  running: "active",
   resetting: "resetting",
   destroying: "destroying",
   destroyed: "destroyed",
@@ -101,15 +120,30 @@ export interface RangeLifecycle {
   known: boolean;
 }
 
+/** Own-property membership test for the nine product phases. */
+function isRangePhase(value: string): value is RangePhase {
+  return (RANGE_PHASE_ORDER as readonly string[]).includes(value);
+}
+
 /**
  * Project a server-recorded lifecycle state onto a product phase.
  *
- * An unrecognized state does NOT guess. It reports `recovery_required` — the phase whose meaning is
- * "automatic progress stopped, a human has to look" — because that is exactly the situation, and
- * because every other phase would assert something specific about infrastructure that this build
- * cannot know. `known:false` lets the UI say so plainly rather than dressing it up.
+ * A value that is ALREADY one of the nine phases passes straight through — that is the range API's
+ * `RangeState`, and re-mapping it would be a chance to corrupt it. The legacy exercise states go
+ * through the table. The native check runs FIRST, so once the range backend lands, `ready` and
+ * `recovery_required` are honoured verbatim rather than falling into the unknown branch.
+ *
+ * The two vocabularies overlap on six names (`draft`, `deploying`, `resetting`, `destroying`,
+ * `destroyed`, `failed`) and agree on all six, so the precedence is safe. They differ only on
+ * `running`, which exists solely in the legacy enum and is handled by the table.
+ *
+ * An unrecognized state does NOT guess. It reports `recovery_required` — "automatic progress
+ * stopped, a human has to look" — because that is exactly the situation, and because every other
+ * phase would assert something specific about infrastructure that this build cannot know.
+ * `known:false` lets the UI say so plainly rather than dressing it up.
  */
 export function rangeLifecycle(recorded: string): RangeLifecycle {
+  if (isRangePhase(recorded)) return { phase: recorded, recorded, known: true };
   if (Object.prototype.hasOwnProperty.call(PHASE_BY_RECORDED_STATE, recorded)) {
     const phase = PHASE_BY_RECORDED_STATE[recorded as LifecycleState];
     if (typeof phase === "string") return { phase, recorded, known: true };

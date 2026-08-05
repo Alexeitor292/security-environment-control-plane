@@ -7,12 +7,14 @@ import { CyberGridBackground } from "../../components/backgrounds";
 import {
   CyberCard,
   EmptyState,
+  SafetyNotice,
   Skeleton,
   StatusBadge,
   TabRail,
   shortId,
   type TabItem,
 } from "../../components/ui";
+import { RECOVERY_REQUIRED_NOTE } from "./range-view";
 import {
   RANGE_PHASE_HELP,
   RANGE_PHASE_LABEL,
@@ -148,6 +150,15 @@ export function RangeLayout() {
           </span>
         </div>
       </div>
+
+      {/* Rendered above the tabs, so it is present on EVERY range surface rather than only the one
+          that happened to trigger it. An unprovable outcome that is only visible on one tab is an
+          unprovable outcome an operator can navigate away from. */}
+      {lifecycle.phase === "recovery_required" && lifecycle.known && (
+        <SafetyNotice role="alert" tone="warn">
+          {RECOVERY_REQUIRED_NOTE}
+        </SafetyNotice>
+      )}
 
       <TabRail
         tabs={tabs}

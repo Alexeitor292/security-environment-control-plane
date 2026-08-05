@@ -46,7 +46,8 @@ export type StatusDomain =
   | "eligibility"
   | "plan-decision"
   | "enrollment"
-  | "range";
+  | "range"
+  | "range-operation";
 
 export const LIFECYCLE_TONE: Record<LifecycleState, StatusTone> = {
   draft: "pending",
@@ -236,21 +237,68 @@ export const ENROLLMENT_TONE: Record<EnrollmentLifecycleState, StatusTone> = {
   recovery_required: "danger",
 };
 
-/** The product-level range lifecycle (pages/range/range-lifecycle.ts owns the projection onto it).
- *  `ready` and `active` are both green because both mean a usable range; the difference between
- *  them is whether a competition is running, which the label carries, not the tone.
- *  `recovery_required` is red for the same reason it is in the enrollment map — it means automatic
- *  progress stopped and nothing is going to fix itself. */
+/**
+ * The product-level range lifecycle (pages/range/range-lifecycle.ts owns the projection onto it).
+ *
+ * The three END states are deliberately THREE DIFFERENT TONES, and that is the whole point of this
+ * map. They answer three different questions and must never be confused for one another:
+ *
+ *  - `failed`            (danger/red)    — the operation ran and did not succeed. It broke.
+ *  - `recovery_required` (warn/amber)    — the operation could not be OBSERVED. Canonically the
+ *                                          provider was unreachable during teardown, so removal AND
+ *                                          the "is it gone?" check failed for the same reason.
+ *                                          Nobody proved residue is gone. A human has to look.
+ *  - `destroyed`         (pending/muted) — proved gone. Settled, intended, nothing to act on.
+ *
+ * Rendering `recovery_required` as red says "it broke"; rendering it as `destroyed` says "it's
+ * gone". Both are false, and the second is the dangerous one — it retires a range that may still
+ * hold live containers. An earlier version of this map had all three on `danger`, which is exactly
+ * the collapse this program exists to prevent.
+ *
+ * In-flight phases are `accent`, not `warn`, so amber belongs to `recovery_required` ALONE within
+ * this domain and cannot be mistaken for "still working".
+ *
+ * `ready` and `active` are both green: both mean a usable range, and the difference between them
+ * (whether a competition is running) is carried by the label, not the tone.
+ */
 export const RANGE_TONE: Record<RangePhase, StatusTone> = {
   draft: "pending",
-  deploying: "warn",
+  deploying: "accent",
   ready: "ok",
   active: "ok",
-  resetting: "warn",
-  recovery_required: "danger",
+  resetting: "accent",
+  recovery_required: "warn",
   failed: "danger",
-  destroying: "warn",
-  destroyed: "danger",
+  destroying: "accent",
+  destroyed: "pending",
+};
+
+/**
+ * `RangeOperationStatus` and `RangeResourceState` from the range contract, plus `ResidueVerdict`.
+ *
+ * `unproven` is a REAL THIRD OUTCOME, not a synonym for either neighbour: the provider could not be
+ * observed, so the answer is unknown. It takes the same amber as `recovery_required` because it is
+ * the same fact at a finer grain, and it must never render as `succeeded`/`verified`/`clean` (which
+ * would claim an observation) or as `failed`/`residue` (which would claim a finding).
+ */
+export const RANGE_OPERATION_TONE: Record<string, StatusTone> = {
+  // RangeOperationStatus
+  pending: "pending",
+  running: "accent",
+  succeeded: "ok",
+  failed: "danger",
+  // RangeResourceState
+  creating: "accent",
+  created: "accent",
+  verified: "ok",
+  removing: "accent",
+  removed: "ok",
+  // ResidueVerdict + resources[].verdict
+  clean: "ok",
+  residue: "danger",
+  present: "danger",
+  // The third state, on every one of the above enums.
+  unproven: "warn",
 };
 
 // Deliberately NOT added to DEFAULT_ORDER: every enrollment call site passes
@@ -276,6 +324,7 @@ const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   "plan-decision": PLAN_DECISION_TONE,
   enrollment: ENROLLMENT_TONE,
   range: RANGE_TONE,
+  "range-operation": RANGE_OPERATION_TONE,
 };
 
 /** Resolution order for domain-less lookups. Lifecycle then plan first, which

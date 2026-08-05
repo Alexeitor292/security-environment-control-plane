@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LifecycleState } from "../../api/types";
+import { RANGE_OPERATION_TONE } from "../../components/ui";
 import {
   DEPLOYMENT_STEPS,
   deploymentProgress,
@@ -45,10 +46,29 @@ describe("rangeLifecycle projection", () => {
     }
   });
 
-  it("projects running to ready, never to active", () => {
-    // The backend records that the range is up. It does not record that a competition is running
-    // on it, so "active" must not be claimed from `running`.
-    expect(rangeLifecycle("running").phase).toBe("ready");
+  it("projects running to active, never to ready", () => {
+    // Lead ruling 2026-08-04: `active` IS the shipped `running`. In the range contract `ready`
+    // specifically means "deployed AND OBSERVED REACHABLE"; the exercise surface observes nothing,
+    // so projecting `running` to `ready` would claim a probe that never ran.
+    expect(rangeLifecycle("running").phase).toBe("active");
+  });
+
+  it("passes the range API's own nine states through unchanged", () => {
+    // These arrive from the range backend as RangeState and must not be re-mapped.
+    for (const phase of RANGE_PHASE_ORDER) {
+      const lc = rangeLifecycle(phase);
+      expect(lc.known, `${phase} must be recognized`).toBe(true);
+      expect(lc.phase, `${phase} must pass through unchanged`).toBe(phase);
+    }
+  });
+
+  it("honours ready and recovery_required from the range backend", () => {
+    // Neither exists in the legacy enum; both must survive rather than falling to the unknown branch.
+    expect(rangeLifecycle("ready")).toMatchObject({ phase: "ready", known: true });
+    expect(rangeLifecycle("recovery_required")).toMatchObject({
+      phase: "recovery_required",
+      known: true,
+    });
   });
 
   it("reports an unknown state as recovery_required and known:false", () => {
@@ -79,6 +99,59 @@ describe("phase metadata completeness", () => {
 
   it("covers exactly the nine product phases", () => {
     expect(RANGE_PHASE_ORDER).toHaveLength(9);
+  });
+});
+
+describe("the three end states are visually distinct", () => {
+  // This is the guard for the defect the program exists to prevent. `failed` means it broke,
+  // `recovery_required` means nobody could prove what happened, `destroyed` means proved gone.
+  // Any two of them sharing a tone lets an unprovable outcome read as a settled one.
+  it("gives failed, recovery_required and destroyed three different tones", () => {
+    const tones = [
+      RANGE_PHASE_TONE.failed,
+      RANGE_PHASE_TONE.recovery_required,
+      RANGE_PHASE_TONE.destroyed,
+    ];
+    expect(new Set(tones).size).toBe(3);
+  });
+
+  it("never renders recovery_required as a success tone", () => {
+    expect(RANGE_PHASE_TONE.recovery_required).not.toBe("ok");
+  });
+
+  it("never renders recovery_required with the same tone as destroyed", () => {
+    // The dangerous confusion: "we could not prove it is gone" shown as "it is gone".
+    expect(RANGE_PHASE_TONE.recovery_required).not.toBe(RANGE_PHASE_TONE.destroyed);
+  });
+
+  it("keeps amber for recovery_required alone, not shared with in-flight phases", () => {
+    const amber = RANGE_PHASE_TONE.recovery_required;
+    for (const phase of ["deploying", "resetting", "destroying"] as const) {
+      expect(RANGE_PHASE_TONE[phase], `${phase} must not share the recovery amber`).not.toBe(amber);
+    }
+  });
+});
+
+describe("unproven is a third outcome", () => {
+  it("renders unproven as neither success nor failure", () => {
+    const unproven = RANGE_OPERATION_TONE.unproven;
+    expect(unproven).not.toBe("ok");
+    expect(unproven).not.toBe("danger");
+    expect(unproven).toBeTruthy();
+  });
+
+  it("separates unproven from succeeded, verified and clean", () => {
+    for (const settled of ["succeeded", "verified", "clean", "removed"]) {
+      expect(RANGE_OPERATION_TONE[settled]).toBe("ok");
+    }
+    expect(RANGE_OPERATION_TONE.unproven).not.toBe("ok");
+  });
+
+  it("separates unproven from failed and residue", () => {
+    for (const bad of ["failed", "residue", "present"]) {
+      expect(RANGE_OPERATION_TONE[bad]).toBe("danger");
+    }
+    expect(RANGE_OPERATION_TONE.unproven).not.toBe("danger");
   });
 });
 

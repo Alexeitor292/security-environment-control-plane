@@ -101,12 +101,12 @@ export function TeamManagement() {
       </CyberCard>
 
       <PendingContractPanel
-        heading="Team membership"
-        title="Team rosters are not modelled in this build"
-        body="The control plane creates teams, but it has no concept of a person belonging to one: there is no roster, invitation or assignment endpoint. This is shown as a missing surface rather than an empty roster, because an empty table would say these teams have no members — the truth is that membership is not something this build records at all."
+        heading="Competition teams"
+        title="Competition teams are not available yet"
+        body="The teams above are the control plane's per-team ENVIRONMENT instances — one isolated copy of the range each. Competition teams are a different thing: named rosters with a join code and a score, created against a competition. Those routes are specified and frozen but are not on main yet, so there is nothing to read or create. Shown as a missing surface rather than an empty roster, because an empty table would say these teams have no members when the truth is that membership is not yet recorded anywhere."
         endpoints={[
-          "GET/POST /api/v1/ranges/{id}/teams — team roster and membership management",
-          "POST /api/v1/ranges/{id}/teams/{team}/members — assign a competitor to a team",
+          "POST|GET /api/v1/competitions/{cid}/teams — create and list competition teams (name, join code, score)",
+          "DELETE /api/v1/competitions/{cid}/teams/{tid} — remove a team before the competition starts",
         ]}
       />
     </div>

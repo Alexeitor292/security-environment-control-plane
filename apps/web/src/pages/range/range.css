@@ -156,6 +156,29 @@
 .rng-danger h3 { margin: 0; }
 .rng-confirm-field { max-width: 42ch; }
 
+/* Blast radius: what a destroy will actually tear down. */
+.rng-blast {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel-2);
+}
+.rng-blast h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-secondary);
+}
+.rng-blast-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
 /* ---------------------------------------------------------------- pending */
 
 .rng-pending-list {
