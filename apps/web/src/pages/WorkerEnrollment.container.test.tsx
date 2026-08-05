@@ -152,16 +152,19 @@ function typeInto(input: HTMLInputElement, value: string, view: { run(fn: () => 
   });
 }
 
-async function settle(view: { run(fn: () => void): void }) {
-  await Promise.resolve();
-  await Promise.resolve();
-  view.run(() => {});
-  await Promise.resolve();
+async function settle(view: { runAsync(fn?: () => void | Promise<void>): Promise<void> }) {
+  // React 19 flushes an update that arrives from a resolved promise only when the await happens
+  // INSIDE the act scope — see `runAsync` in ../testing/dom-a11y.
+  await view.runAsync();
 }
 
 /** Look one enrollment up so the tab-local table has a row to refresh. */
 async function trackOne(
-  view: { container: HTMLElement; run(fn: () => void): void },
+  view: {
+    container: HTMLElement;
+    run(fn: () => void): void;
+    runAsync(fn?: () => void | Promise<void>): Promise<void>;
+  },
   enrollmentId: string,
   state: string,
 ) {

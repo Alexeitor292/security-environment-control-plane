@@ -120,11 +120,10 @@ function click(container: HTMLElement, label: string, view: { run(fn: () => void
 }
 
 /** Let a resolved promise's `.then` chain flush inside act. */
-async function settle(view: { run(fn: () => void): void }) {
-  await Promise.resolve();
-  await Promise.resolve();
-  view.run(() => {});
-  await Promise.resolve();
+async function settle(view: { runAsync(fn?: () => void | Promise<void>): Promise<void> }) {
+  // React 19 flushes an update that arrives from a resolved promise only when the await happens
+  // INSIDE the act scope — see `runAsync` in ../testing/dom-a11y.
+  await view.runAsync();
 }
 
 function rowIds(container: HTMLElement): string[] {

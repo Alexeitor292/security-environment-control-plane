@@ -19,7 +19,11 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["vitest/globals"]
+    // `types` is an ALLOW LIST: with it present, an installed @types package is invisible until it
+    // is named here. `node` is listed so a test can measure a shipped asset off disk — the check
+    // that catches a truncated model or an LFS pointer stub, which `import.meta.glob` can prove
+    // resolvable but cannot weigh.
+    "types": ["vitest/globals", "node"]
   },
   "include": ["src"]
 }

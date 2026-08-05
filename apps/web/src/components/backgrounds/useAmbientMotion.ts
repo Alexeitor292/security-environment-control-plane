@@ -30,7 +30,11 @@ export function usePrefersReducedMotion(): boolean {
  * one hook. Callers add the `bg-paused` class when this returns false.
  */
 export function useAmbientMotion<T extends HTMLElement>(): {
-  ref: React.RefObject<T>;
+  // `T | null` because that is what the ref actually holds: `useRef<T>(null)` is null until the
+  // element mounts, and this hook's own effect guards on `if (!el)` for exactly that reason.
+  // React 18's types let the null be dropped here; React 19's do not, which makes the declaration
+  // agree with the code beneath it rather than with a convenience.
+  ref: React.RefObject<T | null>;
   active: boolean;
 } {
   const ref = useRef<T>(null);

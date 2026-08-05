@@ -10,7 +10,9 @@ export interface TopStatusBarProps {
   capabilities: ProviderCapabilities | null;
   onMenuClick: () => void;
   drawerOpen: boolean;
-  menuButtonRef: RefObject<HTMLButtonElement>;
+  /** `| null` is the honest type: the caller's `useRef<HTMLButtonElement>(null)` holds null until
+   *  the button mounts, and the focus-restore path in AppShell already reads it as `?.focus()`. */
+  menuButtonRef: RefObject<HTMLButtonElement | null>;
 }
 
 export function TopStatusBar({
