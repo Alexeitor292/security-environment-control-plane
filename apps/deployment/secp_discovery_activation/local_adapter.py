@@ -3987,12 +3987,18 @@ def _parse_activation_probe(raw: str) -> _ActivationProbeResult:
             "health_marker": "/tmp/secp-worker.ready",
         }:
             raise ValueError
-        expected_seals = {
-            "generic_activation_subprocess_sealed": True,
-            "generic_executor_subprocess_sealed": True,
-            "plan_only_process_sealed": False,
-            "real_provisioning_disabled": True,
-        }
+        # The seal names come from the PROBE, which is the only thing that produces them. This
+        # used to be a second hardcoded copy of the expected posture, in a different package — so
+        # the probe's key set and the parser's key set were two restatements of one fact, free to
+        # drift apart. They did not drift only because nothing had changed them yet.
+        #
+        # The VALUES are still checked here rather than imported, and deliberately: this parser's
+        # job is to refuse a payload that does not assert a held posture, so it must know what
+        # "held" looks like. What it must not own is the vocabulary.
+        from secp_worker.safety_seal_probe import REQUIRED_SEAL_NAMES, SealState
+
+        _SEAL_STATES = frozenset(state.value for state in SealState)
+        expected_seals = dict.fromkeys(sorted(REQUIRED_SEAL_NAMES), SealState.sealed.value)
         expected_effects = {
             "operator_registered",
             "operator_queue_polled",
@@ -4049,11 +4055,16 @@ def _parse_activation_probe(raw: str) -> _ActivationProbeResult:
             value["ok"],
             *config.values(),
             *health.values(),
-            *seals.values(),
             *worker_keys.values(),
             *effects.values(),
         ]
         if any(type(item) is not bool for item in bool_values):
+            raise ValueError
+        # Seals are STATES, not booleans, and are checked against their own closed vocabulary.
+        # They were in the list above until the probe stopped reading constants: a boolean could
+        # not carry `undetermined`, and `undetermined` is the value that keeps a broken derivation
+        # from reading as a held seal.
+        if any(item not in _SEAL_STATES for item in seals.values()):
             raise ValueError
         overlay_digest = value["runtime_overlay_sha256"]
         if overlay_digest is not None and (
