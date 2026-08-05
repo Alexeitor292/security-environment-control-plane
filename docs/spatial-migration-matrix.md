@@ -610,12 +610,34 @@ as proving everything in it:
 - **Focus styles were sampled on 4 of 34** focusable elements.
 - **Focus styles were sampled on 4 of 34** focusable elements.
 - Element counts are structure, not pixels: two different layouts can share one.
-- **The animation result is DECLARED timing, not observed playback.** I also tried
-  to time a real app-open by listening for `transitionend`/`animationend`, and
-  **captured zero events in 2.6 s on the donor** — so that half measured nothing
-  and is reported as nothing rather than as agreement. Identical declarations are
-  strong evidence the same animations exist with the same timing; they are not
-  evidence that both sides actually played them at the same moment.
+- ~~The animation result is declared timing, not observed playback.~~
+  **CLOSED — see below.**
+
+### Observed playback — the one qualified claim, closed
+
+The first attempt to verify actual playback listened for
+`transitionend`/`animationend` and **captured zero events in 2.6 s**, so it was
+reported as nothing rather than as agreement. The instrument was wrong, not the
+question: **`document.getAnimations()`** returns the live `Animation` objects
+that are *currently running*, instead of waiting for completion events that may
+never fire or never bubble to the listener.
+
+Sampled at three points around a real app-open, reading each animation's target,
+duration, easing and `playbackRate`:
+
+| Sample | Donor | Repository |
+| --- | --- | --- |
+| Idle | 3 animations, `3cd8e120` | 3, `3cd8e120` |
+| 140 ms into the transition | **14 running**, `6e485fd3` | **14 running**, `6e485fd3` |
+| Settled | 8, `7579c33` | 8, `7579c33` |
+
+Same animations, on the same targets, at the same durations and easings, in the
+same play state — `secp-home-stage` filter/opacity at 620 ms `ease`, transform at
+780 ms `cubic-bezier(0.22, 1, 0.36, 1)`, `secp-app-stage` the same, and
+`secp-aurora-drift` running at 18 s `linear` underneath.
+
+So the animation claim is now **declared timing identical AND playback observed
+identical**, and the earlier caveat is withdrawn rather than left standing.
 
 ## 5. What P7-C delivers against this matrix
 
