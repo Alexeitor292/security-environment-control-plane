@@ -19,9 +19,11 @@ import {
   UNSERVED_METHOD_PROBES,
   CREDENTIAL_INVENTORY_SEGMENTS,
   hasCredentialInventorySegment,
+  MISSING_SURFACES,
   servedMethods,
   unservedMethods,
 } from "./adapter-endpoint-map";
+import { analyseReachability, type ContractDocument } from "./reachability";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 const CONTRACT = join(REPO_ROOT, "contracts", "openapi", "openapi.json");
@@ -115,6 +117,52 @@ describe("absent means absent", () => {
     // And the splitting works: an ordinary route is not matched by accident.
     expect(hasCredentialInventorySegment("/api/v1/ranges")).toBe(false);
     expect(hasCredentialInventorySegment([".", "api", "vault"].join("/"))).toBe(true);
+  });
+});
+
+describe("parent reachability is computed, not judged", () => {
+  // THE THIRD CHECKING DIRECTION. The map verifies claimed endpoints exist; the probes verify
+  // unserved methods are still unserved. Neither can see an entry that is SERVED by a route
+  // nobody can reach — it passes both and still cannot be built.
+  //
+  // `listApprovals` is that case: GET /manifests/{manifest_id}/change-sets exists and works, and
+  // nothing enumerates manifests. Marking it `shaped` invited someone to wire it.
+  const reachability = analyseReachability(document as unknown as ContractDocument);
+
+  it("agrees with every entry's recorded status", () => {
+    for (const mapping of ADAPTER_ENDPOINT_MAP) {
+      if (mapping.endpoints.length === 0) continue;
+      const anyReachable = mapping.endpoints.some((path) => reachability.isReachable(path));
+      if (mapping.status === "parent-unreachable") {
+        expect(
+          anyReachable,
+          `${mapping.method} is recorded parent-unreachable, but ${mapping.endpoints.find((p) => reachability.isReachable(p))} is reachable`,
+        ).toBe(false);
+      } else {
+        expect(
+          anyReachable,
+          `${mapping.method} is recorded '${mapping.status}' but none of its endpoints is ` +
+            `reachable — blocked by ${mapping.endpoints.flatMap((p) => reachability.unreachableSpacesOf(p)).join(", ")}. ` +
+            "It is parent-unreachable: the route exists and nothing enumerates the id it needs.",
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("names the one space that blocks approvals, and only that one", () => {
+    // One missing collection route, not two. Reporting two would send the API owner to build
+    // something that is already reachable — plans, via exercises.
+    const approvals = ADAPTER_ENDPOINT_MAP.find((m) => m.method === "listApprovals");
+    const blocked = (approvals?.endpoints ?? []).flatMap((p) =>
+      reachability.unreachableSpacesOf(p),
+    );
+    expect([...new Set(blocked)]).toEqual(["api/v1/manifests"]);
+  });
+
+  it("keeps listEvidence off the backend list, because ranges are enumerable", () => {
+    const evidence = MISSING_SURFACES.find((s) => s.method === "listEvidence");
+    expect(evidence?.owner).toBe("frontend");
+    expect(reachability.isReachable("/api/v1/ranges/{range_id}/teardown-evidence")).toBe(true);
   });
 });
 

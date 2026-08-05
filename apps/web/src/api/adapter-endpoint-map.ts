@@ -29,6 +29,15 @@ export type MappingStatus =
   | "shaped"
   /** No registered route returns this at all. `requires` says what P7-A would have to add. */
   | "absent"
+  /**
+   * A route serves it, and nothing enumerates the id that route requires.
+   *
+   * A THIRD thing, not a flavour of the other two, and the distinction decides who does the work.
+   * `absent` needs a new route; this needs a new COLLECTION route and must not rebuild the
+   * serving route, which already works. Computed by `analyseReachability`, never judged — see
+   * `reachability.ts` for the three separate bugs that judging it by eye produced.
+   */
+  | "parent-unreachable"
   /** Deliberately not served, and must stay that way. `requires` says why. */
   | "withheld";
 
@@ -340,19 +349,28 @@ export const ADAPTER_ENDPOINT_MAP: readonly AdapterMapping[] = [
   },
   {
     method: "listApprovals",
-    status: "shaped",
+    status: "parent-unreachable",
     endpoints: ["/api/v1/manifests/{manifest_id}/change-sets"],
     note:
-      "CORRECTED 2026-08-05: this said `absent`, and it had stopped being true. "
+      "CORRECTED TWICE. It said `absent`, which had stopped being true; then `shaped`, which "
+      + "overstated it. The route exists AND cannot be reached. "
       + "GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals — but "
       + "PER MANIFEST, so an operator must already know which manifest to ask about. The other "
       + "five approval families (plan-secret, plan-generation, activation-dossier, "
       + "readonly-preflight, resolver-activation) remain GET-by-id only; the manifest-scoped "
       + "routes that mention them are POSTs that CREATE an authorization, not lists. So an "
-      + "approvals inbox — 'what is waiting on me' — still cannot be built.",
+      + "approvals inbox — 'what is waiting on me' — still cannot be built. "
+      + "AND THE PARENT IS UNREACHABLE. Nothing enumerates manifests: every GET yielding a "
+      + "manifest id needs a manifest, a change-set or a provisioning-operation id, and those "
+      + "three form a closed cycle. The only way in is POST /api/v1/plans/{plan_id}/manifest, "
+      + "which CREATES one — so an operator reaches approvals only for a manifest made in the "
+      + "same session. Plans themselves ARE reachable, via GET /api/v1/exercises/{exercise_id}"
+      + "/plan, so the chain breaks at exactly ONE level and the fix is ONE collection route.",
     unsourcedFields: ["title", "requestedBy", "riskLevel", "scope", "operation"],
     requires:
-      "A pending-approval query that is not scoped to a parent the operator has to know first. "
+      "GET /api/v1/manifests — a collection route so the parent can be listed. ONE route, not "
+      + "two: plans are already reachable through exercises. Do not rebuild "
+      + "/manifests/{manifest_id}/change-sets; it works, nothing can get to it. "
       + "Whatever is added must keep the six families DISTINCT rather than flattening them into "
       + "one queue: they authorize different acts, and a single 'approval' list is how an "
       + "approval for one operation gets read as authorizing another — the same property "
@@ -502,7 +520,13 @@ export function hasCredentialInventorySegment(path: string): boolean {
  * id the screen is trying to discover.
  */
 export interface MissingSurface {
-  readonly method: AdapterMethod;
+  readonly method: AdapterMethod | "auditOutcomeFacet";
+  /**
+   * Which side owns the fix. `frontend` entries are listed so they are not mistaken for backend
+   * asks — `listEvidence` spent a day on P7-A's list before anyone checked that ranges are
+   * enumerable and the only thing missing was a picker.
+   */
+  readonly owner: "backend" | "frontend";
   /** A suggested route. NOT a proposal to implement as written — the shape matters, not the path. */
   readonly sketch: string;
   /** The scoping the frontend needs, and why the obvious parent-scoped version does not serve. */
@@ -514,18 +538,26 @@ export interface MissingSurface {
 export const MISSING_SURFACES: readonly MissingSurface[] = [
   {
     method: "listEvidence",
-    sketch: "GET /api/v1/evidence?subject_type=&subject_id=&after=",
+    owner: "frontend",
+    sketch: "no new route — GET /api/v1/ranges then /ranges/{range_id}/teardown-evidence",
     scoping:
-      "ORGANIZATION-WIDE. All eight evidence routes in the contract are scoped to a parent id — "
+      "PARENT-NOT-SELECTED, and therefore NOT a backend ask. The eight evidence routes are all "
+      + "scoped to a parent id, but `GET /api/v1/ranges` exists, so the range-scoped one is "
+      + "reachable behind a picker. This was on the backend list until the parent was checked. "
+      + "The org-wide question — evidence across an organization — is a genuinely different "
+      + "surface, and worth raising only if a screen needs it. What blocks the audit page today "
+      + "is a selection step. Original note: all eight evidence routes are scoped to a parent — "
       + "range, onboarding, enrollment, dossier, authorization, registration — so a surface can "
       + "only show evidence for a subject somebody already named. The audit page's job is the "
       + "opposite: find the subject FROM the evidence.",
     unblocks:
-      "The evidence half of the audit surface. `GET /api/v1/audit` already serves the action log "
-      + "org-wide, so the page is half-served today and the asymmetry is the whole problem.",
+      "The evidence half of the audit surface, behind a range picker. `GET /api/v1/audit` serves "
+      + "the action log org-wide with no picker, so the two halves of that page ask for their "
+      + "scope differently — which is a design problem, not a missing route.",
   },
   {
     method: "listApprovals",
+    owner: "backend",
     sketch: "GET /api/v1/approvals?status=pending",
     scoping:
       "NOT manifest-scoped. Change-sets are already enumerable per manifest; the missing question "
@@ -537,6 +569,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   },
   {
     method: "listEvents",
+    owner: "backend",
     sketch: "GET /api/v1/competitions",
     scoping: "Organization-wide. `/ranges/{id}/competition` serves one, given a range.",
     unblocks:
@@ -546,6 +579,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   },
   {
     method: "listUsers",
+    owner: "backend",
     sketch: "GET /api/v1/users",
     scoping: "Organization-wide. `/me` is the current principal only.",
     unblocks:
@@ -554,6 +588,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   },
   {
     method: "listAlerts",
+    owner: "backend",
     sketch: "GET /api/v1/alerts",
     scoping: "Organization-wide, and it needs write state — `acknowledged` is a fact the control "
       + "plane would have to hold, which nothing does today.",
@@ -564,6 +599,7 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
   },
   {
     method: "listReports",
+    owner: "backend",
     sketch: "GET /api/v1/reports",
     scoping:
       "Organization-wide, and it is the one gap where scoping is not the hard part. Nothing "
@@ -574,7 +610,21 @@ export const MISSING_SURFACES: readonly MissingSurface[] = [
       + "concept that does not exist rather than a routing gap.",
   },
   {
+    method: "auditOutcomeFacet",
+    owner: "backend",
+    sketch: "GET /api/v1/audit/outcomes  (or a `facets` block on the audit response)",
+    scoping:
+      "NO-ENDPOINT. Not a scoping problem at all — no route publishes the DISTINCT SET of audit "
+      + "outcomes, so a filter can only offer the outcomes that appear in the rows currently "
+      + "loaded. The set shrinks as you page, and an outcome with no rows on this page looks "
+      + "like an outcome that never happens.",
+    unblocks:
+      "A truthful outcome filter on the audit surface. Without it the control is a summary of the "
+      + "current page wearing the clothes of a filter over the whole log.",
+  },
+  {
     method: "listAccessProfiles",
+    owner: "backend",
     sketch: "GET /api/v1/access-profiles?team_id=",
     scoping: "Team-scoped is fine here; the team id is on screen when the question is asked.",
     unblocks:

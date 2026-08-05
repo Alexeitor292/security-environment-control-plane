@@ -8,7 +8,8 @@ The spatial frontend talks to the control plane through one interface of **22 me
 | | methods |
 | --- | --- |
 | Served, and complete | 0 |
-| Served, with fields the platform does not produce | 16 |
+| Served, with fields the platform does not produce | 15 |
+| Served, but nothing enumerates the id it needs | 1 |
 | No endpoint at all | 5 |
 | Deliberately not served | 1 |
 
@@ -211,22 +212,6 @@ Fields with no source:
 - `name`
 - `steps[].detail`
 
-### `listApprovals`
-
-`/api/v1/manifests/{manifest_id}/change-sets`
-
-CORRECTED 2026-08-05: this said `absent`, and it had stopped being true. GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals — but PER MANIFEST, so an operator must already know which manifest to ask about. The other five approval families (plan-secret, plan-generation, activation-dossier, readonly-preflight, resolver-activation) remain GET-by-id only; the manifest-scoped routes that mention them are POSTs that CREATE an authorization, not lists. So an approvals inbox — 'what is waiting on me' — still cannot be built.
-
-**What it would take:** A pending-approval query that is not scoped to a parent the operator has to know first. Whatever is added must keep the six families DISTINCT rather than flattening them into one queue: they authorize different acts, and a single 'approval' list is how an approval for one operation gets read as authorizing another — the same property `operation_kind` protects on the Proxmox side.
-
-Fields with no source:
-
-- `title`
-- `requestedBy`
-- `riskLevel`
-- `scope`
-- `operation`
-
 ### `listAuditEvents`
 
 `/api/v1/audit`
@@ -270,6 +255,24 @@ Fields with no source:
 `/api/v1/instances/{instance_id}/topology` · `/api/v1/exercises/{exercise_id}/topology` · `/api/v1/ranges/{range_id}/proxmox/topology`
 
 The two generic topology routes return UNTYPED objects — the contract publishes no shape, so a client receives `unknown` and must narrow at runtime or not read them at all. The Proxmox route is the typed one (ProxmoxTopologyOut), but it is provider-specific and its `topology` member is itself an opaque document. `subjectId` is also ambiguous: three different id spaces reach three different routes, and the method takes one string.
+
+## Served, but nothing enumerates the id it needs
+
+### `listApprovals`
+
+`/api/v1/manifests/{manifest_id}/change-sets`
+
+CORRECTED TWICE. It said `absent`, which had stopped being true; then `shaped`, which overstated it. The route exists AND cannot be reached. GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals — but PER MANIFEST, so an operator must already know which manifest to ask about. The other five approval families (plan-secret, plan-generation, activation-dossier, readonly-preflight, resolver-activation) remain GET-by-id only; the manifest-scoped routes that mention them are POSTs that CREATE an authorization, not lists. So an approvals inbox — 'what is waiting on me' — still cannot be built. AND THE PARENT IS UNREACHABLE. Nothing enumerates manifests: every GET yielding a manifest id needs a manifest, a change-set or a provisioning-operation id, and those three form a closed cycle. The only way in is POST /api/v1/plans/{plan_id}/manifest, which CREATES one — so an operator reaches approvals only for a manifest made in the same session. Plans themselves ARE reachable, via GET /api/v1/exercises/{exercise_id}/plan, so the chain breaks at exactly ONE level and the fix is ONE collection route.
+
+**What it would take:** GET /api/v1/manifests — a collection route so the parent can be listed. ONE route, not two: plans are already reachable through exercises. Do not rebuild /manifests/{manifest_id}/change-sets; it works, nothing can get to it. Whatever is added must keep the six families DISTINCT rather than flattening them into one queue: they authorize different acts, and a single 'approval' list is how an approval for one operation gets read as authorizing another — the same property `operation_kind` protects on the Proxmox side.
+
+Fields with no source:
+
+- `title`
+- `requestedBy`
+- `riskLevel`
+- `scope`
+- `operation`
 
 ## No endpoint at all
 

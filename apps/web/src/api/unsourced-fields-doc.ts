@@ -20,12 +20,25 @@ const STATUS_HEADING: Record<MappingStatus, string> = {
   exact: "Served, and complete",
   shaped: "Served, with fields the platform does not produce",
   absent: "No endpoint at all",
+  "parent-unreachable": "Served, but nothing enumerates the id it needs",
   withheld: "Deliberately not served",
 };
 
-const ORDERED_STATUSES: readonly MappingStatus[] = ["exact", "shaped", "absent", "withheld"];
+const ORDERED_STATUSES: readonly MappingStatus[] = [
+  "exact",
+  "shaped",
+  "parent-unreachable",
+  "absent",
+  "withheld",
+];
 /** Most actionable first: the gaps somebody has to decide about come before the settled cases. */
-const DISPLAY_ORDER: readonly MappingStatus[] = ["shaped", "absent", "withheld", "exact"];
+const DISPLAY_ORDER: readonly MappingStatus[] = [
+  "shaped",
+  "parent-unreachable",
+  "absent",
+  "withheld",
+  "exact",
+];
 
 export function renderUnsourcedFieldsDoc(): string {
   const byStatus = (status: MappingStatus) => ADAPTER_ENDPOINT_MAP.filter((m) => m.status === status);

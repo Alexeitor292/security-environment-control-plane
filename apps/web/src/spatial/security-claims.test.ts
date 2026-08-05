@@ -236,8 +236,12 @@ const PAGES_ENTRIES_AT_PIN = 52;
  * becoming false.
  */
 const DOCUMENTATION_MODULES: [file: string, importers: string[]][] = [
-  // Re-decided 2026-08-05, which is what this pin is for. It was empty; `unsourced-fields-doc.ts`
-  // now imports it, and the pin broke exactly as designed.
+  // Re-decided twice on 2026-08-05, which is what this pin is for. It was empty; then
+  // `unsourced-fields-doc.ts` imported it; then `reachability.ts` did. Both times the pin broke
+  // exactly as designed and the answer was re-derived rather than assumed.
+  //
+  // `reachability.ts` takes a TYPE-ONLY import (`AdapterMethod`), erased at build, and renders
+  // nothing — it computes whether a route can be reached. The exemption holds a fortiori.
   //
   // The exemption still holds, and for the original reason rather than a new one: the importer
   // renders the map into `docs/product/unsourced-fields.md` — a markdown file written to disk by
@@ -245,7 +249,7 @@ const DOCUMENTATION_MODULES: [file: string, importers: string[]][] = [
   //
   // If a component ever imports either module, this breaks again and the answer will be different:
   // at that point the prose IS user-facing and has to be reworded or acknowledged, not exempted.
-  ["api/adapter-endpoint-map.ts", ["api/unsourced-fields-doc.ts"]],
+  ["api/adapter-endpoint-map.ts", ["api/reachability.ts", "api/unsourced-fields-doc.ts"]],
 ];
 
 /** Files that import `target`, resolved rather than string-matched. */
