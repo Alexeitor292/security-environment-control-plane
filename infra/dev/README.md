@@ -57,6 +57,81 @@ These come from `.env` (placeholders in `.env.example`):
 
 Both paths run the **same** orchestration code and pass through the approval gate.
 
+## Range-capable worker (opt-in)
+
+The default `worker` service **cannot execute a range**. It connects to Temporal, accepts a range
+operation, and then refuses at the seal, because the base service passes no `SECP_RANGE_LOCAL_DOCKER`
+and mounts no Docker socket. That is correct behaviour and it is also unusable out of the box, so
+acceptance runs used to start a worker by hand on the host instead. `docker-compose.range.yml`
+replaces that workaround.
+
+> ⚠️ **Docker socket access is root-equivalent on the host.** The overlay bind-mounts
+> `/var/run/docker.sock` into the worker. Anything that can talk to that socket can start a
+> container that mounts the host filesystem and read, modify or delete any file on the host as root
+> — regardless of the worker running as the unprivileged uid 10001. Use it on a development machine
+> you are willing to hand root to, and nowhere else. It is refused in production regardless
+> (`range_local_docker_enabled` is false when `SECP_APP_ENV=production`), and no production
+> composition references it.
+
+**One command**, run from `infra/dev`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.range.yml \
+  --env-file ../../.env up -d --build
+```
+
+`--env-file ../../.env` is **required**. `docker compose` resolves a relative `.env` against its own
+project directory (`infra/dev`), never the repo root — omit the flag and every variable resolves
+blank, after which Temporal tries to reach PostgreSQL as user `temporal` and the stack fails in a way
+that does not name the cause.
+
+What the overlay changes:
+
+| | |
+| --- | --- |
+| `worker` | builds `Dockerfile.range-worker` (the worker image **plus the `docker` CLI**), sets `SECP_RANGE_LOCAL_DOCKER=true`, mounts the Docker socket, waits for Temporal to be healthy |
+| `api` | switches to `temporal` dispatch **only**. It gets **no socket** — the API dispatches range work, it never constructs or runs a provider (Charter Invariants 6/7, ADR-005) |
+| `postgres` | republished on host **15432** (see below) |
+
+Both services move to `SECP_WORKFLOW_DISPATCH_MODE=temporal` because `InlineDispatcher` refuses range
+operations outright — there is no inline-safe range provider — so on the repo default (`inline`) a
+range deploy fails at dispatch before the worker is ever consulted.
+
+The overlay **overrides** `worker` rather than adding a second, profile-gated service: two workers on
+the `secp-orchestration` task queue would have Temporal hand roughly half of all range operations to
+the socketless one, which reads as an intermittent range bug rather than a configuration error.
+
+### Things that cost an hour if you do not know them
+
+- **A native host PostgreSQL service may own port 5432.** Docker reports the compose postgres as
+  published there, the native service is what actually answers, and host-side connections fail
+  `password authentication failed` with correct credentials while the *same* credentials work inside
+  the container. The overlay therefore republishes on `15432` by default (`!override`, because
+  Compose merges `ports` by concatenation and would otherwise keep the conflicting binding). Nothing
+  in the stack depends on the host-side port — every service reaches the database at `postgres:5432`
+  over the compose network. Set `SECP_DEV_POSTGRES_HOST_PORT=5432` to restore the base mapping.
+- **On a native Linux Engine the socket is usually owned by a `docker` group**, not root. Set
+  `SECP_RANGE_DOCKER_GID` to the output of `stat -c %g /var/run/docker.sock`; the default `0` matches
+  Docker Desktop, where the socket is `root:root` mode `0660`.
+- **In Git Bash on Windows, `docker run -v /var/run/docker.sock:...` fails** with
+  `mkdir C:\Program Files\Git\var: Access is denied` — MSYS rewrites the path. Prefix the command
+  with `MSYS_NO_PATHCONV=1`. Compose files are unaffected.
+
+### Verifying the worker is really range-capable
+
+```bash
+docker exec secp-dev-worker-1 python -c "
+from secp_api.config import get_settings
+from secp_worker.range import get_provider
+print('seal open:', get_settings().range_local_docker_enabled)
+print('daemon   :', get_provider('local_docker').health())
+"
+```
+
+Ranges are published on the **host's** loopback (`127.0.0.1:<ephemeral>`), never `0.0.0.0` —
+intentionally vulnerable software is never offered to the LAN. Browse a deployed component at the
+`host_port` reported by `GET /api/v1/ranges/{id}/resources`.
+
 ## Authentication in dev
 
 The API performs **strict OIDC bearer-token verification** (ADR-017). A request with

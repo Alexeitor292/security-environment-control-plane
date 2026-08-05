@@ -52,6 +52,7 @@ from secp_api.schemas_range import (
     TeardownEvidenceOut,
     TeardownResourceOut,
 )
+from secp_api.services.ranges import operation_staleness
 
 #: Fallback only. The authoritative bind host is the one the provider RECORDED on the resource
 #: (``detail["bind_host"]``) — the API must not import a provider to find it out, and a resource
@@ -134,10 +135,16 @@ def operation_summary(operation: RangeDeploymentOperation) -> RangeOperationSumm
         completed_steps=operation.completed_steps,
         total_steps=operation.total_steps,
         percent=_percent(operation.completed_steps, operation.total_steps),
+        stale=operation_staleness(operation).stale,
     )
 
 
 def operation_out(operation: RangeDeploymentOperation) -> RangeOperationOut:
+    # Staleness is DERIVED on read, not stored. There is no sweeper writing a ``stale`` flag, so
+    # there is no window in which the database says an operation is fine because nothing has got
+    # round to marking it otherwise: the answer is computed from the operation's own durable
+    # progress every time anyone asks.
+    staleness = operation_staleness(operation)
     return RangeOperationOut(
         id=operation.id,
         range_id=operation.range_instance_id,
@@ -161,6 +168,9 @@ def operation_out(operation: RangeDeploymentOperation) -> RangeOperationOut:
             )
             for step in (operation.steps or [])
         ],
+        lease_expires_at=staleness.expires_at if operation.finished_at is None else None,
+        stale=staleness.stale,
+        stale_reason=staleness.reason,
     )
 
 

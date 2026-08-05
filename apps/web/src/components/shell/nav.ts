@@ -197,9 +197,26 @@ export const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-/** The verbatim development disclosure carried over from the previous shell. */
+/**
+ * The global execution-posture disclosure in the top bar.
+ *
+ * This used to read "Simulated environment · Local development. Simulated execution only — no real
+ * infrastructure." That became FALSE when the range surfaces landed: deploying a range starts real
+ * containers on the worker host, and a browser run was photographed with this banner on screen
+ * while two intentionally-vulnerable containers were running.
+ *
+ * It is not fixed by inverting it either. Posture is PER SURFACE, not global: ranges provision real
+ * local infrastructure, while the staging-lab and discovery surfaces remain genuinely simulated and
+ * carry their own accurate notices. A single banner that claimed either extreme would be wrong on
+ * roughly half the application.
+ *
+ * So the banner now states the one thing that is true everywhere — that posture varies and each
+ * page declares its own — and names the surface that can create real resources, because
+ * under-claiming a capability is still a false statement, and this one under-claimed the ability to
+ * start vulnerable software on the operator's own host.
+ */
 export const DEV_DISCLOSURE =
-  "Local development. Simulated execution only — no real infrastructure.";
+  "Execution posture differs by surface — deploying a range creates real containers on the worker host. Each page states its own posture.";
 
-/** Truthful environment label shown ahead of the disclosure. */
-export const ENVIRONMENT_LABEL = "Simulated environment";
+/** Environment label shown ahead of the disclosure. Says where this runs, not what it simulates. */
+export const ENVIRONMENT_LABEL = "Local development";

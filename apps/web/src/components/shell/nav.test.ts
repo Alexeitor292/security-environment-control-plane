@@ -1,5 +1,6 @@
 import {
   DEV_DISCLOSURE,
+  ENVIRONMENT_LABEL,
   NAV_GROUPS,
   navPermissionReason,
   resolveNavItem,
@@ -106,10 +107,40 @@ describe("shell navigation model", () => {
     }
   });
 
-  it("preserves the development disclosure truth language verbatim", () => {
+  it("states the development disclosure verbatim", () => {
     expect(DEV_DISCLOSURE).toBe(
-      "Local development. Simulated execution only — no real infrastructure.",
+      "Execution posture differs by surface — deploying a range creates real containers on the worker host. Each page states its own posture.",
     );
+    expect(ENVIRONMENT_LABEL).toBe("Local development");
+  });
+
+  it("never claims globally that no real infrastructure exists", () => {
+    // It did, for the whole application, while a browser run was photographed with this banner on
+    // screen and two intentionally-vulnerable containers running. Deploying a range creates real
+    // containers, so a global "simulated only" claim is false — and under-claiming a capability is
+    // still a false statement, especially this capability.
+    const banner = `${ENVIRONMENT_LABEL} ${DEV_DISCLOSURE}`.toLowerCase();
+    for (const claim of [
+      "no real infrastructure",
+      "simulated execution only",
+      "simulated environment",
+    ]) {
+      expect(banner, `the global banner must not claim "${claim}"`).not.toContain(claim);
+    }
+  });
+
+  it("does not claim the opposite either — posture is per surface", () => {
+    // Inverting the lie is not the fix: the staging-lab and discovery surfaces really are
+    // simulated and carry their own accurate notices. The banner's job is to say posture VARIES
+    // and point at the page, not to pick one extreme and be wrong on half the application.
+    expect(DEV_DISCLOSURE).toMatch(/differs by surface/i);
+    expect(DEV_DISCLOSURE).toMatch(/each page states its own/i);
+  });
+
+  it("names the surface that can create real resources", () => {
+    // An operator is entitled to know which action starts vulnerable software on their own host.
+    expect(DEV_DISCLOSURE).toMatch(/range/i);
+    expect(DEV_DISCLOSURE).toMatch(/real containers/i);
   });
 
   it("keeps unavailable-item copy free of fake-status language", () => {

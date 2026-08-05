@@ -583,7 +583,19 @@ class TemporalDispatcher:
             session,
             run,
             workflow="RangeOperationWorkflow",
-            args={"range_operation_id": str(operation_id), "workflow_run_id": str(run.id)},
+            args={
+                "range_operation_id": str(operation_id),
+                "workflow_run_id": str(run.id),
+                # WHICH ROWS this id denotes, according to the database dispatching the work.
+                # Still no image reference, container id, network name, port or credential — these
+                # are identifiers the worker re-reads anyway, and it compares rather than trusts
+                # them. Their only job is to let a worker attached to a DIFFERENT deployment notice
+                # that the operation it resolved is not the one that was dispatched, and refuse.
+                # Two workers polling one `secp-orchestration` queue against two databases is
+                # exactly how the original stranding happened.
+                "range_instance_id": str(operation.range_instance_id),
+                "organization_id": str(operation.organization_id),
+            },
         )
         return run
 
