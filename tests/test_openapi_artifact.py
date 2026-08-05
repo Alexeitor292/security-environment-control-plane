@@ -1,0 +1,493 @@
+"""The OpenAPI artifact is the contract, and these are the properties that make that true.
+
+Three things have to hold or the artifact is decoration:
+
+* it is **in step** with the application that serves it;
+* it is **byte-reproducible**, and reproducible on any machine, so the staleness check is a real
+  gate rather than a flake reviewers learn to re-run;
+* the **specific fields that protect specific invariants** are in it, in the shape that keeps the
+  invariant. A document that merely exists proves nothing.
+
+The last group is the interesting one. Each test names the confusion the field prevents. Their
+counterparts in ``apps/web/src/api/generated.contract.test.ts`` pin the same properties one step
+further down, in the TypeScript a client actually consumes — a field can be correct here and still
+arrive in the browser as ``unknown``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+from export_openapi import ARTIFACT, REPO_ROOT, export_document, serialize  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def document() -> dict[str, Any]:
+    """The COMMITTED artifact, not a freshly exported one.
+
+    Reading the file is the point: every assertion below is then a statement about what this
+    repository publishes, and ``test_committed_artifact_is_in_step_with_the_application`` is what
+    ties the file back to the code.
+    """
+    return json.loads(ARTIFACT.read_text(encoding="utf-8"))
+
+
+def schema(document: dict[str, Any], name: str) -> dict[str, Any]:
+    schemas = document["components"]["schemas"]
+    assert name in schemas, f"{name} is not in the published contract"
+    return schemas[name]
+
+
+def prop(document: dict[str, Any], model: str, field: str) -> dict[str, Any]:
+    properties = schema(document, model)["properties"]
+    assert field in properties, f"{model}.{field} is not in the published contract"
+    return properties[field]
+
+
+def is_nullable(spec: dict[str, Any]) -> bool:
+    """True when the published type admits ``null`` as a distinct value."""
+    return any(option.get("type") == "null" for option in spec.get("anyOf", []))
+
+
+# --- the artifact is in step, and reproducible -------------------------------------------------
+
+
+def test_committed_artifact_is_in_step_with_the_application() -> None:
+    """The whole chain hangs off this. Everything else asserts things about a file; this asserts
+    the file is what the running application publishes."""
+    assert ARTIFACT.exists(), "contracts/openapi/openapi.json is missing"
+    assert ARTIFACT.read_text(encoding="utf-8") == export_document(), (
+        "the committed OpenAPI artifact is stale. "
+        "Run: python scripts/export_openapi.py && (cd apps/web && npm run generate:api)"
+    )
+
+
+def test_export_is_byte_reproducible_in_process() -> None:
+    assert export_document() == export_document()
+
+
+def test_export_does_not_depend_on_the_exporting_machine() -> None:
+    """Export under a HOSTILE environment and demand identical bytes.
+
+    Inverted on purpose. The exporter pins the two settings it knows reach the document, but a
+    list of variables that matter is a closed set someone will out-grow: the next setting to be
+    interpolated into a description would sail past it. This instead states the property —
+    ``SECP_*`` from the environment changes nothing in the artifact — and lets any new leak fail
+    here, whether or not anybody thought of it.
+    """
+    hostile = {
+        **os.environ,
+        "SECP_APP_NAME": "Some Developer's Local Build",
+        "SECP_APP_ENV": "dev",
+        "SECP_CORS_ALLOW_ORIGINS": '["http://localhost:4173"]',
+        "SECP_RANGE_LOCAL_DOCKER": "true",
+        "SECP_AUTH_DEV_MODE": "true",
+        "PYTHONHASHSEED": "12345",
+    }
+    result = subprocess.run(
+        [sys.executable, "scripts/export_openapi.py", "--check"],
+        cwd=REPO_ROOT,
+        env=hostile,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "exporting under a perturbed environment produced a different document:\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+
+
+def test_serialize_sorts_keys_so_an_unrelated_edit_moves_nothing() -> None:
+    """Diff stability is not cosmetic: an unsorted document produces a thousand-line diff when a
+    router is re-ordered, and the one real change hides inside it."""
+    text = serialize({"b": 1, "a": {"z": 1, "y": 2}})
+    assert text == '{\n  "a": {\n    "y": 2,\n    "z": 1\n  },\n  "b": 1\n}\n'
+
+
+# --- the surface is actually published ---------------------------------------------------------
+
+PROXMOX_PATHS = {
+    "/api/v1/ranges/{range_id}/proxmox",
+    "/api/v1/ranges/{range_id}/proxmox/allocations",
+    "/api/v1/ranges/{range_id}/proxmox/apply-authorization",
+    "/api/v1/ranges/{range_id}/proxmox/destroy-authorization",
+    "/api/v1/ranges/{range_id}/proxmox/destroy-plan",
+    "/api/v1/ranges/{range_id}/proxmox/destroy-plan-approval",
+    "/api/v1/ranges/{range_id}/proxmox/observation",
+    "/api/v1/ranges/{range_id}/proxmox/ownership",
+    "/api/v1/ranges/{range_id}/proxmox/plan",
+    "/api/v1/ranges/{range_id}/proxmox/plan-approval",
+    "/api/v1/ranges/{range_id}/proxmox/readiness",
+    "/api/v1/ranges/{range_id}/proxmox/reset-dispositions",
+    "/api/v1/ranges/{range_id}/proxmox/residue",
+    "/api/v1/ranges/{range_id}/proxmox/topology",
+    "/api/v1/ranges/{range_id}/proxmox/verification",
+}
+
+
+def test_every_proxmox_route_is_published(document: dict[str, Any]) -> None:
+    published = {path for path in document["paths"] if "/proxmox" in path}
+    assert published == PROXMOX_PATHS
+
+
+def test_the_four_mutating_routes_are_posts_and_nothing_else(document: dict[str, Any]) -> None:
+    """Approval and authorization are POSTs. A GET that records a decision would make a decision
+    reachable from a link, a prefetch, or a browser history entry."""
+    mutating = {
+        "/api/v1/ranges/{range_id}/proxmox/plan-approval",
+        "/api/v1/ranges/{range_id}/proxmox/apply-authorization",
+        "/api/v1/ranges/{range_id}/proxmox/destroy-plan-approval",
+        "/api/v1/ranges/{range_id}/proxmox/destroy-authorization",
+    }
+    for path in mutating:
+        assert "post" in document["paths"][path]
+    for path in PROXMOX_PATHS - mutating:
+        assert set(document["paths"][path]) == {"get"}, f"{path} publishes a non-GET method"
+
+
+# --- three addresses stay three ----------------------------------------------------------------
+
+
+def test_published_probe_and_observed_addresses_are_three_members(document: dict[str, Any]) -> None:
+    """#103: a worker probed the address the range had PUBLISHED — a loopback, from inside a
+    container where the port was not — so readiness could never be observed and the range hung."""
+    address = schema(document, "ProxmoxGuestAddressOut")
+    assert set(address["properties"]) >= {
+        "published_address",
+        "probe_address",
+        "observed_address",
+        "probe_is_distinct",
+        "observed",
+    }
+
+
+def test_the_published_address_is_the_only_non_nullable_one(document: dict[str, Any]) -> None:
+    """``probe_address: null`` means no distinct probe address was assigned — never "use the
+    published one". ``observed_address: null`` means not observed, which is not an address."""
+    assert not is_nullable(prop(document, "ProxmoxGuestAddressOut", "published_address"))
+    assert is_nullable(prop(document, "ProxmoxGuestAddressOut", "probe_address"))
+    assert is_nullable(prop(document, "ProxmoxGuestAddressOut", "observed_address"))
+
+
+def test_the_observed_flag_separates_nobody_looked_from_no_address(
+    document: dict[str, Any],
+) -> None:
+    observed = prop(document, "ProxmoxGuestAddressOut", "observed")
+    assert observed["type"] == "boolean" and not is_nullable(observed)
+
+
+# --- apply cannot authorize destroy ------------------------------------------------------------
+
+
+def test_operation_kind_is_required_and_enum_valued(document: dict[str, Any]) -> None:
+    """Without it a recorded approval is a bare hash plus a principal, and an apply approval is
+    indistinguishable from a destroy approval once read out of the response that carried it."""
+    approval = schema(document, "ApprovalOut")
+    assert "operation_kind" in approval["required"]
+    assert approval["properties"]["operation_kind"]["$ref"].endswith("/ApprovalKind")
+    assert schema(document, "ApprovalKind")["enum"] == [
+        "plan_approval",
+        "apply_authorization",
+        "destroy_plan_approval",
+        "destroy_authorization",
+    ]
+
+
+def test_the_apply_and_destroy_request_bodies_do_not_validate_as_each_other(
+    document: dict[str, Any],
+) -> None:
+    """Both are required, both forbid extras, and the field names differ — so posting an apply
+    authorization to the destroy endpoint is a 422, not a destroyed range."""
+    apply_body = schema(document, "ProxmoxApplyAuthorizationRequest")
+    destroy_body = schema(document, "ProxmoxDestroyAuthorizationRequest")
+    assert apply_body["required"] == ["plan_hash"]
+    assert destroy_body["required"] == ["destroy_hash"]
+    assert set(apply_body["properties"]) & set(destroy_body["properties"]) == set()
+    for body in (apply_body, destroy_body):
+        assert body.get("additionalProperties") is False, "extra='forbid' is not published"
+
+
+# --- ownership provenance ----------------------------------------------------------------------
+
+
+def test_ownership_carries_both_generations_and_both_provenance_lists(
+    document: dict[str, Any],
+) -> None:
+    """``generation`` separates this range's objects from another range's; ``operation_generation``
+    separates THIS range's reset from its deploy. A sweep that reads only the first cannot tell
+    them apart."""
+    ownership = schema(document, "OwnershipClassOut")
+    assert set(ownership["required"]) >= {
+        "organization_id",
+        "target_id",
+        "range_id",
+        "generation",
+        "operation_generation",
+        "tags",
+        "acts_on",
+        "never_touches",
+    }
+
+
+def test_each_published_guest_carries_both_generations(document: dict[str, Any]) -> None:
+    guest = schema(document, "ProxmoxGuestOut")["properties"]
+    assert "generation" in guest and "operation_generation" in guest
+
+
+# --- unknown is not empty ----------------------------------------------------------------------
+
+#: Members where ``null`` and ``[]`` (or ``0``) are DIFFERENT facts, with the confusion each one
+#: prevents. Every entry is a nullable container: a missing key must never be able to produce the
+#: empty value, because the empty value is the stronger claim.
+UNKNOWN_IS_NOT_EMPTY: tuple[tuple[str, str, str], ...] = (
+    (
+        "ProxmoxDestroyPlanOut",
+        "deletion_set",
+        "an UNCOMPUTED deletion set vs a destroy that removes nothing — the second makes a destroy "
+        "look safe when in truth nothing has been enumerated",
+    ),
+    ("ProxmoxDestroyPlanOut", "deletion_set_size", "null, never 0, when the set was not computed"),
+    (
+        "ProxmoxResidueOut",
+        "uncovered_classes",
+        "an EMPTY list is the strong claim that every residue class was probed, and must never be "
+        "produced by a missing key",
+    ),
+    ("ProxmoxResidueOut", "resources", "a probe that has not run vs a probe that found nothing"),
+    ("ProxmoxResidueOut", "probe_reachable", "unknown reachability vs an unreachable probe"),
+    (
+        "ProxmoxResetDispositionsOut",
+        "dispositions",
+        "a reset that has not run vs a reset that touched no guest",
+    ),
+    (
+        "ProxmoxVerificationOut",
+        "infrastructure_checks",
+        "nothing recorded vs a report that carried no such key",
+    ),
+    ("ProxmoxVerificationOut", "isolation_checks", "the same, for the isolation half"),
+    (
+        "ProxmoxPlanOut",
+        "isolation",
+        "a plan that did not compile vs a plan claiming no isolation properties",
+    ),
+    (
+        "ProxmoxPlanOut",
+        "unguardable_flag_values",
+        "an EMPTY list is a real finding: every flag this template ships CAN be substring-guarded",
+    ),
+    ("ProxmoxPlanOut", "approved_hash_is_current", "unanswerable vs answered no"),
+    ("ProxmoxTopologyOut", "team_refs", "no plan compiled vs a lab with no teams"),
+    ("ProxmoxTopologyOut", "guests", "no plan compiled vs a plan with no guests"),
+    ("ProxmoxAllocationsOut", "allocations", "no identifiers computed vs a plan reserving none"),
+    ("ProxmoxReadinessOut", "satisfied", "readiness not assessed vs assessed and found wanting"),
+    ("ProxmoxReadinessOut", "findings", "nothing assessed vs no requirements"),
+    (
+        "ProxmoxObservationOut",
+        "sdn_supported",
+        "never observed vs observed and not supported — null never means no",
+    ),
+    ("ProxmoxObservationOut", "firewall_supported", "the same, for firewall support"),
+    (
+        "ProxmoxObservationOut",
+        "management_cidrs",
+        "no observation recorded vs a cluster declaring no management network, which is a claim no "
+        "compiled plan may be built on",
+    ),
+)
+
+
+@pytest.mark.parametrize(("model", "field", "confusion"), UNKNOWN_IS_NOT_EMPTY)
+def test_unknown_has_somewhere_to_live(
+    document: dict[str, Any], model: str, field: str, confusion: str
+) -> None:
+    assert is_nullable(prop(document, model, field)), (
+        f"{model}.{field} is not nullable in the published contract, "
+        f"so a client cannot distinguish: {confusion}"
+    )
+
+
+def test_unknown_is_a_member_of_every_lifecycle_enum(document: dict[str, Any]) -> None:
+    """A verification that has not run is ``undetermined`` and never ``passed``; an authorization
+    nobody recorded is ``absent`` and never ``authorized``."""
+    assert set(schema(document, "RecordedStageState")["enum"]) == {"recorded", "undetermined"}
+    assert "undetermined" in schema(document, "AuthorizationState")["enum"]
+    assert "absent" in schema(document, "AuthorizationState")["enum"]
+    assert "blocked" in schema(document, "PlanState")["enum"]
+    assert "absent" in schema(document, "ObservationFreshness")["enum"]
+
+
+# --- the opaque members, held to a declared list -----------------------------------------------
+
+#: Every member the contract publishes as an untyped object, with the reason it stays untyped.
+#:
+#: Stated as "the members the live document leaves opaque are EXACTLY these", not "these members
+#: are opaque". The second is a closed set that a newly-added blob simply walks past; the first
+#: fails the moment anything is added, which is the point — a new opaque member is a decision, and
+#: it should be made deliberately and get a narrowing entry in ``apps/web/src/api/recorded.ts``
+#: rather than arriving as `unknown` in every client.
+OPAQUE_MEMBERS: dict[tuple[str, str], str] = {
+    ("AuditEventOut", "data"): "audit payloads are per-action and open by design",
+    ("ChangeSetApprovalOut", "summary"): "change-set summary is provider-shaped",
+    ("EnvironmentPublicationRequest", "definition"): "an environment definition document",
+    ("ManifestOut", "content"): "a provisioning manifest document",
+    ("OnboardingCreate", "declared_boundary"): "operator-declared boundary document",
+    ("OnboardingOut", "declared_boundary"): "operator-declared boundary document",
+    ("OperationOut", "result"): "operation results are per-operation",
+    ("PlanOut", "summary"): "plan summary is provider-shaped",
+    ("ProxmoxDestroyPlanOut", "deletion_set"): "recorded verbatim; narrowed by asDeletionSet",
+    ("ProxmoxPlanOut", "document"): "the compiled desired-state document the plan hash is over",
+    ("ProxmoxReadinessOut", "scoring_endpoints"): "scenario-shaped scoring endpoints",
+    ("ProxmoxResetDispositionsOut", "dispositions"): (
+        "recorded verbatim; narrowed by asResetActions"
+    ),
+    ("ProxmoxResidueOut", "resources"): "recorded verbatim; narrowed by asAbsenceFindings",
+    ("ProxmoxTopologyOut", "topology"): "the canonical document the plan hash is taken over",
+    ("ProxmoxVerificationOut", "infrastructure_checks"): (
+        "recorded verbatim; the (observed, ok) pair is narrowed by asCheckFindings"
+    ),
+    ("ProxmoxVerificationOut", "isolation_checks"): (
+        "recorded verbatim; the (observed, ok) pair is narrowed by asCheckFindings"
+    ),
+    ("RangeEventOut", "data"): "range event payloads are per-event",
+    ("RangeResourceOut", "detail"): "provider-shaped resource detail",
+    ("ReadonlyPreflightOut", "readiness_facts"): "preflight facts are per-provider",
+    ("ResourceOut", "attributes"): "provider-shaped resource attributes",
+    ("SnapshotOut", "summary"): "discovery summary is per-plugin",
+    ("StagingLabOut", "desired_state"): "a staging desired-state document",
+    ("StagingLabOut", "simulated_observed_state"): "a simulated observation document",
+    ("TargetCreate", "config"): "target config is per-plugin",
+    ("TargetCreate", "scope_policy"): "scope policy is per-plugin",
+    ("TargetOut", "config"): "target config is per-plugin",
+    ("TargetOut", "scope_policy"): "scope policy is per-plugin",
+    ("ToolchainProfileCreate", "profile"): "a toolchain profile document",
+    ("ToolchainProfileOut", "content"): "a toolchain profile document",
+    ("TopologyDraftCreate", "document"): "a topology authoring document",
+    ("TopologyRevisionCreate", "document"): "a topology authoring document",
+    ("TopologyRevisionDetailOut", "document_content"): "a topology authoring document",
+    ("TopologyValidationOut", "findings"): "validator findings are schema-shaped",
+    ("VersionCreate", "definition"): "an environment definition document",
+    ("VersionOut", "spec"): "an environment definition document",
+    ("WorkflowRunOut", "detail"): "workflow detail is per-runner",
+}
+
+
+def _is_open_object(spec: dict[str, Any]) -> bool:
+    return (
+        spec.get("type") == "object"
+        and spec.get("additionalProperties") is True
+        and "properties" not in spec
+    )
+
+
+def _opacity(spec: dict[str, Any]) -> bool:
+    if _is_open_object(spec):
+        return True
+    if spec.get("type") == "array" and _is_open_object(spec.get("items", {})):
+        return True
+    return any(_opacity(option) for option in spec.get("anyOf", []))
+
+
+def live_opaque_members(document: dict[str, Any]) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for name, model in document["components"]["schemas"].items():
+        for field, spec in model.get("properties", {}).items():
+            if _opacity(spec):
+                found.add((name, field))
+    return found
+
+
+def test_the_opaque_members_are_exactly_the_declared_ones(document: dict[str, Any]) -> None:
+    live = live_opaque_members(document)
+    declared = set(OPAQUE_MEMBERS)
+    undeclared = live - declared
+    assert not undeclared, (
+        "these response members are published as untyped objects and are not declared in "
+        f"OPAQUE_MEMBERS: {sorted(undeclared)}. Every client receives them as `unknown`. Either "
+        "type them in the Pydantic model, or declare them here with the reason and add a reader "
+        "to apps/web/src/api/recorded.ts."
+    )
+    assert not declared - live, (
+        f"these members are declared opaque but are now typed: {sorted(declared - live)}. "
+        "Delete the declaration, and the narrowing that existed for it."
+    )
+
+
+def test_the_opaque_guard_can_actually_see_an_opaque_member(document: dict[str, Any]) -> None:
+    """The clause that keeps the guard above honest.
+
+    A detector that matched nothing would let ``test_the_opaque_members_are_exactly_the_declared
+    _ones`` pass by finding an empty set on both sides. This asserts the detector fires on a
+    member we know is opaque, and does NOT fire on one we know is typed.
+    """
+    live = live_opaque_members(document)
+    assert ("ProxmoxVerificationOut", "infrastructure_checks") in live
+    assert ("ProxmoxTopologyOut", "topology") in live
+    assert ("ProxmoxTopologyOut", "guests") not in live
+    assert ("ProxmoxPlanOut", "isolation") not in live
+
+
+# --- no secret has a field to travel in ---------------------------------------------------------
+
+FORBIDDEN_FIELD_SUBSTRINGS = (
+    "password",
+    "secret_value",
+    "private_key",
+    "api_token",
+    "credential",
+)
+
+
+def test_no_proxmox_response_model_has_a_field_a_credential_could_travel_in(
+    document: dict[str, Any],
+) -> None:
+    """The remote-state KEY is published — an operator reasoning about a stuck apply needs to know
+    where state lives. The credential that opens it is not in this process at all.
+
+    A field-NAME scan and nothing more. It cannot prove a credential is absent from a free-text
+    ``detail``; it proves only that nobody added a field for one, which is the thing a review is
+    most likely to miss.
+    """
+    for name, model in document["components"]["schemas"].items():
+        if not name.startswith("Proxmox"):
+            continue
+        for field in model.get("properties", {}):
+            lowered = field.lower()
+            for forbidden in FORBIDDEN_FIELD_SUBSTRINGS:
+                assert forbidden not in lowered, f"{name}.{field} could carry a credential"
+
+
+def test_unguardable_flag_values_is_the_only_flag_shaped_member_and_stays_a_plan_member(
+    document: dict[str, Any],
+) -> None:
+    """``ProxmoxPlanOut.unguardable_flag_values`` is the one member whose NAME says "flag value",
+    and it is a deliberate exception rather than an oversight.
+
+    ``proxmox_lifecycle.unguardable_flag_values`` returns the template's flag values that no
+    substring scan can prove absent — DVWA's flag is the word ``password``, which occurs inside a
+    public challenge key, so searching for it would fire on a clean payload. Naming them IS the
+    finding, and an operator cannot act on "some flag is unguardable".
+
+    Two things are pinned here. It stays on ``ProxmoxPlanOut`` and spreads to no other model, and
+    it stays nullable so "no plan compiled" is distinguishable from "every flag is guardable" —
+    the second is a real, and much stronger, claim. Whether an authenticated reader of
+    ``/proxmox/plan`` should see template flag values at all is a question for the API owner; it is
+    a deliberate published value today, and this test exists so a change to it is a decision.
+    """
+    flag_members = {
+        (name, field)
+        for name, model in document["components"]["schemas"].items()
+        for field in model.get("properties", {})
+        if "flag" in field.lower()
+    }
+    assert flag_members == {("ProxmoxPlanOut", "unguardable_flag_values")}
+    assert is_nullable(prop(document, "ProxmoxPlanOut", "unguardable_flag_values"))

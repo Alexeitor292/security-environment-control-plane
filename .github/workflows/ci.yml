@@ -70,12 +70,25 @@ jobs:
           validate_definition(yaml.safe_load(open("docs/scenarios/web-breach-101.yaml")))
           print("web-breach-101 is valid against the schema")
           PY
+      - name: OpenAPI artifact is in step with the application
+        # LINK 1 OF 2. The committed contract must be what the running app publishes.
+        #
+        # This repository has been bitten repeatedly by a document that lagged the code, so drift
+        # is a red gate and not a discovery. `--check` re-exports from the live FastAPI app and
+        # compares BYTES; it never writes, because a guard that repairs what it detects reports
+        # success on a tree that was broken when it arrived.
+        #
+        # LINK 2 is `Generated API types are in step with the contract` in the `frontend` job,
+        # which regenerates the TypeScript from this same committed document. Together they chain
+        # app -> contract -> client, and neither link can go stale unnoticed.
+        run: uv run python scripts/export_openapi.py --check
       - name: Architecture boundary checks (fast duplicate signal)
         # Also covered by the sharded corpus; run here as an early architectural signal.
         run: >-
           uv run pytest
           tests/test_architecture_boundary.py
           tests/test_pr5f_discovery_activation_boundary.py
+          tests/test_openapi_artifact.py
           -q
 
   # --- machine-enforced complete-coverage proof ------------------------------------------------
@@ -2014,6 +2027,14 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - name: Install
         run: npm ci
+      - name: Generated API types are in step with the contract
+        # LINK 2 OF 2 — see `OpenAPI artifact is in step with the application` in `backend-static`.
+        #
+        # Regenerates src/api/generated/openapi.ts from the committed contracts/openapi/openapi.json
+        # and compares BYTES. It runs BEFORE the type check on purpose: a stale generated file
+        # usually still compiles, so `tsc` would go green over types that describe an API the
+        # server no longer serves, and the failure would surface much later as a runtime surprise.
+        run: npm run generate:api:check
       - name: Type check
         run: npm run typecheck
       - name: Lint
