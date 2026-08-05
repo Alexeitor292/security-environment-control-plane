@@ -36,14 +36,53 @@
 
 import type { AdapterProvenance } from "./provenance";
 
-/** Why a surface has no data, when the reason is not an error. */
+/**
+ * Why a surface has no data, when the reason is not an error.
+ *
+ * The three exist because they fund DIFFERENT WORK, and that is the whole value
+ * of splitting them. Two are backend items and one is not — stated here rather
+ * than in a document, so nobody decides from prose which team a gap belongs to.
+ */
 export type UnavailableReason =
-  /** No registered route serves this concept at all. */
+  /**
+   * No registered route serves this concept at all.
+   *
+   * FIX: a new route. BACKEND (P7-A). Example: no facet surface exists for the
+   * distinct set of audit outcomes, so a filter can only offer what the loaded
+   * page happens to contain.
+   */
   | "no-endpoint"
-  /** A route exists but requires an id that nothing enumerates. */
+  /**
+   * A route exists, but nothing enumerates the id it requires.
+   *
+   * FIX: a new COLLECTION route so the parent can be listed. BACKEND (P7-A), and
+   * a different ask from `no-endpoint` — the serving route already exists and
+   * must not be rebuilt. Example: change-sets are served per manifest, and
+   * nothing lists manifests; plans ARE reachable via exercises, so the chain
+   * breaks at exactly one level.
+   */
   | "parent-unreachable"
-  /** A route exists and requires an id the operator has not chosen yet. */
+  /**
+   * A route exists and the operator has not chosen the parent yet.
+   *
+   * FIX: a selection step. FRONTEND (P7-D) — no backend work at all. Example:
+   * evidence is range-scoped and `GET /api/v1/ranges` exists, so the surface is
+   * buildable behind a range picker.
+   */
   | "parent-not-selected";
+
+/**
+ * Which side owns the fix for each reason.
+ *
+ * Exported so a surface can say who is blocked rather than only that it is
+ * blocked, and so an inventory of backend gaps can be derived from live states
+ * instead of maintained by hand.
+ */
+export const UNAVAILABLE_OWNER = {
+  "no-endpoint": "backend",
+  "parent-unreachable": "backend",
+  "parent-not-selected": "frontend",
+} as const satisfies Record<UnavailableReason, "backend" | "frontend">;
 
 export type QueryState<T> =
   | { readonly status: "loading" }

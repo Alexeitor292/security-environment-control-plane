@@ -111,11 +111,17 @@ Verifying one entry that had been reported as "no longer absent" produced a
 distinction the binary absent/present cannot express. The fix differs per
 category, and only one of them is backend work.
 
-| Category | Meaning | Buildable? | Fix |
-| --- | --- | --- | --- |
-| `no-endpoint` | nothing serves the concept | no | a new route |
-| `parent-unreachable` | a route exists, but nothing yields the id it needs | no | **a new collection route — real backend work** |
-| `parent-not-selected` | a route exists and the operator has not chosen the parent yet | **yes** | a selection step in the UI |
+| Category | Meaning | Buildable? | Fix | Owner |
+| --- | --- | --- | --- | --- |
+| `no-endpoint` | nothing serves the concept | no | a new route | **backend (P7-A)** |
+| `parent-unreachable` | a route exists, but nothing yields the id it needs | no | a new **collection** route — the serving route already exists and must not be rebuilt | **backend (P7-A)** |
+| `parent-not-selected` | a route exists and the operator has not chosen the parent yet | **yes** | a selection step | frontend (P7-D) |
+
+**Two of the three are backend, not one**, and they are different asks — which is
+exactly why the split earns its keep. Ownership is encoded in
+`UNAVAILABLE_OWNER` in the seam, with `satisfies Record<UnavailableReason, …>`,
+so a new reason without an owner is a compile error rather than a prose
+question.
 
 Encoded in the seam as `UnavailableReason`, so a page consuming a
 `parent-unreachable` query renders differently from one awaiting a selection.

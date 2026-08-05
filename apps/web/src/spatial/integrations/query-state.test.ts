@@ -18,7 +18,9 @@ import {
   rowsOf,
   served,
   unavailable,
+  UNAVAILABLE_OWNER,
   type QueryState,
+  type UnavailableReason,
 } from "./query-state";
 
 const ROW = { id: "1" };
@@ -119,5 +121,34 @@ describe("provenance is carried per query", () => {
     // Defaulting to "live" here would label an unloaded page as a real reading.
     expect(pageProvenance([])).toBeNull();
     expect(pageProvenance([loading()])).toBeNull();
+  });
+});
+
+describe("unavailable reasons fund different work", () => {
+  it("assigns an owner to every reason, exhaustively", () => {
+    // `satisfies Record<UnavailableReason, ...>` makes a new reason without an
+    // owner a compile error. This asserts the runtime shape too, so the mapping
+    // cannot be emptied without a test failing as well as the build.
+    const reasons: UnavailableReason[] = [
+      "no-endpoint",
+      "parent-unreachable",
+      "parent-not-selected",
+    ];
+    for (const r of reasons) {
+      expect(UNAVAILABLE_OWNER[r], r).toMatch(/^(backend|frontend)$/);
+    }
+    expect(Object.keys(UNAVAILABLE_OWNER).sort()).toEqual([...reasons].sort());
+  });
+
+  it("puts TWO of the three on the backend, not one", () => {
+    // The distinction that earns the three-way split: `no-endpoint` needs a new
+    // route and `parent-unreachable` needs a new COLLECTION route -- different
+    // asks, both backend. Only the unselected parent is frontend work.
+    const backend = Object.entries(UNAVAILABLE_OWNER)
+      .filter(([, owner]) => owner === "backend")
+      .map(([reason]) => reason)
+      .sort();
+    expect(backend).toEqual(["no-endpoint", "parent-unreachable"]);
+    expect(UNAVAILABLE_OWNER["parent-not-selected"]).toBe("frontend");
   });
 });
