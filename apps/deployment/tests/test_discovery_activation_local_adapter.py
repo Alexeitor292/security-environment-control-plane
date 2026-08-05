@@ -274,11 +274,15 @@ def _probe(*, published: bool = True, enabled: bool = True) -> str:
                 "ordinary_queue": True,
                 "bundle_prep_loop_started": True,
             },
+            # STATES, not booleans, and derived by the probe rather than read from constants.
+            # `real_provisioning_disabled` is gone: it claimed a capability was absent and had
+            # reported `true` for six merges after provisioning shipped. `plan_only_process_sealed`
+            # became `plan_only_process_gated` — the constant it read is `False` by design, so what
+            # is exercised now is that the gate in front of the executor still refuses.
             "safety_seals": {
-                "generic_activation_subprocess_sealed": True,
-                "generic_executor_subprocess_sealed": True,
-                "plan_only_process_sealed": False,
-                "real_provisioning_disabled": True,
+                "generic_activation_subprocess_sealed": "sealed",
+                "generic_executor_subprocess_sealed": "sealed",
+                "plan_only_process_gated": "sealed",
             },
             "worker_keys": {
                 "metadata_safe": True,

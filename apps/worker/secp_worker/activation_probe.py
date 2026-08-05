@@ -30,6 +30,7 @@ from typing import Any
 import secp_api
 
 import secp_worker
+from secp_worker.safety_seal_probe import REQUIRED_SEAL_NAMES
 
 CONTRACT_VERSION = "secp.worker.activation-probe/v1"
 ORDINARY_TASK_QUEUE = "secp-orchestration"
@@ -161,12 +162,10 @@ def _base_payload() -> dict[str, Any]:
             "metadata_safe": False,
             "public_node_matches_local_keys": False,
         },
-        "safety_seals": {
-            "generic_activation_subprocess_sealed": False,
-            "generic_executor_subprocess_sealed": False,
-            "plan_only_process_sealed": True,
-            "real_provisioning_disabled": False,
-        },
+        # The closed/empty payload: every seal UNDETERMINED, which is the honest default. It used
+        # to be a mix of booleans chosen to be "the unsafe value" for each key, which required
+        # knowing each key's polarity; a state vocabulary does not have polarity.
+        "safety_seals": dict.fromkeys(sorted(REQUIRED_SEALS), "undetermined"),
         "worker_node": None,
         "lifecycle": _empty_lifecycle_payload(),
         "runtime_overlay_sha256": None,
@@ -227,26 +226,30 @@ def _default_loop_started() -> bool:
     return bundle_loop_marker.is_current(expected_worker_pid=worker_pid)
 
 
-def _default_seals() -> dict[str, bool]:
-    """Read the four reviewed code constants without constructing an executor or operator."""
+def _default_seals() -> dict[str, str]:
+    """Re-DERIVE each safety seal by exercising the surface it describes.
 
-    from secp_api.routers import providers
+    This used to read four module-level booleans, which is a restatement rather than evidence: each
+    was a claim ABOUT code elsewhere, and nothing checked the code still behaved that way. Deleting
+    the guard inside ``SubprocessProcessExecutor.__init__`` left every seal reporting ``true``.
 
-    from secp_worker.plan_gen import process_boundary
-    from secp_worker.provisioning import activation, process_executor
+    And one of them was false. ``real_provisioning_disabled`` reported ``true`` while #105-#110
+    shipped desired-state compilation, plan generation, apply authorization, observed verification,
+    destroy authorization and the residue proof — for six merges, in the payload published as
+    ``safety_seals``. It is replaced by ``apply_execution_absent``, which asks a question that can
+    be answered from the durable record ("has an apply ever been observed executing?") instead of a
+    question about capability that has a false answer.
 
-    return {
-        "generic_activation_subprocess_sealed": activation._B1A_SUBPROCESS_SEALED,
-        "generic_executor_subprocess_sealed": process_executor._B1A_SUBPROCESS_SEALED,
-        "plan_only_process_sealed": process_boundary._PLAN_ONLY_PROCESS_SEALED,
-        # Reads the SEAL constant, not the API's capability surface. These were the same symbol
-        # until SECP-P7-A: `providers.PROVISIONING_ENABLED` served double duty as this seal input
-        # AND as the value `GET /providers/capabilities` reported to operators. The capability
-        # surface is now derived (`secp_api.provider_capabilities`); this stays a reviewed constant,
-        # with the same value it has always had, because it answers a different question — whether
-        # the worker's execution boundary is sealed, alongside the three seals above it.
-        "real_provisioning_disabled": providers.REAL_PROVISIONING_SEALED,
-    }
+    Values are STATES, not booleans: ``sealed`` / ``unsealed`` / ``undetermined``. A derivation that
+    could not run reports ``undetermined``, and the validator below treats anything that is not
+    ``sealed`` as not sealed — so a broken probe fails the posture rather than passing it.
+
+    Still constructs no operator and contacts nothing: every derivation is a call that is EXPECTED
+    to refuse. See :mod:`secp_worker.safety_seal_probe`.
+    """
+    from secp_worker.safety_seal_probe import derive_seals, seal_payload
+
+    return seal_payload(derive_seals())
 
 
 def _module_loaded_from_overlay(module: object, relative_path: str) -> bool:
@@ -854,18 +857,31 @@ def _configuration(settings: object, payload: dict[str, Any]) -> tuple[uuid.UUID
     return organization_id, label
 
 
-def _validated_seals(raw: object) -> dict[str, bool] | None:
-    expected = {
-        "generic_activation_subprocess_sealed": True,
-        "generic_executor_subprocess_sealed": True,
-        "plan_only_process_sealed": False,
-        "real_provisioning_disabled": True,
-    }
-    if not isinstance(raw, dict) or set(raw) != set(expected):
+#: The seals the probe must report. Imported from the module that PRODUCES them rather than
+#: restated here — see :data:`~secp_worker.safety_seal_probe.REQUIRED_SEAL_NAMES`.
+#:
+#: An EXACT key set, so a seal that disappears is drift rather than a smaller-but-passing report,
+#: and a seal that appears without being considered is drift too. ``plan_only_process_gated``
+#: replaced ``plan_only_process_sealed``: that constant is ``False`` by design (the reviewed PR5B
+#: activation flipped it), so reading it said nothing — what matters is that the GATE in front of
+#: the plan-only executor still refuses, which is what is now exercised.
+REQUIRED_SEALS = REQUIRED_SEAL_NAMES
+
+
+def _validated_seals(raw: object) -> dict[str, str] | None:
+    """Accept the seal report only when every required seal was exercised AND held.
+
+    ``undetermined`` fails here exactly as ``unsealed`` does. That is the whole point of having a
+    third state: a derivation that could not run is not evidence of a seal, and treating it as one
+    would make a broken probe indistinguishable from a safe deployment.
+    """
+    if not isinstance(raw, dict) or set(raw) != REQUIRED_SEALS:
         return None
-    if any(type(raw[key]) is not bool for key in expected):
+    if any(not isinstance(raw[key], str) for key in REQUIRED_SEALS):
         return None
-    return raw if raw == expected else None
+    if any(raw[key] != "sealed" for key in REQUIRED_SEALS):
+        return None
+    return dict(raw)
 
 
 def _public_node_payload(

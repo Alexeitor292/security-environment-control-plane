@@ -54,11 +54,21 @@ def _settings(**updates):
 
 
 def _seals(**updates):
+    """The seal report, as STATES rather than booleans.
+
+    Was four booleans read from module constants, one of which (``real_provisioning_disabled``)
+    reported ``True`` for six merges after provisioning shipped. The probe now re-derives each seal
+    by exercising the surface it describes, and reports ``sealed`` / ``unsealed`` /
+    ``undetermined`` — the third value being the one a boolean could not carry.
+
+    ``plan_only_process_sealed`` became ``plan_only_process_gated``: that constant is ``False`` by
+    design, so reading it proved nothing; what is exercised now is that the gate in front of the
+    plan-only executor still refuses.
+    """
     values = {
-        "generic_activation_subprocess_sealed": True,
-        "generic_executor_subprocess_sealed": True,
-        "plan_only_process_sealed": False,
-        "real_provisioning_disabled": True,
+        "generic_activation_subprocess_sealed": "sealed",
+        "generic_executor_subprocess_sealed": "sealed",
+        "plan_only_process_gated": "sealed",
     }
     values.update(updates)
     return values
@@ -755,17 +765,35 @@ def test_unhealthy_or_wrong_queue_refuses_before_seals_and_database(readiness):
 @pytest.mark.parametrize(
     "drift",
     [
-        {"generic_activation_subprocess_sealed": False},
-        {"generic_executor_subprocess_sealed": False},
-        {"plan_only_process_sealed": True},
-        {"real_provisioning_disabled": False},
+        # Every seal, in every non-holding state. `undetermined` must refuse exactly as `unsealed`
+        # does: a derivation that could not run is not evidence of a seal, and accepting it would
+        # make a broken probe indistinguishable from a safe deployment.
+        {"generic_activation_subprocess_sealed": "unsealed"},
+        {"generic_activation_subprocess_sealed": "undetermined"},
+        {"generic_executor_subprocess_sealed": "unsealed"},
+        {"generic_executor_subprocess_sealed": "undetermined"},
+        {"plan_only_process_gated": "unsealed"},
+        {"plan_only_process_gated": "undetermined"},
+        # A seal that vanishes is drift, not a smaller-but-passing report.
+        {"generic_executor_subprocess_sealed": None},
+        # And a seal nobody considered is drift too.
+        {"an_unconsidered_seal": "sealed"},
     ],
 )
 def test_any_safety_seal_drift_refuses_before_database(drift):
     def unexpected(*_args):
         raise AssertionError("seal refusal must precede the database query")
 
-    result = _run(seals=lambda: _seals(**drift), node=unexpected)
+    def _drifted():
+        values = _seals()
+        for key, value in drift.items():
+            if value is None:
+                values.pop(key, None)
+            else:
+                values[key] = value
+        return values
+
+    result = _run(seals=_drifted, node=unexpected)
 
     assert result["reason_code"] == "safety_seal_drift"
     assert result["worker_node"] is None
