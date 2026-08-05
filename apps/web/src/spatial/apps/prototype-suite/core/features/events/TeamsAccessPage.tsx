@@ -237,7 +237,7 @@ export default function TeamsAccessPage() {
       title: `Rotate gateway keys — ${danger?.team.name ?? ''}`,
       operation: `rotate gateway key material for ${danger?.team.name ?? ''}`,
       preview: [
-        'Generate new gateway key pairs worker-side (values never reach the control plane)',
+        'Generate new gateway key pairs worker-side (this interface handles references, not key values)',
         'All public-key fingerprints change',
         'Participants must re-import connection profiles',
       ],

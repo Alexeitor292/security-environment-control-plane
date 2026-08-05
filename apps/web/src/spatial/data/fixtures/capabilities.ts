@@ -10,7 +10,7 @@ export const capabilityFacts: CapabilityFact[] = [
   {
     key: 'infrastructure.discovery',
     status: 'read-only',
-    label: 'Discovery is read-only and sealed by default',
+    label: 'Discovery collects inventory without modifying it',
     note: 'Controlled worker-owned discovery exists behind explicit gates. Candidate plans are non-executable.',
   },
   {
@@ -33,8 +33,8 @@ export const capabilityFacts: CapabilityFact[] = [
   },
   {
     key: 'deployments.apply',
-    status: 'sealed',
-    label: 'Real provisioning remains sealed',
-    note: 'Plan-only behavior exists, but apply and destroy are not enabled against real infrastructure.',
+    status: 'partial',
+    label: 'Provisioning support varies by provider',
+    note: 'The simulator implements the full lifecycle against database records. Provider-backed provisioning exists for Proxmox; whether an apply can run is determined by the control plane and is not shown here.',
   },
 ]

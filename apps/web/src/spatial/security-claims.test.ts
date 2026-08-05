@@ -1,38 +1,50 @@
 // No page may assert a security property it does not observe.
 //
 // THE INCIDENT THIS ENCODES. `ProvidersPage` shipped a hand-written table
-// stating that for Proxmox every mutating operation -- plan, apply, reset,
-// destroy -- was `refused`, that discovery was GET-only, and that refusals were
-// audited. Nothing verified any of it. By the time it was migrated it was
-// already false: the Proxmox apply, destroy, verification and residue-proof
-// paths had shipped, so the page was telling operators that operations were
-// refused while the endpoints to perform them existed.
+// stating that for Proxmox every mutating operation was `refused`, that
+// discovery was GET-only, and that refusals were audited. Nothing verified any
+// of it, and by the time it was migrated it was already false: the Proxmox
+// apply, destroy, verification and residue-proof paths had shipped.
 //
 // WHY THE OBVIOUS FIX WAS REJECTED. Sourcing the table from
-// `GET /api/v1/providers/capabilities` looks like the correct repair and is
-// worse. That endpoint returns a hardcoded constant (`PROVISIONING_ENABLED =
-// False`) and is stale in the same way. Wiring the page to it would relocate the
-// false claim from the frontend to the backend and make it look OBSERVED,
-// because a claim sourced from an API reads as verified. Hardening a lie is
-// worse than leaving it visibly hand-written.
+// `GET /api/v1/providers/capabilities` looks like the repair and is worse: that
+// endpoint returns a hardcoded constant and is stale in the same way. Wiring
+// them together would relocate the false claim into an API response, where it
+// reads as OBSERVED rather than hand-written. That is a harder lie to catch.
 //
-// THE RULE THIS ENFORCES. A fixture label is an adequate caveat for a deployment
-// count. It is NOT adequate for "every mutating operation is refused", because
-// an operator may act on that, and the error runs in the direction where someone
-// gets hurt. Under-claiming is recoverable; over-claiming safety is not. So
-// security properties are a distinct class: they may render as UNKNOWN, never as
-// a comforting default.
+// THE RULE. A fixture label is an adequate caveat for a deployment count. It is
+// NOT adequate for "every mutating operation is refused", because an operator
+// may act on that and the error runs in the direction where someone gets hurt.
+// Security properties may render as UNKNOWN; never as a comforting default.
 //
-// WHY A STRING SCAN IS LEGITIMATE HERE. Normally "assert the copy" is the
-// self-restating anti-pattern this codebase avoids. This is the inverse: it
-// asserts the ABSENCE of a class of claim across every page, including pages
-// nobody has written yet. It cannot pass by restating itself, because it owns
-// none of the text it inspects. `src/auth/boundary.test.ts` establishes the same
-// shape for forbidden storage APIs.
+// ---------------------------------------------------------------------------
+// WHY THIS FILE IS BUILT THE WAY IT IS
+//
+// Its first version was a list of forbidden phrases. That version missed
+// "no secret manager has ever been contacted" -- a claim of exactly the class it
+// existed to catch -- because the phrase was not on the list. An include list
+// cannot see what nobody thought of, and a guard that reads as comprehensive
+// while being partial is worse than no guard.
+//
+// So the classification is INVERTED, the same way the authorization guard is:
+// key on the CLASS OF CLAIM rather than on phrasing. Every absolute assertion in
+// user-facing copy must be either removed or entered in ACKNOWLEDGED below with
+// a written justification. A new absolute claim therefore fails BY DEFAULT,
+// which is the property a pattern list can never have.
+//
+// SCOPE, AND WHAT IS DELIBERATELY LEFT OUT. `only` and `read-only` are absolute
+// quantifiers too, and they are NOT enforced here. Measured against the migrated
+// tree they produce 84 hits, overwhelmingly legitimate scoping description
+// ("worker-only", "Simulator-only", "read-only inventory"). Requiring a written
+// justification for each would produce a list nobody reads, and a rubber-stamped
+// list is worse than no list because it looks like review. The enforced class is
+// the one where being wrong is dangerous: assertions that something CANNOT
+// happen or has NEVER happened. That narrowing is a judgement, and it is stated
+// here rather than left implicit so it can be argued with.
 
 import { describe, expect, it } from "vitest";
 
-const PAGE_SOURCES = import.meta.glob("./apps/**/features/**/*.tsx", {
+const PAGE_SOURCES = import.meta.glob("./**/*.{ts,tsx}", {
   query: "?raw",
   import: "default",
   eager: true,
@@ -45,52 +57,128 @@ function code(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 
+/** String literals -- an approximation of user-facing copy, and a good one here. */
+const STRING_LITERAL = /'([^'\n]{12,})'|"([^"\n]{12,})"|`([^`]{12,}?)`/g;
+
 /**
- * Assertions about enforcement that no page can observe.
- *
- * Each is phrased to catch a claim, not a discussion. "permits or refuses" in a
- * sentence explaining that the page does not know is fine; "is refused" is not.
+ * Absolute assertions: claims that something CANNOT happen, or has NEVER
+ * happened. Being wrong about one of these is dangerous in the direction that
+ * matters, which is what earns them a default-deny.
  */
-const FORBIDDEN_CLAIMS: { pattern: RegExp; why: string }[] = [
-  { pattern: /\bis refused\b/i, why: "asserts an operation is refused" },
-  { pattern: /\bare refused\b/i, why: "asserts operations are refused" },
-  { pattern: /every mutating operation/i, why: "asserts blanket refusal of mutations" },
-  { pattern: /refusal is audited|audited refusal/i, why: "asserts refusals are audited" },
-  { pattern: /never attempted/i, why: "asserts an operation is never attempted" },
-  { pattern: /\bGET-only\b/i, why: "asserts a request-method restriction is enforced" },
-  { pattern: /hard-sealed|provisioning sealed/i, why: "asserts provisioning cannot occur" },
-  {
-    pattern: /not real infrastructure/i,
-    why: "asserts no real infrastructure is touched -- the exact claim that stayed green for months after it became false",
-  },
+const ABSOLUTE_CLAIM =
+  /\b(never|always|no real|has ever|cannot|impossible|hard-sealed|is refused|are refused|by construction|sealed)\b/gi;
+
+/**
+ * Claims reviewed and kept, with the reason. `[file, phrase, count]`.
+ *
+ * The COUNT is part of the key on purpose: adding a second absolute claim to a
+ * file that already has one acknowledged would otherwise pass silently. A
+ * changed count fails and has to be re-justified.
+ */
+const ACKNOWLEDGED: [file: string, phrase: string, count: number][] = [
+  // "sealed enclave" is the NAME of a network segment in a cyber-range scenario
+  // fixture, not an assertion about the platform's own enforcement.
+  ["apps/deployments/prototype/mocks/deployments.ts", "sealed", 1],
+  ["apps/deployments/prototype/mocks/events.ts", "sealed", 2],
+  ["apps/prototype-suite/core/mocks/deployments.ts", "sealed", 1],
+  ["apps/prototype-suite/core/mocks/events.ts", "sealed", 2],
+  ["apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "sealed", 1],
+
+  // The fixture banner itself. "no real infrastructure" here is the honest
+  // provenance label, not a safety guarantee about a live system -- it is the
+  // one place the phrase is doing the right job.
+  ["apps/prototype-suite/core/components/prototype/PrototypeBanner.tsx", "no real", 1],
+
+  // A statement about the SIMULATOR, whose entire purpose is to not provision.
+  ["apps/prototype-suite/core/features/scenarios/ScenarioOverviewPage.tsx", "no real", 1],
+
+  // Product rules about this application's own behaviour, which it can observe:
+  // a wizard's validation rule, a placement policy, a role definition, and the
+  // immutability of a content-hashed version.
+  ["apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "cannot", 1],
+  ["apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "never", 1],
+  ["apps/prototype-suite/core/features/infrastructure/PlacementPage.tsx", "never", 2],
+  ["apps/prototype-suite/core/features/platform/IdentityPage.tsx", "never", 2],
+  ["apps/prototype-suite/core/features/scenarios/ScenarioVersionsPage.tsx", "never", 1],
 ];
 
+function acknowledgedCount(file: string, phrase: string): number | undefined {
+  return ACKNOWLEDGED.find(([f, p]) => f === file && p === phrase)?.[2];
+}
+
+/** Absolute claims per (file, phrase), across the migrated tree. */
+function absoluteClaims(): Map<string, number> {
+  const found = new Map<string, number>();
+
+  for (const [path, src] of Object.entries(PAGE_SOURCES)) {
+    if (path.includes(".test.")) continue;
+    const rel = path.replace(/^\.\//, "");
+    const body = code(src);
+
+    for (const lit of body.matchAll(STRING_LITERAL)) {
+      const text = lit[1] ?? lit[2] ?? lit[3] ?? "";
+      for (const m of text.matchAll(ABSOLUTE_CLAIM)) {
+        // "|" cannot occur in a path or a phrase, so the key is unambiguous;
+        // a space separator split "no real" in the middle.
+        const key = `${rel}|${m[0].toLowerCase()}`;
+        found.set(key, (found.get(key) ?? 0) + 1);
+      }
+    }
+  }
+
+  return found;
+}
+
 describe("security-property claims", () => {
-  it("scans a real set of pages (guard is not vacuous)", () => {
-    // A glob that matched nothing would make every assertion below pass while
-    // inspecting no files at all.
-    expect(Object.keys(PAGE_SOURCES).length).toBeGreaterThan(30);
+  it("scans a real set of sources (guard is not vacuous)", () => {
+    expect(Object.keys(PAGE_SOURCES).length).toBeGreaterThan(150);
     expect(Object.keys(PAGE_SOURCES)).toContain(PROVIDERS_PAGE);
   });
 
-  it("asserts no unobserved enforcement claim on any page", () => {
-    const violations: string[] = [];
+  it("requires every absolute claim to be acknowledged with a reason", () => {
+    // THE LOAD-BEARING ASSERTION. A newly written "nothing can ever reach the
+    // host" is unacknowledged by construction and fails here. The message tells
+    // whoever trips it what the choice is, because they will not have read the
+    // header.
+    const unacknowledged: string[] = [];
 
-    for (const [path, src] of Object.entries(PAGE_SOURCES)) {
-      const body = code(src);
-      for (const { pattern, why } of FORBIDDEN_CLAIMS) {
-        if (pattern.test(body)) violations.push(`${path}: ${why} (/${pattern.source}/)`);
+    for (const [key, count] of absoluteClaims()) {
+      const [file, phrase] = key.split("|");
+      const allowed = acknowledgedCount(file, phrase);
+      if (allowed === undefined) {
+        unacknowledged.push(`${file}: new absolute claim "${phrase}" (${count}x)`);
+      } else if (allowed !== count) {
+        unacknowledged.push(
+          `${file}: "${phrase}" count changed ${allowed} -> ${count}; re-justify or revert`,
+        );
       }
     }
 
-    expect(violations, `Unobserved security claims found:\n${violations.join("\n")}`).toEqual([]);
+    expect(
+      unacknowledged,
+      `Unacknowledged absolute claim(s):\n${unacknowledged.join("\n")}\n\n` +
+        "An absolute claim in user-facing copy must be either removed or entered in " +
+        "ACKNOWLEDGED with a written reason. If it is a claim about ENFORCEMENT that this " +
+        "application cannot observe -- what a provider refuses, what cannot reach a host, " +
+        "what has never been contacted -- remove it and render the state as unknown. " +
+        "A fixture label does not make a false security claim safe.",
+    ).toEqual([]);
+  });
+
+  it("keeps the acknowledgement list free of stale entries", () => {
+    // An entry left behind after the copy changed would silently pre-authorize a
+    // future claim in that file.
+    const live = absoluteClaims();
+    const stale = ACKNOWLEDGED.filter(([f, p]) => !live.has(`${f}|${p}`)).map(
+      ([f, p]) => `${f}: "${p}"`,
+    );
+    expect(stale, `Stale acknowledgements:\n${stale.join("\n")}`).toEqual([]);
   });
 
   it("renders provider capability as not-determined, in the unknown tone", () => {
-    // The behavioural half. The scan above proves the page stopped SAYING the
-    // wrong thing; this proves it says the right thing in the right register --
-    // `unknown`, never `ok` (which reads as permitted) and never `error` (which
-    // reads as refused). Both of those would be assertions the page cannot make.
+    // The behavioural half: the page says the right thing in the right register
+    // -- `unknown`, never `ok` (reads as permitted), never `error` (reads as
+    // refused). Both would be assertions the page cannot make.
     const src = PAGE_SOURCES[PROVIDERS_PAGE];
 
     expect(src).toMatch(/unverified:\s*\{\s*tone:\s*['"]unknown['"]/);

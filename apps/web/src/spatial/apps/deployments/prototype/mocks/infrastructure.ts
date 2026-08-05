@@ -141,14 +141,14 @@ export const integrations: IntegrationInfo[] = [
     category: 'virtualization',
     status: 'read-only',
     detail:
-      'Live read-only discovery collector implemented; provisioning sealed behind activation.',
+      'Live discovery collector implemented; provisioning is carried out by the worker runner, not from this interface.',
   },
   {
     id: 'int-opentofu',
     name: 'OpenTofu',
     category: 'automation',
     status: 'plan-only',
-    detail: 'Plan generation implemented; apply sealed (worker-only runner, activation-gated).',
+    detail: 'Plan generation implemented; apply is carried out by the worker runner, not from this interface.',
   },
   {
     id: 'int-temporal',

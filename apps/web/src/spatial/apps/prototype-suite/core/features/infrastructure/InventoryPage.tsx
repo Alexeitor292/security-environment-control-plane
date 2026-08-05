@@ -236,7 +236,7 @@ export default function InventoryPage() {
           <Button
             size="sm"
             disabled
-            title="Enqueue-only; the live discovery path is sealed behind an 8-gate activation chain — not wired in this prototype"
+            title="Enqueued through the queue; availability of the live discovery path depends on the activation chain configured for the target, and it is not wired in this prototype"
           >
             Run discovery
           </Button>

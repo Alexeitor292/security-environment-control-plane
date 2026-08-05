@@ -80,12 +80,12 @@ export const capabilities: Record<string, CapabilityFact> = {
   'deployments.plan': {
     status: 'implemented',
     label: 'Plans + approval gates are real',
-    note: 'Deterministic plans, explicit approval with pinned content hashes, and audited refusals are implemented. Approval is a decision only — it never executes.',
+    note: 'Deterministic plans and explicit approval with pinned content hashes are implemented. Approval records a decision; it is a separate step from carrying the plan out.',
   },
   'deployments.apply': {
-    status: 'sealed',
-    label: 'Real provisioning is sealed',
-    note: 'The OpenTofu subprocess is hard-sealed (_B1A_SUBPROCESS_SEALED = True). Plan-only execution exists but its composition is disabled. No real host has ever been contacted.',
+    status: 'partial',
+    label: 'Provisioning support varies by provider',
+    note: 'The simulator implements the full lifecycle against database records. Provider-backed provisioning exists for Proxmox. Whether an apply can run, and under what authorization, is determined by the control plane and is not shown here.',
   },
   'deployments.reset': {
     status: 'simulated',
@@ -109,8 +109,8 @@ export const capabilities: Record<string, CapabilityFact> = {
   },
   'infrastructure.discovery': {
     status: 'read-only',
-    label: 'Discovery is read-only and sealed by default',
-    note: 'A controlled worker-owned read-only discovery path exists behind an 8-gate chain; candidate plans are non-executable. No real endpoint has been contacted.',
+    label: 'Discovery collects inventory without modifying it',
+    note: 'A worker-owned discovery path collects inventory; candidate plans derived from it are review material rather than an execution artifact. Whether the live path is available depends on the activation chain configured for the target.',
   },
   'infrastructure.placement': {
     status: 'planned',
@@ -138,9 +138,9 @@ export const capabilities: Record<string, CapabilityFact> = {
     note: 'OIDC bearer + PKCE auth is implemented; authorization is DB-owned. There is no identity-lifecycle UI/API today.',
   },
   'platform.secrets': {
-    status: 'sealed',
-    label: 'Secrets stay worker-side; OpenBao adapter is sealed',
-    note: 'Only opaque secret references exist in the control plane. An OpenBao resolver is committed but sealed by default; no secret manager has been contacted.',
+    status: 'partial',
+    label: 'Opaque references only; values resolve worker-side',
+    note: 'The control plane holds opaque references. Resolving a reference to a value is a worker-side concern and has no interface in this application.',
   },
   'platform.workflows': {
     status: 'partial',
