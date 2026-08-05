@@ -586,7 +586,43 @@ describe("enrollment route registration", () => {
   });
 
   it("adds no public route", () => {
-    const publicRoutes = MAIN.match(/path: "\/[a-z/-]*"/g) ?? [];
-    expect(publicRoutes.sort()).toEqual(['path: "/"', 'path: "/auth/callback"', 'path: "/login"']);
+    // Absolute-path routes are the only ones that can be public: child routes are declared
+    // relatively and inherit their parent's guard. `/login` and `/auth/callback` are public by
+    // design (ADR-018 / OIDC-B); everything else at this level must be authenticated.
+    //
+    // `/spatial` was added by P7-C (the spatial workspace). It is a top-level route rather than a
+    // child of `/` because it replaces the AppShell chrome rather than rendering inside it -- but
+    // it is wrapped in AuthBoundary, which the next assertion verifies rather than assumes.
+    const absoluteRoutes = MAIN.match(/path: "\/[a-z/-]*"/g) ?? [];
+    expect(absoluteRoutes.sort()).toEqual([
+      'path: "/"',
+      'path: "/auth/callback"',
+      'path: "/login"',
+      'path: "/spatial"',
+    ]);
+  });
+
+  it("guards every absolute route except the two intentional public ones", () => {
+    // The allowlist above is a tripwire: it fires on ANY new top-level route, which is what makes
+    // it useful, but on its own it only proves a path was declared -- not that it is protected.
+    // Widening it to admit a route would therefore quietly weaken it. This assertion carries the
+    // actual security property, so admitting a path to the list above costs a guarded mount here.
+    const PUBLIC_BY_DESIGN = new Set(["/login", "/auth/callback"]);
+
+    // Split the route table at each absolute `path:` declaration; a route's element is the text
+    // between its own declaration and the next one.
+    const declarations = [...MAIN.matchAll(/path: "(\/[a-z/-]*)"/g)];
+    expect(declarations.length).toBeGreaterThan(0);
+
+    for (const [index, match] of declarations.entries()) {
+      const path = match[1];
+      if (PUBLIC_BY_DESIGN.has(path)) continue;
+
+      const start = match.index ?? 0;
+      const end = index + 1 < declarations.length ? (declarations[index + 1].index ?? MAIN.length) : MAIN.length;
+      expect(MAIN.slice(start, end), `route ${path} must render inside AuthBoundary`).toMatch(
+        /<AuthBoundary>/,
+      );
+    }
   });
 });
