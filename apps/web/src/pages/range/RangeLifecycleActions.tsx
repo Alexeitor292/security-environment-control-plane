@@ -9,11 +9,8 @@ import {
   CyberButton,
   CyberCard,
   CyberInput,
-  CyberTable,
-  DataPanel,
   EmptyState,
   SafetyNotice,
-  StatusBadge,
   useAction,
 } from "../../components/ui";
 import { useAsync } from "../../hooks";
@@ -24,21 +21,18 @@ import {
   RANGE_ERROR_TEXT,
   RESET_IS_DISPATCHED_NOTE,
   blastRadius,
-  canResetInstance,
   destroyConfirmationMatches,
-  teamInstanceRows,
 } from "./range-view";
 
 /**
  * Page 9 — Reset and Destroy Confirmation.
  *
- * Reset is per team instance, because that is the granularity the API offers. Destroy is
- * range-wide, irreversible, and gated behind typing the range's exact name — the operator has to
- * read which range they are about to tear down, which a plain "are you sure" does not require.
+ * Both actions return 202 and run on the worker, so neither navigates away or claims completion:
+ * the layout keeps polling and the recorded state is what says the work finished.
  *
- * Both actions are offered only when the RECORDED phase permits them. The server re-checks
- * everything; these controls exist so the UI does not present a button whose only outcome is a
- * refusal.
+ * Destroy is gated behind typing the range's exact name, and states its blast radius from the
+ * server's own resource records first. A confirmation that cannot say what it will destroy is a
+ * button with a warning label.
  */
 export function RangeLifecycleActions() {
   const { range, lifecycle, reloadRange } = useRange();
@@ -47,51 +41,38 @@ export function RangeLifecycleActions() {
   const destroyAction = useAction({ codeText: RANGE_ERROR_TEXT });
   const [confirmation, setConfirmation] = useState("");
 
-  const instances = useAsync(
-    () => api.listInstances(range.id),
-    [range.id, range.lifecycle_state],
-  );
-  const topology = useAsync(
-    () => api.exerciseTopology(range.id).catch(() => []),
-    [range.id, range.lifecycle_state],
+  // `null` on failure rather than `[]`, so the blast radius can tell "nothing there" apart from
+  // "could not look" — the difference between an empty list and an unknown one.
+  const resources = useAsync(
+    () => api.listRangeResources(range.id).catch(() => null),
+    [range.id, range.updated_at],
   );
 
-  const teams = useMemo(
-    () => (instances.data ? teamInstanceRows(instances.data, topology.data ?? []) : []),
-    [instances.data, topology.data],
-  );
-  // Enumerated from the SERVER's records, and honest about gaps: a source that could not be read
-  // makes `complete` false, and the panel says the list may be short rather than presenting it as
-  // the whole story.
-  const radius = useMemo(
-    () => blastRadius(instances.data, topology.data),
-    [instances.data, topology.data],
-  );
-
+  const radius = useMemo(() => blastRadius(resources.data), [resources.data]);
   const allowed = permittedActions(lifecycle);
+  const canReset = allowed.includes("reset");
   const canDestroy = allowed.includes("destroy");
   const confirmed = destroyConfirmationMatches(confirmation, range.name);
 
   const refresh = useCallback(async () => {
-    await Promise.all([reloadRange(), instances.reload()]);
-  }, [reloadRange, instances]);
+    await Promise.all([reloadRange(), resources.reload()]);
+  }, [reloadRange, resources]);
 
-  const resetOne = (instanceId: string) =>
-    resetAction.run(() => api.resetInstance(range.id, instanceId), refresh);
+  const reset = () => resetAction.run(() => api.resetRange(range.id), refresh);
 
   const destroy = () =>
     destroyAction.run(async () => {
-      await api.destroyExercise(range.id);
-      // Stay on the range: destroy is DISPATCHED, not done. The layout keeps polling and the
-      // phase advances to destroyed on its own. Navigating to the catalog here would imply the
-      // teardown had already finished.
-      await reloadRange();
+      await api.destroyRange(range.id);
+      // Stay on the range: destroy is DISPATCHED, not done. The layout keeps polling and the state
+      // advances to `destroyed` — or to `recovery_required` if the teardown could not be observed.
+      // Navigating to the catalog here would imply the teardown had already finished cleanly.
+      await refresh();
       setConfirmation("");
     });
 
   return (
     <div className="rng">
-      <CyberCard heading="Reset team instances" headingLevel={2}>
+      <CyberCard heading="Reset range" headingLevel={2}>
         <SafetyNotice role="note" tone="info">
           {RESET_IS_DISPATCHED_NOTE}
         </SafetyNotice>
@@ -104,51 +85,19 @@ export function RangeLifecycleActions() {
           />
         )}
 
-        <DataPanel
-          state={instances}
-          isEmpty={() => teams.length === 0}
-          empty={
-            <EmptyState title="No team instances to reset">
-              This range has no instances. They are created when it is deployed.
-            </EmptyState>
-          }
-        >
-          {() => (
-            <CyberTable
-              label="Team instances"
-              head={["Team", "Phase", "Recorded", "Action"]}
-              caption="Reset returns one team's targets to their initial state. It is dispatched per instance."
-            >
-              {teams.map((t) => {
-                const resettable = canResetInstance(t);
-                return (
-                  <tr key={t.instanceId}>
-                    <td>{t.teamRef}</td>
-                    <td>
-                      <StatusBadge state={t.lifecycle.phase} domain="range" />
-                    </td>
-                    <td className="muted mono">{t.lifecycle.recorded}</td>
-                    <td>
-                      {resettable ? (
-                        <CyberButton
-                          size="sm"
-                          disabled={resetAction.busy}
-                          onClick={() => resetOne(t.instanceId)}
-                        >
-                          {resetAction.busy ? "Dispatching…" : "Reset"}
-                        </CyberButton>
-                      ) : (
-                        <span className="muted">
-                          Not resettable while {RANGE_PHASE_LABEL[t.lifecycle.phase].toLowerCase()}
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </CyberTable>
-          )}
-        </DataPanel>
+        {canReset ? (
+          <div className="rng-card-foot">
+            <CyberButton disabled={resetAction.busy} onClick={reset}>
+              {resetAction.busy ? "Dispatching…" : "Reset this range"}
+            </CyberButton>
+          </div>
+        ) : (
+          <EmptyState title="Reset is not available in this state">
+            The range is {RANGE_PHASE_LABEL[lifecycle.phase].toLowerCase()}.
+            {lifecycle.phase === "recovery_required" &&
+              " Retrying an operation over infrastructure nobody could observe turns one unproven outcome into two — destroy is the action that can still resolve it."}
+          </EmptyState>
+        )}
       </CyberCard>
 
       <CyberCard heading="Destroy range" headingLevel={2}>
@@ -159,36 +108,42 @@ export function RangeLifecycleActions() {
           </SafetyNotice>
 
           {!canDestroy ? (
-            <EmptyState title="Destroy is not available in this phase">
+            <EmptyState title="Destroy is not available in this state">
               The range is {RANGE_PHASE_LABEL[lifecycle.phase].toLowerCase()}.
               {!lifecycle.known &&
                 " The recorded state is not recognized by this build, so no lifecycle action is offered."}
             </EmptyState>
           ) : (
             <>
-              {/* Blast radius. A confirmation that cannot state what it will destroy is a button
-                  with a warning label, so this enumerates the server's own records. */}
               <div className="rng-blast">
                 <h4>What will be destroyed</h4>
                 <p className="rng-sub">
-                  {radius.teamCount} team instance{radius.teamCount === 1 ? "" : "s"} and{" "}
-                  {radius.targetCount} declared target{radius.targetCount === 1 ? "" : "s"}:
+                  {radius.resourceCount} resource{radius.resourceCount === 1 ? "" : "s"} —{" "}
+                  {radius.containerCount} container{radius.containerCount === 1 ? "" : "s"} and{" "}
+                  {radius.networkCount} network{radius.networkCount === 1 ? "" : "s"}:
                 </p>
-                <ul className="rng-blast-list">
-                  {radius.lines.map((line) => (
-                    <li key={line}>{line}</li>
-                  ))}
-                </ul>
-                {radius.addresses.length > 0 && (
+                {radius.lines.length === 0 ? (
+                  <p className="rng-sub muted">
+                    The server records no live resources for this range.
+                  </p>
+                ) : (
+                  <ul className="rng-blast-list">
+                    {radius.lines.map((line) => (
+                      <li key={line} className="mono">
+                        {line}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {radius.ports.length > 0 && (
                   <p className="rng-sub">
-                    These declared addresses will stop answering:{" "}
-                    <span className="mono">{radius.addresses.join(", ")}</span>
+                    These host ports will stop answering:{" "}
+                    <span className="mono">{radius.ports.join(", ")}</span>
                   </p>
                 )}
                 {!radius.complete && (
                   <SafetyNotice role="alert" tone="warn">
-                    {radius.incompleteReason} Treat the list above as a minimum, not a complete
-                    inventory.
+                    {radius.incompleteReason}
                   </SafetyNotice>
                 )}
               </div>

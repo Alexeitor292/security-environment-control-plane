@@ -1,58 +1,49 @@
 // The range vertical slice, as an executable definition.
 //
-// This is the flow the product exists to deliver — choose a blueprint, create a range, walk the
-// approval gate, deploy it, read the targets, reset a team, destroy it — written ONCE so that it
-// can be executed against two different substrates without the two drifting apart:
+// This is the flow the product exists to deliver — choose a blueprint, create a range, deploy it,
+// reach the targets, reset it, destroy it — written ONCE so it can be executed against two
+// substrates without the two drifting apart:
 //
 //   1. `range-flow.test.ts`      — runs in the Frontend gate on every PR, against a fetch-level
-//                                  fake that implements the control plane's recorded lifecycle.
-//                                  ALWAYS runs. Proves the client drives a conforming server
-//                                  correctly, in the right order, with the right state reads.
-//   2. `range-flow.live-test.ts` — runs on demand against a REAL control plane. Proves the same
-//                                  steps work against the actual server rather than a model of it.
+//                                  fake implementing the range API. ALWAYS runs. Proves the client
+//                                  drives a conforming server correctly: right calls, right order,
+//                                  right reads, right handling of an operation that has no plan
+//                                  yet. It proves NOTHING about a real container.
+//   2. `range-flow.live-test.ts` — runs on demand against a REAL control plane, which for ranges
+//                                  means a running worker with a Docker socket. This is the only
+//                                  half that touches infrastructure.
 //
-// Both execute the REAL `api` client from src/api/client.ts. The only difference between them is
-// what is on the other end of `fetch`, which is exactly the difference that should exist.
+// Both execute the REAL `api` client. The only difference is what is on the other end of `fetch`.
 //
-// WHAT EACH ONE IS WORTH, stated plainly because it is easy to overclaim: the in-gate run cannot
-// discover that the server changed, because the fake IS this repo's belief about the server. Only
-// the live run can do that. The in-gate run catches the client breaking — a call dropped, a step
-// reordered, a state misprojected, a mutation that stops refreshing what it changed — which is the
-// class of regression a UI PR actually introduces.
+// The driver POLLS rather than awaits: every lifecycle mutation returns 202 and the work happens on
+// the worker, so "the call returned" is never "the work finished". Waiting for the recorded state
+// is the only correct way to observe completion, and it is what the pages do too.
 
 import { api as realApi } from "../../api/client";
+import type { Range, RangeState } from "../../api/range-types";
 import { rangeLifecycle, type RangePhase } from "./range-lifecycle";
-import { blastRadius, deployGate, accessTargets, type GateStep } from "./range-view";
+import { accessRows, blastRadius, operationProgress } from "./range-view";
 
 /** The exact client surface the flow needs. The real `api` object satisfies it structurally. */
 export type RangeFlowApi = Pick<
   typeof realApi,
-  | "listTemplates"
-  | "listVersions"
-  | "createExercise"
-  | "getExercise"
-  | "validateExercise"
-  | "generatePlan"
-  | "latestPlan"
-  | "submitPlan"
-  | "approvePlan"
-  | "deployExercise"
-  | "listInstances"
-  | "exerciseTopology"
-  | "resetInstance"
-  | "destroyExercise"
-  | "audit"
+  | "listRangeTemplates"
+  | "createRange"
+  | "getRange"
+  | "deployRange"
+  | "resetRange"
+  | "destroyRange"
+  | "listRangeResources"
+  | "listRangeEvents"
+  | "listTeardownEvidence"
 >;
 
-/** One recorded observation, captured after a step completes. */
+/** One recorded observation, captured after a step settles. */
 export interface FlowObservation {
   step: string;
   /** The state the SERVER recorded — the ground truth for every assertion. */
-  recorded: string;
-  /** The product phase this build projects that state onto. */
+  recorded: RangeState | string;
   phase: RangePhase;
-  /** The next action the deploy gate offers from here. */
-  gateNext: GateStep;
   /** Step-specific facts worth asserting on. */
   detail: Record<string, unknown>;
 }
@@ -60,38 +51,57 @@ export interface FlowObservation {
 export interface FlowResult {
   rangeId: string;
   observations: FlowObservation[];
-  /** Every audit action recorded against the range, oldest first. */
-  auditActions: string[];
+  /** Every event kind the server recorded, in sequence order. */
+  eventKinds: string[];
+  /** The teardown verdict, or null when the range was never destroyed. */
+  teardownVerdict: string | null;
 }
 
 export interface FlowOptions {
   rangeName: string;
-  /** Blueprint slug to use. Defaults to the first blueprint that has a version. */
+  /** Blueprint slug. Defaults to the first in the catalog. */
   templateSlug?: string;
-  /** Called after each step — lets the live runner print progress. */
   onStep?: (observation: FlowObservation) => void;
+  /** How long to wait for one operation to settle. */
+  operationTimeoutMs?: number;
+  pollIntervalMs?: number;
+  /** Injected so the in-gate run does not actually sleep. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_POLL_MS = 500;
+
+/** States from which nothing further happens without an operator. */
+function settled(state: string): boolean {
+  return (
+    state === "draft" ||
+    state === "ready" ||
+    state === "active" ||
+    state === "failed" ||
+    state === "destroyed" ||
+    state === "recovery_required"
+  );
 }
 
 /**
- * Drive the whole slice and return what the server recorded at each step.
+ * Drive the whole slice and report what the server recorded at each step.
  *
- * The driver ASSERTS NOTHING. It reports, and the two callers assert over the transcript. That
- * split is deliberate: the moment a flow driver contains its own expectations, the fake and the
- * live server need different drivers, and the single definition this file exists to provide is
- * gone.
- *
- * Every step reads the range back from the server rather than assuming the mutation's return value
- * is the new truth — which is also exactly what the pages do.
+ * The driver ASSERTS NOTHING — it reports, and the callers assert over the transcript. The moment a
+ * flow driver contains its own expectations, the fake and the live server need different drivers
+ * and the single definition this file exists to provide is gone.
  */
 export async function runRangeFlow(
   api: RangeFlowApi,
   opts: FlowOptions,
 ): Promise<FlowResult> {
   const observations: FlowObservation[] = [];
+  const timeoutMs = opts.operationTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const pollMs = opts.pollIntervalMs ?? DEFAULT_POLL_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
-  // Resolve the blueprint and its newest immutable version from the live catalog.
-  const templates = await api.listTemplates();
-  if (templates.length === 0) throw new Error("flow: no blueprints in the catalog");
+  const templates = await api.listRangeTemplates();
+  if (templates.length === 0) throw new Error("flow: the range catalog is empty");
   const template =
     opts.templateSlug === undefined
       ? templates[0]
@@ -99,29 +109,18 @@ export async function runRangeFlow(
   if (template === undefined) {
     throw new Error(`flow: no blueprint with slug ${String(opts.templateSlug)}`);
   }
-  const versions = await api.listVersions(template.id);
-  if (versions.length === 0) throw new Error("flow: blueprint has no immutable version");
-  const version = versions.reduce((best, v) =>
-    v.version_number > best.version_number ? v : best,
-  );
 
-  const range = await api.createExercise({
-    template_id: template.id,
-    version_id: version.id,
+  const created = await api.createRange({
+    template_slug: template.slug,
     name: opts.rangeName,
   });
-  const rangeId = range.id;
+  const rangeId = created.id;
 
-  // Read the range and the plan back from the server, then record one observation.
-  const observe = async (step: string, detail: Record<string, unknown> = {}) => {
-    const current = await api.getExercise(rangeId);
-    const plan = await api.latestPlan(rangeId).catch(() => null);
-    const lifecycle = rangeLifecycle(current.lifecycle_state);
+  const observe = (step: string, range: Range, detail: Record<string, unknown> = {}) => {
     const observation: FlowObservation = {
       step,
-      recorded: current.lifecycle_state,
-      phase: lifecycle.phase,
-      gateNext: deployGate(current, plan).next,
+      recorded: range.state,
+      phase: rangeLifecycle(range.state).phase,
       detail,
     };
     observations.push(observation);
@@ -129,59 +128,84 @@ export async function runRangeFlow(
     return observation;
   };
 
-  await observe("created", { rangeId, templateSlug: template.slug, teamCount: range.team_count });
+  /**
+   * Poll `GET /ranges/{id}` until the range settles.
+   *
+   * Deliberately waits on the RANGE STATE, not on the operation: an operation can finish while the
+   * range is still transitioning, and the range's state is what every surface renders. Times out
+   * loudly rather than looping forever — a hung worker must look like a hung worker.
+   */
+  const waitForSettled = async (what: string): Promise<Range> => {
+    const deadline = Date.now() + timeoutMs;
+    let last = await api.getRange(rangeId);
+    while (!settled(last.state)) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `flow: ${what} did not settle within ${timeoutMs}ms (last state: ${last.state}). ` +
+            `For a live run this usually means the worker is not running or cannot reach its provider.`,
+        );
+      }
+      await sleep(pollMs);
+      last = await api.getRange(rangeId);
+    }
+    return last;
+  };
 
-  await api.validateExercise(rangeId);
-  await observe("validated");
+  observe("created", created, { rangeId, templateSlug: template.slug });
 
-  const plan = await api.generatePlan(rangeId);
-  await observe("plan-generated", { planId: plan.id });
+  // Deploy: 202 + background work. Capture the pre-plan window, which is the one an obvious
+  // implementation gets wrong by dividing by `total_steps`.
+  const deployOp = await api.deployRange(rangeId);
+  const justDispatched = await api.getRange(rangeId);
+  const dispatchProgress = operationProgress(justDispatched.current_operation);
+  observe("deploy-dispatched", justDispatched, {
+    operationId: deployOp.id,
+    operationStatus: deployOp.status,
+    // `true` here is the contract's pre-plan window: the worker has not planned the steps yet.
+    progressKind: dispatchProgress.kind,
+    totalSteps: dispatchProgress.totalSteps,
+  });
 
-  await api.submitPlan(plan.id);
-  await observe("plan-submitted");
+  const deployed = await waitForSettled("deploy");
+  const access = accessRows(deployed);
+  observe("deployed", deployed, {
+    accessCount: access.length,
+    reachableCount: access.filter((a) => a.reachable).length,
+    observedCount: access.filter((a) => a.observedAt !== null).length,
+  });
 
-  await api.approvePlan(plan.id, "Approved by the range flow acceptance run.");
-  await observe("plan-approved");
-
-  await api.deployExercise(rangeId);
-  await observe("deployed");
-
-  // The payoff of deploying: per-team instances, and targets an operator could reach.
-  const instances = await api.listInstances(rangeId);
-  const topologies = await api.exerciseTopology(rangeId).catch(() => []);
-  const targets = accessTargets(topologies);
-  const radius = blastRadius(instances, topologies);
-  await observe("inspected", {
-    instanceCount: instances.length,
-    targetCount: targets.length,
-    addressCount: radius.addresses.length,
+  const resources = await api.listRangeResources(rangeId);
+  const radius = blastRadius(resources);
+  observe("inspected", deployed, {
+    resourceCount: radius.resourceCount,
+    containerCount: radius.containerCount,
+    networkCount: radius.networkCount,
     blastRadiusComplete: radius.complete,
   });
 
-  if (instances.length === 0) throw new Error("flow: deploy produced no team instances");
-  await api.resetInstance(rangeId, instances[0].id);
-  await observe("reset", { resetInstanceId: instances[0].id });
+  await api.resetRange(rangeId);
+  const afterReset = await waitForSettled("reset");
+  observe("reset", afterReset);
 
-  await api.destroyExercise(rangeId);
-  await observe("destroyed");
+  await api.destroyRange(rangeId);
+  const afterDestroy = await waitForSettled("destroy");
+  observe("destroyed", afterDestroy, { residueVerdict: afterDestroy.residue_verdict });
 
-  const events = await api.audit(rangeId);
+  const events = await api.listRangeEvents(rangeId);
+  const evidence = await api.listTeardownEvidence(rangeId).catch(() => []);
+
   return {
     rangeId,
     observations,
-    auditActions: [...events]
-      .sort((a, b) => a.created_at.localeCompare(b.created_at))
-      .map((e) => e.action),
+    eventKinds: [...events].sort((a, b) => a.sequence - b.sequence).map((e) => e.kind),
+    teardownVerdict: evidence.length === 0 ? null : evidence[0].verdict,
   };
 }
 
-/** The steps `runRangeFlow` emits, in order. Callers assert against this rather than a literal. */
+/** The steps `runRangeFlow` emits, in order. */
 export const FLOW_STEPS: readonly string[] = [
   "created",
-  "validated",
-  "plan-generated",
-  "plan-submitted",
-  "plan-approved",
+  "deploy-dispatched",
   "deployed",
   "inspected",
   "reset",
@@ -189,32 +213,8 @@ export const FLOW_STEPS: readonly string[] = [
 ];
 
 /**
- * The audit actions the control plane records for a complete run, in order.
- *
- * Asserting on the SERVER'S ledger rather than on the UI's own state is the point: it is the only
- * evidence that the flow actually happened rather than that the client believes it did.
- *
- * `instance.created` repeats once per team, so the check is containment-and-order, not equality —
- * see `assertLedgerOrder`.
- */
-export const EXPECTED_LEDGER_ORDER: readonly string[] = [
-  "exercise.created",
-  "exercise.validated",
-  "plan.generated",
-  "plan.submitted",
-  "plan.approved",
-  "deploy.started",
-  "instance.created",
-  "deploy.completed",
-  "reset.started",
-  "reset.completed",
-  "destroy.started",
-  "destroy.completed",
-];
-
-/**
- * Check that `expected` appears within `actual` in order (allowing extra entries between).
- * Returns the first expected action that could not be found, or null when all matched.
+ * Check that `expected` appears within `actual` in order (extra entries between are fine).
+ * Returns the first expected entry that could not be found, or null when all matched.
  */
 export function firstMissingInOrder(
   actual: readonly string[],

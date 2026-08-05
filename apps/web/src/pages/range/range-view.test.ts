@@ -1,26 +1,28 @@
 import { describe, expect, it } from "vitest";
 
 import type {
-  AuditEvent,
-  DeploymentPlan,
-  Exercise,
-  Instance,
-  TeamTopology,
-  Template,
-  Version,
-} from "../../api/types";
+  Range,
+  RangeOperation,
+  RangeOperationSummary,
+  RangeResource,
+  RangeTemplate,
+  TeardownEvidence,
+} from "../../api/range-types";
 import {
-  accessTargets,
+  accessRows,
   blastRadius,
-  canResetInstance,
-  deployGate,
   destroyConfirmationMatches,
+  estimatedDuration,
   filterBlueprints,
+  liveResources,
+  operationInFlight,
+  operationOutcomeText,
+  operationProgress,
   rangeBlueprints,
   rangeSummaries,
-  teamInstanceRows,
-  timelineEntries,
-  timelineTally,
+  reachabilityText,
+  resourceRows,
+  teardownSummary,
 } from "./range-view";
 import {
   VERDICT_LABEL,
@@ -31,349 +33,364 @@ import {
   type ScoreboardEntry,
 } from "./scoreboard-view";
 
-function template(over: Partial<Template> = {}): Template {
+function template(over: Partial<RangeTemplate> = {}): RangeTemplate {
   return {
-    id: "t1",
-    organization_id: "org",
-    name: "web-dmz",
-    slug: "web-dmz",
-    display_name: "Web DMZ",
-    description: "An exposed web tier.",
-    created_at: "2026-01-01T00:00:00",
+    slug: "web-breach-lab",
+    name: "Web Breach Lab",
+    summary: "Two vulnerable web apps.",
+    description: "Longer prose.",
+    provider: "local_docker",
+    difficulty: "beginner",
+    estimated_deploy_seconds: 180,
+    warning: "Intentionally vulnerable.",
+    components: [
+      { key: "juice", name: "Juice Shop", role: "target", image: "juice:1", container_port: 3000, protocol: "http", path: "/" },
+      { key: "dvwa", name: "DVWA", role: "target", image: "dvwa:1", container_port: 80, protocol: "http", path: "/" },
+      { key: "scorer", name: "Scorer", role: "scoring", image: "scorer:1", container_port: null, protocol: "http", path: "/" },
+    ],
+    challenge_count: 6,
+    total_points: 600,
     ...over,
   };
 }
 
-function version(over: Partial<Version> = {}): Version {
+function range(over: Partial<Range> = {}): Range {
   return {
-    id: "v1",
-    template_id: "t1",
-    version_number: 1,
-    api_version: "secp.io/v1alpha2",
-    content_hash: "sha256:aaa",
-    spec: {},
-    created_at: "2026-01-01T00:00:00",
-    publication_provenance: null,
+    id: "rng-1",
+    name: "Tuesday cohort",
+    template_slug: "web-breach-lab",
+    template_name: "Web Breach Lab",
+    provider: "local_docker",
+    state: "ready",
+    state_reason: null,
+    created_at: "2026-08-01T00:00:00",
+    updated_at: "2026-08-01T00:05:00",
+    deployed_at: "2026-08-01T00:05:00",
+    destroyed_at: null,
+    competition_id: null,
+    current_operation: null,
+    residue_verdict: null,
+    access: [],
     ...over,
   };
 }
 
-function exercise(over: Partial<Exercise> = {}): Exercise {
+function operation(over: Partial<RangeOperationSummary> = {}): RangeOperationSummary {
   return {
-    id: "e1",
-    organization_id: "org",
-    template_id: "t1",
-    environment_version_id: "v1",
-    name: "Range One",
-    lifecycle_state: "draft",
-    team_count: 2,
-    created_at: "2026-01-02T00:00:00",
+    id: "op-1",
+    kind: "deploy",
+    status: "running",
+    phase: "create",
+    completed_steps: 2,
+    total_steps: 4,
+    percent: 50,
+    ...over,
+  };
+}
+
+function resource(over: Partial<RangeResource> = {}): RangeResource {
+  return {
+    id: "res-1",
+    kind: "container",
+    provider: "local_docker",
+    component_key: "juice",
+    name: "secp-range-juice",
+    external_id: "ctr1",
+    image: "juice:1",
+    image_digest: "sha256:abc",
+    state: "verified",
+    host_port: 34011,
+    created_at: "2026-08-01T00:05:00",
+    removed_at: null,
+    detail: {},
     ...over,
   };
 }
 
 describe("rangeBlueprints", () => {
-  it("picks the highest version number, not the last array element", () => {
-    const versions = [version({ id: "v1", version_number: 1 }), version({ id: "v3", version_number: 3 }), version({ id: "v2", version_number: 2 })];
-    const [b] = rangeBlueprints([template()], new Map([["t1", versions]]));
-    expect(b.latestVersionId).toBe("v3");
-    expect(b.latestVersionNumber).toBe(3);
-    expect(b.deployable).toBe(true);
+  it("counts only target components as targets", () => {
+    // The scoring component is plumbing, not something a competitor attacks.
+    const [b] = rangeBlueprints([template()]);
+    expect(b.targetCount).toBe(2);
+    expect(b.componentNames).toHaveLength(3);
   });
 
-  it("distinguishes 'no versions published' from 'versions not loaded'", () => {
-    const [loaded] = rangeBlueprints([template()], new Map([["t1", []]]));
-    expect(loaded.deployable).toBe(false);
-    expect(loaded.unavailableReason).toMatch(/no immutable version/i);
-
-    const [missing] = rangeBlueprints([template()], new Map());
-    expect(missing.deployable).toBe(false);
-    expect(missing.unavailableReason).toMatch(/could not be loaded/i);
+  it("carries the vulnerability warning through verbatim", () => {
+    const [b] = rangeBlueprints([template({ warning: "DO NOT EXPOSE" })]);
+    expect(b.warning).toBe("DO NOT EXPOSE");
   });
 
-  it("falls back to name when display_name is empty", () => {
-    const [b] = rangeBlueprints([template({ display_name: "" })], new Map());
-    expect(b.name).toBe("web-dmz");
-  });
-
-  it("sorts by display name", () => {
-    const list = rangeBlueprints(
-      [template({ id: "b", display_name: "Zulu" }), template({ id: "a", display_name: "Alpha" })],
-      new Map(),
-    );
+  it("sorts by name", () => {
+    const list = rangeBlueprints([
+      template({ slug: "z", name: "Zulu" }),
+      template({ slug: "a", name: "Alpha" }),
+    ]);
     expect(list.map((b) => b.name)).toEqual(["Alpha", "Zulu"]);
   });
 });
 
 describe("filterBlueprints", () => {
-  const list = rangeBlueprints(
-    [template({ id: "a", display_name: "Web DMZ", slug: "web-dmz", description: "exposed tier" }), template({ id: "b", display_name: "AD Forest", slug: "ad-forest", description: "directory" })],
-    new Map(),
-  );
+  const list = rangeBlueprints([
+    template({ slug: "web-breach-lab", name: "Web Breach Lab", summary: "vulnerable web", difficulty: "beginner" }),
+    template({ slug: "ad-forest", name: "AD Forest", summary: "directory", difficulty: "advanced" }),
+  ]);
 
-  it("matches name, slug and description case-insensitively", () => {
-    expect(filterBlueprints(list, "DMZ").map((b) => b.slug)).toEqual(["web-dmz"]);
-    expect(filterBlueprints(list, "ad-for").map((b) => b.slug)).toEqual(["ad-forest"]);
+  it("matches name, slug, summary and difficulty case-insensitively", () => {
+    expect(filterBlueprints(list, "BREACH").map((b) => b.slug)).toEqual(["web-breach-lab"]);
     expect(filterBlueprints(list, "directory").map((b) => b.slug)).toEqual(["ad-forest"]);
+    expect(filterBlueprints(list, "advanced").map((b) => b.slug)).toEqual(["ad-forest"]);
   });
 
-  it("returns everything for an empty or whitespace query", () => {
+  it("returns everything for a whitespace query", () => {
     expect(filterBlueprints(list, "   ")).toHaveLength(2);
   });
 });
 
-describe("deployGate", () => {
-  it("walks the approval gate in order", () => {
-    expect(deployGate(exercise({ lifecycle_state: "draft" }), null).next).toBe("validate");
-    expect(deployGate(exercise({ lifecycle_state: "validated" }), null).next).toBe("generate-plan");
-    expect(deployGate(exercise({ lifecycle_state: "approved" }), null).next).toBe("deploy");
+describe("estimatedDuration", () => {
+  it("reports unknown rather than zero for a missing estimate", () => {
+    expect(estimatedDuration(0)).toBe("unknown");
+    expect(estimatedDuration(-5)).toBe("unknown");
   });
 
-  it("uses the plan status to choose the next step when planned", () => {
-    const planned = exercise({ lifecycle_state: "planned" });
-    const plan = (status: string) => ({ status } as Pick<DeploymentPlan, "status">);
-    expect(deployGate(planned, plan("generated")).next).toBe("submit-plan");
-    expect(deployGate(planned, plan("awaiting_approval")).next).toBe("approve-plan");
-    expect(deployGate(planned, plan("approved")).next).toBe("deploy");
-  });
-
-  it("sends a rejected plan back to generation rather than to deploy", () => {
-    const gate = deployGate(exercise({ lifecycle_state: "planned" }), {
-      status: "rejected",
-    } as Pick<DeploymentPlan, "status">);
-    expect(gate.next).toBe("generate-plan");
-    expect(gate.help).toMatch(/rejected/i);
-  });
-
-  it("does not claim a plan step when the plan could not be read", () => {
-    const gate = deployGate(exercise({ lifecycle_state: "planned" }), null);
-    expect(gate.next).toBe("generate-plan");
-  });
-
-  it("offers no action mid-flight and says why", () => {
-    const gate = deployGate(exercise({ lifecycle_state: "deploying" }), null);
-    expect(gate.next).toBe("none");
-    expect(gate.blockedReason).toMatch(/in progress/i);
-  });
-
-  it("treats a deployed range as finished, not blocked", () => {
-    const gate = deployGate(exercise({ lifecycle_state: "running" }), null);
-    expect(gate.next).toBe("none");
-    expect(gate.blockedReason).toBeNull();
-  });
-
-  it("reports a destroyed range as unrecoverable", () => {
-    const gate = deployGate(exercise({ lifecycle_state: "destroyed" }), null);
-    expect(gate.blockedReason).toMatch(/destroyed/i);
+  it("uses seconds below 90 and minutes above", () => {
+    expect(estimatedDuration(45)).toBe("about 45s");
+    expect(estimatedDuration(180)).toBe("about 3 min");
   });
 });
 
-describe("accessTargets", () => {
-  const topo: TeamTopology = {
-    instance_id: "i1",
-    team_ref: "team-1",
-    team_index: 1,
-    lifecycle_state: "running",
-    nodes: [
-      { id: "n1", type: "x", data: { label: "victim", kind: "target", ip: "10.0.0.5", role: "web" } },
-      { id: "n2", type: "x", data: { label: "lan", kind: "network", cidr: "10.0.0.0/24" } },
-      { id: "n3", type: "x", data: { label: "attacker", kind: "attacker", ip: "10.0.0.2" } },
+describe("operationProgress — the pre-plan window", () => {
+  it("reports indeterminate when the worker has not planned the operation", () => {
+    // total_steps: 0 while pending means THE PLAN DOES NOT EXIST YET. Rendering 0% would claim no
+    // work has been done; the truth is that nobody knows yet how much work there is.
+    const p = operationProgress(operation({ status: "pending", total_steps: 0, completed_steps: 0, percent: 0 }));
+    expect(p.kind).toBe("indeterminate");
+    expect(p.percent).toBeNull();
+    expect(p.totalSteps).toBeNull();
+  });
+
+  it("never divides by total_steps", () => {
+    // A zero total must not produce NaN or Infinity anywhere in the result.
+    const p = operationProgress(operation({ status: "running", total_steps: 0, completed_steps: 0, percent: 0 }));
+    expect(Number.isNaN(p.percent as number)).toBe(false);
+    expect(p.percent).toBeNull();
+  });
+
+  it("uses the server's percent once a plan exists", () => {
+    const p = operationProgress(operation({ total_steps: 4, completed_steps: 3, percent: 75 }));
+    expect(p.kind).toBe("determinate");
+    expect(p.percent).toBe(75);
+    expect(p.label).toBe("3 of 4 steps");
+  });
+
+  it("distinguishes a settled zero-step operation from an unplanned one", () => {
+    const settled = operationProgress(operation({ status: "succeeded", total_steps: 0, percent: 100 }));
+    expect(settled.kind).toBe("determinate");
+    expect(settled.label).toMatch(/planned no steps/i);
+  });
+
+  it("reports no operation distinctly from a zero-progress one", () => {
+    const none = operationProgress(null);
+    expect(none.kind).toBe("none");
+    expect(none.percent).toBeNull();
+  });
+});
+
+describe("operationInFlight", () => {
+  it("polls only while pending or running", () => {
+    expect(operationInFlight(operation({ status: "pending" }))).toBe(true);
+    expect(operationInFlight(operation({ status: "running" }))).toBe(true);
+    expect(operationInFlight(operation({ status: "succeeded" }))).toBe(false);
+    expect(operationInFlight(operation({ status: "unproven" }))).toBe(false);
+    expect(operationInFlight(null)).toBe(false);
+  });
+});
+
+describe("operationOutcomeText", () => {
+  const full = (
+    status: RangeOperationSummary["status"],
+    over: { failure_code?: string | null } = {},
+  ): RangeOperation => ({
+    ...operation({ status }),
+    range_id: "rng-1",
+    failure_code: null,
+    failure_message: null,
+    started_at: "2026-08-01T00:00:00",
+    finished_at: null,
+    steps: [],
+    ...over,
+  });
+
+  it("says nothing for a success", () => {
+    expect(operationOutcomeText(full("succeeded"))).toBeNull();
+  });
+
+  it("describes unproven as unknown, not as a failure", () => {
+    const text = operationOutcomeText(full("unproven")) ?? "";
+    expect(text).toMatch(/unknown/i);
+    expect(text).toMatch(/did not necessarily fail/i);
+  });
+
+  it("names the failure code when one is present", () => {
+    expect(
+      operationOutcomeText(full("failed", { failure_code: "range_provider_unavailable" })),
+    ).toContain("range_provider_unavailable");
+  });
+});
+
+describe("accessRows and reachability", () => {
+  const withAccess = range({
+    access: [
+      { component_key: "b", name: "Beta", url: "http://127.0.0.1:2/", host: "127.0.0.1", port: 2, protocol: "http", reachable: true, observed_at: "2026-08-01T00:05:00" },
+      { component_key: "a", name: "Alpha", url: "http://127.0.0.1:1/", host: "127.0.0.1", port: 1, protocol: "http", reachable: false, observed_at: "2026-08-01T00:05:00" },
+      { component_key: "c", name: "Gamma", url: "http://127.0.0.1:3/", host: "127.0.0.1", port: 3, protocol: "http", reachable: false, observed_at: null },
     ],
-    edges: [],
-  };
-
-  it("excludes network segments — they are not things to connect to", () => {
-    const rows = accessTargets([topo]);
-    expect(rows.map((r) => r.label)).toEqual(["attacker", "victim"]);
   });
 
-  it("carries the declared address through without inventing one", () => {
-    const rows = accessTargets([topo]);
-    expect(rows.find((r) => r.label === "victim")?.ip).toBe("10.0.0.5");
+  it("orders by name so reloads are stable", () => {
+    expect(accessRows(withAccess).map((a) => a.name)).toEqual(["Alpha", "Beta", "Gamma"]);
   });
 
-  it("reports a null ip when the plan declares none rather than guessing", () => {
-    const noIp: TeamTopology = {
-      ...topo,
-      nodes: [{ id: "n9", type: "x", data: { label: "ghost", kind: "target" } }],
-    };
-    expect(accessTargets([noIp])[0].ip).toBeNull();
+  it("keeps 'did not respond' and 'never checked' apart", () => {
+    const rows = accessRows(withAccess);
+    expect(reachabilityText(rows.find((r) => r.name === "Beta")!)).toBe("responded");
+    expect(reachabilityText(rows.find((r) => r.name === "Alpha")!)).toBe("did not respond");
+    // Never probed is NOT the same as probed-and-failed.
+    expect(reachabilityText(rows.find((r) => r.name === "Gamma")!)).toBe("not checked");
   });
 
-  it("orders by team index then label so reloads are stable", () => {
-    const second: TeamTopology = { ...topo, instance_id: "i2", team_ref: "team-2", team_index: 2 };
-    const rows = accessTargets([second, topo]);
-    expect(rows.map((r) => r.teamIndex)).toEqual([1, 1, 2, 2]);
-  });
-});
-
-describe("teamInstanceRows", () => {
-  const instances: Instance[] = [
-    { id: "i2", exercise_id: "e1", team_index: 2, team_ref: "team-2", instance_ref: "r2", lifecycle_state: "running", provider: "sim" },
-    { id: "i1", exercise_id: "e1", team_index: 1, team_ref: "team-1", instance_ref: "r1", lifecycle_state: "deploying", provider: "sim" },
-  ];
-
-  it("sorts by team index", () => {
-    expect(teamInstanceRows(instances, []).map((r) => r.teamIndex)).toEqual([1, 2]);
-  });
-
-  it("counts targets per instance", () => {
-    const topo: TeamTopology = {
-      instance_id: "i1",
-      team_ref: "team-1",
-      team_index: 1,
-      lifecycle_state: "running",
-      nodes: [
-        { id: "a", type: "x", data: { label: "a", kind: "target" } },
-        { id: "b", type: "x", data: { label: "b", kind: "network" } },
-      ],
-      edges: [],
-    };
-    const rows = teamInstanceRows(instances, [topo]);
-    expect(rows.find((r) => r.instanceId === "i1")?.targetCount).toBe(1);
-    expect(rows.find((r) => r.instanceId === "i2")?.targetCount).toBe(0);
-  });
-
-  it("permits reset on a deployed instance but not one mid-deploy", () => {
-    const rows = teamInstanceRows(instances, []);
-    expect(canResetInstance(rows.find((r) => r.instanceId === "i2")!)).toBe(true); // running/active
-    expect(canResetInstance(rows.find((r) => r.instanceId === "i1")!)).toBe(false); // deploying
-  });
-
-  it("offers reset on a failed instance — that is how an operator recovers it", () => {
-    const failed = teamInstanceRows(
-      [{ ...instances[0], id: "i3", lifecycle_state: "failed" }],
-      [],
-    );
-    expect(canResetInstance(failed[0])).toBe(true);
-  });
-
-  it("refuses reset on recovery_required and on an unknown state", () => {
-    // Re-running an operation over infrastructure nobody could observe turns one unproven outcome
-    // into two.
-    const unprovable = teamInstanceRows(
-      [
-        // Not a legacy LifecycleState — this is what a range-backend instance will carry.
-        { ...instances[0], id: "i4", lifecycle_state: "recovery_required" as Instance["lifecycle_state"] },
-        { ...instances[0], id: "i5", lifecycle_state: "who-knows" as Instance["lifecycle_state"] },
-      ],
-      [],
-    );
-    expect(canResetInstance(unprovable[0])).toBe(false);
-    expect(canResetInstance(unprovable[1])).toBe(false);
-  });
-});
-
-describe("timeline", () => {
-  const events: AuditEvent[] = [
-    { id: "1", actor: "a", action: "exercise.deployed", resource_type: "exercise", resource_id: "e1", outcome: "success", data: {}, created_at: "2026-01-01T01:00:00" },
-    { id: "2", actor: "a", action: "execution.refused", resource_type: "exercise", resource_id: "e1", outcome: "refused", data: {}, created_at: "2026-01-01T02:00:00" },
-  ];
-
-  it("orders newest first", () => {
-    expect(timelineEntries(events).map((e) => e.id)).toEqual(["2", "1"]);
-  });
-
-  it("flags any non-success outcome", () => {
-    const entries = timelineEntries(events);
-    expect(entries.find((e) => e.id === "2")?.flagged).toBe(true);
-    expect(entries.find((e) => e.id === "1")?.flagged).toBe(false);
-  });
-
-  it("tallies only loaded events", () => {
-    expect(timelineTally(timelineEntries(events))).toEqual({ total: 2, flagged: 1 });
-  });
-
-  it("synthesizes nothing for an empty ledger", () => {
-    expect(timelineEntries([])).toEqual([]);
+  it("returns nothing when the range records no access", () => {
+    expect(accessRows(range())).toEqual([]);
   });
 });
 
 describe("rangeSummaries", () => {
-  it("orders newest first and projects the lifecycle", () => {
+  it("orders newest first and counts observed reachability", () => {
     const list = rangeSummaries([
-      exercise({ id: "old", created_at: "2026-01-01T00:00:00", lifecycle_state: "running" }),
-      exercise({ id: "new", created_at: "2026-02-01T00:00:00", lifecycle_state: "draft" }),
+      range({ id: "old", created_at: "2026-01-01T00:00:00" }),
+      range({
+        id: "new",
+        created_at: "2026-02-01T00:00:00",
+        access: [
+          { component_key: "a", name: "A", url: "u", host: "h", port: 1, protocol: "http", reachable: true, observed_at: "t" },
+          { component_key: "b", name: "B", url: "u", host: "h", port: 2, protocol: "http", reachable: false, observed_at: "t" },
+        ],
+      }),
     ]);
     expect(list.map((r) => r.id)).toEqual(["new", "old"]);
-    expect(list[1].lifecycle.phase).toBe("active");
+    expect(list[0].reachableCount).toBe(1);
+    expect(list[0].accessCount).toBe(2);
+  });
+
+  it("reports whether a competition exists without inventing one", () => {
+    expect(rangeSummaries([range()])[0].hasCompetition).toBe(false);
+    expect(rangeSummaries([range({ competition_id: "c1" })])[0].hasCompetition).toBe(true);
   });
 });
 
-describe("blastRadius", () => {
-  const instances: Instance[] = [
-    { id: "i1", exercise_id: "e1", team_index: 1, team_ref: "team-1", instance_ref: "r1", lifecycle_state: "running", provider: "sim" },
-    { id: "i2", exercise_id: "e1", team_index: 2, team_ref: "team-2", instance_ref: "r2", lifecycle_state: "running", provider: "sim" },
+describe("resources and blast radius", () => {
+  const resources = [
+    resource({ id: "r1", kind: "container", name: "juice" }),
+    resource({ id: "r2", kind: "network", name: "net", host_port: null, component_key: null }),
+    resource({ id: "r3", kind: "container", name: "gone", state: "removed", removed_at: "2026-08-01T01:00:00", host_port: 34012 }),
   ];
-  const topo = (instanceId: string, teamRef: string, teamIndex: number, ip: string): TeamTopology => ({
-    instance_id: instanceId,
-    team_ref: teamRef,
-    team_index: teamIndex,
-    lifecycle_state: "running",
-    nodes: [
-      { id: `${instanceId}-a`, type: "x", data: { label: `${teamRef}-web`, kind: "target", ip } },
-      { id: `${instanceId}-n`, type: "x", data: { label: "lan", kind: "network" } },
-    ],
-    edges: [],
+
+  it("excludes already-removed resources from the blast radius", () => {
+    const r = blastRadius(resources);
+    expect(r.resourceCount).toBe(2);
+    expect(r.containerCount).toBe(1);
+    expect(r.networkCount).toBe(1);
+    expect(r.ports).toEqual([34011]);
   });
 
-  it("enumerates every team and target that will be destroyed", () => {
-    const r = blastRadius(instances, [topo("i1", "team-1", 1, "10.0.0.1"), topo("i2", "team-2", 2, "10.0.1.1")]);
-    expect(r.teamCount).toBe(2);
-    expect(r.targetCount).toBe(2);
-    expect(r.lines).toEqual([
-      "team-1 — 1 target (team-1-web)",
-      "team-2 — 1 target (team-2-web)",
+  it("enumerates what will be destroyed by name and state", () => {
+    expect(blastRadius(resources).lines).toEqual([
+      "container juice (verified)",
+      "network net (verified)",
     ]);
-    expect(r.addresses).toEqual(["10.0.0.1", "10.0.1.1"]);
+  });
+
+  it("marks the enumeration incomplete when the list could not be read", () => {
+    // Under-stating a blast radius is the failure mode that matters, so an unreadable source is
+    // reported rather than silently producing an empty list.
+    const r = blastRadius(null);
+    expect(r.complete).toBe(false);
+    expect(r.incompleteReason).toMatch(/incomplete/i);
+    expect(r.resourceCount).toBe(0);
+  });
+
+  it("treats an empty list as genuinely empty, not as unknown", () => {
+    const r = blastRadius([]);
     expect(r.complete).toBe(true);
-    expect(r.incompleteReason).toBeNull();
+    expect(r.resourceCount).toBe(0);
   });
 
-  it("says so when a team has no declared targets rather than omitting it", () => {
-    const r = blastRadius(instances, [topo("i1", "team-1", 1, "10.0.0.1")]);
-    expect(r.lines).toContain("team-2 — no targets declared");
+  it("keeps unproven resources in the live set — they were never proved gone", () => {
+    const unproven = [resource({ id: "u", state: "unproven", removed_at: null })];
+    expect(liveResources(unproven)).toHaveLength(1);
+    expect(blastRadius(unproven).resourceCount).toBe(1);
   });
 
-  it("marks the enumeration incomplete when the topology could not be read", () => {
-    // Under-stating a blast radius is the failure mode that matters, so a missing source is
-    // reported rather than silently producing a short list.
-    const r = blastRadius(instances, null);
-    expect(r.complete).toBe(false);
-    expect(r.incompleteReason).toMatch(/topology/i);
-    expect(r.teamCount).toBe(2);
+  it("sorts rows by kind then name", () => {
+    expect(resourceRows(resources).map((r) => r.name)).toEqual(["gone", "juice", "net"]);
+  });
+});
+
+describe("teardownSummary", () => {
+  const evidence = (over: Partial<TeardownEvidence> = {}): TeardownEvidence => ({
+    id: "tev-1",
+    range_id: "rng-1",
+    operation_id: "op-1",
+    verdict: "clean",
+    probe_reachable: true,
+    expected_count: 3,
+    removed_confirmed: 3,
+    still_present: 0,
+    unproven_count: 0,
+    reason: null,
+    observed_at: "2026-08-01T01:00:00",
+    resources: [],
+    ...over,
   });
 
-  it("marks the enumeration incomplete when instances could not be read", () => {
-    const r = blastRadius(null, [topo("i1", "team-1", 1, "10.0.0.1")]);
-    expect(r.complete).toBe(false);
-    expect(r.incompleteReason).toMatch(/instance/i);
+  it("reports a reachable clean probe as proved", () => {
+    const s = teardownSummary(evidence());
+    expect(s.provedClean).toBe(true);
+    expect(s.headline).toMatch(/verified clean/i);
   });
 
-  it("omits addresses the plan never declared instead of inventing placeholders", () => {
-    const noIp: TeamTopology = {
-      instance_id: "i1",
-      team_ref: "team-1",
-      team_index: 1,
-      lifecycle_state: "running",
-      nodes: [{ id: "n", type: "x", data: { label: "ghost", kind: "target" } }],
-      edges: [],
-    };
-    const r = blastRadius(instances, [noIp]);
-    expect(r.addresses).toEqual([]);
-    expect(r.targetCount).toBe(1);
+  it("refuses to call it proved when the probe could not run", () => {
+    // The removal and the existence check share a failure mode, so absence was never established.
+    const s = teardownSummary(evidence({ probe_reachable: false }));
+    expect(s.provedClean).toBe(false);
+    expect(s.headline).toMatch(/could not run/i);
+  });
+
+  it("does not report an unproven verdict as clean", () => {
+    const s = teardownSummary(evidence({ verdict: "unproven", probe_reachable: false, unproven_count: 3, removed_confirmed: 0 }));
+    expect(s.provedClean).toBe(false);
+    expect(s.headline).toMatch(/could not be verified/i);
+    expect(s.unprovenCount).toBe(3);
+  });
+
+  it("names residue plainly", () => {
+    const s = teardownSummary(evidence({ verdict: "residue", still_present: 2 }));
+    expect(s.provedClean).toBe(false);
+    expect(s.headline).toMatch(/still present/i);
+  });
+
+  it("prefers the server's own reason over generated copy", () => {
+    const s = teardownSummary(evidence({ verdict: "unproven", reason: "docker daemon unreachable" }));
+    expect(s.detail).toBe("docker daemon unreachable");
   });
 });
 
 describe("destroyConfirmationMatches", () => {
   it("requires an exact name match after trimming", () => {
-    expect(destroyConfirmationMatches("  Range One  ", "Range One")).toBe(true);
-    expect(destroyConfirmationMatches("Range One", "Range One")).toBe(true);
+    expect(destroyConfirmationMatches("  Tuesday cohort  ", "Tuesday cohort")).toBe(true);
   });
 
   it("rejects a case-insensitive near-miss", () => {
-    // The control exists so the operator reads the specific name. Looser matching defeats it.
-    expect(destroyConfirmationMatches("range one", "Range One")).toBe(false);
+    expect(destroyConfirmationMatches("tuesday cohort", "Tuesday cohort")).toBe(false);
   });
 
   it("rejects an empty confirmation even against an empty name", () => {
@@ -394,7 +411,6 @@ describe("scoreboard ordering", () => {
   });
 
   it("honours the server's rank over the score", () => {
-    // The server ranks. A higher score with a worse rank stays where the server put it.
     const rows = orderScoreboard([
       row({ team_name: "b", rank: 2, score: 999 }),
       row({ team_name: "a", rank: 1, score: 1 }),
@@ -402,9 +418,10 @@ describe("scoreboard ordering", () => {
     expect(rows.map((r) => r.team_name)).toEqual(["a", "b"]);
   });
 
-  it("preserves shared ranks for ties instead of renumbering them", () => {
-    // The contract says ties SHARE a rank. Renumbering would turn two teams tied at 1st into a
-    // 1st and a 2nd — a placement the server never made.
+  it("preserves shared ranks instead of renumbering them", () => {
+    // The backend ties on (score, last_solve_at) together, so shared ranks are rare — but when
+    // they happen, standard competition ranking means the next team is 3rd, not 2nd. Using the
+    // array index would silently rewrite that.
     const rows = orderScoreboard([
       row({ team_name: "b", rank: 1, score: 300 }),
       row({ team_name: "a", rank: 1, score: 300 }),
@@ -415,23 +432,18 @@ describe("scoreboard ordering", () => {
   });
 
   it("breaks ties stably by team name so polls do not reshuffle", () => {
-    const rows = orderScoreboard([
-      row({ team_name: "b", rank: 1 }),
-      row({ team_name: "a", rank: 1 }),
-    ]);
+    const rows = orderScoreboard([row({ team_name: "b", rank: 1 }), row({ team_name: "a", rank: 1 })]);
     expect(rows.map((r) => r.team_name)).toEqual(["a", "b"]);
   });
 
   it("never alters a score while ordering", () => {
     const input = [row({ team_name: "a", rank: 1, score: 7 }), row({ team_name: "b", rank: 2, score: 3 })];
-    const out = orderScoreboard(input);
-    expect(out.map((r) => r.score)).toEqual([7, 3]);
-    expect(input.map((r) => r.score)).toEqual([7, 3]); // input untouched
+    expect(orderScoreboard(input).map((r) => r.score)).toEqual([7, 3]);
+    expect(input.map((r) => r.score)).toEqual([7, 3]);
   });
 
   it("displays the server's rank, never the array index", () => {
-    const rows = orderScoreboard([row({ team_name: "only", rank: 4 })]);
-    expect(displayRank(rows[0])).toBe("4");
+    expect(displayRank(orderScoreboard([row({ rank: 4 })])[0])).toBe("4");
   });
 
   it("marks tied rows as tied", () => {
@@ -449,7 +461,8 @@ describe("submission verdicts", () => {
   });
 
   it("does not present an already-solved challenge as a wrong answer", () => {
-    // Telling a competitor their correct flag was "incorrect" is the bug this guards.
+    // `already_solved` comes back for ANY submission once the team holds the solve — including a
+    // wrong guess. Rendering it as an error would tell a competitor their solved challenge failed.
     expect(verdictTone("already_solved")).not.toBe("danger");
     expect(verdictTone("duplicate")).not.toBe("danger");
     expect(verdictTone("incorrect")).toBe("danger");

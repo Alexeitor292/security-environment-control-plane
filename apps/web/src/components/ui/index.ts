@@ -11,6 +11,7 @@ export {
 } from "./CyberSelect";
 export { StatusBadge, type StatusBadgeProps } from "./StatusBadge";
 export {
+  RANGE_EVENT_TONE,
   RANGE_OPERATION_TONE,
   RANGE_TONE,
   resolveStatusTone,

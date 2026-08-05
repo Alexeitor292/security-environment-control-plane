@@ -97,9 +97,14 @@
   border: var(--border-width) solid var(--border);
   border-radius: var(--radius-md);
 }
-.rng-step--current { border-color: var(--border-selected); }
-.rng-step--done { opacity: 0.8; }
+.rng-step--current,
+.rng-step--running { border-color: var(--border-selected); }
+.rng-step--done,
+.rng-step--succeeded { opacity: 0.8; }
 .rng-step--failed { border-color: var(--danger); }
+/* `unproven` is neither done nor failed — it gets the same amber as recovery_required. */
+.rng-step--unproven { border-color: var(--pending); }
+.rng-step--pending { opacity: 0.6; }
 .rng-step-name { font-weight: 600; }
 .rng-step-note {
   color: var(--ink-secondary);
@@ -121,6 +126,27 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .rng-meter-fill { transition: none; }
+}
+
+/* Indeterminate: the worker has not planned the operation yet, so the amount of work is UNKNOWN.
+   A sweeping band says "working, amount unknown"; a 0%-filled bar would say "no progress", which
+   is a different and false claim. */
+.rng-meter--indeterminate { position: relative; }
+.rng-meter-sweep {
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  animation: rng-sweep 1.4s var(--ease-in-out) infinite;
+}
+@keyframes rng-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No motion: a static half-width band still reads as "indeterminate" rather than as a value. */
+  .rng-meter-sweep { animation: none; width: 50%; opacity: 0.6; }
 }
 
 .rng-live {

@@ -1,146 +1,124 @@
-// Pure view-model for the RANGE surfaces: catalog, create, deployment progress, overview, access,
-// timeline, and the reset/destroy confirmation.
+// Pure view-model for the RANGE surfaces: catalog, create, deployment progress, overview and
+// access, event timeline, and the reset/destroy confirmation.
 //
-// No React, no fetching. Every function here is a total function of server-supplied records, so the
-// pages stay thin and the behaviour that matters is testable without a DOM.
+// No React, no fetching. Every function is a total function of server-supplied records.
 //
-// Truth rules enforced here, in the spirit of environments-view.ts:
-// - A blueprint is a DEFINITION. It is not a deployed range and cannot be reached.
-// - Deploying is APPROVAL-GATED. The gate is the server's; this module only reports which step the
-//   operator is actually on so the UI never offers a button whose sole outcome is a refusal.
-// - "Dispatched" is not "done". A reset or destroy that has been requested is reported as
-//   requested until the recorded state says otherwise.
-// - Access details render only from RECORDED plan/topology data. Nothing here probes a host, and
-//   no reachability is asserted that the control plane did not record.
-// - Scores are NEVER computed here. See `scoreboard-view.ts` for why that module refuses to.
+// Truth rules enforced here:
+// - A template is a DEFINITION. Choosing one deploys nothing.
+// - `reachable` is only ever the server's observed value. Nothing here infers reachability from
+//   "the container exists".
+// - "Dispatched" is not "done". Lifecycle mutations return 202 and the work happens on the worker;
+//   the recorded state is the only thing that says an operation finished.
+// - NOT-YET-KNOWN IS NOT ZERO, and it is not empty. `total_steps: 0` before the worker plans the
+//   operation means the plan does not exist yet — rendered as indeterminate, never as 0%.
+// - `unproven` is a third outcome. A teardown that could not observe the provider proves nothing,
+//   and is never reported as clean.
+// - Scores are never computed here. See `scoreboard-view.ts`.
 
 import type {
-  AuditEvent,
-  DeploymentPlan,
-  Exercise,
-  Instance,
-  TeamTopology,
-  Template,
-  Version,
-} from "../../api/types";
+  Range,
+  RangeAccessTarget,
+  RangeOperation,
+  RangeOperationSummary,
+  RangeResource,
+  RangeTemplate,
+  TeardownEvidence,
+} from "../../api/range-types";
 import { rangeLifecycle, type RangeLifecycle } from "./range-lifecycle";
 
 // ------------------------------------------------------------------------------------- copy
 
 export const CATALOG_INTRO =
-  "Vulnerable range blueprints available to your organization. A blueprint is an immutable definition — choosing one does not deploy anything.";
+  "Vulnerable range blueprints available to your organization. A blueprint is a definition — choosing one does not deploy anything.";
 
 /**
- * The single honest statement about what deployment actually does in this build. The control-plane
- * API, the workflow records and the lifecycle transitions are all real; the provider that
- * materializes hosts is the simulation provider that ships with the control plane. Saying "deployed"
- * without this line would claim reachable infrastructure that does not exist.
+ * What the range surface actually does. Unlike the exercise surface (whose shipped provider is the
+ * simulator and contacts nothing), a range deploys real local infrastructure through its provider.
+ * That is worth stating plainly in the opposite direction too: this really does start containers.
  */
 export const EXECUTION_POSTURE_NOTE =
-  "Execution runs through the control plane's configured provider. The shipped default provider is simulated — lifecycle, workflows and topology are real records, but no external infrastructure is contacted.";
+  "Deploying a range starts real infrastructure through its provider. Containers are created on the host running the worker, and the targets are intentionally vulnerable software.";
 
-export const DEPLOY_IS_GATED_NOTE =
-  "Deployment is approval-gated: a range must be validated, planned, submitted and approved before it can be deployed. The server enforces every step.";
+export const VULNERABLE_SOFTWARE_NOTE =
+  "These ranges run intentionally vulnerable software. Keep them on an isolated local host and never expose them to an untrusted network.";
 
-export const ACCESS_IS_DECLARED_NOTE =
-  "Access details come from the recorded plan and topology. They are declared addresses — nothing here probes a host or proves reachability.";
+export const ACCESS_IS_OBSERVED_NOTE =
+  "Access details come from the server. A target is marked reachable only where an actual response was observed — never inferred from the container having been created.";
 
 export const RESET_IS_DISPATCHED_NOTE =
-  "Reset dispatches work per team instance. Requested is not complete — the lifecycle reflects the recorded state only.";
+  "Reset recreates the target containers and clears competition scores and submissions. Teams and challenges survive. Requested is not complete — the recorded state is authoritative.";
 
 export const DESTROY_IS_IRREVERSIBLE_NOTE =
-  "Destroy tears down every team instance in this range. It cannot be undone, and a destroyed range cannot be redeployed — create a new one from the blueprint.";
+  "Destroy removes every resource this range owns and nothing else. It cannot be undone, and a destroyed range cannot be redeployed — create a new one from the blueprint.";
 
 /**
- * The `recovery_required` explanation. This is the one piece of copy on these surfaces that must
- * not be softened: the phase does NOT mean the range broke, and it does NOT mean the range is gone.
- * It means nothing observed the outcome, so neither claim can be made.
+ * The `recovery_required` explanation. This copy must not be softened: the phase does NOT mean the
+ * range broke, and it does NOT mean the range is gone. It means nothing observed the outcome, so
+ * neither claim can be made.
  */
 export const RECOVERY_REQUIRED_NOTE =
   "This range could not be observed to completion. That is not the same as a failure and not the same as a clean teardown: nobody has proved what is left. Resources this range created may still exist. Check the provider directly before assuming anything is gone.";
 
-/** Why `unproven` gets its own colour wherever a status is shown. */
 export const UNPROVEN_NOTE =
   "Unproven means the provider could not be observed — the answer is unknown, not good and not bad. It is never rolled up into a success or a failure count.";
 
 /** Closed-code copy for range surfaces. Raw backend messages never render. */
 export const RANGE_ERROR_TEXT: Record<string, string> = {
-  domain_error: "That action is not allowed in the range's current state.",
-  not_found: "The range was not found, or you cannot access it.",
-  validation_failed: "The server rejected the request's contents.",
+  range_not_found: "The range was not found, or you cannot access it.",
+  range_invalid_transition: "That action is not allowed in the range's current state.",
+  range_provider_unavailable:
+    "The range provider could not be reached. Nothing was changed — check that the worker and its provider are running.",
+  // Hit whenever the control plane is running WITHOUT a worker, which is the common local setup.
+  // The generic fallback ("backend details are not shown by design") is true but useless here, and
+  // this is a refusal with an exact, actionable cause: range operations run only on the durable
+  // worker path, so the API refuses to execute one itself.
+  inline_execution_forbidden:
+    "Range operations run on the durable worker, never inside the API. Nothing was changed. Start a worker with access to its provider (for local_docker, the Docker socket) and try again.",
+  competition_not_open: "The competition is not running.",
+  submission_rejected: "The server rejected that submission.",
   forbidden: "You do not have permission for that action.",
+  not_found: "The requested record was not found.",
+  validation_failed: "The server rejected the request's contents.",
   conflict: "The request conflicts with the range's current recorded state.",
-  approval_required: "This range needs an approved plan before it can be deployed.",
-  plan_stale: "The plan no longer matches the definition. Generate a new plan.",
-  execution_refused: "The execution boundary refused this action.",
 };
 
 // -------------------------------------------------------------------------------- catalog
 
 export interface RangeBlueprint {
-  templateId: string;
-  name: string;
   slug: string;
+  name: string;
+  summary: string;
   description: string;
-  versionCount: number;
-  latestVersionId: string | null;
-  latestVersionNumber: number | null;
-  latestContentHash: string | null;
-  /** A blueprint with no immutable version cannot be instantiated. */
-  deployable: boolean;
-  /** Present only when `deployable` is false — always says what is missing. */
-  unavailableReason: string | null;
+  provider: string;
+  difficulty: string;
+  estimatedDeploySeconds: number;
+  warning: string;
+  targetCount: number;
+  componentNames: string[];
+  challengeCount: number;
+  totalPoints: number;
 }
 
-/**
- * Build catalog entries from templates and their versions.
- *
- * `versionsByTemplate` is keyed by template id; a template MISSING from the map is not the same as
- * a template with zero versions. A missing key means "versions were not loaded for this template",
- * and it reports `versionCount: 0` with a reason that says exactly that, rather than claiming the
- * blueprint has no versions. That distinction is the difference between "nothing to deploy" and
- * "we did not look".
- */
-export function rangeBlueprints(
-  templates: readonly Template[],
-  versionsByTemplate: ReadonlyMap<string, readonly Version[]>,
-): RangeBlueprint[] {
+export function rangeBlueprints(templates: readonly RangeTemplate[]): RangeBlueprint[] {
   return [...templates]
-    .sort((a, b) => displayName(a).localeCompare(displayName(b)))
-    .map((t) => {
-      const loaded = versionsByTemplate.has(t.id);
-      const versions = versionsByTemplate.get(t.id) ?? [];
-      // Highest version_number wins. Never "the last element" — list order is the server's, and
-      // depending on it would silently pick the wrong version if that order ever changed.
-      const latest = versions.reduce<Version | null>(
-        (best, v) => (best === null || v.version_number > best.version_number ? v : best),
-        null,
-      );
-      return {
-        templateId: t.id,
-        name: displayName(t),
-        slug: t.slug,
-        description: t.description,
-        versionCount: versions.length,
-        latestVersionId: latest?.id ?? null,
-        latestVersionNumber: latest?.version_number ?? null,
-        latestContentHash: latest?.content_hash ?? null,
-        deployable: latest !== null,
-        unavailableReason:
-          latest !== null
-            ? null
-            : loaded
-              ? "No immutable version has been published for this blueprint yet."
-              : "Versions for this blueprint could not be loaded.",
-      };
-    });
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((t) => ({
+      slug: t.slug,
+      name: t.name,
+      summary: t.summary,
+      description: t.description,
+      provider: t.provider,
+      difficulty: t.difficulty,
+      estimatedDeploySeconds: t.estimated_deploy_seconds,
+      warning: t.warning,
+      // Only `target` components are things a competitor attacks; scoring/support are plumbing.
+      targetCount: t.components.filter((c) => c.role === "target").length,
+      componentNames: t.components.map((c) => c.name),
+      challengeCount: t.challenge_count,
+      totalPoints: t.total_points,
+    }));
 }
 
-function displayName(t: Template): string {
-  return t.display_name || t.name;
-}
-
-/** Case-insensitive substring filter over the fields an operator would search by. */
 export function filterBlueprints(
   blueprints: readonly RangeBlueprint[],
   query: string,
@@ -148,373 +126,342 @@ export function filterBlueprints(
   const q = query.trim().toLowerCase();
   if (!q) return [...blueprints];
   return blueprints.filter((b) =>
-    `${b.name} ${b.slug} ${b.description}`.toLowerCase().includes(q),
+    `${b.name} ${b.slug} ${b.summary} ${b.difficulty}`.toLowerCase().includes(q),
   );
 }
 
-// ------------------------------------------------------------------------ deployed ranges
+/** Human duration for an estimate. Deliberately coarse — it is an estimate, not a promise. */
+export function estimatedDuration(seconds: number): string {
+  if (seconds <= 0) return "unknown";
+  if (seconds < 90) return `about ${seconds}s`;
+  return `about ${Math.round(seconds / 60)} min`;
+}
+
+// ------------------------------------------------------------------------- deployed ranges
 
 export interface RangeSummary {
   id: string;
   name: string;
+  templateSlug: string;
+  templateName: string;
+  provider: string;
   lifecycle: RangeLifecycle;
-  teamCount: number;
-  environmentVersionId: string;
-  templateId: string;
+  stateReason: string | null;
   createdAt: string;
+  hasCompetition: boolean;
+  reachableCount: number;
+  accessCount: number;
 }
 
-export function rangeSummaries(exercises: readonly Exercise[]): RangeSummary[] {
-  return [...exercises]
+export function rangeSummaries(ranges: readonly Range[]): RangeSummary[] {
+  return [...ranges]
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .map(rangeSummary);
 }
 
-export function rangeSummary(exercise: Exercise): RangeSummary {
+export function rangeSummary(range: Range): RangeSummary {
   return {
-    id: exercise.id,
-    name: exercise.name,
-    lifecycle: rangeLifecycle(exercise.lifecycle_state),
-    teamCount: exercise.team_count,
-    environmentVersionId: exercise.environment_version_id,
-    templateId: exercise.template_id,
-    createdAt: exercise.created_at,
+    id: range.id,
+    name: range.name,
+    templateSlug: range.template_slug,
+    templateName: range.template_name,
+    provider: range.provider,
+    lifecycle: rangeLifecycle(range.state),
+    stateReason: range.state_reason,
+    createdAt: range.created_at,
+    hasCompetition: range.competition_id !== null,
+    reachableCount: range.access.filter((a) => a.reachable).length,
+    accessCount: range.access.length,
   };
 }
 
-// ------------------------------------------------------------------------- the deploy gate
+// --------------------------------------------------------------------- operation progress
 
-/**
- * The steps between a created range and a deployed one. These are the SERVER's gate, mirrored here
- * only so the UI can show the operator where they are and offer exactly one next action.
- */
-export type GateStep =
-  | "validate"
-  | "generate-plan"
-  | "submit-plan"
-  | "approve-plan"
-  | "deploy"
-  | "none";
+export type ProgressKind = "none" | "indeterminate" | "determinate";
 
-export interface DeployGate {
-  /** The one action available now, or "none". */
-  next: GateStep;
+export interface OperationProgress {
+  kind: ProgressKind;
+  /** null when the amount of work is not yet known. Never a fabricated 0. */
+  percent: number | null;
+  completedSteps: number;
+  /** null when the worker has not planned the operation yet. */
+  totalSteps: number | null;
   label: string;
-  help: string;
-  /** Steps already satisfied, in order, for a progress rail. */
-  completed: readonly GateStep[];
-  /** Set when no action is available AND that is not because deployment finished. */
-  blockedReason: string | null;
 }
 
-const GATE_ORDER: readonly GateStep[] = [
-  "validate",
-  "generate-plan",
-  "submit-plan",
-  "approve-plan",
-  "deploy",
-];
+/**
+ * Progress for the current operation, WITHOUT ever dividing by `total_steps`.
+ *
+ * The API no longer plans an operation's steps — asking a provider what it intends to do means
+ * holding one, and the API is not permitted to. So between the 202 and the worker picking the
+ * operation up, `total_steps` is 0. That is three distinct facts away from what it looks like:
+ *
+ *   total_steps: 0, in flight -> the plan DOES NOT EXIST YET    (indeterminate)
+ *   total_steps: 0, settled   -> the operation planned nothing  (determinate)
+ *   total_steps: N            -> a real plan                    (determinate)
+ *
+ * Only the first is the common case, and rendering it as "0%" would state that no work has been
+ * done when the truth is that nobody knows yet how much work there is. `percent` comes from the
+ * server, which clamps it in that window; this never computes it.
+ */
+export function operationProgress(
+  operation: RangeOperationSummary | null,
+): OperationProgress {
+  if (operation === null) {
+    return {
+      kind: "none",
+      percent: null,
+      completedSteps: 0,
+      totalSteps: null,
+      label: "No operation has run against this range yet.",
+    };
+  }
+  const settled =
+    operation.status === "succeeded" ||
+    operation.status === "failed" ||
+    operation.status === "unproven";
 
-export const GATE_LABEL: Record<GateStep, string> = {
-  validate: "Validate definition",
-  "generate-plan": "Generate deployment plan",
-  "submit-plan": "Submit plan for approval",
-  "approve-plan": "Approve plan",
-  deploy: "Deploy range",
-  none: "No action available",
+  if (operation.total_steps === 0 && !settled) {
+    return {
+      kind: "indeterminate",
+      percent: null,
+      completedSteps: 0,
+      totalSteps: null,
+      label: "Waiting for the worker to pick this up and plan the steps.",
+    };
+  }
+  return {
+    kind: "determinate",
+    percent: operation.percent,
+    completedSteps: operation.completed_steps,
+    totalSteps: operation.total_steps,
+    label:
+      operation.total_steps === 0
+        ? "This operation planned no steps."
+        : `${operation.completed_steps} of ${operation.total_steps} steps`,
+  };
+}
+
+/** Whether the client should keep polling, decided from the operation rather than a caller flag. */
+export function operationInFlight(operation: RangeOperationSummary | null): boolean {
+  return operation !== null && (operation.status === "pending" || operation.status === "running");
+}
+
+export const OPERATION_KIND_LABEL: Record<string, string> = {
+  deploy: "Deploy",
+  reset: "Reset",
+  destroy: "Destroy",
 };
 
-/**
- * Resolve the operator's next step from the RECORDED exercise state and the plan (if one exists).
- *
- * Driven by the recorded lifecycle state, not by the plan alone: a plan can be approved while the
- * exercise has already moved on, and in that case the next step is deploy, not approve. `plan` is
- * null when no plan has been generated — distinct from a plan that exists in `generated` status.
- */
-export function deployGate(
-  exercise: Pick<Exercise, "lifecycle_state">,
-  plan: Pick<DeploymentPlan, "status"> | null,
-): DeployGate {
-  const state = exercise.lifecycle_state;
-  const step = (next: GateStep, help: string): DeployGate => ({
-    next,
-    label: GATE_LABEL[next],
-    help,
-    completed: GATE_ORDER.slice(0, GATE_ORDER.indexOf(next)),
-    blockedReason: null,
-  });
-
-  switch (state) {
-    case "draft":
-      return step("validate", "Check the definition parses against the schema.");
-    case "validated":
-      return step("generate-plan", "Produce a deterministic plan pinned to this version's content hash.");
-    case "planned":
-      // `planned` means a plan exists. Which step comes next depends on the PLAN's own status.
-      if (plan === null) {
-        return {
-          next: "generate-plan",
-          label: GATE_LABEL["generate-plan"],
-          help: "The range is planned but the plan could not be read. Generate a new one.",
-          completed: GATE_ORDER.slice(0, 1),
-          blockedReason: null,
-        };
-      }
-      if (plan.status === "generated") {
-        return step("submit-plan", "Send the plan for an approval decision.");
-      }
-      if (plan.status === "awaiting_approval") {
-        return step("approve-plan", "Record an approval decision pinned to this plan hash.");
-      }
-      if (plan.status === "rejected") {
-        return {
-          next: "generate-plan",
-          label: GATE_LABEL["generate-plan"],
-          help: "The plan was rejected. Generate a new plan to continue.",
-          completed: GATE_ORDER.slice(0, 1),
-          blockedReason: null,
-        };
-      }
-      return step("deploy", "Dispatch deployment work for every team.");
-    case "awaiting_approval":
-      return step("approve-plan", "Record an approval decision pinned to this plan hash.");
-    case "approved":
-      return step("deploy", "Dispatch deployment work for every team.");
-    default:
-      return {
-        next: "none",
-        label: GATE_LABEL.none,
-        help: "",
-        completed: GATE_ORDER,
-        blockedReason: gateBlockedReason(state),
-      };
-  }
-}
-
-function gateBlockedReason(state: string): string | null {
-  switch (state) {
-    case "deploying":
-      return "Deployment is already in progress.";
-    case "running":
-      return null; // Deployment finished — not blocked, just done.
-    case "resetting":
-      return "A reset is in progress.";
-    case "destroying":
-      return "The range is being destroyed.";
-    case "destroyed":
-      return "This range has been destroyed. Create a new one from the blueprint.";
+/** Copy for a finished operation. `unproven` is neither success nor failure. */
+export function operationOutcomeText(operation: RangeOperation | null): string | null {
+  if (operation === null) return null;
+  switch (operation.status) {
     case "failed":
-      return "The last operation failed. Inspect the timeline before acting.";
+      return operation.failure_code === null
+        ? "This operation failed."
+        : `This operation failed (${operation.failure_code}).`;
+    case "unproven":
+      return "This operation could not be observed to completion. What happened on the provider is unknown — it did not necessarily fail, and it did not necessarily succeed.";
     default:
-      return `The range is in an unrecognized state (${state}).`;
+      return null;
   }
 }
 
 // -------------------------------------------------------------------------- access targets
 
-export interface AccessTarget {
-  instanceId: string;
-  teamRef: string;
-  teamIndex: number;
-  nodeId: string;
-  label: string;
-  kind: string;
-  role: string | null;
-  /** Declared address from the plan. null when the plan declares none. */
-  ip: string | null;
-  network: string | null;
-  isolated: boolean | null;
+export interface AccessRow {
+  componentKey: string;
+  name: string;
+  url: string;
+  host: string;
+  port: number;
+  protocol: string;
+  reachable: boolean;
+  observedAt: string | null;
 }
 
 /**
- * Flatten per-team topologies into the list of things an operator would connect to.
+ * Access rows for a range, ordered by name so reloads are stable.
  *
- * Network nodes are excluded — they are segments, not targets. Ordering is by team index then node
- * label so the list is stable across reloads regardless of server ordering.
+ * `reachable` is passed through verbatim. `observedAt` is kept alongside it so the UI can tell
+ * "we checked and it did not answer" apart from "we never checked" — see `reachabilityText`.
  */
-export function accessTargets(topologies: readonly TeamTopology[]): AccessTarget[] {
-  const rows: AccessTarget[] = [];
-  for (const topo of topologies) {
-    for (const node of topo.nodes) {
-      if (node.data.kind === "network") continue;
-      rows.push({
-        instanceId: topo.instance_id,
-        teamRef: topo.team_ref,
-        teamIndex: topo.team_index,
-        nodeId: node.id,
-        label: node.data.label,
-        kind: node.data.kind,
-        role: node.data.role ?? null,
-        ip: node.data.ip ?? null,
-        network: node.data.network ?? null,
-        isolated: node.data.isolated ?? null,
-      });
-    }
-  }
-  return rows.sort(
-    (a, b) => a.teamIndex - b.teamIndex || a.label.localeCompare(b.label),
-  );
-}
-
-/** Per-team instance rows for the overview, joined with their recorded lifecycle. */
-export interface TeamInstanceRow {
-  instanceId: string;
-  teamRef: string;
-  teamIndex: number;
-  instanceRef: string;
-  provider: string;
-  lifecycle: RangeLifecycle;
-  targetCount: number;
-}
-
-export function teamInstanceRows(
-  instances: readonly Instance[],
-  topologies: readonly TeamTopology[],
-): TeamInstanceRow[] {
-  const targetsByInstance = new Map<string, number>();
-  for (const t of accessTargets(topologies)) {
-    targetsByInstance.set(t.instanceId, (targetsByInstance.get(t.instanceId) ?? 0) + 1);
-  }
-  return [...instances]
-    .sort((a, b) => a.team_index - b.team_index)
-    .map((i) => ({
-      instanceId: i.id,
-      teamRef: i.team_ref,
-      teamIndex: i.team_index,
-      instanceRef: i.instance_ref,
-      provider: i.provider,
-      lifecycle: rangeLifecycle(i.lifecycle_state),
-      targetCount: targetsByInstance.get(i.id) ?? 0,
+export function accessRows(range: Pick<Range, "access">): AccessRow[] {
+  return [...range.access]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((a: RangeAccessTarget) => ({
+      componentKey: a.component_key,
+      name: a.name,
+      url: a.url,
+      host: a.host,
+      port: a.port,
+      protocol: a.protocol,
+      reachable: a.reachable,
+      observedAt: a.observed_at,
     }));
 }
 
-/**
- * Whether an individual team instance can be reset.
- *
- * Mirrors the range contract's rule — reset is allowed from `ready`, `active` and `failed`. A
- * failed instance is included deliberately: resetting is how an operator recovers one, so hiding
- * the control on exactly the instance that needs it would be backwards.
- *
- * `recovery_required` is NOT included. Nothing there is known to be in a resettable state, and
- * re-running an operation over infrastructure nobody could observe is how you turn one unproven
- * outcome into two. The server re-checks all of this and is authoritative.
- */
-export function canResetInstance(row: Pick<TeamInstanceRow, "lifecycle">): boolean {
-  if (!row.lifecycle.known) return false;
-  const { phase } = row.lifecycle;
-  return phase === "ready" || phase === "active" || phase === "failed";
+/** Reachability wording that keeps "did not respond" and "never checked" apart. */
+export function reachabilityText(row: Pick<AccessRow, "reachable" | "observedAt">): string {
+  if (row.observedAt === null) return "not checked";
+  return row.reachable ? "responded" : "did not respond";
 }
 
-// -------------------------------------------------------------------------------- timeline
+// -------------------------------------------------------------------------------- resources
 
-export interface TimelineEntry {
+export interface ResourceRow {
   id: string;
-  at: string;
-  actor: string;
-  action: string;
-  outcome: string;
-  resourceType: string;
-  resourceId: string | null;
-  /** True for anything that is not a plain success — surfaced prominently. */
-  flagged: boolean;
+  kind: string;
+  name: string;
+  componentKey: string | null;
+  state: string;
+  image: string | null;
+  imageDigest: string | null;
+  externalId: string | null;
+  hostPort: number | null;
+  removedAt: string | null;
 }
 
-/**
- * Range event timeline, newest first.
- *
- * The events are the server's audit ledger scoped to this range. Nothing is synthesized: if the
- * ledger has no entry for a transition, the timeline shows no entry for it, rather than inferring
- * one from the current lifecycle state.
- */
-export function timelineEntries(events: readonly AuditEvent[]): TimelineEntry[] {
-  return [...events]
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
-    .map((e) => ({
-      id: e.id,
-      at: e.created_at,
-      actor: e.actor,
-      action: e.action,
-      outcome: e.outcome,
-      resourceType: e.resource_type,
-      resourceId: e.resource_id,
-      flagged: e.outcome !== "success",
+export function resourceRows(resources: readonly RangeResource[]): ResourceRow[] {
+  return [...resources]
+    .sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name))
+    .map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      name: r.name,
+      componentKey: r.component_key,
+      state: r.state,
+      image: r.image,
+      imageDigest: r.image_digest,
+      externalId: r.external_id,
+      hostPort: r.host_port,
+      removedAt: r.removed_at,
     }));
 }
 
-/** Counts for the timeline header strip. Derived only from loaded events. */
-export function timelineTally(entries: readonly TimelineEntry[]): {
-  total: number;
-  flagged: number;
-} {
-  return {
-    total: entries.length,
-    flagged: entries.filter((e) => e.flagged).length,
-  };
+/** Resources that still exist as far as the server knows — the destroy blast radius. */
+export function liveResources(resources: readonly RangeResource[]): RangeResource[] {
+  return resources.filter((r) => r.removed_at === null && r.state !== "removed");
 }
 
 // -------------------------------------------------------------- destroy confirmation
 
-/**
- * What a destroy will actually tear down, enumerated from the server's own instance and topology
- * records.
- *
- * A confirmation that cannot state its own blast radius is a button with a warning label on it. So
- * this reports what was READ, and reports gaps as gaps: `complete` is false when the topology could
- * not be loaded, and the UI must then say the list may be incomplete rather than presenting a short
- * list as the whole story. Under-stating a blast radius is the failure mode that matters.
- */
 export interface BlastRadius {
-  teamCount: number;
-  targetCount: number;
-  /** One line per team: "team1 — 3 targets (team1-attacker, …)". */
+  resourceCount: number;
+  containerCount: number;
+  networkCount: number;
+  /** One line per resource: "container secp-range-0f2c-juice-shop (verified)". */
   lines: string[];
-  /** Every declared address that will stop answering. */
-  addresses: string[];
-  /** False when a source could not be read, so the enumeration may be short. */
+  /** Every host port that will stop answering. */
+  ports: number[];
+  /** False when the resource list could not be read, so the enumeration may be short. */
   complete: boolean;
-  /** Set when `complete` is false — names which source was missing. */
   incompleteReason: string | null;
 }
 
-export function blastRadius(
-  instances: readonly Instance[] | null,
-  topologies: readonly TeamTopology[] | null,
-): BlastRadius {
-  const targets = accessTargets(topologies ?? []);
-  const rows = teamInstanceRows(instances ?? [], topologies ?? []);
-  const byInstance = new Map<string, AccessTarget[]>();
-  for (const t of targets) {
-    byInstance.set(t.instanceId, [...(byInstance.get(t.instanceId) ?? []), t]);
+/**
+ * What a destroy will tear down, enumerated from the server's own resource records.
+ *
+ * A confirmation that cannot state its own blast radius is a button with a warning label. So this
+ * reports what was READ and reports gaps as gaps: a resource list that could not be loaded makes
+ * `complete` false and the UI says the list may be short rather than presenting it as the whole
+ * story. Under-stating a blast radius is the failure mode that matters.
+ */
+export function blastRadius(resources: readonly RangeResource[] | null): BlastRadius {
+  if (resources === null) {
+    return {
+      resourceCount: 0,
+      containerCount: 0,
+      networkCount: 0,
+      lines: [],
+      ports: [],
+      complete: false,
+      incompleteReason:
+        "The resource list could not be read, so this enumeration is incomplete. Treat it as a minimum, not an inventory.",
+    };
   }
-  const lines = rows.map((r) => {
-    const names = (byInstance.get(r.instanceId) ?? []).map((t) => t.label);
-    return names.length === 0
-      ? `${r.teamRef} — no targets declared`
-      : `${r.teamRef} — ${names.length} target${names.length === 1 ? "" : "s"} (${names.join(", ")})`;
-  });
-  const incompleteReason =
-    instances === null
-      ? "The team instance list could not be read, so this enumeration may be incomplete."
-      : topologies === null
-        ? "The topology could not be read, so per-team targets may be missing from this list."
-        : null;
+  const live = liveResources(resources);
   return {
-    teamCount: rows.length,
-    targetCount: targets.length,
-    lines,
-    addresses: targets.map((t) => t.ip).filter((ip): ip is string => ip !== null),
-    complete: incompleteReason === null,
-    incompleteReason,
+    resourceCount: live.length,
+    containerCount: live.filter((r) => r.kind === "container").length,
+    networkCount: live.filter((r) => r.kind === "network").length,
+    lines: live.map((r) => `${r.kind} ${r.name} (${r.state})`).sort((a, b) => a.localeCompare(b)),
+    ports: live
+      .map((r) => r.host_port)
+      .filter((p): p is number => p !== null)
+      .sort((a, b) => a - b),
+    complete: true,
+    incompleteReason: null,
   };
 }
 
 /**
  * Whether a typed confirmation matches the range name.
  *
- * Exact match after trimming — deliberately NOT case-insensitive and not a fuzzy match. The point
- * of the control is that the operator reads the specific name of the specific range they are about
- * to destroy; anything looser defeats it.
+ * Exact match after trimming — deliberately NOT case-insensitive and not fuzzy. The point of the
+ * control is that the operator reads the specific name of the specific range they are destroying.
  */
 export function destroyConfirmationMatches(typed: string, rangeName: string): boolean {
   return typed.trim() === rangeName.trim() && rangeName.trim() !== "";
+}
+
+// ------------------------------------------------------------------------ teardown evidence
+
+export interface TeardownSummary {
+  verdict: string;
+  /** True only for a `clean` verdict from a REACHABLE probe. */
+  provedClean: boolean;
+  headline: string;
+  detail: string;
+  expected: number;
+  removedConfirmed: number;
+  stillPresent: number;
+  unprovenCount: number;
+  observedAt: string;
+  resources: { name: string; kind: string; verdict: string; detail: string | null }[];
+}
+
+/**
+ * Summarize one teardown-evidence record.
+ *
+ * `provedClean` requires BOTH a `clean` verdict AND a reachable probe. When the probe could not
+ * run, the removal and the "is it gone?" check share a failure mode, so absence was never proved —
+ * and the summary says exactly that rather than reporting zero residue as a clean result.
+ */
+export function teardownSummary(evidence: TeardownEvidence): TeardownSummary {
+  const provedClean = evidence.verdict === "clean" && evidence.probe_reachable;
+  const headline =
+    evidence.verdict === "clean"
+      ? provedClean
+        ? "Teardown verified clean"
+        : "Reported clean, but the probe could not run"
+      : evidence.verdict === "residue"
+        ? "Resources are still present"
+        : "Teardown could not be verified";
+  const detail =
+    evidence.reason !== null
+      ? evidence.reason
+      : provedClean
+        ? "Every resource this range owned was confirmed removed."
+        : evidence.verdict === "residue"
+          ? "The provider still reports resources belonging to this range."
+          : "The provider could not be observed, so nothing was proved either way.";
+  return {
+    verdict: evidence.verdict,
+    provedClean,
+    headline,
+    detail,
+    expected: evidence.expected_count,
+    removedConfirmed: evidence.removed_confirmed,
+    stillPresent: evidence.still_present,
+    unprovenCount: evidence.unproven_count,
+    observedAt: evidence.observed_at,
+    resources: evidence.resources.map((r) => ({
+      name: r.name,
+      kind: r.kind,
+      verdict: r.verdict,
+      detail: r.detail,
+    })),
+  };
 }

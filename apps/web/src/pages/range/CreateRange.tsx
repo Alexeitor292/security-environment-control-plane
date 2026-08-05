@@ -1,6 +1,6 @@
 import "./range.css";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -11,6 +11,7 @@ import {
   CyberCard,
   CyberInput,
   CyberSelect,
+  CyberTable,
   DataPanel,
   EmptyState,
   SafetyNotice,
@@ -18,86 +19,49 @@ import {
 } from "../../components/ui";
 import { useAsync } from "../../hooks";
 import {
-  DEPLOY_IS_GATED_NOTE,
   EXECUTION_POSTURE_NOTE,
   RANGE_ERROR_TEXT,
+  estimatedDuration,
   rangeBlueprints,
 } from "./range-view";
-import type { Version } from "../../api/types";
 
 /**
  * Page 2 — Create Range.
  *
- * Every option on this form is loaded from the API: blueprints and their immutable versions, and
- * the registered execution targets. There is no default template, no invented version and no
- * placeholder target.
+ * Every option is loaded from `GET /range-templates`. Creating a range records it in `draft` and
+ * deploys nothing — deployment is a separate, explicit action on the next page.
  *
- * Creating a range does NOT deploy it. On success this navigates to the deployment page, which is
- * where the approval gate is walked.
+ * The component list is shown before creation because it is the honest answer to "what am I about
+ * to run on my machine": specific images, by tag.
  */
 export function CreateRange() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const action = useAction({ codeText: RANGE_ERROR_TEXT });
 
-  const catalog = useAsync(async () => {
-    const templates = await api.listTemplates();
-    const results = await Promise.allSettled(
-      templates.map(async (t) => [t.id, await api.listVersions(t.id)] as const),
-    );
-    const versions = new Map<string, readonly Version[]>();
-    for (const r of results) {
-      if (r.status === "fulfilled") versions.set(r.value[0], r.value[1]);
-    }
-    return { templates, versions };
-  }, []);
-
-  // Targets are optional context, so a failure here must not block creation. `catch` yields an
-  // empty list and the control below says the list is unavailable rather than claiming there are
-  // no targets.
-  const targets = useAsync(() => api.listTargets().catch(() => []), []);
-
-  const [templateId, setTemplateId] = useState(params.get("template") ?? "");
-  const [versionId, setVersionId] = useState("");
-  const [name, setName] = useState("");
-  const [targetId, setTargetId] = useState("");
-
+  const catalog = useAsync(() => api.listRangeTemplates(), []);
   const blueprints = useMemo(
-    () => (catalog.data ? rangeBlueprints(catalog.data.templates, catalog.data.versions) : []),
+    () => (catalog.data ? rangeBlueprints(catalog.data) : []),
     [catalog.data],
   );
-  const selected = blueprints.find((b) => b.templateId === templateId) ?? null;
-  const versions = useMemo(() => {
-    const list = catalog.data?.versions.get(templateId) ?? [];
-    return [...list].sort((a, b) => b.version_number - a.version_number);
-  }, [catalog.data, templateId]);
 
-  // Default the version to the blueprint's latest whenever the blueprint changes, and clear a
-  // selection that the new blueprint does not contain — a version id from a previous template
-  // would otherwise be submitted against the wrong one.
-  useEffect(() => {
-    if (versions.length === 0) {
-      setVersionId("");
-      return;
-    }
-    setVersionId((current) =>
-      versions.some((v) => v.id === current) ? current : versions[0].id,
-    );
-  }, [versions]);
+  const [slug, setSlug] = useState(params.get("template") ?? "");
+  const [name, setName] = useState("");
 
+  const selected = blueprints.find((b) => b.slug === slug) ?? null;
+  const template = catalog.data?.find((t) => t.slug === slug) ?? null;
   const nameTrimmed = name.trim();
-  const ready = templateId !== "" && versionId !== "" && nameTrimmed !== "";
+  const ready = slug !== "";
 
-  // Navigation happens inside the action so it runs ONLY after the server confirms creation, and
-  // with the id the SERVER assigned. A refusal leaves the operator on the form with their input
-  // intact and the closed-code reason shown below.
+  // Navigation happens inside the action so it runs ONLY after the server confirms creation, with
+  // the id the SERVER assigned. A refusal leaves the operator on the form with the reason shown.
   const create = () =>
     action.run(async () => {
-      const range = await api.createExercise({
-        template_id: templateId,
-        version_id: versionId,
-        name: nameTrimmed,
-        ...(targetId === "" ? {} : { execution_target_id: targetId }),
+      const range = await api.createRange({
+        template_slug: slug,
+        // `name` is optional server-side and defaults to the template name. Sending an empty
+        // string would override that default with a blank name, so it is omitted instead.
+        ...(nameTrimmed === "" ? {} : { name: nameTrimmed }),
       });
       navigate(`/ranges/${range.id}/deployment`);
     });
@@ -110,100 +74,85 @@ export function CreateRange() {
         <div>
           <h1>Create range</h1>
           <p className="rng-sub">
-            Instantiate an immutable blueprint version for a set of isolated teams. Creating a range
-            records it — it does not deploy anything.
+            Creating a range records it as a draft. Nothing is deployed until you deploy it.
           </p>
         </div>
       </div>
 
-      <SafetyNotice role="note" tone="info">
-        {DEPLOY_IS_GATED_NOTE}
+      <SafetyNotice role="note" tone="warn">
+        {EXECUTION_POSTURE_NOTE}
       </SafetyNotice>
 
       <CyberCard heading="Range definition" headingLevel={2}>
         <DataPanel
           state={catalog}
           isEmpty={() => blueprints.length === 0}
-          empty={
-            <EmptyState title="No blueprints available">
-              Create an environment definition in the{" "}
-              <Link to="/templates">environment library</Link> first.
-            </EmptyState>
-          }
+          empty={<EmptyState title="No blueprints available">The range catalog is empty.</EmptyState>}
         >
           {() => (
-            <div className="rng-grid">
-              <div>
+            <>
+              <div className="rng-grid">
                 <CyberSelect
                   label="Blueprint"
-                  value={templateId}
-                  onChange={(e) => setTemplateId(e.target.value)}
+                  value={slug}
+                  onChange={(e) => setSlug(e.target.value)}
                   options={[
                     { value: "", label: "Select a blueprint…" },
-                    ...blueprints.map((b) => ({
-                      value: b.templateId,
-                      label: b.deployable ? b.name : `${b.name} (no version)`,
-                      disabled: !b.deployable,
-                    })),
+                    ...blueprints.map((b) => ({ value: b.slug, label: b.name })),
                   ]}
                 />
-                <CyberSelect
-                  label="Version"
-                  hint="Immutable. The plan is pinned to this version's content hash."
-                  value={versionId}
-                  onChange={(e) => setVersionId(e.target.value)}
-                  disabled={versions.length === 0}
-                  options={
-                    versions.length === 0
-                      ? [{ value: "", label: "Select a blueprint first" }]
-                      : versions.map((v) => ({
-                          value: v.id,
-                          label: `v${v.version_number} · ${v.content_hash.slice(0, 19)}…`,
-                        }))
-                  }
-                />
-              </div>
-              <div>
                 <CyberInput
-                  label="Range name"
-                  hint="Shown throughout the range surfaces and typed back to confirm a destroy."
+                  label="Range name (optional)"
+                  hint="Defaults to the blueprint name. Typed back to confirm a destroy."
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                />
-                <CyberSelect
-                  label="Execution target (optional)"
-                  hint={
-                    targets.error !== null
-                      ? "The target list could not be loaded. Leave unset to let the control plane place this range."
-                      : "Leave unset to let the control plane choose placement."
-                  }
-                  value={targetId}
-                  onChange={(e) => setTargetId(e.target.value)}
-                  options={[
-                    { value: "", label: "Control plane decides" },
-                    // A disabled or discovery-failed target is listed but not selectable: hiding it
-                    // would leave an operator wondering where their target went, and offering it
-                    // would produce a refusal at create time.
-                    ...(targets.data ?? []).map((t) => ({
-                      value: t.id,
-                      label:
-                        t.status === "active"
-                          ? `${t.display_name} (${t.plugin_name})`
-                          : `${t.display_name} (${t.plugin_name}) — ${t.status}`,
-                      disabled: t.status !== "active",
-                    })),
-                  ]}
+                  placeholder={selected?.name ?? ""}
                 />
               </div>
-            </div>
+
+              {selected !== null && (
+                <>
+                  <p className="rng-sub">{selected.description || selected.summary}</p>
+                  <div className="rng-meta">
+                    <span className="mono">{selected.provider}</span>
+                    <span>{selected.difficulty}</span>
+                    <span>{estimatedDuration(selected.estimatedDeploySeconds)} to deploy</span>
+                    <span>
+                      {selected.challengeCount} challenge
+                      {selected.challengeCount === 1 ? "" : "s"} · {selected.totalPoints} pts
+                    </span>
+                  </div>
+                  {selected.warning !== "" && (
+                    <SafetyNotice role="alert" tone="warn">
+                      {selected.warning}
+                    </SafetyNotice>
+                  )}
+                </>
+              )}
+
+              {/* What will actually run, by image and tag. An operator about to start containers on
+                  their own machine is entitled to see exactly which ones before they commit. */}
+              {template !== null && template.components.length > 0 && (
+                <CyberTable
+                  label="Components"
+                  head={["Component", "Role", "Image", "Port"]}
+                  caption={`${template.components.length} component${template.components.length === 1 ? "" : "s"} will be created when this range is deployed`}
+                >
+                  {template.components.map((c) => (
+                    <tr key={c.key}>
+                      <td>{c.name}</td>
+                      <td className="muted">{c.role}</td>
+                      <td className="mono">{c.image}</td>
+                      <td className="muted mono">
+                        {c.container_port === null ? "—" : c.container_port}
+                      </td>
+                    </tr>
+                  ))}
+                </CyberTable>
+              )}
+            </>
           )}
         </DataPanel>
-
-        {selected !== null && (
-          <p className="rng-sub">
-            {selected.description || "No description recorded for this blueprint."}
-          </p>
-        )}
 
         {action.error !== null && (
           <ClosedCodeError
@@ -220,10 +169,6 @@ export function CreateRange() {
           <Link to="/ranges">Cancel</Link>
         </div>
       </CyberCard>
-
-      <SafetyNotice role="note" tone="info">
-        {EXECUTION_POSTURE_NOTE}
-      </SafetyNotice>
     </div>
   );
 }
