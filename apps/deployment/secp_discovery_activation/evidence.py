@@ -351,10 +351,20 @@ class ActivationEvidence(_Strict):
     worker_installation_identity: str
     operator_service_present: bool
     operator_queue_polled: bool
-    generic_activation_subprocess_sealed: bool
-    generic_executor_subprocess_sealed: bool
-    plan_only_process_sealed: bool
-    real_provisioning_enabled: bool
+    #: Per-seal states, as ``[[name, state], ...]``. Replaced four booleans
+    #: (``generic_activation_subprocess_sealed``, ``generic_executor_subprocess_sealed``,
+    #: ``plan_only_process_sealed``, ``real_provisioning_enabled``) which were every one of them
+    #: set from a SINGLE ``probe.seals_valid``, two inverted. They were not four observations, so
+    #: an evidence record carrying them recorded one fact under four names.
+    #:
+    #: THIS IS A VERSIONED SHAPE CHANGE, and the version is what keeps it honest. A record written
+    #: under the previous ``contract_version`` carries the old booleans, and ``_v_semantics``
+    #: refuses any record whose ``contract_version`` is not the current one — so an old record is
+    #: REFUSED rather than reinterpreted. It is deliberately not migrated: rewriting those four
+    #: manufactured booleans into four seal states would republish fabricated structure in a shape
+    #: where it is indistinguishable from four real observations, leaving the new format less
+    #: trustworthy than the old one.
+    seal_states: tuple[tuple[str, str], ...]
     # Required controller-database and pinned internal-admission observations are reported by the
     # positive readiness/publication fields above.  This flag is deliberately scoped to the
     # forbidden target/orchestration/state/secret infrastructure that activation must never touch.
@@ -368,6 +378,29 @@ class ActivationEvidence(_Strict):
     @classmethod
     def _v_objects_tuple(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
+
+    @field_validator("seal_states", mode="before")
+    @classmethod
+    def _v_seal_states_shape(cls, value: object) -> object:
+        """Accept the JSON form of the pairs, and refuse anything that is not a pair of strings.
+
+        This record is committed to disk and read back, and ``model_dump(mode="json")`` turns a
+        tuple of tuples into a LIST OF LISTS, which ``strict=True`` will not accept. Without this
+        the record could not survive its own round trip: it would be written successfully and
+        refused on the next read, and a refusal on re-read is indistinguishable from a tampered
+        record. ``managed_objects`` needed the same treatment for the same reason.
+        """
+        if not isinstance(value, list | tuple):
+            return value
+        coerced: list[tuple[str, str]] = []
+        for item in value:
+            if not isinstance(item, list | tuple) or len(item) != 2:
+                raise ValueError("seal state entry malformed")
+            name, state = item
+            if not isinstance(name, str) or not isinstance(state, str) or not name or not state:
+                raise ValueError("seal state entry malformed")
+            coerced.append((name, state))
+        return tuple(coerced)
 
     @field_validator("worker_image_digest")
     @classmethod
@@ -473,13 +506,18 @@ class ActivationEvidence(_Strict):
         }
         if record_digests != self.configuration_artifact_digests:
             raise ValueError("configuration object digest mismatch")
-        if (
-            self.generic_activation_subprocess_sealed is not True
-            or self.generic_executor_subprocess_sealed is not True
-            or self.plan_only_process_sealed is not False
-            or self.real_provisioning_enabled is not False
-        ):
-            raise ValueError("safety seal posture invalid")
+        # Every seal in the record must have been exercised AND held. Empty is refused rather than
+        # vacuously accepted: a record carrying no seal states has established nothing, and `all()`
+        # over nothing is True — which is precisely how an empty posture would have passed.
+        if not self.seal_states:
+            raise ValueError("safety seal posture absent")
+        # NAME the seals that did not hold. "Posture invalid" tells an operator that something is
+        # unsafe and not which thing, and `unsealed` (exercised, did not refuse) calls for a
+        # different response than `undetermined` (the derivation could not run). Any spelling other
+        # than `sealed` fails closed, so an unknown state is refused rather than treated as held.
+        failing = tuple(f"{name}={state}" for name, state in self.seal_states if state != "sealed")
+        if failing:
+            raise ValueError("safety seal posture invalid: " + ", ".join(sorted(failing)))
         for field_name in (
             "forbidden_infrastructure_contacts_performed",
             "workflows_submitted",
