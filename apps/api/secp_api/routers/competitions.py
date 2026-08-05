@@ -112,9 +112,7 @@ def list_range_team_members(
     competition = competitions.get_competition_for_range(session, principal, range_id)
     return [
         team_member_out(member)
-        for member in competitions.list_team_members(
-            session, principal, competition.id, team_id
-        )
+        for member in competitions.list_team_members(session, principal, competition.id, team_id)
     ]
 
 
@@ -176,9 +174,7 @@ def get_range_scoreboard(
     principal: Principal = Depends(current_principal),
 ) -> ScoreboardOut:
     competition = competitions.get_competition_for_range(session, principal, range_id)
-    resolved, entries, total_points = competitions.scoreboard(
-        session, principal, competition.id
-    )
+    resolved, entries, total_points = competitions.scoreboard(session, principal, competition.id)
     return scoreboard_out(resolved, entries, total_points)
 
 
@@ -260,9 +256,7 @@ def list_team_members(
 ) -> list[TeamMemberOut]:
     return [
         team_member_out(member)
-        for member in competitions.list_team_members(
-            session, principal, competition_id, team_id
-        )
+        for member in competitions.list_team_members(session, principal, competition_id, team_id)
     ]
 
 

@@ -28,7 +28,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -403,10 +403,8 @@ def delete_team(
     team = session.get(CompetitionTeam, team_id)
     if team is None or team.competition_id != competition.id:
         raise NotFoundError("team not found")
-    session.execute(
-        CompetitionSubmission.__table__.delete().where(CompetitionSubmission.team_id == team.id)
-    )
-    session.execute(CompetitionScore.__table__.delete().where(CompetitionScore.team_id == team.id))
+    session.execute(delete(CompetitionSubmission).where(CompetitionSubmission.team_id == team.id))
+    session.execute(delete(CompetitionScore).where(CompetitionScore.team_id == team.id))
     session.delete(team)
     session.flush()
 
@@ -634,6 +632,21 @@ def list_submissions(
 
 
 @dataclass(frozen=True)
+class _StandingRow:
+    """One team's aggregate, before ranking.
+
+    A typed row rather than a dict: the values are genuinely heterogeneous, so a dict makes every
+    field ``object`` to a type checker and the ranking arithmetic below stops being verified at all.
+    """
+
+    team: CompetitionTeam
+    score: int
+    solved: int
+    last: datetime | None
+    challenges: list[uuid.UUID]
+
+
+@dataclass(frozen=True)
 class ScoreboardEntry:
     rank: int
     team_id: uuid.UUID
@@ -667,46 +680,42 @@ def scoreboard(
     for award in awards:
         by_team.setdefault(award.team_id, []).append(award)
 
-    rows = []
-    for team in teams:
-        team_awards = by_team.get(team.id, [])
-        score = sum(award.points for award in team_awards)
-        last = max((award.awarded_at for award in team_awards), default=None)
-        rows.append(
-            {
-                "team": team,
-                "score": score,
-                "solved": len(team_awards),
-                "last": last,
-                "challenges": [award.challenge_id for award in team_awards],
-            }
+    rows = [
+        _StandingRow(
+            team=team,
+            score=sum(award.points for award in by_team.get(team.id, [])),
+            solved=len(by_team.get(team.id, [])),
+            last=max((award.awarded_at for award in by_team.get(team.id, [])), default=None),
+            challenges=[award.challenge_id for award in by_team.get(team.id, [])],
         )
+        for team in teams
+    ]
 
     # Highest score first; a tie is broken by whoever reached it first. Tied teams SHARE a rank.
     rows.sort(
         key=lambda row: (
-            -row["score"],
-            row["last"] or datetime.max.replace(tzinfo=UTC),
-            row["team"].created_at,
+            -row.score,
+            row.last or datetime.max.replace(tzinfo=UTC),
+            row.team.created_at,
         )
     )
     entries: list[ScoreboardEntry] = []
     previous_key: tuple[int, datetime | None] | None = None
     rank = 0
     for index, row in enumerate(rows, start=1):
-        key = (row["score"], row["last"])
+        key = (row.score, row.last)
         if key != previous_key:
             rank = index
             previous_key = key
         entries.append(
             ScoreboardEntry(
                 rank=rank,
-                team_id=row["team"].id,
-                team_name=row["team"].name,
-                score=row["score"],
-                solved_count=row["solved"],
-                last_solve_at=row["last"],
-                solved_challenge_ids=row["challenges"],
+                team_id=row.team.id,
+                team_name=row.team.name,
+                score=row.score,
+                solved_count=row.solved,
+                last_solve_at=row.last,
+                solved_challenge_ids=row.challenges,
             )
         )
     return competition, entries, int(total_points)
@@ -717,12 +726,10 @@ def reset_scores(session: Session, principal: Principal, competition_id: uuid.UU
     competition = get_competition(session, principal, competition_id)
     principal.require(Permission.exercise_reset)
     session.execute(
-        CompetitionScore.__table__.delete().where(CompetitionScore.competition_id == competition.id)
+        delete(CompetitionScore).where(CompetitionScore.competition_id == competition.id)
     )
     session.execute(
-        CompetitionSubmission.__table__.delete().where(
-            CompetitionSubmission.competition_id == competition.id
-        )
+        delete(CompetitionSubmission).where(CompetitionSubmission.competition_id == competition.id)
     )
     session.flush()
     instance = session.get(RangeInstance, competition.range_instance_id)
@@ -744,11 +751,9 @@ def reset_scores_for_range(session: Session, instance: RangeInstance) -> None:
     if competition is None:
         return
     session.execute(
-        CompetitionScore.__table__.delete().where(CompetitionScore.competition_id == competition.id)
+        delete(CompetitionScore).where(CompetitionScore.competition_id == competition.id)
     )
     session.execute(
-        CompetitionSubmission.__table__.delete().where(
-            CompetitionSubmission.competition_id == competition.id
-        )
+        delete(CompetitionSubmission).where(CompetitionSubmission.competition_id == competition.id)
     )
     session.flush()

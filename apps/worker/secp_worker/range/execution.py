@@ -167,23 +167,33 @@ def execute_range_operation(session: Session, operation_id: uuid.UUID) -> None:
             _run_bring_up(session, instance, operation, provider.deploy(spec, ctx), ctx)
     except Exception as exc:  # pragma: no cover - defensive; a provider bug must not wedge a range
         logger.exception("range operation %s failed unexpectedly", operation_id)
+        # The rollback discards the identity map, so both rows are re-read. They are bound to NEW
+        # names rather than reassigned: ``operation`` and ``instance`` are captured by the
+        # ``on_change``/``on_event`` closures above, and rebinding them to an Optional would both
+        # widen their type there and, worse, let a later callback write through a different object
+        # than the one the operation ran against.
         session.rollback()
-        operation = session.get(RangeDeploymentOperation, operation_id)
-        instance = session.get(RangeInstance, operation.range_instance_id) if operation else None
-        if operation is not None and instance is not None:
-            operation.status = RangeOperationStatus.failed
-            operation.failure_code = "internal_error"
-            operation.failure_message = str(exc)[:500]
-            operation.finished_at = _utcnow()
-            instance.state = RangeState.failed
-            instance.state_reason = f"the {operation.kind.value} operation failed unexpectedly"
+        failed_operation = session.get(RangeDeploymentOperation, operation_id)
+        failed_instance = (
+            session.get(RangeInstance, failed_operation.range_instance_id)
+            if failed_operation is not None
+            else None
+        )
+        if failed_operation is not None and failed_instance is not None:
+            kind = failed_operation.kind.value
+            failed_operation.status = RangeOperationStatus.failed
+            failed_operation.failure_code = "internal_error"
+            failed_operation.failure_message = str(exc)[:500]
+            failed_operation.finished_at = _utcnow()
+            failed_instance.state = RangeState.failed
+            failed_instance.state_reason = f"the {kind} operation failed unexpectedly"
             record_event(
                 session,
-                instance,
+                failed_instance,
                 kind="operation_failed",
-                message=f"The {operation.kind.value} operation failed unexpectedly: {exc}",
+                message=f"The {kind} operation failed unexpectedly: {exc}",
                 level="error",
-                operation_id=operation.id,
+                operation_id=failed_operation.id,
             )
             session.commit()
 

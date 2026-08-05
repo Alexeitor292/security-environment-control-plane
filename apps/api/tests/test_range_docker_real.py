@@ -331,7 +331,7 @@ def test_one_real_container_deploys_answers_and_is_removed_without_residue(
     verify = steps[f"verify:{COMPONENT_KEY}"]
     assert verify["status"] == "succeeded", _pretty(verify)
     assert verify["detail"].startswith("HTTP "), (
-        "readiness must be the target's own response, not an assumption: " f"{verify['detail']!r}"
+        f"readiness must be the target's own response, not an assumption: {verify['detail']!r}"
     )
 
     resources = client.get(f"/api/v1/ranges/{range_id}/resources").json()
@@ -427,9 +427,12 @@ def test_one_real_container_deploys_answers_and_is_removed_without_residue(
     _evidence("owned resources after blind teardown", still_owned)
     assert container["name"] in still_owned["containers"]
     assert network["name"] in still_owned["networks"]
-    assert json.loads(_docker("container", "inspect", container["external_id"]).stdout)[0]["State"][
-        "Running"
-    ] is True
+    assert (
+        json.loads(_docker("container", "inspect", container["external_id"]).stdout)[0]["State"][
+            "Running"
+        ]
+        is True
+    )
 
     # 7. TEARDOWN WITH A LIVE DAEMON IS CLEAN --------------------------------------------------
     destroyed = _operation(client, client.post(f"/api/v1/ranges/{range_id}/destroy"))

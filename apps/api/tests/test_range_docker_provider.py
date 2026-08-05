@@ -415,6 +415,7 @@ def test_a_destroy_only_ever_names_specific_recorded_ids(monkeypatch):
     """
     provider = LocalDockerProvider()
     import secp_worker.range.local_docker as local_docker
+
     monkeypatch.setattr(
         provider, "health", lambda: ProviderHealth(reachable=True, endpoint_id="D1", version="29.4")
     )
@@ -466,6 +467,7 @@ def test_published_ports_bind_loopback_only(monkeypatch):
     """Intentionally vulnerable software is never offered to the LAN."""
     provider = LocalDockerProvider()
     import secp_worker.range.local_docker as local_docker
+
     assert local_docker.BIND_HOST == "127.0.0.1"
     monkeypatch.setattr(
         provider, "health", lambda: ProviderHealth(reachable=True, endpoint_id="D1", version="29.4")

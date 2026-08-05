@@ -398,5 +398,3 @@ def start_operation(
         operation_id=operation.id,
     )
     return instance, operation
-
-

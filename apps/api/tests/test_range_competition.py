@@ -484,9 +484,10 @@ def test_team_membership_is_a_roster_and_grants_nothing(session, principal, star
     assert member.team_id == team.id
     assert member.competition_id == competition.id
     assert member.user_id is None, "a competitor need not be a provisioned SECP user"
-    assert [m.display_name for m in competitions.list_team_members(
-        session, principal, competition.id, team.id
-    )] == ["Alex Rivera"]
+    assert [
+        m.display_name
+        for m in competitions.list_team_members(session, principal, competition.id, team.id)
+    ] == ["Alex Rivera"]
 
     # Membership is not consulted when scoring: the team scores, not the person.
     challenge = _challenge(session, principal, competition)
@@ -517,9 +518,7 @@ def test_a_duplicate_display_name_on_one_team_is_refused(session, principal, sta
     from secp_api.errors import ValidationFailedError
 
     competition, team = started
-    competitions.add_team_member(
-        session, principal, competition.id, team.id, display_name="Sam"
-    )
+    competitions.add_team_member(session, principal, competition.id, team.id, display_name="Sam")
     session.commit()
     with pytest.raises(ValidationFailedError):
         competitions.add_team_member(

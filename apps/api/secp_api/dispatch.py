@@ -214,9 +214,7 @@ class InlineDispatcher:
             "process; the operation stops at the sealed plan-only boundary in the worker."
         )
 
-    def dispatch_range_operation(
-        self, session: Session, operation_id: uuid.UUID
-    ) -> WorkflowRun:
+    def dispatch_range_operation(self, session: Session, operation_id: uuid.UUID) -> WorkflowRun:
         # A range operation drives a real provider — for the local Docker provider, a socket that
         # is root-equivalent on the host. That is exactly the privileged execution the inline
         # dispatcher exists NOT to do: it is safe only for the Simulator, whose side effects are
@@ -564,9 +562,7 @@ class TemporalDispatcher:
             workflow="RealPlanGenerationWorkflow",
         )
 
-    def dispatch_range_operation(
-        self, session: Session, operation_id: uuid.UUID
-    ) -> WorkflowRun:
+    def dispatch_range_operation(self, session: Session, operation_id: uuid.UUID) -> WorkflowRun:
         # ENQUEUE-ONLY, same discipline as the readiness operations: durably queue a WorkflowRun +
         # outbox row and stop. Nothing is submitted to Temporal until the API transaction commits.
         # The RANGE OPERATION ID is the only identifier passed — the workflow argument carries no
