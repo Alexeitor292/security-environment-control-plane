@@ -112,6 +112,21 @@ class RangeOperationSummaryOut(BaseModel):
     completed_steps: int
     total_steps: int
     percent: int
+    #: Carried on the SUMMARY, not just the full operation, because this is what a range list is
+    #: for: an operator scanning ranges has to be able to see which one is stuck without opening
+    #: each operation in turn. A stranded range otherwise looks exactly like a busy one.
+    stale: bool = False
+
+
+class RangeOperationAbandonIn(BaseModel):
+    """Body for ``POST /range-operations/{id}/abandon``.
+
+    ``force`` is the operator asserting they have checked that nothing is executing the operation.
+    Without it the endpoint refuses while the lease is still live, because abandoning a running
+    operation puts a second writer on the range.
+    """
+
+    force: bool = False
 
 
 class RangeOperationOut(BaseModel):
@@ -128,6 +143,15 @@ class RangeOperationOut(BaseModel):
     started_at: datetime
     finished_at: datetime | None = None
     steps: list[RangeOperationStepOut]
+    #: When this operation's lease runs out. Renewed by observable progress, so a slow-but-moving
+    #: operation is never stale. ``None`` once the operation is resolved.
+    lease_expires_at: datetime | None = None
+    #: True when an in-flight operation has outlived its lease — nothing is executing it and an
+    #: operator may abandon it. NOT a failure: what the operation did is unknown.
+    stale: bool = False
+    #: Why it is considered stranded, in operator language. ``None`` exactly when ``stale`` is
+    #: false.
+    stale_reason: str | None = None
 
 
 class AccessTargetOut(BaseModel):

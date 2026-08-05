@@ -243,9 +243,22 @@ class RangeOperationWorkflow:
 
     @workflow.run
     async def run(self, arg: dict) -> str:  # pragma: no cover - needs Temporal
+        from temporalio.common import RetryPolicy
+
         return await workflow.execute_activity(
             RANGE_OPERATION_ACTIVITY_NAME,
             arg,
             result_type=str,
             start_to_close_timeout=_activity_timeout(),
+            # BOUNDED retries. Temporal's default is unlimited, and an activity that can now RAISE
+            # when it cannot resolve its operation must not retry forever — an unresolvable
+            # operation is unresolvable, and a workflow retrying it in perpetuity is a different
+            # way of never telling anyone.
+            #
+            # Three attempts is calibrated to the one cause that retrying actually fixes: the
+            # operation row not being visible YET, which is a commit or a replica catching up. The
+            # activity marks every other cause non-retryable, and Temporal stops immediately on
+            # those regardless of this number. Either way the workflow ends FAILED, which is the
+            # whole point — the original defect was that it ended Completed.
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
