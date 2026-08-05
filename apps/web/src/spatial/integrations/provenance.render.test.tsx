@@ -38,9 +38,15 @@ const liveAdapter: ControlPlaneAdapter = Object.assign(Object.create(Object.getP
   provenance: "live" as const,
 });
 
+// `children` is a required prop on AdapterProvider, so it is passed in the props object rather
+// than as a third argument: the third-argument form does not satisfy the required prop under
+// `strict`, and this file must typecheck as shipped.
 function render(adapter: ControlPlaneAdapter): string {
   return renderToStaticMarkup(
-    createElement(AdapterProvider, { adapter }, createElement("p", null, "workspace content")),
+    createElement(AdapterProvider, {
+      adapter,
+      children: createElement("p", null, "workspace content"),
+    }),
   );
 }
 
@@ -88,7 +94,9 @@ describe("adapter data provenance", () => {
     // the no-argument case is asserted explicitly rather than assumed to follow
     // from the explicit-argument cases above.
     const out = renderToStaticMarkup(
-      createElement(AdapterProvider, null, createElement("p", null, "workspace content")),
+      createElement(AdapterProvider, {
+        children: createElement("p", null, "workspace content"),
+      }),
     );
 
     expect(out).toContain(BADGE);
