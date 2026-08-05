@@ -169,6 +169,36 @@
     "permissions": [],
     "state": "unknown"
   },
+  "GET /api/v1/provisioning-manifests/{manifest_id}/plan-generation-readiness": {
+    "permissions": [
+      "plan_generation_manage"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/provisioning-manifests/{manifest_id}/plan-secret-readiness": {
+    "permissions": [
+      "readiness_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/provisioning-manifests/{manifest_id}/provisioning-readiness": {
+    "permissions": [
+      "readiness_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/provisioning-manifests/{manifest_id}/remote-state-readiness": {
+    "permissions": [
+      "readiness_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/provisioning-manifests/{manifest_id}/toolchain-attestation": {
+    "permissions": [
+      "readiness_read"
+    ],
+    "state": "requires"
+  },
   "GET /api/v1/provisioning-operations/{operation_id}": {
     "permissions": [
       "provisioning_read"
@@ -466,8 +496,10 @@
     "state": "unknown"
   },
   "GET /api/v1/target-discovery": {
-    "permissions": [],
-    "state": "unknown"
+    "permissions": [
+      "enrollment_read"
+    ],
+    "state": "requires"
   },
   "GET /api/v1/target-discovery/read-only-bootstrap/enrollments/{enrollment_id}/binding-descriptor": {
     "permissions": [],
@@ -595,7 +627,7 @@
     "permissions": [],
     "state": "unknown"
   },
-  "GET /readiness": {
+  "GET /internal/enrollment-signer/readiness": {
     "permissions": [],
     "state": "unknown"
   },
@@ -675,12 +707,6 @@
     ],
     "state": "requires"
   },
-  "POST /api/v1/enrollment/{enrollment_id}/bind": {
-    "permissions": [
-      "enrollment_progress"
-    ],
-    "state": "requires"
-  },
   "POST /api/v1/enrollment/{enrollment_id}/exchange/bind": {
     "permissions": [
       "enrollment_progress"
@@ -693,39 +719,15 @@
     ],
     "state": "requires"
   },
-  "POST /api/v1/enrollment/{enrollment_id}/healthy": {
-    "permissions": [
-      "enrollment_progress"
-    ],
-    "state": "requires"
-  },
-  "POST /api/v1/enrollment/{enrollment_id}/offer": {
-    "permissions": [
-      "enrollment_progress"
-    ],
-    "state": "requires"
-  },
   "POST /api/v1/enrollment/{enrollment_id}/recover": {
     "permissions": [
       "enrollment_manage"
     ],
     "state": "requires"
   },
-  "POST /api/v1/enrollment/{enrollment_id}/result": {
-    "permissions": [
-      "enrollment_progress"
-    ],
-    "state": "requires"
-  },
   "POST /api/v1/enrollment/{enrollment_id}/revoke": {
     "permissions": [
       "enrollment_manage"
-    ],
-    "state": "requires"
-  },
-  "POST /api/v1/enrollment/{enrollment_id}/verify": {
-    "permissions": [
-      "enrollment_progress"
     ],
     "state": "requires"
   },
@@ -857,6 +859,48 @@
   "POST /api/v1/plans/{plan_id}/submit": {
     "permissions": [
       "plan_generate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/provisioning-manifests/{manifest_id}/activation-dossiers": {
+    "permissions": [
+      "activation_dossier_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/provisioning-manifests/{manifest_id}/plan-generation": {
+    "permissions": [
+      "plan_generation_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/provisioning-manifests/{manifest_id}/plan-generation-authorizations": {
+    "permissions": [
+      "plan_generation_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/provisioning-manifests/{manifest_id}/plan-secret-authorizations": {
+    "permissions": [
+      "readiness_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/provisioning-manifests/{manifest_id}/plan-secret-readiness": {
+    "permissions": [
+      "readiness_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/provisioning-manifests/{manifest_id}/remote-state-readiness": {
+    "permissions": [
+      "readiness_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/provisioning-manifests/{manifest_id}/toolchain-attestation": {
+    "permissions": [
+      "readiness_manage"
     ],
     "state": "requires"
   },
@@ -1003,13 +1047,13 @@
   },
   "POST /api/v1/resolver-activation/authorizations": {
     "permissions": [
-      "resolver_activation_manage"
+      "onboarding_approve"
     ],
     "state": "requires"
   },
   "POST /api/v1/resolver-activation/authorizations/{authorization_id}/approve": {
     "permissions": [
-      "resolver_activation_approve"
+      "onboarding_approve"
     ],
     "state": "requires"
   },
@@ -1021,7 +1065,7 @@
   },
   "POST /api/v1/resolver-activation/authorizations/{authorization_id}/revoke": {
     "permissions": [
-      "resolver_activation_manage"
+      "onboarding_approve"
     ],
     "state": "requires"
   },
@@ -1045,7 +1089,7 @@
   },
   "POST /api/v1/staging-deployments/{deployment_id}/plan": {
     "permissions": [
-      "staging_lab_manage"
+      "plan_generate"
     ],
     "state": "requires"
   },
@@ -1081,7 +1125,7 @@
   },
   "POST /api/v1/staging-labs/{lab_id}/plan": {
     "permissions": [
-      "staging_lab_manage"
+      "plan_generate"
     ],
     "state": "requires"
   },
@@ -1111,7 +1155,7 @@
   },
   "POST /api/v1/target-discovery": {
     "permissions": [
-      "target_discovery_manage"
+      "inventory_discover"
     ],
     "state": "requires"
   },
@@ -1269,7 +1313,7 @@
   },
   "POST /api/v1/worker-identity/registrations/{registration_id}/evidence": {
     "permissions": [
-      "worker_identity_manage"
+      "resolver_activation_manage"
     ],
     "state": "requires"
   },

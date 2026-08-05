@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -184,20 +185,19 @@ def _resolve(
     return found
 
 
-def route_permissions() -> dict[str, dict[str, object]]:
-    """``{"GET /api/v1/ranges": {"state": "requires", "permissions": ["exercise_operate"]}}``."""
-    functions = _module_functions()
-    routes: dict[str, dict[str, object]] = {}
+def _handlers() -> list[tuple[str, ast.FunctionDef, dict[str, str]]]:
+    """Every route handler in ``routers/`` as ``(name, node, aliases-of-its-file)``.
+
+    A LIST, not a dict by name. Two router modules both define ``list_enrollments`` — enrollment
+    and target-discovery — and keying by name let the second overwrite the first, so the enrollment
+    route resolved against target-discovery's body and its import aliases. That is the third time
+    today a name collision has produced a wrong answer in this file, each time from keying on the
+    spelling instead of the thing.
+    """
+    handlers: list[tuple[str, ast.FunctionDef, dict[str, str]]] = []
     for path in sorted((API_ROOT / "routers").glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         aliases = _alias_map(tree)
-        prefix = ""
-        for node in ast.walk(tree):
-            # `APIRouter(prefix="/api/v1")` — the prefix a router's paths hang off.
-            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "APIRouter":
-                for keyword in node.keywords:
-                    if keyword.arg == "prefix" and isinstance(keyword.value, ast.Constant):
-                        prefix = str(keyword.value.value)
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
                 continue
@@ -205,24 +205,70 @@ def route_permissions() -> dict[str, dict[str, object]]:
                 if not isinstance(decorator, ast.Call):
                     continue
                 attribute = decorator.func
-                if not (
-                    isinstance(attribute, ast.Attribute)
-                    and attribute.attr in {"get", "post", "put", "patch", "delete"}
-                ):
-                    continue
-                if not decorator.args or not isinstance(decorator.args[0], ast.Constant):
-                    continue
-                route = f"{attribute.attr.upper()} {prefix}{decorator.args[0].value}"
-                names = sorted(_resolve(node, functions, 0, frozenset({id(node)}), aliases))
-                # Three states, never two. `open` is a verified absence of a gate; `unknown` is
-                # the walk finding nothing, which a client must not render as "needs nothing".
-                if names:
-                    state = "requires"
-                elif route in VERIFIED_OPEN:
-                    state = "open"
-                else:
-                    state = "unknown"
-                routes[route] = {"state": state, "permissions": names}
+                if isinstance(attribute, ast.Attribute) and attribute.attr in _METHODS:
+                    handlers.append((node.name, node, aliases))
+                    break
+    return handlers
+
+
+_METHODS = {"get", "post", "put", "patch", "delete"}
+
+
+def _expected_operation_id(name: str, path: str, method: str) -> str:
+    """FastAPI's default: the handler name, the path with non-identifier characters replaced by
+    underscores, then the method. Reconstructed EXACTLY rather than prefix-matched — a prefix match
+    cannot tell two same-named handlers apart, and this can."""
+    return f"{name}{re.sub(r'[^0-9a-zA-Z_]', '_', path)}_{method}"
+
+
+def route_permissions() -> dict[str, dict[str, object]]:
+    """``{"GET /api/v1/ranges": {"state": "requires", "permissions": ["exercise_operate"]}}``.
+
+    THE ROUTE SET COMES FROM THE COMMITTED DOCUMENT, not from walking decorators. That inversion
+    is the whole correctness of this file and it was wrong until it was checked against the
+    document: reading `@router.get("...")` and prepending the router's own `prefix=` produced a
+    table with **13 real routes missing and 6 routes that do not exist**. Prefixes are also applied
+    at ``include_router(...)``, and a decorated route in a module nobody includes is not a route.
+    Neither is visible from the decorator.
+
+    So the document says WHICH routes exist — it is exported from the running app — and the AST is
+    used only to answer what each one REQUIRES. The two are linked by ``operationId``, which
+    FastAPI builds as ``{handler_name}_{path_slug}_{method}``; the handler is recovered by longest
+    prefix match against the handler names actually defined in ``routers/``.
+
+    A route whose handler cannot be identified is ``unknown`` — never assumed open.
+    """
+    document = json.loads((REPO_ROOT / "contracts/openapi/openapi.json").read_text("utf-8"))
+    functions = _module_functions()
+    handlers = _handlers()
+
+    routes: dict[str, dict[str, object]] = {}
+    for path, operations in document["paths"].items():
+        for method, operation in operations.items():
+            if method not in _METHODS:
+                continue
+            route = f"{method.upper()} {path}"
+            operation_id = operation.get("operationId", "")
+            match = next(
+                (
+                    (node, aliases)
+                    for name, node, aliases in handlers
+                    if _expected_operation_id(name, path, method) == operation_id
+                ),
+                None,
+            )
+            if match is None:
+                routes[route] = {"state": "unknown", "permissions": []}
+                continue
+            node, aliases = match
+            names = sorted(_resolve(node, functions, 0, frozenset({id(node)}), aliases))
+            if names:
+                state = "requires"
+            elif route in VERIFIED_OPEN:
+                state = "open"
+            else:
+                state = "unknown"
+            routes[route] = {"state": state, "permissions": names}
     return routes
 
 
