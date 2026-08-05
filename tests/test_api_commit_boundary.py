@@ -41,9 +41,11 @@ to catch.
 
 from __future__ import annotations
 
+import ast
 import functools
 import inspect
 import sys
+import textwrap
 
 import fastapi
 import fastapi.dependencies.utils as fastapi_dependency_utils
@@ -103,7 +105,7 @@ from secp_api.main import create_app
 # caught it, it had reached a review and a public PR description.
 #
 # So the answer is COMPUTED instead. ``_naive_substitute`` below is that exact one-line substitute,
-# ``TEARDOWN_SHAPE_CORPUS`` is the single corpus both tests consume, and
+# ``TEARDOWN_SHAPE_CORPUS`` is the single corpus every test here consumes, and
 # ``NAIVE_SUBSTITUTE_UNDER_REPORTS`` names the shapes it misses ONCE, as data that a test checks
 # against a live measurement. Adding or removing a shape cannot leave a stale number behind,
 # because there is no number to leave.
@@ -181,55 +183,255 @@ def _bind_to_fastapis_teardown_disjunction():
 ) = _bind_to_fastapis_teardown_disjunction()
 
 
-def _build_teardown_shape_corpus():
-    """``(label, call, carries_teardown)`` for each shape FastAPI's predicate classifies.
+# --------------------------------------------------------------------- the corpus, DERIVED
+#
+# THE CORPUS IS DERIVED FROM THE PREDICATE'S STRUCTURE, NOT LISTED FROM IMAGINATION, and the
+# difference is not stylistic. An enumerated list of shapes was defeated, measured, in review.
+#
+# What the earlier list could not do: an independent reviewer wrote a PLAUSIBLE hand-rolled binding
+# — unwrap partial and ``@wraps``, then look at ``.__call__`` once, which is what a careful person
+# writes — and it agreed with FastAPI on every shape the list contained while disagreeing on real
+# ones it did not. So the discrimination pin could not tell a correct binding from a wrong one,
+# which is the entire job it was there to do. That is the closed-set defect this module was written
+# to escape, reappearing one level up: escaped for the GATE by binding, still present in the
+# EVIDENCE for the binding.
+#
+# FastAPI's predicate is a fixed grid. It looks for a generator at three CALL SITES:
+#
+#   site 1  the incoming ``call`` itself
+#   site 2  ``getattr(_impartial(call), "__call__")``
+#   site 3  ``getattr(_unwrapped_call(call), "__call__")``
+#
+# and tests each under two TRANSFORMS — ``_impartial`` (unwrap ``functools.partial``) and
+# ``_unwrapped_call`` (that, then ``inspect.unwrap``) — in two FLAVOURS, sync and async. Three by
+# two by two is twelve cells, plus the ``isclass`` early-out and the negatives.
+#
+# So the corpus is that product, one genuinely callable shape per cell, and the counts are read out
+# of FastAPI's own source by ``_derive_predicate_structure`` rather than typed here. A future
+# FastAPI that adds a call site changes the derived number and FAILS, instead of quietly leaving a
+# cell uncovered — which is the failure this replaces.
 
-    ONE corpus, consumed by both tests below. Two tests with two private copies of "the shapes" is
-    the same duplication as two prose copies of a count, and decays the same way.
+_DECLARED_CALL_SITES = 3
+_DECLARED_TRANSFORMS = ("_impartial", "_unwrapped_call")
+_FLAVOURS = ("sync", "async")
+
+
+def _source_bearing_predicate():
+    """FastAPI's own sync gen-callable predicate, as an object whose SOURCE can be read."""
+    module_level = getattr(fastapi_dependency_utils, "_is_gen_callable", None)
+    if callable(module_level):
+        import fastapi.dependencies.models as fastapi_dependency_models
+
+        # The public helper just delegates; the classification logic is in the cached worker.
+        return getattr(fastapi_dependency_models, "_is_gen_callable_cached", module_level)
+    attribute = getattr(Dependant, "is_gen_callable", None)
+    return getattr(attribute, "func", attribute)
+
+
+def _derive_predicate_structure():
+    """Read the call-site and transform counts out of FastAPI's predicate, by AST.
+
+    Returns ``(call_sites, transforms)``. Raises rather than degrading: a predicate whose source
+    cannot be read is a predicate whose shape cannot be checked, and a corpus justified by an
+    underivable structure is exactly the unearned claim this module exists to refuse.
+    """
+    predicate = _source_bearing_predicate()
+    if predicate is None:  # pragma: no cover - defensive
+        raise RuntimeError("FastAPI's gen-callable predicate could not be resolved for derivation")
+    try:
+        source = textwrap.dedent(inspect.getsource(predicate))
+    except (OSError, TypeError) as exc:  # pragma: no cover - source-less install
+        raise RuntimeError(
+            f"cannot read the source of {predicate!r}, so the corpus below cannot be shown to "
+            "cover FastAPI's call sites. Do NOT skip past this: an unverifiable structure is how "
+            "a cell goes uncovered in silence."
+        ) from exc
+    tree = ast.parse(source)
+    dunder_lookups = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "__call__"
+    ]
+    transforms = tuple(
+        sorted(
+            {
+                node.func.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in set(_DECLARED_TRANSFORMS)
+            }
+        )
+    )
+    return 1 + len(dunder_lookups), transforms
+
+
+def _build_teardown_shape_corpus():
+    """``(label, call, carries_teardown)``, one genuinely callable shape per derived cell.
+
+    ONE corpus, consumed by every test below. Two tests holding two private copies of "the shapes"
+    is the same duplication as two prose copies of a count, and decays the same way.
+
+    Every positive shape is really callable — no ``__call__`` faked onto an instance via a property
+    — because a shape that could not actually BE a dependency proves nothing about a gate that
+    classifies dependencies.
     """
 
-    def plain():  # pragma: no cover - never executed, only classified
-        return None
-
-    async def coroutine():  # pragma: no cover
-        return None
-
-    def sync_generator():  # pragma: no cover
+    def sync_generator():  # pragma: no cover - never executed, only classified
         yield None
 
     async def async_generator():  # pragma: no cover
         yield None
 
-    @functools.wraps(sync_generator)
-    def wrapped_generator(*args, **kwargs):  # pragma: no cover
-        return sync_generator(*args, **kwargs)
+    def plain():  # pragma: no cover
+        return None
 
-    class GeneratorCall:
-        def __call__(self):  # pragma: no cover
-            yield None
-
-    class AsyncGeneratorCall:
-        async def __call__(self):  # pragma: no cover
-            yield None
+    async def coroutine():  # pragma: no cover
+        return None
 
     class PlainClass:
         def __init__(self):  # pragma: no cover
             pass
 
-    return (
+    # WHY THE `_impartial` SHAPES LOOK CONTRIVED, AND WHY THEY MUST.
+    #
+    # ``_unwrapped_call(x)`` IS ``inspect.unwrap(_impartial(x))`` — it SUBSUMES ``_impartial``
+    # unless unwrapping destroys the evidence. So an ordinary generator satisfies both transforms
+    # at once, and a corpus built from ordinary shapes leaves the ``_impartial`` cells provably
+    # redundant: a binding that skipped them entirely would agree everywhere.
+    #
+    # Measured, not predicted — the first version of this corpus used ordinary shapes and the
+    # per-cell check below reported FOUR of six cells not load-bearing.
+    #
+    # The only way ``_impartial`` can be the sole classifier is a callable that IS a generator while
+    # its ``__wrapped__`` points at something that is NOT — the ``*_hidden_by_unwrap`` pair below.
+    # That is the reason these shapes look the way they do.
+
+    # A GENERATOR whose ``__wrapped__`` points at a plain function. ``_impartial`` sees a generator;
+    # ``_unwrapped_call`` unwraps to ``plain`` and sees none. Written out per flavour because the
+    # generator-ness has to come from the function itself — a wrapper that merely *calls* a
+    # generator is not one, and ``functools.wraps`` copies metadata, never code flags.
+    @functools.wraps(plain)
+    def sync_hidden_by_unwrap():  # pragma: no cover
+        yield None
+
+    @functools.wraps(plain)
+    async def async_hidden_by_unwrap():  # pragma: no cover
+        yield None
+
+    def revealed_by_unwrap(target):
+        """A PLAIN function whose ``__wrapped__`` is a generator; only ``_unwrapped_call`` sees it."""
+
+        @functools.wraps(target)
+        def revealed(*args, **kwargs):  # pragma: no cover
+            return target(*args, **kwargs)
+
+        return revealed
+
+    def shape(dunder, wrapped=None):
+        """A genuinely callable object with this ``__call__``, optionally with ``__wrapped__``."""
+        instance = type("Shape", (), {"__call__": staticmethod(dunder)})()
+        if wrapped is not None:
+            instance.__wrapped__ = wrapped
+        return instance
+
+    hidden_by_flavour = {"sync": sync_hidden_by_unwrap, "async": async_hidden_by_unwrap}
+    corpus = []
+    for flavour, generator in (("sync", sync_generator), ("async", async_generator)):
+        hidden = hidden_by_flavour[flavour]
+        revealed = revealed_by_unwrap(generator)
+        opaque = shape(plain)  # a ``__wrapped__`` target that classifies as nothing itself
+        corpus += [
+            (f"site1/_impartial/{flavour}", hidden, True),
+            (f"site1/_unwrapped_call/{flavour}", revealed, True),
+            (f"site2/_impartial/{flavour}", shape(hidden, wrapped=opaque), True),
+            (f"site2/_unwrapped_call/{flavour}", shape(revealed, wrapped=opaque), True),
+            (f"site3/_impartial/{flavour}", shape(plain, wrapped=shape(hidden)), True),
+            (f"site3/_unwrapped_call/{flavour}", shape(plain, wrapped=shape(revealed)), True),
+        ]
+    # Not cells of the grid, but the answers that must stay False whatever the grid does.
+    corpus += [
+        ("bare sync generator", sync_generator, True),
+        ("bare async generator", async_generator, True),
         ("plain function", plain, False),
         ("coroutine function", coroutine, False),
-        ("class (constructed, never torn down)", PlainClass, False),
-        ("sync generator", sync_generator, True),
-        ("async generator", async_generator, True),
-        ("functools.partial of a sync generator", functools.partial(sync_generator), True),
-        ("@wraps-wrapped sync generator", wrapped_generator, True),
-        ("instance with generator __call__", GeneratorCall(), True),
-        ("instance with async generator __call__", AsyncGeneratorCall(), True),
-    )
+        ("class (isclass early-out)", PlainClass, False),
+    ]
+    return tuple(corpus)
 
 
 TEARDOWN_SHAPE_CORPUS = _build_teardown_shape_corpus()
+
+# The cells the grid requires, as a set, built from the SAME declaration the derivation checks.
+TEARDOWN_CELLS = frozenset(
+    f"site{site}/{transform}/{flavour}"
+    for site in range(1, _DECLARED_CALL_SITES + 1)
+    for transform in _DECLARED_TRANSFORMS
+    for flavour in _FLAVOURS
+)
+
+
+# Every (call site, transform) pair the predicate implements. The foils below are this set minus
+# one element, so "is this cell load-bearing?" is asked once per cell rather than once per
+# plausible-looking binding someone thought of.
+_GRID_PAIRS = tuple(
+    (site, transform)
+    for site in range(1, _DECLARED_CALL_SITES + 1)
+    for transform in _DECLARED_TRANSFORMS
+)
+
+
+def _partial_binding(call, *, enabled):
+    """A reimplementation restricted to ``enabled`` (site, transform) pairs. ONLY a foil.
+
+    Nothing in the gate calls this. It is a model of the predicate whose coverage can be turned off
+    one cell at a time, so the corpus can be required to notice each cell going missing.
+
+    The FIRST version of this took two coarse axes — how many call sites, and whether
+    ``inspect.unwrap`` was applied *globally*. That family could not express "implements every cell
+    except site 2's unwrap transform", so replacing that one cell's shape with a decoy left every
+    foil still killed and the test passed. Measured, not reasoned: the mutation that swapped exactly
+    that shape came back GREEN, which is how this design was found to be too coarse. Per-cell is the
+    granularity the question actually has.
+    """
+
+    def unpartial(value):
+        while isinstance(value, functools.partial):
+            value = value.func
+        return value
+
+    def normalise(value, transform):
+        base = unpartial(value)
+        return inspect.unwrap(base) if transform == "_unwrapped_call" else base
+
+    def generator_like(value):
+        return inspect.isgeneratorfunction(value) or inspect.isasyncgenfunction(value)
+
+    for transform in _DECLARED_TRANSFORMS:
+        if (1, transform) in enabled and generator_like(normalise(call, transform)):
+            return True
+    if inspect.isclass(inspect.unwrap(unpartial(call))):
+        return False
+    # ``getattr(..., "__call__")`` rather than ``callable()`` on purpose, and the noqa is load-
+    # bearing: this foil has to mirror what FastAPI's predicate literally does, which is fetch the
+    # ``__call__`` OBJECT and classify it. ``callable()`` answers a different question and would
+    # make the foil a strawman rather than the plausible wrong binding it is modelling.
+    lookups = {
+        2: lambda value: unpartial(value),
+        3: lambda value: inspect.unwrap(unpartial(value)),
+    }
+    for site, lookup in lookups.items():
+        dunder = getattr(lookup(call), "__call__", None)  # noqa: B004
+        if dunder is None:  # pragma: no cover - defensive
+            continue
+        for transform in _DECLARED_TRANSFORMS:
+            if (site, transform) in enabled and generator_like(normalise(dunder, transform)):
+                return True
+    return False
 
 
 def _naive_substitute(call):
@@ -249,9 +451,16 @@ def _naive_substitute(call):
 # fails that test until this set is updated, which is the point: the edit cannot be half-done.
 NAIVE_SUBSTITUTE_UNDER_REPORTS = frozenset(
     {
-        "@wraps-wrapped sync generator",
-        "instance with generator __call__",
-        "instance with async generator __call__",
+        "site1/_unwrapped_call/sync",
+        "site1/_unwrapped_call/async",
+        "site2/_impartial/sync",
+        "site2/_impartial/async",
+        "site2/_unwrapped_call/sync",
+        "site2/_unwrapped_call/async",
+        "site3/_impartial/sync",
+        "site3/_impartial/async",
+        "site3/_unwrapped_call/sync",
+        "site3/_unwrapped_call/async",
     }
 )
 
@@ -512,6 +721,106 @@ def test_the_shape_predicate_still_discriminates_across_every_teardown_shape():
     assert not wrong, (
         f"the shape predicate ({SHAPE_PREDICATE_BINDING}) no longer classifies teardown-carrying "
         f"dependencies correctly, so every verdict in this module is unsound: {wrong}"
+    )
+
+
+def test_the_corpus_covers_every_call_site_fastapis_own_predicate_uses():
+    """The corpus is checked against FastAPI's STRUCTURE, so a new call site cannot go uncovered.
+
+    This is the check that makes the corpus a derivation rather than a list. It reads the call-site
+    count and the transform names out of FastAPI's own predicate by AST, compares them with what
+    the grid above is built from, and then requires a shape for every cell of that grid.
+
+    If a future FastAPI grows a fourth place to look for a generator, the derived count stops
+    matching and this fails — loudly, naming the number — instead of the corpus silently covering
+    three quarters of the predicate while every other test in this module stays green.
+    """
+    call_sites, transforms = _derive_predicate_structure()
+
+    assert call_sites == _DECLARED_CALL_SITES, (
+        f"FastAPI's gen-callable predicate now inspects {call_sites} call site(s), not "
+        f"{_DECLARED_CALL_SITES}. The corpus below is built from the declared number, so it no "
+        "longer covers the predicate. Re-derive the grid and add a shape per new cell — do not "
+        "just raise the number."
+    )
+    assert transforms == tuple(sorted(_DECLARED_TRANSFORMS)), (
+        f"the predicate's normalising transforms are now {transforms}, not "
+        f"{tuple(sorted(_DECLARED_TRANSFORMS))}; the grid's second axis has changed"
+    )
+
+    covered = {label for label, _call, _expected in TEARDOWN_SHAPE_CORPUS}
+    missing = TEARDOWN_CELLS - covered
+    assert not missing, f"no corpus shape exercises {sorted(missing)}"
+
+    # ...and every cell's shape must actually be classified as carrying teardown, or the label is
+    # decoration rather than coverage.
+    by_label = {label: (call, expected) for label, call, expected in TEARDOWN_SHAPE_CORPUS}
+    wrong = []
+    for cell in sorted(TEARDOWN_CELLS):
+        call, expected = by_label[cell]
+        if not expected:
+            wrong.append(f"{cell}: declared as not carrying teardown")
+        elif _is_generator_dependency(Dependant(call=call)) is not True:
+            wrong.append(f"{cell}: FastAPI does not classify this shape as a generator dependency")
+        elif not callable(call):
+            wrong.append(f"{cell}: the shape is not callable, so it could never be a dependency")
+    assert not wrong, f"cells present in name only: {wrong}"
+
+
+def test_no_incomplete_hand_rolled_binding_survives_the_corpus():
+    """THE POINT OF THE CORPUS: it must tell a correct binding apart from a plausible wrong one.
+
+    An enumerated corpus failed exactly here, and it is worth being precise about how. A reviewer
+    wrote the binding a careful person writes — unwrap ``functools.partial`` and ``@wraps``, then
+    look at ``.__call__`` once — and it agreed with FastAPI on every shape the old list contained
+    while disagreeing on real shapes it did not. A pin that cannot distinguish the right answer
+    from the wrong one is not evidence for the right answer.
+
+    So this asks the question once PER CELL: for each (call site, transform) pair, build the
+    binding that implements every other pair and require the corpus to KILL it. That is exactly
+    "every cell is load-bearing" — if any cell's shape is missing, weak, or a decoy, the foil that
+    omits that cell survives and this fails, naming the cell.
+
+    The complete member is asserted to AGREE everywhere, which is what makes the others' failures
+    mean "incomplete" rather than "differently wrong".
+
+    Flavour is deliberately not a foil axis: a binding that handled sync but not async is caught by
+    ``test_the_shape_predicate_still_discriminates_across_every_teardown_shape``, which checks every
+    corpus shape against its expected answer in both flavours.
+    """
+    assert TEARDOWN_SHAPE_CORPUS, "the corpus is empty; this test would assert nothing"
+    assert _GRID_PAIRS, "the grid is empty; every foil below would be identical"
+
+    truth = {
+        label: _is_generator_dependency(Dependant(call=call))
+        for label, call, _expected in TEARDOWN_SHAPE_CORPUS
+    }
+
+    def killers_of(enabled):
+        return [
+            label
+            for label, call, _expected in TEARDOWN_SHAPE_CORPUS
+            if _partial_binding(call, enabled=enabled) is not truth[label]
+        ]
+
+    complete = frozenset(_GRID_PAIRS)
+    assert not killers_of(complete), (
+        "the COMPLETE member of the foil family disagrees with FastAPI on "
+        f"{killers_of(complete)}. The grid is no longer a faithful model of the predicate, so "
+        "'incomplete' below cannot be trusted to mean what it says — re-derive the structure."
+    )
+
+    survivors = [
+        f"site{site}/{transform}"
+        for site, transform in _GRID_PAIRS
+        if not killers_of(complete - {(site, transform)})
+    ]
+    assert not survivors, (
+        f"{len(survivors)} cell(s) are not load-bearing: a binding that omits {survivors} agrees "
+        "with FastAPI on EVERY shape in the corpus. So the corpus cannot tell that binding apart "
+        "from the real predicate, and is not evidence that this module is bound to the real one. "
+        "The shape for each named cell is missing, or is a decoy that some other cell already "
+        "classifies."
     )
 
 
