@@ -40,10 +40,6 @@ _WORKER_BOOL_KEYS = (
     "operator_container_present",
     "operator_registration_present",
     "operator_queue_polled",
-    "generic_activation_subprocess_sealed",
-    "generic_executor_subprocess_sealed",
-    "plan_only_process_sealed",
-    "real_provisioning_enabled",
     "artifacts_prepared",
     "worker_config_installed",
     "worker_recreation_required",
@@ -118,6 +114,10 @@ def _worker_journal() -> dict[str, object]:
     before_worker: dict[str, object] = {key: False for key in _WORKER_BOOL_KEYS}
     before_worker.update(
         {
+            # The seal posture is no longer four booleans in this journal -- it is the pairs the
+            # probe reported. An old-shape journal is not reconstructed: `_journal_seal_states`
+            # yields `()` for one, which `seals_valid` treats as not-established.
+            "seal_states": [],
             "image_digest": _SHA,
             "generation_digest": _SHA,
             "ordinary_queues": [ORDINARY_TASK_QUEUE],
