@@ -51,6 +51,23 @@ const PAGE_SOURCES = import.meta.glob("../**/*.{ts,tsx}", {
 }) as Record<string, string>;
 
 // Raw glob key: Vite shortens keys for files under this directory to "./...".
+
+/**
+ * Vite normalises glob keys to their shortest relative form, so `PAGE_SOURCES`
+ * has a mix of "./apps/x" (under this directory) and "../pages/x" (outside it).
+ * The import graph and the claim scan must both operate in ONE path space or
+ * resolution silently fails and every module looks unreachable -- which is
+ * exactly what happened on the first attempt.
+ */
+function normalisePath(globKey: string): string {
+  return globKey.startsWith("../") ? globKey.slice(3) : `spatial/${globKey.replace(/^\.\//, "")}`;
+}
+
+/** src-relative path -> source text. The single space everything below uses. */
+const SOURCES: Record<string, string> = Object.fromEntries(
+  Object.entries(PAGE_SOURCES).map(([k, v]) => [normalisePath(k), v]),
+);
+
 const PROVIDERS_PAGE = "./apps/prototype-suite/core/features/infrastructure/ProvidersPage.tsx";
 
 /** Comments legitimately explain what must not be claimed; only real output counts. */
@@ -107,8 +124,8 @@ const ACKNOWLEDGED: [file: string, phrase: string, count: number][] = [
  * Absolute claims that already existed OUTSIDE the migrated tree when this guard
  * was widened to cover all of `src`.
  *
- * THESE ARE PINNED, NOT REVIEWED. P7-C did not audit 66 entries of other
- * streams' copy and will not pretend otherwise -- writing 66 justifications for
+ * THESE ARE PINNED, NOT REVIEWED. P7-C did not audit 55 entries of other
+ * streams' copy and will not pretend otherwise -- writing 55 justifications for
  * code this slice does not own is the rubber stamp this guard exists to avoid.
  * What the pin buys is the property that matters: the counts cannot GROW
  * silently, so a NEW absolute claim anywhere in `src` fails by default, even in
@@ -124,14 +141,6 @@ const PRE_EXISTING: [file: string, phrase: string, count: number][] = [
   ["api/client.ts", "cannot", 1],
   ["components/rive/wrappers.tsx", "sealed", 2],
   ["components/ui/closed-code-error.ts", "cannot", 1],
-  ["domain/proxmox/placement-view.ts", "never", 1],
-  ["domain/proxmox/proxmox-fixtures.ts", "always", 1],
-  ["domain/proxmox/proxmox-fixtures.ts", "cannot", 1],
-  ["domain/proxmox/proxmox-fixtures.ts", "never", 4],
-  ["domain/proxmox/proxmox-fixtures.ts", "sealed", 1],
-  ["domain/proxmox/proxmox-view.ts", "cannot", 1],
-  ["domain/proxmox/proxmox-view.ts", "is refused", 1],
-  ["domain/proxmox/proxmox-view.ts", "never", 2],
   ["pages/AuditLog.tsx", "never", 2],
   ["pages/EnrollmentInventory.tsx", "cannot", 1],
   ["pages/ReadOnlyBootstrap.tsx", "is refused", 1],
@@ -151,8 +160,6 @@ const PRE_EXISTING: [file: string, phrase: string, count: number][] = [
   ["pages/environments-view.ts", "no real", 1],
   ["pages/onboarding-wizard-view.ts", "never", 1],
   ["pages/overview.ts", "never", 1],
-  ["pages/range/range-flow.live-test.ts", "are refused", 1],
-  ["pages/range/range-flow.ts", "cannot", 1],
   ["pages/range/range-view.ts", "cannot", 3],
   ["pages/range/range-view.ts", "never", 4],
   ["pages/range/scoreboard-view.ts", "are refused", 1],
@@ -186,16 +193,15 @@ const PRE_EXISTING: [file: string, phrase: string, count: number][] = [
   ["pages/worker-enrollment.ts", "cannot", 6],
   ["pages/worker-enrollment.ts", "never", 10],
   ["pages/worker-enrollment.ts", "sealed", 1],
-  ["testing/fake-control-plane.ts", "cannot", 1],
 ];
 
 /**
- * P7-H retires `src/pages/` wholesale. 54 of the 66 `PRE_EXISTING` entries live
+ * P7-H retires `src/pages/` wholesale. 52 of the 55 `PRE_EXISTING` entries live
  * there, and they are resolved by that DELETION rather than by review -- which
  * is why they were never audited.
  *
  * Pinning the number turns the retirement into a checked event instead of an
- * assumed one: when `pages/` goes, the count must fall by exactly 54. If it
+ * assumed one: when `pages/` goes, the count must fall by exactly 52. If it
  * falls by less, a claim MOVED rather than died -- carried into the spatial tree
  * by someone porting a page, which is exactly how false claims reached the
  * fixtures in the first place. A count that fails to drop is a signal no diff
@@ -206,25 +212,82 @@ const PRE_EXISTING: [file: string, phrase: string, count: number][] = [
  * arrives unacknowledged and fails the main assertion above. This pin is what
  * catches the case where it lands somewhere else in `src` entirely.
  */
-const PAGES_ENTRIES_AT_PIN = 54;
+const PAGES_ENTRIES_AT_PIN = 52;
 
 function acknowledgedCount(file: string, phrase: string): number | undefined {
   return [...ACKNOWLEDGED, ...PRE_EXISTING].find(([f, p]) => f === file && p === phrase)?.[2];
 }
 
-/** Absolute claims per (file, phrase), across the migrated tree. */
+/**
+ * POSITIONAL SCOPE RULE: a string that no component can reach cannot be rendered.
+ *
+ * The guard enforces claims in USER-FACING copy. Its scan sees string literals,
+ * which is not the same thing -- a developer-facing mapping module full of
+ * explanatory `note:` fields trips it while being unable to reach a screen.
+ *
+ * That gap is closed structurally rather than by exempting files. Every `.tsx`
+ * is a potential renderer; a module is IN SCOPE if it is reachable from one by
+ * following imports. This is computed from the tree on every run, so it needs no
+ * curated list and cannot go stale: the day a component imports one of these
+ * modules, its claims come into scope automatically and must be acknowledged.
+ *
+ * A first attempt at this matched import specifiers by filename stem and
+ * reported 44 unreachable modules including barrel files that plainly render --
+ * it would have silently excluded real UI copy. Resolving specifiers the way a
+ * bundler does (relative paths, `.ts`/`.tsx`, and `/index` files) gives 15, and
+ * the classification is checkable: `mocks/capabilities.ts` and
+ * `data/fixtures/capabilities.ts` are REACHABLE and stay in scope -- which
+ * matters, because that is where three false claims were found -- while
+ * `api/adapter-endpoint-map.ts` is not.
+ */
+function resolveSpecifier(importer: string, spec: string, files: Set<string>): string | null {
+  if (!spec.startsWith(".")) return null;
+
+  const parts: string[] = [];
+  for (const seg of `${importer.split("/").slice(0, -1).join("/")}/${spec}`.split("/")) {
+    if (seg === "..") parts.pop();
+    else if (seg !== "." && seg !== "") parts.push(seg);
+  }
+  const target = parts.join("/").split("?")[0];
+
+  for (const cand of [target, `${target}.ts`, `${target}.tsx`, `${target}/index.ts`, `${target}/index.tsx`]) {
+    if (files.has(cand)) return cand;
+  }
+  return null;
+}
+
+const IMPORT_SPECIFIER = /(?:from|import)\s*\(?\s*["']([^"']+)["']/g;
+
+/** Modules reachable from at least one component, and therefore renderable. */
+function reachableFromComponents(): Set<string> {
+  const files = new Set(Object.keys(SOURCES));
+  const roots = [...files].filter((f) => f.endsWith(".tsx") && !f.includes(".test."));
+  const seen = new Set(roots);
+  const stack = [...roots];
+
+  while (stack.length > 0) {
+    const cur = stack.pop() as string;
+    for (const m of (SOURCES[cur] ?? "").matchAll(IMPORT_SPECIFIER)) {
+      const resolved = resolveSpecifier(cur, m[1], files);
+      if (resolved && !seen.has(resolved)) {
+        seen.add(resolved);
+        stack.push(resolved);
+      }
+    }
+  }
+  return seen;
+}
+
+/** Absolute claims per (file, phrase), across every RENDERABLE source. */
 function absoluteClaims(): Map<string, number> {
   const found = new Map<string, number>();
 
-  for (const [path, src] of Object.entries(PAGE_SOURCES)) {
-    if (path.includes(".test.")) continue;
-    // Vite normalises glob keys to their shortest relative form, so this glob
-    // yields a MIX: "./apps/x" for files under `spatial/`, "../pages/x" for the
-    // rest. Both are resolved to one src-relative form so the lists below can be
-    // written in a single vocabulary.
-    const rel = path.startsWith("../")
-      ? path.slice(3)
-      : `spatial/${path.replace(/^\.\//, "")}`;
+  const renderable = reachableFromComponents();
+
+  for (const [rel, src] of Object.entries(SOURCES)) {
+    if (rel.includes(".test.")) continue;
+    // A string no component can reach is not user-facing copy.
+    if (!renderable.has(rel)) continue;
     const body = code(src);
 
     for (const lit of body.matchAll(STRING_LITERAL)) {
@@ -289,9 +352,9 @@ describe("security-property claims", () => {
     expect(stale, `Stale acknowledgements:\n${stale.join("\n")}`).toEqual([]);
   });
 
-  it("tracks the pages/ retirement: 54 entries must die, not move", () => {
+  it("tracks the pages/ retirement: 52 entries must die, not move", () => {
     // `pages/` is obsolete and scheduled for wholesale removal in P7-H.
-    const pagesTreeLive = Object.keys(PAGE_SOURCES).some((k) => k.startsWith("../pages/"));
+    const pagesTreeLive = Object.keys(SOURCES).some((k) => k.startsWith("pages/"));
     const pagesEntries = PRE_EXISTING.filter(([f]) => f.startsWith("pages/"));
 
     if (pagesTreeLive) {
@@ -304,7 +367,7 @@ describe("security-property claims", () => {
     } else {
       expect(
         pagesEntries,
-        "pages/ has been retired but its PRE_EXISTING entries remain. Every one of the 54 " +
+        "pages/ has been retired but its PRE_EXISTING entries remain. Every one of the 52 " +
           "must be deleted from this list. If a claim survived the retirement it was PORTED, " +
           "not resolved -- find where it landed and remove the claim itself.",
       ).toEqual([]);
