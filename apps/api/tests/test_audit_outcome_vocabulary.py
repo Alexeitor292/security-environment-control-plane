@@ -29,17 +29,34 @@ finding nothing:
 1. **Git** says which Python files exist (``git ls-files``), not a second directory walk written
    the same way as the first.
 2. **The AST** finds the call sites.
-3. **A regex** counts the same call sites a completely different way. If the AST walk silently
-   stops matching -- a renamed helper, a changed import shape -- the two disagree and the scan
-   refuses to report a verdict instead of reporting green.
+3. **The token stream** counts the same call sites a completely different way. If the AST walk
+   silently stops matching -- a renamed helper, a changed import shape, a visitor that stops
+   recursing -- the two disagree and the scan refuses to report a verdict instead of reporting
+   green.
+
+THE SECOND READING WAS A REGEX AND THE REGEX WAS WRONG
+------------------------------------------------------
+It counted ``audit.record(`` as *text*, so it also counted the three occurrences inside **this
+file's own fixture strings** -- the planted sources the red-direction tests parse. Locally that
+was invisible, because this file was still untracked and ``git ls-files`` did not hand it to the
+scan; it fired the moment the file was committed. AST 163, text 166, and the scan correctly
+refused rather than reporting a verdict.
+
+That is §3 of the guard rules on the instrument rather than the subject: **key on the thing, not
+on its spelling.** ``tokenize`` sees ``NAME . NAME (`` as four tokens and sees a string literal as
+one ``STRING`` token, so prose and fixtures cannot inflate it. It remains genuinely independent of
+the AST walk in the way that matters here -- it cannot be shrunk by a bug in the visitor -- while
+no longer being fooled by anything that merely *looks* like a call.
 """
 
 from __future__ import annotations
 
 import ast
 import inspect
-import re
+import io
 import subprocess
+import token as token_module
+import tokenize
 import typing
 import uuid
 from dataclasses import dataclass
@@ -53,8 +70,27 @@ from secp_api.schemas import AuditEventOut
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-#: Matches the call the AST walk is looking for, by a completely different mechanism.
-_CALL_RE = re.compile(r"\baudit\.record\s*\(")
+
+def _tokenized_call_count(text: str) -> int:
+    """Count ``audit.record(`` in the TOKEN stream, ignoring comments and string contents.
+
+    The independent second reading. A text search counts anything shaped like the call, including
+    this file's own fixture strings and any prose that mentions it; the token stream sees a string
+    literal as a single ``STRING`` token and a comment as a single ``COMMENT`` token, so neither
+    can inflate the count.
+    """
+    interesting = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type in {token_module.NAME, token_module.OP}:
+                interesting.append(tok.string)
+    except (tokenize.TokenError, IndentationError, SyntaxError):  # pragma: no cover - defensive
+        return -1
+    return sum(
+        1
+        for i in range(len(interesting) - 3)
+        if interesting[i : i + 4] == ["audit", ".", "record", "("]
+    )
 
 
 class AuditScanUnmeasurable(AssertionError):
@@ -106,18 +142,20 @@ def _tracked_python_files() -> list[Path]:
 def _outcome_arguments(paths: list[Path]) -> tuple[list[OutcomeArgument], int, int]:
     """Every ``outcome=`` argument at an ``audit.record`` call, plus both call counts.
 
-    Returns ``(arguments, ast_calls, regex_calls)`` so the caller can compare the two counts. A
+    Returns ``(arguments, ast_calls, token_calls)`` so the caller can compare the two counts. A
     call with no ``outcome=`` takes the default and contributes to ``ast_calls`` only.
     """
     found: list[OutcomeArgument] = []
     ast_calls = 0
-    regex_calls = 0
+    token_calls = 0
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):  # pragma: no cover - defensive
             continue
-        regex_calls += len(_CALL_RE.findall(text))
+        counted = _tokenized_call_count(text)
+        if counted > 0:
+            token_calls += counted
         try:
             tree = ast.parse(text)
         except SyntaxError:  # pragma: no cover - defensive
@@ -163,21 +201,21 @@ def _outcome_arguments(paths: list[Path]) -> tuple[list[OutcomeArgument], int, i
                     literal=literal,
                 )
             )
-    return found, ast_calls, regex_calls
+    return found, ast_calls, token_calls
 
 
 def _scan() -> list[OutcomeArgument]:
     paths = _tracked_python_files()
-    arguments, ast_calls, regex_calls = _outcome_arguments(paths)
+    arguments, ast_calls, token_calls = _outcome_arguments(paths)
     if ast_calls == 0:
         raise AuditScanUnmeasurable(
             f"the AST walk found no audit.record calls across {len(paths)} tracked Python files; "
             "the walk is broken, not the tree"
         )
-    if ast_calls != regex_calls:
+    if ast_calls != token_calls:
         raise AuditScanUnmeasurable(
-            f"the AST walk found {ast_calls} audit.record call(s) but a plain text scan of the "
-            f"same files found {regex_calls}. The two methods disagree, so neither result can be "
+            f"the AST walk found {ast_calls} audit.record call(s) but the token stream of the "
+            f"same files found {token_calls}. The two methods disagree, so neither result can be "
             "trusted; fix the scan before trusting a verdict from it."
         )
     return arguments
@@ -319,9 +357,28 @@ def test_the_scan_sees_a_planted_literal(tmp_path: Path) -> None:
         "    audit.record(session, action='x', resource_type='y', outcome='suceeded')\n",
         encoding="utf-8",
     )
-    arguments, ast_calls, regex_calls = _outcome_arguments([planted])
-    assert ast_calls == regex_calls == 1
+    arguments, ast_calls, token_calls = _outcome_arguments([planted])
+    assert ast_calls == token_calls == 1
     assert [arg.literal for arg in arguments] == ["suceeded"]
+
+
+def test_the_token_reading_ignores_strings_and_comments() -> None:
+    """The specific defect that made CI red, pinned so the regex cannot come back.
+
+    Both directions: a real call counts, and neither a fixture string nor a comment mentioning the
+    same text does. Without the second half this guard is unmeasurable on its own source, which is
+    exactly how it failed.
+    """
+    real_only = "def go(s):\n    audit.record(s, action='x')\n"
+    decorated = (
+        "# audit.record(s) in a comment\nSAMPLE = \"    audit.record(s, action='x')\"\n" + real_only
+    )
+    assert _tokenized_call_count(real_only) == 1
+    assert _tokenized_call_count(decorated) == 1, (
+        "the token reading counted a comment or a string literal; that is the regex behaviour "
+        "this reading exists to replace"
+    )
+    assert _tokenized_call_count("# audit.record(s)\n") == 0
 
 
 def test_the_scan_sees_a_planted_bogus_member(tmp_path: Path) -> None:
@@ -346,7 +403,7 @@ def test_the_scan_refuses_when_its_two_methods_disagree(tmp_path: Path, monkeypa
         encoding="utf-8",
     )
     monkeypatch.setattr("test_audit_outcome_vocabulary._tracked_python_files", lambda: [planted])
-    # Break the AST half only; the regex half still counts the call.
+    # Break the AST half only; the token half still counts the call.
     monkeypatch.setattr(
         "test_audit_outcome_vocabulary._outcome_arguments",
         lambda paths: ([], 0, 1),
