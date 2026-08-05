@@ -44,12 +44,13 @@
 
 import { describe, expect, it } from "vitest";
 
-const PAGE_SOURCES = import.meta.glob("./**/*.{ts,tsx}", {
+const PAGE_SOURCES = import.meta.glob("../**/*.{ts,tsx}", {
   query: "?raw",
   import: "default",
   eager: true,
 }) as Record<string, string>;
 
+// Raw glob key: Vite shortens keys for files under this directory to "./...".
 const PROVIDERS_PAGE = "./apps/prototype-suite/core/features/infrastructure/ProvidersPage.tsx";
 
 /** Comments legitimately explain what must not be claimed; only real output counts. */
@@ -78,32 +79,118 @@ const ABSOLUTE_CLAIM =
 const ACKNOWLEDGED: [file: string, phrase: string, count: number][] = [
   // "sealed enclave" is the NAME of a network segment in a cyber-range scenario
   // fixture, not an assertion about the platform's own enforcement.
-  ["apps/deployments/prototype/mocks/deployments.ts", "sealed", 1],
-  ["apps/deployments/prototype/mocks/events.ts", "sealed", 2],
-  ["apps/prototype-suite/core/mocks/deployments.ts", "sealed", 1],
-  ["apps/prototype-suite/core/mocks/events.ts", "sealed", 2],
-  ["apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "sealed", 1],
+  ["spatial/apps/deployments/prototype/mocks/deployments.ts", "sealed", 1],
+  ["spatial/apps/deployments/prototype/mocks/events.ts", "sealed", 2],
+  ["spatial/apps/prototype-suite/core/mocks/deployments.ts", "sealed", 1],
+  ["spatial/apps/prototype-suite/core/mocks/events.ts", "sealed", 2],
+  ["spatial/apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "sealed", 1],
 
   // The fixture banner itself. "no real infrastructure" here is the honest
   // provenance label, not a safety guarantee about a live system -- it is the
   // one place the phrase is doing the right job.
-  ["apps/prototype-suite/core/components/prototype/PrototypeBanner.tsx", "no real", 1],
+  ["spatial/apps/prototype-suite/core/components/prototype/PrototypeBanner.tsx", "no real", 1],
 
   // A statement about the SIMULATOR, whose entire purpose is to not provision.
-  ["apps/prototype-suite/core/features/scenarios/ScenarioOverviewPage.tsx", "no real", 1],
+  ["spatial/apps/prototype-suite/core/features/scenarios/ScenarioOverviewPage.tsx", "no real", 1],
 
   // Product rules about this application's own behaviour, which it can observe:
   // a wizard's validation rule, a placement policy, a role definition, and the
   // immutability of a content-hashed version.
-  ["apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "cannot", 1],
-  ["apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "never", 1],
-  ["apps/prototype-suite/core/features/infrastructure/PlacementPage.tsx", "never", 2],
-  ["apps/prototype-suite/core/features/platform/IdentityPage.tsx", "never", 2],
-  ["apps/prototype-suite/core/features/scenarios/ScenarioVersionsPage.tsx", "never", 1],
+  ["spatial/apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "cannot", 1],
+  ["spatial/apps/prototype-suite/core/features/events/NewEventWizardPage.tsx", "never", 1],
+  ["spatial/apps/prototype-suite/core/features/infrastructure/PlacementPage.tsx", "never", 2],
+  ["spatial/apps/prototype-suite/core/features/platform/IdentityPage.tsx", "never", 2],
+  ["spatial/apps/prototype-suite/core/features/scenarios/ScenarioVersionsPage.tsx", "never", 1],
+];
+
+/**
+ * Absolute claims that already existed OUTSIDE the migrated tree when this guard
+ * was widened to cover all of `src`.
+ *
+ * THESE ARE PINNED, NOT REVIEWED. P7-C did not audit 66 entries of other
+ * streams' copy and will not pretend otherwise -- writing 66 justifications for
+ * code this slice does not own is the rubber stamp this guard exists to avoid.
+ * What the pin buys is the property that matters: the counts cannot GROW
+ * silently, so a NEW absolute claim anywhere in `src` fails by default, even in
+ * a file nobody has reviewed and even in one nobody remembered existed.
+ *
+ * Several are certainly correct as written -- `domain/proxmox/proxmox-view.ts`
+ * carries deliberate safety copy, and `pages/` states real product rules. The
+ * honest position is that they are unexamined by this slice, not endorsed by it.
+ * Working this list down, entry by entry with reasons, belongs to whoever owns
+ * those files.
+ */
+const PRE_EXISTING: [file: string, phrase: string, count: number][] = [
+  ["api/client.ts", "cannot", 1],
+  ["components/rive/wrappers.tsx", "sealed", 2],
+  ["components/ui/closed-code-error.ts", "cannot", 1],
+  ["domain/proxmox/placement-view.ts", "never", 1],
+  ["domain/proxmox/proxmox-fixtures.ts", "always", 1],
+  ["domain/proxmox/proxmox-fixtures.ts", "cannot", 1],
+  ["domain/proxmox/proxmox-fixtures.ts", "never", 4],
+  ["domain/proxmox/proxmox-fixtures.ts", "sealed", 1],
+  ["domain/proxmox/proxmox-view.ts", "cannot", 1],
+  ["domain/proxmox/proxmox-view.ts", "is refused", 1],
+  ["domain/proxmox/proxmox-view.ts", "never", 2],
+  ["pages/AuditLog.tsx", "never", 2],
+  ["pages/EnrollmentInventory.tsx", "cannot", 1],
+  ["pages/ReadOnlyBootstrap.tsx", "is refused", 1],
+  ["pages/ReadOnlyBootstrap.tsx", "never", 1],
+  ["pages/ResolverActivation.tsx", "never", 1],
+  ["pages/TopologyAuthoring.tsx", "never", 1],
+  ["pages/TopologyPersistencePanel.tsx", "never", 1],
+  ["pages/TopologyWorkspace.tsx", "never", 1],
+  ["pages/audit-view.ts", "sealed", 1],
+  ["pages/discovery-view.ts", "cannot", 1],
+  ["pages/discovery-view.ts", "sealed", 4],
+  ["pages/enrollment-inventory.ts", "cannot", 6],
+  ["pages/enrollment-inventory.ts", "never", 1],
+  ["pages/environment-publication.ts", "cannot", 2],
+  ["pages/environment-publication.ts", "never", 2],
+  ["pages/environments-view.ts", "never", 1],
+  ["pages/environments-view.ts", "no real", 1],
+  ["pages/onboarding-wizard-view.ts", "never", 1],
+  ["pages/overview.ts", "never", 1],
+  ["pages/range/range-flow.live-test.ts", "are refused", 1],
+  ["pages/range/range-flow.ts", "cannot", 1],
+  ["pages/range/range-view.ts", "cannot", 3],
+  ["pages/range/range-view.ts", "never", 4],
+  ["pages/range/scoreboard-view.ts", "are refused", 1],
+  ["pages/range/scoreboard-view.ts", "cannot", 1],
+  ["pages/range/scoreboard-view.ts", "never", 3],
+  ["pages/read-only-bootstrap.ts", "cannot", 1],
+  ["pages/read-only-bootstrap.ts", "never", 5],
+  ["pages/read-only-bootstrap.ts", "sealed", 1],
+  ["pages/readonly-ops.ts", "cannot", 2],
+  ["pages/readonly-ops.ts", "never", 5],
+  ["pages/readonly-ops.ts", "sealed", 3],
+  ["pages/readonly-preflight.ts", "never", 1],
+  ["pages/resolver-activation.ts", "sealed", 2],
+  ["pages/staging-deployment.ts", "never", 3],
+  ["pages/staging-deployment.ts", "sealed", 2],
+  ["pages/staging-view.ts", "cannot", 1],
+  ["pages/staging-view.ts", "no real", 2],
+  ["pages/staging-view.ts", "sealed", 2],
+  ["pages/target-discovery.ts", "cannot", 1],
+  ["pages/target-discovery.ts", "never", 2],
+  ["pages/target-discovery.ts", "sealed", 3],
+  ["pages/target-hub.ts", "cannot", 1],
+  ["pages/target-hub.ts", "is refused", 1],
+  ["pages/target-hub.ts", "never", 3],
+  ["pages/target-hub.ts", "no real", 1],
+  ["pages/target-hub.ts", "sealed", 4],
+  ["pages/topology-persistence.ts", "cannot", 3],
+  ["pages/topology-persistence.ts", "never", 1],
+  ["pages/topology-workspace.ts", "cannot", 1],
+  ["pages/topology-workspace.ts", "never", 2],
+  ["pages/worker-enrollment.ts", "cannot", 6],
+  ["pages/worker-enrollment.ts", "never", 10],
+  ["pages/worker-enrollment.ts", "sealed", 1],
+  ["testing/fake-control-plane.ts", "cannot", 1],
 ];
 
 function acknowledgedCount(file: string, phrase: string): number | undefined {
-  return ACKNOWLEDGED.find(([f, p]) => f === file && p === phrase)?.[2];
+  return [...ACKNOWLEDGED, ...PRE_EXISTING].find(([f, p]) => f === file && p === phrase)?.[2];
 }
 
 /** Absolute claims per (file, phrase), across the migrated tree. */
@@ -112,7 +199,13 @@ function absoluteClaims(): Map<string, number> {
 
   for (const [path, src] of Object.entries(PAGE_SOURCES)) {
     if (path.includes(".test.")) continue;
-    const rel = path.replace(/^\.\//, "");
+    // Vite normalises glob keys to their shortest relative form, so this glob
+    // yields a MIX: "./apps/x" for files under `spatial/`, "../pages/x" for the
+    // rest. Both are resolved to one src-relative form so the lists below can be
+    // written in a single vocabulary.
+    const rel = path.startsWith("../")
+      ? path.slice(3)
+      : `spatial/${path.replace(/^\.\//, "")}`;
     const body = code(src);
 
     for (const lit of body.matchAll(STRING_LITERAL)) {
@@ -131,7 +224,7 @@ function absoluteClaims(): Map<string, number> {
 
 describe("security-property claims", () => {
   it("scans a real set of sources (guard is not vacuous)", () => {
-    expect(Object.keys(PAGE_SOURCES).length).toBeGreaterThan(150);
+    expect(Object.keys(PAGE_SOURCES).length).toBeGreaterThan(350);
     expect(Object.keys(PAGE_SOURCES)).toContain(PROVIDERS_PAGE);
   });
 
@@ -169,7 +262,9 @@ describe("security-property claims", () => {
     // An entry left behind after the copy changed would silently pre-authorize a
     // future claim in that file.
     const live = absoluteClaims();
-    const stale = ACKNOWLEDGED.filter(([f, p]) => !live.has(`${f}|${p}`)).map(
+    const stale = [...ACKNOWLEDGED, ...PRE_EXISTING]
+      .filter(([f, p]) => !live.has(`${f}|${p}`))
+      .map(
       ([f, p]) => `${f}: "${p}"`,
     );
     expect(stale, `Stale acknowledgements:\n${stale.join("\n")}`).toEqual([]);
