@@ -212,12 +212,17 @@ export function Dashboard() {
           <div className="dash-hero-chips">
             {caps ? (
               <>
-                <span className="dash-chip mono">{caps.milestone}</span>
-                <span className="dash-chip">
-                  {caps.provisioning_enabled
-                    ? "provisioning enabled"
-                    : "provisioning disabled"}
+                {/* Counted from the backend's per-operation capability rather than read off a
+                    single boolean. That boolean was hardcoded false and kept saying "provisioning
+                    disabled" for six merges after provisioning shipped. */}
+                <span className="dash-chip mono">
+                  {caps.authorized_operations.length}/{caps.operations.length} operations
                 </span>
+                {caps.unauthorized_operations.length > 0 && (
+                  <span className="dash-chip">
+                    {caps.unauthorized_operations.length} not authorized for you
+                  </span>
+                )}
                 <span className="dash-chip">discovery: {caps.discovery}</span>
               </>
             ) : (
@@ -228,7 +233,12 @@ export function Dashboard() {
               </span>
             )}
           </div>
-          {caps?.note && <p className="dash-hero-note">{caps.note}</p>}
+          {/* `note` was a hardcoded sentence ("Proxmox provisioning is deferred to SECP-002B")
+              that had been false for six merges. The backend now explains how it established the
+              discovery mode, which is a statement it can actually back. */}
+          {caps?.discovery_detail && (
+            <p className="dash-hero-note">{caps.discovery_detail}</p>
+          )}
         </CyberHeroPanel>
         <div className="dash-hero-side">
           <MetricTile

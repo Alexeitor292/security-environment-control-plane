@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from secp_api.auth import Principal
 from secp_api.deps import DB_SESSION, current_principal
 from secp_api.dispatch import get_dispatcher
+from secp_api.provider_capabilities import build_report
+from secp_api.provider_capability_projection import capabilities_out
 from secp_api.schemas_provider import (
     AddressSpaceOut,
     ReservationOut,
@@ -25,12 +27,28 @@ from secp_api.schemas_provider import (
     TargetOperationCredentialRotate,
     TargetOut,
 )
+from secp_api.schemas_provider_capabilities import ProviderCapabilitiesOut
 from secp_api.services import inventory, reservations, targets
 
 router = APIRouter(prefix="/api/v1", tags=["providers"])
 
-# Surfaced so the UI can clearly state provisioning is not enabled in SECP-002A.
-PROVISIONING_ENABLED = False
+# `PROVISIONING_ENABLED = False` used to live here and was served by
+# `GET /providers/capabilities`. It is deliberately GONE from the response rather than corrected to
+# `True`: the question it answered has three states, not two (see `secp_api.provider_capabilities`),
+# and a module-level constant is exactly the shape that let it stay false for six merges after it
+# stopped being true. A test asserts the key no longer appears in the response.
+#
+# It had ONE non-UI consumer, and that consumer is a different concern entirely:
+# `secp_worker.activation_probe._default_seals` reads it as one of four "reviewed code constants"
+# that together assert this deployment has real provisioning SEALED. That is a claim about the
+# worker's execution boundary — the other three are the subprocess and plan-only seals — not about
+# what the API surface can express, and it feeds the discovery-activation evidence chain.
+#
+# So the seal input survives, under a name that says which of the two questions it answers, with
+# its VALUE UNCHANGED so no evidence-chain semantics move. Whether this seal is still accurate is a
+# real question and it belongs to the discovery-activation owner, not to this slice: it is asserted
+# by a reviewed constant that nothing re-derives, which is the same shape as the defect above.
+REAL_PROVISIONING_SEALED = True
 
 
 @router.get("/targets", response_model=list[TargetOut])
@@ -194,12 +212,21 @@ def list_snapshot_resources(
     ]
 
 
-@router.get("/providers/capabilities")
-def provider_capabilities(_: Principal = Depends(current_principal)) -> dict:
-    """Tells the UI that provisioning is NOT enabled in SECP-002A."""
-    return {
-        "milestone": "SECP-002A",
-        "provisioning_enabled": PROVISIONING_ENABLED,
-        "discovery": "read-only",
-        "note": "Proxmox provisioning is deferred to SECP-002B. Discovery is read-only.",
-    }
+@router.get("/providers/capabilities", response_model=ProviderCapabilitiesOut)
+def provider_capabilities(
+    principal: Principal = Depends(current_principal),
+) -> ProviderCapabilitiesOut:
+    """What this build can actually do, derived from the live modules that implement it.
+
+    This endpoint used to return a hardcoded ``provisioning_enabled: False`` with the note
+    "Proxmox provisioning is deferred to SECP-002B", and a docstring saying its purpose was to tell
+    the UI provisioning was not enabled. It had been false for six merges: #105-#110 shipped
+    desired-state compilation, plan generation, apply authorization, observed verification, destroy
+    authorization and the residue proof.
+
+    A capability endpoint that reads a constant is a restatement — it cannot notice the capability
+    changing, which is the one thing it exists to do. Every value here is now derived, and
+    ``supported_unauthorized`` is distinguished from ``not_supported`` because the old single flag
+    conflated them (along with "not for this target"), and they call for different actions.
+    """
+    return capabilities_out(build_report(principal))

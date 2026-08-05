@@ -252,11 +252,43 @@ export interface ApiError {
 
 // --- Provider Targets (SECP-002A) ---
 
+/** Capability states. Deliberately NOT a boolean: `provisioning_enabled: false` used to mean
+ *  "this build cannot do it", "it can but you may not" and "it can but not against this target"
+ *  all at once, and those need three different actions from an operator. */
+export type CapabilityState =
+  | "not_supported"
+  | "supported_unauthorized"
+  | "supported_authorized"
+  | "undetermined";
+
+export interface OperationCapability {
+  operation: string;
+  state: CapabilityState;
+  /** The exact permission this operation requires, so the UI can name it rather than guess. */
+  required_permission: string;
+  detail: string;
+}
+
+export interface ProviderCapabilityEntry {
+  provider: string;
+  deployable: boolean;
+  lifecycle_operations: string[];
+  detail: string;
+}
+
+/** Derived from the live backend modules — never a constant. The previous shape carried
+ *  `provisioning_enabled`, `milestone` and `note`, all literals; `provisioning_enabled` reported
+ *  false for six merges after provisioning shipped. */
 export interface ProviderCapabilities {
-  milestone: string;
-  provisioning_enabled: boolean;
+  operations: OperationCapability[];
+  providers: ProviderCapabilityEntry[];
+  /** `"read-only"` only while the backend could still check that claim against the discovery
+   *  plugin contract; `"undetermined"` when it no longer can. Never a carried-forward literal. */
   discovery: string;
-  note: string;
+  discovery_detail: string;
+  authorized_operations: string[];
+  unauthorized_operations: string[];
+  unsupported_operations: string[];
 }
 
 export interface ExecutionTarget {

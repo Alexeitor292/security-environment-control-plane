@@ -632,10 +632,18 @@ export function ProviderTargets() {
 
       {caps.data && (
         <div className="thub-chips">
-          <span className="thub-chip mono">{caps.data.milestone}</span>
+          {/* Per-operation, from the backend's derived capability report. The single
+              `provisioning_enabled` flag this replaced conflated "not supported", "not authorized
+              for you" and "not for this target" into one word. */}
           <span className="thub-chip mono">
-            provisioning_enabled={String(caps.data.provisioning_enabled)}
+            authorized={caps.data.authorized_operations.length}/
+            {caps.data.operations.length}
           </span>
+          {caps.data.unsupported_operations.length > 0 && (
+            <span className="thub-chip mono">
+              unsupported={caps.data.unsupported_operations.join(",")}
+            </span>
+          )}
           <span className="thub-chip mono">discovery={caps.data.discovery}</span>
         </div>
       )}
