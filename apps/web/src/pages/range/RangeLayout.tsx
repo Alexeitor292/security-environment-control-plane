@@ -39,6 +39,16 @@ export function useRange(): RangeContext {
   return useOutletContext<RangeContext>();
 }
 
+/**
+ * The seven original tabs, then the four Proxmox provider surfaces.
+ *
+ * The Proxmox tabs sit after the lifecycle tab and follow the flow order — placement, then the
+ * compiled topology, then plan and apply, then verification, with teardown last. They are present
+ * on every range rather than gated on `range.provider`, because no range template on main declares
+ * a Proxmox provider (the shipped catalog is `local_docker` only), and a tab that can never appear
+ * is a surface nobody can review. Each Proxmox page opens by stating the range's recorded provider
+ * and whether the page applies to it — see `ProxmoxSection`.
+ */
 const TABS: readonly { id: string; label: string; segment: string }[] = [
   { id: "overview", label: "Overview", segment: "" },
   { id: "deployment", label: "Deployment", segment: "deployment" },
@@ -47,11 +57,16 @@ const TABS: readonly { id: string; label: string; segment: string }[] = [
   { id: "scoreboard", label: "Scoreboard", segment: "scoreboard" },
   { id: "timeline", label: "Timeline", segment: "timeline" },
   { id: "lifecycle", label: "Reset & destroy", segment: "lifecycle" },
+  { id: "placement", label: "Placement", segment: "placement" },
+  { id: "topology", label: "Topology", segment: "topology" },
+  { id: "plan", label: "Plan & apply", segment: "plan" },
+  { id: "verification", label: "Verification", segment: "verification" },
+  { id: "teardown", label: "Teardown", segment: "teardown" },
 ];
 
 /**
- * Shell for every single-range surface: loads the range once for all seven tabs, renders the
- * identity header, and owns the poll.
+ * Shell for every single-range surface: loads the range once for all tabs, renders the identity
+ * header, and owns the poll.
  *
  * Polling is decided from the RANGE ITSELF — an in-flight operation, or a transitional state — so
  * a destroy started on the lifecycle tab keeps advancing while the operator reads the overview.

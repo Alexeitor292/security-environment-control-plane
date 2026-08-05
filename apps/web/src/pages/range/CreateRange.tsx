@@ -18,6 +18,8 @@ import {
   useAction,
 } from "../../components/ui";
 import { useAsync } from "../../hooks";
+import { ProxmoxCreatePlacement } from "./proxmox/ProxmoxCreatePlacement";
+import { isProxmoxProvider } from "./proxmox/proxmox-view";
 import {
   EXECUTION_POSTURE_NOTE,
   RANGE_ERROR_TEXT,
@@ -128,6 +130,14 @@ export function CreateRange() {
                     </SafetyNotice>
                   )}
                 </>
+              )}
+
+              {/* The provider step of the flow. A Proxmox blueprint runs on a cluster this control
+                  plane does not own, so the operator sees the registered targets and enrolled
+                  workers before creating one — no picker, because the create contract has no field
+                  to carry a choice. */}
+              {selected !== null && isProxmoxProvider(selected.provider) && (
+                <ProxmoxCreatePlacement />
               )}
 
               {/* What will actually run, by image and tag. An operator about to start containers on

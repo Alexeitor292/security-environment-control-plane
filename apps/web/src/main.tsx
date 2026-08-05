@@ -23,6 +23,11 @@ import { CreateRange } from "./pages/range/CreateRange";
 import { DeploymentProgress } from "./pages/range/DeploymentProgress";
 import { RangeCatalog } from "./pages/range/RangeCatalog";
 import { RangeLayout } from "./pages/range/RangeLayout";
+import { ProxmoxPlacement } from "./pages/range/proxmox/ProxmoxPlacement";
+import { ProxmoxPlanReview } from "./pages/range/proxmox/ProxmoxPlanReview";
+import { ProxmoxTeardown } from "./pages/range/proxmox/ProxmoxTeardown";
+import { ProxmoxTopology } from "./pages/range/proxmox/ProxmoxTopology";
+import { ProxmoxVerification } from "./pages/range/proxmox/ProxmoxVerification";
 import { RangeLifecycleActions } from "./pages/range/RangeLifecycleActions";
 import { RangeOverview } from "./pages/range/RangeOverview";
 import { RangeTimeline } from "./pages/range/RangeTimeline";
@@ -80,8 +85,10 @@ const router = createBrowserRouter([
       { path: "ranges", element: <RangeCatalog /> },
       { path: "ranges/new", element: <CreateRange /> },
       {
-        // One layout owns the range load and the lifecycle poll for all seven single-range tabs,
-        // so the phase badge advances no matter which tab is open.
+        // One layout owns the range load and the lifecycle poll for every single-range tab, so the
+        // phase badge advances no matter which tab is open. The five Proxmox surfaces are children
+        // of the same layout for exactly that reason — they are provider detail on an existing
+        // range, not a second product.
         path: "ranges/:rangeId",
         element: <RangeLayout />,
         children: [
@@ -92,6 +99,11 @@ const router = createBrowserRouter([
           { path: "scoreboard", element: <Scoreboard /> },
           { path: "timeline", element: <RangeTimeline /> },
           { path: "lifecycle", element: <RangeLifecycleActions /> },
+          { path: "placement", element: <ProxmoxPlacement /> },
+          { path: "topology", element: <ProxmoxTopology /> },
+          { path: "plan", element: <ProxmoxPlanReview /> },
+          { path: "verification", element: <ProxmoxVerification /> },
+          { path: "teardown", element: <ProxmoxTeardown /> },
         ],
       },
       { path: "provider-targets", element: <ProviderTargets /> },

@@ -1,0 +1,108 @@
+/* Proxmox range surfaces. Extends range.css; defines no colours of its own beyond the tokens. */
+
+/* The offline banner. Deliberately loud: a fixture-backed panel must not be mistakable for a live
+   one at a glance, from across a room, or in a screenshot pasted into a ticket. */
+.pmx-offline-label {
+  display: inline-block;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.pmx-offline-body {
+  display: inline;
+}
+
+.pmx-offline-model {
+  display: inline;
+  font-size: 0.9em;
+}
+
+/* A hatched left edge on every fixture-backed panel. This is the recognition cue that survives
+   skim-reading: the banner says it, and the panel itself looks different from a live one. */
+.pmx-panel--offline {
+  border-left: 3px solid var(--warn, #d98a00);
+  background-image: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--warn, #d98a00) 6%, transparent) 0 6px,
+    transparent 6px 14px
+  );
+}
+
+.pmx-panel--live {
+  border-left: 3px solid var(--ok, #35b37e);
+}
+
+.pmx-live-source {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.6rem;
+  font-size: 0.82rem;
+}
+
+.pmx-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok, #35b37e);
+  flex: none;
+}
+
+.pmx-source-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: var(--ok, #35b37e);
+}
+
+.pmx-offline-chip {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border: 1px solid var(--warn, #d98a00);
+  border-radius: 3px;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn, #d98a00);
+  white-space: nowrap;
+}
+
+/* EXECUTION STATUS: NOT APPLIED. Sized and weighted to be the first thing read on plan review, and
+   never styled as a success. */
+.pmx-execution-status {
+  border: 1px solid var(--warn, #d98a00);
+}
+
+.pmx-not-applied {
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn, #d98a00);
+}
+
+/* The unproven treatment. Distinct from both the ok and danger rows: amber text plus an amber rule
+   on the row, so it reads as a third thing rather than a shade of failure. */
+.pmx-unproven {
+  color: var(--warn, #d98a00);
+}
+
+.pmx-row-unproven td {
+  background: color-mix(in srgb, var(--warn, #d98a00) 8%, transparent);
+}
+
+.pmx-row-emphasis td {
+  font-weight: 600;
+}
+
+.pmx-detail {
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.pmx-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0.8rem 0 0.4rem;
+}
