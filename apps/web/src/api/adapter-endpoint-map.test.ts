@@ -1,0 +1,169 @@
+// The map is only worth having if it cannot lie.
+//
+// A prose table of "method → endpoint" is correct on the day it is written and silently wrong
+// afterwards: routes get renamed, added, and removed, and nothing tells the table. So every claim
+// in `adapter-endpoint-map.ts` is re-resolved here against `contracts/openapi/openapi.json` — the
+// document exported from the live FastAPI app, and the same one the CI staleness guard pins to the
+// running code. A renamed route fails this file; a route added by P7-A that serves an `absent`
+// method fails it too, which is the point — that is the moment somebody should be told.
+
+import { readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it } from "vitest";
+
+import {
+  ADAPTER_ENDPOINT_MAP,
+  ADAPTER_METHODS,
+  servedMethods,
+  unservedMethods,
+} from "./adapter-endpoint-map";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+const CONTRACT = join(REPO_ROOT, "contracts", "openapi", "openapi.json");
+
+const document = JSON.parse(readFileSync(CONTRACT, "utf8")) as {
+  paths: Record<string, Record<string, unknown>>;
+};
+const REGISTERED = new Set(Object.keys(document.paths));
+
+describe("the map covers the adapter exactly", () => {
+  it("has an entry for every declared method and no others", () => {
+    // Set equality in BOTH directions. A method covered twice, or a method covered by nothing,
+    // are different bugs and both are silent — the first shadows, the second reads as "no comment".
+    const mapped = ADAPTER_ENDPOINT_MAP.map((m) => m.method);
+    expect([...mapped].sort()).toEqual([...ADAPTER_METHODS].sort());
+    expect(new Set(mapped).size, "a method is mapped twice").toBe(mapped.length);
+  });
+
+  it("covers 22 methods, the number the spatial adapter declares", () => {
+    expect(ADAPTER_METHODS).toHaveLength(22);
+  });
+});
+
+describe("every endpoint claimed is an endpoint that exists", () => {
+  const claims = ADAPTER_ENDPOINT_MAP.flatMap((m) =>
+    m.endpoints.map((path) => [m.method, path] as const),
+  );
+
+  it("claims at least one endpoint (guards the loop against covering nothing)", () => {
+    expect(claims.length).toBeGreaterThan(15);
+  });
+
+  it.each(claims)("%s → %s is registered on the live app", (_method, path) => {
+    expect(
+      REGISTERED.has(path),
+      `${path} is not in contracts/openapi/openapi.json. Either the route was renamed or ` +
+        "removed, or this claim was never true. Do not delete the assertion — fix the mapping.",
+    ).toBe(true);
+  });
+});
+
+describe("absent means absent", () => {
+  it("declares no endpoint for a method nothing serves", () => {
+    for (const mapping of unservedMethods()) {
+      expect(mapping.endpoints, `${mapping.method} is ${mapping.status} but names an endpoint`)
+        .toEqual([]);
+    }
+  });
+
+  it("says what would have to be added, for every unserved method", () => {
+    // A gap with no stated remedy is a gap that gets rediscovered. `requires` is the message to
+    // whoever owns the API, and `listSecretRefs` uses it to say the opposite: do not add this.
+    for (const mapping of unservedMethods()) {
+      expect(mapping.requires, `${mapping.method} has no \`requires\``).toBeTruthy();
+      expect((mapping.requires ?? "").length).toBeGreaterThan(30);
+    }
+  });
+
+  it("keeps the secrets surface withheld rather than merely missing", () => {
+    // `absent` invites someone to close the gap. `withheld` says the gap is the feature.
+    const secrets = ADAPTER_ENDPOINT_MAP.find((m) => m.method === "listSecretRefs");
+    expect(secrets?.status).toBe("withheld");
+    expect(secrets?.requires).toMatch(/must stay unimplemented|NOTHING/);
+  });
+
+  it("has no route anywhere that would serve a withheld method", () => {
+    // The real guard: not "we chose not to call it" but "there is nothing to call". If a secret
+    // INVENTORY route ever appears, this fails and the decision gets re-made deliberately.
+    //
+    // Matched on a whole path SEGMENT, not a substring. The first version of this test caught
+    // `/provisioning-manifests/{id}/plan-secret-readiness`, which is the authorization-governance
+    // family — it decides whether a secret PURPOSE may be used and returns no credential
+    // inventory. Widening the guard to include it would have made it fire on the wrong thing, and
+    // the usual repair for a guard that fires on the wrong thing is to delete it.
+    const inventorySegments = new Set(["secrets", "secret-refs", "credentials", "vault"]);
+    const inventoryRoutes = [...REGISTERED].filter((path) =>
+      path.split("/").some((segment) => inventorySegments.has(segment)),
+    );
+    expect(
+      inventoryRoutes,
+      "a credential-inventory route has appeared in the contract. listSecretRefs is withheld " +
+        "deliberately — re-make that decision explicitly rather than wiring it up.",
+    ).toEqual([]);
+  });
+
+  it("still fires when a credential-inventory route does appear", () => {
+    // The clause that keeps the guard above honest: a predicate that matches nothing would pass
+    // over an empty set forever. This proves it recognises the shape it is looking for.
+    const withSecrets = new Set([...REGISTERED, "/api/v1/secrets"]);
+    const inventorySegments = new Set(["secrets", "secret-refs", "credentials", "vault"]);
+    const found = [...withSecrets].filter((path) =>
+      path.split("/").some((segment) => inventorySegments.has(segment)),
+    );
+    expect(found).toEqual(["/api/v1/secrets"]);
+  });
+});
+
+describe("served methods name what they cannot supply", () => {
+  it("lists unsourced fields wherever the shape differs", () => {
+    // `shaped` without `unsourcedFields` is the dangerous combination: it reads as "this works"
+    // while the difference that makes it not work is undocumented.
+    for (const mapping of servedMethods()) {
+      if (mapping.status !== "shaped") continue;
+      if (mapping.method === "getTopology") continue; // opaque payload, not a field mismatch
+      expect(
+        mapping.unsourcedFields.length,
+        `${mapping.method} is 'shaped' but names no unsourced field`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it("explains each mapping in prose a reviewer can check", () => {
+    for (const mapping of ADAPTER_ENDPOINT_MAP) {
+      expect(mapping.note.length, `${mapping.method} has no note`).toBeGreaterThan(40);
+    }
+  });
+});
+
+describe("the traps the map exists to prevent", () => {
+  it("does not wire listEvents to the range EVENT LOG", () => {
+    // `RangeEventOut` is a log line — kind, level, message, sequence. An `EventItem` is a
+    // scheduled competition. The route name makes the wrong wiring look right, and it would put
+    // log lines on a competition screen.
+    const events = ADAPTER_ENDPOINT_MAP.find((m) => m.method === "listEvents");
+    expect(events?.endpoints).not.toContain("/api/v1/ranges/{range_id}/events");
+    expect(events?.status).toBe("absent");
+  });
+
+  it("records that listWorkers needs BOTH sources, not either", () => {
+    // One endpoint alone silently drops a whole class of worker: enrolled but never published
+    // keys, or published keys with no enrollment. Both are real states.
+    const workers = ADAPTER_ENDPOINT_MAP.find((m) => m.method === "listWorkers");
+    expect(workers?.endpoints).toHaveLength(2);
+    expect(workers?.endpoints).toContain("/api/v1/enrollment");
+  });
+
+  it("records the scoping mismatches rather than leaving them to be discovered at runtime", () => {
+    // Three methods take an id the routes cannot use. That is a contract problem, not a bug to
+    // find in a component: `listTeams(eventId?)` optional vs a required range id, and
+    // `listScores(eventId)` against range/competition-keyed routes.
+    for (const method of ["listTeams", "listParticipants", "listScores"]) {
+      const mapping = ADAPTER_ENDPOINT_MAP.find((m) => m.method === method);
+      expect(mapping?.note, `${method} does not record its scoping mismatch`).toMatch(
+        /SCOPING MISMATCH|SIGNATURE MISMATCH|Reachable only as/,
+      );
+    }
+  });
+});

@@ -81,6 +81,10 @@ function operation(over: Partial<RangeOperationSummary> = {}): RangeOperationSum
     kind: "deploy",
     status: "running",
     phase: "create",
+    // The default is a LIVE operation. `stale` is a third outcome beside running and finished —
+    // the lease lapsed and nobody recorded how it ended — and it leaves `status` saying whatever
+    // it last said, so a fixture that omitted it was describing a state the server never sends.
+    stale: false,
     completed_steps: 2,
     total_steps: 4,
     percent: 50,
@@ -212,6 +216,7 @@ describe("operationOutcomeText", () => {
   ): RangeOperation => ({
     ...operation({ status }),
     range_id: "rng-1",
+    stale_reason: null,
     failure_code: null,
     failure_message: null,
     started_at: "2026-08-01T00:00:00",
