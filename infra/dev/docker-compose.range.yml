@@ -1,0 +1,102 @@
+# SECP-RANGE — the range-capable development worker profile. EXPLICIT OPT-IN.
+#
+# ============================================================================================
+#  ⚠  DOCKER SOCKET ACCESS IS ROOT-EQUIVALENT ON THE HOST.  ⚠
+#
+#  This overlay bind-mounts the host's Docker socket into the worker container. Anything that can
+#  talk to that socket can start a container that mounts the host filesystem and therefore read,
+#  modify or delete ANY file on the host as root — regardless of the container running as the
+#  unprivileged uid 10001. The `group_add` below buys ordinary filesystem/process hygiene inside the
+#  container; it buys NOTHING against the socket itself. There is no such thing as a partially
+#  privileged Docker socket.
+#
+#  Layer this file on a development machine you are willing to hand root to, and nowhere else.
+#  It is refused in production twice over: `range_local_docker_enabled` is `range_local_docker AND
+#  NOT is_production` (apps/api/secp_api/config.py), and no production composition references this
+#  file. Never add it to one.
+# ============================================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# `docker compose up worker` builds a worker that connects to Temporal, accepts a range operation,
+# and then refuses at the seal — correct behaviour, unusable out of the box. The base `worker`
+# service passes no `SECP_RANGE_LOCAL_DOCKER` and mounts no socket, so `get_provider()` raises
+# `RangeProviderSealedError`. Every acceptance run so far worked around that by starting a worker by
+# hand on the host. This file replaces that workaround with a shipped path.
+#
+# WHY IT OVERRIDES `worker` RATHER THAN ADDING A SECOND SERVICE
+# -------------------------------------------------------------
+# A `profiles:`-gated `range-worker` service alongside the ordinary one would put TWO workers on the
+# same `secp-orchestration` task queue. Temporal load-balances across pollers, so roughly half of all
+# range operations would be handed to the socketless worker and fail at the seal — an intermittent
+# failure that looks like a range bug. One worker, reconfigured, is the only correct shape. This
+# follows the same override idiom as docker-compose.discovery-live.yml.
+#
+# START (the one documented command — run from infra/dev):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.range.yml \
+#     --env-file ../../.env up -d --build
+#
+# `--env-file ../../.env` is REQUIRED and is not a nicety: `docker compose` resolves a relative
+# `.env` against its own project directory (infra/dev), never the repo root. Omit it and every
+# variable below resolves blank — Temporal then tries to reach PostgreSQL as user `temporal` and the
+# stack fails in a way that does not name the cause.
+name: secp-dev
+
+services:
+  # The API DELIBERATELY GETS NO SOCKET. It is listed here only to switch dispatch to Temporal;
+  # nothing else about it changes. The API holds the range CONTRACT types and dispatches — it never
+  # constructs a provider and never runs one (Charter Invariants 6/7, ADR-005). Do not add a
+  # `volumes:` entry to this service. The architecture-boundary guard forbids `subprocess` under
+  # `secp_api`, but a socket mount would be privilege the guard cannot see.
+  api:
+    environment:
+      # Range operations REQUIRE the durable path. `InlineDispatcher` refuses them outright — there
+      # is no inline-safe range provider — so leaving the repo default (`inline`) makes every range
+      # deploy fail at dispatch, before the worker is ever consulted.
+      SECP_WORKFLOW_DISPATCH_MODE: temporal
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/dev/Dockerfile.range-worker
+      additional_contexts:
+        # Layer on the very worker image this stack builds, so the range worker can never drift
+        # from the ordinary one. Requires Compose v2.24+ (`service:` named contexts).
+        base: service:worker
+    environment:
+      SECP_WORKFLOW_DISPATCH_MODE: temporal
+      # The seal. Without this the provider refuses to be constructed at all, socket or no socket.
+      SECP_RANGE_LOCAL_DOCKER: "true"
+    volumes:
+      # THE ROOT-EQUIVALENT MOUNT. Worker-only — never the api, web, or any other service.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The socket is root:root mode 0660 (verified on Docker Desktop 29.4.0), so the image's uid
+    # 10001 gets EACCES without a matching supplementary group. Adding the socket's group is what
+    # lets the worker stay non-root instead of being run as `user: root`. The default 0 matches
+    # Docker Desktop; a native Linux Engine usually owns the socket by a `docker` group instead —
+    # set SECP_RANGE_DOCKER_GID to the output of `stat -c %g /var/run/docker.sock` there.
+    group_add:
+      - "${SECP_RANGE_DOCKER_GID:-0}"
+    depends_on:
+      # In `temporal` dispatch mode the worker is FAIL-CLOSED: it exits non-zero rather than falling
+      # back to inline orchestration (apps/worker/secp_worker/main.py). Starting it before Temporal
+      # is serving therefore produces a real crash loop, not a retry. The base compose file only
+      # waits for postgres because its worker runs in inline mode.
+      temporal:
+        condition: service_healthy
+
+  postgres:
+    # `!override` REPLACES the base list instead of appending to it. Compose merges `ports` by
+    # concatenation, so without this the service publishes 5432 AND the replacement — leaving the
+    # very conflict below still in place while appearing to have fixed it.
+    ports: !override
+      # Republished off 5432 BY DEFAULT for this profile. On at least one development machine a
+      # NATIVE Windows PostgreSQL service owns host port 5432: Docker reports the compose postgres
+      # as published there, the native service is what actually answers, and host-side connections
+      # fail `password authentication failed` with correct credentials while the SAME credentials
+      # work inside the container. Nothing in the stack depends on the host-side port — every
+      # service reaches the database at `postgres:5432` over the compose network — so moving it
+      # costs nothing and removes a failure that costs an hour to diagnose. Set
+      # SECP_DEV_POSTGRES_HOST_PORT=5432 to restore the base mapping.
+      - "${SECP_DEV_POSTGRES_HOST_PORT:-15432}:5432"

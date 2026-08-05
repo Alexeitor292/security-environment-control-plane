@@ -1,0 +1,39 @@
+# The range-capable development worker image — DEVELOPMENT/DEMO ONLY.
+#
+# Identical to the ordinary worker image in every respect except one: it also carries the `docker`
+# CLI binary. `secp_worker.range.docker_cli` deliberately drives the CLI rather than an SDK, so it
+# calls `shutil.which("docker")` and fails closed when the binary is absent. The ordinary worker
+# image has no `docker` binary, which is why `docker compose up worker` yields a worker that
+# connects to Temporal, accepts a range operation, and then refuses at the seal.
+#
+# WHY THIS IS A SEPARATE FILE AND NOT AN ARG IN Dockerfile.python
+# ---------------------------------------------------------------
+# `Dockerfile.python` is the SHARED api/worker/CI image and is contract-tested from four places:
+# `tests/test_packaging_contract.py`, `tests/test_health_command_interpreter.py`,
+# `apps/acceptance/tests/test_acceptance_container_worker_image.py`, and the `secp/api:ci` build in
+# `.github/workflows/ci.yml`. Two of those read the FIRST `FROM` and map it through a CLOSED table,
+# so introducing a multi-stage build there fails them by construction. More to the point: adding a
+# docker binary to the shared image would put one in the API image too. The API must not merely be
+# socketless — it should not carry the tool either. So the range worker layers on top instead, and
+# the shared image is left exactly as it is.
+#
+# The base is supplied by Compose as the named build context `base` (`additional_contexts:
+# base: service:worker` in docker-compose.range.yml), so this image is always the very worker image
+# the stack just built — never a stale or separately-maintained copy of the install steps.
+
+# Pinned to the same major the local daemon speaks (29.x). This stage contributes ONE static binary.
+FROM docker:29.4-cli AS dockercli
+
+FROM base
+
+# The CLI only; no daemon, no compose plugin, no buildx. The provider shells out to
+# `docker network|run|inspect|port|rm` and nothing else.
+USER root
+COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
+RUN chmod 0755 /usr/local/bin/docker && docker --version
+
+# Back to the ordinary non-root runtime identity (uid=gid=10001). Access to the mounted socket comes
+# from the supplementary group Compose adds (`group_add`), NOT from running as root: the container's
+# own filesystem and process identity stay unprivileged. See the warning in docker-compose.range.yml
+# for what socket access does and does not let this container do.
+USER secp
