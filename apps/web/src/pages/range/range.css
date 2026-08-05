@@ -1,0 +1,169 @@
+/* RANGE surfaces: catalog, create, deployment progress, overview, competition,
+   teams, scoreboard, timeline, reset/destroy. Tokens only — no literal colors,
+   so light and dark themes both inherit correctly and no new contrast pair is
+   introduced. */
+
+.rng {
+  position: relative;
+  display: grid;
+  gap: 14px;
+}
+.rng-bg { z-index: 0; }
+.rng > *:not(.rng-bg) { position: relative; z-index: 1; }
+
+.rng-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.rng-head h1 { margin: 0 0 4px; }
+.rng-sub {
+  color: var(--ink-secondary);
+  max-width: 72ch;
+  margin: 0;
+}
+.rng-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rng-grid {
+  display: grid;
+  /* min() lets tracks shrink below the ideal width on narrow viewports so the
+     page never scrolls horizontally at 320px / 200% zoom (WCAG 1.4.10). */
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+/* ---------------------------------------------------------------- catalog */
+
+.rng-search {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.rng-search > * { flex: 1 1 240px; }
+
+.rng-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.rng-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--ink-secondary);
+  font-size: 0.85rem;
+}
+
+/* --------------------------------------------------------- range identity */
+
+.rng-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.rng-recorded {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+/* -------------------------------------------------------------- lifecycle */
+
+.rng-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rng-step {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 10px;
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-md);
+}
+.rng-step--current { border-color: var(--border-selected); }
+.rng-step--done { opacity: 0.8; }
+.rng-step--failed { border-color: var(--danger); }
+.rng-step-name { font-weight: 600; }
+.rng-step-note {
+  color: var(--ink-secondary);
+  font-size: 0.85rem;
+}
+
+/* Progress meter. `--rng-progress` is set inline from server-derived state. */
+.rng-meter {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.rng-meter-fill {
+  height: 100%;
+  width: calc(var(--rng-progress, 0) * 100%);
+  background: var(--accent);
+  transition: width var(--motion-base) var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rng-meter-fill { transition: none; }
+}
+
+.rng-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-secondary);
+  font-size: 0.85rem;
+}
+.rng-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: rng-pulse 1.6s var(--ease-in-out) infinite;
+}
+@keyframes rng-pulse {
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rng-live-dot { animation: none; }
+}
+
+/* ------------------------------------------------------------ destructive */
+
+.rng-danger {
+  border: var(--border-width) solid var(--danger);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+.rng-danger h3 { margin: 0; }
+.rng-confirm-field { max-width: 42ch; }
+
+/* ---------------------------------------------------------------- pending */
+
+.rng-pending-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: var(--ink-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}

@@ -13,6 +13,25 @@ export type LifecycleState =
   | "destroyed"
   | "failed";
 
+/**
+ * The product-level range lifecycle.
+ *
+ * These nine phases are the vocabulary the range surfaces speak. The API does NOT emit them today —
+ * it emits `LifecycleState` above, and `pages/range/range-lifecycle.ts` owns the single projection
+ * between the two. The union lives here, with the other API unions, because the range backend is
+ * expected to emit these values natively, at which point the projection collapses toward identity.
+ */
+export type RangePhase =
+  | "draft"
+  | "deploying"
+  | "ready"
+  | "active"
+  | "resetting"
+  | "recovery_required"
+  | "failed"
+  | "destroying"
+  | "destroyed";
+
 export type PlanStatus =
   | "generated"
   | "awaiting_approval"

@@ -83,6 +83,14 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [{ id: "overview", label: "Overview", href: "/", end: true }],
   },
   {
+    id: "ranges",
+    label: "Ranges",
+    items: [
+      { id: "range-catalog", label: "Range Catalog", href: "/ranges", end: true },
+      { id: "range-create", label: "Create Range", href: "/ranges/new" },
+    ],
+  },
+  {
     id: "environments",
     label: "Environments",
     items: [
