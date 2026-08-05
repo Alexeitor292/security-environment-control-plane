@@ -516,6 +516,40 @@ layer. Nothing else differs.
 | Layout at 640/760/900/1024/1280/1600 | every measured field identical |
 | **Animation & transition timing** | **55 distinct durations, identical counts; easings identical; 6 delay values; 33 `animation-name`s — zero difference** |
 
+### The 3D scene — driven through the real flow, on both sides
+
+The scene is not on the home shell; it is reached through
+Infrastructure → *Add infrastructure* → *Proxmox*, which is the path a user
+takes. Both sides were driven through that exact sequence with the same probe,
+with WebGL instrumented from outside before the flow started.
+
+| | Donor | Repository |
+| --- | --- | --- |
+| Navigation path taken | Infrastructure → Add infrastructure → Proxmox | *same* |
+| Canvases after app open / after scene | 1 → 2 | 1 → 2 |
+| `.scene-shell--active` | yes | yes |
+| GLB fetched | `server-rack.glb`, **6,148,672 B** | **6,148,672 B** |
+| WebGL contexts created | 1 | 1 |
+| Draw calls in the sample window | **1,445** | **1,445** |
+
+The GLB byte count is the same value `model-integrity.test.ts` pins and the same
+value the scene harness measured, now confirmed a third time through the
+product's own navigation rather than a test fixture.
+
+**Shader appearance is NOT mechanically comparable and was not compared.** A
+pixel diff of a live WebGL canvas varies with GPU, driver, antialiasing and frame
+timing; a threshold loose enough to pass reliably is loose enough to pass a wrong
+shader, and a threshold tuned until it passes certifies whatever it is shown.
+What was verified instead is that both sides load the same model, create the same
+number of contexts, and issue the same number of draw calls over the same window
+— which establishes the same geometry is being submitted, and does **not**
+establish that it looks the same. The shader source is byte-identical (§4.9
+source comparison), which is the stronger guarantee available here.
+
+The identical draw count is timing-sensitive by nature: it matches because the
+same geometry is submitted at the same frame rate over an equal window. It would
+be wrong to read it as a deterministic constant.
+
 The timing result is the strongest single measurement in this comparison. Every
 duration matches with its exact occurrence count, including the values most
 likely to be lost or rounded in a hand-port: `0.01ms` ×14 (the reduced-motion
