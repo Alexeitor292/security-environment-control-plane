@@ -4,8 +4,8 @@ The order in which the migrated spatial pages get wired onto the transport layer
 #118 landed, what each one can and cannot show, and the permission gate each
 carries.
 
-**This is a plan. No page is wired by it.** P7-D proper starts once #115 is on
-`main`.
+**This is a plan. No page is wired by it.** #115 merged as `640bbb3`; wiring
+begins from this order.
 
 ## How this was built
 
@@ -65,14 +65,14 @@ unsourced fields needing a presentation decision, not the fetching.
 | # | Page | Methods | Unsourced fields to decide | Permission | Notes |
 | ---: | --- | --- | ---: | --- | --- |
 | 1 | **AuditPage** | `listAuditEvents`, `listEvidence` | 1 + 4 | **`audit:read`** | Smallest real gap. `origin` unsourced |
-| 2 | **TargetsPage** | `listTargets`, `listWorkers` | 10 + 5 | org-scope; workers need **`target_discovery:manage`** | See the permission trap below |
+| 2 | **TargetsPage** | `listTargets`, `listWorkers` | 10 + 5 | targets: **none** (org-scope, verified a decision); workers: **`target_discovery:manage`** | Two different answers on one page |
 | 3 | **WorkersPage** | `listTargets`, `listWorkers` | 10 + 5 | as above | **Consumes `placement-view.ts`** |
-| 4 | **PlacementPage** | `listTargets` | 10 | org-scope only | Same reader as #2 |
-| 5 | **InventoryPage** | `listTargets`, `listEvidence` | 10 + 4 | org-scope + evidence | |
-| 6 | **IntegrationsPage** | `listIntegrations` | 2 | org-scope | `category`, `detail` unsourced |
-| 7 | **EventScoringPage** | `listScores`, `listTeams` | 6 + 11 | org-scope | Scores are entirely unsourced — see below |
-| 8 | **TeamsAccessPage** | `listTeams`, `listParticipants`, `listAccessProfiles` | 11 + 3 + **absent** | org-scope | Partially blocked |
-| 9 | **ScenarioLibraryPage** | `listScenarios` | 10 | org-scope | |
+| 4 | **PlacementPage** | `listTargets` | 10 | **none** — org-scope, verified a decision | Same reader as #2 |
+| 5 | **InventoryPage** | `listTargets`, `listEvidence` | 10 + 4 | targets: none; evidence: resolve per route | |
+| 6 | **IntegrationsPage** | `listIntegrations` | 2 | resolve at wiring | `category`, `detail` unsourced |
+| 7 | **EventScoringPage** | `listScores`, `listTeams` | 6 + 11 | **`exercise:operate`** | Scores entirely unsourced — see the ruling below |
+| 8 | **TeamsAccessPage** | `listTeams`, `listParticipants`, `listAccessProfiles` | 11 + 3 + **absent** | **`exercise:operate`** | Partially blocked |
+| 9 | **ScenarioLibraryPage** | `listScenarios` | 10 | resolve at wiring | |
 | 10 | **DeploymentPortfolioPage** | `listDeployments`, `listEvents`, `listScenarios` | 11 + **absent** + 10 | **`exercise:operate`** | Blocked on `listEvents` |
 | 11 | **WorkflowsPage** | `listWorkers`, `listWorkflowRuns` | 5 + 3 | mixed | |
 | 12 | Topology pages ×3 | `getTopology`, `listTeams` | see trap | varies | **Hardest, not easiest** |
@@ -118,17 +118,64 @@ the method takes one string.
 
 Intuition says a read page needs a read permission. Measured, that is false:
 
-| Read | Requires |
-| --- | --- |
-| `list_audit_events` | `audit:read` |
-| `list_worker_nodes` | **`target_discovery:manage`** |
-| `list_ranges` | **`exercise:operate`** |
-| `list_targets`, `list_teams`, `scoreboard` | organization scope only, no permission |
+| Read | Requires | Where the check lives |
+| --- | --- | --- |
+| `list_audit_events` | `audit:read` | in the function |
+| `list_worker_nodes` | **`target_discovery:manage`** | in the function |
+| `list_ranges` | **`exercise:operate`** | in the function |
+| `list_teams` | **`exercise:operate`** | **one call upstream** |
+| `scoreboard` | **`exercise:operate`** | **one call upstream** |
+| `list_team_members`, `list_challenges` | **`exercise:operate`** | **one call upstream** |
+| `list_targets` | organization scope only | query filter |
 
 So a page gated on a guessed `*:read` permission would be **wrong in both
 directions** — refusing users who should see the page, and admitting users the
 service will refuse anyway. **Resolve the permission from the service function
 that backs the call, every time.**
+
+#### A gate can be one call upstream, and grep will not see it
+
+**The first version of this table was wrong**, and the error is worth keeping
+because it is the exact mistake this section warns against. It listed
+`list_teams` and `scoreboard` as "organization scope only", derived by grepping
+for `require(Permission.` **inside each function body**.
+
+Both are gated. Their first statement is
+`competition = get_competition(session, principal, competition_id)`, and
+`get_competition` requires `exercise:operate` and then `require_org`. The same
+holds for `list_team_members` and `list_challenges`.
+
+**Grepping a function body finds gates that are written there and misses gates
+that are delegated.** A wiring decision made from that table would have gated a
+scoreboard on nothing while the server demanded `exercise:operate` — failing at
+the boundary rather than at the gate, which reads as a server bug.
+
+**Method that actually works:** follow the call graph from the service function
+the route invokes, through every helper it delegates to, until a permission
+check or an explicit organization scope is reached. Cheapest reliable form is to
+read the first few lines of the function rather than to grep it.
+
+### `list_targets` has no permission, and that is a decision rather than a gap
+
+Flagged for verification because "no permission" and "nobody added one" are
+indistinguishable from a call site. Verified: it is a **decision**.
+
+- **Reads are organization-scoped structurally.** `list_targets` filters on
+  `actor.organization_id` in the query itself; `get_target` calls
+  `actor.require_org(...)`.
+- **Writes on the same resource all require a permission** — `register_target`
+  and `disable_target` require `target:manage`, and both credential rotations
+  require `credential_binding:manage`.
+- The module docstring states the model outright: *"Targets are
+  organization-scoped, secret-free, and have immutable configuration."*
+
+A clean read/write asymmetry plus a stated model is a design, not an omission.
+So **`TargetsPage` and `PlacementPage` carry no permission gate for their read**,
+and adding one would be inventing a boundary the server does not enforce — which
+hides the question instead of answering it.
+
+If that reading is ever revisited, it belongs to `owner-operator-api`; the
+frontend must not compensate for it either way.
 
 ## Unsourced fields: the presentation rule
 
@@ -143,6 +190,15 @@ The rule, before any wiring:
 `InfraTarget.capacity`, `Deployment.drift`, and every `ScoreEntry` numeric —
 `listScores` has **6 unsourced fields including `total`**, so a scoreboard wired
 naively would display invented totals with the authority of a reading.
+
+**Never synthesise a score total in the browser** — not as a fallback, not "just
+for display". `listScores` leaves `total` unsourced, and a total computed by
+summing components client-side carries the authority of a reading on the one
+surface where people act on the number without checking where it came from. The
+server already refuses this on its own side: `scoreboard()` in
+`services/competitions.py` documents that it computes from the award ledger and
+*"nothing here trusts a client-supplied total"*. The browser must hold the same
+line in the other direction.
 
 This is the `provenance.tsx` distinction at field granularity, and the existing
 `Sourced<T>` discipline in `domain/proxmox/provenance.ts` is the shape to reuse —
