@@ -22,6 +22,31 @@ import sys
 
 import pytest
 
+# --- the worker extra must be PRESENT, not optional, for this file -------------------------------
+#
+# Every seal assertion below is gated on ``temporalio``. Without the ``worker`` extra installed they
+# do not fail — they SKIP, and a skipped seal check reads exactly like a passing one. That is not
+# hypothetical here: this repository already lost ``temporalio`` for months while seven tests
+# reported as passing without ever executing, and the sealed-set assertions in this file were
+# verified by hand in a worktree where they were silently skipping.
+#
+# CI proves the extra is present for the shards ("Prove the worker extra is actually present (no
+# silent re-skip)") and fails any shard skip whose reason is ``could not import 'x'``. Nothing
+# enforced it for someone running THIS FILE by hand, which is the exact path that nearly reported a
+# pass. So the import is hard: an absent extra fails loudly at collection instead of shrinking the
+# run. The fix is one command — ``uv sync --frozen --extra dev --extra worker``.
+#
+# The per-test ``pytest.importorskip("temporalio")`` calls below can therefore no longer mask an
+# absent extra; they are left in place as belt-and-braces, not as a live skip path.
+try:
+    import temporalio as _require_worker_extra  # noqa: F401
+except ModuleNotFoundError as _exc:  # pragma: no cover - the whole point is that this is loud
+    raise RuntimeError(
+        "the 'worker' extra is not installed, so the sealed-set assertions in this file would "
+        "SKIP rather than run — and a skipped seal check is indistinguishable from a passing one. "
+        "Install it with: uv sync --frozen --extra dev --extra worker"
+    ) from _exc
+
 WORKFLOW_NAMES = (
     "DeployWorkflow",
     "ResetWorkflow",
@@ -35,6 +60,11 @@ WORKFLOW_NAMES = (
     # WS-B R3: the scheduled enrollment expiry sweep. It must satisfy the SAME sandbox rule as every
     # other workflow — dispatch by activity NAME only, so nothing I/O-capable enters the sandbox.
     "EnrollmentRecoverySweepWorkflow",
+    # SECP-RANGE: the range lifecycle operation. Privileged Docker execution must be dispatched to
+    # the worker (Charter Invariants 6/7, ADR-005), and a worker cannot run a workflow the sealed
+    # set does not name. Same sandbox rule as the rest — it dispatches its activity BY NAME, so
+    # nothing I/O-capable enters the sandbox.
+    "RangeOperationWorkflow",
 )
 
 

@@ -14,6 +14,31 @@ from unittest import mock
 
 import pytest
 
+# --- the worker extra must be PRESENT, not optional, for this file -------------------------------
+#
+# Every seal assertion below is gated on ``temporalio``. Without the ``worker`` extra installed they
+# do not fail — they SKIP, and a skipped seal check reads exactly like a passing one. That is not
+# hypothetical here: this repository already lost ``temporalio`` for months while seven tests
+# reported as passing without ever executing, and the sealed-set assertions in this file were
+# verified by hand in a worktree where they were silently skipping.
+#
+# CI proves the extra is present for the shards ("Prove the worker extra is actually present (no
+# silent re-skip)") and fails any shard skip whose reason is ``could not import 'x'``. Nothing
+# enforced it for someone running THIS FILE by hand, which is the exact path that nearly reported a
+# pass. So the import is hard: an absent extra fails loudly at collection instead of shrinking the
+# run. The fix is one command — ``uv sync --frozen --extra dev --extra worker``.
+#
+# The per-test ``pytest.importorskip("temporalio")`` calls below can therefore no longer mask an
+# absent extra; they are left in place as belt-and-braces, not as a live skip path.
+try:
+    import temporalio as _require_worker_extra  # noqa: F401
+except ModuleNotFoundError as _exc:  # pragma: no cover - the whole point is that this is loud
+    raise RuntimeError(
+        "the 'worker' extra is not installed, so the sealed-set assertions in this file would "
+        "SKIP rather than run — and a skipped seal check is indistinguishable from a passing one. "
+        "Install it with: uv sync --frozen --extra dev --extra worker"
+    ) from _exc
+
 
 class _TemporalSettings:
     """Minimal settings selecting temporal mode (main only reads workflow_dispatch_mode here)."""
@@ -255,6 +280,10 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
         W.RealPlanGenerationWorkflow,
         # WS-B R3: the scheduled enrollment expiry sweep is ORDINARY-queue work.
         W.EnrollmentRecoverySweepWorkflow,
+        # SECP-RANGE: the range lifecycle operation is ORDINARY-queue work. It contacts no provider
+        # credential and no infrastructure beyond a LOCAL container runtime that is itself sealed
+        # off by default (SECP_RANGE_LOCAL_DOCKER), so there is no controlled-live variant of it.
+        W.RangeOperationWorkflow,
     }
     registered_workflows = set(captured["workflows"])
     # Both directions, reported separately so a failure names the actual defect.
@@ -285,6 +314,12 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
         T.real_plan_generation_activity,
         # WS-B R3: the sweep activity has no sealed/controlled-live split — it contacts nothing.
         T.enrollment_recovery_sweep_activity,
+        # SECP-RANGE: the range lifecycle activity. Registered because RangeOperationWorkflow
+        # dispatches it BY NAME — a registered workflow whose activity is absent does not fail
+        # closed, it starts and then fails partway through a privileged operation. One capability,
+        # two registration points. It is a plain module-level function, not a composed instance, so
+        # the bound-method control below (len(owners) == 5) is unaffected.
+        T.range_operation_activity,
     }
     registered_activities = set(captured["activities"])
     assert not (expected_activities - registered_activities), "intended activity NOT registered"
