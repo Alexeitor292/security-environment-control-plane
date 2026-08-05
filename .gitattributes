@@ -7,3 +7,13 @@
 *.ico binary
 *.woff binary
 *.woff2 binary
+
+# 3D scene models. These MUST be marked binary explicitly: the `* text=auto`
+# rule above would otherwise let git's heuristic decide, and a glTF binary that
+# is line-ending-normalized on checkout is corrupt in a way nothing catches
+# until the scene renders empty. The rack models are 22.6 MB and 6.1 MB, so a
+# silent truncation is also invisible in a diff.
+*.glb binary
+*.gltf binary
+*.hdr binary
+*.ktx2 binary

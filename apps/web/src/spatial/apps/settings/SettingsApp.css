@@ -1,0 +1,150 @@
+.settings-app {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  background:
+    radial-gradient(circle at 50% 30%, rgba(28, 115, 174, 0.13), transparent 35%),
+    linear-gradient(180deg, rgba(2, 10, 20, 0.7), rgba(1, 5, 13, 0.92));
+}
+
+.settings-app__content {
+  width: min(820px, calc(100vw - 56px));
+  margin: 0 auto;
+  padding: 112px 0 128px;
+}
+
+.settings-app__header {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 24px;
+}
+
+.settings-app__header p {
+  margin: 0;
+  color: #68c9f5;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.settings-app__header h1 {
+  margin: 0;
+  font-size: clamp(2.2rem, 5vw, 3.6rem);
+  letter-spacing: -0.055em;
+}
+
+.settings-app__header span {
+  color: #829caf;
+}
+
+.settings-panel {
+  --liquid-glass-radius: 26px;
+  padding: 24px;
+}
+
+.settings-section {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 24px;
+  align-items: center;
+  padding: 20px 0;
+  border-top: 1px solid rgba(103, 184, 229, 0.09);
+}
+
+.settings-section:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.settings-section > div:first-child {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-section strong {
+  font-size: 0.85rem;
+}
+
+.settings-section span {
+  max-width: 480px;
+  color: #7f99ac;
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+.segmented-control {
+  display: flex;
+  padding: 4px;
+  background: rgba(6, 25, 42, 0.58);
+  border: 1px solid rgba(100, 190, 239, 0.12);
+  border-radius: 12px;
+}
+
+.segmented-control button {
+  min-height: 34px;
+  padding: 0 12px;
+  color: #7896aa;
+  text-transform: capitalize;
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.segmented-control button.is-active {
+  color: #ecfaff;
+  background: rgba(42, 145, 205, 0.26);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.settings-switch {
+  position: relative;
+  width: 48px;
+  height: 28px;
+  padding: 0;
+  background: rgba(53, 83, 103, 0.55);
+  border: 1px solid rgba(125, 183, 219, 0.15);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.settings-switch span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  background: #bfd2de;
+  border-radius: 50%;
+  transition:
+    transform 260ms ease,
+    background 260ms ease;
+}
+
+.settings-switch--active {
+  background: rgba(37, 145, 201, 0.58);
+}
+
+.settings-switch--active span {
+  background: #7de0ff;
+  transform: translateX(20px);
+}
+
+.settings-section--info {
+  grid-template-columns: 1fr;
+}
+
+@media (max-width: 700px) {
+  .settings-section {
+    grid-template-columns: 1fr;
+  }
+
+  .segmented-control {
+    width: 100%;
+  }
+
+  .segmented-control button {
+    flex: 1;
+  }
+}

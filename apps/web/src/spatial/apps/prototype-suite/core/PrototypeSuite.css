@@ -1,0 +1,3974 @@
+.secp-prototype-suite {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  background:
+    radial-gradient(circle at 50% 10%, rgba(22, 111, 170, 0.14), transparent 35%),
+    linear-gradient(180deg, rgba(2, 10, 20, 0.9), rgba(1, 5, 13, 0.985));
+}
+.secp-prototype-suite *,
+.secp-prototype-suite *::before,
+.secp-prototype-suite *::after {
+  box-sizing: border-box;
+}
+.secp-prototype-suite .u-page {
+  max-width: 1580px;
+  padding-top: 92px;
+  padding-bottom: 116px;
+}
+.secp-prototype-suite .l-workspace {
+  max-width: 1580px;
+  margin: 0 auto;
+  padding-top: 82px;
+  padding-bottom: 116px;
+}
+.secp-prototype-suite .l-workspace__head {
+  position: sticky;
+  top: 66px;
+  z-index: 8;
+  padding-top: 14px;
+  background: linear-gradient(
+    180deg,
+    rgba(2, 10, 20, 0.97) 0%,
+    rgba(2, 10, 20, 0.84) 78%,
+    transparent 100%
+  );
+  backdrop-filter: blur(18px);
+}
+.secp-prototype-suite .c-card,
+.secp-prototype-suite .c-metric,
+.secp-prototype-suite .c-capnotice,
+.secp-prototype-suite .c-accordion,
+.secp-prototype-suite .c-dialog__panel,
+.secp-prototype-suite .c-drawer__panel {
+  background: linear-gradient(145deg, rgba(19, 55, 81, 0.62), rgba(4, 18, 31, 0.8));
+  border-color: rgba(107, 200, 246, 0.22);
+  backdrop-filter: blur(22px) saturate(1.18);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.07),
+    0 18px 50px rgba(0, 0, 0, 0.18);
+}
+.secp-prototype-suite .c-table {
+  background: rgba(3, 14, 25, 0.48);
+}
+.secp-prototype-suite .c-table thead th {
+  background: rgba(15, 46, 68, 0.72);
+}
+.secp-prototype-suite .c-table tbody tr:nth-child(even) td {
+  background: rgba(18, 48, 69, 0.15);
+}
+.secp-prototype-suite .c-pagehead h1 {
+  font-size: clamp(1.9rem, 2.6vw, 2.7rem);
+  letter-spacing: -0.045em;
+}
+.secp-prototype-suite .c-cardgrid {
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+}
+.secp-prototype-suite .c-card__body,
+.secp-prototype-suite .c-table td,
+.secp-prototype-suite .c-table th {
+  font-size: 0.78rem;
+}
+.secp-prototype-suite .prototype-section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.secp-prototype-suite .prototype-enroll-link {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  padding: 0 13px;
+  color: #eefaff;
+  font-size: 0.72rem;
+  font-weight: 750;
+  background: linear-gradient(135deg, rgba(27, 138, 206, 0.94), rgba(10, 78, 132, 0.94));
+  border: 1px solid rgba(111, 210, 255, 0.34);
+  border-radius: 10px;
+}
+.secp-prototype-suite .prototype-cross-route {
+  display: grid;
+  gap: 10px;
+  width: min(620px, calc(100vw - 40px));
+  margin: 140px auto;
+  padding: 24px;
+  background: rgba(8, 29, 47, 0.8);
+  border: 1px solid rgba(105, 198, 244, 0.2);
+  border-radius: 18px;
+}
+.secp-prototype-suite .prototype-suite-home-link {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 32px;
+  align-items: center;
+  padding: 0 10px;
+  color: #85d8fa;
+  font-size: 0.68rem;
+  background: rgba(14, 52, 79, 0.65);
+  border: 1px solid rgba(105, 198, 244, 0.14);
+  border-radius: 9px;
+}
+@media (max-width: 900px) {
+  .secp-prototype-suite .u-page,
+  .secp-prototype-suite .l-workspace__head {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+
+/* SOURCE: design/tokens.css */
+/*
+ * SECP UX Prototype — STRUCTURAL design tokens.
+ *
+ * Everything in this file is appearance-independent: geometry, rhythm, type
+ * scale, motion. It contains no colour.
+ *
+ * Colour, material and glass live in `appearance.css`, which resolves them from
+ * the `data-appearance` / `data-surface-style` / `data-accent-theme` attributes
+ * on <html>. `materials.css` then decides which application surface adopts
+ * which material role. See docs/16.
+ *
+ * History: this file previously carried the whole Dark palette (docs/14). Those
+ * values were not discarded — they are the Dark half of the matrix in
+ * `appearance.css`, and Solid Dark reproduces them exactly.
+ */
+.secp-prototype-suite {
+  /* --- Typography -------------------------------------------------------- */
+  --font-ui: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
+  --text-xs: 0.6875rem;
+  --text-sm: 0.78125rem;
+  --text-base: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.1875rem;
+  --text-2xl: 1.5rem;
+
+  /* --- Spacing (compact density) ----------------------------------------- */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+
+  /* --- Radii -------------------------------------------------------------- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* --- Layout -------------------------------------------------------------
+     `--topbar-height` mirrors the notch center height; the notch component
+     re-declares it from the geometry module so both stay in step. */
+  --sidebar-width: 216px;
+  --sidebar-width-collapsed: 52px;
+  --topbar-height: 60px;
+  --inspector-width: 360px;
+
+  /* --- Motion -------------------------------------------------------------- */
+  --motion-fast: 120ms ease;
+  --motion-medium: 200ms ease;
+
+  /* --- Pop Button geometry (Vengeance UI "Pop Button" adaptation) ----------
+     The depth model is three stacked box-shadows; only the travel and edge
+     HEIGHTS are structural. The edge and shadow COLOURS are appearance-
+     dependent and live in appearance.css. */
+  --pop-edge-height: 4px;
+  --pop-edge-height-sm: 3px;
+  --pop-edge-height-xs: 2px;
+  --pop-travel-hover: 1px;
+  --pop-travel-press: 4px;
+  --pop-travel-press-sm: 3px;
+  --pop-travel-press-xs: 2px;
+  --pop-ease: cubic-bezier(0, 0, 0.58, 1);
+  --pop-duration: 130ms;
+
+  /* --- Navigation dock geometry (docs/15) --------------------------------- */
+  --dock-tile-radius: 13px;
+  --dock-glass-blur: 18px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secp-prototype-suite {
+    --motion-fast: 0ms;
+    --motion-medium: 0ms;
+  }
+}
+
+/* SOURCE: design/appearance.css */
+/*
+ * SECP — appearance & material token matrix.
+ *
+ * FOUR appearances are designed here, not two: Light Glass, Dark Glass,
+ * Light Solid, Dark Solid. Light is NOT an inversion of Dark — the two palettes
+ * were authored separately and verified separately (docs/16).
+ *
+ * Resolution order (all driven by attributes on <html>):
+ *
+ *   [data-appearance]      light | dark      → tints, text, borders, status
+ *   [data-surface-style]   glass | solid     → whether tints carry alpha + blur
+ *   [data-accent-theme]    cyan | ocean | …  → accent + focus ONLY
+ *
+ * HOW GLASS WORKS
+ * Every material role is `rgb(<tint> / <opacity>)`. The opacity is a linear
+ * function of the transparency slider between an "opaque" value and a per-role
+ * FLOOR that the slider can never cross:
+ *
+ *     opacity = HI − transparency × (HI − FLOOR)
+ *
+ * The floors are what keep the system legible: dialogs, inputs, tooltips and
+ * safety-critical panels barely move, while page panels and navigation are
+ * allowed to become genuinely translucent. Solid mode simply pins every opacity
+ * to 1 and every blur to 0 — it is the same token graph, not a degraded mode.
+ *
+ * Contrast for every combination is verified in `appearance-contrast.test.ts`
+ * against the RESOLVED material colour (tint composited over the dimmed
+ * wallpaper), including the worst case a user can create: a pure-white or
+ * pure-black custom wallpaper at maximum transparency.
+ */
+
+.secp-prototype-suite {
+  /* --- User-controlled glass parameters (written by AppearanceProvider) ----
+     Ranges are clamped in TypeScript; the clamps here are a second line of
+     defence so a corrupted value can never produce unreadable UI. */
+  --glass-transparency: 0.5; /* 0 = nearly opaque, 1 = maximum translucency */
+  --glass-blur-strength: 1; /* multiplier, 0.25 – 1.6 */
+  --glass-saturation: 1.3; /* backdrop saturation, 1 – 1.8 */
+  --glass-contrast: 1; /* backdrop contrast, 0.9 – 1.2 */
+  --wallpaper-dim-user: 0.35; /* user's requested dimming, before the floor */
+  --wallpaper-blur: 0px;
+
+  /* Base blur radii per depth tier, scaled by the user's blur strength. */
+  --glass-blur-nav: calc(22px * var(--glass-blur-strength));
+  --glass-blur-panel: calc(14px * var(--glass-blur-strength));
+  --glass-blur-elevated: calc(26px * var(--glass-blur-strength));
+  --glass-blur-popover: calc(30px * var(--glass-blur-strength));
+  --glass-blur-dialog: calc(34px * var(--glass-blur-strength));
+
+  /* Composed backdrop filters — one per depth tier, applied by materials.css.
+     Deliberately NOT nested: a backdrop-filter inside a backdrop-filter both
+     doubles the cost and produces a visibly wrong result. */
+  --glass-nav: blur(var(--glass-blur-nav)) saturate(var(--glass-saturation))
+    contrast(var(--glass-contrast));
+  --glass-panel: blur(var(--glass-blur-panel)) saturate(var(--glass-saturation))
+    contrast(var(--glass-contrast));
+  --glass-elevated: blur(var(--glass-blur-elevated)) saturate(var(--glass-saturation))
+    contrast(var(--glass-contrast));
+  --glass-popover: blur(var(--glass-blur-popover)) saturate(var(--glass-saturation))
+    contrast(var(--glass-contrast));
+  --glass-dialog: blur(var(--glass-blur-dialog)) saturate(var(--glass-saturation))
+    contrast(var(--glass-contrast));
+
+  /* Appearance cross-fade. Restrained: tint/border/text only, never layout. */
+  --appearance-transition: 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ==========================================================================
+   DARK — the approved SECP operational identity.
+   ========================================================================== */
+.secp-prototype-suite[data-appearance='dark'] {
+  color-scheme: dark;
+
+  /* Material tints, as space-separated channels so alpha can be applied. */
+  --tint-app: 10 16 23;
+  --tint-base: 4 7 12;
+  --tint-panel: 21 31 45;
+  --tint-interactive: 31 42 58;
+  --tint-elevated: 40 52 74;
+  --tint-popover: 14 23 35;
+  --tint-dialog: 26 36 50;
+  --tint-input: 17 26 38;
+  --tint-table: 21 31 45;
+  --tint-tooltip: 13 20 32;
+  --tint-critical: 28 34 49;
+
+  /* Role opacity curves: HI − transparency × RANGE. See the header. */
+  --op-base: calc(1 - var(--glass-transparency) * 0.5);
+  --op-nav: calc(0.98 - var(--glass-transparency) * 0.43);
+  --op-panel: calc(0.98 - var(--glass-transparency) * 0.36);
+  --op-table: calc(0.99 - var(--glass-transparency) * 0.27);
+  --op-elevated: calc(1 - var(--glass-transparency) * 0.24);
+  --op-interactive: calc(1 - var(--glass-transparency) * 0.3);
+  --op-popover: calc(1 - var(--glass-transparency) * 0.14);
+  --op-dialog: calc(1 - var(--glass-transparency) * 0.1);
+  --op-input: calc(1 - var(--glass-transparency) * 0.1);
+  --op-tooltip: calc(1 - var(--glass-transparency) * 0.06);
+  --op-critical: calc(1 - var(--glass-transparency) * 0.06);
+
+  /* A bright wallpaper under a dark appearance is the hardest case in the
+     whole system, so the dimming floor is high enough that even a pure-white
+     upload cannot lift a panel out of contrast. Designed dark presets declare
+     a low luminance and are dimmed far less (see AppearanceProvider). */
+  --wallpaper-dim-floor: 0.8;
+
+  --text-primary: #eef3fa;
+  --text-secondary: #bcc9dc;
+  --text-muted: #94a5bd;
+  --text-inverse: #04070c;
+
+  --border-subtle: #3d4d67;
+  --border-default: #6b8099;
+  --border-strong: #8698b0;
+
+  --state-hover: rgb(148 180 224 / 0.11);
+  --state-active: rgb(var(--accent-rgb) / 0.14);
+  --selection: rgb(var(--accent-rgb) / 0.16);
+  --selection-border: rgb(var(--accent-rgb) / 0.45);
+  --scrim: rgb(3 6 11 / 0.62);
+
+  --status-ok: #4ade80;
+  --status-warn: #fbbf24;
+  --status-error: #fb8f8f;
+  --status-info: #7ab5fb;
+  --status-neutral: #a7b6cb;
+  --status-progress: #c9a0fd;
+  --status-degraded: #fbab5c;
+  --status-planned: #9fadf9;
+  --status-unknown: #bfae95;
+  --status-disabled: #8b9ab0;
+
+  --cap-planned: #f0abfc;
+  --cap-sealed: #fda4af;
+  --cap-simulated: #93c5fd;
+  --cap-mock: #fcd34d;
+
+  --provider-aws: #f6b352;
+  --provider-azure: #38bdf8;
+  --provider-gcp: #fb8f8f;
+  --provider-proxmox: #fb923c;
+  --provider-kubernetes: #9aa5f8;
+  --provider-vmware: #a3e635;
+
+  --status-ok-soft: rgb(74 222 128 / 0.12);
+  --status-warn-soft: rgb(251 191 36 / 0.12);
+  --status-error-soft: rgb(251 143 143 / 0.12);
+  --status-info-soft: rgb(122 181 251 / 0.12);
+  --status-neutral-soft: rgb(167 182 203 / 0.12);
+  --status-progress-soft: rgb(201 160 253 / 0.12);
+  --status-degraded-soft: rgb(251 171 92 / 0.12);
+  --status-planned-soft: rgb(159 173 249 / 0.12);
+  --status-unknown-soft: rgb(191 174 149 / 0.12);
+
+  --disabled-surface: rgb(23 32 46 / var(--op-interactive));
+  --disabled-border: #3a4a60;
+  --disabled-text: #8494ab;
+
+  --glass-highlight: rgb(214 231 255 / 0.16);
+  --glass-specular: rgb(150 220 255 / 0.13);
+  --glass-rim-top: rgb(210 228 252 / 0.34);
+  --glass-rim-bottom: rgb(4 8 14 / 0.5);
+  --glass-depth: rgb(3 6 12 / 0.66);
+  --glass-shadow: rgb(0 0 0 / 0.55);
+  --glass-noise-alpha: 0.022;
+
+  /* Component colours that follow the appearance. Structural sizes for these
+     live in tokens.css; only the colour half is here. */
+  --pop-surface: var(--surface-interactive);
+  --pop-surface-hover: rgb(36 49 74 / var(--op-interactive));
+  --pop-edge: #55697f;
+  --pop-shadow-rest: 0 7px 12px -6px rgb(0 0 0 / 0.72);
+  --pop-shadow-hover: 0 5px 9px -6px rgb(0 0 0 / 0.72);
+  --pop-shadow-press: 0 0 0 0 rgb(0 0 0 / 0);
+
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.45);
+  --shadow-overlay: 0 8px 28px rgb(0 0 0 / 0.6);
+
+  --notch-surface: var(--surface-navigation);
+  --notch-outline: var(--border-default);
+  --notch-outline-soft: var(--border-subtle);
+
+  --dock-glass-base: rgb(19 27 40 / var(--op-nav));
+  --dock-glass-base-opaque: rgb(19 27 40 / 0.95);
+  --dock-glass-highlight: var(--glass-highlight);
+  --dock-glass-specular: var(--glass-specular);
+  --dock-glass-rim-top: var(--glass-rim-top);
+  --dock-glass-rim-mid: rgb(150 175 210 / 0.14);
+  --dock-glass-rim-bottom: var(--glass-rim-bottom);
+  --dock-glass-depth: var(--glass-depth);
+  --dock-tile-highlight: rgb(226 238 255 / 0.2);
+  --dock-tile-shadow: rgb(3 6 12 / 0.6);
+  --dock-tile-border: rgb(150 175 210 / 0.22);
+  --dock-tone-operations: #2dd4bf;
+  --dock-tone-coordination: #38bdf8;
+  --dock-tone-authoring: #a78bfa;
+  --dock-tone-execution: #60a5fa;
+  --dock-tone-infrastructure: #94a3b8;
+  --dock-tone-analysis: #818cf8;
+  --dock-tone-steel: #8698b0;
+  --dock-tone-guidance: #7ab5fb;
+  --dock-tone-identity: #5eead4;
+  --dock-indicator: var(--accent);
+  --dock-tooltip-surface: var(--surface-tooltip);
+  --dock-tooltip-border: var(--border-default);
+  --dock-separator: rgb(150 175 210 / 0.26);
+  --dock-handle: rgb(150 175 210 / 0.34);
+
+  --gs-surface: var(--surface-popover);
+  --gs-surface-raised: var(--surface-interactive);
+  --gs-edge: var(--border-default);
+  --gs-hairline: var(--border-subtle);
+  --gs-inner-highlight: var(--glass-highlight);
+  --gooey-surface: var(--surface-popover);
+}
+
+/* ==========================================================================
+   LIGHT — designed from scratch: frosted neutral, never marketing-bright.
+   No pure white is used structurally; #fff appears only where a surface must
+   be the most opaque thing on screen (dialog, input, popover).
+   ========================================================================== */
+.secp-prototype-suite[data-appearance='light'] {
+  color-scheme: light;
+
+  --tint-app: 232 236 243;
+  --tint-base: 221 227 236;
+  --tint-panel: 247 249 252;
+  --tint-interactive: 238 242 248;
+  --tint-elevated: 255 255 255;
+  --tint-popover: 255 255 255;
+  --tint-dialog: 255 255 255;
+  --tint-input: 255 255 255;
+  --tint-table: 249 251 253;
+  --tint-tooltip: 22 32 46;
+  --tint-critical: 255 253 253;
+
+  /* Every floor is higher than Dark's. Dark-on-light text loses contrast much
+     faster than light-on-dark when a dark wallpaper drags the backdrop down. */
+  --op-base: calc(1 - var(--glass-transparency) * 0.34);
+  --op-nav: calc(0.98 - var(--glass-transparency) * 0.28);
+  --op-panel: calc(0.98 - var(--glass-transparency) * 0.18);
+  --op-table: calc(0.99 - var(--glass-transparency) * 0.13);
+  --op-elevated: calc(1 - var(--glass-transparency) * 0.12);
+  --op-interactive: calc(1 - var(--glass-transparency) * 0.16);
+  --op-popover: calc(1 - var(--glass-transparency) * 0.07);
+  --op-dialog: calc(1 - var(--glass-transparency) * 0.04);
+  --op-input: calc(1 - var(--glass-transparency) * 0.04);
+  --op-tooltip: calc(1 - var(--glass-transparency) * 0.04);
+  --op-critical: calc(1 - var(--glass-transparency) * 0.03);
+
+  --wallpaper-dim-floor: 0.74;
+
+  --text-primary: #0f1826;
+  --text-secondary: #37475e;
+  --text-muted: #47566b;
+  --text-inverse: #f7f9fc;
+
+  --border-subtle: #c9d3e0;
+  --border-default: #6f7f95;
+  --border-strong: #5d6d84;
+
+  --state-hover: rgb(24 44 78 / 0.07);
+  --state-active: rgb(var(--accent-rgb) / 0.14);
+  --selection: rgb(var(--accent-rgb) / 0.15);
+  --selection-border: rgb(var(--accent-rgb) / 0.5);
+  --scrim: rgb(28 38 54 / 0.4);
+
+  /* Same meanings, re-darkened for a pale backdrop. Hue families are preserved
+     so a user switching appearance never has to relearn the taxonomy. */
+  --status-ok: #0d6634;
+  --status-warn: #7a4d00;
+  --status-error: #a81b1b;
+  --status-info: #17539b;
+  --status-neutral: #445266;
+  --status-progress: #63339e;
+  --status-degraded: #8f4712;
+  --status-planned: #3b46a0;
+  --status-unknown: #5f4c2e;
+  --status-disabled: #556374;
+
+  --cap-planned: #8c2f9c;
+  --cap-sealed: #a3202f;
+  --cap-simulated: #17539b;
+  --cap-mock: #7a4d00;
+
+  --provider-aws: #8a5300;
+  --provider-azure: #0b5f8a;
+  --provider-gcp: #a81b1b;
+  --provider-proxmox: #8f4712;
+  --provider-kubernetes: #3b46a0;
+  --provider-vmware: #4a6b0d;
+
+  /* Light soft fills are lighter tints, not the dark-mode alphas: a 12% dark
+     hue over a pale panel reads as dirt rather than as a status. */
+  --status-ok-soft: rgb(13 102 52 / 0.11);
+  --status-warn-soft: rgb(122 77 0 / 0.11);
+  --status-error-soft: rgb(168 27 27 / 0.1);
+  --status-info-soft: rgb(23 83 155 / 0.1);
+  --status-neutral-soft: rgb(68 82 102 / 0.09);
+  --status-progress-soft: rgb(99 51 158 / 0.1);
+  --status-degraded-soft: rgb(143 71 18 / 0.11);
+  --status-planned-soft: rgb(59 70 160 / 0.1);
+  --status-unknown-soft: rgb(95 76 46 / 0.11);
+
+  --disabled-surface: rgb(226 231 239 / var(--op-interactive));
+  --disabled-border: #aab6c6;
+  --disabled-text: #5b6a7e;
+
+  --glass-highlight: rgb(255 255 255 / 0.62);
+  --glass-specular: rgb(255 255 255 / 0.4);
+  --glass-rim-top: rgb(255 255 255 / 0.85);
+  --glass-rim-bottom: rgb(90 108 132 / 0.28);
+  --glass-depth: rgb(94 112 138 / 0.2);
+  --glass-shadow: rgb(31 45 66 / 0.18);
+  --glass-noise-alpha: 0.016;
+
+  --pop-surface: var(--surface-interactive);
+  --pop-surface-hover: rgb(224 231 241 / var(--op-interactive));
+  /* A light Pop Button needs a DARKER edge than its face, or the whole depth
+     illusion inverts and the button reads as a hole. */
+  --pop-edge: #9aa8bc;
+  --pop-shadow-rest: 0 7px 12px -6px rgb(31 45 66 / 0.28);
+  --pop-shadow-hover: 0 5px 9px -6px rgb(31 45 66 / 0.28);
+  --pop-shadow-press: 0 0 0 0 rgb(0 0 0 / 0);
+
+  --shadow-raised: 0 1px 2px rgb(31 45 66 / 0.12);
+  --shadow-overlay: 0 8px 28px rgb(31 45 66 / 0.18);
+
+  --notch-surface: var(--surface-navigation);
+  --notch-outline: var(--border-default);
+  --notch-outline-soft: var(--border-subtle);
+
+  --dock-glass-base: rgb(255 255 255 / var(--op-nav));
+  --dock-glass-base-opaque: rgb(248 250 253 / 0.96);
+  --dock-glass-highlight: var(--glass-highlight);
+  --dock-glass-specular: var(--glass-specular);
+  --dock-glass-rim-top: var(--glass-rim-top);
+  --dock-glass-rim-mid: rgb(120 140 170 / 0.16);
+  --dock-glass-rim-bottom: var(--glass-rim-bottom);
+  --dock-glass-depth: var(--glass-depth);
+  --dock-tile-highlight: rgb(255 255 255 / 0.85);
+  --dock-tile-shadow: rgb(31 45 66 / 0.22);
+  --dock-tile-border: rgb(90 110 140 / 0.26);
+  /* Dock tile identities re-picked for a pale shelf: the dark-mode tints are
+     pastel and vanish on white. */
+  --dock-tone-operations: #0d7a6b;
+  --dock-tone-coordination: #0b6c9c;
+  --dock-tone-authoring: #6d28d9;
+  --dock-tone-execution: #1d4ed8;
+  --dock-tone-infrastructure: #4c5b70;
+  --dock-tone-analysis: #4338ca;
+  --dock-tone-steel: #47566b;
+  --dock-tone-guidance: #17539b;
+  --dock-tone-identity: #0a6659;
+  --dock-indicator: var(--accent);
+  --dock-tooltip-surface: var(--surface-tooltip);
+  --dock-tooltip-border: var(--border-strong);
+  --dock-separator: rgb(90 110 140 / 0.3);
+  --dock-handle: rgb(90 110 140 / 0.42);
+
+  --gs-surface: var(--surface-popover);
+  --gs-surface-raised: var(--surface-interactive);
+  --gs-edge: var(--border-default);
+  --gs-hairline: var(--border-subtle);
+  --gs-inner-highlight: var(--glass-highlight);
+  --gooey-surface: var(--surface-popover);
+}
+
+/* ==========================================================================
+   MATERIAL ROLES — the only surfaces the application is allowed to paint.
+   ========================================================================== */
+.secp-prototype-suite {
+  --app-background: rgb(var(--tint-app));
+  --surface-base: rgb(var(--tint-base) / var(--op-base));
+  --surface-navigation: rgb(var(--tint-base) / var(--op-nav));
+  --surface-panel: rgb(var(--tint-panel) / var(--op-panel));
+  --surface-table: rgb(var(--tint-table) / var(--op-table));
+  --surface-elevated: rgb(var(--tint-elevated) / var(--op-elevated));
+  --surface-interactive: rgb(var(--tint-interactive) / var(--op-interactive));
+  --surface-popover: rgb(var(--tint-popover) / var(--op-popover));
+  --surface-dialog: rgb(var(--tint-dialog) / var(--op-dialog));
+  --surface-input: rgb(var(--tint-input) / var(--op-input));
+  --surface-tooltip: rgb(var(--tint-tooltip) / var(--op-tooltip));
+  --surface-critical: rgb(var(--tint-critical) / var(--op-critical));
+
+  /* The wallpaper overlay: the user's dimming, floored so that no wallpaper —
+     including an uploaded photograph — can push a panel out of contrast. */
+  --wallpaper-overlay: rgb(
+    var(--tint-app) / max(var(--wallpaper-dim-user), var(--wallpaper-dim-floor))
+  );
+
+  /* Legacy aliases. The ~55 existing consumers keep working unchanged while
+     the migration in materials.css re-points the ones that must diverge. */
+  --background: var(--app-background);
+  --bg-app: var(--app-background);
+  --surface-sunken: var(--surface-base);
+  --bg-sunken: var(--surface-base);
+  --surface-1: var(--surface-panel);
+  --bg-surface: var(--surface-panel);
+  --surface-2: var(--surface-interactive);
+  --bg-raised: var(--surface-interactive);
+  --surface-raised: var(--surface-elevated);
+  --bg-overlay: var(--surface-elevated);
+  --bg-hover: var(--state-hover);
+  --bg-active: var(--state-active);
+
+  --accent: rgb(var(--accent-rgb));
+  --accent-hover: rgb(var(--accent-hover-rgb));
+  --accent-strong: rgb(var(--accent-strong-rgb));
+  --accent-active: rgb(var(--accent-strong-rgb));
+  --accent-soft: rgb(var(--accent-rgb) / 0.14);
+  --focus: rgb(var(--focus-rgb));
+  --focus-ring: var(--focus);
+  --border-focus: var(--focus);
+}
+
+/* ==========================================================================
+   SOLID — a first-class design, not "glass turned off".
+   Every material becomes fully opaque and every backdrop filter is dropped, so
+   the approved hard-colour SECP hierarchy returns exactly as it was.
+   ========================================================================== */
+.secp-prototype-suite[data-surface-style='solid'] {
+  --op-base: 1;
+  --op-nav: 1;
+  --op-panel: 1;
+  --op-table: 1;
+  --op-elevated: 1;
+  --op-interactive: 1;
+  --op-popover: 1;
+  --op-dialog: 1;
+  --op-input: 1;
+  --op-tooltip: 1;
+  --op-critical: 1;
+
+  --glass-nav: none;
+  --glass-panel: none;
+  --glass-elevated: none;
+  --glass-popover: none;
+  --glass-dialog: none;
+  --glass-noise-alpha: 0;
+
+  /* The wallpaper survives in Solid, but only in the environment gaps around
+     the opaque shell — it never sits behind readable content. */
+  --wallpaper-dim-floor: 0.5;
+}
+
+/* Solid Dark restores the exact approved surface ramp (docs/14). */
+.secp-prototype-suite[data-surface-style='solid'][data-appearance='dark'] {
+  --tint-panel: 21 31 45;
+  --tint-interactive: 31 42 58;
+  --tint-elevated: 40 52 74;
+  --tint-popover: 4 7 12;
+  --tint-dialog: 21 31 45;
+  --tint-input: 31 42 58;
+  --tint-table: 21 31 45;
+  --tint-critical: 21 31 45;
+}
+
+.secp-prototype-suite[data-surface-style='solid'][data-appearance='light'] {
+  --tint-panel: 255 255 255;
+  --tint-interactive: 240 244 250;
+  --tint-elevated: 255 255 255;
+  --tint-popover: 255 255 255;
+  --tint-dialog: 255 255 255;
+  --tint-input: 255 255 255;
+  --tint-table: 255 255 255;
+  --tint-critical: 255 255 255;
+  --tint-base: 226 232 240;
+}
+
+/* ==========================================================================
+   ACCENT THEMES — accent, focus, selection and decorative emphasis ONLY.
+   No accent theme may touch a --status-* token: operational truth does not
+   have a colour preference. `appearance-contrast.test.ts` asserts this.
+   ========================================================================== */
+.secp-prototype-suite[data-accent-theme='cyan'][data-appearance='dark'] {
+  --accent-rgb: 94 234 212;
+  --accent-hover-rgb: 153 246 228;
+  --accent-strong-rgb: 45 212 191;
+  --focus-rgb: 103 232 249;
+}
+.secp-prototype-suite[data-accent-theme='cyan'][data-appearance='light'] {
+  --accent-rgb: 10 102 89;
+  --accent-hover-rgb: 7 78 68;
+  --accent-strong-rgb: 13 122 107;
+  --focus-rgb: 3 105 161;
+}
+
+.secp-prototype-suite[data-accent-theme='ocean'][data-appearance='dark'] {
+  --accent-rgb: 96 165 250;
+  --accent-hover-rgb: 147 197 253;
+  --accent-strong-rgb: 59 130 246;
+  --focus-rgb: 125 211 252;
+}
+.secp-prototype-suite[data-accent-theme='ocean'][data-appearance='light'] {
+  --accent-rgb: 26 69 189;
+  --accent-hover-rgb: 19 52 145;
+  --accent-strong-rgb: 29 78 216;
+  --focus-rgb: 29 78 216;
+}
+
+.secp-prototype-suite[data-accent-theme='violet'][data-appearance='dark'] {
+  --accent-rgb: 196 181 253;
+  --accent-hover-rgb: 221 214 254;
+  --accent-strong-rgb: 167 139 250;
+  --focus-rgb: 216 180 254;
+}
+.secp-prototype-suite[data-accent-theme='violet'][data-appearance='light'] {
+  --accent-rgb: 109 40 217;
+  --accent-hover-rgb: 88 28 176;
+  --accent-strong-rgb: 124 58 237;
+  --focus-rgb: 109 40 217;
+}
+
+.secp-prototype-suite[data-accent-theme='amber'][data-appearance='dark'] {
+  --accent-rgb: 252 211 77;
+  --accent-hover-rgb: 253 230 138;
+  --accent-strong-rgb: 245 190 32;
+  --focus-rgb: 253 224 71;
+}
+.secp-prototype-suite[data-accent-theme='amber'][data-appearance='light'] {
+  --accent-rgb: 125 82 8;
+  --accent-hover-rgb: 99 65 6;
+  --accent-strong-rgb: 146 96 10;
+  --focus-rgb: 146 96 10;
+}
+
+.secp-prototype-suite[data-accent-theme='graphite'][data-appearance='dark'] {
+  --accent-rgb: 182 196 214;
+  --accent-hover-rgb: 209 219 232;
+  --accent-strong-rgb: 148 165 189;
+  --focus-rgb: 209 219 232;
+}
+.secp-prototype-suite[data-accent-theme='graphite'][data-appearance='light'] {
+  --accent-rgb: 63 77 97;
+  --accent-hover-rgb: 45 56 72;
+  --accent-strong-rgb: 78 94 117;
+  --focus-rgb: 45 56 72;
+}
+
+.secp-prototype-suite[data-accent-theme='monochrome'][data-appearance='dark'] {
+  --accent-rgb: 232 238 247;
+  --accent-hover-rgb: 255 255 255;
+  --accent-strong-rgb: 200 210 225;
+  --focus-rgb: 255 255 255;
+}
+.secp-prototype-suite[data-accent-theme='monochrome'][data-appearance='light'] {
+  --accent-rgb: 27 36 50;
+  --accent-hover-rgb: 10 16 23;
+  --accent-strong-rgb: 45 58 78;
+  --focus-rgb: 10 16 23;
+}
+
+/* ==========================================================================
+   SYSTEM PREFERENCES — these win over the stored preference without erasing
+   it, so the user's choice returns when the system setting changes.
+   ========================================================================== */
+
+/* Reduced transparency: pin every material opaque and drop every filter.
+   Functionality and the accent theme are untouched. */
+@media (prefers-reduced-transparency: reduce) {
+  .secp-prototype-suite[data-reduce-transparency='auto'],
+  .secp-prototype-suite[data-reduce-transparency='on'] {
+    --op-base: 1;
+    --op-nav: 1;
+    --op-panel: 1;
+    --op-table: 1;
+    --op-elevated: 1;
+    --op-interactive: 1;
+    --op-popover: 1;
+    --op-dialog: 1;
+    --op-input: 1;
+    --op-tooltip: 1;
+    --op-critical: 1;
+    --glass-nav: none;
+    --glass-panel: none;
+    --glass-elevated: none;
+    --glass-popover: none;
+    --glass-dialog: none;
+    --glass-noise-alpha: 0;
+  }
+}
+
+/* An explicit user request applies regardless of the system setting. */
+.secp-prototype-suite[data-reduce-transparency='on'] {
+  --op-base: 1;
+  --op-nav: 1;
+  --op-panel: 1;
+  --op-table: 1;
+  --op-elevated: 1;
+  --op-interactive: 1;
+  --op-popover: 1;
+  --op-dialog: 1;
+  --op-input: 1;
+  --op-tooltip: 1;
+  --op-critical: 1;
+  --glass-nav: none;
+  --glass-panel: none;
+  --glass-elevated: none;
+  --glass-popover: none;
+  --glass-dialog: none;
+  --glass-noise-alpha: 0;
+}
+
+@media (prefers-contrast: more) {
+  .secp-prototype-suite[data-appearance='dark'] {
+    --border-subtle: #566b88;
+    --border-default: #8698b0;
+    --border-strong: #a5b5c9;
+    --text-secondary: #dbe4f0;
+    --text-muted: #b8c6da;
+  }
+  .secp-prototype-suite[data-appearance='light'] {
+    --border-subtle: #93a2b6;
+    --border-default: #4c5b70;
+    --border-strong: #16202e;
+    --text-secondary: #1f2c40;
+    --text-muted: #2c3a4f;
+  }
+  .secp-prototype-suite {
+    --glass-transparency: 0.15;
+  }
+}
+
+/* Forced colours (Windows High Contrast): stand aside completely. The OS owns
+   colour here, so every material becomes a system canvas and blur is dropped —
+   a backdrop-filter over a forced palette destroys legibility. */
+@media (forced-colors: active) {
+  .secp-prototype-suite {
+    --app-background: Canvas;
+    --surface-base: Canvas;
+    --surface-navigation: Canvas;
+    --surface-panel: Canvas;
+    --surface-table: Canvas;
+    --surface-elevated: Canvas;
+    --surface-interactive: Canvas;
+    --surface-popover: Canvas;
+    --surface-dialog: Canvas;
+    --surface-input: Field;
+    --surface-tooltip: Canvas;
+    --surface-critical: Canvas;
+    --text-primary: CanvasText;
+    --text-secondary: CanvasText;
+    --text-muted: CanvasText;
+    --border-subtle: CanvasText;
+    --border-default: CanvasText;
+    --border-strong: CanvasText;
+    --focus: Highlight;
+    --accent: LinkText;
+    --glass-nav: none;
+    --glass-panel: none;
+    --glass-elevated: none;
+    --glass-popover: none;
+    --glass-dialog: none;
+    --wallpaper-overlay: Canvas;
+    --glass-noise-alpha: 0;
+  }
+}
+
+/* No backdrop-filter support at all (older engines): materials go opaque so a
+   translucent tint never floats over an unblurred wallpaper. */
+@supports not (backdrop-filter: blur(4px)) {
+  @supports not (-webkit-backdrop-filter: blur(4px)) {
+    .secp-prototype-suite {
+      --op-base: 1;
+      --op-nav: 1;
+      --op-panel: 1;
+      --op-table: 1;
+      --op-elevated: 1;
+      --op-interactive: 1;
+      --op-popover: 1;
+      --op-dialog: 1;
+      --op-input: 1;
+      --op-tooltip: 1;
+      --op-critical: 1;
+    }
+  }
+}
+
+/* SOURCE: design/global.css */
+
+.secp-prototype-suite *,
+.secp-prototype-suite *::before,
+.secp-prototype-suite *::after {
+  box-sizing: border-box;
+}
+
+.secp-prototype-suite,
+.secp-prototype-suite,
+.secp-prototype-suite {
+  height: 100%;
+  margin: 0;
+}
+
+.secp-prototype-suite {
+  background: var(--app-background);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.secp-prototype-suite h1,
+.secp-prototype-suite h2,
+.secp-prototype-suite h3,
+.secp-prototype-suite h4,
+.secp-prototype-suite p {
+  margin: 0;
+}
+
+.secp-prototype-suite a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.secp-prototype-suite a:hover {
+  text-decoration: underline;
+}
+
+.secp-prototype-suite button {
+  font-family: inherit;
+}
+
+.secp-prototype-suite code,
+.secp-prototype-suite pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.secp-prototype-suite ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.secp-prototype-suite ::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+  border: 2px solid var(--bg-app);
+}
+
+.secp-prototype-suite ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Generic utility layer used across pages (kept intentionally small). */
+.secp-prototype-suite .u-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5) var(--sp-6);
+  max-width: 1500px;
+  width: 100%;
+}
+
+.secp-prototype-suite .u-grid {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.secp-prototype-suite .u-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.secp-prototype-suite .u-spread {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.secp-prototype-suite .u-muted {
+  color: var(--text-muted);
+}
+
+.secp-prototype-suite .u-secondary {
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .u-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite .u-small {
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite .u-xs {
+  font-size: var(--text-xs);
+}
+
+/* SOURCE: design/materials.css */
+/*
+ * SECP — material application layer.
+ *
+ * This is the ONLY file that decides which application surface adopts which
+ * material role, and which depth tier of glass it gets. It is loaded last, so
+ * it re-points the surfaces that must diverge (a dialog is not a card; an input
+ * is not a chip) without editing twelve feature stylesheets and without
+ * scattering glass CSS across 41 routes.
+ *
+ * PERFORMANCE MODEL — three tiers, deliberately:
+ *
+ *   specialty   one SVG-displacement glass, used by the navigation dock only
+ *               (navigation/dock/dock-glass.css). Expensive; exactly one
+ *               instance exists on screen.
+ *   standard    `blur() saturate() contrast()` on SHELL and PANEL surfaces —
+ *               the sidebar, top bar, cards, drawers, dialogs, palette. Cheap
+ *               enough at this count, and each one is a compositor layer.
+ *   tint-only   everything nested INSIDE a panel — chips, badges, table rows,
+ *               metric tiles, buttons. These get a translucent material tint
+ *               and NO filter at all.
+ *
+ * The third tier is the important one. A backdrop-filter inside another
+ * backdrop-filter is both a doubled cost and a visibly wrong result (it samples
+ * an already-filtered backdrop), so nested surfaces never get one.
+ */
+
+/* ==========================================================================
+   Environment: the wallpaper sits behind everything, exactly once.
+   ========================================================================== */
+.secp-prototype-suite .l-wallpaper {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  /* Its own stacking + paint context so wallpaper repaints never invalidate
+     application content. */
+  contain: strict;
+}
+
+.secp-prototype-suite .l-wallpaper__image {
+  position: absolute;
+  /* Overscan so a blurred wallpaper never shows a soft transparent edge. */
+  inset: calc(-1 * var(--wallpaper-blur) - 8px);
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(var(--wallpaper-blur));
+  transform: translateZ(0);
+}
+
+.secp-prototype-suite .l-wallpaper__image[data-fit='cover'] {
+  background-size: cover;
+}
+.secp-prototype-suite .l-wallpaper__image[data-fit='contain'] {
+  background-size: contain;
+}
+.secp-prototype-suite .l-wallpaper__image[data-fit='center'] {
+  background-size: auto;
+}
+
+/* The adaptive-legibility layer: a single tint whose alpha is floored per
+   appearance so no wallpaper — including an uploaded photograph — can push a
+   panel out of contrast. */
+.secp-prototype-suite .l-wallpaper__scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--wallpaper-overlay);
+  transition: background-color var(--appearance-transition);
+}
+
+/* Application chrome sits above the environment. */
+.secp-prototype-suite .l-shell {
+  position: relative;
+  z-index: 1;
+}
+
+/* With a wallpaper present the shell must not paint over it. */
+.secp-prototype-suite[data-wallpaper='on'] body,
+.secp-prototype-suite[data-wallpaper='on'] .l-shell__content {
+  background: transparent;
+}
+
+/* ==========================================================================
+   Shell chrome — navigation tier.
+   ========================================================================== */
+.secp-prototype-suite .l-sidebar {
+  background: var(--surface-navigation);
+  backdrop-filter: var(--glass-nav);
+  -webkit-backdrop-filter: var(--glass-nav);
+  border-right-color: var(--border-default);
+}
+
+.secp-prototype-suite .notch__rail,
+.secp-prototype-suite .notch__slice-bg,
+.secp-prototype-suite .notch__center-bg {
+  background: var(--surface-navigation);
+}
+
+/* One filter for the whole bar rather than one per slice: three sibling
+   backdrop-filters would sample the backdrop three times and seam visibly. */
+.secp-prototype-suite .notch {
+  backdrop-filter: var(--glass-nav);
+  -webkit-backdrop-filter: var(--glass-nav);
+}
+
+/* ==========================================================================
+   Panels — the standard content tier.
+   ========================================================================== */
+.secp-prototype-suite .c-card,
+.secp-prototype-suite .c-accordion,
+.secp-prototype-suite .c-wizard__content,
+.secp-prototype-suite .sb-inspector,
+.secp-prototype-suite .p-panel {
+  background: var(--surface-panel);
+  backdrop-filter: var(--glass-panel);
+  -webkit-backdrop-filter: var(--glass-panel);
+  border-color: var(--border-default);
+}
+
+/* Nested inside a panel: tint only, no filter. */
+.secp-prototype-suite .c-metric,
+.secp-prototype-suite .c-phases__pill,
+.secp-prototype-suite .c-topo-node,
+.secp-prototype-suite .ev-opt {
+  background: var(--surface-panel);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ==========================================================================
+   Elevated — drawers and inspectors that float above the page.
+   ========================================================================== */
+.secp-prototype-suite .c-drawer__panel {
+  background: var(--surface-elevated);
+  backdrop-filter: var(--glass-elevated);
+  -webkit-backdrop-filter: var(--glass-elevated);
+  border-color: var(--border-default);
+}
+
+/* ==========================================================================
+   Dialog — the most opaque role, with the environment behind it dimmed.
+   ========================================================================== */
+.secp-prototype-suite .c-dialog__panel {
+  background: var(--surface-dialog);
+  backdrop-filter: var(--glass-dialog);
+  -webkit-backdrop-filter: var(--glass-dialog);
+  border-color: var(--border-strong);
+}
+
+.secp-prototype-suite .c-dialog {
+  background: var(--scrim);
+  backdrop-filter: blur(calc(3px * var(--glass-blur-strength)));
+  -webkit-backdrop-filter: blur(calc(3px * var(--glass-blur-strength)));
+}
+
+/* ==========================================================================
+   Safety-critical — capability-truth notices and destructive confirmations.
+   A hard opacity floor: glass must never make a dangerous action decorative,
+   and a truth disclosure must never be hard to read.
+   ========================================================================== */
+.secp-prototype-suite .c-capnotice,
+.secp-prototype-suite .ev-confirm,
+.secp-prototype-suite .c-dialog__preview {
+  background: var(--surface-critical);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ==========================================================================
+   Popover / search palette — high opacity, strong blur, crisp border.
+   ========================================================================== */
+.secp-prototype-suite .gs-palette {
+  background: var(--surface-popover);
+  backdrop-filter: var(--glass-popover);
+  -webkit-backdrop-filter: var(--glass-popover);
+}
+
+/* Rows and chips inside the palette are nested: tint only. */
+.secp-prototype-suite .gs-cat,
+.secp-prototype-suite .gs-kbd {
+  background: var(--surface-interactive);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.secp-prototype-suite .dock-tooltip {
+  background: var(--surface-tooltip);
+  color: var(--text-primary);
+}
+
+.secp-prototype-suite[data-appearance='light'] .dock-tooltip {
+  /* A dark tooltip on a light UI, so it reads as a floating annotation rather
+     than as another panel. Its text therefore inverts too. */
+  color: var(--text-inverse);
+}
+
+/* ==========================================================================
+   Inputs — always more opaque than the panel they sit in, always bounded.
+   ========================================================================== */
+.secp-prototype-suite .c-search,
+.secp-prototype-suite .c-search input,
+.secp-prototype-suite .l-eventsel select,
+.secp-prototype-suite .ev-field select,
+.secp-prototype-suite .ev-field input,
+.secp-prototype-suite .ev-field textarea,
+.secp-prototype-suite .sf-field select,
+.secp-prototype-suite .sf-field input,
+.secp-prototype-suite .sf-field textarea,
+.secp-prototype-suite .p-field select,
+.secp-prototype-suite .p-field input {
+  background: var(--surface-input);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+/* ==========================================================================
+   Tables — controlled transparency, stable row readability.
+   ========================================================================== */
+.secp-prototype-suite .c-table {
+  background: transparent;
+}
+
+.secp-prototype-suite .c-table thead th {
+  background: var(--surface-table);
+  /* The header is sticky, so it must stay opaque enough to hide the rows
+     scrolling beneath it regardless of the transparency slider. */
+  backdrop-filter: var(--glass-panel);
+  -webkit-backdrop-filter: var(--glass-panel);
+  border-bottom-color: var(--border-default);
+}
+
+.secp-prototype-suite .c-table tbody tr:nth-child(even) td {
+  background: var(--state-hover);
+}
+
+.secp-prototype-suite .c-table td {
+  border-bottom-color: var(--border-subtle);
+}
+
+/* ==========================================================================
+   Interactive surfaces — chips, toggles, controls. Tint only.
+   ========================================================================== */
+.secp-prototype-suite .c-advtoggle,
+.secp-prototype-suite .ev-chip,
+.secp-prototype-suite .inf-chip,
+.secp-prototype-suite .p-chip,
+.secp-prototype-suite .sb-palette__item,
+.secp-prototype-suite .c-matrix__cell.is-self,
+.secp-prototype-suite .inf-capbar__track {
+  background: var(--surface-interactive);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ==========================================================================
+   Sunken / technical surfaces — code, evidence, canvases.
+   Identifiers, hashes and evidence must never fight a background pattern.
+   ========================================================================== */
+.secp-prototype-suite .c-raw,
+.secp-prototype-suite .c-topo,
+.secp-prototype-suite .c-topo .react-flow__background {
+  background: var(--surface-base);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.secp-prototype-suite .c-raw {
+  /* Monospace evidence gets the strongest floor in the system. */
+  background: var(--surface-critical);
+  color: var(--text-primary);
+}
+
+/* ==========================================================================
+   Glass finish — the layered Apple-style treatment, applied ONCE per surface.
+   A 1px inner rim highlight, a soft outer shadow, and a barely-there noise
+   that stops large translucent areas from banding. No rainbow refraction, no
+   shimmer, no animation.
+   ========================================================================== */
+.secp-prototype-suite[data-surface-style='glass'] .c-card,
+.secp-prototype-suite[data-surface-style='glass'] .c-accordion,
+.secp-prototype-suite[data-surface-style='glass'] .c-wizard__content,
+.secp-prototype-suite[data-surface-style='glass'] .c-drawer__panel,
+.secp-prototype-suite[data-surface-style='glass'] .c-dialog__panel,
+.secp-prototype-suite[data-surface-style='glass'] .gs-palette,
+.secp-prototype-suite[data-surface-style='glass'] .sb-inspector {
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-highlight),
+    inset 0 -1px 0 0 var(--glass-rim-bottom),
+    0 1px 2px var(--glass-shadow),
+    0 12px 28px -12px var(--glass-shadow);
+}
+
+/* The noise sits on a pseudo-element so it can never be an ancestor of text. */
+.secp-prototype-suite[data-surface-style='glass'] .c-card::before,
+.secp-prototype-suite[data-surface-style='glass'] .c-drawer__panel::before,
+.secp-prototype-suite[data-surface-style='glass'] .c-dialog__panel::before,
+.secp-prototype-suite[data-surface-style='glass'] .gs-palette::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: var(--glass-noise-alpha);
+  /* A tiny procedural fractal-noise tile — no external asset. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
+}
+
+.secp-prototype-suite .c-card,
+.secp-prototype-suite .c-drawer__panel,
+.secp-prototype-suite .c-dialog__panel,
+.secp-prototype-suite .gs-palette {
+  position: relative;
+}
+
+/* ==========================================================================
+   Appearance cross-fade. Colour only — never layout, never text metrics.
+   ========================================================================== */
+.secp-prototype-suite,
+.secp-prototype-suite .l-sidebar,
+.secp-prototype-suite .notch__rail,
+.secp-prototype-suite .notch__slice-bg,
+.secp-prototype-suite .notch__center-bg,
+.secp-prototype-suite .c-card,
+.secp-prototype-suite .c-accordion,
+.secp-prototype-suite .c-metric,
+.secp-prototype-suite .c-drawer__panel,
+.secp-prototype-suite .c-dialog__panel,
+.secp-prototype-suite .gs-palette,
+.secp-prototype-suite .c-table thead th,
+.secp-prototype-suite .dock-tile,
+.secp-prototype-suite .dock-glass {
+  transition:
+    background-color var(--appearance-transition),
+    border-color var(--appearance-transition),
+    color var(--appearance-transition),
+    box-shadow var(--appearance-transition);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secp-prototype-suite,
+  .secp-prototype-suite .l-sidebar,
+  .secp-prototype-suite .notch__rail,
+  .secp-prototype-suite .notch__slice-bg,
+  .secp-prototype-suite .notch__center-bg,
+  .secp-prototype-suite .c-card,
+  .secp-prototype-suite .c-accordion,
+  .secp-prototype-suite .c-metric,
+  .secp-prototype-suite .c-drawer__panel,
+  .secp-prototype-suite .c-dialog__panel,
+  .secp-prototype-suite .gs-palette,
+  .secp-prototype-suite .c-table thead th,
+  .secp-prototype-suite .dock-tile,
+  .secp-prototype-suite .dock-glass,
+  .secp-prototype-suite .l-wallpaper__scrim {
+    transition-duration: 1ms;
+  }
+}
+
+/* ==========================================================================
+   Canvas chrome — the topology minimap sits ON the canvas, so it needs its own
+   boundary or it disappears entirely under a light appearance.
+   ========================================================================== */
+.secp-prototype-suite .c-topo__minimap {
+  background: var(--surface-panel) !important;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+
+/* React Flow paints its own controls; give them the material palette so they do
+   not stay dark-on-light after an appearance switch. */
+.secp-prototype-suite .c-topo .react-flow__controls-button {
+  background: var(--surface-interactive);
+  border-color: var(--border-default);
+  fill: var(--text-secondary);
+  color: var(--text-secondary);
+}
+
+/* The skeleton shimmer is a gradient of two material tints; under Solid both
+   are opaque, under Glass both carry the panel alpha. */
+.secp-prototype-suite .c-skeleton__line {
+  background: linear-gradient(
+    90deg,
+    var(--surface-interactive),
+    var(--surface-elevated),
+    var(--surface-interactive)
+  );
+}
+
+/* ==========================================================================
+   Active navigation link.
+
+   The active link is accent text on an accent-tinted state layer, which is the
+   one place in the shell where a foreground and its background share a hue and
+   the ratio collapses (measured 4.43:1 against the resolved material). Using
+   the hover step — brighter in Dark, darker in Light — restores the margin
+   without changing the accent identity or the state layer.
+   ========================================================================== */
+.secp-prototype-suite .l-sidebar__link.is-active {
+  color: var(--accent-hover);
+}
+
+/* SOURCE: design/components.css */
+/* SECP UX Prototype — component styles (tokens only, no raw literals). */
+
+.secp-prototype-suite .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.secp-prototype-suite .c-spin {
+  animation: c-spin 1.2s linear infinite;
+}
+
+@keyframes c-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secp-prototype-suite .c-spin {
+    animation: none;
+  }
+}
+
+/* Buttons ----------------------------------------------------------
+   The `.c-btn` rules that lived here were removed on 2026-07-20: every
+   application button now renders through the shared Pop Button primitive
+   (`components/pop-button.css`), so nothing consumed them any more. */
+
+/* Status badges ---------------------------------------------------- */
+.secp-prototype-suite .c-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .c-badge--ok {
+  color: var(--status-ok);
+  border-color: color-mix(in srgb, var(--status-ok) 45%, transparent);
+  background: var(--status-ok-soft);
+}
+
+.secp-prototype-suite .c-badge--warn {
+  color: var(--status-warn);
+  border-color: color-mix(in srgb, var(--status-warn) 45%, transparent);
+  background: var(--status-warn-soft);
+}
+
+.secp-prototype-suite .c-badge--error {
+  color: var(--status-error);
+  border-color: color-mix(in srgb, var(--status-error) 45%, transparent);
+  background: var(--status-error-soft);
+}
+
+.secp-prototype-suite .c-badge--info {
+  color: var(--status-info);
+  border-color: color-mix(in srgb, var(--status-info) 45%, transparent);
+  background: var(--status-info-soft);
+}
+
+.secp-prototype-suite .c-badge--neutral {
+  color: var(--status-neutral);
+  border-style: dashed;
+  background: var(--status-neutral-soft);
+}
+
+.secp-prototype-suite .c-badge--progress {
+  color: var(--status-progress);
+  border-color: color-mix(in srgb, var(--status-progress) 45%, transparent);
+  background: var(--status-progress-soft);
+}
+
+.secp-prototype-suite .c-badge--degraded {
+  color: var(--status-degraded);
+  border-color: color-mix(in srgb, var(--status-degraded) 45%, transparent);
+  background: var(--status-degraded-soft);
+}
+
+/* Planned and unknown keep a dashed edge: "nothing is running here yet" and
+   "we do not know" must never read as a settled, healthy state. */
+.secp-prototype-suite .c-badge--planned {
+  color: var(--status-planned);
+  border-color: color-mix(in srgb, var(--status-planned) 50%, transparent);
+  border-style: dashed;
+  background: var(--status-planned-soft);
+}
+
+.secp-prototype-suite .c-badge--unknown {
+  color: var(--status-unknown);
+  border-color: color-mix(in srgb, var(--status-unknown) 50%, transparent);
+  border-style: dashed;
+  background: var(--status-unknown-soft);
+}
+
+.secp-prototype-suite .c-badge--disabled {
+  color: var(--status-disabled);
+  border-color: var(--disabled-border);
+  background: var(--disabled-surface);
+}
+
+.secp-prototype-suite .c-dot {
+  display: inline-flex;
+  align-items: center;
+}
+
+.secp-prototype-suite .c-dot--ok {
+  color: var(--status-ok);
+}
+.secp-prototype-suite .c-dot--warn {
+  color: var(--status-warn);
+}
+.secp-prototype-suite .c-dot--error {
+  color: var(--status-error);
+}
+.secp-prototype-suite .c-dot--info {
+  color: var(--status-info);
+}
+.secp-prototype-suite .c-dot--neutral {
+  color: var(--status-neutral);
+}
+.secp-prototype-suite .c-dot--progress {
+  color: var(--status-progress);
+}
+.secp-prototype-suite .c-dot--degraded {
+  color: var(--status-degraded);
+}
+.secp-prototype-suite .c-dot--planned {
+  color: var(--status-planned);
+}
+.secp-prototype-suite .c-dot--unknown {
+  color: var(--status-unknown);
+}
+.secp-prototype-suite .c-dot--disabled {
+  color: var(--status-disabled);
+}
+
+/* Capability tags & notices ---------------------------------------- */
+.secp-prototype-suite .c-captag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  margin-left: 6px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-strong);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .c-captag--ok {
+  color: var(--status-ok);
+}
+.secp-prototype-suite .c-captag--sim {
+  color: var(--cap-simulated);
+}
+.secp-prototype-suite .c-captag--sealed {
+  color: var(--cap-sealed);
+}
+.secp-prototype-suite .c-captag--planned {
+  color: var(--cap-planned);
+}
+
+.secp-prototype-suite .c-capnotice {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-surface);
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite .c-capnotice__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: 2px;
+}
+
+.secp-prototype-suite .c-capnotice__head .c-captag {
+  margin-left: 0;
+}
+
+.secp-prototype-suite .c-capnotice p {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.secp-prototype-suite .c-capnotice--sealed {
+  border-color: color-mix(in srgb, var(--cap-sealed) 40%, transparent);
+}
+
+.secp-prototype-suite .c-capnotice--planned {
+  border-color: color-mix(in srgb, var(--cap-planned) 40%, transparent);
+}
+
+.secp-prototype-suite .c-capnotice--sim {
+  border-color: color-mix(in srgb, var(--cap-simulated) 40%, transparent);
+}
+
+/* Provider chips --------------------------------------------------- */
+.secp-prototype-suite .c-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .c-provider__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--status-neutral);
+}
+
+.secp-prototype-suite .c-provider[data-provider='aws'] .c-provider__swatch {
+  background: var(--provider-aws);
+}
+.secp-prototype-suite .c-provider[data-provider='azure'] .c-provider__swatch {
+  background: var(--provider-azure);
+}
+.secp-prototype-suite .c-provider[data-provider='gcp'] .c-provider__swatch {
+  background: var(--provider-gcp);
+}
+.secp-prototype-suite .c-provider[data-provider='proxmox'] .c-provider__swatch {
+  background: var(--provider-proxmox);
+}
+.secp-prototype-suite .c-provider[data-provider='kubernetes'] .c-provider__swatch {
+  background: var(--provider-kubernetes);
+}
+.secp-prototype-suite .c-provider[data-provider='vmware'] .c-provider__swatch {
+  background: var(--provider-vmware);
+}
+
+/* Cards ------------------------------------------------------------ */
+.secp-prototype-suite .c-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-raised);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.secp-prototype-suite .c-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.secp-prototype-suite .c-card__head h3 {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .c-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.secp-prototype-suite .c-card__body {
+  min-width: 0;
+}
+
+.secp-prototype-suite .c-card__body--padded {
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.secp-prototype-suite .c-cardgrid {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+/* Metric tiles ----------------------------------------------------- */
+.secp-prototype-suite .c-metricrow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-3);
+}
+
+.secp-prototype-suite .c-metric {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.secp-prototype-suite .c-metric__label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.secp-prototype-suite .c-metric__value {
+  font-size: var(--text-2xl);
+  font-weight: 650;
+  line-height: 1.15;
+}
+
+.secp-prototype-suite .c-metric__detail {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .c-metric--ok .c-metric__value {
+  color: var(--status-ok);
+}
+.secp-prototype-suite .c-metric--warn .c-metric__value {
+  color: var(--status-warn);
+}
+.secp-prototype-suite .c-metric--error .c-metric__value {
+  color: var(--status-error);
+}
+.secp-prototype-suite .c-metric--info .c-metric__value {
+  color: var(--status-info);
+}
+
+/* Page header ------------------------------------------------------ */
+.secp-prototype-suite .c-pagehead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.secp-prototype-suite .c-pagehead h1 {
+  font-size: var(--text-xl);
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.secp-prototype-suite .c-pagehead__desc {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  margin-top: 2px;
+  max-width: 70ch;
+}
+
+.secp-prototype-suite .c-pagehead__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.secp-prototype-suite .c-pagehead__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* Key-value grid --------------------------------------------------- */
+.secp-prototype-suite .c-kv {
+  display: grid;
+  gap: var(--sp-2) var(--sp-4);
+  margin: 0;
+}
+
+.secp-prototype-suite .c-kv--1 {
+  grid-template-columns: 1fr;
+}
+.secp-prototype-suite .c-kv--2 {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+.secp-prototype-suite .c-kv--3 {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.secp-prototype-suite .c-kv__item dt {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.secp-prototype-suite .c-kv__item dd {
+  margin: 1px 0 0;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* States ----------------------------------------------------------- */
+.secp-prototype-suite .c-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  text-align: center;
+  padding: var(--sp-5) var(--sp-4);
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .c-state--error {
+  color: var(--status-error);
+}
+
+.secp-prototype-suite .c-state--error p {
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .c-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+}
+
+.secp-prototype-suite .c-skeleton__line {
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--bg-raised), var(--bg-overlay), var(--bg-raised));
+  background-size: 200% 100%;
+  animation: c-shimmer 1.6s ease infinite;
+}
+
+@keyframes c-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secp-prototype-suite .c-skeleton__line {
+    animation: none;
+  }
+}
+
+/* Tables ----------------------------------------------------------- */
+.secp-prototype-suite .c-table__scroll {
+  overflow-x: auto;
+}
+
+.secp-prototype-suite .c-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite .c-table th {
+  text-align: left;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-default);
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .c-table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+.secp-prototype-suite .c-table tr[data-clickable] {
+  cursor: pointer;
+}
+
+.secp-prototype-suite .c-table tr[data-clickable]:hover td {
+  background: var(--bg-hover);
+}
+
+.secp-prototype-suite .c-table tr.is-selected td {
+  background: var(--bg-active);
+}
+
+/* Filter bar ------------------------------------------------------- */
+.secp-prototype-suite .c-filterbar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.secp-prototype-suite .c-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.secp-prototype-suite .c-filter__label {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.secp-prototype-suite .c-filter select,
+.secp-prototype-suite .c-search input {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  padding: 5px 8px;
+  font-family: inherit;
+}
+
+.secp-prototype-suite .c-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 0 8px;
+  color: var(--text-muted);
+}
+
+.secp-prototype-suite .c-search input {
+  border: none;
+  background: transparent;
+  padding: 6px 0;
+  min-width: 160px;
+}
+
+.secp-prototype-suite .c-search input:focus {
+  outline: none;
+}
+
+.secp-prototype-suite .c-search:focus-within {
+  border-color: var(--border-focus);
+}
+
+/* Tabs ------------------------------------------------------------- */
+.secp-prototype-suite .c-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-default);
+  overflow-x: auto;
+}
+
+.secp-prototype-suite .c-tabs__tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 7px 12px;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .c-tabs__tab:hover {
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.secp-prototype-suite .c-tabs__tab.is-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Drawer ----------------------------------------------------------- */
+.secp-prototype-suite .c-drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.secp-prototype-suite .c-drawer__backdrop,
+.secp-prototype-suite .c-dialog__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 7, 12, 0.6);
+}
+
+.secp-prototype-suite .c-drawer__panel {
+  position: relative;
+  width: min(var(--inspector-width), 92vw);
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border-default);
+  box-shadow: var(--shadow-overlay);
+  display: flex;
+  flex-direction: column;
+  animation: c-drawer-in var(--motion-medium);
+}
+
+@keyframes c-drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+.secp-prototype-suite .c-drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.secp-prototype-suite .c-drawer__head h3 {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.secp-prototype-suite .c-drawer__body {
+  padding: var(--sp-3) var(--sp-4);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.secp-prototype-suite .c-drawer__foot {
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Accordion -------------------------------------------------------- */
+.secp-prototype-suite .c-accordion {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.secp-prototype-suite .c-accordion + .c-accordion {
+  margin-top: var(--sp-2);
+}
+
+.secp-prototype-suite .c-accordion__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  text-align: left;
+}
+
+.secp-prototype-suite .c-accordion__chev {
+  transition: transform var(--motion-fast);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.secp-prototype-suite .c-accordion.is-open .c-accordion__chev {
+  transform: rotate(90deg);
+}
+
+.secp-prototype-suite .c-accordion__hint {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.secp-prototype-suite .c-accordion__body {
+  padding: var(--sp-2) var(--sp-3) var(--sp-3) calc(var(--sp-3) + 22px);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Timeline --------------------------------------------------------- */
+.secp-prototype-suite .c-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: relative;
+}
+
+.secp-prototype-suite .c-timeline::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--border-default);
+}
+
+.secp-prototype-suite .c-timeline__entry {
+  position: relative;
+  padding: 0 0 var(--sp-3) var(--sp-5);
+}
+
+.secp-prototype-suite .c-timeline__entry:last-child {
+  padding-bottom: 0;
+}
+
+.secp-prototype-suite .c-timeline__node {
+  position: absolute;
+  left: 0;
+  top: 5px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--status-neutral);
+  background: var(--bg-app);
+}
+
+.secp-prototype-suite .c-timeline__node--ok {
+  border-color: var(--status-ok);
+}
+.secp-prototype-suite .c-timeline__node--warn {
+  border-color: var(--status-warn);
+}
+.secp-prototype-suite .c-timeline__node--error {
+  border-color: var(--status-error);
+}
+.secp-prototype-suite .c-timeline__node--info {
+  border-color: var(--status-info);
+}
+.secp-prototype-suite .c-timeline__node--progress {
+  border-color: var(--status-progress);
+}
+
+.secp-prototype-suite .c-timeline__title {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+/* Phase timeline --------------------------------------------------- */
+.secp-prototype-suite .c-phases {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  flex-wrap: wrap;
+}
+
+.secp-prototype-suite .c-phases__item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.secp-prototype-suite .c-phases__sep {
+  color: var(--text-muted);
+}
+
+.secp-prototype-suite .c-phases__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .c-phases__pill:disabled {
+  cursor: default;
+}
+
+.secp-prototype-suite .c-phases__pill.is-complete {
+  color: var(--status-ok);
+  border-color: color-mix(in srgb, var(--status-ok) 35%, transparent);
+}
+
+.secp-prototype-suite .c-phases__pill.is-active {
+  color: var(--accent);
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-weight: 650;
+}
+
+.secp-prototype-suite .c-phases__pill.is-selected {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.secp-prototype-suite .c-phases__live {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: c-pulse 1.8s ease infinite;
+}
+
+@keyframes c-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secp-prototype-suite .c-phases__live {
+    animation: none;
+  }
+}
+
+/* Connectivity matrix ---------------------------------------------- */
+.secp-prototype-suite .c-matrix {
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+}
+
+.secp-prototype-suite .c-matrix th {
+  padding: 4px 8px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .c-matrix__team {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+.secp-prototype-suite .c-matrix__team::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--team, var(--status-neutral));
+}
+
+.secp-prototype-suite .c-matrix__cell {
+  width: 40px;
+  height: 30px;
+  text-align: center;
+  border: 1px solid var(--border-default);
+}
+
+.secp-prototype-suite .c-matrix__cell.is-open {
+  color: var(--status-ok);
+  background: var(--status-ok-soft);
+}
+
+.secp-prototype-suite .c-matrix__cell.is-blocked {
+  color: var(--status-error);
+  background: var(--status-error-soft);
+}
+
+.secp-prototype-suite .c-matrix__cell.is-self {
+  color: var(--text-muted);
+  background: var(--bg-raised);
+}
+
+/* Dialog ----------------------------------------------------------- */
+.secp-prototype-suite .c-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-4);
+}
+
+.secp-prototype-suite .c-dialog__panel {
+  position: relative;
+  width: min(560px, 94vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-overlay);
+}
+
+.secp-prototype-suite .c-dialog__panel--danger {
+  border-color: color-mix(in srgb, var(--status-error) 45%, transparent);
+}
+
+.secp-prototype-suite .c-dialog__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.secp-prototype-suite .c-dialog__head h3 {
+  font-size: var(--text-base);
+  font-weight: 600;
+  flex: 1;
+}
+
+.secp-prototype-suite .c-dialog__dangericon {
+  color: var(--status-error);
+}
+
+.secp-prototype-suite .c-dialog__body {
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.secp-prototype-suite .c-dialog__preview {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+  padding: var(--sp-3);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.secp-prototype-suite .c-dialog__approvals ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .c-dialog__ack {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .c-dialog__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Alerts ----------------------------------------------------------- */
+.secp-prototype-suite .c-alerts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.secp-prototype-suite .c-alerts__row {
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  align-items: flex-start;
+}
+
+.secp-prototype-suite .c-alerts__row:last-child {
+  border-bottom: none;
+}
+
+.secp-prototype-suite .c-alerts__icon {
+  margin-top: 2px;
+}
+
+.secp-prototype-suite .c-alerts__row.is-critical .c-alerts__icon {
+  color: var(--status-error);
+}
+.secp-prototype-suite .c-alerts__row.is-warning .c-alerts__icon {
+  color: var(--status-warn);
+}
+.secp-prototype-suite .c-alerts__row.is-info .c-alerts__icon {
+  color: var(--status-info);
+}
+
+.secp-prototype-suite .c-alerts__row.is-acked {
+  opacity: 0.55;
+}
+
+.secp-prototype-suite .c-alerts__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.secp-prototype-suite .c-alerts__act {
+  flex-shrink: 0;
+}
+
+/* Wizard ----------------------------------------------------------- */
+.secp-prototype-suite .c-wizard {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--sp-4);
+  align-items: start;
+}
+
+.secp-prototype-suite .c-wizard--with-aside {
+  grid-template-columns: 220px 1fr 280px;
+}
+
+.secp-prototype-suite .c-wizard__rail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: sticky;
+  top: var(--sp-4);
+}
+
+.secp-prototype-suite .c-wizard__step {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.secp-prototype-suite .c-wizard__step:hover {
+  background: var(--bg-hover);
+}
+
+.secp-prototype-suite .c-wizard__step.is-current {
+  color: var(--text-primary);
+  background: var(--bg-active);
+  border-color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.secp-prototype-suite .c-wizard__step.is-complete {
+  color: var(--status-ok);
+}
+
+.secp-prototype-suite .c-wizard__num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+
+.secp-prototype-suite .c-wizard__content {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-4);
+  min-width: 0;
+}
+
+.secp-prototype-suite .c-wizard__title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin-bottom: var(--sp-3);
+}
+
+.secp-prototype-suite .c-wizard__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.secp-prototype-suite .c-wizard__foot {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.secp-prototype-suite .c-wizard__aside {
+  position: sticky;
+  top: var(--sp-4);
+}
+
+@media (max-width: 980px) {
+  .secp-prototype-suite .c-wizard,
+  .secp-prototype-suite .c-wizard--with-aside {
+    grid-template-columns: 1fr;
+  }
+
+  .secp-prototype-suite .c-wizard__rail {
+    flex-direction: row;
+    overflow-x: auto;
+    position: static;
+  }
+}
+
+/* Topology --------------------------------------------------------- */
+.secp-prototype-suite .c-topo {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+
+.secp-prototype-suite .c-topo .react-flow__background {
+  background: var(--bg-sunken);
+}
+
+.secp-prototype-suite .c-topo-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--team, var(--border-default));
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  min-width: 130px;
+  box-shadow: var(--shadow-raised);
+}
+
+.secp-prototype-suite .c-topo-node.is-selected {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.secp-prototype-suite .c-topo-node.is-degraded {
+  border-style: dashed;
+  border-color: var(--status-warn);
+}
+
+.secp-prototype-suite .c-topo-node.is-unhealthy {
+  border-style: dashed;
+  border-color: var(--status-error);
+}
+
+.secp-prototype-suite .c-topo-node__icon {
+  color: var(--accent);
+  display: inline-flex;
+}
+
+.secp-prototype-suite .c-topo-node__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  font-size: var(--text-xs);
+}
+
+.secp-prototype-suite .c-topo-node__text strong {
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite .c-topo__minimap {
+  background: var(--bg-raised) !important;
+}
+
+.secp-prototype-suite .c-topo-edge--link path {
+  stroke: var(--border-strong);
+}
+.secp-prototype-suite .c-topo-edge--route path {
+  stroke: var(--status-info);
+}
+.secp-prototype-suite .c-topo-edge--monitoring path {
+  stroke: var(--accent);
+  stroke-dasharray: 4 4;
+  opacity: 0.55;
+}
+.secp-prototype-suite .c-topo-edge--attack-path path {
+  stroke: var(--status-error);
+  stroke-dasharray: 7 5;
+}
+
+.secp-prototype-suite .c-topo-legend {
+  display: flex;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  padding: var(--sp-2) 0;
+}
+
+.secp-prototype-suite .c-topo-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.secp-prototype-suite .c-topo-legend__line {
+  width: 22px;
+  height: 0;
+  border-top: 2px solid var(--border-strong);
+}
+
+.secp-prototype-suite .c-topo-legend__line.is-route {
+  border-color: var(--status-info);
+}
+.secp-prototype-suite .c-topo-legend__line.is-attack-path {
+  border-color: var(--status-error);
+  border-top-style: dashed;
+}
+.secp-prototype-suite .c-topo-legend__line.is-monitoring {
+  border-color: var(--accent);
+  border-top-style: dotted;
+}
+
+/* Inspector -------------------------------------------------------- */
+.secp-prototype-suite .c-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.secp-prototype-suite .c-raw {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2);
+  font-size: var(--text-xs);
+  overflow-x: auto;
+  margin: 0;
+}
+
+/* Advanced toggle -------------------------------------------------- */
+.secp-prototype-suite .c-advtoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.secp-prototype-suite .c-advtoggle.is-on {
+  color: var(--accent);
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.secp-prototype-suite .c-advtoggle__state {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.8;
+}
+
+/* Prototype banner ------------------------------------------------- */
+.secp-prototype-suite .p-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--cap-mock);
+  border: 1px dashed color-mix(in srgb, var(--cap-mock) 50%, transparent);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+/* Top-bar content concessions ---------------------------------------------
+   The notch centres the search geometrically, which caps how wide the control
+   cluster beside it may be (see layouts/notch/notch.css). These tiers spend
+   that budget from the least load-bearing information upward.
+
+   Each tier hides text VISUALLY ONLY — it stays in the accessibility tree and
+   in each control's `title`, so the prototype's truth disclosure is never
+   actually removed at any width. */
+
+/* Even 1920 cannot afford the banner's trailing clause inside a centred bar. */
+.secp-prototype-suite .p-banner__detail {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Always: the cluster can no longer afford this clause at any width. The full
+   sentence remains in the element's title and in the accessibility tree. */
+.secp-prototype-suite .p-banner__mock {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 1600px) {
+  .secp-prototype-suite .c-advtoggle__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 1280px) {
+  /* Advanced mode is a display preference and the Appearance menu now covers
+     the same need, so it is the next thing to yield. */
+  .secp-prototype-suite .c-advtoggle {
+    display: none;
+  }
+}
+
+@media (max-width: 1024px) {
+  .secp-prototype-suite .p-banner__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+/* Preference radio groups (Profile → Display preferences) -----------
+   Passive selection controls, deliberately not Pop Buttons — a radio must not
+   look like it performs an action. */
+.secp-prototype-suite .c-prefgroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.secp-prototype-suite .c-radiogroup {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.secp-prototype-suite .c-radiogroup__legend {
+  padding: 0 var(--sp-1);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.secp-prototype-suite .c-radiogroup__option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  cursor: pointer;
+  /* Comfortable target without turning the row into a button. */
+  min-height: 28px;
+}
+
+.secp-prototype-suite .c-radiogroup__option--inline {
+  align-items: center;
+  display: inline-flex;
+  margin-right: var(--sp-4);
+}
+
+.secp-prototype-suite .c-radiogroup__option input {
+  margin: 3px 0 0;
+  accent-color: var(--accent-strong);
+  flex: 0 0 auto;
+}
+
+.secp-prototype-suite .c-radiogroup__option--inline input {
+  margin: 0;
+}
+
+.secp-prototype-suite .c-radiogroup__option input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.secp-prototype-suite .c-radiogroup__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.secp-prototype-suite .c-radiogroup__label {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.secp-prototype-suite .c-radiogroup__hint {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* SOURCE: design/shell.css */
+/* SECP UX Prototype — shell & layout styles (tokens only). */
+
+.secp-prototype-suite .l-shell {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+.secp-prototype-suite .l-skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  background: var(--bg-overlay);
+  color: var(--text-primary);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+}
+
+.secp-prototype-suite .l-skip:focus {
+  left: var(--sp-2);
+  top: var(--sp-2);
+}
+
+/* Sidebar ---------------------------------------------------------- */
+.secp-prototype-suite .l-sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-3) var(--sp-2);
+  gap: var(--sp-2);
+  transition: width var(--motion-medium);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.secp-prototype-suite .l-sidebar.is-collapsed {
+  width: var(--sidebar-width-collapsed);
+}
+
+.secp-prototype-suite .l-sidebar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2) var(--sp-3);
+}
+
+.secp-prototype-suite .l-sidebar__mark {
+  color: var(--accent);
+  font-size: 1.3rem;
+  line-height: 1;
+}
+
+.secp-prototype-suite .l-sidebar__title {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.secp-prototype-suite .l-sidebar__title strong {
+  font-size: var(--text-base);
+  letter-spacing: 0.08em;
+}
+
+.secp-prototype-suite .l-sidebar__title span:last-child {
+  font-size: 0.56rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.secp-prototype-suite .l-sidebar__group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.secp-prototype-suite .l-sidebar__link {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .l-sidebar__link:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.secp-prototype-suite .l-sidebar__link.is-active {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+
+.secp-prototype-suite .l-sidebar__rule {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: var(--sp-1) var(--sp-2);
+}
+
+.secp-prototype-suite .l-sidebar__foot {
+  margin-top: auto;
+}
+
+.secp-prototype-suite .l-sidebar__collapse {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.secp-prototype-suite .l-sidebar__collapse:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Main column ------------------------------------------------------ */
+.secp-prototype-suite .l-shell__main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.secp-prototype-suite .l-shell__content {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.secp-prototype-suite .l-shell__content > * {
+  width: 100%;
+}
+
+/* Top bar ----------------------------------------------------------
+   The bar itself is the Notch Navbar component (`layouts/notch/notch.css`);
+   what remains here is the content that sits inside its lowered centre. */
+.secp-prototype-suite .l-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.secp-prototype-suite .l-crumbs a {
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .l-crumbs a:hover {
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.secp-prototype-suite .l-crumbs__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.secp-prototype-suite .l-crumbs__item [aria-current] {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.secp-prototype-suite .l-eventsel select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  padding: 4px 6px;
+  max-width: 135px;
+  font-family: inherit;
+}
+
+/* Yields below 1700 (was 1440): the appearance toggle and menu now share the
+   cluster, and every event stays reachable through the Events route and the
+   global search — so this is still the cheapest thing to drop. */
+@media (max-width: 1700px) {
+  .secp-prototype-suite .l-eventsel {
+    display: none;
+  }
+}
+
+/* The alert/approval controls are PopButtons (variant `icon`); this only
+   positions the count badge that overhangs their corner. */
+.secp-prototype-suite .l-topbar__count {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  background: var(--status-info);
+  color: var(--text-inverse);
+  font-size: 0.6rem;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  padding: 0 3px;
+}
+
+.secp-prototype-suite .l-topbar__count.is-alert {
+  background: var(--status-error);
+}
+
+.secp-prototype-suite .l-approvals {
+  list-style: none;
+  margin: 0 0 var(--sp-3);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.secp-prototype-suite .l-approvals__row {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+/* Workspace frames ------------------------------------------------- */
+.secp-prototype-suite .l-workspace {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 1500px;
+}
+
+.secp-prototype-suite .l-workspace__head {
+  padding: var(--sp-4) var(--sp-5) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.secp-prototype-suite .l-workspace__head h1 {
+  font-size: var(--text-xl);
+  font-weight: 650;
+}
+
+.secp-prototype-suite .l-workspace__phases {
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+/* Navigation dock mode ---------------------------------------------
+   The dock is `position: fixed`, so it never participates in the flex row and
+   the main column simply takes the full width. A PINNED dock reserves the
+   space it occupies so it can never cover page controls; an EDGE dock does not,
+   because it is hidden until summoned. */
+.secp-prototype-suite
+  .l-shell[data-navigation-mode='pinned-dock'].l-shell--dock-bottom
+  .l-shell__content {
+  padding-bottom: 104px;
+}
+
+.secp-prototype-suite
+  .l-shell[data-navigation-mode='pinned-dock'].l-shell--dock-left
+  .l-shell__content {
+  padding-left: 88px;
+}
+
+.secp-prototype-suite
+  .l-shell[data-navigation-mode='pinned-dock'].l-shell--dock-right
+  .l-shell__content {
+  padding-right: 88px;
+}
+
+/* Responsive ------------------------------------------------------- */
+@media (max-width: 900px) {
+  .secp-prototype-suite .l-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 50;
+    width: var(--sidebar-width-collapsed);
+  }
+
+  .secp-prototype-suite .l-sidebar:not(.is-collapsed) {
+    width: var(--sidebar-width);
+    box-shadow: var(--shadow-overlay);
+  }
+
+  .secp-prototype-suite .l-shell__main {
+    margin-left: var(--sidebar-width-collapsed);
+  }
+
+  /* No sidebar in dock mode, so nothing to leave room for. */
+  .secp-prototype-suite .l-shell--dock .l-shell__main {
+    margin-left: 0;
+  }
+
+  .secp-prototype-suite .l-crumbs {
+    display: none;
+  }
+}
+
+/* SOURCE: components/pop-button.css */
+/*
+ * Pop Button — Vengeance UI "Pop Button" mechanics on SECP tokens.
+ *
+ * The reference stacks three box-shadows to fake a physical body:
+ *   0 12px 0 -2px <inner lip>, 0 12px 0 0 <solid edge>, 0 22px 0 0 <ground>
+ * and then walks the button down (`translate-y-1` → `translate-y-3`) while
+ * shrinking those shadows to zero. That model is kept exactly; only the depth,
+ * palette and density are re-tokenized for a dense dark control room.
+ *
+ * All displacement uses `translate` — never margin or layout — so a press never
+ * nudges the controls around it.
+ */
+
+.secp-prototype-suite .pop-btn {
+  /* Per-variant knobs; every variant only overrides these four. */
+  --btn-surface: var(--pop-surface);
+  --btn-surface-hover: var(--pop-surface-hover);
+  --btn-edge: var(--pop-edge);
+  --btn-text: var(--text-primary);
+  /* Per-size knobs. */
+  --btn-edge-h: var(--pop-edge-height);
+  --btn-press: var(--pop-travel-press);
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  margin-bottom: var(--btn-edge-h); /* reserves the edge, so rows never jump */
+  border: 1px solid var(--btn-edge);
+  border-radius: var(--radius-md);
+  background: var(--btn-surface);
+  color: var(--btn-text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  translate: 0 0;
+  box-shadow:
+    0 var(--btn-edge-h) 0 -1px var(--btn-surface-hover),
+    0 var(--btn-edge-h) 0 0 var(--btn-edge),
+    var(--pop-shadow-rest);
+  transition:
+    translate var(--pop-duration) var(--pop-ease),
+    box-shadow var(--pop-duration) var(--pop-ease),
+    background-color var(--motion-fast),
+    border-color var(--motion-fast);
+}
+
+.secp-prototype-suite .pop-btn:hover:not(:disabled) {
+  background: var(--btn-surface-hover);
+  translate: 0 var(--pop-travel-hover);
+  box-shadow:
+    0 calc(var(--btn-edge-h) - var(--pop-travel-hover)) 0 -1px var(--btn-surface-hover),
+    0 calc(var(--btn-edge-h) - var(--pop-travel-hover)) 0 0 var(--btn-edge),
+    var(--pop-shadow-hover);
+}
+
+/* Pressed: the body travels the full edge height and the edge collapses flat,
+   so the button reads as pushed into the surface. Keyboard activation gets the
+   same treatment via :active, which fires for Space/Enter on a native button. */
+.secp-prototype-suite .pop-btn:active:not(:disabled) {
+  background: var(--btn-surface-hover);
+  translate: 0 var(--btn-press);
+  box-shadow:
+    0 0 0 0 var(--btn-surface-hover),
+    0 0 0 0 var(--btn-edge),
+    var(--pop-shadow-press);
+}
+
+.secp-prototype-suite .pop-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Disabled: flat on the surface, dimmer fill, dimmer edge — it must not look
+   like something that can be pressed. `disabled` is native, so pointer and
+   keyboard activation are both blocked. */
+.secp-prototype-suite .pop-btn:disabled {
+  background: var(--disabled-surface);
+  border-color: var(--disabled-border);
+  color: var(--disabled-text);
+  cursor: not-allowed;
+  translate: 0 0;
+  box-shadow: 0 1px 0 0 var(--disabled-border);
+}
+
+.secp-prototype-suite .pop-btn__spinner {
+  flex: 0 0 auto;
+}
+
+/* Pointer-target expansion that does not alter the rendered box or layout. */
+.secp-prototype-suite .pop-btn--hit::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: max(100%, 44px);
+  height: max(100%, 44px);
+  transform: translate(-50%, -50%);
+}
+
+/* --- Sizes ---------------------------------------------------------------
+   Smaller sizes keep a real, readable edge (2–3px) rather than losing the
+   depth cue entirely. */
+.secp-prototype-suite .pop-btn--xs {
+  --btn-edge-h: var(--pop-edge-height-xs);
+  --btn-press: var(--pop-travel-press-xs);
+  height: 22px;
+  padding: 0 8px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  gap: 4px;
+}
+
+.secp-prototype-suite .pop-btn--sm {
+  --btn-edge-h: var(--pop-edge-height-sm);
+  --btn-press: var(--pop-travel-press-sm);
+  height: 27px;
+  padding: 0 11px;
+  font-size: var(--text-xs);
+  gap: 5px;
+}
+
+.secp-prototype-suite .pop-btn--md {
+  height: 32px;
+  padding: 0 14px;
+}
+
+.secp-prototype-suite .pop-btn--lg {
+  height: 38px;
+  padding: 0 18px;
+  font-size: var(--text-base);
+}
+
+/* --- Variants ------------------------------------------------------------- */
+.secp-prototype-suite .pop-btn--primary {
+  --btn-surface: color-mix(in srgb, var(--accent) 16%, var(--surface-2));
+  --btn-surface-hover: color-mix(in srgb, var(--accent) 26%, var(--surface-2));
+  --btn-edge: var(--accent-strong);
+  --btn-text: var(--accent-hover);
+}
+
+.secp-prototype-suite .pop-btn--secondary {
+  --btn-surface: var(--surface-2);
+  --btn-surface-hover: var(--surface-interactive);
+  --btn-edge: var(--pop-edge);
+  --btn-text: var(--text-primary);
+}
+
+.secp-prototype-suite .pop-btn--neutral {
+  --btn-surface: var(--surface-1);
+  --btn-surface-hover: var(--surface-2);
+  --btn-edge: var(--border-default);
+  --btn-text: var(--text-secondary);
+}
+
+.secp-prototype-suite .pop-btn--danger {
+  --btn-surface: color-mix(in srgb, var(--status-error) 15%, var(--surface-2));
+  --btn-surface-hover: color-mix(in srgb, var(--status-error) 25%, var(--surface-2));
+  --btn-edge: color-mix(in srgb, var(--status-error) 70%, var(--border-strong));
+  --btn-text: var(--status-error);
+}
+
+.secp-prototype-suite .pop-btn--warning {
+  --btn-surface: color-mix(in srgb, var(--status-warn) 14%, var(--surface-2));
+  --btn-surface-hover: color-mix(in srgb, var(--status-warn) 24%, var(--surface-2));
+  --btn-edge: color-mix(in srgb, var(--status-warn) 60%, var(--border-strong));
+  --btn-text: var(--status-warn);
+}
+
+.secp-prototype-suite .pop-btn--success {
+  --btn-surface: color-mix(in srgb, var(--status-ok) 14%, var(--surface-2));
+  --btn-surface-hover: color-mix(in srgb, var(--status-ok) 24%, var(--surface-2));
+  --btn-edge: color-mix(in srgb, var(--status-ok) 60%, var(--border-strong));
+  --btn-text: var(--status-ok);
+}
+
+/* Lowest-emphasis pop: no fill at rest, but it still has a real edge and still
+   travels, so it reads as a button rather than as a text link. */
+.secp-prototype-suite .pop-btn--ghost-pop {
+  --btn-surface: transparent;
+  --btn-surface-hover: var(--bg-hover);
+  --btn-edge: var(--border-default);
+  --btn-text: var(--text-secondary);
+}
+
+.secp-prototype-suite .pop-btn--ghost-pop:hover:not(:disabled) {
+  --btn-text: var(--text-primary);
+}
+
+.secp-prototype-suite .pop-btn--icon {
+  --btn-surface: var(--surface-2);
+  --btn-surface-hover: var(--surface-interactive);
+  --btn-edge: var(--pop-edge);
+  --btn-text: var(--text-secondary);
+  width: 32px;
+  padding: 0;
+}
+
+.secp-prototype-suite .pop-btn--icon:hover:not(:disabled) {
+  --btn-text: var(--text-primary);
+}
+
+.secp-prototype-suite .pop-btn--icon.pop-btn--xs {
+  width: 22px;
+}
+.secp-prototype-suite .pop-btn--icon.pop-btn--sm {
+  width: 27px;
+}
+.secp-prototype-suite .pop-btn--icon.pop-btn--lg {
+  width: 38px;
+}
+
+/* --- High contrast -------------------------------------------------------- */
+@media (prefers-contrast: more) {
+  .secp-prototype-suite .pop-btn {
+    --btn-edge: var(--text-secondary);
+    border-color: var(--text-secondary);
+  }
+}
+
+/* --- Reduced motion -------------------------------------------------------
+   Travel is removed, but the rest/hover/active states stay visually distinct:
+   the edge still collapses on press, so the feedback is immediate and obvious
+   without anything sliding. */
+@media (prefers-reduced-motion: reduce) {
+  .secp-prototype-suite .pop-btn,
+  .secp-prototype-suite .pop-btn:hover:not(:disabled),
+  .secp-prototype-suite .pop-btn:active:not(:disabled) {
+    translate: 0 0;
+    transition:
+      background-color var(--motion-fast),
+      box-shadow var(--motion-fast),
+      border-color var(--motion-fast);
+  }
+
+  .secp-prototype-suite .pop-btn:hover:not(:disabled) {
+    box-shadow:
+      0 var(--btn-edge-h) 0 -1px var(--btn-surface-hover),
+      0 var(--btn-edge-h) 0 0 var(--btn-edge),
+      var(--pop-shadow-hover);
+  }
+
+  .secp-prototype-suite .pop-btn:active:not(:disabled) {
+    box-shadow:
+      0 0 0 1px var(--btn-edge),
+      var(--pop-shadow-press);
+  }
+}
+
+/* SOURCE: features/events/events.css */
+/* Events feature: wizard option cards + small form fields. */
+
+.secp-prototype-suite .ev-optgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--sp-2);
+}
+
+.secp-prototype-suite .ev-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite .ev-opt input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.secp-prototype-suite .ev-opt strong {
+  display: block;
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite .ev-opt.is-selected {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+}
+
+.secp-prototype-suite .ev-opt.is-disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.secp-prototype-suite .ev-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 300px;
+}
+
+.secp-prototype-suite .ev-field > span {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.secp-prototype-suite .ev-field input,
+.secp-prototype-suite .ev-field select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  padding: 5px 8px;
+  font-family: inherit;
+}
+
+.secp-prototype-suite .ev-field input:focus,
+.secp-prototype-suite .ev-field select:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.secp-prototype-suite .ev-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.secp-prototype-suite .ev-chip {
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+}
+
+.secp-prototype-suite .ev-confirm {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+/* SOURCE: features/infrastructure/infrastructure.css */
+/* Infrastructure section: capacity bars, capability chips, onboarding chain, policy radios. */
+
+.secp-prototype-suite .inf-capbar {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 150px;
+}
+
+.secp-prototype-suite .inf-capbar__track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  overflow: hidden;
+}
+
+.secp-prototype-suite .inf-capbar__fill {
+  height: 100%;
+  background: var(--status-ok);
+}
+
+.secp-prototype-suite .inf-capbar--warn .inf-capbar__fill {
+  background: var(--status-warn);
+}
+
+.secp-prototype-suite .inf-capbar__label {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .inf-capbar--warn .inf-capbar__label {
+  color: var(--status-warn);
+}
+
+.secp-prototype-suite .inf-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.secp-prototype-suite .inf-chip {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+/* Onboarding chain: numbered lifecycle with the current step highlighted. */
+.secp-prototype-suite .inf-chain {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  counter-reset: chain;
+}
+
+.secp-prototype-suite .inf-chain li {
+  counter-increment: chain;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.secp-prototype-suite .inf-chain li::before {
+  content: counter(chain);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border-default);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.secp-prototype-suite .inf-chain li.is-done {
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .inf-chain li.is-done::before {
+  border-color: var(--status-ok);
+  color: var(--status-ok);
+}
+
+.secp-prototype-suite .inf-chain li.is-current {
+  color: var(--text-primary);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.secp-prototype-suite .inf-chain li.is-current::before {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Placement policy radio list. */
+.secp-prototype-suite .inf-policy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.secp-prototype-suite .inf-policy label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.secp-prototype-suite .inf-policy label:hover {
+  background: var(--bg-hover);
+}
+
+.secp-prototype-suite .inf-policy label.is-selected {
+  background: var(--accent-soft);
+}
+
+.secp-prototype-suite .inf-policy input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+/* Offline worker emphasis (paired with icon + status badge, never color alone). */
+.secp-prototype-suite .inf-offline-name {
+  color: var(--status-error);
+  font-weight: 600;
+}
+
+/* SOURCE: features/platform/platform.css */
+/*
+ * Platform administration pages — feature-specific styles.
+ * Small additions only; everything else comes from the shared design system.
+ */
+
+.secp-prototype-suite .p-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.secp-prototype-suite .p-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.secp-prototype-suite .p-chip--service {
+  border-style: dashed;
+}
+
+.secp-prototype-suite .p-field {
+  display: grid;
+  gap: 3px;
+  margin-bottom: var(--sp-3);
+  max-width: 440px;
+}
+
+.secp-prototype-suite .p-field > span {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.secp-prototype-suite .p-field input,
+.secp-prototype-suite .p-field select {
+  padding: 5px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.secp-prototype-suite .p-field input:disabled,
+.secp-prototype-suite .p-field select:disabled {
+  opacity: 0.75;
+  cursor: not-allowed;
+}
+
+/* SOURCE: features/scenarios/builder.css */
+/* Scenario builder frame: palette / canvas / inspector. */
+
+.secp-prototype-suite .sb-frame {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 300px;
+  gap: var(--sp-3);
+  align-items: start;
+}
+
+.secp-prototype-suite .sb-palette,
+.secp-prototype-suite .sb-inspector {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  position: sticky;
+  top: var(--sp-3);
+  max-height: calc(100vh - var(--topbar-height) - 2 * var(--sp-3));
+  overflow-y: auto;
+}
+
+.secp-prototype-suite .sb-palette__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.secp-prototype-suite .sb-palette__cat {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  padding: var(--sp-1) 0;
+}
+
+.secp-prototype-suite .sb-palette__item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--bg-raised);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  padding: 5px 8px;
+  cursor: grab;
+  text-align: left;
+}
+
+.secp-prototype-suite .sb-palette__item:disabled {
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+
+.secp-prototype-suite .sb-canvas {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+@media (max-width: 1100px) {
+  .secp-prototype-suite .sb-frame {
+    grid-template-columns: 1fr;
+  }
+
+  .secp-prototype-suite .sb-palette,
+  .secp-prototype-suite .sb-inspector {
+    position: static;
+    max-height: none;
+  }
+}
+
+/* SOURCE: features/scenarios/scenario-forms.css */
+/* New-scenario form: proposed friendlier front over the implemented template flow. */
+
+.secp-prototype-suite .sf-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  max-width: 560px;
+}
+
+.secp-prototype-suite .sf-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.secp-prototype-suite .sf-field > span:first-child {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.secp-prototype-suite .sf-field input[type='text'],
+.secp-prototype-suite .sf-field input[type='number'],
+.secp-prototype-suite .sf-field textarea,
+.secp-prototype-suite .sf-field select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  padding: 6px 8px;
+  font-family: inherit;
+}
+
+.secp-prototype-suite .sf-field textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+
+.secp-prototype-suite .sf-field input:focus-visible,
+.secp-prototype-suite .sf-field textarea:focus-visible,
+.secp-prototype-suite .sf-field select:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.secp-prototype-suite .sf-range {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.secp-prototype-suite .sf-range input {
+  width: 90px;
+}
+
+.secp-prototype-suite .sf-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+}
+
+.secp-prototype-suite .sf-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.secp-prototype-suite .sf-confirm {
+  border: 1px solid var(--status-ok);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+/* ==========================================================================
+   STAGE 5B â€” SPATIAL OS PROTOTYPE MATERIAL REPAIR
+   ========================================================================== */
+
+.secp-prototype-suite {
+  --glass-transparency: 0.34;
+  --glass-blur-strength: 1.05;
+  --glass-saturation: 1.22;
+  --glass-contrast: 1.02;
+  isolation: isolate;
+  color: var(--text-primary);
+  background:
+    radial-gradient(circle at 50% 10%, rgba(22, 111, 170, 0.13), transparent 35%),
+    linear-gradient(180deg, rgba(2, 10, 20, 0.88), rgba(1, 5, 13, 0.985));
+}
+
+.secp-prototype-suite .u-page {
+  width: min(1580px, calc(100vw - 64px));
+  max-width: none;
+  margin-inline: auto;
+  padding-top: 92px;
+  padding-bottom: 116px;
+}
+
+.secp-prototype-suite .l-workspace {
+  width: min(1580px, calc(100vw - 64px));
+  max-width: none;
+  margin-inline: auto;
+  padding-top: 82px;
+  padding-bottom: 116px;
+}
+
+.secp-prototype-suite .l-workspace__head {
+  top: 64px;
+  border-bottom-color: rgba(105, 198, 244, 0.12);
+}
+
+.secp-prototype-suite .c-pagehead h1,
+.secp-prototype-suite .l-workspace__head h1 {
+  color: var(--text-primary);
+}
+
+.secp-prototype-suite .c-card,
+.secp-prototype-suite .c-metric,
+.secp-prototype-suite .c-capnotice,
+.secp-prototype-suite .c-accordion,
+.secp-prototype-suite .c-dialog__panel,
+.secp-prototype-suite .c-drawer__panel {
+  background: linear-gradient(145deg, rgba(22, 58, 84, 0.68), rgba(4, 18, 31, 0.84));
+  border-color: rgba(107, 200, 246, 0.24);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.07),
+    0 18px 50px rgba(0, 0, 0, 0.18);
+}
+
+.secp-prototype-suite .c-table {
+  background: rgba(3, 14, 25, 0.58);
+  border-color: rgba(105, 198, 244, 0.16);
+}
+
+.secp-prototype-suite .c-table thead th {
+  color: var(--text-muted);
+  background: rgba(15, 46, 68, 0.82);
+}
+
+.secp-prototype-suite .c-table tbody tr:nth-child(even) td {
+  background: rgba(18, 48, 69, 0.2);
+}
+
+.secp-prototype-suite .c-tabs,
+.secp-prototype-suite .l-workspace__tabs {
+  border-bottom-color: rgba(105, 198, 244, 0.16);
+}
+
+.secp-prototype-suite input,
+.secp-prototype-suite select,
+.secp-prototype-suite textarea {
+  color: var(--text-primary);
+  background: rgba(7, 23, 38, 0.82);
+  border-color: rgba(105, 198, 244, 0.2);
+}
+
+.secp-prototype-suite button {
+  font-family: inherit;
+}
+
+@media (max-width: 900px) {
+  .secp-prototype-suite .u-page,
+  .secp-prototype-suite .l-workspace {
+    width: calc(100vw - 24px);
+  }
+}
