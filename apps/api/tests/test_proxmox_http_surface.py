@@ -870,3 +870,90 @@ def test_operation_generation_survives_serialization(session, principal):
     # And on every object in the desired state.
     for guest in compiled.manifest["guests"]:
         assert "operation_generation" in guest["ownership"]
+
+
+# --- three addresses, never one ----------------------------------------------
+
+
+def test_all_three_addresses_are_typed_and_separate(session, principal):
+    """#103: the worker probed the address the range PUBLISHED, and readiness hung.
+
+    The published address is not necessarily reachable from the worker. A client that sees only
+    one address re-derives the same wrong conclusion, so all three are separate typed fields.
+    """
+    from secp_api.proxmox_projection import topology_out
+
+    instance = make_range(session, principal)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    out = topology_out(compiled, None, proxmox_lifecycle.PlanState.compiled)
+    assert out.guests
+    for guest in out.guests:
+        assert guest.address.published_address
+        # Nothing was observed, so the observed address is absent — not the published one.
+        assert guest.address.observed_address is None
+        assert guest.address.observed is False
+        # And the probe address is never silently filled from the published one.
+        if guest.address.probe_address is not None:
+            assert guest.address.probe_is_distinct == (
+                guest.address.probe_address != guest.address.published_address
+            )
+
+
+def test_an_observed_address_never_overwrites_the_planned_ones(session, principal):
+    from secp_api.proxmox_projection import topology_out
+
+    instance = make_range(session, principal)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    first = compiled.manifest["guests"][0]
+    recorded = {
+        "infrastructure_outcome": "verified",
+        "guests": [{"vmid": first["vmid"], "address": "203.0.113.9"}],
+    }
+    out = topology_out(compiled, None, proxmox_lifecycle.PlanState.compiled, verification=recorded)
+    seen = next(g for g in out.guests if g.vmid == first["vmid"])
+    assert seen.address.observed_address == "203.0.113.9"
+    assert seen.address.observed is True
+    # The planned addresses are untouched by the observation.
+    assert seen.address.published_address == first["address"]["published_address"]
+    assert seen.address.probe_address == first["address"]["probe_address"]
+    assert seen.address.published_address != "203.0.113.9"
+
+    # A guest with no observation stays unobserved rather than inheriting a sibling's address.
+    others = [g for g in out.guests if g.vmid != first["vmid"]]
+    assert others
+    assert all(g.address.observed is False and g.address.observed_address is None for g in others)
+
+
+def test_the_typed_guests_are_published_in_the_openapi_contract(client):
+    """The raw topology blob is not a contract; the typed guest is."""
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    address = schemas["ProxmoxGuestAddressOut"]["properties"]
+    for field in ("published_address", "probe_address", "observed_address", "probe_is_distinct"):
+        assert field in address, f"{field} is not in the published contract"
+    assert "guests" in schemas["ProxmoxTopologyOut"]["properties"]
+    assert "operation_generation" in schemas["ProxmoxGuestOut"]["properties"]
+
+
+def test_a_blocked_lifecycle_is_a_blocked_shape_not_a_thin_plan(session, principal):
+    """`plan_hash: null` beside otherwise-normal fields cannot be told from 'computed and empty'."""
+    from secp_api.proxmox_projection import lifecycle_out
+
+    instance = make_range(session, principal, record_observation=False)
+    compiled = proxmox_lifecycle.compile_plan(session, instance)
+    out = lifecycle_out(
+        instance,
+        compiled,
+        None,
+        plan_state=proxmox_lifecycle.PlanState.blocked,
+        apply_state=proxmox_lifecycle.AuthorizationState.undetermined,
+        destroy_state=proxmox_lifecycle.AuthorizationState.undetermined,
+        verification=proxmox_lifecycle.RecordedStageState.undetermined,
+        reset_state=proxmox_lifecycle.RecordedStageState.undetermined,
+        residue=proxmox_lifecycle.RecordedStageState.undetermined,
+    )
+    assert out.plan_state is proxmox_lifecycle.PlanState.blocked
+    assert out.plan_hash is None and out.destroy_hash is None
+    assert out.readiness_satisfied is None and out.isolation_holds is None
+    # The blockers are the answer, and they are never empty on a blocked plan.
+    assert out.blocked_reasons
+    assert out.blocked_reasons[0].reason_id == "proxmox.no_observation_of_record"

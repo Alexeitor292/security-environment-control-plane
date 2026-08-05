@@ -27,6 +27,8 @@ from secp_api.schemas_proxmox import (
     ProxmoxApplyAuthorizationOut,
     ProxmoxDestroyAuthorizationOut,
     ProxmoxDestroyPlanOut,
+    ProxmoxGuestAddressOut,
+    ProxmoxGuestOut,
     ProxmoxLifecycleOut,
     ProxmoxObservationOut,
     ProxmoxOwnershipOut,
@@ -156,10 +158,68 @@ def observation_out(
     )
 
 
+def _observed_guests(recorded: dict | None) -> dict[int, dict]:
+    """Index a recorded verification's guest observations by vmid.
+
+    Returns ``{}`` when nothing was recorded, which the caller turns into ``observed=False`` on
+    every guest — not into an address.
+    """
+    if not recorded:
+        return {}
+    observed: dict[int, dict] = {}
+    for entry in recorded.get("guests") or ():
+        if isinstance(entry, dict) and isinstance(entry.get("vmid"), int):
+            observed[entry["vmid"]] = entry
+    return observed
+
+
+def guest_out(guest: dict, observed: dict[int, dict]) -> ProxmoxGuestOut:
+    """One planned guest, with its three addresses kept apart.
+
+    ``published_address`` and ``probe_address`` come from the compiled plan and are never
+    substituted for one another. ``observed_address`` comes only from a recorded observation; with
+    none, it is ``None`` and ``observed`` is ``False``, which says nobody looked rather than
+    claiming an address.
+    """
+    address = guest.get("address") or {}
+    published = str(address.get("published_address") or "")
+    probe = address.get("probe_address")
+    vmid = guest.get("vmid")
+    seen = observed.get(vmid) if isinstance(vmid, int) else None
+    ownership = guest.get("ownership") or {}
+    return ProxmoxGuestOut(
+        guest_ref=str(guest.get("guest_ref") or ""),
+        name=str(guest.get("name") or ""),
+        kind=str(guest.get("kind") or ""),
+        vmid=guest.get("vmid"),
+        node_name=guest.get("node_name"),
+        template_ref=guest.get("template_ref"),
+        team_ref=ownership.get("team_ref"),
+        address=ProxmoxGuestAddressOut(
+            published_address=published,
+            probe_address=probe,
+            # The domain's own rule: distinct only when present AND different. Never derived by a
+            # client, and never a fallback.
+            probe_is_distinct=bool(probe is not None and probe != published),
+            observed_address=(seen or {}).get("address"),
+            observed=seen is not None,
+        ),
+        mac_addresses=[
+            nic["mac_address"]
+            for nic in (guest.get("nics") or ())
+            if isinstance(nic, dict) and nic.get("mac_address")
+        ],
+        generation=ownership.get("generation"),
+        operation_generation=ownership.get("operation_generation"),
+    )
+
+
 def topology_out(
     compiled: CompiledRangePlan | BlockedPlan,
     binding: ProxmoxBinding | None,
     state: PlanState,
+    *,
+    verification: dict | None = None,
 ) -> ProxmoxTopologyOut:
     if isinstance(compiled, BlockedPlan):
         return ProxmoxTopologyOut(
@@ -168,11 +228,13 @@ def topology_out(
             blocked_reasons=blocked_reasons_out(compiled),
             observation=observation_out(binding),
         )
+    observed = _observed_guests(verification)
     return ProxmoxTopologyOut(
         state=state,
         plan_hash=compiled.plan_hash,
         observation=observation_out(binding),
         topology=compiled.manifest,
+        guests=[guest_out(guest, observed) for guest in compiled.manifest.get("guests") or ()],
         team_refs=[team.team_ref for team in compiled.binding.teams],
         guest_count=len(compiled.workload.topology.guests),
         vnet_count=len(compiled.workload.topology.network.vnets),
@@ -417,23 +479,43 @@ def lifecycle_out(
     reset_state: RecordedStageState,
     residue: RecordedStageState,
 ) -> ProxmoxLifecycleOut:
-    blocked = isinstance(compiled, BlockedPlan)
+    """Roll the whole lifecycle up, with BLOCKED as a first-class shape, not a degenerate one.
+
+    The blocked case returns early on an ``isinstance`` narrowing rather than reading a compiled
+    plan's fields behind a boolean. That is not a style preference: a ternary over a
+    ``blocked = isinstance(...)`` flag reads every attribute on the union anyway — the type checker
+    caught exactly that here — and it produces a body where ``plan_hash: null`` sits beside
+    otherwise-normal fields, which is indistinguishable from "computed, and empty". A blocked
+    lifecycle answers with its unresolved prerequisites and nothing else.
+    """
+    common = {
+        "range_id": instance.id,
+        "provider": instance.provider,
+        "range_state": instance.state.value,
+        "observation": observation_out(binding),
+        "plan_state": plan_state,
+        "apply_authorization": apply_state,
+        "destroy_authorization": destroy_state,
+        "verification": verification,
+        "reset_dispositions": reset_state,
+        "residue": residue,
+    }
+    if isinstance(compiled, BlockedPlan):
+        return ProxmoxLifecycleOut(
+            **common,
+            plan_hash=None,
+            destroy_hash=None,
+            readiness_satisfied=None,
+            isolation_holds=None,
+            blocked_reasons=blocked_reasons_out(compiled),
+        )
     return ProxmoxLifecycleOut(
-        range_id=instance.id,
-        provider=instance.provider,
-        range_state=instance.state.value,
-        observation=observation_out(binding),
-        plan_state=plan_state,
-        plan_hash=None if blocked else compiled.plan_hash,
-        destroy_hash=None if blocked else compiled.destroy_hash,
-        apply_authorization=apply_state,
-        destroy_authorization=destroy_state,
-        verification=verification,
-        reset_dispositions=reset_state,
-        residue=residue,
-        readiness_satisfied=(None if blocked else readiness_is_satisfied(compiled.readiness)),
-        isolation_holds=(None if blocked else all(finding.holds for finding in compiled.isolation)),
-        blocked_reasons=blocked_reasons_out(compiled),
+        **common,
+        plan_hash=compiled.plan_hash,
+        destroy_hash=compiled.destroy_hash,
+        readiness_satisfied=readiness_is_satisfied(compiled.readiness),
+        isolation_holds=all(finding.holds for finding in compiled.isolation),
+        blocked_reasons=[],
     )
 
 

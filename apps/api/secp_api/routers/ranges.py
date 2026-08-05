@@ -351,12 +351,26 @@ def get_proxmox_topology(
     session: Session = DB_SESSION,
     principal: Principal = Depends(current_principal),
 ) -> ProxmoxTopologyOut:
-    """The compiled desired state — what would exist if this plan were applied exactly."""
+    """The compiled desired state — what would exist if this plan were applied exactly.
+
+    Each guest carries three separate addresses: the ``published_address`` a participant is told to
+    use, the ``probe_address`` readiness verification actually connects to, and the
+    ``observed_address`` the provider reported after apply. The published address is not
+    necessarily reachable from the worker — #103 was exactly that — so none of the three is ever
+    substituted for another, and an unobserved address stays null.
+    """
     instance, binding, compiled = _resolve(session, principal, range_id)
     state = proxmox_lifecycle.plan_state(
         compiled, proxmox_lifecycle.plan_approval(session, instance)
     )
-    return topology_out(compiled, binding, state)
+    return topology_out(
+        compiled,
+        binding,
+        state,
+        verification=proxmox_lifecycle.recorded_stage(
+            session, instance, proxmox_lifecycle.EVENT_VERIFICATION
+        ),
+    )
 
 
 @router.get("/ranges/{range_id}/proxmox/allocations", response_model=ProxmoxAllocationsOut)

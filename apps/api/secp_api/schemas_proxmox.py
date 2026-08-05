@@ -193,6 +193,58 @@ class OwnershipClassOut(BaseModel):
 # --- read surfaces -------------------------------------------------------------
 
 
+class ProxmoxGuestAddressOut(BaseModel):
+    """A guest's addresses, kept strictly separate — THREE concepts, never one.
+
+    This repository has already paid for conflating them. A worker probed the address the range
+    had *published* — a loopback address, from inside a container where the port was not — so
+    readiness could never be observed and the range hung. #103 fixed it by separating the two, and
+    :class:`~secp_api.range_providers.proxmox_model.GuestAddress` refuses to fall back from one to
+    the other for the same reason: a readiness check that quietly probes the published address
+    proves the address was published, not that the guest is reachable.
+
+    The wire has to keep them apart too, or a client re-derives the same wrong conclusion:
+
+    ``published_address``  what a scoreboard or a participant is told to use. NOT NECESSARILY
+                           REACHABLE from the worker.
+    ``probe_address``      what readiness verification actually connects to. ``None`` means no
+                           distinct probe address was assigned — never "use the published one".
+    ``observed_address``   what the provider actually reported for this guest after apply.
+                           ``None`` means not observed, which is not an address and not a failure.
+    """
+
+    published_address: str
+    probe_address: str | None = None
+    #: The domain's own :attr:`GuestAddress.probe_is_distinct`, published so a client does not
+    #: re-derive it (and cannot re-derive it wrongly).
+    probe_is_distinct: bool
+    #: ``None`` until a verification is recorded that reports one. Distinct from ``observed``.
+    observed_address: str | None = None
+    #: Whether ANY observation of this guest has been recorded. ``False`` with
+    #: ``observed_address: null`` means nobody has looked; ``True`` with ``null`` means the
+    #: provider was observed and reported no address.
+    observed: bool = False
+
+
+class ProxmoxGuestOut(BaseModel):
+    """One planned guest, typed — so the contract carries it rather than an opaque blob."""
+
+    guest_ref: str
+    name: str
+    kind: str
+    vmid: int | None = None
+    node_name: str | None = None
+    template_ref: str | None = None
+    team_ref: str | None = None
+    address: ProxmoxGuestAddressOut
+    #: MAC addresses this guest's NICs are allocated, in NIC order.
+    mac_addresses: list[str] = Field(default_factory=list)
+    #: Carried per guest because it distinguishes THIS operation's objects from a previous
+    #: generation's. Dropping it is how a reset's objects become indistinguishable from a deploy's.
+    generation: int | None = None
+    operation_generation: int | None = None
+
+
 class ProxmoxTopologyOut(BaseModel):
     """The compiled desired state: what would exist if this plan were applied exactly."""
 
@@ -203,6 +255,10 @@ class ProxmoxTopologyOut(BaseModel):
     observation: ProxmoxObservationOut
     #: The canonical desired-state document. Same content the plan hash is taken over.
     topology: dict[str, Any] | None = None
+    #: The same guests as ``topology["guests"]``, typed. The raw document stays because the plan
+    #: hash is taken over it and a reviewer must be able to see exactly what was hashed; this is
+    #: what a client should actually read.
+    guests: list[ProxmoxGuestOut] | None = None
     #: ``None`` when the plan did not compile. An empty list would read as "a lab with no
     #: teams", which is a shape the compiler refuses to produce.
     team_refs: list[str] | None = None
