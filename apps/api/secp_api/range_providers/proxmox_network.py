@@ -59,6 +59,19 @@ IPSET_MANAGEMENT = "secp-mgmt"
 #: IPSet holding the SECP controller/worker management interfaces.
 IPSET_CONTROL_PLANE = "secp-ctlplane"
 
+#: Off-segment destinations :func:`verify_isolation` probes to prove no default public route.
+#:
+#: These are RFC 5737 TEST-NET-1/TEST-NET-2 documentation addresses, reserved precisely so they can
+#: appear in code and tests while routing nowhere. A real address here (a public resolver, a real
+#: site) would be one refactor away from a genuine connection attempt originating from the module
+#: whose entire purpose is proving no such route exists — so the probe set stays unroutable by
+#: construction, not by intent.
+#:
+#: TEST-NET-3 (``203.0.113.0/24``) is deliberately NOT used here: it is the block the egress tests
+#: use for an APPROVED destination, and keeping "must never be reachable" and "reachable only when
+#: approved" in different blocks stops one from silently satisfying the other's assertion.
+PUBLIC_PROBE_ADDRESSES = ("192.0.2.53", "192.0.2.200", "198.51.100.10")
+
 #: Rule positions are spaced so the isolation block always precedes every allow, and a later edit
 #: adding an allow cannot land above the denies by accident.
 _POS_MANAGEMENT_DENY = 0
@@ -865,7 +878,7 @@ def verify_isolation(
 
     # -- no default public route ---------------------------------------------------------
     approved_egress = plan.egress.allowed_destinations if plan.egress else ()
-    public_probe = ("8.8.8.8", "1.1.1.1", "93.184.216.34")
+    public_probe = PUBLIC_PROBE_ADDRESSES
     public_violations: list[str] = []
     for source in plan.vnets:
         for address in public_probe:

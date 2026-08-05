@@ -44,6 +44,7 @@ from secp_api.range_providers.proxmox_model import (
     is_owned_by_secp,
 )
 from secp_api.range_providers.proxmox_network import (
+    PUBLIC_PROBE_ADDRESSES,
     ControlPlaneReviewedPath,
     IsolationProperty,
     TeamRequest,
@@ -319,7 +320,9 @@ def test_reviewed_path_refuses_a_widened_destination_or_port():
 def test_no_public_route_by_default():
     plan, _ = compile_ok()
     for vnet in plan.vnets:
-        for address in ("8.8.8.8", "1.1.1.1", "93.184.216.34"):
+        # RFC 5737 documentation addresses: unroutable by construction, so this test can never
+        # become a real connection attempt. See PUBLIC_PROBE_ADDRESSES.
+        for address in PUBLIC_PROBE_ADDRESSES:
             assert (
                 evaluate_flow(plan, from_vnet=vnet.name, to_address=address, port=443)
                 is FirewallVerdict.drop
