@@ -514,6 +514,42 @@ layer. Nothing else differs.
 | Keyboard | `Ctrl+Shift+K` opens and `Escape` closes the command menu on both — the shell's own handler, dispatched live |
 | `@media` conditions | 23 distinct, identical counts, +1 `print` |
 | Layout at 640/760/900/1024/1280/1600 | every measured field identical |
+
+### Responsive layout, probed from the stylesheet rather than by guess
+
+**Equal-and-meaningless is not equal-and-verified.** A first pass hand-picked
+what to measure and produced six identical rows, one of which (`gridCols`)
+returned `1` at every width on both sides because the selector fell through to a
+non-grid container. It was withdrawn rather than counted — the table looks the
+same either way, which is exactly why it had to be checked.
+
+The probe set is now **derived from the `@media` blocks themselves**: enumerate
+every `[condition, selector, property]` the stylesheet changes, then at each
+width read the computed value of exactly those properties on exactly those
+elements. Coverage is computed rather than assumed, so the null result means
+something — and it immediately found what guessing had missed:
+**`grid-template-columns` is changed 32 times**, the second most-modified
+property in the entire responsive layer, and the original probe measured none of
+it.
+
+**314 selector/property pairs across 19 width conditions. Every digest matches.**
+
+| Width | Properties measured | Digest (donor = repo) |
+| ---: | ---: | --- |
+| 640 | 74 | `44251118` |
+| 700 | 57 | `61bcd5bc` |
+| 760 | 39 | `a275028b` |
+| 900 | 30 | `813970ee` |
+| 1024 | 12 | `352b0d4d` |
+| 1280 | 1 | `18feca79` |
+| 1600 | 1 | `18feca79` |
+
+**Coverage limit, stated because the numbers expose it:** at 640px, 74 pairs were
+measured and **228 were skipped because their selectors match no element on the
+home shell** — they target markup inside apps that this pass did not open. So
+this verifies the responsive layer *of the surfaces that were mounted*, not all
+314 pairs. At 1280 and 1600 only one property was measurable, so those two rows
+are near-empty and should not be read as broad agreement.
 | **Animation & transition timing** | **55 distinct durations, identical counts; easings identical; 6 delay values; 33 `animation-name`s — zero difference** |
 
 ### The 3D scene — driven through the real flow, on both sides
@@ -571,12 +607,7 @@ as proving everything in it:
   selectors is strong; it is not pixels.
 - **Breakpoints are declared, not exercised.** Identical `@media` conditions do
   not prove the layout reflows identically at 720px.
-- **The resize pass found little reflow to compare.** Only viewport-tracking
-  values varied across 640→1600; dock, widgets and font-size were constant. Either
-  the shell genuinely does not reflow in that range or the probes do not touch
-  where it does — those are not distinguished. One measure (`gridCols`) was
-  **withdrawn as uninformative**: it returned `1` at every width on both sides
-  because the selector fell through to a non-grid container.
+- **Focus styles were sampled on 4 of 34** focusable elements.
 - **Focus styles were sampled on 4 of 34** focusable elements.
 - Element counts are structure, not pixels: two different layouts can share one.
 - **The animation result is DECLARED timing, not observed playback.** I also tried
