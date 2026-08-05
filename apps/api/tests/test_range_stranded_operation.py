@@ -62,7 +62,7 @@ from secp_worker.range.execution import (
     RangeExecutionUnresolvable,
     execute_range_operation,
 )
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 provider = pytest.fixture(provider_fixture)
 
@@ -202,25 +202,40 @@ def test_operation_from_another_organization_is_refused(session, principal, prov
 
 
 def _age(session, operation: RangeDeploymentOperation, minutes: int) -> None:
-    """Backdate an operation's durable progress so its lease has genuinely expired.
+    """Backdate a range's operation history so the given operation's lease has genuinely expired.
 
     Backdating the ROWS rather than injecting a clock keeps the real derivation under test: the
     lease is computed from ``started_at`` and the per-step ``at`` stamps, and both are moved here
     exactly as the passage of time would have left them.
+
+    EVERY operation on the range moves, not just this one. Shifting one row backwards would reorder
+    the range's history — a reset aged past the deploy that preceded it stops being the range's
+    newest operation, and ``current_operation`` would then report the long-finished deploy. Time
+    passing does not reorder anything, so neither does this.
     """
     shift = timedelta(minutes=minutes)
-    operation.started_at = operation.started_at - shift
-    aged = []
-    for original in operation.steps or []:
-        step = dict(original)
-        at = step.get("at")
-        if isinstance(at, str):
-            parsed = datetime.fromisoformat(at)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=UTC)
-            step["at"] = (parsed - shift).isoformat()
-        aged.append(step)
-    operation.steps = aged
+    siblings = (
+        session.execute(
+            select(RangeDeploymentOperation).where(
+                RangeDeploymentOperation.range_instance_id == operation.range_instance_id
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in siblings:
+        row.started_at = row.started_at - shift
+        aged = []
+        for original in row.steps or []:
+            step = dict(original)
+            at = step.get("at")
+            if isinstance(at, str):
+                parsed = datetime.fromisoformat(at)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+                step["at"] = (parsed - shift).isoformat()
+            aged.append(step)
+        row.steps = aged
     session.commit()
 
 
@@ -380,6 +395,11 @@ def test_operator_recovers_a_stranded_range_over_http_with_no_sql(session, princ
     assert status["lease_expires_at"] is not None
     assert "never picked up" in status["stale_reason"]
 
+    # And it is visible from the RANGE LIST, where an operator would actually look first. Without
+    # this a stranded range is indistinguishable from a busy one until you open it.
+    listed = next(row for row in client.get("/api/v1/ranges").json() if row["id"] == str(range_id))
+    assert listed["current_operation"]["stale"] is True
+
     abandoned = client.post(f"/api/v1/range-operations/{operation_id}/abandon")
     assert abandoned.status_code == 200
     # ``unproven``, NOT ``failed``: nobody observed this operation fail. It stopped being
@@ -390,6 +410,9 @@ def test_operator_recovers_a_stranded_range_over_http_with_no_sql(session, princ
     recovered = client.get(f"/api/v1/ranges/{range_id}").json()
     assert recovered["state"] == "recovery_required"
     assert "no observable progress" in recovered["state_reason"]
+
+    session.expire_all()
+    assert ranges.get_range(session, principal, range_id).state is RangeState.recovery_required
 
     # And the way out is now open: destroy is no longer refused by the STATE MACHINE.
     #

@@ -112,6 +112,10 @@ class RangeOperationSummaryOut(BaseModel):
     completed_steps: int
     total_steps: int
     percent: int
+    #: Carried on the SUMMARY, not just the full operation, because this is what a range list is
+    #: for: an operator scanning ranges has to be able to see which one is stuck without opening
+    #: each operation in turn. A stranded range otherwise looks exactly like a busy one.
+    stale: bool = False
 
 
 class RangeOperationAbandonIn(BaseModel):

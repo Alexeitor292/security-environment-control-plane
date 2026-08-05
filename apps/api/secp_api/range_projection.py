@@ -135,6 +135,7 @@ def operation_summary(operation: RangeDeploymentOperation) -> RangeOperationSumm
         completed_steps=operation.completed_steps,
         total_steps=operation.total_steps,
         percent=_percent(operation.completed_steps, operation.total_steps),
+        stale=operation_staleness(operation).stale,
     )
 
 
