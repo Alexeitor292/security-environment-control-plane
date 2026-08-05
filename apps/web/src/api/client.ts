@@ -61,6 +61,15 @@ import type {
   DiscoveryReadiness,
   SubstrateEligibilityGrant,
 } from "./types";
+import type {
+  Range,
+  RangeCreate,
+  RangeEvent,
+  RangeOperation,
+  RangeResource,
+  RangeTemplate,
+  TeardownEvidence,
+} from "./range-types";
 
 export interface ApiBaseResolution {
   /** true when a usable API base was resolved; false means requests must fail closed. */
@@ -301,6 +310,57 @@ async function request<T>(
 }
 
 export const api = {
+  // --- Ranges (SECP range API) ---------------------------------------------------------------
+  //
+  // The range surface deploys REAL local infrastructure through a provider, unlike the exercise
+  // surface whose shipped provider is the simulator. Lifecycle mutations return 202 with an
+  // operation and do their work in the background on the durable worker path, so every one of them
+  // is followed by polling `getRange` rather than by trusting the response body as the new state.
+  listRangeTemplates: () => request<RangeTemplate[]>("GET", "/api/v1/range-templates"),
+  getRangeTemplate: (slug: string) =>
+    request<RangeTemplate>("GET", `/api/v1/range-templates/${slug}`),
+
+  listRanges: (query: { state?: readonly string[]; includeDestroyed?: boolean } = {}) => {
+    const params: QueryParams = {};
+    if (query.state && query.state.length > 0) params.state = [...query.state];
+    if (query.includeDestroyed !== undefined) {
+      params.include_destroyed = String(query.includeDestroyed);
+    }
+    return request<Range[]>("GET", "/api/v1/ranges", undefined, params);
+  },
+  createRange: (body: RangeCreate) => request<Range>("POST", "/api/v1/ranges", body),
+  /** The polling endpoint: `state` and `current_operation.percent` are what move. */
+  getRange: (rangeId: string) => request<Range>("GET", `/api/v1/ranges/${rangeId}`),
+
+  // 202 + a background operation. Allowed from `draft` and `failed`.
+  deployRange: (rangeId: string) =>
+    request<RangeOperation>("POST", `/api/v1/ranges/${rangeId}/deploy`),
+  // Allowed from `ready`, `active`, `failed`. Clears competition scores; keeps teams/challenges.
+  resetRange: (rangeId: string) =>
+    request<RangeOperation>("POST", `/api/v1/ranges/${rangeId}/reset`),
+  // Allowed from every state except `destroying`/`destroyed`. Terminal state is `destroyed`
+  // (proved gone) or `recovery_required` (unproven — could not observe).
+  destroyRange: (rangeId: string) =>
+    request<RangeOperation>("POST", `/api/v1/ranges/${rangeId}/destroy`),
+
+  getRangeOperation: (operationId: string) =>
+    request<RangeOperation>("GET", `/api/v1/range-operations/${operationId}`),
+  listRangeOperations: (rangeId: string) =>
+    request<RangeOperation[]>("GET", `/api/v1/ranges/${rangeId}/operations`),
+  listRangeResources: (rangeId: string) =>
+    request<RangeResource[]>("GET", `/api/v1/ranges/${rangeId}/resources`),
+  /** Append-only, oldest first. `afterSequence` fetches only what is new. */
+  listRangeEvents: (rangeId: string, afterSequence?: number) =>
+    request<RangeEvent[]>(
+      "GET",
+      `/api/v1/ranges/${rangeId}/events`,
+      undefined,
+      afterSequence === undefined ? undefined : { after_sequence: String(afterSequence) },
+    ),
+  /** `[]` if the range was never destroyed. Newest first. */
+  listTeardownEvidence: (rangeId: string) =>
+    request<TeardownEvidence[]>("GET", `/api/v1/ranges/${rangeId}/teardown-evidence`),
+
   // Public browser auth configuration (ADR-018). Sent WITHOUT an Authorization header.
   authConfig: () =>
     request<AuthConfig>("GET", "/api/v1/auth/config", undefined, undefined, { anonymous: true }),

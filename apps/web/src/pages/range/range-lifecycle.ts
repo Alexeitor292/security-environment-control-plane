@@ -182,18 +182,24 @@ export type RangeAction = "deploy" | "reset" | "destroy";
 export function permittedActions(lifecycle: RangeLifecycle): readonly RangeAction[] {
   if (!lifecycle.known) return [];
   switch (lifecycle.phase) {
+    // Deploy is allowed from `draft` and `failed`; destroy from everything except the two
+    // destroy states. Destroy is offered mid-flight deliberately — an operator aborting a stuck
+    // deploy needs it, and the server permits it.
     case "draft":
-      return ["deploy"];
+      return ["deploy", "destroy"];
+    case "failed":
+      return ["deploy", "reset", "destroy"];
     case "ready":
     case "active":
       return ["reset", "destroy"];
-    // A failed range still has whatever the failed operation left behind, so tearing it down is
-    // exactly what an operator needs. Re-deploying over the wreckage is not offered.
-    case "failed":
-    case "recovery_required":
-      return ["destroy"];
     case "deploying":
     case "resetting":
+      return ["destroy"];
+    // `recovery_required` permits ONLY destroy: retrying an operation over infrastructure nobody
+    // could observe turns one unproven outcome into two. Destroy is offered because attempting the
+    // teardown again is the one action that can still resolve the unknown.
+    case "recovery_required":
+      return ["destroy"];
     case "destroying":
     case "destroyed":
       return [];

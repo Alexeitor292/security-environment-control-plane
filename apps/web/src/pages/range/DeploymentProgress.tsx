@@ -1,6 +1,6 @@
 import "./range.css";
 
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 
 import { api } from "../../api/client";
 import {
@@ -16,211 +16,209 @@ import {
 } from "../../components/ui";
 import { useAsync } from "../../hooks";
 import { useRange } from "./RangeLayout";
+import { RANGE_PHASE_HELP, permittedActions } from "./range-lifecycle";
 import {
-  DEPLOYMENT_STEPS,
-  RANGE_PHASE_HELP,
-  RANGE_PHASE_LABEL,
-  deploymentProgress,
-  deploymentStepStatus,
-} from "./range-lifecycle";
-import {
-  DEPLOY_IS_GATED_NOTE,
   EXECUTION_POSTURE_NOTE,
-  GATE_LABEL,
+  OPERATION_KIND_LABEL,
   RANGE_ERROR_TEXT,
-  deployGate,
-  timelineEntries,
+  UNPROVEN_NOTE,
+  operationOutcomeText,
+  operationProgress,
 } from "./range-view";
-import { onlyNotFoundAsNull } from "../environments-view";
 
 /**
  * Page 3 — Deployment Progress.
  *
- * The step rail and the meter are computed from the range's RECORDED lifecycle state, which the
- * layout re-reads from the server every couple of seconds while an operation is in flight. Nothing
- * here animates expected progress: if the server does not advance, neither does the rail.
+ * Progress comes from the server's own operation record, re-read by the layout every 2s while
+ * anything is in flight. Nothing here animates expected progress: if the server does not advance,
+ * neither does the page.
  *
- * The page also walks the approval gate, because on this control plane a range cannot be deployed
- * until its plan has been generated, submitted and approved. Exactly one next action is offered at
- * a time, and it is derived from the recorded state rather than from what the operator last
- * clicked.
+ * The critical case is the window between the 202 and the worker picking the operation up. In that
+ * window `total_steps` is 0 because THE PLAN DOES NOT EXIST YET — the API is not permitted to hold
+ * a provider, so it cannot plan the steps. That is rendered as an indeterminate bar, never as 0%,
+ * because "we do not know how much work there is" and "no work has been done" are different
+ * claims and only the first is true.
  */
 export function DeploymentProgress() {
   const { range, lifecycle, reloadRange, polling } = useRange();
   const action = useAction({ codeText: RANGE_ERROR_TEXT });
 
-  // A plan may legitimately not exist yet. Only a 404 means "no plan"; every other failure must
-  // surface as an error rather than as a false claim of absence.
-  const plan = useAsync(
-    () => api.latestPlan(range.id).catch(onlyNotFoundAsNull),
-    [range.id, range.lifecycle_state],
+  // The full operation record — steps live here, not on the range summary.
+  const operationId = range.current_operation?.id ?? null;
+  const operation = useAsync(
+    () => (operationId === null ? Promise.resolve(null) : api.getRangeOperation(operationId)),
+    [operationId, range.updated_at],
   );
 
-  // The recent recorded events for this range — the evidence that the phase changes above came
-  // from the backend and not from the client.
-  const events = useAsync(
-    () => api.audit(range.id),
-    [range.id, range.lifecycle_state],
-  );
+  // The server's incremental log for this range.
+  const events = useAsync(() => api.listRangeEvents(range.id), [range.id, range.updated_at]);
 
-  const gate = deployGate(range, plan.data ?? null);
-  const progress = deploymentProgress(lifecycle);
+  const progress = useMemo(
+    () => operationProgress(range.current_operation),
+    [range.current_operation],
+  );
+  const outcome = operationOutcomeText(operation.data);
+  const canDeploy = permittedActions(lifecycle).includes("deploy");
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([reloadRange(), plan.reload(), events.reload()]);
-  }, [reloadRange, plan, events]);
+    await Promise.all([reloadRange(), operation.reload(), events.reload()]);
+  }, [reloadRange, operation, events]);
 
-  const runGateAction = () => {
-    const call = {
-      validate: () => api.validateExercise(range.id),
-      "generate-plan": () => api.generatePlan(range.id),
-      "submit-plan": async () => {
-        const p = plan.data ?? (await api.latestPlan(range.id));
-        return api.submitPlan(p.id);
-      },
-      "approve-plan": async () => {
-        const p = plan.data ?? (await api.latestPlan(range.id));
-        return api.approvePlan(p.id, "Approved from the range deployment page.");
-      },
-      deploy: () => api.deployExercise(range.id),
-      none: async () => undefined,
-    }[gate.next];
-    return action.run(call, refreshAll);
-  };
+  const deploy = () => action.run(() => api.deployRange(range.id), refreshAll);
 
-  const recent = events.data ? timelineEntries(events.data).slice(0, 8) : [];
+  const recent = useMemo(
+    () => [...(events.data ?? [])].sort((a, b) => b.sequence - a.sequence).slice(0, 12),
+    [events.data],
+  );
 
   return (
     <div className="rng">
       <CyberCard heading="Deployment" headingLevel={2}>
-        <div
-          className="rng-meter"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(progress * 100)}
-          aria-label="Deployment progress"
-          style={{ ["--rng-progress" as string]: String(progress) }}
-        >
-          <div className="rng-meter-fill" />
-        </div>
-
-        <ol className="rng-steps">
-          {DEPLOYMENT_STEPS.map((step) => {
-            const status = deploymentStepStatus(step, lifecycle);
-            return (
-              <li key={step} className={`rng-step rng-step--${status}`}>
-                <StatusBadge state={step} domain="range" />
-                <span className="rng-step-name">{RANGE_PHASE_LABEL[step]}</span>
-                <span className="rng-step-note">
-                  {status === "failed"
-                    ? "This step failed. Inspect the events below."
-                    : status === "current"
-                      ? "In progress — waiting on the server."
-                      : status === "done"
-                        ? "Complete."
-                        : RANGE_PHASE_HELP[step]}
-                </span>
-              </li>
-            );
-          })}
-        </ol>
-
-        {polling && (
-          <p className="rng-live" role="status">
-            <span className="rng-live-dot" aria-hidden="true" />
-            The server is mid-operation. This page is re-reading the recorded state until it
-            settles.
-          </p>
-        )}
-      </CyberCard>
-
-      <CyberCard heading="Approval gate" headingLevel={2}>
-        <SafetyNotice role="note" tone="info">
-          {DEPLOY_IS_GATED_NOTE}
-        </SafetyNotice>
-
-        {gate.next === "none" ? (
-          <EmptyState
-            title={
-              gate.blockedReason === null
-                ? "Deployment complete"
-                : "No deployment action available"
-            }
-          >
-            {gate.blockedReason ?? RANGE_PHASE_HELP[lifecycle.phase]}
+        {progress.kind === "none" ? (
+          <EmptyState title="Not deployed yet">
+            {RANGE_PHASE_HELP[lifecycle.phase]}
           </EmptyState>
         ) : (
           <>
-            <ol className="rng-steps">
-              {(["validate", "generate-plan", "submit-plan", "approve-plan", "deploy"] as const).map(
-                (step) => {
-                  const done = gate.completed.includes(step);
-                  const current = gate.next === step;
-                  return (
-                    <li
-                      key={step}
-                      className={`rng-step ${current ? "rng-step--current" : done ? "rng-step--done" : ""}`}
-                    >
-                      <span className="rng-step-name">{GATE_LABEL[step]}</span>
-                      <span className="rng-step-note">
-                        {done ? "Complete." : current ? gate.help : "Not reached."}
-                      </span>
-                    </li>
-                  );
-                },
-              )}
-            </ol>
-
-            {action.error !== null && (
-              <ClosedCodeError
-                error={action.error}
-                codeText={RANGE_ERROR_TEXT}
-                onDismiss={action.clearError}
+            <div className="rng-meta">
+              <StatusBadge
+                state={range.current_operation?.status ?? "pending"}
+                domain="range-operation"
               />
+              <span>
+                {OPERATION_KIND_LABEL[range.current_operation?.kind ?? ""] ?? "Operation"}
+                {range.current_operation?.phase !== null &&
+                range.current_operation?.phase !== undefined
+                  ? ` · ${range.current_operation.phase}`
+                  : ""}
+              </span>
+              <span className="muted">{progress.label}</span>
+            </div>
+
+            {progress.kind === "indeterminate" ? (
+              // No numeric value: an indeterminate bar states "working, amount unknown". Giving it
+              // aria-valuenow={0} would announce "0 percent" to a screen reader, which is the same
+              // false claim as showing 0%.
+              <div
+                className="rng-meter rng-meter--indeterminate"
+                role="progressbar"
+                aria-label="Deployment progress"
+                aria-valuetext="Waiting for the worker to plan the steps"
+              >
+                <div className="rng-meter-sweep" />
+              </div>
+            ) : (
+              <div
+                className="rng-meter"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progress.percent ?? 0}
+                aria-label="Deployment progress"
+                style={{ ["--rng-progress" as string]: String((progress.percent ?? 0) / 100) }}
+              >
+                <div className="rng-meter-fill" />
+              </div>
             )}
 
-            <div className="rng-card-foot">
-              <CyberButton
-                variant="primary"
-                disabled={action.busy || !lifecycle.known}
-                onClick={runGateAction}
+            {outcome !== null && (
+              <SafetyNotice
+                role="alert"
+                tone={operation.data?.status === "unproven" ? "warn" : "danger"}
               >
-                {action.busy ? "Working…" : gate.label}
-              </CyberButton>
-              <CyberButton onClick={() => void refreshAll()} disabled={action.busy}>
-                Refresh
-              </CyberButton>
-            </div>
+                {outcome}
+              </SafetyNotice>
+            )}
+            {operation.data?.status === "unproven" && (
+              <SafetyNotice role="note" tone="warn">
+                {UNPROVEN_NOTE}
+              </SafetyNotice>
+            )}
+
+            {polling && (
+              <p className="rng-live" role="status">
+                <span className="rng-live-dot" aria-hidden="true" />
+                An operation is in flight. This page is re-reading the recorded state until it
+                settles.
+              </p>
+            )}
           </>
         )}
+
+        {action.error !== null && (
+          <ClosedCodeError
+            error={action.error}
+            codeText={RANGE_ERROR_TEXT}
+            onDismiss={action.clearError}
+          />
+        )}
+
+        <div className="rng-card-foot">
+          {canDeploy && (
+            <CyberButton variant="primary" disabled={action.busy} onClick={deploy}>
+              {action.busy ? "Dispatching…" : "Deploy range"}
+            </CyberButton>
+          )}
+          <CyberButton onClick={() => void refreshAll()} disabled={action.busy}>
+            Refresh
+          </CyberButton>
+        </div>
       </CyberCard>
 
-      <CyberCard heading="Recent recorded events" headingLevel={2}>
+      <CyberCard heading="Operation steps" headingLevel={2}>
+        <DataPanel
+          state={operation}
+          isEmpty={() => (operation.data?.steps.length ?? 0) === 0}
+          empty={
+            <EmptyState title="No steps planned yet">
+              {/* The honest reading of total_steps: 0 while pending. */}
+              The worker plans an operation&rsquo;s steps when it picks it up. Until then there is
+              no plan to show — this is not an empty deployment.
+            </EmptyState>
+          }
+        >
+          {(op) => (
+            <ol className="rng-steps">
+              {op === null
+                ? null
+                : op.steps.map((step) => (
+                    <li key={step.key} className={`rng-step rng-step--${step.status}`}>
+                      <StatusBadge state={step.status} domain="range-operation" />
+                      <span className="rng-step-name">{step.label}</span>
+                      <span className="rng-step-note">
+                        {step.detail ?? (step.at === null ? "" : step.at.slice(11, 19))}
+                      </span>
+                    </li>
+                  ))}
+            </ol>
+          )}
+        </DataPanel>
+      </CyberCard>
+
+      <CyberCard heading="Recent events" headingLevel={2}>
         <DataPanel
           state={events}
           isEmpty={() => recent.length === 0}
           empty={
             <EmptyState title="No events recorded for this range yet">
-              The ledger records every mutation and authorization decision. Nothing has been
-              recorded against this range so far.
+              The server appends an event for everything that happens to this range.
             </EmptyState>
           }
         >
           {() => (
             <CyberTable
               label="Recent range events"
-              head={["When", "Action", "Outcome", "Actor"]}
-              caption="The eight most recent recorded events. This is the server's ledger — no client-side entries."
+              head={["#", "When", "Event", "Level"]}
+              caption="The twelve most recent server-recorded events, newest first."
             >
               {recent.map((e) => (
                 <tr key={e.id}>
-                  <td className="muted mono">{e.at.slice(0, 19).replace("T", " ")}</td>
-                  <td className="mono">{e.action}</td>
+                  <td className="muted mono">{e.sequence}</td>
+                  <td className="muted mono">{e.occurred_at.slice(11, 19)}</td>
+                  <td>{e.message}</td>
                   <td>
-                    <StatusBadge state={e.outcome} domain="audit" />
+                    <StatusBadge state={e.level} domain="range-event" />
                   </td>
-                  <td className="muted">{e.actor}</td>
                 </tr>
               ))}
             </CyberTable>
@@ -228,7 +226,7 @@ export function DeploymentProgress() {
         </DataPanel>
       </CyberCard>
 
-      <SafetyNotice role="note" tone="info">
+      <SafetyNotice role="note" tone="warn">
         {EXECUTION_POSTURE_NOTE}
       </SafetyNotice>
     </div>

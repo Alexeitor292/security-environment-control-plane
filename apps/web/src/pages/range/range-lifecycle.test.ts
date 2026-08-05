@@ -179,25 +179,42 @@ describe("phase predicates", () => {
   });
 });
 
-describe("permittedActions", () => {
-  it("offers deploy only from draft", () => {
-    expect(permittedActions(rangeLifecycle("draft"))).toEqual(["deploy"]);
-  });
-
-  it("offers reset and destroy on a ready range", () => {
-    expect(permittedActions(rangeLifecycle("running"))).toEqual(["reset", "destroy"]);
-  });
-
-  it("offers destroy but not deploy on a failed range", () => {
-    const actions = permittedActions(rangeLifecycle("failed"));
-    expect(actions).toContain("destroy");
-    expect(actions).not.toContain("deploy");
-  });
-
-  it("offers nothing while an operation is in flight", () => {
-    for (const state of ["deploying", "resetting", "destroying"]) {
-      expect(permittedActions(rangeLifecycle(state))).toEqual([]);
+describe("permittedActions — mirrors the range contract's transition rules", () => {
+  it("offers deploy from draft and from failed, and nowhere else", () => {
+    for (const phase of RANGE_PHASE_ORDER) {
+      const offered = permittedActions(rangeLifecycle(phase)).includes("deploy");
+      expect(offered, `deploy on ${phase}`).toBe(phase === "draft" || phase === "failed");
     }
+  });
+
+  it("offers reset from ready, active and failed, and nowhere else", () => {
+    for (const phase of RANGE_PHASE_ORDER) {
+      const offered = permittedActions(rangeLifecycle(phase)).includes("reset");
+      expect(offered, `reset on ${phase}`).toBe(
+        phase === "ready" || phase === "active" || phase === "failed",
+      );
+    }
+  });
+
+  it("offers destroy from every state except the two destroy states", () => {
+    for (const phase of RANGE_PHASE_ORDER) {
+      const offered = permittedActions(rangeLifecycle(phase)).includes("destroy");
+      expect(offered, `destroy on ${phase}`).toBe(
+        phase !== "destroying" && phase !== "destroyed",
+      );
+    }
+  });
+
+  it("offers destroy mid-flight so a stuck operation can be aborted", () => {
+    for (const phase of ["deploying", "resetting"]) {
+      expect(permittedActions(rangeLifecycle(phase))).toEqual(["destroy"]);
+    }
+  });
+
+  it("offers ONLY destroy on recovery_required", () => {
+    // Retrying an operation over infrastructure nobody could observe turns one unproven outcome
+    // into two. Destroy is offered because attempting teardown again can still resolve the unknown.
+    expect(permittedActions(rangeLifecycle("recovery_required"))).toEqual(["destroy"]);
   });
 
   it("offers nothing on a destroyed range", () => {

@@ -47,7 +47,8 @@ export type StatusDomain =
   | "plan-decision"
   | "enrollment"
   | "range"
-  | "range-operation";
+  | "range-operation"
+  | "range-event";
 
 export const LIFECYCLE_TONE: Record<LifecycleState, StatusTone> = {
   draft: "pending",
@@ -301,6 +302,13 @@ export const RANGE_OPERATION_TONE: Record<string, StatusTone> = {
   unproven: "warn",
 };
 
+/** `RangeEventLevel` on the append-only range event log. */
+export const RANGE_EVENT_TONE: Record<string, StatusTone> = {
+  info: "pending",
+  warning: "warn",
+  error: "danger",
+};
+
 // Deliberately NOT added to DEFAULT_ORDER: every enrollment call site passes
 // domain="enrollment", and every range call site passes domain="range", so
 // these keys can never shadow (or be shadowed by) an identically-named state
@@ -325,6 +333,7 @@ const DOMAIN_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   enrollment: ENROLLMENT_TONE,
   range: RANGE_TONE,
   "range-operation": RANGE_OPERATION_TONE,
+  "range-event": RANGE_EVENT_TONE,
 };
 
 /** Resolution order for domain-less lookups. Lifecycle then plan first, which

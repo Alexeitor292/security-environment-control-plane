@@ -1,32 +1,28 @@
 // The range vertical slice, executed against a REAL control plane.
 //
-// This is the acceptance producer: the same flow that used to exist only as a sequence of manual
-// browser steps and a folder of screenshots. It runs the identical step definition as
-// `range-flow.test.ts` — see `range-flow.ts` — so the two cannot describe different flows.
+// This is the acceptance producer, and it is THE ONLY HALF THAT TOUCHES INFRASTRUCTURE. It runs
+// the identical step definition as `range-flow.test.ts` — see `range-flow.ts` — so the two cannot
+// describe different flows, but only this one proves a container was actually started.
 //
 // RUN IT:
-//   1. start the API:  .venv/Scripts/python.exe -m uvicorn secp_api.main:app --port 8099
-//   2. from apps/web:  VITE_API_BASE_URL=http://localhost:8099 npm run test:live
+//   1. start the API:     .venv/Scripts/python.exe -m uvicorn secp_api.main:app --port 8099
+//   2. start the WORKER, with access to the Docker socket. Range operations run on the durable
+//      worker path; `InlineDispatcher` refuses range dispatch outright, so without a worker the
+//      range is created and then never leaves `deploying`.
+//   3. from apps/web:     VITE_API_BASE_URL=http://localhost:8099 npm run test:live
 //
-// It is NOT in the default gate, because it needs a server the Frontend CI job does not have.
-// It is deliberately NOT a conditionally-skipped test either: a suite that silently passes when
-// its subject is absent is how coverage disappears while CI stays green. If the API is unreachable
-// this FAILS, loudly, naming what was missing — an absent acceptance run is visible as a failure or
-// as a command nobody ran, never as a pass.
+// It is NOT in the default gate, because the Frontend CI job has no control plane, no worker and no
+// Docker socket. It is deliberately NOT a conditionally-skipped test either: a suite that silently
+// passes when its subject is absent is how coverage disappears while CI stays green. Without a
+// reachable API this FAILS, naming what was missing.
 //
-// It creates a range, deploys it, resets a team and DESTROYS it. Point it only at a development
-// control plane.
+// It creates a range, DEPLOYS REAL CONTAINERS, resets and destroys them. Point it only at a
+// development host you are willing to have containers created on.
 
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { API_BASE, api } from "../../api/client";
-import {
-  EXPECTED_LEDGER_ORDER,
-  FLOW_STEPS,
-  firstMissingInOrder,
-  runRangeFlow,
-  type FlowResult,
-} from "./range-flow";
+import { FLOW_STEPS, firstMissingInOrder, runRangeFlow, type FlowResult } from "./range-flow";
 
 const RANGE_NAME = `Acceptance ${new Date().toISOString().slice(0, 19)}`;
 
@@ -35,51 +31,63 @@ let result: FlowResult;
 beforeAll(async () => {
   // Fail with an actionable message rather than a raw connection error, but FAIL — never skip.
   try {
-    await api.listTemplates();
+    await api.listRangeTemplates();
   } catch (e) {
     throw new Error(
-      `The live acceptance run needs a reachable control plane at ${API_BASE}. ` +
-        `Start it with: .venv/Scripts/python.exe -m uvicorn secp_api.main:app --port 8099 ` +
-        `and run with VITE_API_BASE_URL set. Underlying failure: ${String(e)}`,
+      `The live acceptance run needs a reachable control plane at ${API_BASE} with the range API ` +
+        `available. Start it with: .venv/Scripts/python.exe -m uvicorn secp_api.main:app --port 8099 ` +
+        `and run with VITE_API_BASE_URL set. A running worker with the Docker socket is also ` +
+        `required — range operations are refused on the inline path. Underlying failure: ${String(e)}`,
     );
   }
 
   result = await runRangeFlow(api, {
     rangeName: RANGE_NAME,
     onStep: (o) => {
-      // Progress is printed so a human watching a real deployment can see it advance.
       // eslint-disable-next-line no-console
-      console.log(`  ${o.step.padEnd(16)} recorded=${o.recorded.padEnd(18)} phase=${o.phase}`);
+      console.log(`  ${o.step.padEnd(18)} recorded=${o.recorded.padEnd(18)} phase=${o.phase}`);
     },
   });
-}, 120_000);
+}, 600_000);
 
 describe("range vertical slice — against a real control plane", () => {
   it("runs every step of the flow", () => {
     expect(result.observations.map((o) => o.step)).toEqual([...FLOW_STEPS]);
   });
 
-  it("reaches a deployed range and then a destroyed one", () => {
-    const byStep = Object.fromEntries(result.observations.map((o) => [o.step, o]));
-    expect(byStep.deployed.phase).toBe("active");
-    expect(byStep.destroyed.recorded).toBe("destroyed");
+  it("does not treat the 202 as completion", () => {
+    const dispatched = result.observations.find((o) => o.step === "deploy-dispatched");
+    expect(dispatched?.recorded).toBe("deploying");
   });
 
-  it("creates real team instances with reachable-looking targets", () => {
+  it("reaches a deployed range with reachable targets", () => {
+    const deployed = result.observations.find((o) => o.step === "deployed");
+    expect(deployed?.recorded).toBe("ready");
+    expect(deployed?.detail.accessCount).toBeGreaterThan(0);
+    // The whole point of the range surface over the exercise surface: reachability was OBSERVED.
+    expect(deployed?.detail.reachableCount).toBeGreaterThan(0);
+    expect(deployed?.detail.observedCount).toBe(deployed?.detail.accessCount);
+  });
+
+  it("creates real provider resources", () => {
     const inspected = result.observations.find((o) => o.step === "inspected");
-    expect(inspected?.detail.instanceCount).toBeGreaterThan(0);
-    expect(inspected?.detail.targetCount).toBeGreaterThan(0);
+    expect(inspected?.detail.containerCount).toBeGreaterThan(0);
     expect(inspected?.detail.blastRadiusComplete).toBe(true);
   });
 
-  it("records the full lifecycle in the server's own audit ledger", () => {
-    // The ledger is the evidence that this happened on the server, not merely in the client.
-    expect(firstMissingInOrder(result.auditActions, EXPECTED_LEDGER_ORDER)).toBeNull();
+  it("records the lifecycle in the server's own event log", () => {
+    expect(
+      firstMissingInOrder(result.eventKinds, ["deploy_started", "reset_started", "destroy_started"]),
+    ).toBeNull();
   });
 
-  it("leaves the range destroyed, not merely requested", () => {
+  it("ends destroyed with a proved-clean teardown, not merely requested", () => {
     const last = result.observations[result.observations.length - 1];
+    // If the teardown probe could not run this is `recovery_required` with an `unproven` verdict —
+    // a legitimate outcome, but not one an acceptance run should pass on, because it means nobody
+    // proved the containers are gone.
     expect(last.recorded).toBe("destroyed");
-    expect(last.phase).toBe("destroyed");
+    expect(last.detail.residueVerdict).toBe("clean");
+    expect(result.teardownVerdict).toBe("clean");
   });
 });

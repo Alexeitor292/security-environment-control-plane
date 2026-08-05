@@ -13,47 +13,51 @@ import {
   MetricTile,
   SafetyNotice,
   StatusBadge,
-  shortId,
 } from "../../components/ui";
 import { useAsync } from "../../hooks";
-import { detailFields, hiddenFieldsNote, ledgerTimestamp, OPERATOR_SAFE_NOTE } from "../audit-view";
 import { useRange } from "./RangeLayout";
-import { timelineEntries, timelineTally } from "./range-view";
+import { UNPROVEN_NOTE, teardownSummary } from "./range-view";
 
 /**
  * Page 8 — Evidence and Event Timeline.
  *
- * The range-scoped slice of the append-only audit ledger, read live from `GET /api/v1/audit`.
- * Event detail renders through the SAME operator-safe allowlist the global ledger uses
- * (`audit-view.detailFields`), so free-form backend internals and secret-shaped values are withheld
- * here exactly as they are there — this page does not get its own, looser rules.
+ * Two live reads: the append-only range event log, and the teardown evidence. The evidence half is
+ * the reason this page matters — it is where "we could not prove the residue is gone" is stated in
+ * full rather than compressed into a status badge.
  */
 export function RangeTimeline() {
   const { range } = useRange();
   const [query, setQuery] = useState("");
-  const [flaggedOnly, setFlaggedOnly] = useState(false);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [problemsOnly, setProblemsOnly] = useState(false);
 
   const events = useAsync(
-    () => api.audit(range.id),
-    [range.id, range.lifecycle_state],
+    () => api.listRangeEvents(range.id),
+    [range.id, range.updated_at],
+  );
+  const evidence = useAsync(
+    () => api.listTeardownEvidence(range.id).catch(() => []),
+    [range.id, range.updated_at],
   );
 
-  const all = useMemo(() => timelineEntries(events.data ?? []), [events.data]);
-  const tally = useMemo(() => timelineTally(all), [all]);
+  // Newest first for reading; the server returns oldest first for incremental fetch.
+  const all = useMemo(
+    () => [...(events.data ?? [])].sort((a, b) => b.sequence - a.sequence),
+    [events.data],
+  );
+  const problems = all.filter((e) => e.level !== "info").length;
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return all.filter((e) => {
-      if (flaggedOnly && !e.flagged) return false;
+      if (problemsOnly && e.level === "info") return false;
       if (!q) return true;
-      return `${e.action} ${e.actor} ${e.outcome} ${e.resourceType}`.toLowerCase().includes(q);
+      return `${e.message} ${e.kind} ${e.level}`.toLowerCase().includes(q);
     });
-  }, [all, query, flaggedOnly]);
+  }, [all, query, problemsOnly]);
 
-  const byId = useMemo(
-    () => new Map((events.data ?? []).map((e) => [e.id, e])),
-    [events.data],
+  const teardowns = useMemo(
+    () => (evidence.data ?? []).map(teardownSummary),
+    [evidence.data],
   );
 
   return (
@@ -61,35 +65,79 @@ export function RangeTimeline() {
       <div className="rng-grid">
         <MetricTile
           label="Recorded events"
-          value={events.data === null ? "—" : tally.total}
-          detail={events.data === null ? "Ledger unavailable." : "Scoped to this range"}
+          value={events.data === null ? "—" : all.length}
+          detail={events.data === null ? "Event log unavailable." : "Append-only, server-owned"}
         />
         <MetricTile
-          label="Flagged"
-          value={events.data === null ? "—" : tally.flagged}
-          tone={tally.flagged > 0 ? "warn" : "default"}
-          detail="Any outcome other than success"
+          label="Warnings and errors"
+          value={events.data === null ? "—" : problems}
+          tone={problems > 0 ? "warn" : "default"}
+          detail="Events above info level"
         />
       </div>
 
-      <CyberCard heading="Event timeline" headingLevel={2}>
-        <SafetyNotice role="note" tone="info">
-          {OPERATOR_SAFE_NOTE}
-        </SafetyNotice>
+      {teardowns.length > 0 && (
+        <CyberCard heading="Teardown evidence" headingLevel={2}>
+          {teardowns.map((t) => (
+            <div key={t.observedAt} className="rng-evidence">
+              <div className="rng-identity">
+                <StatusBadge state={t.verdict} domain="range-operation" />
+                <strong>{t.headline}</strong>
+                <span className="rng-recorded">{t.observedAt.slice(0, 19).replace("T", " ")}</span>
+              </div>
+              <p className="rng-sub">{t.detail}</p>
+              <div className="rng-meta">
+                <span>{t.expected} expected</span>
+                <span>{t.removedConfirmed} confirmed removed</span>
+                <span>{t.stillPresent} still present</span>
+                {/* Never folded into either of the two counts above. */}
+                <span>{t.unprovenCount} unproven</span>
+              </div>
+              {!t.provedClean && (
+                <SafetyNotice role="alert" tone="warn">
+                  {UNPROVEN_NOTE}
+                </SafetyNotice>
+              )}
+              {t.resources.length > 0 && (
+                <CyberTable
+                  label="Teardown resources"
+                  head={["Resource", "Kind", "Verdict", "Detail"]}
+                  caption="Per-resource verdict from the teardown probe"
+                >
+                  {t.resources.map((r) => (
+                    <tr key={`${r.kind}:${r.name}`}>
+                      <td className="mono">{r.name}</td>
+                      <td className="muted">{r.kind}</td>
+                      <td>
+                        <StatusBadge
+                          state={r.verdict === "removed" ? "removed" : r.verdict}
+                          domain="range-operation"
+                        />
+                      </td>
+                      <td className="muted">{r.detail ?? "—"}</td>
+                    </tr>
+                  ))}
+                </CyberTable>
+              )}
+            </div>
+          ))}
+        </CyberCard>
+      )}
 
+      <CyberCard heading="Event timeline" headingLevel={2}>
         <div className="rng-search">
           <CyberInput
             label="Filter events"
-            placeholder="Action, actor or outcome"
+            placeholder="Message, kind or level"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
           <CyberButton
-            variant={flaggedOnly ? "primary" : undefined}
-            aria-pressed={flaggedOnly}
-            onClick={() => setFlaggedOnly((v) => !v)}
+            variant={problemsOnly ? "primary" : undefined}
+            aria-pressed={problemsOnly}
+            onClick={() => setProblemsOnly((v) => !v)}
           >
-            {flaggedOnly ? "Showing flagged only" : "Show flagged only"}
+            {problemsOnly ? "Showing problems only" : "Show problems only"}
           </CyberButton>
           <CyberButton onClick={() => void events.reload()}>Refresh</CyberButton>
         </div>
@@ -99,69 +147,34 @@ export function RangeTimeline() {
           isEmpty={() => all.length === 0}
           empty={
             <EmptyState title="No events recorded for this range">
-              Nothing has been recorded against this range yet. The timeline shows only what the
-              ledger holds — it never infers an event from the current state.
+              The timeline shows only what the server recorded — it never infers an event from the
+              current state.
             </EmptyState>
           }
         >
           {() =>
             visible.length === 0 ? (
               <EmptyState title="No event matches those filters">
-                {tally.total} event{tally.total === 1 ? "" : "s"} recorded for this range.
+                {all.length} event{all.length === 1 ? "" : "s"} recorded for this range.
               </EmptyState>
             ) : (
               <CyberTable
                 label="Range event timeline"
-                head={["When", "Action", "Outcome", "Actor", "Resource", ""]}
-                caption={`${visible.length} of ${tally.total} recorded event${tally.total === 1 ? "" : "s"} · append-only ledger, newest first`}
+                head={["#", "When", "Event", "Kind", "Level"]}
+                caption={`${visible.length} of ${all.length} recorded event${all.length === 1 ? "" : "s"} · append-only, newest first`}
               >
-                {visible.map((e) => {
-                  const raw = byId.get(e.id);
-                  const isOpen = expanded === e.id;
-                  const detail = raw ? detailFields(raw) : { fields: [], hiddenCount: 0 };
-                  return (
-                    <tr key={e.id}>
-                      <td className="muted mono">{ledgerTimestamp(e.at)}</td>
-                      <td className="mono">{e.action}</td>
-                      <td>
-                        <StatusBadge state={e.outcome} domain="audit" />
-                      </td>
-                      <td className="muted">{e.actor}</td>
-                      <td className="muted mono" title={e.resourceId ?? undefined}>
-                        {e.resourceId === null ? e.resourceType : shortId(e.resourceId)}
-                      </td>
-                      <td>
-                        <CyberButton
-                          size="sm"
-                          aria-expanded={isOpen}
-                          onClick={() => setExpanded(isOpen ? null : e.id)}
-                        >
-                          {isOpen ? "Hide" : "Evidence"}
-                        </CyberButton>
-                        {isOpen && (
-                          <div className="rng-meta">
-                            {detail.fields.length === 0 ? (
-                              <span className="muted">
-                                No displayable recorded fields for this event.
-                              </span>
-                            ) : (
-                              detail.fields.map((f) => (
-                                <span key={f.key} className={f.mono ? "mono" : undefined}>
-                                  <strong>{f.label}:</strong> {f.value}
-                                </span>
-                              ))
-                            )}
-                            {detail.hiddenCount > 0 && (
-                              <span className="muted">
-                                {hiddenFieldsNote(detail.hiddenCount)}
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {visible.map((e) => (
+                  <tr key={e.id}>
+                    <td className="muted mono">{e.sequence}</td>
+                    <td className="muted mono">{e.occurred_at.slice(0, 19).replace("T", " ")}</td>
+                    {/* `message` is the display text; `kind` is a stable machine string. */}
+                    <td>{e.message}</td>
+                    <td className="muted mono">{e.kind}</td>
+                    <td>
+                      <StatusBadge state={e.level} domain="range-event" />
+                    </td>
+                  </tr>
+                ))}
               </CyberTable>
             )
           }

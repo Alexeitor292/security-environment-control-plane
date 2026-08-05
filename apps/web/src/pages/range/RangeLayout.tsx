@@ -14,7 +14,6 @@ import {
   shortId,
   type TabItem,
 } from "../../components/ui";
-import { RECOVERY_REQUIRED_NOTE } from "./range-view";
 import {
   RANGE_PHASE_HELP,
   RANGE_PHASE_LABEL,
@@ -22,15 +21,16 @@ import {
   rangeLifecycle,
   type RangeLifecycle,
 } from "./range-lifecycle";
+import { RECOVERY_REQUIRED_NOTE, operationInFlight } from "./range-view";
 import { usePolledAsync } from "./use-range-polling";
-import type { Exercise } from "../../api/types";
+import type { Range } from "../../api/range-types";
 
 export interface RangeContext {
-  range: Exercise;
+  range: Range;
   lifecycle: RangeLifecycle;
   /** Refetch the range. Every mutating child calls this so the header advances too. */
-  reloadRange: () => Promise<Exercise | null>;
-  /** True while the layout is polling because the server is mid-operation. */
+  reloadRange: () => Promise<Range | null>;
+  /** True while the layout is polling because an operation is in flight. */
   polling: boolean;
 }
 
@@ -50,21 +50,24 @@ const TABS: readonly { id: string; label: string; segment: string }[] = [
 ];
 
 /**
- * Shell for every single-range surface: loads the range ONCE for all seven tabs, renders the
- * identity header, and owns the lifecycle poll.
+ * Shell for every single-range surface: loads the range once for all seven tabs, renders the
+ * identity header, and owns the poll.
  *
- * Polling lives here rather than on the deployment page so the phase badge advances no matter which
- * tab the operator is on — a destroy started from the lifecycle tab must be visible from the
- * overview without a manual refresh.
+ * Polling is decided from the RANGE ITSELF — an in-flight operation, or a transitional state — so
+ * a destroy started on the lifecycle tab keeps advancing while the operator reads the overview.
+ * `GET /ranges/{id}` is the contract's designated polling endpoint and the only thing polled here.
  */
 export function RangeLayout() {
   const { rangeId = "" } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
 
-  const state = usePolledAsync(() => api.getExercise(rangeId), [rangeId], {
+  const state = usePolledAsync(() => api.getRange(rangeId), [rangeId], {
+    intervalMs: 2000,
     shouldPoll: (range) =>
-      range !== null && isInFlight(rangeLifecycle(range.lifecycle_state).phase),
+      range !== null &&
+      (operationInFlight(range.current_operation) ||
+        isInFlight(rangeLifecycle(range.state).phase)),
   });
 
   const range = state.data;
@@ -97,7 +100,7 @@ export function RangeLayout() {
     );
   }
 
-  const lifecycle = rangeLifecycle(range.lifecycle_state);
+  const lifecycle = rangeLifecycle(range.state);
   const tabs: TabItem[] = TABS.map((t) => ({ id: t.id, label: t.label }));
 
   const context: RangeContext = {
@@ -117,9 +120,9 @@ export function RangeLayout() {
           <div className="rng-identity">
             <StatusBadge state={lifecycle.phase} domain="range" />
             <span>{RANGE_PHASE_LABEL[lifecycle.phase]}</span>
-            {/* The precise server-recorded state, always shown next to the product phase so the
-                projection in range-lifecycle.ts is never something the operator has to take on
-                trust. */}
+            {/* The raw server-recorded state, always beside the label. The range API emits these
+                natively so this is not a projection today — it stays because the untranslated
+                value next to the rendered one is what makes the rendering checkable. */}
             <span className="rng-recorded" title="State recorded by the control plane">
               recorded: {lifecycle.recorded}
             </span>
@@ -132,28 +135,27 @@ export function RangeLayout() {
             )}
           </div>
           <p className="rng-sub">{RANGE_PHASE_HELP[lifecycle.phase]}</p>
+          {/* The server's own explanation of the state, when it gave one. */}
+          {range.state_reason !== null && range.state_reason !== "" && (
+            <p className="rng-sub">{range.state_reason}</p>
+          )}
           {!lifecycle.known && (
             <p className="rng-sub" role="alert">
-              This build does not recognize the recorded state{" "}
-              <code>{lifecycle.recorded}</code>. No lifecycle actions are offered until it is
-              understood.
+              This build does not recognize the recorded state <code>{lifecycle.recorded}</code>.
+              No lifecycle actions are offered until it is understood.
             </p>
           )}
         </div>
         <div className="rng-meta">
           <span title={range.id}>range {shortId(range.id)}</span>
-          <span title={range.environment_version_id}>
-            version {shortId(range.environment_version_id)}
-          </span>
-          <span>
-            {range.team_count} team{range.team_count === 1 ? "" : "s"}
-          </span>
+          <span>{range.template_name}</span>
+          <span className="mono">{range.provider}</span>
         </div>
       </div>
 
       {/* Rendered above the tabs, so it is present on EVERY range surface rather than only the one
-          that happened to trigger it. An unprovable outcome that is only visible on one tab is an
-          unprovable outcome an operator can navigate away from. */}
+          that happened to trigger it. An unprovable outcome visible on one tab is one an operator
+          can navigate away from. */}
       {lifecycle.phase === "recovery_required" && lifecycle.known && (
         <SafetyNotice role="alert" tone="warn">
           {RECOVERY_REQUIRED_NOTE}

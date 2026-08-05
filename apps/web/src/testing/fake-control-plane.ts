@@ -1,152 +1,319 @@
-// A fetch-level fake of the control-plane routes the range flow uses.
+// A fetch-level fake of the RANGE API routes the flow uses.
 //
 // TEST-ONLY. It exists so `range-flow.test.ts` can drive the REAL api client through the whole
-// vertical slice on every PR without a server.
+// vertical slice on every PR without a control plane, a worker or Docker.
 //
-// It models the lifecycle this repo observed the shipped API produce:
+// It models the parts of the contract that the client can get wrong:
 //
-//   draft --validate--> validated --plan--> planned --submit--> awaiting_approval
-//         --approve--> approved --deploy--> running --destroy--> destroyed
-//
-// and appends the same audit actions, including one `instance.created` per team.
+//   - lifecycle: draft -> deploying -> ready -> resetting -> ready -> destroying -> destroyed
+//   - 202 + BACKGROUND work. A mutation does not change the state synchronously; the state
+//     advances only after `workerTicks` subsequent polls, so a client that assumes the mutation's
+//     response is the new truth fails here.
+//   - THE PRE-PLAN WINDOW: immediately after the 202 the operation is `pending` with
+//     `total_steps: 0`, because the API cannot plan an operation it is not permitted to hold a
+//     provider for. The worker fills the plan in on a later poll. A progress bar dividing by
+//     `total_steps` divides by zero here.
+//   - `unproven` teardown: `failTeardownProbe` makes destroy land in `recovery_required` with an
+//     `unproven` residue verdict rather than in `destroyed`.
 //
 // WHAT IT CANNOT DO, stated so nobody mistakes a green run for more than it is: this fake is this
 // repo's BELIEF about the server. If the real API changes, the fake keeps agreeing with the client
-// and the gate stays green. Only `range-flow.live-test.ts`, against a real control plane, can catch
-// that. What this does catch is the client regressing — a dropped call, a reordered step, a
-// mutation that stops refreshing what it changed.
+// and the gate stays green. Only the live run can catch that. Its fidelity is pinned by
+// `range-contract.test.ts`, which checks the fake's enums against the frozen contract's.
 
-interface FakeExercise {
+interface FakeOperation {
   id: string;
-  organization_id: string;
-  template_id: string;
-  environment_version_id: string;
-  name: string;
-  lifecycle_state: string;
-  team_count: number;
-  created_at: string;
-}
-
-interface FakePlan {
-  id: string;
-  exercise_id: string;
+  range_id: string;
+  kind: string;
   status: string;
+  phase: string | null;
+  completed_steps: number;
+  total_steps: number;
+  percent: number;
+  failure_code: string | null;
+  failure_message: string | null;
+  started_at: string;
+  finished_at: string | null;
+  steps: { key: string; label: string; status: string; detail: string | null; at: string | null }[];
 }
 
-interface FakeInstance {
-  id: string;
-  exercise_id: string;
-  team_index: number;
-  team_ref: string;
-  instance_ref: string;
-  lifecycle_state: string;
-  provider: string;
+export interface FakeRangeApiOptions {
+  /** Polls the worker takes to plan the operation, then to finish it. */
+  workerTicks?: number;
+  /** Make the teardown probe unreachable, so destroy lands in recovery_required. */
+  failTeardownProbe?: boolean;
+  /** Make deploy fail rather than succeed. */
+  failDeploy?: boolean;
 }
 
-export interface FakeControlPlaneOptions {
-  /** Teams the blueprint declares. Each produces one instance on deploy. */
-  teamCount?: number;
-  /** Targets declared per team in the topology. */
-  targetsPerTeam?: number;
-}
-
-export interface FakeControlPlane {
-  /** Install as `globalThis.fetch`. */
+export interface FakeRangeApi {
   fetch: typeof fetch;
   /** Every request the client made, as "METHOD /path" — proves call order. */
   calls: string[];
-  /** The recorded audit ledger, oldest first. */
-  auditActions: () => string[];
-  /** Force the range into a state, for testing branches the happy path never reaches. */
-  setState: (state: string) => void;
+  /** Event kinds recorded so far, in order. */
+  eventKinds: () => string[];
 }
 
-const ORG = "11111111-1111-1111-1111-111111111111";
+const COMPONENTS = [
+  { key: "juice-shop", name: "OWASP Juice Shop", role: "target", image: "bkimminich/juice-shop:v17.1.0", container_port: 3000, protocol: "http", path: "/" },
+  { key: "dvwa", name: "DVWA", role: "target", image: "vulnerables/web-dvwa:1.9", container_port: 80, protocol: "http", path: "/" },
+  { key: "scorer", name: "Scoring probe", role: "scoring", image: "secp/scorer:1", container_port: null, protocol: "http", path: "/" },
+];
 
-export function createFakeControlPlane(
-  opts: FakeControlPlaneOptions = {},
-): FakeControlPlane {
-  const teamCount = opts.teamCount ?? 2;
-  const targetsPerTeam = opts.targetsPerTeam ?? 3;
-
+export function createFakeRangeApi(opts: FakeRangeApiOptions = {}): FakeRangeApi {
+  const workerTicks = opts.workerTicks ?? 1;
   const calls: string[] = [];
+
   let seq = 0;
-  const nextId = (prefix: string) => `${prefix}-${String(++seq).padStart(4, "0")}`;
-  // A fixed clock: the ledger is asserted on ORDER, and a real clock would make two events
-  // recorded in the same millisecond sort unpredictably.
+  const nextId = (p: string) => `${p}-${String(++seq).padStart(4, "0")}`;
+  // A fixed clock so event ordering is deterministic.
   let tick = 0;
   const now = () => {
     tick += 1;
     return `2026-08-05T00:00:${String(tick).padStart(2, "0")}`;
   };
 
-  const audit: { id: string; actor: string; action: string; resource_type: string; resource_id: string | null; outcome: string; data: Record<string, unknown>; created_at: string }[] = [];
-  const record = (action: string, resourceId: string | null, actor = "operator") => {
-    audit.push({
+  const templates = [
+    {
+      slug: "web-breach-lab",
+      name: "Web Breach Lab",
+      summary: "Two intentionally vulnerable web applications on an isolated Docker network.",
+      description: "Longer prose for the detail pane.",
+      provider: "local_docker",
+      difficulty: "beginner",
+      estimated_deploy_seconds: 180,
+      warning: "Contains intentionally vulnerable software. Ephemeral local Docker only.",
+      components: COMPONENTS,
+      challenge_count: 6,
+      total_points: 600,
+    },
+  ];
+
+  interface FakeRange {
+    id: string;
+    name: string;
+    template_slug: string;
+    template_name: string;
+    provider: string;
+    state: string;
+    state_reason: string | null;
+    created_at: string;
+    updated_at: string;
+    deployed_at: string | null;
+    destroyed_at: string | null;
+    competition_id: string | null;
+    residue_verdict: string | null;
+    access: unknown[];
+  }
+
+  let range: FakeRange | null = null;
+  let operation: FakeOperation | null = null;
+  /** Polls remaining before the worker advances the current operation. */
+  let ticksLeft = 0;
+  /** Whether the worker has planned the current operation yet. */
+  let planned = false;
+  let resources: Record<string, unknown>[] = [];
+  const events: { id: string; range_id: string; sequence: number; kind: string; level: string; message: string; data: Record<string, unknown>; occurred_at: string }[] = [];
+  const teardowns: Record<string, unknown>[] = [];
+
+  const emit = (kind: string, message: string, level = "info") => {
+    events.push({
       id: nextId("evt"),
-      actor,
-      action,
-      resource_type: "exercise",
-      resource_id: resourceId,
-      outcome: "success",
+      range_id: range?.id ?? "",
+      sequence: events.length + 1,
+      kind,
+      level,
+      message,
       data: {},
-      created_at: now(),
+      occurred_at: now(),
     });
   };
 
-  const templates = [
-    {
-      id: "tpl-0001",
-      organization_id: ORG,
-      name: "Web Breach 101",
-      slug: "web-breach-101",
-      display_name: "Web Breach 101",
-      description: "Two-team web exploitation scenario.",
-      created_at: "2026-08-01T00:00:00",
-    },
-  ];
-  const versions = [
-    {
-      id: "ver-0001",
-      template_id: "tpl-0001",
-      version_number: 1,
-      api_version: "secp.io/v1alpha2",
-      content_hash: "sha256:bd8d77e726a6b413e0996aec114cb9651b066ceb773cc21e23e49679881bb5f0",
-      spec: {},
-      created_at: "2026-08-01T00:00:00",
-      publication_provenance: null,
-    },
-    // A LOWER version number listed AFTER the highest, so a client that takes "the last element"
-    // instead of the maximum picks the wrong one and the flow test notices.
-    {
-      id: "ver-0000",
-      template_id: "tpl-0001",
-      version_number: 0,
-      api_version: "secp.io/v1alpha1",
-      content_hash: "sha256:0000",
-      spec: {},
-      created_at: "2026-07-01T00:00:00",
-      publication_provenance: null,
-    },
-  ];
-
-  let exercise: FakeExercise | null = null;
-  let plan: FakePlan | null = null;
-  let instances: FakeInstance[] = [];
-
   const json = (body: unknown, status = 200): Response =>
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
+    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   const error = (status: number, code: string, message: string): Response =>
     json({ error: { code, message } }, status);
 
-  // An unknown id must produce a 404 RESPONSE, never a thrown fetch. Throwing would surface to the
-  // client as `api_unreachable` (a transport failure) and would let a genuine not-found bug hide
-  // behind a network-shaped error.
-  const findExercise = (id: string): FakeExercise | null =>
-    exercise !== null && exercise.id === id ? exercise : null;
+  const startOperation = (kind: string): FakeOperation => {
+    // The 202 window: pending, NO PLAN. total_steps is 0 because the API cannot plan an operation
+    // it may not hold a provider for.
+    operation = {
+      id: nextId("op"),
+      range_id: range?.id ?? "",
+      kind,
+      status: "pending",
+      phase: null,
+      completed_steps: 0,
+      total_steps: 0,
+      percent: 0,
+      failure_code: null,
+      failure_message: null,
+      started_at: now(),
+      finished_at: null,
+      steps: [],
+    };
+    planned = false;
+    ticksLeft = workerTicks;
+    return operation;
+  };
+
+  const planSteps = (kind: string) => {
+    if (operation === null) return;
+    const labels =
+      kind === "deploy"
+        ? ["Create isolated network", "Pull OWASP Juice Shop", "Start OWASP Juice Shop", "Verify OWASP Juice Shop responds"]
+        : kind === "reset"
+          ? ["Recreate target containers", "Verify targets respond"]
+          : ["Remove containers", "Remove network", "Verify removal"];
+    operation.status = "running";
+    operation.phase = kind === "deploy" ? "create" : kind;
+    operation.total_steps = labels.length;
+    operation.steps = labels.map((label, i) => ({
+      key: `${kind}-${i}`,
+      label,
+      status: "pending",
+      detail: null,
+      at: null,
+    }));
+    planned = true;
+    emit(`${kind}_planned`, `${labels.length} steps planned`);
+  };
+
+  const finishOperation = (kind: string) => {
+    if (operation === null || range === null) return;
+    const unproven = kind === "destroy" && opts.failTeardownProbe === true;
+    const failed = kind === "deploy" && opts.failDeploy === true;
+
+    operation.completed_steps = operation.total_steps;
+    operation.percent = failed || unproven ? operation.percent : 100;
+    operation.status = failed ? "failed" : unproven ? "unproven" : "succeeded";
+    operation.finished_at = now();
+    operation.steps = operation.steps.map((s) => ({
+      ...s,
+      status: failed ? "failed" : unproven ? "unproven" : "succeeded",
+      at: now(),
+    }));
+    if (failed) {
+      operation.failure_code = "range_provider_unavailable";
+      operation.failure_message = "provider unreachable";
+    }
+
+    if (kind === "deploy") {
+      if (failed) {
+        range.state = "failed";
+        range.state_reason = "The provider could not be reached.";
+        emit("deploy_failed", "Deployment failed", "error");
+      } else {
+        resources = [
+          { id: nextId("res"), kind: "network", provider: "local_docker", component_key: null, name: "secp-range-net", external_id: "net123", image: null, image_digest: null, state: "verified", host_port: null, created_at: now(), removed_at: null, detail: {} },
+          ...COMPONENTS.filter((c) => c.container_port !== null).map((c, i) => ({
+            id: nextId("res"),
+            kind: "container",
+            provider: "local_docker",
+            component_key: c.key,
+            name: `secp-range-${c.key}`,
+            external_id: `ctr${i}`,
+            image: c.image,
+            image_digest: `sha256:dead${i}`,
+            state: "verified",
+            host_port: 34010 + i,
+            created_at: now(),
+            removed_at: null,
+            detail: {},
+          })),
+        ];
+        range.state = "ready";
+        range.deployed_at = now();
+        range.access = COMPONENTS.filter((c) => c.container_port !== null).map((c, i) => ({
+          component_key: c.key,
+          name: c.name,
+          url: `http://127.0.0.1:${34010 + i}/`,
+          host: "127.0.0.1",
+          port: 34010 + i,
+          protocol: "http",
+          reachable: true,
+          observed_at: now(),
+        }));
+        emit("deploy_completed", "Deployment completed");
+      }
+    } else if (kind === "reset") {
+      range.state = "ready";
+      emit("reset_completed", "Reset completed");
+    } else {
+      // Destroy. `unproven` lands in recovery_required, NOT destroyed — nobody proved it is gone.
+      for (const r of resources) {
+        r.state = unproven ? "unproven" : "removed";
+        r.removed_at = unproven ? null : now();
+      }
+      range.access = [];
+      range.state = unproven ? "recovery_required" : "destroyed";
+      range.residue_verdict = unproven ? "unproven" : "clean";
+      range.destroyed_at = unproven ? null : now();
+      if (unproven) range.state_reason = "The teardown probe could not reach the provider.";
+      teardowns.push({
+        id: nextId("tev"),
+        range_id: range.id,
+        operation_id: operation.id,
+        verdict: unproven ? "unproven" : "clean",
+        probe_reachable: !unproven,
+        expected_count: resources.length,
+        removed_confirmed: unproven ? 0 : resources.length,
+        still_present: 0,
+        unproven_count: unproven ? resources.length : 0,
+        reason: unproven
+          ? "The removal and the existence check share a failure mode, so absence was not proved."
+          : null,
+        observed_at: now(),
+        resources: resources.map((r) => ({
+          kind: r.kind,
+          name: r.name,
+          external_id: r.external_id,
+          verdict: unproven ? "unproven" : "removed",
+          detail: null,
+        })),
+      });
+      emit(
+        unproven ? "teardown_unproven" : "destroy_completed",
+        unproven ? "Teardown could not be verified" : "Destroy completed",
+        unproven ? "warning" : "info",
+      );
+    }
+    range.updated_at = now();
+  };
+
+  /** Advance the worker one poll. Called on every `GET /ranges/{id}`. */
+  const advanceWorker = () => {
+    if (operation === null || range === null) return;
+    if (operation.status === "succeeded" || operation.status === "failed" || operation.status === "unproven") {
+      return;
+    }
+    if (ticksLeft > 0) {
+      ticksLeft -= 1;
+      return;
+    }
+    if (!planned) {
+      planSteps(operation.kind);
+      ticksLeft = workerTicks;
+      return;
+    }
+    finishOperation(operation.kind);
+  };
+
+  const summary = (op: FakeOperation | null) =>
+    op === null
+      ? null
+      : {
+          id: op.id,
+          kind: op.kind,
+          status: op.status,
+          phase: op.phase,
+          completed_steps: op.completed_steps,
+          total_steps: op.total_steps,
+          percent: op.percent,
+        };
+
+  const rangeOut = () =>
+    range === null ? null : { ...range, current_operation: summary(operation) };
 
   const fakeFetch: typeof fetch = async (input, init) => {
     const url = new URL(typeof input === "string" ? input : String(input));
@@ -154,164 +321,91 @@ export function createFakeControlPlane(
     const method = (init?.method ?? "GET").toUpperCase();
     calls.push(`${method} ${path}`);
 
-    if (method === "GET" && path === "/api/v1/templates") return json(templates);
-    if (method === "GET" && /^\/api\/v1\/templates\/[^/]+\/versions$/.test(path)) {
-      return json(versions);
+    if (method === "GET" && path === "/api/v1/range-templates") return json(templates);
+    const tplMatch = /^\/api\/v1\/range-templates\/([^/]+)$/.exec(path);
+    if (method === "GET" && tplMatch !== null) {
+      const t = templates.find((x) => x.slug === tplMatch[1]);
+      return t === undefined ? error(404, "not_found", "template not found") : json(t);
     }
 
-    if (method === "POST" && path === "/api/v1/exercises") {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { name: string; version_id: string; template_id: string };
-      exercise = {
-        id: nextId("ex"),
-        organization_id: ORG,
-        template_id: body.template_id,
-        environment_version_id: body.version_id,
-        name: body.name,
-        lifecycle_state: "draft",
-        team_count: teamCount,
+    if (method === "POST" && path === "/api/v1/ranges") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { template_slug: string; name?: string };
+      const t = templates.find((x) => x.slug === body.template_slug);
+      if (t === undefined) return error(404, "not_found", "template not found");
+      range = {
+        id: nextId("rng"),
+        name: body.name ?? t.name,
+        template_slug: t.slug,
+        template_name: t.name,
+        provider: t.provider,
+        state: "draft",
+        state_reason: null,
         created_at: now(),
+        updated_at: now(),
+        deployed_at: null,
+        destroyed_at: null,
+        competition_id: null,
+        residue_verdict: null,
+        access: [],
       };
-      record("exercise.created", exercise.id);
-      return json(exercise, 201);
+      operation = null;
+      emit("range_created", `Range ${range.name} created`);
+      return json(rangeOut(), 201);
     }
 
-    const exMatch = /^\/api\/v1\/exercises\/([^/]+)(\/.*)?$/.exec(path);
-    if (exMatch !== null) {
-      const tail = exMatch[2] ?? "";
-      const ex = findExercise(exMatch[1]);
-      if (ex === null) return error(404, "not_found", "exercise not found");
+    if (method === "GET" && path === "/api/v1/ranges") return json(range === null ? [] : [rangeOut()]);
 
-      if (method === "GET" && tail === "") return json(ex);
+    const opMatch = /^\/api\/v1\/range-operations\/([^/]+)$/.exec(path);
+    if (method === "GET" && opMatch !== null) {
+      return operation === null || operation.id !== opMatch[1]
+        ? error(404, "not_found", "operation not found")
+        : json(operation);
+    }
 
-      if (method === "GET" && tail === "/plan") {
-        return plan === null
-          ? error(404, "not_found", "no plan has been generated")
-          : json(plan);
+    const rngMatch = /^\/api\/v1\/ranges\/([^/]+)(\/.*)?$/.exec(path);
+    if (rngMatch !== null) {
+      if (range === null || range.id !== rngMatch[1]) {
+        return error(404, "range_not_found", "range not found");
+      }
+      const tail = rngMatch[2] ?? "";
+
+      if (method === "GET" && tail === "") {
+        // Every poll advances the worker: this is what makes the state change asynchronously
+        // rather than in the mutation's response.
+        advanceWorker();
+        return json(rangeOut());
+      }
+      if (method === "GET" && tail === "/resources") return json(resources);
+      if (method === "GET" && tail === "/operations") return json(operation === null ? [] : [operation]);
+      if (method === "GET" && tail === "/teardown-evidence") return json([...teardowns].reverse());
+      if (method === "GET" && tail === "/events") {
+        const after = url.searchParams.get("after_sequence");
+        const from = after === null ? 0 : Number(after);
+        return json(events.filter((e) => e.sequence > from));
       }
 
-      if (method === "POST" && tail === "/validate") {
-        ex.lifecycle_state = "validated";
-        record("exercise.validated", ex.id);
-        return json(ex);
-      }
-
-      if (method === "POST" && tail === "/plan") {
-        plan = { id: nextId("plan"), exercise_id: ex.id, status: "generated" };
-        ex.lifecycle_state = "planned";
-        record("plan.generated", plan.id);
-        return json(plan);
-      }
-
-      if (method === "POST" && tail === "/deploy") {
-        // The gate is the server's: deploying without an approved plan is refused, and the flow
-        // test relies on this being enforced here rather than only in the UI.
-        if (plan === null || plan.status !== "approved") {
-          return error(409, "approval_required", "an approved plan is required");
+      const action = /^\/(deploy|reset|destroy)$/.exec(tail);
+      if (method === "POST" && action !== null) {
+        const kind = action[1];
+        const allowed =
+          kind === "deploy"
+            ? ["draft", "failed"]
+            : kind === "reset"
+              ? ["ready", "active", "failed"]
+              : ["draft", "deploying", "ready", "active", "resetting", "failed", "recovery_required"];
+        if (!allowed.includes(range.state)) {
+          return error(409, "range_invalid_transition", `cannot ${kind} from ${range.state}`);
         }
-        record("deploy.started", ex.id, "system");
-        instances = Array.from({ length: teamCount }, (_, i) => ({
-          id: nextId("inst"),
-          exercise_id: ex.id,
-          team_index: i + 1,
-          team_ref: `team${i + 1}`,
-          instance_ref: `${ex.name}-team${i + 1}`,
-          lifecycle_state: "running",
-          provider: "simulator",
-        }));
-        for (const inst of instances) record("instance.created", inst.id, "system");
-        ex.lifecycle_state = "running";
-        record("deploy.completed", ex.id, "system");
-        return json({ id: nextId("run"), exercise_id: ex.id, kind: "deploy", status: "completed" });
-      }
-
-      if (method === "GET" && tail === "/instances") return json(instances);
-
-      if (method === "GET" && tail === "/topology") {
-        return json(
-          instances.map((inst) => ({
-            instance_id: inst.id,
-            team_ref: inst.team_ref,
-            team_index: inst.team_index,
-            lifecycle_state: inst.lifecycle_state,
-            nodes: [
-              ...Array.from({ length: targetsPerTeam }, (_, n) => ({
-                id: `${inst.id}-n${n}`,
-                type: "host",
-                data: {
-                  label: `${inst.team_ref}-host${n}`,
-                  kind: n === 0 ? "attacker" : "target",
-                  role: n === 0 ? "attacker" : "web-server",
-                  ip: `10.20.${inst.team_index}.${10 + n}`,
-                  network: "team-network",
-                },
-              })),
-              // A network node, which is NOT a target and must not be counted as one.
-              {
-                id: `${inst.id}-net`,
-                type: "network",
-                data: { label: "team-network", kind: "network", cidr: `10.20.${inst.team_index}.0/24` },
-              },
-            ],
-            edges: [],
-          })),
-        );
-      }
-
-      const resetMatch = /^\/instances\/([^/]+)\/reset$/.exec(tail);
-      if (method === "POST" && resetMatch !== null) {
-        record("reset.started", resetMatch[1], "system");
-        record("reset.completed", resetMatch[1], "system");
-        return json({ id: nextId("run"), exercise_id: ex.id, kind: "reset", status: "completed" });
-      }
-
-      if (method === "POST" && tail === "/destroy") {
-        record("destroy.started", ex.id, "system");
-        for (const inst of instances) inst.lifecycle_state = "destroyed";
-        ex.lifecycle_state = "destroyed";
-        record("destroy.completed", ex.id, "system");
-        return json({ id: nextId("run"), exercise_id: ex.id, kind: "destroy", status: "completed" });
+        const op = startOperation(kind);
+        range.state = kind === "deploy" ? "deploying" : kind === "reset" ? "resetting" : "destroying";
+        range.updated_at = now();
+        emit(`${kind}_started`, `${kind} started`);
+        return json(op, 202);
       }
     }
 
-    const planMatch = /^\/api\/v1\/plans\/([^/]+)\/(submit|approve|reject)$/.exec(path);
-    if (method === "POST" && planMatch !== null) {
-      if (plan === null || plan.id !== planMatch[1] || exercise === null) {
-        return error(404, "not_found", "plan not found");
-      }
-      const ex = exercise;
-      if (planMatch[2] === "submit") {
-        plan.status = "awaiting_approval";
-        ex.lifecycle_state = "awaiting_approval";
-        record("plan.submitted", plan.id);
-      } else if (planMatch[2] === "approve") {
-        plan.status = "approved";
-        ex.lifecycle_state = "approved";
-        record("plan.approved", plan.id);
-      } else {
-        plan.status = "rejected";
-        record("plan.rejected", plan.id);
-      }
-      return json(plan);
-    }
-
-    if (method === "GET" && path === "/api/v1/audit") {
-      const forExercise = url.searchParams.get("exercise_id");
-      // The real endpoint returns newest first; the client sorts. Returning them in the awkward
-      // order here keeps the client's own ordering honest.
-      const rows = [...audit].reverse();
-      return json(forExercise === null ? rows : rows);
-    }
-
-    return error(404, "not_found", `fake control plane has no route for ${method} ${path}`);
+    return error(404, "not_found", `fake range API has no route for ${method} ${path}`);
   };
 
-  return {
-    fetch: fakeFetch,
-    calls,
-    auditActions: () => audit.map((e) => e.action),
-    setState: (state: string) => {
-      if (exercise === null) throw new Error("fake: no exercise created yet");
-      exercise.lifecycle_state = state;
-    },
-  };
+  return { fetch: fakeFetch, calls, eventKinds: () => events.map((e) => e.kind) };
 }
