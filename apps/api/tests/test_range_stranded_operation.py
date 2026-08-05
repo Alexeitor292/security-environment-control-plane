@@ -362,6 +362,37 @@ def test_abandon_is_refused_while_the_lease_is_still_live(session, principal, pr
     assert forced.failure_code == "abandoned_by_operator"
 
 
+def test_abandon_requires_the_permission_that_would_have_started_the_operation(
+    session, principal, provider
+):
+    """Reading a range must not be enough to abandon its operation.
+
+    ``get_operation`` gates on ``exercise_operate``, which is the READ permission — everyone who
+    can see a range holds it. Abandoning changes state and opens the range to destroy, so it takes
+    the permission that would have let you request the operation in the first place.
+    """
+    from dataclasses import replace
+
+    from secp_api.enums import Permission
+
+    instance = deploy_ready_range(session, principal, provider)
+    operation = _reset_in_flight(session, principal, instance)
+    _age(session, operation, minutes=45)
+
+    viewer = replace(principal, permissions=frozenset({Permission.exercise_operate}))
+    with pytest.raises(Exception) as caught:
+        ranges.abandon_operation(session, viewer, operation.id)
+    assert caught.value.http_status == 403
+
+    # The permission that starts a reset is the one that releases a stuck reset.
+    resetter = replace(
+        principal,
+        permissions=frozenset({Permission.exercise_operate, Permission.exercise_reset}),
+    )
+    _, released = ranges.abandon_operation(session, resetter, operation.id)
+    assert released.status is RangeOperationStatus.unproven
+
+
 def test_operator_recovers_a_stranded_range_over_http_with_no_sql(session, principal, provider):
     """THE RECOVERY PATH, end to end over HTTP — the replacement for hand-written UPDATEs.
 

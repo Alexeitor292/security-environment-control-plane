@@ -101,6 +101,13 @@ _IN_FLIGHT: dict[RangeOperationKind, RangeState] = {
     RangeOperationKind.destroy: RangeState.destroying,
 }
 
+#: The permission each operation kind requires — to START one, and equally to ABANDON one.
+_KIND_PERMISSION: dict[RangeOperationKind, Permission] = {
+    RangeOperationKind.deploy: Permission.exercise_apply,
+    RangeOperationKind.reset: Permission.exercise_reset,
+    RangeOperationKind.destroy: Permission.exercise_destroy,
+}
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -351,7 +358,12 @@ def abandon_operation(
     sweeps the complete set, and can only reach ``clean`` by actually proving each one absent.
     """
     operation = get_operation(session, principal, operation_id)
-    principal.require(Permission.exercise_operate)
+    # AUTHORIZED as the operation's own kind, not merely as "can see this range". ``get_operation``
+    # already checked ``exercise_operate``, which is the READ permission — anyone who can view a
+    # range holds it. Abandoning changes state and opens the range to destroy, so the bar is the
+    # one that would have let you start the operation in the first place: you may release a stuck
+    # reset if you could have requested that reset.
+    principal.require(_KIND_PERMISSION[operation.kind])
 
     if operation.status not in _IN_FLIGHT_OPERATION_STATUSES:
         raise RangeInvalidTransitionError(
@@ -548,12 +560,7 @@ def start_operation(
     """Validate the transition, create the operation row, and move the range into its in-flight
     state. The work itself is run by :mod:`secp_api.services.range_runner`."""
     instance = get_range(session, principal, range_id)
-    permission = {
-        RangeOperationKind.deploy: Permission.exercise_apply,
-        RangeOperationKind.reset: Permission.exercise_reset,
-        RangeOperationKind.destroy: Permission.exercise_destroy,
-    }[kind]
-    principal.require(permission)
+    principal.require(_KIND_PERMISSION[kind])
 
     if instance.state in RANGE_TERMINAL_STATES:
         raise RangeInvalidTransitionError(f"a {instance.state.value} range cannot {kind.value}")
