@@ -131,6 +131,21 @@ export interface RangeOperationSummary {
   total_steps: number;
   /** Server-computed and already clamped in the pre-plan window. Prefer this over dividing. */
   percent: number;
+  /**
+   * The operation's lease expired without a terminal status: nobody is working on it, and nobody
+   * recorded how it ended.
+   *
+   * A THIRD outcome beside running and finished, and the reason it is here at all. It was missing
+   * from this transcription while the contract has carried it all along
+   * (`RangeOperationSummaryOut.stale`), so a progress surface reading these types could only see
+   * `status: "running"` and would show a stalled operation as making progress forever. Found by
+   * typing `control-plane-reader.ts` against the generated contract, which is the whole argument
+   * for generating rather than transcribing.
+   *
+   * `status` is unchanged when this is true — it still says whatever it last said — so the pair
+   * has to be read together, exactly like `(observed, ok)` on a verification check.
+   */
+  stale: boolean;
 }
 
 export interface RangeOperation extends RangeOperationSummary {
@@ -140,6 +155,11 @@ export interface RangeOperation extends RangeOperationSummary {
   started_at: string;
   finished_at: string | null;
   steps: RangeOperationStep[];
+  /**
+   * Why the lease lapsed, when the server recorded a reason. `null` with `stale: true` means the
+   * operation IS stale and no reason was recorded — not that it is fine.
+   */
+  stale_reason: string | null;
 }
 
 export interface RangeAccessTarget {
