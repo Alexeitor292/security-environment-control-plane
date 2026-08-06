@@ -480,3 +480,38 @@ def test_the_authority_is_bound_to_its_own_snapshot():
     assert authority.binding.facts_hash == FACTS_HASH
     assert authority.binding.operation_manifest_hash == MANIFEST_HASH
     assert authority.binding.target_identity == TARGET
+
+
+def test_the_authority_cannot_be_constructed_subclassed_or_repointed():
+    """A token check in ``__init__`` is not a construction guard.
+
+    An adversarial review demonstrated four escapes on this type, and its only consumer's check is
+    ``isinstance``: ``object.__new__`` skips ``__init__``; a subclass can define its own; the
+    ``__binding`` slot was freely reassignable, so an authority issued for a REFUSED snapshot could
+    be repointed at a clean binding; and deletion would leave one that raises rather than refuses.
+    """
+    with pytest.raises(DiscoveryVerificationError):
+        VerifiedDiscoverySnapshot(object(), None)  # type: ignore[arg-type]
+
+    with pytest.raises(DiscoveryVerificationError):
+        VerifiedDiscoverySnapshot.__new__(VerifiedDiscoverySnapshot, object())
+
+    with pytest.raises(DiscoveryVerificationError):
+
+        class _Sub(VerifiedDiscoverySnapshot):  # type: ignore[misc]
+            pass
+
+
+def test_an_issued_authority_cannot_be_repointed_at_another_binding():
+    """The escape that matters most: an authority for a snapshot that FAILED verification, pointed
+    at a binding that passed."""
+    priv, pub = generate_keypair()
+    binding = _binding(pub)
+    _projection, authority = _verify(binding, _sign(priv, binding), _registration(pub))
+    assert authority is not None
+
+    with pytest.raises(DiscoveryVerificationError):
+        authority.__setattr__("_VerifiedDiscoverySnapshot__binding", "anything")
+    with pytest.raises(DiscoveryVerificationError):
+        del authority.binding
+    assert authority.binding is binding

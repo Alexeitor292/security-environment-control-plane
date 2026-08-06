@@ -40,6 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import NoReturn
 
 from secp_commissioning.canonical import sha256_digest
 
@@ -124,9 +125,101 @@ class PendingSdnObject:
         }
 
 
+_PENDING_CONTENT_TOKEN = object()
+
+
+def pending_content_token() -> object:
+    """Handed to the one function permitted to authenticate pending content.
+
+    A function rather than a public constant so the token is not importable as data; the module that
+    authenticates content calls it, and nothing else has a reason to.
+    """
+    return _PENDING_CONTENT_TOKEN
+
+
+class AuthenticatedPendingContent:
+    """Proof that a pending document's content is exactly what a registered worker signed.
+
+    This type exists because ``signature_verified: bool`` was a field, and a field is something a
+    caller assigns. It is produced only by
+    :func:`secp_api.sdn_pending_observation.authenticate_pending_content`, which recomputes the fact
+    commitment and refuses unless the digest equals the signed ``facts_hash``.
+
+    It carries ``pending_sdn_state`` — the state the WORKER signed for that fact — so the document's
+    visibility claim is read from inside the signature rather than recomputed by whoever is asking.
+    """
+
+    __slots__ = ("__facts_hash", "__pending_sdn_state")
+
+    def __init_subclass__(cls, **kwargs: object) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent cannot be subclassed")
+
+    def __new__(cls, token: object = None, **kwargs: object) -> AuthenticatedPendingContent:
+        if token is not _PENDING_CONTENT_TOKEN:
+            raise SdnActivationRefused(
+                "AuthenticatedPendingContent cannot be constructed directly; it is produced only "
+                "by authenticating content against a verified snapshot"
+            )
+        return super().__new__(cls)
+
+    def __init__(self, token: object, *, facts_hash: str, pending_sdn_state: str) -> None:
+        if token is not _PENDING_CONTENT_TOKEN:
+            raise SdnActivationRefused("AuthenticatedPendingContent cannot be constructed directly")
+        object.__setattr__(self, "_AuthenticatedPendingContent__facts_hash", facts_hash)
+        object.__setattr__(
+            self, "_AuthenticatedPendingContent__pending_sdn_state", pending_sdn_state
+        )
+
+    def __setattr__(self, name: str, value: object) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent is immutable")
+
+    def __delattr__(self, name: str) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent is immutable")
+
+    @property
+    def facts_hash(self) -> str:
+        return object.__getattribute__(self, "_AuthenticatedPendingContent__facts_hash")  # type: ignore[no-any-return]
+
+    @property
+    def pending_sdn_state(self) -> str:
+        return object.__getattribute__(  # type: ignore[no-any-return]
+            self, "_AuthenticatedPendingContent__pending_sdn_state"
+        )
+
+    def __repr__(self) -> str:
+        return f"AuthenticatedPendingContent(facts_hash={self.facts_hash!r})"
+
+    def __getstate__(self) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent cannot be serialized")
+
+    def __reduce__(self) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent cannot be pickled")
+
+
+def _authenticated_facts_hash(authentication: object) -> str:
+    """The signed facts hash a real authentication carries, or "" for anything else.
+
+    Reading the slot is what distinguishes a genuinely issued carrier from an ``object.__new__``
+    allocation of the same type: the allocation passes ``isinstance`` and raises on every attribute.
+    """
+    if not isinstance(authentication, AuthenticatedPendingContent):
+        return ""
+    try:
+        return authentication.facts_hash
+    except AttributeError:
+        return ""
+
+
 @dataclass(frozen=True)
 class PendingSdnDocument:
-    """The complete cluster-wide pending state at one instant, with its own bindings."""
+    """The complete cluster-wide pending state at one instant, with its own bindings.
+
+    ``signature_verified`` and ``visibility_complete`` are PROPERTIES, not fields. They used to be
+    booleans a builder could stamp, and the activation gate reads both — so stamping them was the
+    whole attack. There is now no keyword to pass and no attribute to assign; both answer from an
+    :class:`AuthenticatedPendingContent` that only content matching a signed ``facts_hash``
+    produces.
+    """
 
     observed_at: datetime
     target_identity: str
@@ -135,9 +228,35 @@ class PendingSdnDocument:
     worker_installation_id: str
     worker_release_fingerprint: str
     objects: tuple[PendingSdnObject, ...] = ()
-    signature_verified: bool = False
-    visibility_complete: bool = False
+    authentication: AuthenticatedPendingContent | None = None
     unreadable_families: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def signature_verified(self) -> bool:
+        """True only when the content authenticated against a registered worker's signature.
+
+        ``isinstance`` alone is NOT the check, and that is not a nicety. ``object.__new__(cls)``
+        allocates an instance without running ``__new__`` or ``__init__`` — Python offers no way to
+        forbid it — and such an object satisfies every ``isinstance`` its consumers make. What it
+        cannot do is have its slots set, so the guard reads the state real construction produces
+        and treats an unreadable carrier as unauthenticated.
+        """
+        return bool(_authenticated_facts_hash(self.authentication))
+
+    @property
+    def visibility_complete(self) -> bool:
+        """True only when the WORKER SIGNED that the pending SDN read was observed.
+
+        Not the caller's projection of the same question. A binding declaring ``permission_denied``
+        cannot produce a document claiming complete pending visibility, because the claim is read
+        out of the signature rather than alongside it.
+        """
+        if not self.signature_verified:
+            return False
+        try:
+            return self.authentication.pending_sdn_state == "observed"  # type: ignore[union-attr]
+        except AttributeError:
+            return False
 
     def pending_sdn_hash(self) -> str:
         """Hash of what the TARGET reported. Nothing about ownership enters here.

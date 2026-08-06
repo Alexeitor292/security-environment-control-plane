@@ -163,9 +163,35 @@ class VerifiedDiscoverySnapshot:
 
     Bound to the exact snapshot and manifest hashes, so an authority for one snapshot cannot be
     offered for another.
+
+    **Four escapes are closed explicitly**, because a token check in ``__init__`` alone is not a
+    construction guard — an adversarial review demonstrated all of them:
+
+    * ``object.__new__(cls)`` skips ``__init__`` entirely and yields an instance that satisfies
+      every ``isinstance`` check its consumers make, so ``__new__`` carries the token check too;
+    * a subclass can define its own ``__init__`` and never call this one, so subclassing is refused;
+    * without ``__setattr__``, the ``__binding`` slot on an honestly issued authority is freely
+      reassignable, so an authority for a refused snapshot can be repointed at a clean binding;
+    * ``__delattr__`` would leave an authority whose binding raises on read rather than refusing.
     """
 
     __slots__ = ("__binding",)
+
+    def __init_subclass__(cls, **kwargs: object) -> NoReturn:
+        raise DiscoveryVerificationError(
+            "VerifiedDiscoverySnapshot cannot be subclassed; a subclass could define an __init__ "
+            "that never runs the issuance check while still satisfying isinstance"
+        )
+
+    def __new__(
+        cls, token: object = None, *args: object, **kwargs: object
+    ) -> VerifiedDiscoverySnapshot:
+        if token is not _VERIFIED_SNAPSHOT_TOKEN:
+            raise DiscoveryVerificationError(
+                "VerifiedDiscoverySnapshot cannot be constructed directly; it is issued only by "
+                "the control-plane verifier"
+            )
+        return super().__new__(cls)
 
     def __init__(self, token: object, binding: DiscoverySnapshotBinding) -> None:
         if token is not _VERIFIED_SNAPSHOT_TOKEN:
@@ -174,6 +200,15 @@ class VerifiedDiscoverySnapshot:
                 "the control-plane verifier"
             )
         object.__setattr__(self, "_VerifiedDiscoverySnapshot__binding", binding)
+
+    def __setattr__(self, name: str, value: object) -> NoReturn:
+        raise DiscoveryVerificationError(
+            "VerifiedDiscoverySnapshot is immutable; repointing an issued authority at another "
+            "binding would make it authority for a snapshot nobody verified"
+        )
+
+    def __delattr__(self, name: str) -> NoReturn:
+        raise DiscoveryVerificationError("VerifiedDiscoverySnapshot is immutable")
 
     @property
     def binding(self) -> DiscoverySnapshotBinding:

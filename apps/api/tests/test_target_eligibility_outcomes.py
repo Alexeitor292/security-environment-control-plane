@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from _sdn_authentication import authenticated
 from secp_api.discovery_required_facts import (
     facts_required_before_apply,
     facts_required_before_compilation,
@@ -48,12 +49,19 @@ from secp_commissioning.enrollment_attestation import key_id_for, sign_detached
 from secp_management.signing import generate_keypair
 
 NOW = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
+
 ORG = "org-1"
 TARGET = "target-abc"
 OPERATION = "op-1"
 GENERATION = 3
 FACTS = "sha256:" + "f" * 64
 MANIFEST = "sha256:" + "m" * 64
+
+#: A GENUINE authentication: a real key signs a real binding, the binding verifies against a real
+#: registered anchor, and the content's recomputed commitment matches the signed facts_hash.
+AUTHENTICATED = authenticated()
+#: The same, except the WORKER signed that it could not read the pending SDN state.
+SIGNED_AS_UNREADABLE = authenticated(pending_sdn_state="permission_denied")
 
 
 def _all_facts_observed() -> tuple[tuple[str, str], ...]:
@@ -298,8 +306,7 @@ def _document(objects, **overrides) -> PendingSdnDocument:
         worker_installation_id="wk-1",
         worker_release_fingerprint="sha256:" + "r" * 64,
         objects=tuple(objects),
-        signature_verified=True,
-        visibility_complete=True,
+        authentication=AUTHENTICATED,
     )
     base.update(overrides)
     return PendingSdnDocument(**base)
@@ -315,7 +322,7 @@ def test_partial_sdn_visibility_refuses_activation_even_with_a_complete_inventor
     obj = _owned_object()
     document = _document(
         (obj,),
-        visibility_complete=False,
+        authentication=SIGNED_AS_UNREADABLE,
         unreadable_families=(("controllers", "permission_denied"),),
     )
     proofs = PendingSdnOwnershipProofSet(results=(_owned_proof(obj),))

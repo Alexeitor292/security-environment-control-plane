@@ -1,30 +1,39 @@
-"""Stage 2, where two caller-assignable booleans become conclusions.
+"""Stage 2, where two stampable booleans became conclusions drawn from a signature.
 
-``PendingSdnDocument.signature_verified`` and ``.visibility_complete`` decide whether an activation
-may be authorised at all, and on the dataclass they are fields — things a caller assigns. This file
-pins that the production builder derives both, that no other module in the live tree constructs a
-document, and that nothing observed is dropped on the way.
+The defect, stated as the attack a verifier reproduced end to end: a caller holding a GENUINE
+``VerifiedDiscoverySnapshot`` — whose signed binding stated ``pending_sdn_state`` was
+``permission_denied``, the worker's attestation that it could not see the pending state — handed
+``build_pending_sdn_document`` contradicting raw mappings and received a document reporting
+``signature_verified=True``, ``visibility_complete=True``, ``unreadable_families=()``.
+``issue_activation_authorization`` gates on exactly those two booleans, so the worker's signed
+refusal became "nothing is pending" and the cluster-wide ``PUT /cluster/sdn`` blast radius was
+judged against a pending set nobody observed.
+
+Both booleans are now read-only properties backed by an ``AuthenticatedPendingContent`` that only
+content whose recomputed commitment equals the signed ``facts_hash`` can produce, and the visibility
+claim is read from inside the signature rather than from the caller's own projection.
 """
 
 from __future__ import annotations
 
 import ast
-import uuid
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from secp_api.discovery_fact_projection import REQUIRED_FACT_PROJECTION_ID
-from secp_api.discovery_observation import Observation
-from secp_api.discovery_verification import (
-    DISCOVERY_CONTRACT_VERSION,
-    DISCOVERY_SNAPSHOT_DOMAIN,
-    DISCOVERY_SNAPSHOT_KIND,
-    DiscoverySnapshotBinding,
-    ExpectedWorkerRegistration,
-    verify_discovery_snapshot,
+from _sdn_authentication import (
+    DEFAULT_CLUSTER_IDENTITY,
+    DEFAULT_OPERATION,
+    DEFAULT_RELEASE,
+    DEFAULT_TARGET,
+    DEFAULT_WORKER,
+    NOW,
+    cluster_fingerprint,
+    signed_snapshot,
 )
+from secp_api.discovery_observation import Observation
 from secp_api.sdn_activation_stages import (
+    AuthenticatedPendingContent,
+    OperationBinding,
     PendingSdnDocument,
     PendingSdnOwnershipProofSet,
     SdnActivationRefused,
@@ -34,25 +43,13 @@ from secp_api.sdn_pending_observation import (
     PENDING_FAMILIES,
     UNIDENTIFIED,
     PendingObservationError,
+    authenticate_pending_content,
     build_pending_sdn_document,
 )
-from secp_commissioning.canonical import sha256_digest
-from secp_commissioning.enrollment_attestation import key_id_for, sign_detached
-from secp_management.signing import generate_keypair
-
-NOW = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
-ORG = str(uuid.uuid4())
-TARGET = str(uuid.uuid4())
-WORKER = "wk-1"
-OPERATION = "op-1"
-GENERATION = 3
-ROLE = "proxmox_privileged"
-RELEASE = "sha256:" + "r" * 64
-CLUSTER = "sha256:" + "c" * 64
 
 
-def _pending_value() -> dict:
-    return {
+def _pending_value(**overrides) -> dict:
+    base = {
         "zones": (
             {
                 "family": "zones",
@@ -66,194 +63,243 @@ def _pending_value() -> dict:
         "controllers": (),
         "subnets@secpv1": (),
     }
-
-
-def _raw(**overrides) -> dict[str, Observation]:
-    base = {"pending_sdn_state": Observation.observed(_pending_value())}
     base.update(overrides)
     return base
 
 
-def _facts(usable: bool = True) -> dict[str, Observation]:
-    return {
-        "pending_sdn_state": (
-            Observation.observed(_pending_value())
-            if usable
-            else Observation.permission_denied(
-                missing_privilege="SDN.Audit", reason_code="sdn_read_authority_not_established"
-            )
+def _observations(pending=None, **overrides) -> dict[str, Observation]:
+    base = {
+        "cluster_identity": Observation.observed(dict(DEFAULT_CLUSTER_IDENTITY)),
+        "pending_sdn_state": Observation.observed(_pending_value() if pending is None else pending),
+    }
+    base.update(overrides)
+    return base
+
+
+def _build(*, pending_sdn_state="observed", observations=None, **snapshot_kwargs):
+    """Sign the content, verify it, then build the document from it. The whole real path."""
+    observations = observations if observations is not None else _observations()
+    authority, obs, required, contributions = signed_snapshot(
+        observations=observations, pending_sdn_state=pending_sdn_state, **snapshot_kwargs
+    )
+    return build_pending_sdn_document(
+        authority=authority,
+        observations=obs,
+        required_facts=required,
+        contributions=contributions,
+    )
+
+
+# === the booleans are not data ====================================================================
+
+
+def test_the_document_exposes_no_way_to_stamp_either_boolean():
+    """Not a field, not a keyword, not an assignable attribute."""
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(PendingSdnDocument)}
+    assert "signature_verified" not in fields
+    assert "visibility_complete" not in fields
+
+    with pytest.raises(TypeError):
+        PendingSdnDocument(
+            observed_at=NOW,
+            target_identity=DEFAULT_TARGET,
+            cluster_fingerprint="x",
+            observation_identity="o",
+            worker_installation_id="w",
+            worker_release_fingerprint="r",
+            signature_verified=True,  # type: ignore[call-arg]
         )
+
+    document = _build()
+    with pytest.raises((AttributeError, dataclasses.FrozenInstanceError)):
+        document.signature_verified = True  # type: ignore[misc]
+
+
+def test_an_unauthenticated_document_is_not_verified_and_not_visible():
+    """The default is refusal, so a document nobody authenticated cannot pass the gate."""
+    document = PendingSdnDocument(
+        observed_at=NOW,
+        target_identity=DEFAULT_TARGET,
+        cluster_fingerprint="x",
+        observation_identity="o",
+        worker_installation_id="w",
+        worker_release_fingerprint="r",
+    )
+    assert document.signature_verified is False
+    assert document.visibility_complete is False
+
+
+def test_the_authenticated_type_cannot_be_constructed_or_mutated():
+    """Every escape the review demonstrated on the authority type, closed here too."""
+    with pytest.raises(SdnActivationRefused):
+        AuthenticatedPendingContent(object(), facts_hash="x", pending_sdn_state="observed")
+    with pytest.raises(SdnActivationRefused):
+
+        class _Forged(AuthenticatedPendingContent):  # type: ignore[misc]
+            pass
+
+    real = _build().authentication
+    with pytest.raises(SdnActivationRefused):
+        real.__setattr__("_AuthenticatedPendingContent__pending_sdn_state", "observed")
+    with pytest.raises(SdnActivationRefused):
+        real.__reduce__()
+
+
+def test_an_object_new_allocation_passes_isinstance_and_still_authenticates_nothing():
+    """Python offers no way to forbid ``object.__new__(cls)``, so the guard must not be isinstance.
+
+    The allocation is a real instance of the type — every ``isinstance`` check accepts it — and its
+    slots are unset, so the document reads it as unauthenticated. This is the same lesson as the
+    closed-set guards: check the property, not the label.
+    """
+    forged = object.__new__(AuthenticatedPendingContent)
+    assert isinstance(forged, AuthenticatedPendingContent)
+
+    document = PendingSdnDocument(
+        observed_at=NOW,
+        target_identity=DEFAULT_TARGET,
+        cluster_fingerprint="x",
+        observation_identity="o",
+        worker_installation_id="w",
+        worker_release_fingerprint="r",
+        authentication=forged,
+    )
+    assert document.signature_verified is False
+    assert document.visibility_complete is False
+
+    with pytest.raises(SdnActivationRefused, match="unsigned"):
+        issue_activation_authorization(
+            document=document,
+            proofs=PendingSdnOwnershipProofSet(),
+            operation=_operation(),
+            authorized_at=NOW,
+            authorized_by="operator",
+        )
+
+
+# === THE ATTACK: a signed refusal cannot become a visibility claim ================================
+
+
+def test_a_binding_declaring_permission_denied_cannot_authenticate_complete_visibility():
+    """The exact reproduction, now refused.
+
+    The worker signs ``pending_sdn_state = permission_denied``. The content it signed is offered
+    honestly, so it authenticates — and the resulting document still reports visibility as
+    INCOMPLETE, because the claim is read out of the signature rather than recomputed beside it.
+    """
+    document = _build(pending_sdn_state="permission_denied")
+
+    assert document.signature_verified is True  # the signature really is valid ...
+    assert document.visibility_complete is False  # ... and it says the read was denied
+    assert set(document.unreadable_families) == {
+        (family, "permission_denied") for family in PENDING_FAMILIES
     }
 
+    with pytest.raises(SdnActivationRefused, match="visibility_incomplete"):
+        issue_activation_authorization(
+            document=document,
+            proofs=PendingSdnOwnershipProofSet(),
+            operation=_operation(),
+            authorized_at=NOW,
+            authorized_by="operator",
+        )
 
-def _authority():
-    priv, pub = generate_keypair()
-    binding = DiscoverySnapshotBinding(
-        discovery_contract_version=DISCOVERY_CONTRACT_VERSION,
-        operation_identity=OPERATION,
-        operation_generation=GENERATION,
-        organization_identity=ORG,
-        target_identity=TARGET,
-        requested_target_authority="pve.example.test:8006",
-        worker_installation_id=WORKER,
-        worker_role=ROLE,
-        worker_release_fingerprint=RELEASE,
-        signer_fingerprint=key_id_for(pub),
-        observation_started_at=(NOW - timedelta(seconds=30)).isoformat(),
-        observation_completed_at=(NOW - timedelta(seconds=10)).isoformat(),
-        freshness_bound_seconds=1800,
-        facts_hash=sha256_digest({"observations": []}),
-        operation_manifest_hash=sha256_digest({"manifest": {}}),
-        projection_implementation_id=REQUIRED_FACT_PROJECTION_ID,
-        required_fact_observation_states=(),
+
+def test_contradicting_the_signed_content_refuses_rather_than_authenticating():
+    """The other half: content that was never signed does not authenticate, however it is labelled.
+
+    A caller holding a genuine authority swaps in a pending set of its own invention. The recomputed
+    commitment no longer equals the signed facts_hash, so no authenticated content is produced at
+    all — there is nothing to stamp a document with.
+    """
+    authority, obs, required, contributions = signed_snapshot(observations=_observations())
+    invented = dict(obs)
+    invented["pending_sdn_state"] = Observation.observed(_pending_value(zones=()))
+
+    with pytest.raises(PendingObservationError, match="does_not_match_the_signed_facts"):
+        authenticate_pending_content(
+            authority=authority,
+            observations=invented,
+            required_facts=required,
+            contributions=contributions,
+        )
+    with pytest.raises(PendingObservationError, match="does_not_match_the_signed_facts"):
+        build_pending_sdn_document(
+            authority=authority,
+            observations=invented,
+            required_facts=required,
+            contributions=contributions,
+        )
+
+
+def test_a_signature_over_a_different_target_does_not_authenticate_this_content():
+    """The binding is inside the commitment, so a snapshot of another target cannot be reused."""
+    authority, obs, required, contributions = signed_snapshot(
+        observations=_observations(), target_identity="target-elsewhere", facts_hash="sha256:wrong"
     )
-    attestation = sign_detached(
-        priv,
-        domain=DISCOVERY_SNAPSHOT_DOMAIN,
-        kind=DISCOVERY_SNAPSHOT_KIND,
-        digest=binding.digest(),
-    )
-    _projection, authority = verify_discovery_snapshot(
-        binding=binding,
-        attestation=attestation,
-        registration=ExpectedWorkerRegistration(
-            worker_installation_id=WORKER,
-            worker_role=ROLE,
-            worker_release_fingerprint=RELEASE,
-            verification_anchor_fingerprint=key_id_for(pub),
-            target_identity=TARGET,
-            organization_identity=ORG,
-        ),
-        expected_operation_identity=OPERATION,
-        expected_operation_generation=GENERATION,
-        expected_target_identity=TARGET,
-        expected_organization_identity=ORG,
-        facts_hash=binding.facts_hash,
-        operation_manifest_hash=binding.operation_manifest_hash,
-        compilation_required_facts=(),
-        apply_required_facts=(),
-        now=NOW,
-    )
-    assert authority is not None
-    return authority
-
-
-def _build(**overrides):
-    kwargs = dict(
-        authority=_authority(),
-        required_facts=_facts(),
-        raw_observations=_raw(),
-        cluster_fingerprint=CLUSTER,
-        observed_at=NOW,
-    )
-    kwargs.update(overrides)
-    return build_pending_sdn_document(**kwargs)
-
-
-# === the booleans are conclusions =================================================================
+    with pytest.raises(PendingObservationError, match="does_not_match_the_signed_facts"):
+        build_pending_sdn_document(
+            authority=authority,
+            observations=obs,
+            required_facts=required,
+            contributions=contributions,
+        )
 
 
 def test_the_builder_requires_the_verifiers_authority_not_a_claim():
-    """A caller cannot assert that a snapshot verified; it can only hand over what the verifier
-    issued, and that object cannot be constructed, pickled or forged."""
     with pytest.raises(PendingObservationError, match="requires_a_verified_snapshot"):
-        _build(authority=object())
-    with pytest.raises(PendingObservationError):
-        _build(authority=None)
+        build_pending_sdn_document(
+            authority=object(),  # type: ignore[arg-type]
+            observations={},
+            required_facts={},
+            contributions={},
+        )
 
 
-def test_the_builder_takes_no_signature_or_visibility_parameter():
+def test_the_builder_takes_no_stampable_parameter():
     import inspect
 
     params = set(inspect.signature(build_pending_sdn_document).parameters)
-    for banned in ("signature_verified", "visibility_complete", "objects", "target_identity"):
+    for banned in (
+        "signature_verified",
+        "visibility_complete",
+        "objects",
+        "target_identity",
+        "cluster_fingerprint",
+        "observed_at",
+        "unreadable_families",
+    ):
         assert banned not in params, banned
+    assert params == {"authority", "observations", "required_facts", "contributions"}
 
 
-def test_identity_is_read_off_the_signed_binding_not_supplied():
-    """A document cannot claim a target the signature did not cover."""
+# === identity and freshness come off the binding ==================================================
+
+
+def test_identity_is_read_off_the_signed_binding():
     document = _build()
-    assert document.target_identity == TARGET
-    assert document.observation_identity == OPERATION
-    assert document.worker_installation_id == WORKER
-    assert document.worker_release_fingerprint == RELEASE
-    assert document.signature_verified is True
+    assert document.target_identity == DEFAULT_TARGET
+    assert document.observation_identity == DEFAULT_OPERATION
+    assert document.worker_installation_id == DEFAULT_WORKER
+    assert document.worker_release_fingerprint == DEFAULT_RELEASE
 
 
-def test_visibility_is_the_same_completeness_compilation_is_gated_on():
-    assert _build().visibility_complete is True
-    refused = _build(required_facts=_facts(usable=False))
-    assert refused.visibility_complete is False
-
-
-def test_an_incomplete_enumeration_names_the_families_an_operator_must_grant_for():
-    """The refusal reason alone says only that something was missing."""
-    partial = {"zones": (), "vnets": ()}
-    document = _build(
-        raw_observations={"pending_sdn_state": Observation.observed(partial)},
-        required_facts=_facts(usable=False),
-    )
-    missing = {family for family, _state in document.unreadable_families}
-    assert missing == {"subnets", "controllers"}
-    for _family, state in document.unreadable_families:
-        assert state == "permission_denied"
-
-
-def test_subnets_count_as_covered_only_via_a_per_vnet_scope():
+def test_the_observation_time_is_the_signed_one_not_a_parameter():
+    """Freshness is enforced on observed_at, so a caller who set it could revive a stale read."""
     document = _build()
-    assert document.unreadable_families == ()
-    assert set(PENDING_FAMILIES) == {"zones", "vnets", "subnets", "controllers"}
+    authority, _o, _r, _c = signed_snapshot(observations=_observations())
+    assert document.observed_at.isoformat() == authority.binding.observation_completed_at
 
 
-def test_the_control_plane_family_list_matches_the_workers():
-    """The list is restated because the plane boundary forbids the control plane importing worker
-    internals, and a restatement is a second copy that can drift.
-
-    This is the only place both copies are read at once. Two tests each comparing its own copy to
-    the same literal would both keep passing while the two lists said different things — which is
-    exactly how a family would stop being enumerated on one side and stay required on the other.
-    """
-    from secp_worker.proxmox_sdn_operations import SDN_PENDING_FAMILIES
-
-    assert PENDING_FAMILIES == SDN_PENDING_FAMILIES
-
-
-def test_a_cluster_with_no_vnets_has_no_subnets_to_walk():
-    """The document must not contradict itself: reporting subnets unreadable while the required-fact
-    projection computes visibility as complete from the same facts is output an operator is right
-    not to trust. With zero vnets there is nothing to walk, and that is coverage."""
-    value = {"zones": (), "vnets": (), "controllers": ()}
-    document = _build(
-        raw_observations={
-            "pending_sdn_state": Observation.observed(value),
-            "existing_vnets": Observation.observed({}),
-        }
-    )
-    assert document.visibility_complete is True
-    assert document.unreadable_families == ()
-
-
-def test_an_unwalked_vnet_still_makes_subnets_unreadable():
-    """The complement, and the reason the rule above is about ZERO vnets specifically."""
-    value = {"zones": (), "vnets": (), "controllers": ()}
-    document = _build(
-        raw_observations={
-            "pending_sdn_state": Observation.observed(value),
-            "existing_vnets": Observation.observed({"v1": {}}),
-        }
-    )
-    assert ("subnets", "observed") in document.unreadable_families
-
-
-def test_subnets_are_unreadable_when_the_vnet_index_itself_was_not_observed():
-    value = {"zones": (), "vnets": (), "controllers": ()}
-    document = _build(
-        raw_observations={
-            "pending_sdn_state": Observation.observed(value),
-            "existing_vnets": Observation.probe_failed("x"),
-        }
-    )
-    assert ("subnets", "observed") in document.unreadable_families
+def test_the_cluster_fingerprint_matches_the_workers_derivation():
+    """Two implementations of the same derivation, pinned against each other. If they drift, no
+    content ever authenticates again — which is loud, but this test says why."""
+    observations = _observations()
+    document = _build(observations=observations)
+    assert document.cluster_fingerprint == cluster_fingerprint(observations)
+    assert document.cluster_fingerprint.startswith("sha256:")
 
 
 # === nothing observed is dropped ==================================================================
@@ -273,89 +319,94 @@ def test_every_observed_pending_object_becomes_a_document_object():
 def test_an_unidentifiable_object_is_kept_and_marked_rather_than_dropped():
     """It still occupies the cluster. Dropping it would shrink the pending set that exclusivity is
     judged on, turning a contaminated cluster into a clean-looking one."""
-    value = {
-        "zones": (
-            {"family": "zones", "object_id": "", "state": "new", "observed": {"type": "vlan"}},
-        ),
-        "vnets": (),
-        "controllers": (),
-        "subnets@v1": (),
-    }
-    document = _build(raw_observations={"pending_sdn_state": Observation.observed(value)})
+    nameless = {"family": "zones", "object_id": "", "state": "new", "observed": {"type": "vlan"}}
+    document = _build(observations=_observations(pending=_pending_value(zones=(nameless,))))
     (obj,) = document.objects
     assert obj.object_id == ""
     assert obj.observation_state == UNIDENTIFIED
 
 
 def test_a_subnet_scope_records_the_vnet_it_came_from():
-    value = {
-        "zones": (),
-        "vnets": (),
-        "controllers": (),
-        "subnets@secpv1": (
-            {"family": "subnets", "object_id": "s1", "state": "new", "observed": {"cidr": "x"}},
-        ),
-    }
-    document = _build(raw_observations={"pending_sdn_state": Observation.observed(value)})
+    rows = {"family": "subnets", "object_id": "s1", "state": "new", "observed": {"cidr": "x"}}
+    pending = _pending_value(zones=())
+    pending["subnets@secpv1"] = (rows,)
+    document = _build(observations=_observations(pending=pending))
     (obj,) = document.objects
     assert obj.family == "subnets"
     assert obj.source_endpoint == "/cluster/sdn/vnets/secpv1/subnets"
 
 
 def test_the_running_and_post_activation_views_are_hashed_separately():
-    """A changed object's two views must not collapse into one digest, or the manifest could not
-    say what activation would replace."""
-    value = {
-        "zones": (
-            {
-                "family": "zones",
-                "object_id": "z1",
-                "state": "changed",
-                "observed": {"mtu": 9000},
-                "active": {"mtu": 1500},
-            },
-        ),
-        "vnets": (),
-        "controllers": (),
-        "subnets@v1": (),
+    changed = {
+        "family": "zones",
+        "object_id": "z1",
+        "state": "changed",
+        "observed": {"mtu": 9000},
+        "active": {"mtu": 1500},
     }
-    document = _build(raw_observations={"pending_sdn_state": Observation.observed(value)})
+    document = _build(observations=_observations(pending=_pending_value(zones=(changed,))))
     (obj,) = document.objects
     assert obj.normalized_active_representation
     assert obj.normalized_pending_representation
     assert obj.normalized_active_representation != obj.normalized_pending_representation
 
 
-def test_an_unusable_pending_observation_produces_an_empty_but_honest_document():
-    """Empty objects plus visibility_complete False. The activation constructor refuses on both,
-    so an unreadable cluster cannot be mistaken for one with nothing pending."""
-    document = _build(
-        raw_observations={"pending_sdn_state": Observation.probe_failed("x")},
-        required_facts=_facts(usable=False),
-    )
-    assert document.objects == ()
-    assert document.visibility_complete is False
-    with pytest.raises(SdnActivationRefused, match="visibility_incomplete"):
-        issue_activation_authorization(
-            document=document,
-            proofs=PendingSdnOwnershipProofSet(),
-            operation=_operation(),
-            authorized_at=NOW,
-            authorized_by="operator",
-        )
+# === unreadable families ==========================================================================
 
 
-def _operation():
-    from secp_api.sdn_activation_stages import OperationBinding
+def test_a_complete_enumeration_names_no_unreadable_family():
+    assert _build().unreadable_families == ()
 
+
+def test_an_incomplete_enumeration_names_the_families_an_operator_must_grant_for():
+    partial = {"zones": (), "vnets": ()}
+    document = _build(observations=_observations(pending=partial))
+    missing = {family for family, _state in document.unreadable_families}
+    assert missing == {"subnets", "controllers"}
+
+
+def test_a_cluster_with_no_vnets_has_no_subnets_to_walk():
+    """The document must not contradict itself: reporting subnets unreadable while the signed state
+    says the pending read was observed is output an operator is right not to trust."""
+    observations = _observations(pending={"zones": (), "vnets": (), "controllers": ()})
+    observations["existing_vnets"] = Observation.observed({})
+    document = _build(observations=observations)
+    assert document.visibility_complete is True
+    assert document.unreadable_families == ()
+
+
+def test_an_unwalked_vnet_still_makes_subnets_unreadable():
+    observations = _observations(pending={"zones": (), "vnets": (), "controllers": ()})
+    observations["existing_vnets"] = Observation.observed({"v1": {}})
+    document = _build(observations=observations)
+    assert ("subnets", "observed") in document.unreadable_families
+
+
+def test_subnets_are_unreadable_when_the_vnet_index_itself_was_not_observed():
+    observations = _observations(pending={"zones": (), "vnets": (), "controllers": ()})
+    observations["existing_vnets"] = Observation.probe_failed("x")
+    document = _build(observations=observations)
+    assert ("subnets", "observed") in document.unreadable_families
+
+
+def test_the_control_plane_family_list_matches_the_workers():
+    """The list is restated because the plane boundary forbids the control plane importing worker
+    internals, and a restatement is a second copy that can drift. This is the only place both
+    copies are read at once."""
+    from secp_worker.proxmox_sdn_operations import SDN_PENDING_FAMILIES
+
+    assert PENDING_FAMILIES == SDN_PENDING_FAMILIES
+
+
+def _operation() -> OperationBinding:
     return OperationBinding(
-        target_identity=TARGET,
-        cluster_fingerprint=CLUSTER,
+        target_identity=DEFAULT_TARGET,
+        cluster_fingerprint="sha256:cluster",
         range_identity="range-1",
-        operation_identity=OPERATION,
-        operation_generation=GENERATION,
-        stage1_workspace_hash="sha256:" + "w" * 64,
-        stage1_plan_hash="sha256:" + "p" * 64,
+        operation_identity=DEFAULT_OPERATION,
+        operation_generation=3,
+        stage1_workspace_hash="sha256:ws",
+        stage1_plan_hash="sha256:plan",
         stage1_authorization_id="auth-1",
         stage1_execution_receipt="receipt-1",
     )
@@ -364,19 +415,13 @@ def _operation():
 # === no second construction site ==================================================================
 
 
-_ALLOWED_CONSTRUCTION_SITES = frozenset(
-    {
-        "sdn_activation_stages.py",  # the definition itself
-        "sdn_pending_observation.py",  # the derivation
-    }
-)
+_ALLOWED_CONSTRUCTION_SITES = frozenset({"sdn_activation_stages.py", "sdn_pending_observation.py"})
 
 
 def test_no_other_module_in_the_live_tree_constructs_a_pending_document():
-    """Inverted on purpose. Listing the modules allowed to build one is a closed set that a new
-    module silently joins; scanning every module for the construction and allowing two is a check a
-    new module has to be deliberately added to.
-    """
+    """Inverted on purpose, and it now also catches ``dataclasses.replace``: a frozen dataclass can
+    be copied with fields overridden without ever naming the class, which the earlier bare-name
+    scan missed entirely."""
     root = Path(__file__).resolve().parents[3]
     offenders = []
     for path in root.rglob("*.py"):
@@ -390,14 +435,24 @@ def test_no_other_module_in_the_live_tree_constructs_a_pending_document():
         except (SyntaxError, UnicodeDecodeError):
             continue
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "PendingSdnDocument":
-                offenders.append(f"{path.name}:{node.lineno}")
+            if not isinstance(node, ast.Call):
+                continue
+            named = getattr(node.func, "id", "") or getattr(node.func, "attr", "")
+            if named == "PendingSdnDocument":
+                offenders.append(f"{path.name}:{node.lineno}:construction")
+            if named == "replace" and any(
+                isinstance(k, ast.keyword) and k.arg in ("authentication",) for k in node.keywords
+            ):
+                offenders.append(f"{path.name}:{node.lineno}:dataclasses.replace")
     assert offenders == [], offenders
 
 
-def test_the_definition_still_carries_the_two_fields_this_module_derives():
-    """Renaming or removing either field would make the derivation silently stop applying."""
-    import dataclasses
-
-    names = {f.name for f in dataclasses.fields(PendingSdnDocument)}
-    assert {"signature_verified", "visibility_complete", "unreadable_families"} <= names
+def test_the_document_still_exposes_the_properties_the_activation_gate_reads():
+    """If either property were renamed, issue_activation_authorization would read a missing
+    attribute and this module's derivation would silently stop applying."""
+    document = _build()
+    assert isinstance(document.signature_verified, bool)
+    assert isinstance(document.visibility_complete, bool)
+    assert not isinstance(type(document).__dict__.get("signature_verified"), (bool, type(None))), (
+        "signature_verified must be a property, not a class attribute"
+    )

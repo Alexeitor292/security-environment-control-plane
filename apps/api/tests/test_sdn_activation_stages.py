@@ -17,6 +17,7 @@ import inspect
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from _sdn_authentication import authenticated
 from secp_api.sdn_activation_stages import (
     NON_EXCLUSIVE_OWNERSHIP,
     STAGE_ACTIVATED,
@@ -44,6 +45,13 @@ from secp_api.sdn_activation_stages import (
 )
 
 NOW = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
+
+#: A GENUINE authentication: a real key signs a real binding, the binding verifies against a real
+#: registered anchor, and the content's recomputed commitment matches the signed facts_hash. There
+#: is no way to fabricate one, which is the whole point of the change these tests cover.
+AUTHENTICATED = authenticated()
+#: The same, except the WORKER signed that it could not read the pending SDN state.
+SIGNED_AS_UNREADABLE = authenticated(pending_sdn_state="permission_denied")
 
 OPERATION = OperationBinding(
     target_identity="target-abc",
@@ -108,8 +116,7 @@ def _document(objects=(_ZONE, _VNET, _SUBNET), **overrides) -> PendingSdnDocumen
         worker_installation_id="wk-1",
         worker_release_fingerprint="sha256:rel",
         objects=tuple(objects),
-        signature_verified=True,
-        visibility_complete=True,
+        authentication=AUTHENTICATED,
     )
     base.update(overrides)
     return PendingSdnDocument(**base)
@@ -526,10 +533,10 @@ def test_an_empty_pending_set_cannot_be_authorized():
 
 
 def test_an_unsigned_or_incomplete_document_cannot_be_authorized():
-    document = _document(signature_verified=False)
+    document = _document(authentication=None)
     with pytest.raises(SdnActivationRefused, match="unsigned"):
         _issue(document, _proofs(document))
-    document = _document(visibility_complete=False)
+    document = _document(authentication=SIGNED_AS_UNREADABLE)
     with pytest.raises(SdnActivationRefused, match="visibility_incomplete"):
         _issue(document, _proofs(document))
 
