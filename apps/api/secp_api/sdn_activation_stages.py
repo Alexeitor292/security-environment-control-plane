@@ -1,38 +1,38 @@
-"""The five-stage SDN activation model, and the window it exists to close.
+"""The five-stage SDN activation model, with ownership derived and disclosure non-authoritative.
 
 Proxmox commits SDN configuration with ``PUT /cluster/sdn``, which applies **every** pending change
-on the cluster. There is no scoping attribute on the provider's applier resource and no per-object
-apply in the API — so SECP cannot commit only its own SDN objects, and no amount of care in the
-renderer changes that.
-
-The model does not pretend to scope it. It makes the real blast radius explicit and separately
-authorised:
+on the cluster. There is no scoping attribute on the applier and no per-object apply in the API, so
+SECP cannot commit only its own objects. The model does not pretend to scope it; it makes the real
+blast radius explicit and refuses whenever the pending set is not exclusively this operation's.
 
 ======= ==========================================================================================
 Stage 1 Prepare SECP-owned SDN configuration. Nothing is activated.
-Stage 2 Rediscover and hash the COMPLETE cluster-wide pending state — SECP's changes and everyone
-        else's.
-Stage 3 Separately authorise that exact activation, against that exact hash.
-Stage 4 Activate.
+Stage 2 Rediscover and hash the COMPLETE cluster-wide pending state.
+Stage 3 Separately authorise that exact activation.
+Stage 4 Activate, after recomputing everything.
 Stage 5 Verify the active SDN, and only then deploy guests.
 ======= ==========================================================================================
 
-**The window.** Stages 2 and 4 are separated in time, and the pending state is cluster-wide and
-mutable by anybody with SDN.Allocate. Between the operator seeing what would be committed and the
-commit happening, a foreign change can be staged. Without a binding, that change is committed under
-an authorisation that never saw it — the operator approved a set of three objects and four were
-applied.
+**Three records, separated by authority.** The earlier version collapsed them, and the collapse was
+the defect: an ``ActivationAuthorization`` accepted ``disclosed_counts`` from its caller, so an
+all-zero summary offered against a contaminated document survived construction and was only caught
+by a later recompute.
 
-So the authorisation binds the **hash of the complete pending set**, and stage 4 refuses when the
-observed hash no longer matches. That turns a silent widening into a refusal an operator resolves by
-re-observing and re-authorising.
+:class:`PendingSdnDocument`
+    What the target said. Canonical, observed, signed. Contains **no ownership claim at all** —
+    ownership is not a property of the cluster's pending state, it is a conclusion SECP draws.
+:class:`PendingSdnOwnershipProofSet`
+    One derived proof per object, keyed one-to-one. Carries the evidence and the classification it
+    yields.
+:class:`PendingSdnDisclosure`
+    The operator-facing summary. **Derived only**, from the two above, and authoritative over
+    nothing. It cannot be handed to the authorization constructor because the constructor has no
+    parameter for it.
 
-**The authorisation must show foreign changes, not filter them out.** An operator authorising this
-activation is authorising somebody else's staged work too. Presenting only SECP's objects would make
-the decision look smaller than it is, which is the specific dishonesty this module is written
-against.
-
-Pure: no I/O, no clock. ``now`` and observations are parameters.
+**Two digests, because they protect different facts.** ``pending_sdn_hash`` proves the target's
+pending configuration did not change. ``ownership_provenance_digest`` proves the classification and
+its supporting evidence did not change. Raw objects can stay byte-identical while a provenance
+record disappears underneath them — one hash cannot see both.
 """
 
 from __future__ import annotations
@@ -49,8 +49,6 @@ STAGE_ACTIVATION_AUTHORIZED = "activation_authorized"
 STAGE_ACTIVATED = "activated"
 STAGE_VERIFIED = "verified"
 
-#: Ordered. A stage may only be entered from its immediate predecessor — there is no path that
-#: reaches activation without an authorisation bound to an observation.
 STAGE_ORDER: tuple[str, ...] = (
     STAGE_PREPARED,
     STAGE_PENDING_OBSERVED,
@@ -59,47 +57,115 @@ STAGE_ORDER: tuple[str, ...] = (
     STAGE_VERIFIED,
 )
 
-#: How long an observation of the pending set may back an authorisation. Short on purpose: this is
-#: the exact interval during which a foreign change can be staged unseen, and the hash binding
-#: catches it only when the observation is actually re-taken.
 DEFAULT_PENDING_OBSERVATION_TTL = timedelta(minutes=10)
 
 
 class SdnActivationRefused(Exception):
-    """Activation refused. Carries a closed reason code, never a host or credential."""
+    """Activation refused. A closed reason code, never a host or credential."""
 
 
 class SdnObjectOwnership(str, Enum):
     """How a pending SDN object relates to the operation being authorised.
 
-    Deliberately not a boolean. A bool is caller-assertable — whoever builds the object declares
-    ownership — and ownership is exactly the claim that must be *derived*. The value here is
-    produced by :func:`classify_ownership` from binding proof, never passed in.
+    Deliberately not a boolean, and deliberately not settable on the object: ownership is a
+    conclusion drawn from proof, and a value anyone can assign is not a conclusion.
     """
 
-    #: Every applicable binding agreed. The only value MVP activation tolerates.
-    operation_owned = "operation_owned"
-    #: Provably not ours.
-    foreign = "foreign"
-    #: SECP's, but a different range, operation, or generation — including an earlier failed or
-    #: abandoned one. Distinct from ``foreign`` because it is a different remediation.
+    current_operation = "current_operation"
     other_secp_operation = "other_secp_operation"
-    #: Proof was incomplete. NOT a soft ``foreign``: it means we do not know, and the whole point
-    #: is that not knowing must refuse rather than default either way.
+    foreign = "foreign"
     unknown = "unknown"
-    #: Never submitted for classification at all.
     unclassified = "unclassified"
 
 
-#: Everything MVP activation refuses on. Only ``operation_owned`` is absent.
 NON_EXCLUSIVE_OWNERSHIP: frozenset[SdnObjectOwnership] = frozenset(
     {
-        SdnObjectOwnership.foreign,
         SdnObjectOwnership.other_secp_operation,
+        SdnObjectOwnership.foreign,
         SdnObjectOwnership.unknown,
         SdnObjectOwnership.unclassified,
     }
 )
+
+
+# ==================================================================================================
+# A. The canonical pending document — what the TARGET said. No ownership claims.
+# ==================================================================================================
+
+
+@dataclass(frozen=True)
+class PendingSdnObject:
+    """One staged SDN change, as observed. Carries no ownership field by construction."""
+
+    family: str
+    object_id: str
+    action: str  # new | changed | deleted
+    normalized_active_representation: str = ""
+    normalized_pending_representation: str = ""
+    source_endpoint: str = ""
+    observation_state: str = ""
+    raw_result_digest: str = ""
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """The one-to-one join key with a proof result."""
+        return (self.family, self.object_id)
+
+    def canonical(self) -> dict:
+        return {
+            "family": self.family,
+            "object_id": self.object_id,
+            "action": self.action,
+            "active": self.normalized_active_representation,
+            "pending": self.normalized_pending_representation,
+            "source_endpoint": self.source_endpoint,
+            "observation_state": self.observation_state,
+            "raw_result_digest": self.raw_result_digest,
+        }
+
+
+@dataclass(frozen=True)
+class PendingSdnDocument:
+    """The complete cluster-wide pending state at one instant, with its own bindings."""
+
+    observed_at: datetime
+    target_identity: str
+    cluster_fingerprint: str
+    observation_identity: str
+    worker_installation_id: str
+    worker_release_fingerprint: str
+    objects: tuple[PendingSdnObject, ...] = ()
+    signature_verified: bool = False
+    visibility_complete: bool = False
+    unreadable_families: tuple[tuple[str, str], ...] = ()
+
+    def pending_sdn_hash(self) -> str:
+        """Hash of what the TARGET reported. Nothing about ownership enters here.
+
+        Keeping ownership out is what makes the two digests independent: a classification change
+        with byte-identical target state must move the OTHER digest and not this one, so the pair
+        can distinguish "the cluster changed" from "our evidence changed".
+        """
+        return sha256_digest(
+            {
+                "target_identity": self.target_identity,
+                "cluster_fingerprint": self.cluster_fingerprint,
+                "observation_identity": self.observation_identity,
+                "objects": sorted(
+                    (obj.canonical() for obj in self.objects),
+                    key=lambda row: (row["family"], row["object_id"]),
+                ),
+            }
+        )
+
+    @property
+    def keys(self) -> tuple[tuple[str, str], ...]:
+        return tuple(obj.key for obj in self.objects)
+
+
+# ==================================================================================================
+# B. The ownership proof set — SECP's conclusion, and the evidence behind it.
+# ==================================================================================================
 
 
 @dataclass(frozen=True)
@@ -118,310 +184,456 @@ class OperationBinding:
 
 
 @dataclass(frozen=True)
-class ObjectOwnershipProof:
-    """The per-object evidence ownership is derived from.
+class OwnershipProofResult:
+    """One object's classification and the evidence digests behind it.
 
-    Every field is a binding the observed object must match. A missing or disagreeing binding
-    yields ``unknown`` — never ``operation_owned``, and never ``foreign``, because "we could not
-    prove it is ours" and "we proved it is somebody else's" are different facts with different
-    remediations.
-
-    Explicitly NOT evidence, and absent from this structure on purpose:
-
-    * an identifier beginning with a SECP prefix — reproducible by any actor;
-    * a VNet alias mentioning SECP — same;
-    * attribute equality with the desired plan — two actors can render the same values;
-    * the object appearing after a Stage 1 run — coincidence is not causation;
-    * absence from one earlier incomplete observation — an incomplete view proves nothing;
-    * presence in an OpenTofu state file without target-side corroboration.
+    Explicitly NOT evidence, and absent from this structure on purpose: a SECP name prefix, a VNet
+    alias, an HCL comment, attribute equality alone, creation-like timing alone, or "appeared after
+    Stage 1" alone. Each is reproducible by another actor or is a coincidence, and none appears as
+    a field here — so none can be offered as proof.
     """
 
-    # --- which operation this object is claimed for ---------------------------------------------
-    claimed_target_identity: str = ""
-    claimed_cluster_fingerprint: str = ""
-    claimed_range_identity: str = ""
-    claimed_operation_identity: str = ""
-    claimed_operation_generation: int = -1
-
-    # --- what Stage 1 said it would do ------------------------------------------------------------
-    stage1_desired_object_id: str = ""
-    stage1_object_family: str = ""
-    stage1_expected_action: str = ""  # create | change | delete
+    object_key: tuple[str, str]
+    ownership: SdnObjectOwnership
+    classification_reason: str
+    range_identity: str = ""
+    operation_identity: str = ""
+    operation_generation: int = -1
+    stage1_desired_object_digest: str = ""
     stage1_workspace_hash: str = ""
     stage1_plan_hash: str = ""
-    stage1_authorization_id: str = ""
-    stage1_execution_receipt: str = ""
+    stage1_execution_receipt_digest: str = ""
+    pre_stage1_absence_proof_digest: str = ""
+    durable_ownership_provenance_digest: str = ""
+    target_identity: str = ""
+    cluster_fingerprint: str = ""
+    proof_complete: bool = False
 
-    # --- what was observed ------------------------------------------------------------------------
-    #: The signed post-Stage-1 pending observation this object was seen in.
-    post_stage1_observation_signed: bool = False
-    #: For a NEW object: a signed PRE-Stage-1 observation, with complete visibility, showing the
-    #: identifier absent from BOTH active and pending configuration and unowned by another range.
-    pre_stage1_absence_proven: bool = False
-    #: For an EXISTING object: durable SECP provenance that the same range lineage created or
-    #: adopted it. Names and attribute equality do not substitute.
-    durable_provenance_record: str = ""
-
-    #: Set when the object is provably somebody else's rather than merely unproven.
-    proven_foreign: bool = False
+    def canonical(self) -> dict:
+        return {
+            "object_key": list(self.object_key),
+            "ownership": self.ownership.value,
+            "classification_reason": self.classification_reason,
+            "range_identity": self.range_identity,
+            "operation_identity": self.operation_identity,
+            "operation_generation": self.operation_generation,
+            "stage1_desired_object_digest": self.stage1_desired_object_digest,
+            "stage1_workspace_hash": self.stage1_workspace_hash,
+            "stage1_plan_hash": self.stage1_plan_hash,
+            "stage1_execution_receipt_digest": self.stage1_execution_receipt_digest,
+            "pre_stage1_absence_proof_digest": self.pre_stage1_absence_proof_digest,
+            "durable_ownership_provenance_digest": self.durable_ownership_provenance_digest,
+            "target_identity": self.target_identity,
+            "cluster_fingerprint": self.cluster_fingerprint,
+            "proof_complete": self.proof_complete,
+        }
 
 
 @dataclass(frozen=True)
-class PendingSdnObject:
-    """One staged SDN change. Ownership is a derived classification, not a constructor argument."""
+class PendingSdnOwnershipProofSet:
+    """Exactly one proof per pending object, no more and no fewer."""
 
-    family: str  # zones | vnets | subnets | controllers
-    object_id: str
-    #: ``new`` | ``changed`` | ``deleted`` — Proxmox's own classification.
-    state: str
-    #: Defaults to ``unclassified``: an object nobody submitted for classification must not read as
-    #: ours, and must not read as somebody else's either.
-    ownership: SdnObjectOwnership = SdnObjectOwnership.unclassified
+    results: tuple[OwnershipProofResult, ...] = ()
 
-    def digest_tuple(self) -> tuple[str, str, str, str]:
-        return (self.family, self.object_id, self.state, self.ownership.value)
+    def ownership_provenance_digest(self) -> str:
+        return sha256_digest(
+            {
+                "results": sorted(
+                    (r.canonical() for r in self.results), key=lambda row: row["object_key"]
+                )
+            }
+        )
+
+    @property
+    def keys(self) -> tuple[tuple[str, str], ...]:
+        return tuple(r.object_key for r in self.results)
+
+    def by_key(self) -> dict[tuple[str, str], OwnershipProofResult]:
+        return {r.object_key: r for r in self.results}
 
 
 def classify_ownership(
-    obj: PendingSdnObject, proof: ObjectOwnershipProof, operation: OperationBinding
+    obj: PendingSdnObject, proof: OwnershipProofResult, operation: OperationBinding
 ) -> SdnObjectOwnership:
-    """Derive ownership from proof. Returns ``unknown`` on any incomplete binding.
+    """Derive ownership from evidence. ``unknown`` on any incomplete or disagreeing binding.
 
-    The order matters: ``proven_foreign`` is checked first because a positive proof that the object
-    belongs to somebody else is stronger information than our own binding failing, and the operator
-    should be told the stronger thing.
+    Never returns ``current_operation`` on the strength of a name, an alias, a comment, matching
+    attributes or timing — none of those is a parameter here, so none can be supplied.
     """
-    if proof.proven_foreign:
+    if proof.ownership is SdnObjectOwnership.foreign and proof.proof_complete:
+        # Positive proof it belongs to somebody else is stronger information than our binding
+        # failing, and the operator should be told the stronger thing.
         return SdnObjectOwnership.foreign
 
-    # A different range, operation or generation is SECP's but not THIS operation's — including an
-    # earlier failed or abandoned run, whose leftovers must never ride along on a new approval.
     if (
-        proof.claimed_range_identity
-        and proof.claimed_operation_identity
+        proof.range_identity
+        and proof.operation_identity
         and (
-            proof.claimed_range_identity != operation.range_identity
-            or proof.claimed_operation_identity != operation.operation_identity
-            or proof.claimed_operation_generation != operation.operation_generation
+            proof.range_identity != operation.range_identity
+            or proof.operation_identity != operation.operation_identity
+            or proof.operation_generation != operation.operation_generation
         )
     ):
         return SdnObjectOwnership.other_secp_operation
 
-    bindings_agree = (
-        proof.claimed_target_identity == operation.target_identity
-        and proof.claimed_cluster_fingerprint == operation.cluster_fingerprint
-        and proof.claimed_range_identity == operation.range_identity
-        and proof.claimed_operation_identity == operation.operation_identity
-        and proof.claimed_operation_generation == operation.operation_generation
+    required_non_empty = (
+        proof.target_identity,
+        proof.cluster_fingerprint,
+        proof.range_identity,
+        proof.operation_identity,
+        proof.stage1_workspace_hash,
+        proof.stage1_plan_hash,
+        proof.stage1_execution_receipt_digest,
+    )
+    # Two empty strings compare equal, so equality alone is not proof. Without this, an object with
+    # no evidence measured against an unconfigured operation would satisfy every `==`.
+    if not all(required_non_empty):
+        return SdnObjectOwnership.unknown
+
+    if not (
+        proof.target_identity == operation.target_identity
+        and proof.cluster_fingerprint == operation.cluster_fingerprint
+        and proof.range_identity == operation.range_identity
+        and proof.operation_identity == operation.operation_identity
+        and proof.operation_generation == operation.operation_generation
         and proof.stage1_workspace_hash == operation.stage1_workspace_hash
         and proof.stage1_plan_hash == operation.stage1_plan_hash
-        and proof.stage1_authorization_id == operation.stage1_authorization_id
-        and proof.stage1_execution_receipt == operation.stage1_execution_receipt
-        and proof.stage1_desired_object_id == obj.object_id
-        and proof.stage1_object_family == obj.family
-        and proof.stage1_expected_action == obj.state
-        and proof.post_stage1_observation_signed
-    )
-    if not bindings_agree or not all(
-        (
-            proof.claimed_target_identity,
-            proof.claimed_cluster_fingerprint,
-            proof.claimed_range_identity,
-            proof.claimed_operation_identity,
-            proof.stage1_workspace_hash,
-            proof.stage1_plan_hash,
-            proof.stage1_authorization_id,
-            proof.stage1_execution_receipt,
-        )
+        and proof.proof_complete
     ):
         return SdnObjectOwnership.unknown
 
-    # A NEW object additionally needs proof the identifier was free before Stage 1 — otherwise SECP
-    # may have adopted somebody else's object that happened to share the name.
-    if obj.state == "new":
+    if obj.action == "new":
+        # Otherwise SECP could adopt somebody else's object that happened to share the identifier.
         return (
-            SdnObjectOwnership.operation_owned
-            if proof.pre_stage1_absence_proven
+            SdnObjectOwnership.current_operation
+            if proof.pre_stage1_absence_proof_digest
             else SdnObjectOwnership.unknown
         )
 
-    # A CHANGE or DELETE touches an object that already existed, so name and attribute agreement
-    # cannot establish that SECP was the one who created it. Durable provenance is required.
+    # A change or delete touches something that already existed, so name and attribute agreement
+    # cannot establish who created it.
     return (
-        SdnObjectOwnership.operation_owned
-        if proof.durable_provenance_record
+        SdnObjectOwnership.current_operation
+        if proof.durable_ownership_provenance_digest
         else SdnObjectOwnership.unknown
     )
 
 
-@dataclass(frozen=True)
-class PendingSdnObservation:
-    """The complete cluster-wide pending set at one instant.
+# ==================================================================================================
+# C. The disclosure — derived, presentational, authoritative over nothing.
+# ==================================================================================================
 
-    ``complete`` is the field that decides whether this observation may back an authorisation at
-    all. A partial enumeration — some family denied, some endpoint unsupported — cannot establish
-    what activation would commit, and an activation authorised on a partial view is authorised on a
-    guess.
+
+@dataclass(frozen=True)
+class PendingSdnDisclosure:
+    """The operator-facing summary. Built ONLY by :func:`derive_disclosure`.
+
+    It carries the two source digests so it cannot be transplanted onto a different document: a
+    disclosure derived from one pending state and offered alongside another is detectable, which
+    matters because this object is the one an operator actually reads.
     """
 
-    observed_at: datetime
-    objects: tuple[PendingSdnObject, ...] = ()
-    #: False when any SDN family could not be enumerated with confirmed authority.
-    complete: bool = False
-    #: Families that could not be read, with the observation state that explains why.
-    unreadable_families: tuple[tuple[str, str], ...] = ()
+    pending_sdn_hash: str
+    ownership_provenance_digest: str
+    ownership_counts: dict[str, int]
+    action_counts: dict[str, int]
+    family_counts: dict[str, int]
+    classification_complete: bool
+    exclusive_to_current_operation: bool
 
-    def pending_hash(self) -> str:
-        """Hash of the COMPLETE pending set, ordered deterministically.
 
-        Includes foreign objects. Hashing only SECP's own changes would produce a stable hash while
-        the thing actually being committed changed underneath it — which is precisely the failure
-        this hash exists to detect.
-        """
-        rows = sorted(obj.digest_tuple() for obj in self.objects)
-        return sha256_digest({"pending": [list(row) for row in rows]})
+#: The fixed projection. Explicit rather than derived from enum members, so renaming or adding an
+#: ownership classification cannot silently change the manifest contract an operator reads.
+_OWNERSHIP_FIELDS: tuple[tuple[str, SdnObjectOwnership], ...] = (
+    ("current_operation", SdnObjectOwnership.current_operation),
+    ("other_secp_operation", SdnObjectOwnership.other_secp_operation),
+    ("foreign", SdnObjectOwnership.foreign),
+    ("unknown", SdnObjectOwnership.unknown),
+    ("unclassified", SdnObjectOwnership.unclassified),
+)
 
-    @property
-    def non_exclusive_objects(self) -> tuple[PendingSdnObject, ...]:
-        """Every object that is not provably this operation's.
+_ACTION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("create", "new"),
+    ("change", "changed"),
+    ("delete", "deleted"),
+)
 
-        Foreign, another SECP operation's, unknown and unclassified are all here. For MVP the
-        distinction between them affects only the message an operator reads — every one of them
-        refuses.
-        """
-        return tuple(obj for obj in self.objects if obj.ownership in NON_EXCLUSIVE_OWNERSHIP)
 
-    def ownership_counts(self) -> dict[str, int]:
-        """The counts an operator is shown, by classification.
+def derive_disclosure(
+    document: PendingSdnDocument, proofs: PendingSdnOwnershipProofSet
+) -> PendingSdnDisclosure:
+    """Compute the disclosure. The only way one comes into existence."""
+    by_key = proofs.by_key()
+    counts = {name: 0 for name, _ in _OWNERSHIP_FIELDS}
+    for obj in document.objects:
+        result = by_key.get(obj.key)
+        classification = result.ownership if result is not None else SdnObjectOwnership.unclassified
+        for name, member in _OWNERSHIP_FIELDS:
+            if classification is member:
+                counts[name] += 1
+                break
 
-        Reported even though MVP refuses on any non-zero total: "one foreign object" and "eleven
-        objects from an abandoned run" call for very different next actions, and a bare refusal
-        would send someone hunting for the difference.
-        """
-        counts = {member.value: 0 for member in SdnObjectOwnership}
-        for obj in self.objects:
-            counts[obj.ownership.value] += 1
-        counts["total"] = len(self.objects)
-        return counts
+    total = len(document.objects)
+    ownership_counts = {"total_pending": total, **counts}
 
-    @property
-    def is_empty(self) -> bool:
-        return not self.objects
+    action_counts = {name: 0 for name, _ in _ACTION_FIELDS}
+    for obj in document.objects:
+        for name, action in _ACTION_FIELDS:
+            if obj.action == action:
+                action_counts[name] += 1
+                break
+
+    family_counts: dict[str, int] = {}
+    for obj in document.objects:
+        family_counts[obj.family] = family_counts.get(obj.family, 0) + 1
+
+    classification_complete = counts["unknown"] == 0 and counts["unclassified"] == 0
+    exclusive = (
+        total == counts["current_operation"]
+        and counts["other_secp_operation"] == 0
+        and counts["foreign"] == 0
+        and counts["unknown"] == 0
+        and counts["unclassified"] == 0
+    )
+
+    return PendingSdnDisclosure(
+        pending_sdn_hash=document.pending_sdn_hash(),
+        ownership_provenance_digest=proofs.ownership_provenance_digest(),
+        ownership_counts=ownership_counts,
+        action_counts=action_counts,
+        family_counts=family_counts,
+        classification_complete=classification_complete,
+        exclusive_to_current_operation=exclusive,
+    )
+
+
+def object_manifest(
+    document: PendingSdnDocument, proofs: PendingSdnOwnershipProofSet
+) -> tuple[dict, ...]:
+    """Every pending object, individually. A summary is not a manifest.
+
+    An operator refused an activation needs to see WHICH object blocked it; a count tells them how
+    many and nothing else.
+    """
+    by_key = proofs.by_key()
+    rows = []
+    for obj in document.objects:
+        result = by_key.get(obj.key)
+        rows.append(
+            {
+                "family": obj.family,
+                "identifier": obj.object_id,
+                "action": obj.action,
+                "ownership_classification": (
+                    result.ownership.value
+                    if result is not None
+                    else SdnObjectOwnership.unclassified.value
+                ),
+                "classification_reason": (
+                    result.classification_reason if result is not None else "no_proof_submitted"
+                ),
+                "range_binding": result.range_identity if result is not None else "",
+                "operation_binding": result.operation_identity if result is not None else "",
+                "generation_binding": result.operation_generation if result is not None else -1,
+                "active_representation_digest": obj.normalized_active_representation,
+                "pending_representation_digest": obj.normalized_pending_representation,
+                "source_endpoint": obj.source_endpoint,
+                "observation_state": obj.observation_state,
+            }
+        )
+    return tuple(rows)
+
+
+# ==================================================================================================
+# The authorization — derives everything, accepts no summary.
+# ==================================================================================================
 
 
 @dataclass(frozen=True)
 class ActivationAuthorization:
     """An operator's approval of one exact activation.
 
-    Binds the observation's hash, not the plan's. Two activations of the same SECP objects over
-    different cluster-wide pending sets are different acts, and only one of them was approved.
+    Construct with :func:`issue_activation_authorization`. There is deliberately no counts
+    parameter, no disclosure parameter and no ownership boolean anywhere on this type: a caller can
+    supply the evidence classification is derived from, never the classification outcome.
     """
 
-    authorized_pending_hash: str
+    pending_sdn_hash: str
+    ownership_provenance_digest: str
+    disclosure: PendingSdnDisclosure
     authorized_at: datetime
     authorized_by: str
     target_identity: str
-    operation_identity: str = ""
-    operation_generation: int = -1
-    #: The counts the operator was shown, recorded so a later reviewer can establish what was
-    #: disclosed rather than inferring it.
-    disclosed_counts: dict[str, int] = field(default_factory=dict)
+    cluster_fingerprint: str
+    range_identity: str
+    operation_identity: str
+    operation_generation: int
+    worker_installation_id: str
+    worker_release_fingerprint: str
     observation_ttl: timedelta = DEFAULT_PENDING_OBSERVATION_TTL
 
-    def __post_init__(self) -> None:
-        """MVP invariant, enforced at CONSTRUCTION.
 
-        An authorisation covering a foreign or unknown object is **structurally invalid** for the
-        first MVP, not merely refused later by a checker somebody could move or make conditional.
-        Making it unconstructable means no code path can produce one to be checked.
+def issue_activation_authorization(
+    *,
+    document: PendingSdnDocument,
+    proofs: PendingSdnOwnershipProofSet,
+    operation: OperationBinding,
+    authorized_at: datetime,
+    authorized_by: str,
+    observation_ttl: timedelta = DEFAULT_PENDING_OBSERVATION_TTL,
+) -> ActivationAuthorization:
+    """Validate, derive, enforce exclusivity, and bind. Refuses rather than returning a weak one.
 
-        Accepting the foreign-object residual is deliberately NOT available through ordinary Stage 3
-        approval. A mixed-owner or break-glass activation is a different operation kind with its own
-        authorisation contract, explicit cluster-wide acknowledgement and — most likely — dual
-        approval. It is outside the MVP and must not be reachable by an operator clicking through
-        this one.
-        """
-        for key in ("foreign", "other_secp_operation", "unknown", "unclassified"):
-            if self.disclosed_counts.get(key, 0):
-                raise SdnActivationRefused(
-                    "cluster_pending_sdn_not_exclusive_to_operation:"
-                    f"{key}={self.disclosed_counts[key]}"
-                )
+    The MVP invariant is enforced here, at the only place an authorization can come into being: a
+    non-exclusive pending set produces no authorization at all, so there is nothing for a later
+    check to be persuaded to skip. Accepting the foreign-object residual is deliberately not
+    available through this path — a mixed-owner activation is a different operation kind with its
+    own contract.
+    """
+    if not document.signature_verified:
+        raise SdnActivationRefused("sdn_pending_document_unsigned")
+    if not document.visibility_complete:
+        raise SdnActivationRefused("sdn_pending_document_visibility_incomplete")
+
+    doc_keys = list(document.keys)
+    proof_keys = list(proofs.keys)
+    if len(set(doc_keys)) != len(doc_keys):
+        raise SdnActivationRefused("sdn_pending_document_duplicate_object")
+    if len(set(proof_keys)) != len(proof_keys):
+        raise SdnActivationRefused("sdn_ownership_proof_duplicated")
+    if set(doc_keys) != set(proof_keys):
+        raise SdnActivationRefused("sdn_ownership_proof_set_mismatch")
+
+    if not document.objects:
+        # An activation of nothing is meaningless and can conceal an observation or composition
+        # failure that produced an empty document. An operation with nothing pending does not need
+        # cluster-wide activation and must not manufacture an authorization for one.
+        raise SdnActivationRefused("sdn_activation_empty_pending_set")
+
+    for binding in (
+        operation.target_identity,
+        operation.cluster_fingerprint,
+        operation.range_identity,
+        operation.operation_identity,
+    ):
+        if not binding or not str(binding).strip():
+            raise SdnActivationRefused("sdn_activation_operation_binding_blank")
+
+    if document.target_identity != operation.target_identity:
+        raise SdnActivationRefused("sdn_activation_target_mismatch")
+    if document.cluster_fingerprint != operation.cluster_fingerprint:
+        raise SdnActivationRefused("sdn_activation_cluster_mismatch")
+
+    disclosure = derive_disclosure(document, proofs)
+
+    if not disclosure.classification_complete:
+        raise SdnActivationRefused(
+            "cluster_pending_sdn_not_exclusive_to_operation:"
+            + _counts_detail(disclosure.ownership_counts)
+        )
+    if not disclosure.exclusive_to_current_operation:
+        raise SdnActivationRefused(
+            "cluster_pending_sdn_not_exclusive_to_operation:"
+            + _counts_detail(disclosure.ownership_counts)
+        )
+
+    return ActivationAuthorization(
+        pending_sdn_hash=disclosure.pending_sdn_hash,
+        ownership_provenance_digest=disclosure.ownership_provenance_digest,
+        disclosure=disclosure,
+        authorized_at=authorized_at,
+        authorized_by=authorized_by,
+        target_identity=operation.target_identity,
+        cluster_fingerprint=operation.cluster_fingerprint,
+        range_identity=operation.range_identity,
+        operation_identity=operation.operation_identity,
+        operation_generation=operation.operation_generation,
+        worker_installation_id=document.worker_installation_id,
+        worker_release_fingerprint=document.worker_release_fingerprint,
+        observation_ttl=observation_ttl,
+    )
+
+
+def _counts_detail(counts: dict[str, int]) -> str:
+    """Every count in the refusal.
+
+    One foreign object and eleven objects from an abandoned run are the same refusal and very
+    different next actions, so the message carries the whole breakdown rather than a total.
+    """
+    parts = [f"total_pending={counts.get('total_pending', 0)}"]
+    parts.extend(f"{name}={counts.get(name, 0)}" for name, _ in _OWNERSHIP_FIELDS)
+    return ",".join(parts)
 
 
 def activation_refusals(
     *,
     stage: str,
     authorization: ActivationAuthorization | None,
-    observation: PendingSdnObservation | None,
+    document: PendingSdnDocument | None,
+    proofs: PendingSdnOwnershipProofSet | None,
+    operation: OperationBinding,
     now: datetime,
-    expected_target_identity: str,
 ) -> tuple[str, ...]:
-    """Every reason activation must not proceed. Empty means it may.
+    """Stage 4. Rediscover, reclassify, recompute both digests, compare everything.
 
-    All reasons are returned, not the first — an operator who re-observes to clear a stale hash only
-    to meet a target mismatch has been told half the truth twice.
+    All failing reasons are returned, not the first — an operator who re-observes to clear a stale
+    hash only to meet a binding mismatch has been told half the truth twice.
     """
     reasons: list[str] = []
 
     if stage != STAGE_ACTIVATION_AUTHORIZED:
-        # Activation is reachable only from an authorised state. Naming the stage makes the refusal
-        # actionable rather than merely negative.
         reasons.append(f"sdn_activation_wrong_stage:{stage}")
-
     if authorization is None:
         reasons.append("sdn_activation_unauthorized")
-    if observation is None:
+    if document is None or proofs is None:
         reasons.append("sdn_activation_no_pending_observation")
-    if authorization is None or observation is None:
-        return tuple(reasons)
+    if authorization is None or document is None or proofs is None:
+        return tuple(dict.fromkeys(reasons))
 
-    if not observation.complete:
-        # A partial view cannot establish what activation would commit. Distinct from "nothing
-        # pending" — this is "we do not know what is pending".
-        reasons.append("sdn_activation_pending_state_incomplete")
-        for family, state in observation.unreadable_families:
+    if not document.signature_verified:
+        reasons.append("sdn_pending_document_unsigned")
+    if not document.visibility_complete:
+        reasons.append("sdn_pending_document_visibility_incomplete")
+        for family, state in document.unreadable_families:
             reasons.append(f"sdn_pending_family_unreadable:{family}:{state}")
 
-    # THE binding. A foreign change staged between observation and activation moves this hash.
-    if observation.pending_hash() != authorization.authorized_pending_hash:
-        reasons.append("sdn_activation_pending_state_changed")
+    if set(document.keys) != set(proofs.keys):
+        reasons.append("sdn_ownership_proof_set_mismatch")
 
-    age = now - observation.observed_at
+    # BOTH digests, recomputed. The pending hash catches the cluster changing; the provenance digest
+    # catches our evidence changing while the cluster did not — a provenance record disappearing
+    # leaves the target-observed bytes identical.
+    if document.pending_sdn_hash() != authorization.pending_sdn_hash:
+        reasons.append("sdn_activation_pending_state_changed")
+    if proofs.ownership_provenance_digest() != authorization.ownership_provenance_digest:
+        reasons.append("sdn_activation_ownership_provenance_changed")
+
+    disclosure = derive_disclosure(document, proofs)
+    if not disclosure.exclusive_to_current_operation or not disclosure.classification_complete:
+        reasons.append(
+            "cluster_pending_sdn_not_exclusive_to_operation:"
+            + _counts_detail(disclosure.ownership_counts)
+        )
+    if disclosure.ownership_counts != authorization.disclosure.ownership_counts:
+        reasons.append("sdn_activation_disclosure_changed")
+
+    age = now - document.observed_at
     if age < timedelta(0):
         reasons.append("sdn_activation_observation_clock_skew")
     elif age > authorization.observation_ttl:
         reasons.append("sdn_activation_observation_expired")
 
-    if authorization.target_identity != expected_target_identity:
+    if authorization.target_identity != operation.target_identity:
         reasons.append("sdn_activation_target_mismatch")
-
-    # THE MVP RULE. Re-checked here as well as at construction, because the observation is re-taken
-    # immediately before activation and an object can have changed classification in between — a
-    # foreign object staged after authorisation is exactly the case that must not activate.
-    non_exclusive = observation.non_exclusive_objects
-    if non_exclusive:
-        counts = observation.ownership_counts()
-        reasons.append(
-            "cluster_pending_sdn_not_exclusive_to_operation:"
-            f"total={counts['total']},"
-            f"operation_owned={counts['operation_owned']},"
-            f"foreign={counts['foreign']},"
-            f"other_secp_operation={counts['other_secp_operation']},"
-            f"unknown={counts['unknown']},"
-            f"unclassified={counts['unclassified']}"
-        )
-
-    # An authorisation that did not disclose what it would commit did not describe the act being
-    # authorised, even if its hash matches.
-    if authorization.disclosed_counts != observation.ownership_counts():
-        reasons.append("sdn_activation_disclosure_mismatch")
+    if authorization.operation_identity != operation.operation_identity:
+        reasons.append("sdn_activation_operation_mismatch")
+    if authorization.operation_generation != operation.operation_generation:
+        reasons.append("sdn_activation_generation_mismatch")
 
     return tuple(dict.fromkeys(reasons))
 
 
 def next_stage(current: str) -> str:
-    """The single legal successor. Raises rather than returning a default."""
     if current not in STAGE_ORDER:
         raise SdnActivationRefused(f"sdn_activation_unknown_stage:{current}")
     index = STAGE_ORDER.index(current)
@@ -431,11 +643,10 @@ def next_stage(current: str) -> str:
 
 
 def guests_may_deploy(stage: str) -> bool:
-    """Guests attach to VNets, so they may not deploy until the SDN is verified ACTIVE.
+    """Guests attach to VNets, so they wait for stage 5.
 
-    Not merely activated: ``PUT /cluster/sdn`` returning success means the task was accepted, not
-    that every node has reloaded and the bridges exist. A guest attached to a VNet that has not
-    materialised on its node fails in a way that looks like a guest problem.
+    ``PUT /cluster/sdn`` returning success means the task was accepted, not that every node has
+    reloaded and the bridges exist.
     """
     return stage == STAGE_VERIFIED
 
@@ -445,11 +656,10 @@ class ActivationRecord:
     """What is retained about one activation, for the operator manifest and for audit."""
 
     stage: str
-    pending_hash_at_authorization: str = ""
-    pending_hash_at_activation: str = ""
-    #: Full per-classification counts rather than a foreign tally: an operator reading an audit
-    #: record needs to know whether the blocker was somebody else's work, an abandoned run of our
-    #: own, or an unproven object.
+    pending_sdn_hash_at_authorization: str = ""
+    pending_sdn_hash_at_activation: str = ""
+    ownership_provenance_digest_at_authorization: str = ""
+    ownership_provenance_digest_at_activation: str = ""
     ownership_counts_at_activation: dict[str, int] = field(default_factory=dict)
     activated_at: datetime | None = None
     verified_at: datetime | None = None

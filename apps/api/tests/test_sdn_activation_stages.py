@@ -1,22 +1,19 @@
-"""The five-stage SDN activation model, with MVP zero-tolerance and derived ownership.
+"""Ownership is derived; disclosure authorises nothing.
 
-Two properties drive everything here.
+The hole this file exists to close, stated as the attack: an ``ActivationAuthorization`` used to
+accept ``disclosed_counts`` from its caller, so an **all-zero summary offered against a contaminated
+pending document** survived construction and was only caught by a later recompute. The constructor
+now has no counts parameter, no disclosure parameter and no ownership boolean — a caller may supply
+the evidence classification is derived from, never the classification outcome.
 
-**Ownership is derived, never asserted.** The first cut of this module had
-``PendingSdnObject.secp_owned: bool`` — a caller-supplied boolean, so whoever built the object
-declared ownership rather than proving it. That is the same defect class as a plan document being
-told its own validation result. Ownership now comes from :func:`classify_ownership` against binding
-proof, and anything short of complete proof is ``unknown``.
-
-**MVP refuses on ANY non-exclusive object.** `PUT /cluster/sdn` commits everything pending
-cluster-wide. Disclosing a foreign object is not the same as it being safe to commit, and an
-operator must not be able to accept that residual through ordinary Stage 3 approval. An
-authorisation covering one is structurally unconstructable.
+Two digests, because they protect different facts: the pending hash catches the cluster changing;
+the provenance digest catches our evidence changing while the target-observed bytes stay identical.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -29,23 +26,27 @@ from secp_api.sdn_activation_stages import (
     STAGE_PREPARED,
     STAGE_VERIFIED,
     ActivationAuthorization,
-    ObjectOwnershipProof,
     OperationBinding,
+    OwnershipProofResult,
+    PendingSdnDisclosure,
+    PendingSdnDocument,
     PendingSdnObject,
-    PendingSdnObservation,
+    PendingSdnOwnershipProofSet,
     SdnActivationRefused,
     SdnObjectOwnership,
     activation_refusals,
     classify_ownership,
+    derive_disclosure,
     guests_may_deploy,
+    issue_activation_authorization,
     next_stage,
+    object_manifest,
 )
 
 NOW = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
-TARGET = "target-abc"
 
 OPERATION = OperationBinding(
-    target_identity=TARGET,
+    target_identity="target-abc",
     cluster_fingerprint="sha256:cluster",
     range_identity="range-1",
     operation_identity="op-1",
@@ -56,157 +57,414 @@ OPERATION = OperationBinding(
     stage1_execution_receipt="receipt-1",
 )
 
-
-def _owned(object_id="secplab", family="zones", state="new") -> PendingSdnObject:
-    return PendingSdnObject(family, object_id, state, SdnObjectOwnership.operation_owned)
-
-
-_SECP_OBJECTS = (
-    _owned("secplab", "zones"),
-    _owned("secpteam1", "vnets"),
-    _owned("secplab-10.10.1.0-24", "subnets"),
+_ZONE = PendingSdnObject(
+    "zones", "secplab", "new", "", "zone-pending", "/cluster/sdn/zones", "observed", "sha256:z"
 )
-_FOREIGN = PendingSdnObject("zones", "opsvlan", "changed", SdnObjectOwnership.foreign)
-_UNKNOWN = PendingSdnObject("vnets", "mystery", "new", SdnObjectOwnership.unknown)
-_OTHER_OP = PendingSdnObject("zones", "secpold", "new", SdnObjectOwnership.other_secp_operation)
+_VNET = PendingSdnObject(
+    "vnets", "secpteam1", "new", "", "vnet-pending", "/cluster/sdn/vnets", "observed", "sha256:v"
+)
+_SUBNET = PendingSdnObject(
+    "subnets",
+    "secplab-10.10.1.0-24",
+    "new",
+    "",
+    "sub",
+    "/cluster/sdn/vnets/x/subnets",
+    "observed",
+    "sha256:s",
+)
+_INTRUDER = PendingSdnObject(
+    "zones", "opsvlan", "changed", "live", "chg", "/cluster/sdn/zones", "observed", "sha256:o"
+)
 
 
-def _proof(**overrides) -> ObjectOwnershipProof:
+def _proof(obj: PendingSdnObject, **overrides) -> OwnershipProofResult:
     base = dict(
-        claimed_target_identity=TARGET,
-        claimed_cluster_fingerprint="sha256:cluster",
-        claimed_range_identity="range-1",
-        claimed_operation_identity="op-1",
-        claimed_operation_generation=3,
-        stage1_desired_object_id="secplab",
-        stage1_object_family="zones",
-        stage1_expected_action="new",
-        stage1_workspace_hash="sha256:ws",
-        stage1_plan_hash="sha256:plan",
-        stage1_authorization_id="auth-1",
-        stage1_execution_receipt="receipt-1",
-        post_stage1_observation_signed=True,
-        pre_stage1_absence_proven=True,
-    )
-    base.update(overrides)
-    return ObjectOwnershipProof(**base)
-
-
-def _observation(objects=_SECP_OBJECTS, **overrides) -> PendingSdnObservation:
-    base = dict(observed_at=NOW - timedelta(minutes=1), objects=tuple(objects), complete=True)
-    base.update(overrides)
-    return PendingSdnObservation(**base)
-
-
-def _authorization(observation, **overrides) -> ActivationAuthorization:
-    base = dict(
-        authorized_pending_hash=observation.pending_hash(),
-        authorized_at=NOW - timedelta(seconds=30),
-        authorized_by="juan",
-        target_identity=TARGET,
+        object_key=obj.key,
+        ownership=SdnObjectOwnership.current_operation,
+        classification_reason="all_bindings_agree",
+        range_identity="range-1",
         operation_identity="op-1",
         operation_generation=3,
-        disclosed_counts=observation.ownership_counts(),
+        stage1_desired_object_digest="sha256:desired",
+        stage1_workspace_hash="sha256:ws",
+        stage1_plan_hash="sha256:plan",
+        stage1_execution_receipt_digest="receipt-1",
+        pre_stage1_absence_proof_digest="sha256:absent",
+        target_identity="target-abc",
+        cluster_fingerprint="sha256:cluster",
+        proof_complete=True,
     )
     base.update(overrides)
-    return ActivationAuthorization(**base)
+    return OwnershipProofResult(**base)
 
 
-def _refusals(observation, authorization, *, stage=STAGE_ACTIVATION_AUTHORIZED, now=NOW):
-    return activation_refusals(
-        stage=stage,
-        authorization=authorization,
-        observation=observation,
-        now=now,
-        expected_target_identity=TARGET,
+def _document(objects=(_ZONE, _VNET, _SUBNET), **overrides) -> PendingSdnDocument:
+    base = dict(
+        observed_at=NOW - timedelta(minutes=1),
+        target_identity="target-abc",
+        cluster_fingerprint="sha256:cluster",
+        observation_identity="obs-1",
+        worker_installation_id="wk-1",
+        worker_release_fingerprint="sha256:rel",
+        objects=tuple(objects),
+        signature_verified=True,
+        visibility_complete=True,
+    )
+    base.update(overrides)
+    return PendingSdnDocument(**base)
+
+
+def _proofs(document, **per_object) -> PendingSdnOwnershipProofSet:
+    return PendingSdnOwnershipProofSet(
+        results=tuple(_proof(obj, **per_object.get(obj.object_id, {})) for obj in document.objects)
     )
 
 
-# --- ownership is DERIVED ------------------------------------------------------------------------
+def _issue(document, proofs, **overrides):
+    kwargs = dict(
+        document=document,
+        proofs=proofs,
+        operation=OPERATION,
+        authorized_at=NOW - timedelta(seconds=30),
+        authorized_by="juan",
+    )
+    kwargs.update(overrides)
+    return issue_activation_authorization(**kwargs)
 
 
-def test_ownership_is_not_a_constructor_argument_anybody_can_assert():
-    """The regression test for the defect this correction closes.
+# --- THE HOLE ------------------------------------------------------------------------------------
 
-    An object nobody submitted for classification is ``unclassified`` — not owned, and not foreign
-    either, because we have not established anything about it.
+
+def test_the_constructor_has_no_counts_or_disclosure_parameter():
+    """All-zero caller counts cannot be passed because there is nowhere to pass them."""
+    params = set(inspect.signature(issue_activation_authorization).parameters)
+    for banned in (
+        "disclosed_counts",
+        "ownership_counts",
+        "classification_complete",
+        "exclusive_to_current_operation",
+        "foreign_count",
+        "disclosure",
+    ):
+        assert banned not in params, banned
+    assert params == {
+        "document",
+        "proofs",
+        "operation",
+        "authorized_at",
+        "authorized_by",
+        "observation_ttl",
+    }
+
+
+def test_a_forged_all_zero_disclosure_cannot_authorize_a_contaminated_document():
+    """The exact reported attack.
+
+    A hand-built disclosure claiming a clean cluster is constructed and thrown away: it reaches no
+    authority path, because the constructor derives its own from the document and proof set.
     """
-    obj = PendingSdnObject("zones", "anything", "new")
-    assert obj.ownership is SdnObjectOwnership.unclassified
-    assert obj.ownership in NON_EXCLUSIVE_OWNERSHIP
+    contaminated = _document(objects=(_ZONE, _VNET, _SUBNET, _INTRUDER))
+    proofs = PendingSdnOwnershipProofSet(
+        results=(
+            *(_proof(o) for o in (_ZONE, _VNET, _SUBNET)),
+            _proof(
+                _INTRUDER, ownership=SdnObjectOwnership.foreign, classification_reason="third_party"
+            ),
+        )
+    )
+    forged = PendingSdnDisclosure(
+        pending_sdn_hash=contaminated.pending_sdn_hash(),
+        ownership_provenance_digest=proofs.ownership_provenance_digest(),
+        ownership_counts={
+            "total_pending": 4,
+            "current_operation": 4,
+            "other_secp_operation": 0,
+            "foreign": 0,
+            "unknown": 0,
+            "unclassified": 0,
+        },
+        action_counts={"create": 4, "change": 0, "delete": 0},
+        family_counts={"zones": 2, "vnets": 1, "subnets": 1},
+        classification_complete=True,
+        exclusive_to_current_operation=True,
+    )
+    assert forged.exclusive_to_current_operation is True  # the lie is well-formed ...
+
+    with pytest.raises(SdnActivationRefused, match="not_exclusive_to_operation"):
+        _issue(contaminated, proofs)  # ... and unreachable
+
+    truth = derive_disclosure(contaminated, proofs)
+    assert truth.ownership_counts["foreign"] == 1
+    assert truth.exclusive_to_current_operation is False
 
 
-def test_complete_proof_yields_operation_owned():
+def test_counts_are_derived_from_the_document_and_proofs():
+    document = _document()
+    disclosure = derive_disclosure(document, _proofs(document))
+    assert disclosure.ownership_counts == {
+        "total_pending": 3,
+        "current_operation": 3,
+        "other_secp_operation": 0,
+        "foreign": 0,
+        "unknown": 0,
+        "unclassified": 0,
+    }
+    assert disclosure.classification_complete is True
+    assert disclosure.exclusive_to_current_operation is True
+
+
+@pytest.mark.parametrize(
+    "ownership,field",
+    [
+        (SdnObjectOwnership.foreign, "foreign"),
+        (SdnObjectOwnership.unknown, "unknown"),
+        (SdnObjectOwnership.other_secp_operation, "other_secp_operation"),
+        (SdnObjectOwnership.unclassified, "unclassified"),
+    ],
+)
+def test_one_contaminating_object_derives_exactly_one(ownership, field):
+    document = _document(objects=(_ZONE, _VNET, _SUBNET, _INTRUDER))
+    proofs = PendingSdnOwnershipProofSet(
+        results=(
+            *(_proof(o) for o in (_ZONE, _VNET, _SUBNET)),
+            _proof(_INTRUDER, ownership=ownership, classification_reason="x"),
+        )
+    )
+    disclosure = derive_disclosure(document, proofs)
+    assert disclosure.ownership_counts[field] == 1
+    assert disclosure.exclusive_to_current_operation is False
+    with pytest.raises(SdnActivationRefused, match="not_exclusive_to_operation"):
+        _issue(document, proofs)
+
+
+def test_an_object_with_no_proof_at_all_counts_as_unclassified():
+    """A missing proof must not silently vanish from the summary."""
+    document = _document(objects=(_ZONE, _VNET))
+    partial = PendingSdnOwnershipProofSet(results=(_proof(_ZONE),))
+    disclosure = derive_disclosure(document, partial)
+    assert disclosure.ownership_counts["unclassified"] == 1
+    assert disclosure.classification_complete is False
+
+
+def test_an_uncontaminated_document_authorizes():
     """A gate that never opens is not a gate."""
-    obj = PendingSdnObject("zones", "secplab", "new")
-    assert classify_ownership(obj, _proof(), OPERATION) is SdnObjectOwnership.operation_owned
+    document = _document()
+    auth = _issue(document, _proofs(document))
+    assert auth.pending_sdn_hash == document.pending_sdn_hash()
+    assert auth.disclosure.exclusive_to_current_operation is True
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("claimed_target_identity", "target-other"),
-        ("claimed_cluster_fingerprint", "sha256:other"),
-        ("stage1_workspace_hash", "sha256:other"),
-        ("stage1_plan_hash", "sha256:other"),
-        ("stage1_authorization_id", "auth-other"),
-        ("stage1_execution_receipt", "receipt-other"),
-        ("stage1_desired_object_id", "somethingelse"),
-        ("stage1_object_family", "vnets"),
-        ("stage1_expected_action", "changed"),
-        ("post_stage1_observation_signed", False),
-    ],
-)
-def test_any_disagreeing_binding_yields_unknown_not_owned(field, value):
-    """Unknown, not foreign: "we could not prove it is ours" and "we proved it is somebody else's"
-    are different facts with different remediations."""
-    obj = PendingSdnObject("zones", "secplab", "new")
-    result = classify_ownership(obj, _proof(**{field: value}), OPERATION)
-    assert result is SdnObjectOwnership.unknown
+# --- the invariants ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "claimed_target_identity",
-        "claimed_cluster_fingerprint",
-        "claimed_range_identity",
-        "claimed_operation_identity",
-        "stage1_workspace_hash",
-        "stage1_plan_hash",
-        "stage1_authorization_id",
-        "stage1_execution_receipt",
-    ],
-)
-def test_an_empty_binding_is_not_a_matching_binding(field):
-    """Two empty strings compare equal, so equality alone is not proof.
-
-    The trap is BOTH sides empty — an unconfigured operation and an object with no proof would
-    otherwise satisfy ``==`` on every field and classify as owned, which is the worst possible
-    direction. So the operation binding is blanked in the same field as the proof: a plain mismatch
-    would be caught by the comparison anyway and would not exercise this at all.
-
-    (Written this way after the first version passed against a mutation that removed the
-    non-emptiness guard — it had been comparing an empty proof field against a populated operation,
-    which is just a mismatch wearing this test's name.)
-    """
-    obj = PendingSdnObject("zones", "secplab", "new")
-    blank_both = (
-        dataclasses.replace(OPERATION, **{field: ""})
-        if field.startswith("stage1_")
-        else dataclasses.replace(OPERATION, **{field.replace("claimed_", ""): ""})
+def test_the_counts_sum_to_total_pending():
+    document = _document(objects=(_ZONE, _VNET, _SUBNET, _INTRUDER))
+    proofs = PendingSdnOwnershipProofSet(
+        results=(
+            _proof(_ZONE),
+            _proof(_VNET, ownership=SdnObjectOwnership.unknown, classification_reason="u"),
+            _proof(
+                _SUBNET,
+                ownership=SdnObjectOwnership.other_secp_operation,
+                classification_reason="o",
+            ),
+            _proof(_INTRUDER, ownership=SdnObjectOwnership.foreign, classification_reason="f"),
+        )
     )
-    proof = _proof(**{field: ""})
-    assert classify_ownership(obj, proof, blank_both) is not SdnObjectOwnership.operation_owned
+    c = derive_disclosure(document, proofs).ownership_counts
+    assert c["total_pending"] == (
+        c["current_operation"]
+        + c["other_secp_operation"]
+        + c["foreign"]
+        + c["unknown"]
+        + c["unclassified"]
+    )
 
 
-def test_an_object_with_no_proof_against_an_unconfigured_operation_is_never_owned():
-    """The whole trap in one case: every field empty on both sides.
+def test_the_disclosure_schema_is_the_exact_six_fields():
+    document = _document()
+    counts = derive_disclosure(document, _proofs(document)).ownership_counts
+    assert set(counts) == {
+        "total_pending",
+        "current_operation",
+        "other_secp_operation",
+        "foreign",
+        "unknown",
+        "unclassified",
+    }
 
-    Every ``==`` succeeds. Only the non-emptiness guard stops this classifying as owned.
-    """
-    obj = PendingSdnObject("zones", "secplab", "new")
-    empty_operation = OperationBinding(
+
+def test_operation_owned_is_not_retained_as_an_alias():
+    """One exact name. Nothing has executed or persisted this contract, so an alias would be pure
+    ambiguity."""
+    document = _document()
+    counts = derive_disclosure(document, _proofs(document)).ownership_counts
+    assert "operation_owned" not in counts
+    assert not hasattr(SdnObjectOwnership, "operation_owned")
+
+
+def test_the_projection_is_fixed_rather_than_derived_from_enum_keys():
+    """Renaming or adding an ownership member must not silently alter the manifest contract, so the
+    field list is explicit in the module rather than read off the enum."""
+    import secp_api.sdn_activation_stages as mod
+
+    names = [name for name, _ in mod._OWNERSHIP_FIELDS]
+    assert names == [
+        "current_operation",
+        "other_secp_operation",
+        "foreign",
+        "unknown",
+        "unclassified",
+    ]
+
+
+def test_action_and_family_counts_are_derived_and_are_not_ownership_proof():
+    document = _document(objects=(_ZONE, _VNET, _INTRUDER))
+    proofs = PendingSdnOwnershipProofSet(
+        results=(
+            _proof(_ZONE),
+            _proof(_VNET),
+            _proof(_INTRUDER, ownership=SdnObjectOwnership.foreign, classification_reason="f"),
+        )
+    )
+    disclosure = derive_disclosure(document, proofs)
+    assert disclosure.action_counts == {"create": 2, "change": 1, "delete": 0}
+    assert disclosure.family_counts == {"zones": 2, "vnets": 1}
+    # Action/family agreement does not make the foreign object ours.
+    assert disclosure.exclusive_to_current_operation is False
+
+
+# --- the two digests -----------------------------------------------------------------------------
+
+
+def test_changing_only_the_proof_moves_the_provenance_digest_not_the_pending_hash():
+    """The reason there are two. Target-observed bytes identical, evidence changed."""
+    document = _document()
+    a = _proofs(document)
+    b = PendingSdnOwnershipProofSet(
+        results=tuple(
+            dataclasses.replace(r, durable_ownership_provenance_digest="sha256:moved")
+            for r in a.results
+        )
+    )
+    assert document.pending_sdn_hash() == document.pending_sdn_hash()
+    assert a.ownership_provenance_digest() != b.ownership_provenance_digest()
+
+
+def test_changing_only_the_target_values_moves_the_pending_hash():
+    a = _document()
+    b = _document(
+        objects=(
+            dataclasses.replace(_ZONE, normalized_pending_representation="different"),
+            _VNET,
+            _SUBNET,
+        )
+    )
+    assert a.pending_sdn_hash() != b.pending_sdn_hash()
+
+
+def test_a_classification_change_with_identical_raw_state_refuses_at_stage_four():
+    """The case one hash cannot see: nothing about the cluster changed, but an object slipped from
+    current_operation to unknown because a provenance record disappeared."""
+    document = _document()
+    auth = _issue(document, _proofs(document))
+
+    degraded = PendingSdnOwnershipProofSet(
+        results=(
+            _proof(
+                _ZONE, ownership=SdnObjectOwnership.unknown, classification_reason="provenance_lost"
+            ),
+            _proof(_VNET),
+            _proof(_SUBNET),
+        )
+    )
+    reasons = activation_refusals(
+        stage=STAGE_ACTIVATION_AUTHORIZED,
+        authorization=auth,
+        document=document,
+        proofs=degraded,
+        operation=OPERATION,
+        now=NOW,
+    )
+    assert "sdn_activation_pending_state_changed" not in reasons  # the cluster did NOT change
+    assert "sdn_activation_ownership_provenance_changed" in reasons
+    assert any(r.startswith("cluster_pending_sdn_not_exclusive_to_operation") for r in reasons)
+
+
+@pytest.mark.parametrize(
+    "objects",
+    [(_ZONE, _VNET), (_ZONE, _VNET, _SUBNET, _INTRUDER)],
+    ids=["smaller", "larger"],
+)
+def test_a_smaller_or_larger_pending_set_refuses(objects):
+    document = _document()
+    auth = _issue(document, _proofs(document))
+    changed = _document(objects=objects)
+    reasons = activation_refusals(
+        stage=STAGE_ACTIVATION_AUTHORIZED,
+        authorization=auth,
+        document=changed,
+        proofs=_proofs(changed),
+        operation=OPERATION,
+        now=NOW,
+    )
+    assert "sdn_activation_pending_state_changed" in reasons
+
+
+# --- constructor refusals -------------------------------------------------------------------------
+
+
+def test_an_empty_pending_set_cannot_be_authorized():
+    """An activation of nothing is meaningless and can conceal an observation failure."""
+    with pytest.raises(SdnActivationRefused, match="empty_pending_set"):
+        _issue(_document(objects=()), PendingSdnOwnershipProofSet())
+
+
+def test_an_unsigned_or_incomplete_document_cannot_be_authorized():
+    document = _document(signature_verified=False)
+    with pytest.raises(SdnActivationRefused, match="unsigned"):
+        _issue(document, _proofs(document))
+    document = _document(visibility_complete=False)
+    with pytest.raises(SdnActivationRefused, match="visibility_incomplete"):
+        _issue(document, _proofs(document))
+
+
+def test_the_proof_set_must_match_the_document_one_to_one():
+    document = _document()
+    short = PendingSdnOwnershipProofSet(results=(_proof(_ZONE), _proof(_VNET)))
+    with pytest.raises(SdnActivationRefused, match="proof_set_mismatch"):
+        _issue(document, short)
+
+    extra = PendingSdnOwnershipProofSet(results=(*_proofs(document).results, _proof(_INTRUDER)))
+    with pytest.raises(SdnActivationRefused, match="proof_set_mismatch"):
+        _issue(document, extra)
+
+
+def test_a_duplicated_proof_is_refused():
+    document = _document(objects=(_ZONE,))
+    dup = PendingSdnOwnershipProofSet(results=(_proof(_ZONE), _proof(_ZONE)))
+    with pytest.raises(SdnActivationRefused, match="proof_duplicated"):
+        _issue(document, dup)
+
+
+@pytest.mark.parametrize(
+    "field", ["target_identity", "cluster_fingerprint", "range_identity", "operation_identity"]
+)
+def test_a_blank_operation_binding_is_refused(field):
+    document = _document()
+    blank = dataclasses.replace(OPERATION, **{field: ""})
+    with pytest.raises(SdnActivationRefused):
+        _issue(document, _proofs(document), operation=blank)
+
+
+# --- classification: what is NOT evidence ---------------------------------------------------------
+
+
+def test_matching_blank_bindings_cannot_establish_ownership():
+    """Two empty strings compare equal, so equality alone is not proof. Both sides blank must not
+    satisfy every ``==`` and classify as ours."""
+    blank_op = OperationBinding(
         target_identity="",
         cluster_fingerprint="",
         range_identity="",
@@ -217,210 +475,164 @@ def test_an_object_with_no_proof_against_an_unconfigured_operation_is_never_owne
         stage1_authorization_id="",
         stage1_execution_receipt="",
     )
-    empty_proof = ObjectOwnershipProof(
-        claimed_operation_generation=-1,
-        stage1_desired_object_id="secplab",
-        stage1_object_family="zones",
-        stage1_expected_action="new",
-        post_stage1_observation_signed=True,
-        pre_stage1_absence_proven=True,
+    blank_proof = OwnershipProofResult(
+        object_key=_ZONE.key,
+        ownership=SdnObjectOwnership.current_operation,
+        classification_reason="",
+        operation_generation=-1,
+        proof_complete=True,
     )
-    assert classify_ownership(obj, empty_proof, empty_operation) is SdnObjectOwnership.unknown
+    assert classify_ownership(_ZONE, blank_proof, blank_op) is SdnObjectOwnership.unknown
 
 
-def test_a_new_object_without_pre_stage1_absence_proof_is_unknown():
-    """Otherwise SECP could adopt somebody else's object that happened to share the identifier."""
-    obj = PendingSdnObject("zones", "secplab", "new")
-    result = classify_ownership(obj, _proof(pre_stage1_absence_proven=False), OPERATION)
-    assert result is SdnObjectOwnership.unknown
+@pytest.mark.parametrize(
+    "banned",
+    ["name_prefix", "alias", "hcl_comment", "attributes_match", "appeared_after_stage1", "timing"],
+)
+def test_the_proof_structure_has_no_field_for_a_non_evidence_signal(banned):
+    """A name prefix, a VNet alias and an HCL comment are reproducible by any actor; attribute
+    equality and creation-like timing are coincidences. None is a field, so none can be offered."""
+    fields = {f.name for f in dataclasses.fields(OwnershipProofResult)}
+    assert banned not in fields
 
 
-def test_a_change_or_delete_requires_durable_provenance():
-    """A change or delete touches an object that already existed, so name and attribute agreement
-    cannot establish that SECP created it."""
-    for action in ("changed", "deleted"):
-        obj = PendingSdnObject("zones", "secplab", action)
-        proof = _proof(stage1_expected_action=action, durable_provenance_record="")
-        assert classify_ownership(obj, proof, OPERATION) is SdnObjectOwnership.unknown
+def test_a_secp_looking_identifier_with_no_evidence_is_unknown():
+    bare = OwnershipProofResult(
+        object_key=_ZONE.key,
+        ownership=SdnObjectOwnership.current_operation,
+        classification_reason="looks_like_ours",
+        operation_generation=-1,
+    )
+    assert classify_ownership(_ZONE, bare, OPERATION) is SdnObjectOwnership.unknown
 
-        with_provenance = _proof(
-            stage1_expected_action=action, durable_provenance_record="range-1/lineage/7"
+
+def test_a_new_object_needs_pre_stage1_absence_proof():
+    proof = _proof(_ZONE, pre_stage1_absence_proof_digest="")
+    assert classify_ownership(_ZONE, proof, OPERATION) is SdnObjectOwnership.unknown
+
+
+def test_a_change_or_delete_needs_durable_provenance():
+    changed = dataclasses.replace(_ZONE, action="changed")
+    without = _proof(changed, durable_ownership_provenance_digest="")
+    assert classify_ownership(changed, without, OPERATION) is SdnObjectOwnership.unknown
+    with_prov = _proof(changed, durable_ownership_provenance_digest="sha256:lineage")
+    assert classify_ownership(changed, with_prov, OPERATION) is SdnObjectOwnership.current_operation
+
+
+def test_another_generation_is_other_secp_operation_not_foreign():
+    proof = _proof(_ZONE, operation_generation=2)
+    assert classify_ownership(_ZONE, proof, OPERATION) is SdnObjectOwnership.other_secp_operation
+
+
+def test_non_exclusive_covers_everything_except_current_operation():
+    assert SdnObjectOwnership.current_operation not in NON_EXCLUSIVE_OWNERSHIP
+    assert len(NON_EXCLUSIVE_OWNERSHIP) == len(SdnObjectOwnership) - 1
+
+
+# --- the manifest lists every object --------------------------------------------------------------
+
+
+def test_the_manifest_lists_every_object_individually():
+    """A summary is not a manifest: an operator refused an activation needs to know WHICH object."""
+    document = _document(objects=(_ZONE, _INTRUDER))
+    proofs = PendingSdnOwnershipProofSet(
+        results=(
+            _proof(_ZONE),
+            _proof(
+                _INTRUDER, ownership=SdnObjectOwnership.foreign, classification_reason="third_party"
+            ),
         )
-        assert classify_ownership(obj, with_provenance, OPERATION) is (
-            SdnObjectOwnership.operation_owned
+    )
+    rows = object_manifest(document, proofs)
+    assert len(rows) == 2
+    blocker = next(r for r in rows if r["identifier"] == "opsvlan")
+    assert blocker["ownership_classification"] == "foreign"
+    assert blocker["classification_reason"] == "third_party"
+    assert blocker["source_endpoint"] == "/cluster/sdn/zones"
+    assert set(rows[0]) == {
+        "family",
+        "identifier",
+        "action",
+        "ownership_classification",
+        "classification_reason",
+        "range_binding",
+        "operation_binding",
+        "generation_binding",
+        "active_representation_digest",
+        "pending_representation_digest",
+        "source_endpoint",
+        "observation_state",
+    }
+
+
+def test_an_object_with_no_proof_is_still_listed():
+    document = _document(objects=(_ZONE,))
+    rows = object_manifest(document, PendingSdnOwnershipProofSet())
+    assert rows[0]["ownership_classification"] == "unclassified"
+    assert rows[0]["classification_reason"] == "no_proof_submitted"
+
+
+# --- stage plumbing -------------------------------------------------------------------------------
+
+
+def test_a_good_activation_passes_stage_four():
+    document = _document()
+    proofs = _proofs(document)
+    assert (
+        activation_refusals(
+            stage=STAGE_ACTIVATION_AUTHORIZED,
+            authorization=_issue(document, proofs),
+            document=document,
+            proofs=proofs,
+            operation=OPERATION,
+            now=NOW,
         )
-
-
-def test_another_secp_operation_is_distinguished_from_foreign():
-    """An abandoned earlier run of our own needs a different remediation than a third party's
-    object, so it gets its own classification rather than being lumped in."""
-    obj = PendingSdnObject("zones", "secpold", "new")
-    result = classify_ownership(obj, _proof(claimed_operation_generation=2), OPERATION)
-    assert result is SdnObjectOwnership.other_secp_operation
-
-    other_range = classify_ownership(obj, _proof(claimed_range_identity="range-9"), OPERATION)
-    assert other_range is SdnObjectOwnership.other_secp_operation
-
-
-def test_proven_foreign_beats_a_failing_binding():
-    """Positive proof that it is somebody else's is stronger information than our binding failing,
-    and the operator should be told the stronger thing."""
-    obj = PendingSdnObject("zones", "opsvlan", "changed")
-    result = classify_ownership(obj, _proof(proven_foreign=True), OPERATION)
-    assert result is SdnObjectOwnership.foreign
-
-
-def test_a_name_prefix_is_not_evidence():
-    """The explicit rule. An identifier beginning with a SECP prefix is reproducible by any actor,
-    so it appears nowhere in the proof structure and cannot make an object owned.
-    """
-    fields = {f.name for f in dataclasses.fields(ObjectOwnershipProof)}
-    for banned in ("name_prefix", "alias", "attributes_match", "appeared_after_stage1"):
-        assert banned not in fields
-    # And an object whose id looks like ours, with no proof, is not ours.
-    obj = PendingSdnObject("zones", "secplab", "new")
-    empty = ObjectOwnershipProof()
-    assert classify_ownership(obj, empty, OPERATION) is SdnObjectOwnership.unknown
-
-
-# --- MVP zero tolerance --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("intruder", [_FOREIGN, _UNKNOWN, _OTHER_OP])
-def test_any_non_exclusive_object_refuses_activation(intruder):
-    observed = _observation(objects=(*_SECP_OBJECTS, intruder))
-    # The authorisation cannot even be built for this observation (next test), so build one against
-    # a clean set and then present the contaminated observation — the stage-4 re-check.
-    clean = _observation()
-    auth = _authorization(clean)
-    reasons = _refusals(observed, auth)
-    assert any(r.startswith("cluster_pending_sdn_not_exclusive_to_operation") for r in reasons)
-
-
-@pytest.mark.parametrize("intruder", [_FOREIGN, _UNKNOWN, _OTHER_OP])
-def test_an_authorization_covering_a_non_exclusive_object_is_unconstructable(intruder):
-    """Structurally invalid, not merely refused.
-
-    An operator must not be able to accept the foreign-object residual through ordinary Stage 3
-    approval — a mixed-owner activation is a different operation kind with its own contract, and it
-    must not be reachable by clicking through this one.
-    """
-    contaminated = _observation(objects=(*_SECP_OBJECTS, intruder))
-    with pytest.raises(SdnActivationRefused, match="not_exclusive_to_operation"):
-        _authorization(contaminated)
-
-
-def test_the_refusal_reports_every_count():
-    observed = _observation(objects=(*_SECP_OBJECTS, _FOREIGN, _UNKNOWN, _OTHER_OP))
-    reasons = _refusals(observed, _authorization(_observation()))
-    detail = next(
-        r for r in reasons if r.startswith("cluster_pending_sdn_not_exclusive_to_operation")
+        == ()
     )
-    assert "total=6" in detail
-    assert "operation_owned=3" in detail
-    assert "foreign=1" in detail
-    assert "unknown=1" in detail
-    assert "other_secp_operation=1" in detail
-
-
-def test_a_fully_owned_pending_set_permits_activation():
-    observed = _observation()
-    assert observed.ownership_counts()["operation_owned"] == 3
-    assert observed.non_exclusive_objects == ()
-    assert _refusals(observed, _authorization(observed)) == ()
-
-
-def test_non_exclusive_covers_every_classification_except_owned():
-    assert SdnObjectOwnership.operation_owned not in NON_EXCLUSIVE_OWNERSHIP
-    assert NON_EXCLUSIVE_OWNERSHIP == frozenset(
-        {
-            SdnObjectOwnership.foreign,
-            SdnObjectOwnership.other_secp_operation,
-            SdnObjectOwnership.unknown,
-            SdnObjectOwnership.unclassified,
-        }
-    )
-
-
-# --- the hash binding (unchanged behaviour, re-verified against the new shape) --------------------
-
-
-def test_a_change_staged_after_authorization_refuses_activation():
-    observed = _observation()
-    auth = _authorization(observed)
-    later = dataclasses.replace(observed, objects=(*_SECP_OBJECTS, _FOREIGN))
-    assert "sdn_activation_pending_state_changed" in _refusals(later, auth)
-
-
-def test_the_hash_covers_ownership_so_a_reclassification_moves_it():
-    """An object whose classification changed between observation and activation is a different
-    pending set, even at the same identifier and state."""
-    owned = _observation(objects=(_owned("x", "zones"),))
-    unknown = _observation(
-        objects=(PendingSdnObject("zones", "x", "new", SdnObjectOwnership.unknown),)
-    )
-    assert owned.pending_hash() != unknown.pending_hash()
-
-
-def test_the_hash_is_order_independent_but_content_sensitive():
-    a = _observation(objects=(_SECP_OBJECTS[0], _SECP_OBJECTS[1], _SECP_OBJECTS[2]))
-    b = _observation(objects=(_SECP_OBJECTS[2], _SECP_OBJECTS[0], _SECP_OBJECTS[1]))
-    assert a.pending_hash() == b.pending_hash()
-    changed = dataclasses.replace(_SECP_OBJECTS[0], state="deleted")
-    assert _observation(objects=(changed, *_SECP_OBJECTS[1:])).pending_hash() != a.pending_hash()
-
-
-def test_a_disclosure_mismatch_refuses():
-    observed = _observation()
-    understated = _authorization(observed, disclosed_counts={"total": 0, "operation_owned": 0})
-    assert "sdn_activation_disclosure_mismatch" in _refusals(observed, understated)
-
-
-# --- incomplete observation ----------------------------------------------------------------------
-
-
-def test_a_partial_pending_view_cannot_back_an_activation():
-    """ "We do not know what is pending" is not "nothing is pending". A denied SDN index returns 200
-    with an empty list, which is exactly the case that would otherwise look like a clean cluster."""
-    observed = _observation(
-        complete=False, unreadable_families=(("controllers", "permission_denied"),)
-    )
-    reasons = _refusals(observed, _authorization(observed))
-    assert "sdn_activation_pending_state_incomplete" in reasons
-    assert "sdn_pending_family_unreadable:controllers:permission_denied" in reasons
-
-
-def test_an_empty_but_complete_observation_is_usable():
-    observed = _observation(objects=())
-    assert observed.is_empty is True
-    assert _refusals(observed, _authorization(observed)) == ()
-
-
-# --- staleness, stages, guests -------------------------------------------------------------------
-
-
-def test_an_expired_observation_refuses():
-    old = _observation(observed_at=NOW - timedelta(hours=2))
-    assert "sdn_activation_observation_expired" in _refusals(old, _authorization(old))
-
-
-def test_an_observation_from_the_future_is_skew_not_freshness():
-    ahead = _observation(observed_at=NOW + timedelta(minutes=5))
-    assert "sdn_activation_observation_clock_skew" in _refusals(ahead, _authorization(ahead))
 
 
 @pytest.mark.parametrize("stage", [STAGE_PREPARED, STAGE_PENDING_OBSERVED, STAGE_ACTIVATED])
 def test_activation_is_reachable_only_from_the_authorized_stage(stage):
-    observed = _observation()
-    assert f"sdn_activation_wrong_stage:{stage}" in _refusals(
-        observed, _authorization(observed), stage=stage
+    document = _document()
+    proofs = _proofs(document)
+    reasons = activation_refusals(
+        stage=stage,
+        authorization=_issue(document, proofs),
+        document=document,
+        proofs=proofs,
+        operation=OPERATION,
+        now=NOW,
     )
+    assert f"sdn_activation_wrong_stage:{stage}" in reasons
 
 
-def test_activation_without_an_authorization_or_observation_refuses():
-    assert "sdn_activation_unauthorized" in _refusals(_observation(), None)
-    observed = _observation()
-    assert "sdn_activation_no_pending_observation" in _refusals(None, _authorization(observed))
+def test_an_expired_observation_refuses():
+    document = _document()
+    proofs = _proofs(document)
+    auth = _issue(document, proofs)
+    reasons = activation_refusals(
+        stage=STAGE_ACTIVATION_AUTHORIZED,
+        authorization=auth,
+        document=document,
+        proofs=proofs,
+        operation=OPERATION,
+        now=NOW + timedelta(hours=2),
+    )
+    assert "sdn_activation_observation_expired" in reasons
+
+
+def test_a_future_observation_is_skew_not_freshness():
+    document = _document(observed_at=NOW + timedelta(minutes=5))
+    proofs = _proofs(document)
+    reasons = activation_refusals(
+        stage=STAGE_ACTIVATION_AUTHORIZED,
+        authorization=_issue(document, proofs),
+        document=document,
+        proofs=proofs,
+        operation=OPERATION,
+        now=NOW,
+    )
+    assert "sdn_activation_observation_clock_skew" in reasons
 
 
 def test_the_stage_order_is_the_reviewed_five():
@@ -433,28 +645,26 @@ def test_the_stage_order_is_the_reviewed_five():
     )
 
 
-def test_stages_advance_one_at_a_time_and_cannot_skip():
+def test_stages_advance_one_at_a_time():
     assert next_stage(STAGE_PREPARED) == STAGE_PENDING_OBSERVED
-    assert next_stage(STAGE_ACTIVATION_AUTHORIZED) == STAGE_ACTIVATED
     with pytest.raises(SdnActivationRefused, match="already_verified"):
         next_stage(STAGE_VERIFIED)
     with pytest.raises(SdnActivationRefused, match="unknown_stage"):
         next_stage("activated_probably")
 
 
-def test_a_target_mismatch_refuses():
-    observed = _observation()
-    assert "sdn_activation_target_mismatch" in _refusals(
-        observed, _authorization(observed, target_identity="target-other")
-    )
-
-
 @pytest.mark.parametrize(
     "stage", [STAGE_PREPARED, STAGE_PENDING_OBSERVED, STAGE_ACTIVATION_AUTHORIZED, STAGE_ACTIVATED]
 )
-def test_guests_cannot_deploy_before_the_sdn_is_verified(stage):
+def test_guests_cannot_deploy_before_verified(stage):
     assert guests_may_deploy(stage) is False
 
 
 def test_guests_may_deploy_once_verified():
     assert guests_may_deploy(STAGE_VERIFIED) is True
+
+
+def test_the_authorization_type_carries_no_settable_ownership_boolean():
+    fields = {f.name for f in dataclasses.fields(ActivationAuthorization)}
+    for banned in ("foreign_count", "classification_complete", "exclusive_to_current_operation"):
+        assert banned not in fields
