@@ -348,7 +348,7 @@ def test_a_foreign_pending_sdn_object_refuses_automated_activation():
             ),
         )
     )
-    disclosure = derive_disclosure(document, proofs)
+    disclosure = derive_disclosure(document, proofs, _operation_binding())
     assert disclosure.ownership_counts["foreign"] == 1
     assert disclosure.exclusive_to_current_operation is False
 

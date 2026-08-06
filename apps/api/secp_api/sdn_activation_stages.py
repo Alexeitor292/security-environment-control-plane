@@ -194,6 +194,11 @@ class OwnershipProofResult:
     """
 
     object_key: tuple[str, str]
+    #: What the SUBMITTER claims. Deliberately NOT the answer: :func:`classify_ownership` derives
+    #: the outcome from the evidence digests below, and every consumer must use the derived value.
+    #: The claim is retained because one case reads it as evidence — a submitter asserting
+    #: ``foreign`` with a complete proof is volunteering that the object is somebody else's, which
+    #: is stronger information than our binding failing, and nobody gains by claiming it falsely.
     ownership: SdnObjectOwnership
     classification_reason: str
     range_identity: str = ""
@@ -360,14 +365,27 @@ _ACTION_FIELDS: tuple[tuple[str, str], ...] = (
 
 
 def derive_disclosure(
-    document: PendingSdnDocument, proofs: PendingSdnOwnershipProofSet
+    document: PendingSdnDocument,
+    proofs: PendingSdnOwnershipProofSet,
+    operation: OperationBinding,
 ) -> PendingSdnDisclosure:
-    """Compute the disclosure. The only way one comes into existence."""
+    """Compute the disclosure. The only way one comes into existence.
+
+    ``operation`` is required, and its absence was a critical defect: this function used to count
+    ``result.ownership`` — a plain field the submitter fills in — so the exclusivity gate standing
+    between SECP and a cluster-wide ``PUT /cluster/sdn`` was decided by the value the submitter
+    declared, and :func:`classify_ownership`, written precisely to derive that value from evidence,
+    was called by nothing outside its own tests.
+    """
     by_key = proofs.by_key()
     counts = {name: 0 for name, _ in _OWNERSHIP_FIELDS}
     for obj in document.objects:
         result = by_key.get(obj.key)
-        classification = result.ownership if result is not None else SdnObjectOwnership.unclassified
+        classification = (
+            classify_ownership(obj, result, operation)
+            if result is not None
+            else SdnObjectOwnership.unclassified
+        )
         for name, member in _OWNERSHIP_FIELDS:
             if classification is member:
                 counts[name] += 1
@@ -408,26 +426,37 @@ def derive_disclosure(
 
 
 def object_manifest(
-    document: PendingSdnDocument, proofs: PendingSdnOwnershipProofSet
+    document: PendingSdnDocument,
+    proofs: PendingSdnOwnershipProofSet,
+    operation: OperationBinding,
 ) -> tuple[dict, ...]:
     """Every pending object, individually. A summary is not a manifest.
 
     An operator refused an activation needs to see WHICH object blocked it; a count tells them how
     many and nothing else.
+
+    The classification shown is the DERIVED one, for the same reason the counts are: an operator
+    reading a manifest that echoes the submitter's claim is reading the submitter, not the cluster.
+    Where the two differ, both are shown — a claim that does not survive derivation is worth
+    seeing.
     """
     by_key = proofs.by_key()
     rows = []
     for obj in document.objects:
         result = by_key.get(obj.key)
+        derived = (
+            classify_ownership(obj, result, operation)
+            if result is not None
+            else SdnObjectOwnership.unclassified
+        )
         rows.append(
             {
                 "family": obj.family,
                 "identifier": obj.object_id,
                 "action": obj.action,
-                "ownership_classification": (
-                    result.ownership.value
-                    if result is not None
-                    else SdnObjectOwnership.unclassified.value
+                "ownership_classification": derived.value,
+                "submitted_classification": (
+                    result.ownership.value if result is not None else "none_submitted"
                 ),
                 "classification_reason": (
                     result.classification_reason if result is not None else "no_proof_submitted"
@@ -524,7 +553,7 @@ def issue_activation_authorization(
     if document.cluster_fingerprint != operation.cluster_fingerprint:
         raise SdnActivationRefused("sdn_activation_cluster_mismatch")
 
-    disclosure = derive_disclosure(document, proofs)
+    disclosure = derive_disclosure(document, proofs, operation)
 
     if not disclosure.classification_complete:
         raise SdnActivationRefused(
@@ -608,7 +637,7 @@ def activation_refusals(
     if proofs.ownership_provenance_digest() != authorization.ownership_provenance_digest:
         reasons.append("sdn_activation_ownership_provenance_changed")
 
-    disclosure = derive_disclosure(document, proofs)
+    disclosure = derive_disclosure(document, proofs, operation)
     if not disclosure.exclusive_to_current_operation or not disclosure.classification_complete:
         reasons.append(
             "cluster_pending_sdn_not_exclusive_to_operation:"

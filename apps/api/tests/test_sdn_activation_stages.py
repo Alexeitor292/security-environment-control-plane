@@ -194,14 +194,14 @@ def test_a_forged_all_zero_disclosure_cannot_authorize_a_contaminated_document()
     with pytest.raises(SdnActivationRefused, match="not_exclusive_to_operation"):
         _issue(contaminated, proofs)  # ... and unreachable
 
-    truth = derive_disclosure(contaminated, proofs)
+    truth = derive_disclosure(contaminated, proofs, OPERATION)
     assert truth.ownership_counts["foreign"] == 1
     assert truth.exclusive_to_current_operation is False
 
 
 def test_counts_are_derived_from_the_document_and_proofs():
     document = _document()
-    disclosure = derive_disclosure(document, _proofs(document))
+    disclosure = derive_disclosure(document, _proofs(document), OPERATION)
     assert disclosure.ownership_counts == {
         "total_pending": 3,
         "current_operation": 3,
@@ -214,35 +214,134 @@ def test_counts_are_derived_from_the_document_and_proofs():
     assert disclosure.exclusive_to_current_operation is True
 
 
+#: Each entry breaks the EVIDENCE in a different way and names the class that must be derived from
+#: it. The earlier version set ``ownership=<class>`` on the proof and asserted the count landed in
+#: that bucket — which passed by echoing the submitter's own label, proving nothing was derived at
+#: all. A test for a derivation must never be able to pass by relabelling.
+_CONTAMINATION = [
+    # A binding that names a DIFFERENT SECP operation. Nothing here is malformed; it simply is not
+    # this operation's object, and adopting it would apply another run's staged change.
+    ({"operation_identity": "op-other"}, "other_secp_operation"),
+    # A missing plan hash. Incomplete evidence is an unknown, never a permissive default.
+    ({"stage1_plan_hash": ""}, "unknown"),
+    # A complete proof asserting the object belongs to somebody else. Read as evidence because
+    # nobody gains by falsely claiming an object is foreign - it can only refuse.
+    ({"ownership": SdnObjectOwnership.foreign}, "foreign"),
+    # A "new" object with no proof that it was absent before Stage 1: SECP would otherwise adopt
+    # an object that merely happens to share an identifier.
+    ({"pre_stage1_absence_evidence_digest": ""}, "unknown"),
+    # The right operation but the wrong cluster.
+    ({"cluster_fingerprint": "sha256:elsewhere"}, "unknown"),
+]
+
+
 @pytest.mark.parametrize(
-    "ownership,field",
-    [
-        (SdnObjectOwnership.foreign, "foreign"),
-        (SdnObjectOwnership.unknown, "unknown"),
-        (SdnObjectOwnership.other_secp_operation, "other_secp_operation"),
-        (SdnObjectOwnership.unclassified, "unclassified"),
-    ],
+    "broken_evidence,field",
+    _CONTAMINATION,
+    ids=[c[1] + str(i) for i, c in enumerate(_CONTAMINATION)],
 )
-def test_one_contaminating_object_derives_exactly_one(ownership, field):
+def test_one_contaminating_object_derives_exactly_one(broken_evidence, field):
+    """The classification is derived from the evidence, never taken from the submitter's label."""
     document = _document(objects=(_ZONE, _VNET, _SUBNET, _INTRUDER))
     proofs = PendingSdnOwnershipProofSet(
         results=(
             *(_proof(o) for o in (_ZONE, _VNET, _SUBNET)),
-            _proof(_INTRUDER, ownership=ownership, classification_reason="x"),
+            _proof(_INTRUDER, classification_reason="x", **broken_evidence),
         )
     )
-    disclosure = derive_disclosure(document, proofs)
-    assert disclosure.ownership_counts[field] == 1
+    disclosure = derive_disclosure(document, proofs, OPERATION)
+    assert disclosure.ownership_counts[field] == 1, disclosure.ownership_counts
     assert disclosure.exclusive_to_current_operation is False
     with pytest.raises(SdnActivationRefused, match="not_exclusive_to_operation"):
         _issue(document, proofs)
+
+
+def test_a_submitter_cannot_declare_a_contaminating_object_to_be_ours():
+    """The defect this whole seam exists to prevent, stated as a test.
+
+    An object whose evidence binds it to another operation is ``other_secp_operation`` no matter
+    what the submitted label says. Before the derivation was wired in, the label alone decided, so a
+    caller could clear the exclusivity gate for a cluster-wide PUT /cluster/sdn by writing one word.
+    """
+    document = _document(objects=(_ZONE, _INTRUDER))
+    proofs = PendingSdnOwnershipProofSet(
+        results=(
+            _proof(_ZONE),
+            _proof(
+                _INTRUDER,
+                ownership=SdnObjectOwnership.current_operation,  # the lie
+                operation_identity="op-somebody-else",  # the evidence
+                classification_reason="claimed_ours",
+            ),
+        )
+    )
+    disclosure = derive_disclosure(document, proofs, OPERATION)
+    assert disclosure.ownership_counts["current_operation"] == 1
+    assert disclosure.ownership_counts["other_secp_operation"] == 1
+    assert disclosure.exclusive_to_current_operation is False
+    with pytest.raises(SdnActivationRefused, match="not_exclusive_to_operation"):
+        _issue(document, proofs)
+
+
+def test_every_consumer_of_a_proof_derives_the_class_rather_than_reading_the_label():
+    """Structural, because the behavioural tests above can only catch the paths they exercise.
+
+    ``classify_ownership`` existed, was correct, was tested — and was called by nothing outside its
+    own tests for the whole of PR #138, while ``derive_disclosure`` counted ``result.ownership``
+    directly. Every function that turns a proof into a classification must call the deriver; the
+    only place permitted to read the raw label is the deriver itself, which reads it as evidence.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "secp_api" / "sdn_activation_stages.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+
+    for name in ("derive_disclosure", "object_manifest"):
+        fn = functions[name]
+        calls = {
+            n.func.id
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        }
+        assert "classify_ownership" in calls, f"{name} does not derive the classification"
+        assert "operation" in {a.arg for a in fn.args.args + fn.args.kwonlyargs}, name
+
+    # And nobody else reads a PROOF's submitted label. Reading ``self.ownership`` is the record
+    # serialising its own field and is fine; reading it off another object is a decision.
+    allowed = {"classify_ownership", "object_manifest"}
+    for name, fn in functions.items():
+        if name in allowed:
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Attribute) and node.attr == "ownership":
+                base = getattr(node.value, "id", "")
+                assert base == "self", f"{name} reads .ownership off {base!r} to decide something"
+
+
+def test_the_manifest_shows_the_derived_class_and_the_submitted_claim_side_by_side():
+    """An operator reading a manifest that echoes the submitter is reading the submitter."""
+    document = _document(objects=(_INTRUDER,))
+    proofs = PendingSdnOwnershipProofSet(
+        results=(
+            _proof(
+                _INTRUDER,
+                ownership=SdnObjectOwnership.current_operation,
+                operation_identity="op-somebody-else",
+            ),
+        )
+    )
+    (row,) = object_manifest(document, proofs, OPERATION)
+    assert row["ownership_classification"] == "other_secp_operation"
+    assert row["submitted_classification"] == "current_operation"
 
 
 def test_an_object_with_no_proof_at_all_counts_as_unclassified():
     """A missing proof must not silently vanish from the summary."""
     document = _document(objects=(_ZONE, _VNET))
     partial = PendingSdnOwnershipProofSet(results=(_proof(_ZONE),))
-    disclosure = derive_disclosure(document, partial)
+    disclosure = derive_disclosure(document, partial, OPERATION)
     assert disclosure.ownership_counts["unclassified"] == 1
     assert disclosure.classification_complete is False
 
@@ -272,7 +371,7 @@ def test_the_counts_sum_to_total_pending():
             _proof(_INTRUDER, ownership=SdnObjectOwnership.foreign, classification_reason="f"),
         )
     )
-    c = derive_disclosure(document, proofs).ownership_counts
+    c = derive_disclosure(document, proofs, OPERATION).ownership_counts
     assert c["total_pending"] == (
         c["current_operation"]
         + c["other_secp_operation"]
@@ -284,7 +383,7 @@ def test_the_counts_sum_to_total_pending():
 
 def test_the_disclosure_schema_is_the_exact_six_fields():
     document = _document()
-    counts = derive_disclosure(document, _proofs(document)).ownership_counts
+    counts = derive_disclosure(document, _proofs(document), OPERATION).ownership_counts
     assert set(counts) == {
         "total_pending",
         "current_operation",
@@ -299,7 +398,7 @@ def test_operation_owned_is_not_retained_as_an_alias():
     """One exact name. Nothing has executed or persisted this contract, so an alias would be pure
     ambiguity."""
     document = _document()
-    counts = derive_disclosure(document, _proofs(document)).ownership_counts
+    counts = derive_disclosure(document, _proofs(document), OPERATION).ownership_counts
     assert "operation_owned" not in counts
     assert not hasattr(SdnObjectOwnership, "operation_owned")
 
@@ -328,7 +427,7 @@ def test_action_and_family_counts_are_derived_and_are_not_ownership_proof():
             _proof(_INTRUDER, ownership=SdnObjectOwnership.foreign, classification_reason="f"),
         )
     )
-    disclosure = derive_disclosure(document, proofs)
+    disclosure = derive_disclosure(document, proofs, OPERATION)
     assert disclosure.action_counts == {"create": 2, "change": 1, "delete": 0}
     assert disclosure.family_counts == {"zones": 2, "vnets": 1}
     # Action/family agreement does not make the foreign object ours.
@@ -370,10 +469,15 @@ def test_a_classification_change_with_identical_raw_state_refuses_at_stage_four(
     document = _document()
     auth = _issue(document, _proofs(document))
 
+    # The provenance record itself disappears — not merely its label. Relabelling proves nothing
+    # now that the classification is derived, which is the point: the degradation has to be in the
+    # evidence for the derived class to move.
     degraded = PendingSdnOwnershipProofSet(
         results=(
             _proof(
-                _ZONE, ownership=SdnObjectOwnership.unknown, classification_reason="provenance_lost"
+                _ZONE,
+                pre_stage1_absence_evidence_digest="",
+                classification_reason="provenance_lost",
             ),
             _proof(_VNET),
             _proof(_SUBNET),
@@ -543,7 +647,7 @@ def test_the_manifest_lists_every_object_individually():
             ),
         )
     )
-    rows = object_manifest(document, proofs)
+    rows = object_manifest(document, proofs, OPERATION)
     assert len(rows) == 2
     blocker = next(r for r in rows if r["identifier"] == "opsvlan")
     assert blocker["ownership_classification"] == "foreign"
@@ -553,7 +657,11 @@ def test_the_manifest_lists_every_object_individually():
         "family",
         "identifier",
         "action",
+        # The DERIVED class and the SUBMITTED claim are both present, and they are different keys
+        # on purpose: an operator who can only see one of them cannot tell whether the submitter's
+        # label survived derivation.
         "ownership_classification",
+        "submitted_classification",
         "classification_reason",
         "range_binding",
         "operation_binding",
@@ -567,7 +675,7 @@ def test_the_manifest_lists_every_object_individually():
 
 def test_an_object_with_no_proof_is_still_listed():
     document = _document(objects=(_ZONE,))
-    rows = object_manifest(document, PendingSdnOwnershipProofSet())
+    rows = object_manifest(document, PendingSdnOwnershipProofSet(), OPERATION)
     assert rows[0]["ownership_classification"] == "unclassified"
     assert rows[0]["classification_reason"] == "no_proof_submitted"
 
