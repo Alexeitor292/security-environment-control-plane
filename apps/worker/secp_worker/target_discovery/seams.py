@@ -47,7 +47,10 @@ class InventoryFacts:
     cpu_total: int
     mem_total_mb: int
     mem_free_mb: int
-    nested_available: bool
+    #: ``None`` in first-MVP discovery, which is HTTPS-only and has no host-local channel to read
+    #: the sysfs kernel parameter. Deliberately three-valued: ``False`` would assert the target
+    #: lacks nested virtualization, which nobody observed.
+    nested_available: bool | None
     storages: tuple[StorageOption, ...] = field(default_factory=tuple)
     used_vmids: frozenset[int] = field(default_factory=frozenset)
 

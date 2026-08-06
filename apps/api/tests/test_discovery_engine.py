@@ -208,6 +208,13 @@ def _assert_refused(session, principal, *, facts, expected, presences=None):
     assert session.query(DiscoveryCandidatePlan).count() == 0
 
 
+def _assert_eligible(session, principal, *, facts, presences=None):
+    """The complement of ``_assert_refused``: the run succeeds and a plan is produced."""
+    _enrollment, outcome = _run(session, principal, facts=facts, presences=presences)
+    assert outcome.ok is True, outcome.reason_code
+    assert outcome.reason_code != "nested_virtualization_unavailable"
+
+
 def test_clustered_target_refused(session, principal):
     _assert_refused(
         session, principal, facts=_healthy_facts(is_clustered=True), expected="target_is_clustered"
@@ -229,13 +236,24 @@ def test_unsupported_version_refused(session, principal):
     )
 
 
-def test_no_nested_virtualization_refused(session, principal):
-    _assert_refused(
-        session,
-        principal,
-        facts=_healthy_facts(nested_available=False),
-        expected="nested_virtualization_unavailable",
-    )
+def test_unobserved_nested_virtualization_does_not_degrade_eligibility(session, principal):
+    """Inverted deliberately. This test used to assert the opposite.
+
+    Nested virtualization is no longer an eligibility gate: it blocks no compilation decision and
+    no apply decision, and its only observation path was a host-local ``cat`` over SSH, which
+    first-MVP HTTPS-only discovery does not have. A target must not be ineligible for a fact nobody
+    looks at — that would be an unobserved absence rendered as a proven one.
+    """
+    _assert_eligible(session, principal, facts=_healthy_facts(nested_available=None))
+
+
+def test_a_target_reporting_no_nested_virtualization_is_still_eligible(session, principal):
+    """Even an explicit ``False`` no longer refuses.
+
+    Kept separate from the ``None`` case because they are different facts and only one of them can
+    occur in first-MVP discovery — but neither may gate the target.
+    """
+    _assert_eligible(session, principal, facts=_healthy_facts(nested_available=False))
 
 
 def test_insufficient_capacity_refused(session, principal):

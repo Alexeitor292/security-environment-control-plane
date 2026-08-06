@@ -30,20 +30,25 @@ from secp_worker.deployment.locators import (
     ServiceIdentityLocator,
 )
 
-# The CLOSED executable allowlist. Nothing else may ever be exec'd as a probe.
+# The CLOSED executable allowlist for FIRST-MVP discovery.
+#
+# ``pveversion`` and ``cat`` are both gone, and the removals are withdrawals of capability rather
+# than tidy-ups. ``pveversion`` was allowlisted and accepted by the host forced-command wrapper for
+# a probe that no code ever emitted. ``cat`` existed solely for the nested-virtualization sysfs
+# read, which gates nothing: it is not a compilation-blocking fact, not an apply-blocking fact, and
+# has no bearing on provider compatibility, isolation or guest deployment.
+#
+# ``pvesh`` remains, and its removal is a different change with a different owner. This module is
+# the LEGACY SSH probe contract; the first-MVP production discovery composition is HTTPS-only and
+# renders none of these, which is a property of that composition and is asserted there. Emptying
+# this allowlist here would break the six remaining pvesh probes without removing them, leaving a
+# module that cannot execute its own contract — a worse state than an honest legacy one.
 _PVESH = "pvesh"
-_PVEVERSION = "pveversion"
-_CAT = "cat"
-_READ_ONLY_EXECUTABLES = frozenset({_PVESH, _PVEVERSION, _CAT})
+_READ_ONLY_EXECUTABLES = frozenset({_PVESH})
 # The ONLY pvesh verb permitted. ``create``/``set``/``delete``/``push``/``pull`` are not
 # representable.
 _PVESH_READ_VERB = "get"
 _JSON = ("--output-format", "json")
-# Fixed, closed sysfs kernel-parameter files for nested virtualization (read-only). The module name
-# is
-# from a CLOSED set — never free input — so no arbitrary path can be read.
-_NESTED_MODULES = ("kvm_intel", "kvm_amd")
-_NESTED_PATH_RE = re.compile(r"^/sys/module/(kvm_intel|kvm_amd)/parameters/nested$")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Any token reaching the runner must contain no whitespace or shell metacharacter (belt-and-braces
 # over shell=False). A pvesh path token must further be a strict slash-separated safe-token path.
@@ -66,6 +71,8 @@ def _token(value: object, field: str) -> str:
 
 @dataclass(frozen=True)
 class ProbeVersion:
+    """``pvesh get /version`` — the API's own view of the version."""
+
     probe_code: ClassVar[str] = "version"
 
 
@@ -103,16 +110,6 @@ class ProbeVmidAvailability:
 
 
 @dataclass(frozen=True)
-class ProbeNestedVirtualization:
-    module: str  # closed set: kvm_intel | kvm_amd
-    probe_code: ClassVar[str] = "nested_virtualization"
-
-    def __post_init__(self) -> None:
-        if self.module not in _NESTED_MODULES:
-            raise ProbeError("unsupported_nested_module")
-
-
-@dataclass(frozen=True)
 class ProbeCandidateLocatorPresence:
     locator: ResourceLocator
     probe_code: ClassVar[str] = "candidate_locator_presence"
@@ -125,7 +122,6 @@ ReadOnlyHostProbe = (
     | ProbeNodeCapacity
     | ProbeStorage
     | ProbeVmidAvailability
-    | ProbeNestedVirtualization
     | ProbeCandidateLocatorPresence
 )
 
@@ -164,8 +160,6 @@ def render_probe_argv(probe: ReadOnlyHostProbe) -> tuple[str, ...]:
         argv = (_PVESH, _PVESH_READ_VERB, f"/nodes/{probe.node}/storage", *_JSON)
     elif isinstance(probe, ProbeVmidAvailability):
         argv = (_PVESH, _PVESH_READ_VERB, "/cluster/resources", "--type", "vm", *_JSON)
-    elif isinstance(probe, ProbeNestedVirtualization):
-        argv = (_CAT, f"/sys/module/{probe.module}/parameters/nested")
     elif isinstance(probe, ProbeCandidateLocatorPresence):
         argv = (_PVESH, _PVESH_READ_VERB, _locator_get_path(probe.locator), *_JSON)
     else:  # pragma: no cover - exhaustiveness guard
@@ -203,13 +197,6 @@ def assert_read_only(argv: Sequence[str]) -> None:
                 raise ProbeError("pvesh_arg_not_path")
             if not _SAFE_PVESH_PATH_RE.match(tok):
                 raise ProbeError("pvesh_path_unsafe")
-    elif exe == _CAT:
-        # cat is restricted to the fixed nested-virt sysfs kernel parameter files ONLY.
-        if len(argv) != 2 or not _NESTED_PATH_RE.match(argv[1]):
-            raise ProbeError("cat_path_not_allowed")
-    elif exe == _PVEVERSION:
-        if len(argv) != 1:
-            raise ProbeError("pveversion_takes_no_args")
 
 
 def candidate_presence_probe(locator: ResourceLocator) -> ProbeCandidateLocatorPresence:
@@ -254,15 +241,93 @@ def _int(value: object, *, lo: int = 0, hi: int = 10**15) -> int:
     return ivalue
 
 
+#: ``major.minor`` with an OPTIONAL patch. The patch group is what the original expression lacked:
+#: it matched only two groups, so an observed ``9.1.1`` was reduced to ``9.1`` at the regex and the
+#: loss was final by the time anything downstream could notice.
+_VERSION_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})(?:\.(\d{1,4}))?")
+
+#: The ``pve-manager/<version>/<buildid> (running kernel: <k>)`` form. Retained for the HTTPS
+#: source, not for SSH: `GET /nodes/{node}/apt/versions` reports the same shape in the
+#: ``pve-manager`` row's ``Version``/``ManagerVersion`` fields. Captured as three optional parts so
+#: a format change degrades to a parse failure with the raw text still recorded, rather than to a
+#: confidently wrong version.
+_PVEVERSION_RE = re.compile(
+    r"^pve-manager/(\d{1,3}\.\d{1,3}(?:\.\d{1,4})?)"
+    r"(?:/([0-9a-fA-F]{6,64}))?"
+    r"(?:\s+\(running kernel:\s*([^)]{1,64})\))?"
+)
+
+
 def parse_version_major_minor(stdout: bytes) -> tuple[int, int]:
+    """Kept for callers needing only the coarse pair.
+
+    Derived from :func:`parse_api_version`, so the two can never disagree about one input.
+    """
+    major, minor, _patch = parse_api_version(stdout)
+    return major, minor
+
+
+def parse_api_version(stdout: bytes) -> tuple[int, int, int | None]:
+    """``(major, minor, patch)`` from ``pvesh get /version``.
+
+    ``patch`` is ``None`` only when the target genuinely reported a two-part version — never
+    because the parser dropped it. That distinction is the whole point: a discovery evidence record
+    saying ``9.1`` when the host said ``9.1.1`` is a quiet lie about which release was observed, and
+    provider compatibility is decided at the patch level.
+    """
     data = _load_json(stdout)
     version = data.get("version") if isinstance(data, dict) else None
     if not isinstance(version, str):
         raise ProbeError("malformed_probe_output")
-    match = re.match(r"^(\d{1,3})\.(\d{1,3})", version)
+    match = _VERSION_RE.match(version)
     if not match:
         raise ProbeError("malformed_probe_output")
-    return int(match.group(1)), int(match.group(2))
+    patch = int(match.group(3)) if match.group(3) is not None else None
+    return int(match.group(1)), int(match.group(2)), patch
+
+
+def parse_host_package_version(stdout: bytes) -> tuple[str, str, str]:
+    """``(version, build_id, kernel)`` from a ``pve-manager/...`` version string.
+
+    Sourced from `GET /nodes/{node}/apt/versions` over HTTPS. There is no ``pveversion`` probe:
+    the executable is not in the read-only allowlist, and every fact it would have supplied is
+    available over the API.
+
+    Returns strings rather than parsed integers because this is the RAW product identity — the
+    exact ``pve-manager`` version string, the build/repo id and the running kernel — and every one
+    of the three is a value an operator compares against a release note verbatim. Parsing them into
+    numbers would discard the form they need to be compared in.
+
+    ``build_id`` and ``kernel`` are empty when the output did not carry them. Empty here means the
+    host did not print it, which the caller records as an observed-but-partial fact rather than as
+    an absent one.
+    """
+    text = stdout.decode("utf-8", errors="replace").strip()
+    if not text:
+        raise ProbeError("malformed_probe_output")
+    match = _PVEVERSION_RE.match(text)
+    if not match:
+        raise ProbeError("malformed_probe_output")
+    return match.group(1), match.group(2) or "", (match.group(3) or "").strip()
+
+
+def api_and_package_version_agree(api: tuple[int, int, int | None], package_version: str) -> bool:
+    """Whether the two independent version sources describe the same release.
+
+    Compared on the parts the API actually reported: when the API gave no patch component, the
+    comparison is major.minor, because demanding a patch the API never sent would report a
+    disagreement that does not exist. A real mismatch — 9.1.1 installed, 9.0.3 running — is what
+    this is for, and it is reported rather than resolved.
+    """
+    match = _VERSION_RE.match(package_version)
+    if not match:
+        return False
+    major, minor, patch = api
+    if int(match.group(1)) != major or int(match.group(2)) != minor:
+        return False
+    if patch is None:
+        return True
+    return match.group(3) is not None and int(match.group(3)) == patch
 
 
 def parse_is_clustered(stdout: bytes) -> bool:
@@ -295,11 +360,6 @@ def parse_used_vmids(stdout: bytes) -> frozenset[int]:
         if len(used) > 100_000:  # bounded
             raise ProbeError("probe_output_too_large")
     return frozenset(used)
-
-
-def parse_nested_enabled(stdout: bytes) -> bool:
-    # The sysfs file contains ``Y``/``1`` when nested virtualization is enabled.
-    return stdout.strip().lower() in (b"y", b"1")
 
 
 def parse_node_capacity(stdout: bytes) -> tuple[int, int, int]:
