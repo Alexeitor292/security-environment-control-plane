@@ -270,7 +270,7 @@ def _operation_binding() -> OperationBinding:
     )
 
 
-def _owned_object(object_id="secplab", family="zones", action="new") -> PendingSdnObject:
+def _owned_object(object_id="secplab", family="zones", action="create") -> PendingSdnObject:
     return PendingSdnObject(
         family, object_id, action, "", "pending-repr", "/cluster/sdn/zones", "observed", "sha256:z"
     )
@@ -344,7 +344,7 @@ def test_a_foreign_pending_sdn_object_refuses_automated_activation():
     disclosure problem — it is somebody else's change that our approval would commit."""
     ours = _owned_object()
     foreign = PendingSdnObject(
-        "zones", "opsvlan", "changed", "live", "chg", "/cluster/sdn/zones", "observed", "sha256:o"
+        "zones", "opsvlan", "change", "live", "chg", "/cluster/sdn/zones", "observed", "sha256:o"
     )
     document = _document((ours, foreign))
     proofs = PendingSdnOwnershipProofSet(

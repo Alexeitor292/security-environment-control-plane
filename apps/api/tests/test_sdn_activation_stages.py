@@ -65,16 +65,18 @@ OPERATION = OperationBinding(
     stage1_execution_receipt="receipt-1",
 )
 
+#: Actions are the DERIVED vocabulary (create/change/delete/unchanged/ambiguous), not Proxmox's own
+#: new/changed/deleted annotation — the annotation is retained separately as ``target_state``.
 _ZONE = PendingSdnObject(
-    "zones", "secplab", "new", "", "zone-pending", "/cluster/sdn/zones", "observed", "sha256:z"
+    "zones", "secplab", "create", "", "zone-pending", "/cluster/sdn/zones", "observed", "sha256:z"
 )
 _VNET = PendingSdnObject(
-    "vnets", "secpteam1", "new", "", "vnet-pending", "/cluster/sdn/vnets", "observed", "sha256:v"
+    "vnets", "secpteam1", "create", "", "vnet-pending", "/cluster/sdn/vnets", "observed", "sha256:v"
 )
 _SUBNET = PendingSdnObject(
     "subnets",
     "secplab-10.10.1.0-24",
-    "new",
+    "create",
     "",
     "sub",
     "/cluster/sdn/vnets/x/subnets",
@@ -82,7 +84,7 @@ _SUBNET = PendingSdnObject(
     "sha256:s",
 )
 _INTRUDER = PendingSdnObject(
-    "zones", "opsvlan", "changed", "live", "chg", "/cluster/sdn/zones", "observed", "sha256:o"
+    "zones", "opsvlan", "change", "live", "chg", "/cluster/sdn/zones", "observed", "sha256:o"
 )
 
 
@@ -435,7 +437,15 @@ def test_action_and_family_counts_are_derived_and_are_not_ownership_proof():
         )
     )
     disclosure = derive_disclosure(document, proofs, OPERATION)
-    assert disclosure.action_counts == {"create": 2, "change": 1, "delete": 0}
+    assert disclosure.action_counts == {
+        "create": 2,
+        "change": 1,
+        "delete": 0,
+        "unchanged": 0,
+        # Counted even at zero: an object whose effect nobody can state must appear in the
+        # operator's summary rather than fall out of it.
+        "ambiguous": 0,
+    }
     assert disclosure.family_counts == {"zones": 2, "vnets": 1}
     # Action/family agreement does not make the foreign object ours.
     assert disclosure.exclusive_to_current_operation is False

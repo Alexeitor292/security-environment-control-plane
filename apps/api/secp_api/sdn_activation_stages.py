@@ -100,12 +100,22 @@ class PendingSdnObject:
 
     family: str
     object_id: str
-    action: str  # new | changed | deleted
+    #: The DERIVED action — create | change | delete | unchanged | ambiguous — not the target's own
+    #: annotation. Proxmox's ``state`` is one source's summary of the same pair of views; the pair
+    #: is what SECP classifies from, and the annotation is retained separately as evidence.
+    action: str
     normalized_active_representation: str = ""
     normalized_pending_representation: str = ""
     source_endpoint: str = ""
     observation_state: str = ""
     raw_result_digest: str = ""
+    #: What the target annotated the row with, kept apart from the derived action so a disagreement
+    #: between the two is visible rather than resolved silently.
+    target_state: str = ""
+    #: Why the action could not be resolved, when it is ``ambiguous``.
+    ambiguity_reason: str = ""
+    active_present: bool = False
+    pending_present: bool = False
 
     @property
     def key(self) -> tuple[str, str]:
@@ -117,6 +127,10 @@ class PendingSdnObject:
             "family": self.family,
             "object_id": self.object_id,
             "action": self.action,
+            "target_state": self.target_state,
+            "ambiguity_reason": self.ambiguity_reason,
+            "active_present": self.active_present,
+            "pending_present": self.pending_present,
             "active": self.normalized_active_representation,
             "pending": self.normalized_pending_representation,
             "source_endpoint": self.source_endpoint,
@@ -426,8 +440,11 @@ def classify_ownership(
     ):
         return SdnObjectOwnership.unknown
 
-    if obj.action == "new":
+    if obj.action == "create":
         # Otherwise SECP could adopt somebody else's object that happened to share the identifier.
+        # Note this reads the DERIVED action, not the target's ``new`` annotation: an object the
+        # target labels new but whose active view is populated is not a create, and treating the
+        # label as the answer is how an adoption passes as a creation.
         return (
             SdnObjectOwnership.current_operation
             if proof.pre_stage1_absence_evidence_digest
@@ -476,10 +493,14 @@ _OWNERSHIP_FIELDS: tuple[tuple[str, SdnObjectOwnership], ...] = (
     ("unclassified", SdnObjectOwnership.unclassified),
 )
 
+#: The DERIVED action vocabulary. ``unchanged`` and ``ambiguous`` are counted too: an object whose
+#: effect nobody can state must appear in the operator's summary, not fall out of it.
 _ACTION_FIELDS: tuple[tuple[str, str], ...] = (
-    ("create", "new"),
-    ("change", "changed"),
-    ("delete", "deleted"),
+    ("create", "create"),
+    ("change", "change"),
+    ("delete", "delete"),
+    ("unchanged", "unchanged"),
+    ("ambiguous", "ambiguous"),
 )
 
 
@@ -672,6 +693,9 @@ def issue_activation_authorization(
     if document.cluster_fingerprint != operation.cluster_fingerprint:
         raise SdnActivationRefused("sdn_activation_cluster_mismatch")
 
+    for reason in sdn_differential_refusals(document, proofs):
+        raise SdnActivationRefused(reason)
+
     disclosure = derive_disclosure(document, proofs, operation)
 
     if not disclosure.classification_complete:
@@ -700,6 +724,47 @@ def issue_activation_authorization(
         worker_release_fingerprint=document.worker_release_fingerprint,
         observation_ttl=observation_ttl,
     )
+
+
+def sdn_differential_refusals(
+    document: PendingSdnDocument, proofs: PendingSdnOwnershipProofSet
+) -> tuple[str, ...]:
+    """Every reason this pending set's active/pending differential may not be acted on.
+
+    Separate from the ownership gate because they answer different questions: ownership asks WHOSE
+    an object is, the differential asks WHAT activation would do to it. An object can be provably
+    ours and still be one whose effect nobody can state.
+    """
+    from secp_api.sdn_differential import ACTION_AMBIGUOUS, ACTION_CREATE, ACTION_DELETE
+
+    by_key = proofs.by_key()
+    reasons: list[str] = []
+    seen: dict[tuple[str, str], int] = {}
+
+    for obj in document.objects:
+        seen[obj.key] = seen.get(obj.key, 0) + 1
+
+        if obj.action == ACTION_AMBIGUOUS:
+            reasons.append(
+                f"sdn_object_action_ambiguous:{obj.family}:"
+                f"{obj.object_id or '<unidentified>'}:{obj.ambiguity_reason or 'unclassified'}"
+            )
+        if obj.action == ACTION_CREATE:
+            proof = by_key.get(obj.key)
+            if proof is None or not proof.pre_stage1_absence_evidence_digest:
+                # Without proof it was absent before Stage 1, a "create" may be an existing object
+                # SECP is about to adopt because it happens to share an identifier.
+                reasons.append(f"sdn_create_without_absence_evidence:{obj.family}:{obj.object_id}")
+        if obj.action == ACTION_DELETE and not obj.normalized_active_representation:
+            reasons.append(f"sdn_delete_without_active_evidence:{obj.family}:{obj.object_id}")
+
+    for (family, object_id), count in sorted(seen.items()):
+        if count > 1:
+            # The object-to-proof join is one-to-one by construction; a duplicated identifier
+            # cannot be matched to one proof and must not be resolved by picking either.
+            reasons.append(f"sdn_identifier_not_unique:{family}:{object_id or '<unidentified>'}")
+
+    return tuple(dict.fromkeys(reasons))
 
 
 def _counts_detail(counts: dict[str, int]) -> str:
@@ -755,6 +820,8 @@ def activation_refusals(
         reasons.append("sdn_activation_pending_state_changed")
     if proofs.ownership_provenance_digest() != authorization.ownership_provenance_digest:
         reasons.append("sdn_activation_ownership_provenance_changed")
+
+    reasons.extend(sdn_differential_refusals(document, proofs))
 
     disclosure = derive_disclosure(document, proofs, operation)
     if not disclosure.exclusive_to_current_operation or not disclosure.classification_complete:

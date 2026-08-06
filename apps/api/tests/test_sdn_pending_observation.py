@@ -307,10 +307,13 @@ def test_the_cluster_fingerprint_matches_the_workers_derivation():
 
 def test_every_observed_pending_object_becomes_a_document_object():
     document = _build()
+    # The action is DERIVED from the two views, not copied from the target's own annotation: the
+    # row is labelled "new" and the pair (pending present, active absent) makes it a create.
     assert [(o.family, o.object_id, o.action) for o in document.objects] == [
-        ("zones", "secpz1", "new")
+        ("zones", "secpz1", "create")
     ]
     (obj,) = document.objects
+    assert obj.target_state == "new"
     assert obj.source_endpoint == "/cluster/sdn/zones"
     assert obj.normalized_pending_representation
     assert obj.raw_result_digest

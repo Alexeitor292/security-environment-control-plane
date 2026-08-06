@@ -55,6 +55,7 @@ from secp_api.sdn_activation_stages import (
     PendingSdnObject,
     pending_content_token,
 )
+from secp_api.sdn_differential import derive_object_differential
 
 #: The families a complete enumeration must cover.
 #:
@@ -204,33 +205,57 @@ def _observed_at(binding: object) -> datetime:
 
 
 def _objects(families: Mapping[str, object]) -> tuple[PendingSdnObject, ...]:
+    """Every observed pending row, with its action DERIVED from the two views.
+
+    The count out equals the count in. Nothing is filtered — not the unidentifiable rows, not the
+    ambiguous ones — because an object dropped here is an object that stops blocking activation
+    exclusivity, and ``PUT /cluster/sdn`` commits all of them.
+    """
+    endpoints = {scope: _endpoint(scope) for scope in families}
     out: list[PendingSdnObject] = []
+    for differential, scope, row in _rows_with_scope(families):
+        identifier = differential.object_id
+        out.append(
+            PendingSdnObject(
+                family=differential.family,
+                object_id=identifier,
+                action=differential.action,
+                target_state=differential.target_state,
+                ambiguity_reason=differential.ambiguity_reason,
+                active_present=differential.active_present,
+                pending_present=differential.pending_present,
+                # Digests rather than the values themselves: the document is hashed and shown to an
+                # operator, and a raw SDN config can carry addressing an operator's audit log
+                # should not silently accumulate.
+                normalized_active_representation=differential.active_digest,
+                normalized_pending_representation=differential.pending_digest,
+                source_endpoint=endpoints[scope],
+                observation_state="observed" if identifier else UNIDENTIFIED,
+                raw_result_digest=_digest(row),
+            )
+        )
+    return tuple(out)
+
+
+def _rows_with_scope(families: Mapping[str, object]):
+    """Walk every row once, keeping the scope it came from so its endpoint stays attributable."""
     for scope in sorted(families):
         rows = families[scope]
         if not isinstance(rows, (list, tuple)):
             continue
         family = scope.split("@", 1)[0]
-        endpoint = _endpoint(scope)
         for row in rows:
-            if not isinstance(row, dict):
-                continue
-            identifier = str(row.get("object_id") or "")
-            out.append(
-                PendingSdnObject(
-                    family=family,
-                    object_id=identifier,
-                    action=str(row.get("state") or ""),
-                    # Digests rather than the values themselves: the document is hashed and shown to
-                    # an operator, and a raw SDN config can carry addressing an operator's audit log
-                    # should not silently accumulate.
-                    normalized_active_representation=_digest(row.get("active")),
-                    normalized_pending_representation=_digest(row.get("observed")),
-                    source_endpoint=endpoint,
-                    observation_state="observed" if identifier else UNIDENTIFIED,
-                    raw_result_digest=_digest(row),
-                )
-            )
-    return tuple(out)
+            if isinstance(row, dict):
+                yield derive_object_differential(family, row), scope, row
+
+
+def observed_row_count(families: Mapping[str, object]) -> int:
+    """How many pending rows the target actually reported, before any classification."""
+    total = 0
+    for rows in families.values():
+        if isinstance(rows, (list, tuple)):
+            total += sum(1 for row in rows if isinstance(row, dict))
+    return total
 
 
 def _endpoint(scope: str) -> str:
