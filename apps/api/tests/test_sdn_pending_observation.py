@@ -205,6 +205,19 @@ def test_subnets_count_as_covered_only_via_a_per_vnet_scope():
     assert set(PENDING_FAMILIES) == {"zones", "vnets", "subnets", "controllers"}
 
 
+def test_the_control_plane_family_list_matches_the_workers():
+    """The list is restated because the plane boundary forbids the control plane importing worker
+    internals, and a restatement is a second copy that can drift.
+
+    This is the only place both copies are read at once. Two tests each comparing its own copy to
+    the same literal would both keep passing while the two lists said different things — which is
+    exactly how a family would stop being enumerated on one side and stay required on the other.
+    """
+    from secp_worker.proxmox_sdn_operations import SDN_PENDING_FAMILIES
+
+    assert PENDING_FAMILIES == SDN_PENDING_FAMILIES
+
+
 def test_a_cluster_with_no_vnets_has_no_subnets_to_walk():
     """The document must not contradict itself: reporting subnets unreadable while the required-fact
     projection computes visibility as complete from the same facts is output an operator is right

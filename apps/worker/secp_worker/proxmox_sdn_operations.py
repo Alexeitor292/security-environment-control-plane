@@ -331,11 +331,10 @@ def parse_pending_objects(family: str, payload: object) -> tuple[dict, ...]:
     return tuple(out)
 
 
-def pending_families_complete(observed: dict[str, bool]) -> bool:
-    """Every family must have been enumerated with confirmed authority.
-
-    There is no read-only "does anything pend" boolean in the API, so completeness across all four
-    families is the only way to know — and a partial enumeration is an unknown, not a smaller
-    answer.
-    """
-    return all(observed.get(family, False) for family in SDN_PENDING_FAMILIES)
+# Completeness across the families is decided by
+# ``secp_api.discovery_fact_projection._pending_sdn_completeness``, the production path and the only
+# one. A ``pending_families_complete(dict[str, bool])`` helper lived here and was reached by
+# nothing: it could not express the rule that actually matters — subnets have no cluster-wide index,
+# so completeness means every OBSERVED VNET was walked, which a flat family→bool map cannot say.
+# Two functions answering "was the pending state fully enumerated" is how the weaker one ends up
+# deciding, so the weaker one is gone rather than kept for convenience.

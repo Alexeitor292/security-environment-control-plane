@@ -49,7 +49,6 @@ from secp_worker.proxmox_sdn_operations import (
     GetSdnVnetsOperation,
     GetSdnZonesOperation,
     parse_pending_objects,
-    pending_families_complete,
 )
 
 SRC = "prior:/nodes"
@@ -298,16 +297,25 @@ def test_a_malformed_pending_row_is_refused():
 # --- completeness --------------------------------------------------------------------------------
 
 
-def test_every_pending_family_must_be_enumerated():
-    """There is no read-only "does anything pend" boolean, so completeness across all four families
-    is the only way to know. A partial enumeration is an unknown, not a smaller answer."""
+def test_the_pending_families_are_the_four_with_no_does_anything_pend_boolean():
+    """There is no read-only "does anything pend" endpoint, so completeness across all four families
+    is the only way to know, and a partial enumeration is an unknown rather than a smaller answer.
+
+    Whether an enumeration WAS complete is decided by the control plane's
+    ``_pending_sdn_completeness``, which is the only implementation of that rule — see
+    ``test_discovery_fact_projection``. This module owns the family list; it does not own a second
+    opinion about completeness.
+    """
     assert SDN_PENDING_FAMILIES == ("zones", "vnets", "subnets", "controllers")
-    assert pending_families_complete({f: True for f in SDN_PENDING_FAMILIES}) is True
-    for family in SDN_PENDING_FAMILIES:
-        partial = {f: True for f in SDN_PENDING_FAMILIES}
-        partial[family] = False
-        assert pending_families_complete(partial) is False
 
 
-def test_an_empty_enumeration_record_is_not_complete():
-    assert pending_families_complete({}) is False
+def test_this_module_offers_no_second_completeness_rule():
+    """A flat family→bool helper lived here and was reached by nothing. It could not express the
+    rule that matters — subnets have no cluster-wide index, so completeness means every OBSERVED
+    VNET was walked — and two functions answering the same question is how the weaker one ends up
+    deciding."""
+    import secp_worker.proxmox_sdn_operations as mod
+
+    assert not hasattr(mod, "pending_families_complete")
+    for name in dir(mod):
+        assert "complete" not in name.lower(), name

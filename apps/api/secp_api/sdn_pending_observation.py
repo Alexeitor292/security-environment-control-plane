@@ -33,9 +33,13 @@ from secp_api.discovery_observation import Observation
 from secp_api.discovery_verification import VerifiedDiscoverySnapshot
 from secp_api.sdn_activation_stages import PendingSdnDocument, PendingSdnObject
 
-#: The families a complete enumeration must cover. Mirrors the worker's SDN_PENDING_FAMILIES; the
-#: control plane may not import worker modules, so the list is restated and pinned by a test that
-#: reads both.
+#: The families a complete enumeration must cover.
+#:
+#: Deliberately restated rather than imported: this is control-plane code and the plane boundary
+#: forbids importing worker internals. A restatement is a second copy that can drift, so
+#: ``test_sdn_pending_observation`` imports BOTH this and the worker's ``SDN_PENDING_FAMILIES`` and
+#: asserts they are equal. Two tests each comparing its own copy to the same literal would not
+#: catch the drift — they would both pass while the two lists said different things.
 PENDING_FAMILIES: tuple[str, ...] = ("zones", "vnets", "subnets", "controllers")
 
 #: Where each family's pending rows are recorded by the projection. Subnets are keyed per vnet
