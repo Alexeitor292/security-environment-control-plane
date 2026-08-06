@@ -33,6 +33,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
+from secp_api.discovery_fact_commitment import (
+    FactContribution,
+    canonical_value,
+    contribution_of,
+)
 from secp_api.discovery_observation import Observation
 from secp_api.discovery_operation_evidence import (
     DiscoveryOperationEvidence,
@@ -101,12 +106,18 @@ class DiscoveryCompositionError(Exception):
 
 @dataclass(frozen=True)
 class VersionDiscoveryResult:
-    """What one ``/version`` discovery produced: observations, and the evidence for them."""
+    """What a discovery run produced: observations, evidence, and every source's contribution.
+
+    ``contributions`` is not a debugging aid. The merge decides which answer a field code carries;
+    this records what every operation actually said, INCLUDING the ones that failed, so a refusal
+    another source overwrote is still visible and still signed.
+    """
 
     observations: dict[str, Observation]
     manifest: DiscoveryOperationManifest
     failed: bool = False
     failure_reason: str = ""
+    contributions: dict[str, tuple[FactContribution, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -127,6 +138,7 @@ class SignedDiscoveryResult:
     failed: bool = False
     failure_reason: str = ""
     required_facts: dict[str, Observation] = field(default_factory=dict)
+    contributions: dict[str, tuple[FactContribution, ...]] = field(default_factory=dict)
 
 
 def run_full_discovery(
@@ -199,6 +211,8 @@ def run_full_discovery(
         observations=execution.observations,
         manifest=execution.manifest,
         required_facts=required_facts,
+        contributions=execution.contributions,
+        cluster_fingerprint=cluster_fingerprint_of(execution.observations),
         started_at=started_at,
         completed_at=completed_at,
         freshness_bound_seconds=freshness_bound_seconds,
@@ -213,7 +227,24 @@ def run_full_discovery(
         failed=execution.failed,
         failure_reason=execution.failure_reason,
         required_facts=required_facts,
+        contributions=execution.contributions,
     )
+
+
+def cluster_fingerprint_of(observations: dict[str, Observation]) -> str:
+    """A stable fingerprint of WHICH cluster this was, derived from the observed identity.
+
+    Derived rather than supplied for the same reason everything else in the binding is: a caller
+    able to name the cluster could bind a snapshot taken from one cluster to an operation targeting
+    another, and the identity is precisely what the substitution would change.
+
+    Empty when the identity was not usable — an unobserved cluster has no fingerprint, and inventing
+    a placeholder would let two different unidentified clusters compare equal.
+    """
+    identity = observations.get("cluster_identity")
+    if identity is None or not identity.is_usable:
+        return ""
+    return sha256_digest({"cluster_identity": canonical_value(identity.value)})
 
 
 def build_discovery_binding(
@@ -224,6 +255,8 @@ def build_discovery_binding(
     observations: dict[str, Observation],
     manifest: DiscoveryOperationManifest,
     required_facts: dict[str, Observation],
+    contributions: dict[str, tuple[FactContribution, ...]],
+    cluster_fingerprint: str,
     started_at: datetime,
     completed_at: datetime,
     freshness_bound_seconds: int,
@@ -240,15 +273,31 @@ def build_discovery_binding(
       running — both of which the registered anchor is checked against;
     * the hashes are computed here from the run's own products.
 
-    ``facts_hash`` covers the RAW observation states and ``operation_manifest_hash`` covers the
-    evidence, so a snapshot whose facts were edited and a snapshot whose request set was edited are
-    two distinct, separately detectable tampering events.
+    ``facts_hash`` is the digest of the full :class:`FactCommitment` — every fact's VALUE, state,
+    scope, reason, missing privilege and per-source contribution, plus the target, cluster,
+    organization, operation and generation it was observed under. It previously covered
+    ``(code, state)`` pairs only, which left every VMID, VLAN tag, CIDR, subnet, bridge, VNet,
+    storage id and pending SDN object outside the signature: rewriting any of them changed nothing a
+    verifier could see. ``operation_manifest_hash`` remains separate so an edited fact set and an
+    edited request set stay two distinct, separately attributable tampering events.
     """
+    from secp_api.discovery_fact_commitment import build_fact_commitment
     from secp_api.discovery_fact_projection import (
         REQUIRED_FACT_PROJECTION_ID,
         required_fact_states,
     )
     from secp_api.discovery_verification import DISCOVERY_CONTRACT_VERSION, DiscoverySnapshotBinding
+
+    commitment = build_fact_commitment(
+        observations=observations,
+        required_facts=required_facts,
+        contributions=contributions,
+        organization_identity=str(expectation.organization_id),
+        target_identity=str(expectation.execution_target_id),
+        cluster_fingerprint=cluster_fingerprint,
+        operation_identity=expectation.operation_identity,
+        operation_generation=expectation.operation_generation,
+    )
 
     return DiscoverySnapshotBinding(
         discovery_contract_version=DISCOVERY_CONTRACT_VERSION,
@@ -264,9 +313,7 @@ def build_discovery_binding(
         observation_started_at=started_at.isoformat(),
         observation_completed_at=completed_at.isoformat(),
         freshness_bound_seconds=freshness_bound_seconds,
-        facts_hash=sha256_digest(
-            {"observations": sorted((k, v.state.value) for k, v in observations.items())}
-        ),
+        facts_hash=commitment.digest(),
         operation_manifest_hash=sha256_digest({"manifest": manifest.canonical()}),
         projection_implementation_id=REQUIRED_FACT_PROJECTION_ID,
         required_fact_observation_states=required_fact_states(required_facts),
@@ -339,6 +386,7 @@ def run_operation_plan(
 
     observations: dict[str, Observation] = {}
     records: list[DiscoveryOperationEvidence] = []
+    contributions: dict[str, tuple[FactContribution, ...]] = {}
     failure = ""
 
     for index, plan in enumerate(phases if phases is not None else PHASES):
@@ -352,6 +400,7 @@ def run_operation_plan(
         reason = _execute_into(
             observations=observations,
             records=records,
+            contributions=contributions,
             transport=transport,
             operations=operations,
             target_authority_identity=target_authority_identity,
@@ -366,6 +415,7 @@ def run_operation_plan(
         manifest=DiscoveryOperationManifest(operations=tuple(records)),
         failed=bool(failure),
         failure_reason=failure,
+        contributions=contributions,
     )
 
 
@@ -394,9 +444,11 @@ def run_operation_sequence(
     """
     observations: dict[str, Observation] = {}
     records: list[DiscoveryOperationEvidence] = []
+    contributions: dict[str, tuple[FactContribution, ...]] = {}
     reason = _execute_into(
         observations=observations,
         records=records,
+        contributions=contributions,
         transport=transport,
         operations=operations,
         target_authority_identity=target_authority_identity,
@@ -409,6 +461,7 @@ def run_operation_sequence(
         manifest=DiscoveryOperationManifest(operations=tuple(records)),
         failed=bool(reason),
         failure_reason=reason,
+        contributions=contributions,
     )
 
 
@@ -416,6 +469,7 @@ def _execute_into(
     *,
     observations: dict[str, Observation],
     records: list[DiscoveryOperationEvidence],
+    contributions: dict[str, tuple[FactContribution, ...]],
     transport: DiscoveryTransport,
     operations: Sequence[object],
     target_authority_identity: str,
@@ -444,11 +498,13 @@ def _execute_into(
         except Exception as exc:  # noqa: BLE001 - mapped to a closed reason
             reason = _closed_reason(exc)
             first_reason = first_reason or reason
+            failure: Observation = Observation.probe_failed(reason)
             for code in operation.observation_field_codes:  # type: ignore[attr-defined]
-                # Do NOT overwrite a field an earlier operation observed successfully: several
-                # operations contribute to the same fact, and one failing source must not erase a
-                # good answer from another.
-                observations.setdefault(code, Observation.probe_failed(reason))
+                # The contribution is recorded UNCONDITIONALLY, even when the merge keeps another
+                # source's answer. A refusal that leaves no trace is a refusal an operator is never
+                # told about, and it is the thing the signature most needs to admit.
+                _record_contribution(contributions, code, operation, failure)
+                observations[code] = _merge_observation(code, observations.get(code), failure)
             records.append(
                 _sequence_evidence(
                     operation, target_authority_identity, "refused", b"", started_at, completed_at
@@ -463,9 +519,25 @@ def _execute_into(
             )
         )
         for code, obs in parse(operation, payload).items():
+            _record_contribution(contributions, code, operation, obs)
             observations[code] = _merge_observation(code, observations.get(code), obs)
 
     return first_reason
+
+
+def _record_contribution(
+    contributions: dict[str, tuple[FactContribution, ...]],
+    code: str,
+    operation: object,
+    observation: Observation,
+) -> None:
+    """Append what this operation said about this fact. Never replaces an earlier entry."""
+    entry = contribution_of(
+        operation_code=operation.operation_code,  # type: ignore[attr-defined]
+        rendered_path=operation.rendered_path(),  # type: ignore[attr-defined]
+        observation=observation,
+    )
+    contributions[code] = (*contributions.get(code, ()), entry)
 
 
 def _sequence_evidence(

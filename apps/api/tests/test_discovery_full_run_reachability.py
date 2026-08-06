@@ -50,7 +50,7 @@ from secp_worker.preflight.secret_resolution import (
     TrustedCredentialReference,
     build_discovery_resolution_request,
 )
-from secp_worker.proxmox_discovery_composition import run_full_discovery
+from secp_worker.proxmox_discovery_composition import cluster_fingerprint_of, run_full_discovery
 from secp_worker.proxmox_discovery_plan import MAX_PLANNED_OPERATIONS, DiscoveryPlanError
 
 NOW = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
@@ -412,9 +412,72 @@ def test_the_two_hashes_cover_different_documents():
     assert result.binding.operation_manifest_hash == sha256_digest(
         {"manifest": result.manifest.canonical()}
     )
-    assert result.binding.facts_hash == sha256_digest(
-        {"observations": sorted((k, v.state.value) for k, v in result.observations.items())}
+
+
+def test_the_signed_facts_hash_covers_the_observed_values_not_just_their_states():
+    """The end-to-end version of the commitment tests: rewriting a VMID in a real run's output must
+    change what the worker signed, while every observation STATE stays identical."""
+    from secp_api.discovery_fact_commitment import build_fact_commitment
+
+    result, _target, _r, _f, _s, _pub = _run()
+
+    def _commit(observations):
+        return build_fact_commitment(
+            observations=observations,
+            required_facts=result.required_facts,
+            contributions=result.contributions,
+            organization_identity=str(ORG),
+            target_identity=str(TARGET_ID),
+            cluster_fingerprint=cluster_fingerprint_of(observations),
+            operation_identity=OPERATION,
+            operation_generation=GENERATION,
+        )
+
+    assert _commit(result.observations).digest() == result.binding.facts_hash
+
+    tampered = dict(result.observations)
+    original = tampered["existing_vm_ids"].value
+    assert original == {"pve-a": (100,), "pve-b": (101,)}
+    tampered["existing_vm_ids"] = Observation.observed({"pve-a": (100,), "pve-b": (999,)})
+
+    # Every state is unchanged — this is exactly what the old digest covered ...
+    assert sorted((k, v.state.value) for k, v in tampered.items()) == sorted(
+        (k, v.state.value) for k, v in result.observations.items()
     )
+    # ... and the signed digest still moves.
+    assert _commit(tampered).digest() != result.binding.facts_hash
+
+
+def test_the_cluster_fingerprint_is_derived_from_the_observed_identity():
+    """Derived, not supplied: a caller able to name the cluster could bind a snapshot taken from one
+    cluster to an operation targeting another."""
+    import inspect
+
+    result, _target, _r, _f, _s, _pub = _run()
+    assert "cluster_fingerprint" not in set(inspect.signature(run_full_discovery).parameters)
+    assert cluster_fingerprint_of(result.observations).startswith("sha256:")
+
+    other = dict(result.observations)
+    other["cluster_identity"] = Observation.observed({"kind": "cluster", "cluster_name": "other"})
+    assert cluster_fingerprint_of(other) != cluster_fingerprint_of(result.observations)
+
+
+def test_an_unobserved_cluster_identity_has_no_fingerprint_rather_than_a_placeholder():
+    """Two different unidentified clusters must not compare equal."""
+    assert cluster_fingerprint_of({}) == ""
+    assert cluster_fingerprint_of({"cluster_identity": Observation.probe_failed("x")}) == ""
+
+
+def test_every_failing_operation_leaves_a_contribution_even_when_another_source_answers():
+    """The refusal that the merge does not surface is still signed."""
+    payloads = _cluster_payloads()
+    payloads.pop("/cluster/status")  # node_names also comes from /nodes
+    result, _target, _r, _f, _s, _pub = _run(payloads=payloads)
+
+    assert result.observations["node_names"].is_usable is True  # /nodes answered
+    sources = {c.operation_code: c.state for c in result.contributions["node_names"]}
+    assert sources["cluster_status"] == "probe_failed", sources
+    assert sources["node_index"] == "observed", sources
 
 
 def test_the_signed_binding_verifies_against_the_registered_anchor_end_to_end():
