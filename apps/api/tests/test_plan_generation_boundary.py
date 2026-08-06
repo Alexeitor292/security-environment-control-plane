@@ -5,8 +5,10 @@ plan-only boundary and that every pre-existing execution seal is untouched:
 
 * the plan-only process seal is a code constant set ``True``; ``PlanOnlyProcessExecutor`` cannot be
   constructed (even with a capability) and cannot run;
-* the plan-only command grammar admits only offline ``init`` / non-destroy ``plan`` / ``show -json``
-  and refuses apply / destroy / ``plan -destroy`` / every other subcommand and token;
+* the plan-only command grammar admits only offline ``init`` (two reviewed shapes, one of which
+  declines the backend for schema inspection) / non-destroy ``plan`` / ``show -json`` /
+  ``validate -json`` / ``providers schema -json``, and refuses apply / destroy / ``plan -destroy`` /
+  plain ``providers`` / every other subcommand and token;
 * the ``PlanOnlyCapability`` cannot be built without the module-private token and is not
   serializable (never pickled, placed in a Temporal argument, or leaked through repr/str/format);
 * NO ``secp_worker.plan_gen`` module imports subprocess / socket / HTTP / a provider SDK, and the
@@ -135,16 +137,94 @@ def _plan_argv() -> list[str]:
     ]
 
 
-def test_grammar_admits_the_three_reviewed_shapes():
+def _schema_init_argv() -> list[str]:
+    """The schema-inspection init: the plan init plus ``-backend=false`` and nothing else."""
+    argv = _init_argv()
+    argv.insert(-1, "-backend=false")  # before -plugin-dir, which must stay last
+    return argv
+
+
+# Every shape the grammar admits, keyed by the leading verb. `test_no_sixth_verb_can_enter_the_
+# grammar_unnoticed` reads this table, so a verb added to the admit-list without a reviewed shape
+# here fails rather than passing silently.
+_ADMITTED_SHAPES: dict[str, list[list[str]]] = {
+    "init": [_init_argv(), _schema_init_argv()],
+    "plan": [_plan_argv()],
+    "show": [[_EXE, f"-chdir={_WS}", "show", "-json", _PLAN]],
+    "validate": [[_EXE, f"-chdir={_WS}", "validate", "-json"]],
+    "providers": [[_EXE, f"-chdir={_WS}", "providers", "schema", "-json"]],
+}
+
+
+def test_grammar_admits_exactly_the_reviewed_shapes():
     from secp_worker.plan_gen.process_boundary import validate_plan_only_command
 
-    for argv, kind in (
-        (_init_argv(), "init"),
-        (_plan_argv(), "plan"),
-        ([_EXE, f"-chdir={_WS}", "show", "-json", _PLAN], "show"),
+    for kind, shapes in _ADMITTED_SHAPES.items():
+        for argv in shapes:
+            cmd = validate_plan_only_command(argv, executable=_EXE, workspace=_WS, plan_file=_PLAN)
+            assert cmd.kind == kind, argv
+
+
+def test_the_two_init_shapes_are_distinct_and_neither_absorbs_the_other():
+    """``-backend=false`` belongs to the schema init alone.
+
+    If it were folded into the shared ``_INIT_FLAGS`` the plan path would break — a workspace
+    initialised with ``-backend=false`` cannot run ``plan`` — so the two sets must stay separate
+    and each must be exact. A superset of either is refused.
+    """
+    from secp_worker.plan_gen.process_boundary import (
+        _INIT_FLAGS,
+        _SCHEMA_INIT_FLAGS,
+        PlanOnlyProcessError,
+        validate_plan_only_command,
+    )
+
+    assert _SCHEMA_INIT_FLAGS - _INIT_FLAGS == {"-backend=false"}
+    assert "-backend=false" not in _INIT_FLAGS
+
+    # A union of the two plus one extra reviewed-looking flag is still refused.
+    bloated = _schema_init_argv()
+    bloated.insert(-1, "-reconfigure")
+    with pytest.raises(PlanOnlyProcessError):
+        validate_plan_only_command(bloated, executable=_EXE, workspace=_WS, plan_file=_PLAN)
+
+
+def test_no_sixth_verb_can_enter_the_grammar_unnoticed():
+    """Pins the admit-list itself, by CONTENT rather than by count.
+
+    Adding a verb to ``_PLAN_ONLY_SUBCOMMANDS`` fails here until it is also given a reviewed exact
+    shape above — which is the moment the decision is actually made. A test that only counted the
+    verbs would be satisfied by swapping one for another, and a test that only checked the two new
+    ones would not notice a sixth at all.
+    """
+    from secp_worker.plan_gen.process_boundary import _PLAN_ONLY_SUBCOMMANDS
+
+    assert _PLAN_ONLY_SUBCOMMANDS == frozenset({"init", "plan", "show", "validate", "providers"}), (
+        "the admitted verb set changed; add its exact reviewed shape to _ADMITTED_SHAPES first"
+    )
+    assert set(_ADMITTED_SHAPES) == set(_PLAN_ONLY_SUBCOMMANDS)
+
+
+def test_validate_and_providers_are_still_refused_as_trailing_tokens():
+    """Admitting the two verbs at position 2 must not admit them anywhere else.
+
+    ``_FORBIDDEN_SUBCOMMANDS`` and the admit-list deliberately overlap on these two names, and this
+    is the assertion that keeps the overlap: a future tidy-up that "removes the duplicates" from the
+    forbidden set would let ``providers providers -json`` through.
+    """
+    from secp_worker.plan_gen.process_boundary import (
+        _FORBIDDEN_SUBCOMMANDS,
+        PlanOnlyProcessError,
+        validate_plan_only_command,
+    )
+
+    assert {"validate", "providers"} <= _FORBIDDEN_SUBCOMMANDS
+    for argv in (
+        [_EXE, f"-chdir={_WS}", "providers", "providers", "-json"],
+        [_EXE, f"-chdir={_WS}", "validate", "validate"],
     ):
-        cmd = validate_plan_only_command(argv, executable=_EXE, workspace=_WS, plan_file=_PLAN)
-        assert cmd.kind == kind
+        with pytest.raises(PlanOnlyProcessError):
+            validate_plan_only_command(argv, executable=_EXE, workspace=_WS, plan_file=_PLAN)
 
 
 @pytest.mark.parametrize(
@@ -161,6 +241,39 @@ def test_grammar_admits_the_three_reviewed_shapes():
         [_EXE, f"-chdir={_WS}", "plan", "-input=false", "-no-color", "-lock=true", "-out=/etc/x"],
         [_EXE, f"-chdir={_WS}", "show", "-json", "/etc/passwd"],
         [_EXE, f"-chdir={_WS}", "plan", "-input=false", "-no-color", "-lock=true", "-out=$(x)"],
+        # --- the widened grammar's own negative space -------------------------------------------
+        # `validate` is admitted ONLY as `validate -json`.
+        [_EXE, f"-chdir={_WS}", "validate"],
+        [_EXE, f"-chdir={_WS}", "validate", "-no-color"],
+        [_EXE, f"-chdir={_WS}", "validate", "-json", "-no-color"],
+        [_EXE, f"-chdir={_WS}", "validate", "-json=true"],
+        # A configuration's placeholder values are rendered into the workspace, never passed here:
+        # a command-line value would sit outside the rendered-workspace hash, and so outside the
+        # evidence that the manifest binds.
+        [_EXE, f"-chdir={_WS}", "validate", "-json", "-var=x=1"],
+        [_EXE, f"-chdir={_WS}", "validate", "-json", "-var-file=/tmp/x.tfvars"],
+        # `providers` is admitted ONLY as `providers schema -json`.
+        [_EXE, f"-chdir={_WS}", "providers"],
+        [_EXE, f"-chdir={_WS}", "providers", "schema"],
+        [_EXE, f"-chdir={_WS}", "providers", "-json"],
+        [_EXE, f"-chdir={_WS}", "providers", "schema", "-json", "extra"],
+        [_EXE, f"-chdir={_WS}", "providers", "schema", "-json=true"],
+        # The other `providers` subcommands. `lock` and `mirror` are the dangerous pair: both WRITE
+        # — `lock` rewrites .terraform.lock.hcl, `mirror` fetches providers to a directory — and
+        # both would reach the network, which is the whole reason the mirror is offline and the
+        # lockfile read-only.
+        [_EXE, f"-chdir={_WS}", "providers", "lock"],
+        [_EXE, f"-chdir={_WS}", "providers", "mirror", "/tmp/mirror"],
+        # `-backend=false` does not become a free-floating flag on the other verbs.
+        [
+            _EXE,
+            f"-chdir={_WS}",
+            "plan",
+            "-input=false",
+            "-no-color",
+            "-lock=true",
+            "-backend=false",
+        ],
     ],
 )
 def test_grammar_refuses_apply_destroy_and_every_other_shape(argv):
@@ -303,19 +416,35 @@ def test_capability_is_refused_on_implementation_digest_drift():
         _issue(_activation(classification="bogus"))
 
 
-def test_capability_issuance_refuses_the_old_v1_implementation_identity():
-    """The seal flip advanced the executor identity v1 -> v2. A capability minted against the OLD
-    sealed v1 process implementation id/digest cannot be issued for the unsealed v2 executor."""
+@pytest.mark.parametrize("superseded", ["v1", "v2"])
+def test_capability_issuance_refuses_every_superseded_implementation_identity(superseded):
+    """Each reviewed behavioural change advances the executor identity, and every earlier identity
+    stays refused.
+
+    ``v1`` was the sealed executor; ``v2`` was the unsealed one whose grammar admitted three
+    subcommands. ``v3`` admits five. A capability minted against v2 was reviewed against a boundary
+    that could not run ``validate`` or ``providers schema``, so it must not authorise one that can
+    — an old attestation has to FAIL here rather than silently validate the widened grammar.
+    """
     import hashlib
 
     from secp_worker.plan_gen.capability import PlanOnlyCapabilityRefused
 
-    v1_id = "secp-002b-1b-pr5b/plan-only-executor/v1"
-    v1_digest = "sha256:" + hashlib.sha256(v1_id.encode()).hexdigest()
-    # An activation carrying the exact old v1 digest is refused at issuance (expected digest is v2).
-    v1_act = _activation(process_implementation_id=v1_id, process_implementation_digest=v1_digest)
+    old_id = f"secp-002b-1b-pr5b/plan-only-executor/{superseded}"
+    old_digest = "sha256:" + hashlib.sha256(old_id.encode()).hexdigest()
+    old_act = _activation(
+        process_implementation_id=old_id, process_implementation_digest=old_digest
+    )
     with pytest.raises(PlanOnlyCapabilityRefused, match="process implementation digest"):
-        _issue(v1_act)
+        _issue(old_act)
+
+
+def test_the_executor_identity_is_the_widened_v3():
+    """Pinned so that reverting the grammar without reverting the identity — or the reverse — is a
+    test failure rather than a boundary whose attestation no longer describes it."""
+    from secp_worker.plan_gen.process_boundary import PLAN_ONLY_EXECUTOR_IMPLEMENTATION_ID
+
+    assert PLAN_ONLY_EXECUTOR_IMPLEMENTATION_ID == "secp-002b-1b-pr5b/plan-only-executor/v3"
 
 
 # --- the plan_gen package imports nothing capable of I/O -----------------------------------------
