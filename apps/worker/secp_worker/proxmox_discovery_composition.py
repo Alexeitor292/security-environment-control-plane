@@ -410,7 +410,7 @@ def run_operation_plan(
 
     for index, plan in enumerate(phases if phases is not None else PHASES):
         try:
-            operations, bounded = plan() if index == 0 else plan(observations)
+            operations, bounded = plan() if index == 0 else plan(observations, len(records))
         except DiscoveryPlanError as exc:
             failure = str(exc.args[0])
             break

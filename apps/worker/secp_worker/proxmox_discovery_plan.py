@@ -147,6 +147,7 @@ def phase_one_operations() -> tuple[tuple[object, ...], tuple[BoundedInventoryRe
 
 def phase_two_operations(
     observations: Mapping[str, Observation],
+    already_planned: int = 0,
 ) -> tuple[tuple[object, ...], tuple[BoundedInventoryRefusal, ...]]:
     """Everything that needs a node name, for every node the target named."""
     nodes = _identifiers(observations, "node_names", source=SOURCE_NODE_INDEX)
@@ -164,11 +165,12 @@ def phase_two_operations(
                 GetNodeSdnZonesOperation(node, SOURCE_NODE_INDEX),
             )
         )
-    return _bounded(operations), ()
+    return _bounded(operations, already_planned), ()
 
 
 def phase_three_operations(
     observations: Mapping[str, Observation],
+    already_planned: int = 0,
 ) -> tuple[tuple[object, ...], tuple[BoundedInventoryRefusal, ...]]:
     """Everything that needs a storage id, a vnet id or a zone id.
 
@@ -209,14 +211,19 @@ def phase_three_operations(
         for zone in zones:
             operations.append(GetNodeSdnBridgesOperation(node, zone, SOURCE_SDN_ZONES))
 
-    return _bounded(operations), tuple(refusals)
+    return _bounded(operations, already_planned), tuple(refusals)
 
 
 PHASES = (phase_one_operations, phase_two_operations, phase_three_operations)
 
 
-def _bounded(operations: list[object]) -> tuple[object, ...]:
-    if len(operations) > MAX_PLANNED_OPERATIONS:
+def _bounded(operations: list[object], already_planned: int = 0) -> tuple[object, ...]:
+    """The ceiling is on the WHOLE plan, not on each phase.
+
+    Called once per phase, it used to compare only that phase's count — so the documented limit of
+    512 was in practice 13 + 512 + 512. The running total is passed in.
+    """
+    if len(operations) + already_planned > MAX_PLANNED_OPERATIONS:
         # Raising rather than truncating: a silently shortened plan produces a snapshot that LOOKS
         # complete, and the required-fact evaluator has no way to tell it was cut short.
         raise DiscoveryPlanError("discovery_plan_too_large")

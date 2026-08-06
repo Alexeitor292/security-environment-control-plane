@@ -22,9 +22,8 @@ direction, the parsers take the direction that causes SECP to refuse rather than
 
 from __future__ import annotations
 
-import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from secp_api.discovery_observation import Observation
 
@@ -133,17 +132,37 @@ def _normalised_manager_version(raw: str) -> str | None:
 # --- version --------------------------------------------------------------------------------------
 
 
+#: ``9``, ``9.1`` or ``9.1.1``. The third group is optional and its ABSENCE is meaningful: a
+#: two-part version is what the target said, and inventing a ``.0`` would be a quiet lie about
+#: which release was observed on the one field provider compatibility is decided by.
+_API_VERSION_RE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?")
+
+
+def parse_api_version(payload: Mapping[str, object]) -> tuple[int, int, int | None]:
+    """``(major, minor, patch)`` from a ``/version`` body.
+
+    Implemented HERE rather than imported from ``target_discovery.probes``. That module is the
+    LEGACY SSH host-command contract — it owns ``render_probe_argv`` and the ``pvesh`` argv grammar
+    — and importing it made the composition's "no route to the legacy probe path, not a disabled
+    route, no route" claim false transitively, in the one file the structural guard did not scan.
+    The parse is a dozen lines and duplicating it is cheaper than the untrue claim.
+    """
+    version = payload.get("version")
+    if not isinstance(version, str):
+        raise _MalformedPayload("version_absent_or_not_a_string")
+    match = _API_VERSION_RE.match(version)
+    if not match:
+        raise _MalformedPayload("version_unparseable")
+    patch = int(match.group(3)) if match.group(3) is not None else None
+    return int(match.group(1)), int(match.group(2)), patch
+
+
 def _parse_api_version(operation: object, payload: object) -> dict[str, Observation]:
     """``/version``. A malformed or partial response yields ``observed_malformed`` — never an empty
     or default version, because a version is precisely the field where an invented value silently
     changes which provider SECP believes it may use."""
-    from secp_worker.target_discovery.probes import ProbeError, parse_api_version
-
     body = _object(payload, "version_payload")
-    try:
-        major, minor, patch = parse_api_version(json.dumps(body).encode("utf-8"))
-    except ProbeError as exc:
-        raise _MalformedPayload(str(getattr(exc, "args", ["malformed_probe_output"])[0])) from None
+    major, minor, patch = parse_api_version(body)
 
     release = body.get("release")
     repoid = body.get("repoid")

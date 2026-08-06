@@ -735,6 +735,7 @@ def sdn_differential_refusals(
     an object is, the differential asks WHAT activation would do to it. An object can be provably
     ours and still be one whose effect nobody can state.
     """
+    from secp_api.discovery_fact_projection import safe_identifier
     from secp_api.sdn_differential import ACTION_AMBIGUOUS, ACTION_CREATE, ACTION_DELETE
 
     by_key = proofs.by_key()
@@ -747,7 +748,8 @@ def sdn_differential_refusals(
         if obj.action == ACTION_AMBIGUOUS:
             reasons.append(
                 f"sdn_object_action_ambiguous:{obj.family}:"
-                f"{obj.object_id or '<unidentified>'}:{obj.ambiguity_reason or 'unclassified'}"
+                f"{safe_identifier(obj.object_id) if obj.object_id else '<unidentified>'}:"
+                f"{obj.ambiguity_reason or 'unclassified'}"
             )
         if obj.action == ACTION_CREATE:
             proof = by_key.get(obj.key)
@@ -756,13 +758,18 @@ def sdn_differential_refusals(
                 # SECP is about to adopt because it happens to share an identifier.
                 reasons.append(f"sdn_create_without_absence_evidence:{obj.family}:{obj.object_id}")
         if obj.action == ACTION_DELETE and not obj.normalized_active_representation:
-            reasons.append(f"sdn_delete_without_active_evidence:{obj.family}:{obj.object_id}")
+            reasons.append(
+                f"sdn_delete_without_active_evidence:{obj.family}:{safe_identifier(obj.object_id)}"
+            )
 
     for (family, object_id), count in sorted(seen.items()):
         if count > 1:
             # The object-to-proof join is one-to-one by construction; a duplicated identifier
             # cannot be matched to one proof and must not be resolved by picking either.
-            reasons.append(f"sdn_identifier_not_unique:{family}:{object_id or '<unidentified>'}")
+            reasons.append(
+                f"sdn_identifier_not_unique:{family}:"
+                f"{safe_identifier(object_id) if object_id else '<unidentified>'}"
+            )
 
     return tuple(dict.fromkeys(reasons))
 

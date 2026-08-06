@@ -71,7 +71,7 @@ def _raw(**overrides) -> dict[str, Observation]:
         "existing_subnets": Observation.observed({"s1": {}}),
         "existing_vlan_use": Observation.observed({"vnet:v1": 100}),
         "pending_sdn_state": Observation.observed(
-            {"zones": (), "vnets": (), "controllers": (), "subnets@v1": ()}
+            {"zones": (), "vnets": (), "controllers": (), "subnets@v1": (), "fabrics": ()}
         ),
     }
     for key, value in overrides.items():
@@ -546,7 +546,7 @@ def test_subnets_must_be_walked_for_every_observed_vnet():
     raw = _raw(
         existing_vnets=Observation.observed({"v1": {}, "v2": {}}),
         pending_sdn_state=Observation.observed(
-            {"zones": (), "vnets": (), "controllers": (), "subnets@v1": ()}
+            {"zones": (), "vnets": (), "controllers": (), "subnets@v1": (), "fabrics": ()}
         ),
     )
     projected = project_required_facts(
@@ -675,3 +675,70 @@ def test_both_refused_privileges_are_reported_for_the_operator():
         raw, control_plane_facts=_control_plane(), contributions=_contributions()
     )
     assert unobserved_privileges(projected) == ("SDN.Audit", "VM.Audit")
+
+
+# === one family vocabulary, and fabrics accounted for =============================================
+
+
+def test_the_pending_family_list_has_exactly_one_declaration_in_the_control_plane():
+    """It had three: the worker's, the control plane's, and a bare literal inside
+    ``_pending_sdn_completeness`` — which was the copy that actually decided the answer, and the
+    only one pinned to nothing."""
+    from secp_api.sdn_pending_families import PENDING_FAMILIES as CANONICAL
+    from secp_api.sdn_pending_observation import PENDING_FAMILIES as REEXPORTED
+
+    assert REEXPORTED is CANONICAL
+
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "secp_api" / "discovery_fact_projection.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    literals = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Tuple)
+        and {getattr(e, "value", None) for e in node.elts} >= {"zones", "vnets"}
+    ]
+    assert literals == [], "a second family list literal reappeared in the projection"
+
+
+def test_an_unenumerated_fabrics_family_refuses():
+    """PUT /cluster/sdn commits pending fabrics too, so a family nobody asked about makes the
+    pending set knowably smaller than the set that would activate."""
+    without = {"zones": (), "vnets": (), "controllers": (), "subnets@v1": ()}
+    raw = _raw(pending_sdn_state=Observation.observed(without))
+    projected = project_required_facts(
+        raw, control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    assert projected["pending_sdn_state"].is_usable is False
+    assert "fabrics" in projected["pending_sdn_state"].reason_code
+
+
+# === target-controlled bytes never reach an operator-facing reason ================================
+
+
+def test_a_hostile_node_identifier_cannot_ride_into_a_reason_code():
+    """Reason codes are projected to operators and go into signed evidence, and their own contract
+    says "never a host, endpoint, path or credential". The identifiers interpolated into them come
+    straight from the target's JSON."""
+    from secp_api.discovery_fact_projection import safe_identifier
+
+    hostile = "pve\nSet-Cookie: x=1\r\nhttps://evil.example/" + "A" * 200
+    cleaned = safe_identifier(hostile)
+    assert "\n" not in cleaned and "\r" not in cleaned
+    assert "://" not in cleaned
+    assert len(cleaned) <= 65
+    assert safe_identifier("") == "<empty>"
+    assert safe_identifier("pve-a") == "pve-a"  # ordinary names survive intact
+
+
+def test_a_hostile_identifier_is_bounded_in_the_refusal_it_produces():
+    hostile = "pve\nX: 1 " + "B" * 300
+    raw = _raw(node_names=Observation.observed(("pve-a", hostile)))
+    projected = project_required_facts(
+        raw, control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    reason = projected["node_capacity"].reason_code
+    assert "\n" not in reason
+    assert len(reason) < 400

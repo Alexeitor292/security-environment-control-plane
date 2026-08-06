@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from secp_commissioning.canonical import sha256_digest
 
 from secp_api.discovery_fact_commitment import canonical_value
+from secp_api.discovery_fact_projection import safe_identifier
 
 ACTION_CREATE = "create"
 ACTION_CHANGE = "change"
@@ -203,26 +204,27 @@ def differential_refusals(
         seen[key] = seen.get(key, 0) + 1
     for (family, object_id), count in sorted(seen.items()):
         if count > 1:
-            reasons.append(f"sdn_identifier_not_unique:{family}:{object_id or '<unidentified>'}")
+            reasons.append(
+                f"sdn_identifier_not_unique:{family}:"
+                f"{safe_identifier(object_id) if object_id else '<unidentified>'}"
+            )
 
     absence = dict(absence_evidence_by_key or {})
     for differential in differentials:
+        named = (
+            safe_identifier(differential.object_id) if differential.object_id else "<unidentified>"
+        )
         key = (differential.family, differential.object_id)
         if differential.action == ACTION_AMBIGUOUS:
             reasons.append(
                 f"sdn_object_action_ambiguous:{differential.family}:"
-                f"{differential.object_id or '<unidentified>'}:"
-                f"{differential.ambiguity_reason or 'unclassified'}"
+                f"{named}:{differential.ambiguity_reason or 'unclassified'}"
             )
         if differential.action == ACTION_CREATE and not absence.get(key):
             # Without proof the object was absent before Stage 1, a "create" may be an existing
             # object SECP is about to adopt because it happens to share an identifier.
-            reasons.append(
-                f"sdn_create_without_absence_evidence:{differential.family}:{differential.object_id}"
-            )
+            reasons.append(f"sdn_create_without_absence_evidence:{differential.family}:{named}")
         if differential.action == ACTION_DELETE and not differential.active_digest:
-            reasons.append(
-                f"sdn_delete_without_active_evidence:{differential.family}:{differential.object_id}"
-            )
+            reasons.append(f"sdn_delete_without_active_evidence:{differential.family}:{named}")
 
     return tuple(dict.fromkeys(reasons))

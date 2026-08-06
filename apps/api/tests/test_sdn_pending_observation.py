@@ -61,6 +61,7 @@ def _pending_value(**overrides) -> dict:
         ),
         "vnets": (),
         "controllers": (),
+        "fabrics": (),
         "subnets@secpv1": (),
     }
     base.update(overrides)

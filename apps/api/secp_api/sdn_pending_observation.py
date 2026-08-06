@@ -57,14 +57,10 @@ from secp_api.sdn_activation_stages import (
 )
 from secp_api.sdn_differential import derive_object_differential
 
-#: The families a complete enumeration must cover.
-#:
-#: Deliberately restated rather than imported: this is control-plane code and the plane boundary
-#: forbids importing worker internals. A restatement is a second copy that can drift, so
-#: ``test_sdn_pending_observation`` imports BOTH this and the worker's ``SDN_PENDING_FAMILIES`` and
-#: asserts they are equal. Two tests each comparing its own copy to the same literal would not
-#: catch the drift — they would both pass while the two lists said different things.
-PENDING_FAMILIES: tuple[str, ...] = ("zones", "vnets", "subnets", "controllers")
+#: Re-exported from the single control-plane declaration. The plane boundary forbids importing the
+#: worker's copy, so a restatement across planes is unavoidable — but a test imports BOTH and
+#: asserts they are equal, and inside this plane there is exactly one.
+from secp_api.sdn_pending_families import PENDING_FAMILIES  # noqa: F401
 
 #: Where each family's pending rows are recorded by the projection. Subnets are keyed per vnet
 #: because there is no cluster-wide subnet index.

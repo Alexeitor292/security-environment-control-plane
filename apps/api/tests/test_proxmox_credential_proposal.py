@@ -148,20 +148,62 @@ def test_the_module_cannot_execute_anything():
     assert imported == {"__future__", "secp_api"}
 
 
+#: Every file type that could invoke the renderer or run its output. Scanning only ``*.py`` left a
+#: shell script, a PowerShell script, a CI workflow or a Makefile invisible — and the proposal's
+#: whole claim is that NOTHING in the repository runs these commands.
+_EXECUTABLE_SUFFIXES = (
+    "*.py",
+    "*.sh",
+    "*.bash",
+    "*.ps1",
+    "*.psm1",
+    "*.yml",
+    "*.yaml",
+    "*.toml",
+    "*.mk",
+    "Makefile",
+    "*.just",
+    "*.cmd",
+    "*.bat",
+)
+
+
 def test_nothing_in_the_repository_runs_the_proposed_commands():
-    """Inverted: scan for a caller rather than list the approved ones."""
+    """Inverted: scan for a caller rather than list the approved ones — across every file type that
+    could be one, not only Python."""
     root = Path(__file__).resolve().parents[3]
+    exempt = {"proxmox_discovery_credential_proposal.py", Path(__file__).name}
     callers = []
-    for path in root.rglob("*.py"):
-        parts = set(path.parts)
-        if "__pycache__" in parts or ".venv" in parts:
-            continue
-        if path.name in ("proxmox_discovery_credential_proposal.py", Path(__file__).name):
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if "provisioning_commands" in text or "rollback_commands" in text:
-            callers.append(str(path.relative_to(root)))
-    assert callers == [], callers
+    for pattern in _EXECUTABLE_SUFFIXES:
+        for path in root.rglob(pattern):
+            parts = set(path.parts)
+            if "__pycache__" in parts or ".venv" in parts or "node_modules" in parts:
+                continue
+            if path.name in exempt or not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "provisioning_commands" in text or "rollback_commands" in text:
+                callers.append(str(path.relative_to(root)))
+    assert sorted(set(callers)) == [], sorted(set(callers))
+
+
+def test_no_file_of_any_type_carries_the_provisioning_commands_verbatim():
+    """The commands could also be COPIED rather than called. A pveum command creating the discovery
+    role anywhere in the tree would be a script somebody could run."""
+    root = Path(__file__).resolve().parents[3]
+    exempt = {"proxmox_discovery_credential_proposal.py", Path(__file__).name}
+    offenders = []
+    needle = f"pveum role add {DISCOVERY_ROLE}"
+    for pattern in _EXECUTABLE_SUFFIXES:
+        for path in root.rglob(pattern):
+            parts = set(path.parts)
+            if "__pycache__" in parts or ".venv" in parts or "node_modules" in parts:
+                continue
+            if path.name in exempt or not path.is_file():
+                continue
+            if needle in path.read_text(encoding="utf-8", errors="ignore"):
+                offenders.append(str(path.relative_to(root)))
+    assert sorted(set(offenders)) == [], sorted(set(offenders))
 
 
 def test_the_notice_says_what_approving_it_does_not_authorise():

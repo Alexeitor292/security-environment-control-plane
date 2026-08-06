@@ -30,6 +30,7 @@ is a different problem from a grant to request, and the distinction survives to 
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 
 from secp_api.discovery_fact_commitment import (
@@ -41,6 +42,11 @@ from secp_api.discovery_fact_commitment import (
 from secp_api.discovery_observation import Observation
 from secp_api.discovery_required_facts import REQUIRED_FACTS
 from secp_api.enums import DiscoveryObservationState
+
+#: The pending families whose enumeration must be complete. Imported from the control plane's ONE
+#: declaration rather than restated: this module previously carried a third copy of the list, and it
+#: was the copy that actually decided the answer.
+from secp_api.sdn_pending_families import FABRICS_FAMILY, PENDING_FAMILIES
 
 #: Bound into the signed binding as ``projection_implementation_id``. Two runs that saw identical
 #: bytes but derived facts with different code produced different observations.
@@ -203,6 +209,23 @@ def _unobserved(reason: str) -> Observation:
     return Observation.not_requested(reason)
 
 
+#: Reason codes are projected to operators and go into signed evidence, and their own contract says
+#: "never a host, endpoint, path or credential". Identifiers interpolated into them come straight
+#: from the target's JSON, so they are bounded and reduced to a safe alphabet first. A target that
+#: names a vnet with a newline, a URL or four kilobytes of text cannot use a refusal message as a
+#: delivery channel.
+_REASON_SAFE = re.compile(r"[^A-Za-z0-9._@-]")
+_MAX_REASON_IDENTIFIER = 64
+
+
+def safe_identifier(value: object) -> str:
+    """One target-supplied identifier, made safe to appear in an operator-facing reason."""
+    text = _REASON_SAFE.sub("?", str(value))
+    if len(text) > _MAX_REASON_IDENTIFIER:
+        return text[:_MAX_REASON_IDENTIFIER] + "~"
+    return text or "<empty>"
+
+
 def _sdn_authority_established(raw: Mapping[str, Observation]) -> bool:
     """Only a successful ``GET /cluster/sdn`` counts.
 
@@ -274,7 +297,9 @@ def _node_coverage(
             unaccounted[node] = "answered_without_covering"
 
     if unaccounted:
-        detail = ",".join(f"{node}={outcome}" for node, outcome in sorted(unaccounted.items()))
+        detail = ",".join(
+            f"{safe_identifier(node)}={outcome}" for node, outcome in sorted(unaccounted.items())
+        )
         if all(outcome == NODE_DENIED for outcome in unaccounted.values()):
             return Observation.permission_denied(
                 missing_privilege=_denied_privilege(contributions.get(name, ())),
@@ -312,14 +337,23 @@ def _pending_sdn_completeness(observation: Observation, raw: Mapping[str, Observ
     answer. Subnets have no cluster-wide index, so every observed vnet must have been walked.
     """
     value = observation.value if isinstance(observation.value, dict) else {}
-    missing = [family for family in ("zones", "vnets", "controllers") if family not in value]
+    # ONE family list, imported rather than restated. This was a THIRD copy — the worker had
+    # SDN_PENDING_FAMILIES, the control plane had PENDING_FAMILIES pinned to it, and this literal
+    # was the copy that actually decided visibility_complete.
+    missing = [family for family in PENDING_FAMILIES if family != "subnets" and family not in value]
+    # `fabrics` is version-dependent: it exists from PVE 9.0 and a 404 on it is an ANSWER
+    # (observed_unsupported), not a gap. It is required to have been ACCOUNTED for — attempted and
+    # either enumerated or answered — because PUT /cluster/sdn commits pending fabrics too, so a
+    # family nobody asked about makes the pending set knowably smaller than what would activate.
+    if FABRICS_FAMILY not in value:
+        missing.append(FABRICS_FAMILY)
     vnets = raw.get("existing_vnets")
     if vnets is None or not vnets.is_usable or not isinstance(vnets.value, dict):
         missing.append("subnets(no_vnet_index)")
     else:
         for vnet in sorted(vnets.value):
             if f"subnets@{vnet}" not in value:
-                missing.append(f"subnets@{vnet}")
+                missing.append(f"subnets@{safe_identifier(vnet)}")
     return ",".join(missing)
 
 
