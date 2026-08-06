@@ -34,7 +34,13 @@ from typing import NoReturn, SupportsIndex
 # behavioral change — ``v2`` marks the reviewed activation that flipped the production behavior from
 # UNAVAILABLE (sealed) to AVAILABLE, so a capability/activation/composition minted against the old
 # ``v1`` (sealed) digest can never activate this executor.
-PLAN_ONLY_EXECUTOR_IMPLEMENTATION_ID = "secp-002b-1b-pr5b/plan-only-executor/v2"
+#
+# ``v3`` marks the reviewed widening of the command grammar to admit ``validate -json`` and
+# ``providers schema -json`` (both read-only, both offline). The bump is the whole point of the
+# constant here: a capability minted against ``v2`` was reviewed against a grammar of three
+# subcommands, and it must not silently authorise a boundary that now runs five. An older
+# attestation therefore fails the digest check rather than validating the widened grammar.
+PLAN_ONLY_EXECUTOR_IMPLEMENTATION_ID = "secp-002b-1b-pr5b/plan-only-executor/v3"
 
 
 def plan_only_executor_implementation_digest() -> str:
@@ -58,7 +64,8 @@ def plan_only_executor_implementation_digest() -> str:
 # The generic SubprocessProcessExecutor seal (_B1A_SUBPROCESS_SEALED) and the apply/destroy seals
 # are
 # INDEPENDENT constants that stay True, and the command grammar admits only init/non-destroy
-# plan/show, so a plan-only build can never apply or destroy.
+# plan/show/validate/providers-schema — every one of those five reads, none writes infrastructure —
+# so a plan-only build can never apply or destroy.
 #
 # The token-gated test-only path (``PlanOnlyProcessExecutor.for_inert_fixture_test``) still exists
 # so
@@ -90,10 +97,31 @@ class PlanOnlyProcessError(RuntimeError):
 
 # --- the plan-only command grammar (pure; testable without constructing the executor) ------------
 
-# The only three subcommands the plan-only capability admits.
-_PLAN_ONLY_SUBCOMMANDS = frozenset({"init", "plan", "show"})
+# The only five subcommands the plan-only capability admits, and the ONLY set consulted for the
+# leading verb. Every one of the five reads: none of them creates, changes or destroys
+# infrastructure, and none of them writes remote state.
+#
+# ``validate`` and ``providers`` were previously refused outright. They are admitted here so that
+# ``provider_schema_validation`` has an honest producer at all — see ``plan_document.py`` — because
+# the only way to establish that the pinned provider's schema actually contains every type the
+# rendered modules use is to ask the provider. Asserting it instead is the failure mode that field
+# exists to prevent.
+#
+# Admitting the VERB is not admitting the subcommand family. ``providers`` alone,
+# ``providers lock``, ``providers mirror``, and ``providers schema`` without ``-json`` are all
+# refused below; only the two exact shapes in ``_VALIDATE_ARGS`` and ``_PROVIDERS_SCHEMA_ARGS``
+# survive.
+_PLAN_ONLY_SUBCOMMANDS = frozenset({"init", "plan", "show", "validate", "providers"})
 
-# Flags/tokens that are NEVER permitted, even attached to an allowed subcommand.
+# Tokens that are NEVER permitted AFTER the leading verb, even attached to an allowed subcommand.
+#
+# This set and ``_PLAN_ONLY_SUBCOMMANDS`` are deliberately NO LONGER complements, and the overlap is
+# load-bearing rather than an oversight: ``validate`` and ``providers`` appear in BOTH. They are
+# admitted as the leading verb (position 2) and still refused as a trailing token, so
+# ``providers providers -json`` and ``plan validate`` are refused while ``providers schema -json``
+# is accepted. The leading verb is therefore checked against the admit-list ALONE — reinstating a
+# membership test against this set at position 2 would refuse the two shapes this boundary now
+# exists to run.
 _FORBIDDEN_SUBCOMMANDS = frozenset(
     {
         "apply",
@@ -123,7 +151,33 @@ _FORBIDDEN_SUBCOMMANDS = frozenset(
 _INIT_FLAGS = frozenset(
     {"-input=false", "-no-color", "-get=false", "-upgrade=false", "-lockfile=readonly"}
 )
+# The schema-inspection init. Identical to the plan init plus ``-backend=false``, which is a
+# SEPARATE reviewed shape rather than an addition to ``_INIT_FLAGS`` — and the distinction is not
+# stylistic. ``-backend=false`` skips backend initialisation entirely, so a workspace initialised
+# this way cannot subsequently run ``plan``: OpenTofu refuses with "Backend initialization
+# required". Folding the flag into the shared init set would therefore have broken the plan path
+# on the way to making schema validation possible.
+#
+# Schema inspection has no state to keep, so declining the backend is exactly right for it: no
+# remote state is configured, read, locked or written, and there is nothing for a credential to
+# reach even if one were present.
+_SCHEMA_INIT_FLAGS = frozenset(_INIT_FLAGS | {"-backend=false"})
 _PLAN_FLAGS = frozenset({"-input=false", "-no-color", "-lock=true"})
+
+# The two exact argument tails admitted after the two new verbs. Tuples, not sets: for these shapes
+# ORDER is part of the grammar, and there is no flag the caller may add, omit or reorder.
+#
+# ``-json`` is required on both, and not for convenience. It pins the machine-readable output
+# contract that the evidence step parses, so a future OpenTofu release that changes human-readable
+# formatting cannot quietly change what gets recorded as proof. ``validate`` without it is refused.
+#
+# Neither shape accepts ``-var`` or ``-var-file``: any placeholder value a configuration needs is
+# written deterministically into the generated workspace, where it is hashed with the rest of the
+# rendered inputs. A value passed on the command line would be outside the rendered-workspace hash
+# and therefore outside the evidence.
+_VALIDATE_ARGS = ("-json",)
+_PROVIDERS_SCHEMA_ARGS = ("schema", "-json")
+
 _SHELL_METACHARS = set(";|&$`<>\n\r\t\\\"'*?()[]{}!# ")
 
 
@@ -132,7 +186,10 @@ class PlanOnlyCommand:
     """A validated plan-only argv (the ONLY shapes the plan-only executor would ever run in
     PR5B)."""
 
-    kind: str  # "init" | "plan" | "show"
+    # The leading verb. Both init shapes report "init"; they are distinguished by their argv, which
+    # is what the evidence records — so the recorded proof shows whether the backend was declined,
+    # rather than a label asserting it.
+    kind: str  # "init" | "plan" | "show" | "validate" | "providers"
     argv: tuple[str, ...]
 
 
@@ -158,10 +215,16 @@ def validate_plan_only_command(
     * ``<exe> -chdir=<workspace> plan -input=false -no-color -lock=true -out=<plan_file>``
       (NEVER ``-destroy``)
     * ``<exe> -chdir=<workspace> show -json <plan_file>``
+    * ``<exe> -chdir=<workspace> init …-backend=false -plugin-dir=<...>`` (schema inspection only;
+      the workspace it initialises can never run ``plan``)
+    * ``<exe> -chdir=<workspace> validate -json``
+    * ``<exe> -chdir=<workspace> providers schema -json``
 
-    Every apply/destroy/``plan -destroy``/import/refresh/state/output/workspace/providers/console/
+    Every apply/destroy/``plan -destroy``/import/refresh/state/output/workspace/console/
     force-unlock/taint token, an arbitrary cwd or plan file, a shell metacharacter, ``..``, an
-    unrecognised flag, a response file (``@file``), and environment interpolation are refused.
+    unrecognised flag, ``-var``/``-var-file``, a response file (``@file``), and environment
+    interpolation are refused. So are plain ``providers``, ``providers schema`` without ``-json``,
+    and every other ``providers`` subcommand.
     """
     tokens = list(argv)
     if len(tokens) < 3:
@@ -173,7 +236,13 @@ def validate_plan_only_command(
 
     sub = tokens[2]
     rest = tokens[3:]
-    if sub in _FORBIDDEN_SUBCOMMANDS or sub not in _PLAN_ONLY_SUBCOMMANDS:
+    # Admit-list ALONE at position 2. `_FORBIDDEN_SUBCOMMANDS` still contains `validate` and
+    # `providers` because it governs trailing tokens, so testing membership here as well would
+    # refuse the two shapes this boundary exists to run. Anything not named in the admit list —
+    # apply, destroy, import, refresh, state, console, and every verb OpenTofu may add in future —
+    # falls through to the refusal below, which is why the check is phrased as an allow-list rather
+    # than a deny-list.
+    if sub not in _PLAN_ONLY_SUBCOMMANDS:
         raise PlanOnlyProcessError(f"plan-only grammar refuses subcommand {sub!r}")
 
     # The plan file (when relevant) must be an ABSOLUTE, direct child of the exact workspace.
@@ -196,7 +265,9 @@ def validate_plan_only_command(
     if sub == "init":
         flags = {t for t in rest if not t.startswith("-plugin-dir=")}
         plugin_dirs = [t for t in rest if t.startswith("-plugin-dir=")]
-        if flags != _INIT_FLAGS or len(plugin_dirs) != 1:
+        # Exactly one of the two reviewed sets — never a union, never a superset. The plan init and
+        # the schema init differ by `-backend=false` and by nothing else.
+        if flags not in (_INIT_FLAGS, _SCHEMA_INIT_FLAGS) or len(plugin_dirs) != 1:
             raise PlanOnlyProcessError("plan-only init flags are not the reviewed offline set")
         # The plugin dir is bound to the EXACT freshly-attested provider mirror; an arbitrary
         # -plugin-dir is refused (not merely required to look safe).
@@ -211,9 +282,21 @@ def validate_plan_only_command(
         flags = {t for t in rest if not t.startswith("-out=")}
         if flags != _PLAN_FLAGS or len(out) != 1 or out[0] != f"-out={plan_file}":
             raise PlanOnlyProcessError("plan-only plan flags/-out are not the exact reviewed set")
-    else:  # show
+    elif sub == "show":
         if rest != ["-json", plan_file]:
             raise PlanOnlyProcessError("plan-only show must be `show -json <exact plan file>`")
+    elif sub == "validate":
+        # Exact tail, order included. `-json` is not optional, and there is no second flag to add:
+        # `-var`, `-var-file`, `-no-color` and everything else fail this equality.
+        if tuple(rest) != _VALIDATE_ARGS:
+            raise PlanOnlyProcessError("plan-only validate must be exactly `validate -json`")
+    else:  # providers
+        # Refuses plain `providers`, `providers schema` without `-json`, `providers lock`,
+        # `providers mirror`, and any extra argument after `-json`.
+        if tuple(rest) != _PROVIDERS_SCHEMA_ARGS:
+            raise PlanOnlyProcessError(
+                "plan-only providers must be exactly `providers schema -json`"
+            )
 
     return PlanOnlyCommand(kind=sub, argv=tuple(tokens))
 
@@ -236,6 +319,60 @@ def build_init_command(*, executable: str, workspace: str, plugin_dir: str) -> P
     ]
     return validate_plan_only_command(
         argv, executable=executable, workspace=workspace, plan_file="", plugin_dir=plugin_dir
+    )
+
+
+def build_schema_init_command(
+    *, executable: str, workspace: str, plugin_dir: str
+) -> PlanOnlyCommand:
+    """Derive the exact reviewed offline ``init -backend=false`` argv for schema inspection.
+
+    A workspace initialised by this command can run ``validate`` and ``providers schema`` and
+    NOTHING else — ``plan`` refuses against it for want of an initialised backend. That is a
+    property of the flag rather than of this function, so it holds even if a caller mixes the two
+    up: the failure is a refusal, not a plan against an unconfigured backend.
+    """
+    argv = [
+        executable,
+        f"-chdir={workspace}",
+        "init",
+        "-input=false",
+        "-no-color",
+        "-get=false",
+        "-upgrade=false",
+        "-lockfile=readonly",
+        "-backend=false",
+        f"-plugin-dir={plugin_dir}",
+    ]
+    return validate_plan_only_command(
+        argv, executable=executable, workspace=workspace, plan_file="", plugin_dir=plugin_dir
+    )
+
+
+def build_validate_command(*, executable: str, workspace: str) -> PlanOnlyCommand:
+    """Derive the exact reviewed ``validate -json`` argv, then validate it (fail closed).
+
+    Takes no plan file and no variables: it validates the rendered configuration already present in
+    the workspace, which is the artifact whose hash the evidence binds.
+    """
+    argv = [executable, f"-chdir={workspace}", "validate", "-json"]
+    return validate_plan_only_command(
+        argv, executable=executable, workspace=workspace, plan_file=""
+    )
+
+
+def build_providers_schema_command(*, executable: str, workspace: str) -> PlanOnlyCommand:
+    """Derive the exact reviewed ``providers schema -json`` argv, then validate it (fail closed).
+
+    This may START THE PROVIDER PLUGIN. OpenTofu obtains a provider's schema by launching the
+    plugin binary and calling ``GetProviderSchema`` over its RPC interface, so provider code runs
+    in a child process. It is given no credentials and no endpoint, and the process sandbox and
+    network denial apply exactly as they do for ``plan`` — a schema read is not a reason to relax
+    any of them.
+    """
+    argv = [executable, f"-chdir={workspace}", "providers", "schema", "-json"]
+    return validate_plan_only_command(
+        argv, executable=executable, workspace=workspace, plan_file=""
     )
 
 
