@@ -111,7 +111,6 @@ def test_render_probe_argv_is_always_read_only():
         ProbeCandidateLocatorPresence,
         ProbeClusterStatus,
         ProbeError,
-        ProbeNestedVirtualization,
         ProbeNodeCapacity,
         ProbeNodeIdentity,
         ProbeStorage,
@@ -128,15 +127,16 @@ def test_render_probe_argv_is_always_read_only():
         ProbeNodeCapacity("pve-a"),
         ProbeStorage("pve-a"),
         ProbeVmidAvailability(),
-        ProbeNestedVirtualization("kvm_intel"),
-        ProbeNestedVirtualization("kvm_amd"),
         ProbeCandidateLocatorPresence(BridgeLocator("pve-a", "secpbr")),
         ProbeCandidateLocatorPresence(ServiceIdentityLocator("secpabc@pam")),
         ProbeCandidateLocatorPresence(GuestLocator("pve-a", 9001)),
     ]
     for probe in probes:
         argv = render_probe_argv(probe)  # asserts read-only internally
-        assert argv[0] in ("pvesh", "pveversion", "cat")
+        # `pveversion` and `cat` were withdrawn with the first-MVP HTTPS-only decision: the former
+        # was allowlisted for a probe nothing emitted, the latter existed solely for the
+        # nested-virtualization sysfs read, which gates no compilation or apply decision.
+        assert argv[0] == "pvesh"
         if argv[0] == "pvesh":
             assert argv[1] == "get"  # only the read verb
         assert_read_only(argv)  # explicit second gate
