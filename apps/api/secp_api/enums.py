@@ -1891,10 +1891,53 @@ class DiscoveryJobStatus(str, Enum):
     refused = "refused"
 
 
+class DiscoveryObservationState(str, Enum):
+    """WHAT KIND of observation a single discovery FIELD has.
+
+    Deliberately distinct from :class:`DiscoveryProbeCode` (which probe) and
+    :class:`DiscoveryFailureCode` (why a RUN failed). A run can succeed overall while one field is
+    permission-denied and another has no probe at all, so field state and run failure are two
+    questions and merging them loses the one the plan compiler needs.
+
+    The distinction that motivates the whole enum: **an observed empty list and an unobserved list
+    are different facts.** ``observed`` with an empty value means the target genuinely has none.
+    Every other member means the value is absent, and rendering any of them as ``[]`` makes "nobody
+    looked" read as "there are none" — which is how a plan comes to allocate into space that was
+    never checked.
+    """
+
+    #: A probe ran, the target answered, and the value is usable. The ONLY state whose value means
+    #: anything.
+    observed = "observed"
+    #: The target answered and the answer could not be parsed. Evidence about the TARGET.
+    observed_malformed = "observed_malformed"
+    #: The target answered that it does not support this — e.g. an older PVE with no SDN API.
+    observed_unsupported = "observed_unsupported"
+    #: This run did not ask. A deliberately narrow run is legitimate; silent emptiness is not.
+    not_requested = "not_requested"
+    #: SECP has no probe for this fact. Code to write, not a grant to request.
+    not_implemented = "not_implemented"
+    #: The target refused for want of a privilege. Carries the privilege name, because Proxmox can
+    #: answer a denied SDN read with an EMPTY LIST rather than a 403 — so at the wire, "no zones"
+    #: and "not allowed to see zones" are indistinguishable unless kept apart here.
+    permission_denied = "permission_denied"
+    #: The forced-command wrapper or the probe grammar refused to run it.
+    probe_refused = "probe_refused"
+    #: The probe ran and did not complete — timeout, transport error, non-zero exit.
+    probe_failed = "probe_failed"
+    #: The producer itself was unreachable — no worker, no bootstrap, sealed source.
+    source_unavailable = "source_unavailable"
+
+
 class DiscoveryProbeCode(str, Enum):
     """Closed set of read-only probe operation codes (each renders a FIXED read-only argv)."""
 
     version = "version"
+    #: ``pveversion`` — the HOST PACKAGE version, a separate source from :attr:`version`, which is
+    #: ``pvesh get /version`` (the API's own view). Deliberately not merged: they can disagree, and
+    #: silently preferring whichever looks newer would hide a half-upgraded node. Both are kept and
+    #: disagreement is reported.
+    host_package_version = "host_package_version"
     cluster_status = "cluster_status"
     node_identity = "node_identity"
     node_capacity = "node_capacity"
@@ -1936,6 +1979,27 @@ class DiscoveryFailureCode(str, Enum):
     probe_refused = "probe_refused"
     malformed_probe_output = "malformed_probe_output"
     unsupported_probe = "unsupported_probe"
+    # The target refused a read for want of a privilege. Distinct from `probe_refused`, which is
+    # SECP's own grammar or the forced-command wrapper declining to RUN the command: this one ran
+    # and the target said no. An operator resolves the two differently — one is a grant, the other
+    # is an allowlist entry — so collapsing them would send them to the wrong place.
+    probe_permission_denied = "probe_permission_denied"
+    # SECP has no probe for a fact the compiler needs. Not a target problem and not a grant
+    # problem; a release blocker. Named so it can never be reported as an empty observation.
+    probe_not_implemented = "probe_not_implemented"
+    # The discovery snapshot the decision rests on is outside its own freshness bound. Distinct
+    # from `stale_evidence`, which grades the derived candidate plan: a FRESH plan compiled from a
+    # STALE snapshot is still invalid, and one code cannot say both.
+    discovery_snapshot_expired = "discovery_snapshot_expired"
+    # The snapshot's signature is absent, or verifies against no trusted key, or the signer is not
+    # the worker/release the snapshot claims. An unkeyed content hash cannot satisfy this.
+    discovery_evidence_unauthenticated = "discovery_evidence_unauthenticated"
+    # The snapshot is bound to a different target, worker or release than the one being compiled
+    # for.
+    discovery_binding_mismatch = "discovery_binding_mismatch"
+    # The snapshot's timestamps are ahead of the evaluating clock beyond the allowed skew. Never
+    # treated as freshness — a clock ahead of ours is a fault, not a guarantee.
+    discovery_clock_skew = "discovery_clock_skew"
     target_is_clustered = "target_is_clustered"
     ambiguous_node_selection = "ambiguous_node_selection"
     unsupported_proxmox_version = "unsupported_proxmox_version"
