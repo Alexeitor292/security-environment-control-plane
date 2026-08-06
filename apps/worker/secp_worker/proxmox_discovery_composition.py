@@ -499,7 +499,7 @@ def _execute_into(
         except Exception as exc:  # noqa: BLE001 - mapped to a closed reason
             reason = _closed_reason(exc)
             first_reason = first_reason or reason
-            failure: Observation = Observation.probe_failed(reason)
+            failure: Observation = _failure_observation(operation, reason)
             for code in operation.observation_field_codes:  # type: ignore[attr-defined]
                 # The contribution is recorded UNCONDITIONALLY, even when the merge keeps another
                 # source's answer. A refusal that leaves no trace is a refusal an operator is never
@@ -747,19 +747,87 @@ def run_version_discovery(
     )
 
 
+#: How each closed transport reason becomes an observation STATE. Flattening all of them into
+#: ``probe_failed`` — which is what this used to do — destroys the one distinction the observation
+#: vocabulary exists for: a denial is a grant to request, an unsupported endpoint is a fact about
+#: the target, a TLS failure is an identity problem, and a timeout is none of those.
+#:
+#: ``proxmox_discovery_endpoint_absent`` is deliberately ABSENT from this table. A 404 means
+#: different things for different requests and is resolved per operation by
+#: :func:`_not_found_observation`.
+_REASON_STATES: dict[str, DiscoveryObservationState] = {
+    # The credential itself is not accepted, so nothing at all is readable through it.
+    "proxmox_discovery_unauthenticated": DiscoveryObservationState.source_unavailable,
+    # The one unambiguous denial signal on a surface where a denied index read returns 200 + [].
+    "proxmox_discovery_permission_denied": DiscoveryObservationState.permission_denied,
+    # The target answered that it does not implement this. An ANSWER, not a gap.
+    "proxmox_discovery_endpoint_unsupported": DiscoveryObservationState.observed_unsupported,
+    # The pinned CA did not verify the presented certificate: this is an identity failure, and
+    # reading it as a flaky network is how a substituted endpoint goes unnoticed.
+    "proxmox_discovery_tls_identity_unverified": DiscoveryObservationState.source_unavailable,
+    "proxmox_discovery_timeout": DiscoveryObservationState.probe_failed,
+    # SECP refused to read further, so the probe did not complete. Not the target's malformity.
+    "proxmox_discovery_response_exceeded_bound": DiscoveryObservationState.probe_refused,
+    # The target answered with something that is not a Proxmox response.
+    "proxmox_discovery_response_not_an_object": DiscoveryObservationState.observed_malformed,
+    "proxmox_discovery_request_refused": DiscoveryObservationState.probe_refused,
+    "proxmox_discovery_transport_failed": DiscoveryObservationState.probe_failed,
+}
+
+_NOT_FOUND = "proxmox_discovery_endpoint_absent"
+
+
+def _failure_observation(operation: object, reason: str) -> Observation:
+    """Turn one closed transport reason into the observation state it actually means."""
+    if reason == _NOT_FOUND:
+        return _not_found_observation(operation)
+
+    state = _REASON_STATES.get(reason, DiscoveryObservationState.probe_failed)
+    if state is DiscoveryObservationState.permission_denied:
+        privilege = getattr(operation, "required_privilege", "") or "unknown_privilege"
+        return Observation.permission_denied(missing_privilege=privilege, reason_code=reason)
+    if state is DiscoveryObservationState.observed_unsupported:
+        return Observation.unsupported(reason)
+    if state is DiscoveryObservationState.source_unavailable:
+        return Observation.source_unavailable(reason)
+    if state is DiscoveryObservationState.probe_refused:
+        return Observation.probe_refused(reason)
+    if state is DiscoveryObservationState.observed_malformed:
+        return Observation.malformed(reason)
+    return Observation.probe_failed(reason)
+
+
+def _not_found_observation(operation: object) -> Observation:
+    """A 404 means what the OPERATION says it means, and an ambiguous one refuses.
+
+    The same status is "this API has no such capability" for a fixed endpoint and "the identifier a
+    previous response gave us no longer resolves" for a dynamic one — the first is a fact about the
+    target, the second is stale inventory, and they lead an operator to different places. Guessing
+    between them from the path shape breaks on
+    ``/nodes/{node}/sdn/zones/{zone}/bridges``, which is BOTH a 9.1-and-later endpoint and a
+    dynamic-identifier read, so that one declares itself ambiguous and degrades rather than
+    resolving to either.
+    """
+    meaning = getattr(operation, "not_found_meaning", "")
+    if meaning == "capability_absent":
+        return Observation.unsupported("proxmox_discovery_capability_absent")
+    if meaning == "inventory_stale":
+        return Observation.probe_failed("proxmox_discovery_inventory_stale")
+    # Includes "ambiguous" AND any operation that failed to declare: both are refusals, because a
+    # default here would be a guess about a target nobody asked.
+    return Observation.probe_failed("proxmox_discovery_not_found_meaning_undetermined")
+
+
 def _closed_reason(exc: Exception) -> str:
     """Map a transport failure to a closed reason code.
 
     The exception is not chained and its text is not reused: the hardened transport already raises
     closed codes, and anything else could carry a URL or a header.
     """
+    from secp_worker.proxmox_discovery_transport import TRANSPORT_REASONS
+
     code = getattr(exc, "args", [""])[0]
-    known = {
-        "proxmox_discovery_permission_denied",
-        "proxmox_discovery_unauthenticated",
-        "proxmox_discovery_endpoint_absent",
-        "proxmox_discovery_endpoint_unsupported",
-        "proxmox_discovery_request_refused",
-        "proxmox_discovery_transport_failed",
-    }
-    return str(code) if code in known else "proxmox_discovery_transport_failed"
+    # The allowlist is the transport's own closed vocabulary rather than a second copy of it: a
+    # reason the transport learns to raise and this module has never heard of must become a generic
+    # failure, not a silently accepted new state.
+    return str(code) if code in TRANSPORT_REASONS else "proxmox_discovery_transport_failed"

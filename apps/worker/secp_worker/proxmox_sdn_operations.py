@@ -46,6 +46,8 @@ class GetSdnRootOperation:
     """
 
     operation_code: ClassVar[str] = "sdn_root_authority"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/cluster/sdn"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-root-authority/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-root-authority/v1"
@@ -68,6 +70,8 @@ class GetEffectivePermissionsOperation:
     """
 
     operation_code: ClassVar[str] = "effective_permissions"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = ""
     path_template: ClassVar[str] = "/access/permissions"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.effective-permissions/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.effective-permissions/v1"
@@ -85,6 +89,8 @@ class GetSdnZonesOperation:
     """``GET /cluster/sdn/zones?pending=1``."""
 
     operation_code: ClassVar[str] = "sdn_zones_pending"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/cluster/sdn/zones"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-zones-pending/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-zones-pending/v1"
@@ -106,6 +112,8 @@ class GetSdnVnetsOperation:
     """``GET /cluster/sdn/vnets?pending=1``. Also the source of every vnet id used below."""
 
     operation_code: ClassVar[str] = "sdn_vnets_pending"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/cluster/sdn/vnets"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-vnets-pending/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-vnets-pending/v1"
@@ -135,6 +143,8 @@ class GetSdnSubnetsOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "sdn_subnets_pending"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/cluster/sdn/vnets/{vnet}/subnets"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-subnets-pending/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-subnets-pending/v1"
@@ -158,6 +168,8 @@ class GetSdnControllersOperation:
     """``GET /cluster/sdn/controllers?pending=1``."""
 
     operation_code: ClassVar[str] = "sdn_controllers_pending"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/cluster/sdn/controllers"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-controllers-pending/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-controllers-pending/v1"
@@ -179,6 +191,8 @@ class GetSdnIpamStatusOperation:
     """
 
     operation_code: ClassVar[str] = "sdn_ipam_status"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/cluster/sdn/ipams/pve/status"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-ipam-status/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-ipam-status/v1"
@@ -200,6 +214,8 @@ class GetSdnFabricsOperation:
     """
 
     operation_code: ClassVar[str] = "sdn_fabrics"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/cluster/sdn/fabrics/all"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-fabrics/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-fabrics/v1"
@@ -225,6 +241,8 @@ class GetNodeSdnZonesOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_sdn_zones"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/nodes/{node}/sdn/zones"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-sdn-zones/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-sdn-zones/v1"
@@ -253,6 +271,8 @@ class GetNodeSdnBridgesOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_sdn_bridges"
+    not_found_meaning: ClassVar[str] = "ambiguous"
+    required_privilege: ClassVar[str] = "SDN.Audit"
     path_template: ClassVar[str] = "/nodes/{node}/sdn/zones/{zone}/bridges"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-sdn-bridges/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-sdn-bridges/v1"

@@ -125,14 +125,23 @@ def _cluster_payloads(*, sdn_root_denied: bool = False) -> dict[str, object]:
 
 
 class _FakeTarget:
-    """Answers from a fixed table. Opens no socket, and records every path asked for."""
+    """Answers from a fixed table. Opens no socket, and records every path asked for.
 
-    def __init__(self, payloads: dict[str, object]) -> None:
+    ``denied`` raises the transport's permission code for a path, which is a DIFFERENT thing from
+    an absent one: a 404 on a fixed endpoint says the API lacks the capability, and that is an
+    answer rather than a gap. A fake that could only express "missing" would quietly turn every
+    intended denial into an unsupported-capability answer.
+    """
+
+    def __init__(self, payloads: dict[str, object], denied: set[str] | None = None) -> None:
         self.payloads = payloads
+        self.denied = denied or set()
         self.calls: list[str] = []
 
     def get(self, path: str, params: dict | None = None):
         self.calls.append(path)
+        if path in self.denied:
+            raise RuntimeError("proxmox_discovery_permission_denied")
         if path not in self.payloads:
             raise RuntimeError("proxmox_discovery_endpoint_absent")
         return self.payloads[path]
@@ -201,9 +210,9 @@ def _control_plane_facts() -> dict[str, Observation]:
     }
 
 
-def _run(*, payloads=None, signer=None, keys=None, control_plane=None):
+def _run(*, payloads=None, signer=None, keys=None, control_plane=None, denied=None):
     priv, pub = keys or generate_keypair()
-    target = _FakeTarget(payloads if payloads is not None else _cluster_payloads())
+    target = _FakeTarget(payloads if payloads is not None else _cluster_payloads(), denied)
     resolver, factory = _SpyResolver(), _SpyFactory(target)
     signer = signer if signer is not None else _SpySigner(priv, pub)
     request, expectation = build_discovery_resolution_request(
@@ -324,19 +333,18 @@ def test_the_sdn_gate_bites_end_to_end_when_the_root_read_is_refused():
 def test_a_refused_source_degrades_the_fact_end_to_end_rather_than_being_overwritten():
     """One node's storage read fails. Under the old merge the fact still read ``observed`` with
     that node simply absent; now the refusal wins and the operator is told which read failed."""
-    payloads = _cluster_payloads()
-    payloads.pop("/nodes/pve-b/storage")
-    result, _target, _r, _f, _s, _pub = _run(payloads=payloads)
+    result, _target, _r, _f, _s, _pub = _run(denied={"/nodes/pve-b/storage"})
 
     fact = result.observations["storage_ids"]
     assert fact.is_usable is False
-    assert fact.reason_code == "proxmox_discovery_endpoint_absent"
+    assert fact.state is S.permission_denied
+    assert fact.missing_privilege == "Datastore.Audit"
     assert result.required_facts["storage_ids"].is_usable is False
 
     # The successful node's answer is not lost — it is in provenance, attributed to its operation.
     by_path = {c.rendered_path: c.state for c in result.contributions["storage_ids"]}
     assert by_path["/nodes/pve-a/storage"] == "observed"
-    assert by_path["/nodes/pve-b/storage"] == "probe_failed"
+    assert by_path["/nodes/pve-b/storage"] == "permission_denied"
 
 
 def test_a_refusal_does_not_abort_the_run_or_the_later_phases():
@@ -477,16 +485,166 @@ def test_an_unobserved_cluster_identity_has_no_fingerprint_rather_than_a_placeho
 
 def test_a_denied_source_degrades_a_multi_source_fact_and_both_contributions_are_kept():
     """success + denial, end to end. ``node_names`` is fed by /cluster/status and /nodes."""
-    payloads = _cluster_payloads()
-    payloads.pop("/cluster/status")
-    result, _target, _r, _f, _s, _pub = _run(payloads=payloads)
+    result, _target, _r, _f, _s, _pub = _run(denied={"/cluster/status"})
 
     assert result.observations["node_names"].is_usable is False
     sources = {c.operation_code: c.state for c in result.contributions["node_names"]}
-    assert sources["cluster_status"] == "probe_failed", sources
+    assert sources["cluster_status"] == "permission_denied", sources
     assert sources["node_index"] == "observed", sources
     # The degraded fact is what compilation sees.
     assert result.required_facts["node_names"].is_usable is False
+
+
+class _ClassifyingTarget(_FakeTarget):
+    """Raises an exact transport reason per path, so each classification is driven end to end."""
+
+    def __init__(self, payloads, reasons: dict[str, str]) -> None:
+        super().__init__(payloads)
+        self.reasons = reasons
+
+    def get(self, path: str, params: dict | None = None):
+        self.calls.append(path)
+        if path in self.reasons:
+            raise RuntimeError(self.reasons[path])
+        if path not in self.payloads:
+            raise RuntimeError("proxmox_discovery_endpoint_absent")
+        return self.payloads[path]
+
+
+def _run_classified(reasons: dict[str, str]):
+    priv, pub = generate_keypair()
+    target = _ClassifyingTarget(_cluster_payloads(), reasons)
+    resolver, factory = _SpyResolver(), _SpyFactory(target)
+    request, expectation = build_discovery_resolution_request(
+        organization_id=ORG,
+        execution_target_id=TARGET_ID,
+        worker_installation_id=WORKER,
+        operation_identity=OPERATION,
+        operation_generation=GENERATION,
+        credential_reference=TrustedCredentialReference("vault:secp/discovery/target-abc"),
+    )
+    return run_full_discovery(
+        resolver=resolver,
+        resolution_request=request,
+        resolution_expectation=expectation,
+        transport_factory=factory,
+        signer=_SpySigner(priv, pub),
+        base_url="https://pve.example.test:8006/api2/json",
+        ca_path="/etc/secp/pve-ca.pem",
+        target_authority_identity=AUTHORITY,
+        expected_worker_installation_id=WORKER,
+        expected_worker_key_fingerprint=key_id_for(pub),
+        control_plane_facts=_control_plane_facts(),
+        freshness_bound_seconds=1800,
+        now=NOW,
+        started_at=NOW - timedelta(seconds=30),
+        completed_at=NOW - timedelta(seconds=10),
+    )
+
+
+@pytest.mark.parametrize(
+    "reason,expected_state",
+    [
+        ("proxmox_discovery_unauthenticated", S.source_unavailable),
+        ("proxmox_discovery_permission_denied", S.permission_denied),
+        ("proxmox_discovery_endpoint_unsupported", S.observed_unsupported),
+        ("proxmox_discovery_tls_identity_unverified", S.source_unavailable),
+        ("proxmox_discovery_timeout", S.probe_failed),
+        ("proxmox_discovery_response_exceeded_bound", S.probe_refused),
+        ("proxmox_discovery_response_not_an_object", S.observed_malformed),
+        ("proxmox_discovery_request_refused", S.probe_refused),
+        ("proxmox_discovery_transport_failed", S.probe_failed),
+    ],
+)
+def test_every_transport_classification_survives_to_its_own_state(reason, expected_state):
+    """Flattening these into ``probe_failed`` destroyed the one distinction the observation
+    vocabulary exists for: a denial is a grant to request, an unsupported endpoint is a fact about
+    the target, a TLS failure is an identity problem, and a timeout is none of those."""
+    # ``cluster_identity`` has exactly ONE source, so the state observed here is the projection's
+    # answer and not the merge lattice's. (A two-source fact would legitimately keep the other
+    # source's usable value for the non-degrading classifications.)
+    result = _run_classified({"/cluster/status": reason})
+    fact = result.observations["cluster_identity"]
+    assert fact.state is expected_state, (reason, fact.state)
+    assert fact.reason_code == reason
+
+
+def test_observed_unsupported_is_actually_producible_through_the_full_run():
+    """Named explicitly because the state existed in the vocabulary, was relied on by the merge
+    lattice as the one non-degrading failure, and until now nothing could produce it."""
+    result = _run_classified({"/cluster/status": "proxmox_discovery_endpoint_unsupported"})
+    fact = result.observations["cluster_identity"]
+    assert fact.state is S.observed_unsupported
+    assert fact.was_looked_for is True  # the target ANSWERED
+    assert fact.reason_code == "proxmox_discovery_endpoint_unsupported"
+
+    # And because it does not degrade, a sibling source's usable answer survives it: node_names is
+    # fed by /cluster/status AND /nodes, and the unsupported answer does not take it down.
+    assert result.observations["node_names"].is_usable is True
+
+
+def test_a_denial_names_the_privilege_the_operation_declares():
+    result = _run_classified({"/nodes/pve-a/storage": "proxmox_discovery_permission_denied"})
+    fact = result.observations["storage_ids"]
+    assert fact.state is S.permission_denied
+    assert fact.missing_privilege == "Datastore.Audit"
+
+
+def test_a_404_on_a_fixed_capability_endpoint_is_unsupported():
+    """The API surface lacks it. That is an answer about the target."""
+    payloads = _cluster_payloads()
+    payloads.pop("/cluster/sdn/fabrics/all")
+    result, _t, _r, _f, _s, _pub = _run(payloads=payloads)
+    states = {c.operation_code: c.state for c in result.contributions.get("pending_sdn_state", ())}
+    assert states["sdn_fabrics"] == "observed_unsupported", states
+
+
+def test_a_404_on_a_dynamic_identifier_endpoint_is_stale_inventory_not_unsupported():
+    """The node index named this node moments ago. Its disappearance is a stale inventory, and
+    calling it "unsupported" would say the API lacks per-node status entirely."""
+    payloads = _cluster_payloads()
+    payloads.pop("/nodes/pve-b/status")
+    result, _t, _r, _f, _s, _pub = _run(payloads=payloads)
+    fact = result.observations["node_capacity"]
+    assert fact.state is S.probe_failed
+    assert fact.reason_code == "proxmox_discovery_inventory_stale"
+
+
+def test_an_ambiguous_404_refuses_rather_than_guessing():
+    """``/nodes/{node}/sdn/zones/{zone}/bridges`` is BOTH a 9.1-and-later endpoint and a dynamic
+    read, so a 404 could mean either. It declares itself ambiguous and degrades."""
+    payloads = _cluster_payloads()
+    for node in NODES:
+        payloads.pop(f"/nodes/{node}/sdn/zones/z1/bridges")
+    result, _t, _r, _f, _s, _pub = _run(payloads=payloads)
+    states = {
+        c.operation_code: (c.state, c.reason_code)
+        for c in result.contributions["bridge_vlan_awareness"]
+    }
+    assert states["node_sdn_bridges"] == (
+        "probe_failed",
+        "proxmox_discovery_not_found_meaning_undetermined",
+    )
+
+
+def test_every_transport_reason_has_a_projection_rule():
+    """Inverted: the transport owns the closed vocabulary, and this asserts the projection covers
+    all of it rather than listing the ones somebody remembered."""
+    from secp_worker.proxmox_discovery_composition import _NOT_FOUND, _REASON_STATES
+    from secp_worker.proxmox_discovery_transport import TRANSPORT_REASONS
+
+    unhandled = [r for r in TRANSPORT_REASONS if r not in _REASON_STATES and r != _NOT_FOUND]
+    assert unhandled == [], unhandled
+
+
+def test_every_operation_declares_a_404_meaning_and_a_privilege():
+    from secp_worker.proxmox_discovery_operations import FIRST_MVP_OPERATIONS
+    from secp_worker.proxmox_sdn_operations import SDN_OPERATIONS
+
+    allowed = {"capability_absent", "inventory_stale", "ambiguous"}
+    for op in FIRST_MVP_OPERATIONS + SDN_OPERATIONS:
+        assert op.not_found_meaning in allowed, op.__name__
+        assert isinstance(op.required_privilege, str), op.__name__
 
 
 def test_an_omitted_negative_contribution_changes_the_signature():
@@ -494,12 +652,12 @@ def test_an_omitted_negative_contribution_changes_the_signature():
     covers provenance, so a snapshot that hides a refusal no longer verifies."""
     from secp_api.discovery_fact_commitment import build_fact_commitment
 
-    payloads = _cluster_payloads()
-    payloads.pop("/cluster/status")
-    result, _target, _r, _f, _s, _pub = _run(payloads=payloads)
+    result, _target, _r, _f, _s, _pub = _run(denied={"/cluster/status"})
 
     scrubbed = dict(result.contributions)
-    scrubbed["node_names"] = tuple(c for c in scrubbed["node_names"] if c.state != "probe_failed")
+    scrubbed["node_names"] = tuple(
+        c for c in scrubbed["node_names"] if c.state != "permission_denied"
+    )
     assert len(scrubbed["node_names"]) < len(result.contributions["node_names"])
 
     recomputed = build_fact_commitment(

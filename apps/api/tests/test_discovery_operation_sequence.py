@@ -133,7 +133,9 @@ def test_a_failing_operation_does_not_stop_the_sequence():
     assert result.failure_reason == "proxmox_discovery_permission_denied"
     # The successful operations still produced usable observations.
     assert result.observations["pve_version_full"].is_usable is True
-    assert result.observations["cluster_identity"].state is S.probe_failed
+    # A 403 is now a DENIAL that names the privilege, not an anonymous probe failure.
+    assert result.observations["cluster_identity"].state is S.permission_denied
+    assert result.observations["cluster_identity"].missing_privilege == "Sys.Audit"
 
 
 def test_the_refused_operation_is_still_recorded_as_evidence():
@@ -176,7 +178,7 @@ def test_a_success_does_not_erase_a_refusal_from_another_source():
 
     # Nothing is lost: both contributions survive, including the one that succeeded.
     states = {c.operation_code: c.state for c in result.contributions["node_names"]}
-    assert states == {"cluster_status": "observed", "node_index": "probe_failed"}
+    assert states == {"cluster_status": "observed", "node_index": "probe_refused"}
 
 
 def test_a_success_does_not_erase_a_refusal_in_the_other_order_either():
@@ -195,9 +197,9 @@ def test_a_success_does_not_erase_a_refusal_in_the_other_order_either():
     assert result.observations["node_names"].is_usable is False
     assert result.observations["node_names"].reason_code == "proxmox_discovery_request_refused"
     states = {c.operation_code: c.state for c in result.contributions["node_names"]}
-    assert states == {"cluster_status": "probe_failed", "node_index": "observed"}
-    # And the fact only /cluster/status supplies stays failed.
-    assert result.observations["cluster_identity"].state is S.probe_failed
+    assert states == {"cluster_status": "probe_refused", "node_index": "observed"}
+    # And the fact only /cluster/status supplies stays unusable.
+    assert result.observations["cluster_identity"].state is S.probe_refused
 
 
 def test_complementary_sources_that_both_succeed_still_merge():

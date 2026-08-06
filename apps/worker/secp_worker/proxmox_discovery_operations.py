@@ -41,6 +41,8 @@ class GetVersionOperation:
     """
 
     operation_code: ClassVar[str] = "api_version"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = ""
     path_template: ClassVar[str] = "/version"
     parser_implementation_id: ClassVar[str] = VERSION_PARSER_IMPLEMENTATION_ID
     normalizer_implementation_id: ClassVar[str] = VERSION_NORMALIZER_IMPLEMENTATION_ID
@@ -103,6 +105,8 @@ class GetClusterStatusOperation:
     """``GET /cluster/status`` — cluster identity, membership and quorum."""
 
     operation_code: ClassVar[str] = "cluster_status"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "Sys.Audit"
     path_template: ClassVar[str] = "/cluster/status"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-status/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-status/v1"
@@ -120,6 +124,8 @@ class GetNodesOperation:
     """``GET /nodes`` — the node index, and the source of every node identifier used below."""
 
     operation_code: ClassVar[str] = "node_index"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = ""
     path_template: ClassVar[str] = "/nodes"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-index/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-index/v1"
@@ -140,6 +146,8 @@ class GetNodeStatusOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_status"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = "Sys.Audit"
     path_template: ClassVar[str] = "/nodes/{node}/status"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-status/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-status/v1"
@@ -167,6 +175,8 @@ class GetNodeVersionOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_version"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = ""
     path_template: ClassVar[str] = "/nodes/{node}/version"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-version/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-version/v1"
@@ -190,6 +200,8 @@ class GetNodeAptVersionsOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_package_inventory"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = "Sys.Audit"
     path_template: ClassVar[str] = "/nodes/{node}/apt/versions"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-package-inventory/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-package-inventory/v1"
@@ -216,6 +228,8 @@ class GetNodeNetworkOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_network"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = ""
     path_template: ClassVar[str] = "/nodes/{node}/network"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-network/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-network/v1"
@@ -244,6 +258,8 @@ class GetNodeStorageOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_storage"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = "Datastore.Audit"
     path_template: ClassVar[str] = "/nodes/{node}/storage"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-storage/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-storage/v1"
@@ -273,6 +289,8 @@ class GetStorageContentOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "storage_content"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = "Datastore.Audit"
     path_template: ClassVar[str] = "/nodes/{node}/storage/{storage}/content"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.storage-content/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.storage-content/v1"
@@ -304,6 +322,8 @@ class GetClusterResourcesOperation:
     """
 
     operation_code: ClassVar[str] = "cluster_resources_vm"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "VM.Audit"
     path_template: ClassVar[str] = "/cluster/resources"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-resources/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-resources/v1"
@@ -332,6 +352,8 @@ class GetNodeQemuOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_qemu_index"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = "VM.Audit"
     path_template: ClassVar[str] = "/nodes/{node}/qemu"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-qemu-index/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-qemu-index/v1"
@@ -366,6 +388,8 @@ class GetNodeLxcOperation:
     sourced_from: str = ""
 
     operation_code: ClassVar[str] = "node_lxc_index"
+    not_found_meaning: ClassVar[str] = "inventory_stale"
+    required_privilege: ClassVar[str] = "VM.Audit"
     path_template: ClassVar[str] = "/nodes/{node}/lxc"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-lxc-index/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-lxc-index/v1"
@@ -386,6 +410,8 @@ class GetClusterFirewallOptionsOperation:
     """``GET /cluster/firewall/options`` — whether the cluster firewall can enforce anything."""
 
     operation_code: ClassVar[str] = "cluster_firewall_options"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = "Sys.Audit"
     path_template: ClassVar[str] = "/cluster/firewall/options"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-firewall-options/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-firewall-options/v1"
@@ -403,6 +429,8 @@ class GetClusterFirewallGroupsOperation:
     """``GET /cluster/firewall/groups`` — existing security groups, for ownership and collision."""
 
     operation_code: ClassVar[str] = "cluster_firewall_groups"
+    not_found_meaning: ClassVar[str] = "capability_absent"
+    required_privilege: ClassVar[str] = ""
     path_template: ClassVar[str] = "/cluster/firewall/groups"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-firewall-groups/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-firewall-groups/v1"

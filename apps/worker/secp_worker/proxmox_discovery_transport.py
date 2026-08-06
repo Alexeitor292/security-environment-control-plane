@@ -163,11 +163,14 @@ class HardenedProxmoxDiscoveryTransport:
             raise
         except ProxmoxDiscoveryTransportError:
             raise
-        except Exception:
+        except Exception as exc:
             # `from None` severs the backend exception chain. httpx exceptions carry the request —
             # URL and Authorization header included — so re-raising with context would put the
-            # credential into every traceback that touches this call.
-            raise ProxmoxDiscoveryTransportError("proxmox_discovery_transport_failed") from None
+            # credential into every traceback that touches this call. The CLASS is still read
+            # first, because "the certificate did not verify", "the target did not answer in time"
+            # and "the body exceeded the cap" are three different operator actions and collapsing
+            # them into one code is how a TLS substitution reads as a flaky network.
+            raise ProxmoxDiscoveryTransportError(_failure_reason(exc)) from None
 
         payload = parse_bounded_json(raw)
         if isinstance(payload, dict):
@@ -175,6 +178,50 @@ class HardenedProxmoxDiscoveryTransport:
         # A Proxmox success is always a `{"data": ...}` object. Anything else is not a response
         # this transport understands, and guessing at it is how a malformed body becomes a fact.
         raise ProxmoxDiscoveryTransportError("proxmox_discovery_response_not_an_object")
+
+
+#: Closed reason codes this transport may raise. Nothing outside this set reaches an observation,
+#: and a test asserts the projection has a rule for every one of them.
+TRANSPORT_REASONS: tuple[str, ...] = (
+    "proxmox_discovery_unauthenticated",
+    "proxmox_discovery_permission_denied",
+    "proxmox_discovery_endpoint_absent",
+    "proxmox_discovery_endpoint_unsupported",
+    "proxmox_discovery_request_refused",
+    "proxmox_discovery_tls_identity_unverified",
+    "proxmox_discovery_timeout",
+    "proxmox_discovery_response_exceeded_bound",
+    "proxmox_discovery_response_not_an_object",
+    "proxmox_discovery_transport_failed",
+)
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """Classify a backend failure WITHOUT reusing its text.
+
+    Only the exception's type and, for the one helper that raises closed codes of its own, its
+    first argument are consulted. Nothing from a backend message is propagated: httpx and ssl
+    messages routinely carry the URL.
+    """
+    import ssl
+
+    if isinstance(exc, ssl.SSLError):
+        return "proxmox_discovery_tls_identity_unverified"
+
+    first = ""
+    args = getattr(exc, "args", ())
+    if args and isinstance(args[0], str):
+        first = args[0]
+    if first == "response_too_large":
+        return "proxmox_discovery_response_exceeded_bound"
+
+    # httpx is imported lazily elsewhere; match on the type name so this module keeps no import.
+    name = type(exc).__name__
+    if "Timeout" in name or "Timedout" in name:
+        return "proxmox_discovery_timeout"
+    if "CertificateError" in name or "SSL" in name:
+        return "proxmox_discovery_tls_identity_unverified"
+    return "proxmox_discovery_transport_failed"
 
 
 def _status_reason(status: int) -> str:
