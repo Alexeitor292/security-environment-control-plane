@@ -53,7 +53,6 @@ def _probe_samples() -> list[object]:
     )
     from secp_worker.target_discovery.probes import (
         ProbeClusterStatus,
-        ProbeHostPackageVersion,
         ProbeNestedVirtualization,
         ProbeNodeCapacity,
         ProbeNodeIdentity,
@@ -65,7 +64,6 @@ def _probe_samples() -> list[object]:
 
     probes = [
         ProbeVersion(),
-        ProbeHostPackageVersion(),
         ProbeClusterStatus(),
         ProbeNodeIdentity(),
         ProbeNodeCapacity("pve-node-1"),

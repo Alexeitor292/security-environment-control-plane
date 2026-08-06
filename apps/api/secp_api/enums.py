@@ -1933,11 +1933,6 @@ class DiscoveryProbeCode(str, Enum):
     """Closed set of read-only probe operation codes (each renders a FIXED read-only argv)."""
 
     version = "version"
-    #: ``pveversion`` — the HOST PACKAGE version, a separate source from :attr:`version`, which is
-    #: ``pvesh get /version`` (the API's own view). Deliberately not merged: they can disagree, and
-    #: silently preferring whichever looks newer would hide a half-upgraded node. Both are kept and
-    #: disagreement is reported.
-    host_package_version = "host_package_version"
     cluster_status = "cluster_status"
     node_identity = "node_identity"
     node_capacity = "node_capacity"

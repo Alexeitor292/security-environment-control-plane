@@ -31,10 +31,16 @@ from secp_worker.deployment.locators import (
 )
 
 # The CLOSED executable allowlist. Nothing else may ever be exec'd as a probe.
+#
+# ``pveversion`` was removed here, not merely left unused. It was allowlisted and accepted by the
+# host forced-command wrapper for a probe that no code ever emitted, and the facts it would have
+# supplied — exact patch version, build id, running kernel — are all available over the HTTPS API
+# without SSH and, for `/version`, without any privilege at all. Keeping a granted-but-unreached
+# execution capability because a parser for it is useful is exactly the kind of latent surface that
+# is hard to notice and easy to re-reach.
 _PVESH = "pvesh"
-_PVEVERSION = "pveversion"
 _CAT = "cat"
-_READ_ONLY_EXECUTABLES = frozenset({_PVESH, _PVEVERSION, _CAT})
+_READ_ONLY_EXECUTABLES = frozenset({_PVESH, _CAT})
 # The ONLY pvesh verb permitted. ``create``/``set``/``delete``/``push``/``pull`` are not
 # representable.
 _PVESH_READ_VERB = "get"
@@ -69,23 +75,6 @@ class ProbeVersion:
     """``pvesh get /version`` — the API's own view of the version."""
 
     probe_code: ClassVar[str] = "version"
-
-
-@dataclass(frozen=True)
-class ProbeHostPackageVersion:
-    """``pveversion`` — the HOST PACKAGE version, from the pve-manager package itself.
-
-    A SEPARATE source from :class:`ProbeVersion`, deliberately not merged with it. The two can
-    disagree — a node whose packages were upgraded but whose services have not restarted reports one
-    version from the running API and another from the installed package — and that disagreement is
-    exactly the condition an operator needs told before a plan is compiled against either. Silently
-    preferring whichever looks newer would hide a half-upgraded node.
-
-    The executable has been in the read-only allowlist and in the host forced-command wrapper all
-    along; what was missing was a probe that emits it. Nothing about the grant changes here.
-    """
-
-    probe_code: ClassVar[str] = "host_package_version"
 
 
 @dataclass(frozen=True)
@@ -139,7 +128,6 @@ class ProbeCandidateLocatorPresence:
 
 ReadOnlyHostProbe = (
     ProbeVersion
-    | ProbeHostPackageVersion
     | ProbeClusterStatus
     | ProbeNodeIdentity
     | ProbeNodeCapacity
@@ -174,11 +162,6 @@ def render_probe_argv(probe: ReadOnlyHostProbe) -> tuple[str, ...]:
     verb."""
     if isinstance(probe, ProbeVersion):
         argv: tuple[str, ...] = (_PVESH, _PVESH_READ_VERB, "/version", *_JSON)
-    elif isinstance(probe, ProbeHostPackageVersion):
-        # Bare, with no arguments at all. `pveversion` takes an optional `-verbose`, which is NOT
-        # admitted: a caller-selectable flag is a caller-controlled argv, and the whole point of
-        # this grammar is that the argv is a property of the probe type rather than of its caller.
-        argv = (_PVEVERSION,)
     elif isinstance(probe, ProbeClusterStatus):
         argv = (_PVESH, _PVESH_READ_VERB, "/cluster/status", *_JSON)
     elif isinstance(probe, ProbeNodeIdentity):
@@ -232,9 +215,6 @@ def assert_read_only(argv: Sequence[str]) -> None:
         # cat is restricted to the fixed nested-virt sysfs kernel parameter files ONLY.
         if len(argv) != 2 or not _NESTED_PATH_RE.match(argv[1]):
             raise ProbeError("cat_path_not_allowed")
-    elif exe == _PVEVERSION:
-        if len(argv) != 1:
-            raise ProbeError("pveversion_takes_no_args")
 
 
 def candidate_presence_probe(locator: ResourceLocator) -> ProbeCandidateLocatorPresence:
@@ -284,10 +264,11 @@ def _int(value: object, *, lo: int = 0, hi: int = 10**15) -> int:
 #: loss was final by the time anything downstream could notice.
 _VERSION_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})(?:\.(\d{1,4}))?")
 
-#: ``pveversion`` prints e.g.
-#: ``pve-manager/9.1.1/abcdef1234567890 (running kernel: 6.14.11-1-pve)``. Captured as three
-#: optional parts so a format change degrades to a parse failure with the raw output still
-#: recorded, rather than to a confidently wrong version.
+#: The ``pve-manager/<version>/<buildid> (running kernel: <k>)`` form. Retained for the HTTPS
+#: source, not for SSH: `GET /nodes/{node}/apt/versions` reports the same shape in the
+#: ``pve-manager`` row's ``Version``/``ManagerVersion`` fields. Captured as three optional parts so
+#: a format change degrades to a parse failure with the raw text still recorded, rather than to a
+#: confidently wrong version.
 _PVEVERSION_RE = re.compile(
     r"^pve-manager/(\d{1,3}\.\d{1,3}(?:\.\d{1,4})?)"
     r"(?:/([0-9a-fA-F]{6,64}))?"
@@ -324,7 +305,11 @@ def parse_api_version(stdout: bytes) -> tuple[int, int, int | None]:
 
 
 def parse_host_package_version(stdout: bytes) -> tuple[str, str, str]:
-    """``(version, build_id, kernel)`` from bare ``pveversion`` output.
+    """``(version, build_id, kernel)`` from a ``pve-manager/...`` version string.
+
+    Sourced from `GET /nodes/{node}/apt/versions` over HTTPS. There is no ``pveversion`` probe:
+    the executable is not in the read-only allowlist, and every fact it would have supplied is
+    available over the API.
 
     Returns strings rather than parsed integers because this is the RAW product identity — the
     exact ``pve-manager`` version string, the build/repo id and the running kernel — and every one
