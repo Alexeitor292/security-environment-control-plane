@@ -44,6 +44,7 @@ from secp_api.discovery_operation_evidence import (
     DiscoveryOperationManifest,
     TransportKind,
 )
+from secp_api.enums import DiscoveryObservationState
 from secp_commissioning.canonical import sha256_digest
 
 from secp_worker.proxmox_discovery_operations import (
@@ -569,36 +570,91 @@ def _sequence_evidence(
     )
 
 
+#: How badly a non-usable contribution degrades a fact, most severe first.
+#:
+#: Ordered by what it tells an OPERATOR, not by how the code failed: ``permission_denied`` names a
+#: grant to request and so must survive alongside anything else; ``not_requested`` says only that
+#: nobody asked. When two sources fail differently, the operator is shown the one they can act on.
+_DEGRADED_PRECEDENCE: tuple[DiscoveryObservationState, ...] = (
+    DiscoveryObservationState.permission_denied,
+    DiscoveryObservationState.probe_refused,
+    DiscoveryObservationState.probe_failed,
+    DiscoveryObservationState.source_unavailable,
+    DiscoveryObservationState.not_implemented,
+    DiscoveryObservationState.observed_malformed,
+    DiscoveryObservationState.not_requested,
+)
+
+#: The one non-usable state that does NOT degrade a fact. The target ANSWERED — it said it does not
+#: support this — which is a fact about the target rather than a gap in what SECP saw. Treating it
+#: as a failure would make every PVE 8.x cluster permanently ineligible because ``/cluster/sdn/
+#: fabrics/all`` did not exist yet.
+_NON_DEGRADING = DiscoveryObservationState.observed_unsupported
+
+
+def _degrades(observation: Observation) -> bool:
+    return not observation.is_usable and observation.state is not _NON_DEGRADING
+
+
 def _merge_observation(
     code: str, existing: Observation | None, incoming: Observation
 ) -> Observation:
-    """Combine two observations of the SAME fact from two different operations.
+    """Join two observations of the SAME fact from two different operations. FAIL-CLOSED.
 
-    "First usable wins" is wrong for the facts that matter most here. Per-node facts —
-    ``node_capacity``, ``bridges``, ``storage_ids`` — carry one field code but many nodes, so
-    keeping the first would silently report a three-node cluster's first node as the whole cluster.
-    A fact that looks complete and describes one node is worse than no fact at all.
+    The lattice, and why each rung is where it is:
 
-    So mappings MERGE: each operation contributes its own keys. Everything else must AGREE, and two
-    sources that disagree about one fact make it ``observed_malformed`` rather than picking a winner
-    — the disagreement is itself the finding, and silently preferring either source would hide a
-    target that is answering inconsistently.
+    ``degraded ⊔ anything = degraded``
+        A successful source must not erase a refusal, a malformed payload or an incomplete view
+        from another source. This rung fixes a critical defect: the rule used to be "a usable
+        answer replaces an unusable one", so a fact fed by two operations read ``observed`` after
+        one of them was DENIED — that source's contribution silently absent from the value, and
+        nothing anywhere for an operator to grant. The refusal now wins, and provenance keeps the
+        good answer so nothing is lost.
+    ``degraded ⊔ degraded = the more actionable one``
+        See :data:`_DEGRADED_PRECEDENCE`.
+    ``unsupported ⊔ usable = usable``
+        ``observed_unsupported`` is an ANSWER, not a gap: the target said it does not have this.
+    ``usable ⊔ usable = deep merge``
+        Mappings merge so each operation contributes its own keys — per-node facts carry one field
+        code and many nodes, and keeping the first would report a three-node cluster's first node as
+        the whole cluster. Non-mapping values must AGREE; two sources that disagree yield
+        ``observed_malformed``, which is itself degrading, because a target answering inconsistently
+        is a finding rather than a choice between answers.
+
+    The join is commutative and associative on these rules, so the incremental pairwise merge the
+    executor performs gives the same answer as folding every contribution at the end.
     """
     if existing is None:
         return incoming
-    if not incoming.is_usable:
-        # A failing source never overwrites — not a good answer from another source, and not an
-        # earlier failure either: the run reports the FIRST reason, and a second one for the same
-        # field would silently relabel why an operator is being asked to act.
-        return existing
+
+    existing_bad, incoming_bad = _degrades(existing), _degrades(incoming)
+    if existing_bad or incoming_bad:
+        if existing_bad and incoming_bad:
+            return _more_actionable(existing, incoming)
+        return existing if existing_bad else incoming
+
+    # Neither degrades. An "unsupported" answer yields to a real value from another source.
     if not existing.is_usable:
         return incoming
+    if not incoming.is_usable:
+        return existing
 
     try:
         merged = _deep_merge(existing.value, incoming.value, path=code)
     except _Disagreement as exc:
         return Observation.malformed(f"source_disagreement:{exc.path}")
     return existing if merged == existing.value else Observation.observed(merged)
+
+
+def _more_actionable(left: Observation, right: Observation) -> Observation:
+    """Of two degraded contributions, the one an operator can do something about.
+
+    Not "the first one" and not "the last one": those are arbitrary, and which of two failures an
+    operator is shown decides whether they go and grant a privilege or go looking for a bug.
+    """
+    order = {state: index for index, state in enumerate(_DEGRADED_PRECEDENCE)}
+    fallback = len(order)
+    return left if order.get(left.state, fallback) <= order.get(right.state, fallback) else right
 
 
 class _Disagreement(Exception):

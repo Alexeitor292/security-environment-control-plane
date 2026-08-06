@@ -150,12 +150,14 @@ def test_the_refused_operation_is_still_recorded_as_evidence():
     assert record.transport_kind is TransportKind.proxmox_https_api
 
 
-def test_a_failing_source_does_not_erase_a_good_answer_from_another():
-    """Several operations contribute to the same fact.
+def test_a_success_does_not_erase_a_refusal_from_another_source():
+    """THE FAIL-CLOSED RULE, in the order success-then-denial.
 
-    ``node_names`` comes from both /cluster/status and /nodes. If /nodes fails after
-    /cluster/status succeeded, the fact must keep the observed value rather than being overwritten
-    with a failure — otherwise adding a redundant source makes discovery worse.
+    ``node_names`` is fed by both /cluster/status and /nodes. The old rule was "a usable answer
+    replaces an unusable one", so this fact read ``observed`` after one of its sources had been
+    DENIED — with that source's contribution silently missing from the value and nothing anywhere
+    for an operator to grant. The refusal now wins, and the good answer is kept in provenance so
+    nothing is lost.
     """
 
     class _Denied(Exception):
@@ -167,12 +169,18 @@ def test_a_failing_source_does_not_erase_a_good_answer_from_another():
         errors={"/nodes": _Denied("proxmox_discovery_request_refused")},
     )
     result = _run(transport, ops)
-    assert result.observations["node_names"].is_usable is True
-    assert result.observations["node_names"].value == ["cluster-data"]
+
+    fact = result.observations["node_names"]
+    assert fact.is_usable is False
+    assert fact.reason_code == "proxmox_discovery_request_refused"
+
+    # Nothing is lost: both contributions survive, including the one that succeeded.
+    states = {c.operation_code: c.state for c in result.contributions["node_names"]}
+    assert states == {"cluster_status": "observed", "node_index": "probe_failed"}
 
 
-def test_a_later_usable_observation_replaces_an_earlier_unusable_one():
-    """The complement: a fact that failed from one source and succeeded from another is observed."""
+def test_a_success_does_not_erase_a_refusal_in_the_other_order_either():
+    """Denial-then-success. The join is commutative or it is not a join."""
 
     class _Denied(Exception):
         pass
@@ -183,10 +191,100 @@ def test_a_later_usable_observation_replaces_an_earlier_unusable_one():
         errors={"/cluster/status": _Denied("proxmox_discovery_request_refused")},
     )
     result = _run(transport, ops)
-    assert result.observations["node_names"].is_usable is True
-    assert result.observations["node_names"].value == ["node-data"]
+
+    assert result.observations["node_names"].is_usable is False
+    assert result.observations["node_names"].reason_code == "proxmox_discovery_request_refused"
+    states = {c.operation_code: c.state for c in result.contributions["node_names"]}
+    assert states == {"cluster_status": "probe_failed", "node_index": "observed"}
     # And the fact only /cluster/status supplies stays failed.
     assert result.observations["cluster_identity"].state is S.probe_failed
+
+
+def test_complementary_sources_that_both_succeed_still_merge():
+    """The rule must not be "any second source ruins the fact" — that would make redundancy
+    useless. Two usable contributions covering different keys combine as before."""
+    ops = [GetNodeStatusOperation("pve-a", SRC), GetNodeStatusOperation("pve-b", SRC)]
+    transport = _Fake({"/nodes/pve-a/status": {}, "/nodes/pve-b/status": {}})
+    seen = iter(
+        [
+            {"node_capacity": Observation.observed({"pve-a": {"cpus": 8}})},
+            {"node_capacity": Observation.observed({"pve-b": {"cpus": 16}})},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+    assert result.observations["node_capacity"].is_usable is True
+    assert set(result.observations["node_capacity"].value) == {"pve-a", "pve-b"}
+
+
+def test_the_more_actionable_refusal_is_the_one_reported():
+    """Which of two failures an operator is shown decides whether they grant a privilege or go
+    hunting for a bug, so it is chosen rather than left to arrival order."""
+    ops = [GetClusterStatusOperation(), GetNodesOperation()]
+    transport = _Fake({"/cluster/status": [], "/nodes": []})
+    seen = iter(
+        [
+            {"node_names": Observation.probe_failed("transport_broke")},
+            {
+                "node_names": Observation.permission_denied(
+                    missing_privilege="Sys.Audit", reason_code="denied"
+                )
+            },
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+
+    fact = result.observations["node_names"]
+    assert fact.state is S.permission_denied
+    assert fact.missing_privilege == "Sys.Audit"
+
+
+def test_an_unsupported_answer_is_an_answer_and_does_not_degrade_the_fact():
+    """``observed_unsupported`` means the TARGET replied that it does not have this. Treating it as
+    a gap would make every PVE 8.x cluster permanently ineligible over an endpoint that did not
+    exist yet."""
+    ops = [GetClusterStatusOperation(), GetNodesOperation()]
+    transport = _Fake({"/cluster/status": [], "/nodes": []})
+    seen = iter(
+        [
+            {"node_names": Observation.unsupported("endpoint_absent_on_this_version")},
+            {"node_names": Observation.observed(("pve-a",))},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+    assert result.observations["node_names"].is_usable is True
+    assert result.observations["node_names"].value == ("pve-a",)
+
+
+def test_a_conflict_between_two_successes_degrades_the_fact():
+    """success + conflict. A target answering inconsistently is a finding, not a choice."""
+    ops = [GetClusterStatusOperation(), GetNodesOperation()]
+    transport = _Fake({"/cluster/status": [], "/nodes": []})
+    seen = iter(
+        [
+            {"node_names": Observation.observed(("pve-a", "pve-b"))},
+            {"node_names": Observation.observed(("pve-a",))},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+    fact = result.observations["node_names"]
+    assert fact.is_usable is False
+    assert fact.state is S.observed_malformed
+    assert fact.reason_code == "source_disagreement:node_names"
+
+
+def test_a_conflict_survives_a_later_success_from_a_third_source():
+    """The lattice is associative: once degraded, a subsequent good answer cannot lift it."""
+    ops = [GetClusterStatusOperation(), GetNodesOperation(), GetNodeStatusOperation("pve-a", SRC)]
+    transport = _Fake({"/cluster/status": [], "/nodes": [], "/nodes/pve-a/status": {}})
+    seen = iter(
+        [
+            {"node_names": Observation.observed(("pve-a", "pve-b"))},
+            {"node_names": Observation.observed(("pve-a",))},
+            {"node_names": Observation.observed(("pve-a", "pve-b"))},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+    assert result.observations["node_names"].is_usable is False
 
 
 def test_an_all_failing_run_still_produces_a_manifest():
@@ -365,8 +463,9 @@ def test_a_disagreement_deep_inside_one_object_names_the_exact_path():
 
 
 def test_a_second_failure_does_not_relabel_the_first_reason():
-    """The run reports the FIRST reason; a later failure for the same field must not silently
-    change what an operator is being told to act on."""
+    """Two failures of EQUAL severity resolve to the first, so a later one cannot silently relabel
+    what an operator is being told to act on. (Unequal severities resolve by actionability — see
+    the more-actionable test above.)"""
 
     class _Denied(Exception):
         pass

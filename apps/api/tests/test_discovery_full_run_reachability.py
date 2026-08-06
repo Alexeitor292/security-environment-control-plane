@@ -321,15 +321,22 @@ def test_the_sdn_gate_bites_end_to_end_when_the_root_read_is_refused():
     assert [f for f in facts_required_before_compilation() if f not in usable]
 
 
-def test_node_completeness_bites_end_to_end_when_one_node_refuses():
-    """A cluster where one node's storage read fails must not report storage as known."""
+def test_a_refused_source_degrades_the_fact_end_to_end_rather_than_being_overwritten():
+    """One node's storage read fails. Under the old merge the fact still read ``observed`` with
+    that node simply absent; now the refusal wins and the operator is told which read failed."""
     payloads = _cluster_payloads()
     payloads.pop("/nodes/pve-b/storage")
     result, _target, _r, _f, _s, _pub = _run(payloads=payloads)
 
-    assert result.observations["storage_ids"].value == {"pve-a": ("local",)}
+    fact = result.observations["storage_ids"]
+    assert fact.is_usable is False
+    assert fact.reason_code == "proxmox_discovery_endpoint_absent"
     assert result.required_facts["storage_ids"].is_usable is False
-    assert "pve-b" in result.required_facts["storage_ids"].reason_code
+
+    # The successful node's answer is not lost — it is in provenance, attributed to its operation.
+    by_path = {c.rendered_path: c.state for c in result.contributions["storage_ids"]}
+    assert by_path["/nodes/pve-a/storage"] == "observed"
+    assert by_path["/nodes/pve-b/storage"] == "probe_failed"
 
 
 def test_a_refusal_does_not_abort_the_run_or_the_later_phases():
@@ -468,16 +475,44 @@ def test_an_unobserved_cluster_identity_has_no_fingerprint_rather_than_a_placeho
     assert cluster_fingerprint_of({"cluster_identity": Observation.probe_failed("x")}) == ""
 
 
-def test_every_failing_operation_leaves_a_contribution_even_when_another_source_answers():
-    """The refusal that the merge does not surface is still signed."""
+def test_a_denied_source_degrades_a_multi_source_fact_and_both_contributions_are_kept():
+    """success + denial, end to end. ``node_names`` is fed by /cluster/status and /nodes."""
     payloads = _cluster_payloads()
-    payloads.pop("/cluster/status")  # node_names also comes from /nodes
+    payloads.pop("/cluster/status")
     result, _target, _r, _f, _s, _pub = _run(payloads=payloads)
 
-    assert result.observations["node_names"].is_usable is True  # /nodes answered
+    assert result.observations["node_names"].is_usable is False
     sources = {c.operation_code: c.state for c in result.contributions["node_names"]}
     assert sources["cluster_status"] == "probe_failed", sources
     assert sources["node_index"] == "observed", sources
+    # The degraded fact is what compilation sees.
+    assert result.required_facts["node_names"].is_usable is False
+
+
+def test_an_omitted_negative_contribution_changes_the_signature():
+    """Dropping the failing source from provenance is tampering, not tidying — and the signature
+    covers provenance, so a snapshot that hides a refusal no longer verifies."""
+    from secp_api.discovery_fact_commitment import build_fact_commitment
+
+    payloads = _cluster_payloads()
+    payloads.pop("/cluster/status")
+    result, _target, _r, _f, _s, _pub = _run(payloads=payloads)
+
+    scrubbed = dict(result.contributions)
+    scrubbed["node_names"] = tuple(c for c in scrubbed["node_names"] if c.state != "probe_failed")
+    assert len(scrubbed["node_names"]) < len(result.contributions["node_names"])
+
+    recomputed = build_fact_commitment(
+        observations=result.observations,
+        required_facts=result.required_facts,
+        contributions=scrubbed,
+        organization_identity=str(ORG),
+        target_identity=str(TARGET_ID),
+        cluster_fingerprint=cluster_fingerprint_of(result.observations),
+        operation_identity=OPERATION,
+        operation_generation=GENERATION,
+    )
+    assert recomputed.digest() != result.binding.facts_hash
 
 
 def test_the_signed_binding_verifies_against_the_registered_anchor_end_to_end():
@@ -584,8 +619,14 @@ def test_a_planning_failure_keeps_the_evidence_already_gathered():
     """Discarding phase one because phase two could not be planned would turn "this cluster is
     larger than the plan allows" into "nothing is known about this cluster"."""
     payloads = _cluster_payloads()
-    payloads["/nodes"] = [{"node": f"node{i}", "status": "online"} for i in range(200)]
-    payloads["/cluster/status"] = [{"type": "cluster", "name": "lab", "id": "cluster/lab"}]
+    many = [f"node{i}" for i in range(200)]
+    payloads["/nodes"] = [{"node": n, "status": "online"} for n in many]
+    # BOTH sources must agree, or the fail-closed merge degrades node_names first and phase two is
+    # never planned — the bound would then go untested for the wrong reason.
+    payloads["/cluster/status"] = [
+        {"type": "cluster", "name": "lab", "id": "cluster/lab", "quorate": 1},
+        *({"type": "node", "name": n, "online": 1} for n in many),
+    ]
     result, _target, _r, _f, _s, _pub = _run(payloads=payloads)
 
     assert result.failed is True
