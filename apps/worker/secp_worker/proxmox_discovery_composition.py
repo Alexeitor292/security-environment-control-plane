@@ -13,10 +13,17 @@ the ones that are true by CONSTRUCTION rather than by check:
 * the credential arrives as an opaque reference and is resolved only inside the privileged worker,
   for one exact purpose and one exact target.
 
-``run_version_discovery`` takes its transport and resolver as parameters rather than constructing
-them, so a test can supply bounded fakes without the module growing a mode switch. What it does NOT
-take is a choice of transport KIND — the operation types and the evidence they produce are
-HTTPS-shaped, and there is no branch that could produce anything else.
+``run_full_discovery`` takes its transport factory, resolver and signer as parameters rather than
+constructing them, so a test can supply bounded fakes without the module growing a mode switch. What
+it does NOT take is a choice of transport KIND, a binding, or any identity that goes inside the
+signature — the operation types and the evidence they produce are HTTPS-shaped, and there is no
+branch that could produce anything else.
+
+It is the ONLY signed entry point. There was briefly a second, ``run_signed_discovery``, which took
+a caller-supplied ``binding_factory``; a caller able to build the binding can attest to any
+organization, target, worker, role or release it likes, so it was removed rather than fixed in
+place. ``run_version_discovery`` likewise runs through the one sequencer instead of keeping its own
+evidence builder: two builders for one signed document is how the two quietly stop agreeing.
 """
 
 from __future__ import annotations
@@ -35,8 +42,6 @@ from secp_api.discovery_operation_evidence import (
 from secp_commissioning.canonical import sha256_digest
 
 from secp_worker.proxmox_discovery_operations import (
-    VERSION_NORMALIZER_IMPLEMENTATION_ID,
-    VERSION_PARSER_IMPLEMENTATION_ID,
     GetVersionOperation,
 )
 from secp_worker.proxmox_discovery_projection import observe
@@ -68,16 +73,24 @@ class TransportFactory(Protocol):
 
 
 class WorkerLocalSigner(Protocol):
-    """Signs a canonical binding digest with the installed worker's own key.
+    """The installed worker's own identity and signing key.
 
     Deliberately NOT a generic ``sign(digest, key)``: there is no key parameter, because the key is
     a property of the installation and must never arrive from orchestration. The production
     implementation reads the enrolled worker's local key; a test injects an explicit fake.
+
+    ``role`` and ``release_fingerprint`` are here for the same reason. They go inside the signature
+    and are checked against the registered worker anchor, so a caller able to supply them could
+    attest to a role it was not enrolled with, or to a release it is not running.
     """
 
     def installation_id(self) -> str: ...
 
     def key_fingerprint(self) -> str: ...
+
+    def role(self) -> str: ...
+
+    def release_fingerprint(self) -> str: ...
 
     def sign_discovery_binding(self, *, digest: str) -> object: ...
 
@@ -116,82 +129,6 @@ class SignedDiscoveryResult:
     required_facts: dict[str, Observation] = field(default_factory=dict)
 
 
-def run_signed_discovery(
-    *,
-    resolver,
-    resolution_request,
-    resolution_expectation,
-    transport_factory: TransportFactory,
-    signer: WorkerLocalSigner,
-    base_url: str,
-    ca_path: str,
-    target_authority_identity: str,
-    binding_factory,
-    expected_worker_installation_id: str,
-    expected_worker_key_fingerprint: str,
-    now: datetime,
-    started_at: datetime,
-    completed_at: datetime,
-) -> SignedDiscoveryResult:
-    """The whole production path: resolve, execute, observe, bind, sign.
-
-    Ordered so nothing exists before it is earned. The credential is resolved immediately before the
-    transport is built and is not referenced again; the signer is checked against the selected
-    worker BEFORE it signs, so a mismatch refuses rather than producing a signature nobody can use.
-
-    There is no fallback at any step. A resolution failure does not try the environment, and a
-    transport failure does not try SSH — both would mean the safest configuration silently degrades
-    at exactly the moment something is already wrong.
-    """
-    from secp_worker.preflight.secret_resolution import (
-        SecretResolutionError,
-        assert_discovery_resolution_authorized,
-    )
-
-    # 1. The request must match the independently derived expectation before anything is resolved.
-    try:
-        assert_discovery_resolution_authorized(resolution_request, resolution_expectation)
-        material = resolver.resolve(resolution_request, expectation=resolution_expectation, now=now)
-    except SecretResolutionError as exc:
-        return _resolution_failure(str(getattr(exc, "reason_code", "credential_unavailable")))
-    except Exception:  # noqa: BLE001 - never surface a resolver's raw error
-        return _resolution_failure("credential_unavailable")
-
-    # 2. The signer must BE the selected worker. Checked before any request goes out, so a
-    #    misbound worker never contacts the target at all.
-    if signer.installation_id() != expected_worker_installation_id:
-        return _resolution_failure("discovery_signer_installation_mismatch")
-    if signer.key_fingerprint() != expected_worker_key_fingerprint:
-        return _resolution_failure("discovery_signer_key_mismatch")
-
-    # 3. Build the transport from the resolved token. The token exists only inside this call.
-    transport = transport_factory.build(
-        base_url=base_url, ca_path=ca_path, token=material.reveal_secret()
-    )
-
-    execution = run_version_discovery(
-        transport=transport,
-        operation=GetVersionOperation(),
-        target_authority_identity=target_authority_identity,
-        started_at=started_at,
-        completed_at=completed_at,
-    )
-
-    # 4. Bind and sign. The binding is built by the caller's factory from the observations and the
-    #    manifest, so the signature covers what actually happened rather than what was intended.
-    binding = binding_factory(execution.observations, execution.manifest)
-    attestation = signer.sign_discovery_binding(digest=binding.digest())
-
-    return SignedDiscoveryResult(
-        observations=execution.observations,
-        manifest=execution.manifest,
-        binding=binding,
-        attestation=attestation,
-        failed=execution.failed,
-        failure_reason=execution.failure_reason,
-    )
-
-
 def run_full_discovery(
     *,
     resolver,
@@ -202,10 +139,10 @@ def run_full_discovery(
     base_url: str,
     ca_path: str,
     target_authority_identity: str,
-    binding_factory,
     expected_worker_installation_id: str,
     expected_worker_key_fingerprint: str,
     control_plane_facts,
+    freshness_bound_seconds: int,
     now: datetime,
     started_at: datetime,
     completed_at: datetime,
@@ -222,6 +159,11 @@ def run_full_discovery(
     The projection happens BEFORE signing, so what the worker attests to is the derived
     required-fact state — not a raw field set that a later consumer would have to re-derive with
     code the signature does not cover.
+
+    There is no ``binding_factory`` parameter. The binding names the organization, the target, the
+    operation, the worker, its role and its release; a caller able to supply it could attest to any
+    of them. Every field is taken from the resolution expectation, the installation or the run
+    itself, and :func:`build_discovery_binding` is the only thing that assembles one.
     """
     from secp_api.discovery_fact_projection import project_required_facts
 
@@ -250,7 +192,17 @@ def run_full_discovery(
         execution.observations, control_plane_facts=control_plane_facts
     )
 
-    binding = binding_factory(execution.observations, execution.manifest, required_facts)
+    binding = build_discovery_binding(
+        expectation=resolution_expectation,
+        signer=signer,
+        requested_target_authority=target_authority_identity,
+        observations=execution.observations,
+        manifest=execution.manifest,
+        required_facts=required_facts,
+        started_at=started_at,
+        completed_at=completed_at,
+        freshness_bound_seconds=freshness_bound_seconds,
+    )
     attestation = signer.sign_discovery_binding(digest=binding.digest())
 
     return SignedDiscoveryResult(
@@ -261,6 +213,63 @@ def run_full_discovery(
         failed=execution.failed,
         failure_reason=execution.failure_reason,
         required_facts=required_facts,
+    )
+
+
+def build_discovery_binding(
+    *,
+    expectation,
+    signer: WorkerLocalSigner,
+    requested_target_authority: str,
+    observations: dict[str, Observation],
+    manifest: DiscoveryOperationManifest,
+    required_facts: dict[str, Observation],
+    started_at: datetime,
+    completed_at: datetime,
+    freshness_bound_seconds: int,
+):
+    """Assemble the document the worker signs. The ONLY thing that builds one.
+
+    Every field comes from a source the worker cannot choose freely:
+
+    * organization, target, operation identity and generation come from the resolution
+      **expectation** — the contract independently derived by the control plane, not the request the
+      worker sent. A worker that resolved a credential for target A cannot attest about target B;
+    * installation id, key fingerprint, role and release fingerprint come from the installation
+      itself, so a worker cannot claim a role it was not enrolled with or a release it is not
+      running — both of which the registered anchor is checked against;
+    * the hashes are computed here from the run's own products.
+
+    ``facts_hash`` covers the RAW observation states and ``operation_manifest_hash`` covers the
+    evidence, so a snapshot whose facts were edited and a snapshot whose request set was edited are
+    two distinct, separately detectable tampering events.
+    """
+    from secp_api.discovery_fact_projection import (
+        REQUIRED_FACT_PROJECTION_ID,
+        required_fact_states,
+    )
+    from secp_api.discovery_verification import DISCOVERY_CONTRACT_VERSION, DiscoverySnapshotBinding
+
+    return DiscoverySnapshotBinding(
+        discovery_contract_version=DISCOVERY_CONTRACT_VERSION,
+        operation_identity=expectation.operation_identity,
+        operation_generation=expectation.operation_generation,
+        organization_identity=str(expectation.organization_id),
+        target_identity=str(expectation.execution_target_id),
+        requested_target_authority=requested_target_authority,
+        worker_installation_id=signer.installation_id(),
+        worker_role=signer.role(),
+        worker_release_fingerprint=signer.release_fingerprint(),
+        signer_fingerprint=signer.key_fingerprint(),
+        observation_started_at=started_at.isoformat(),
+        observation_completed_at=completed_at.isoformat(),
+        freshness_bound_seconds=freshness_bound_seconds,
+        facts_hash=sha256_digest(
+            {"observations": sorted((k, v.state.value) for k, v in observations.items())}
+        ),
+        operation_manifest_hash=sha256_digest({"manifest": manifest.canonical()}),
+        projection_implementation_id=REQUIRED_FACT_PROJECTION_ID,
+        required_fact_observation_states=required_fact_states(required_facts),
     )
 
 
@@ -595,80 +604,18 @@ def run_version_discovery(
     On failure this returns observations in a failure STATE rather than raising past the caller —
     the distinction between "the probe failed" and "the fact is absent" is the whole point of the
     observation vocabulary, and an exception collapses it.
+
+    Implemented as a one-operation sequence rather than its own execution path. It once had a second
+    evidence builder that happened to agree with the sequencer's; two builders for one document is
+    how the two quietly stop agreeing, and the disagreement would live inside a signature.
     """
-    path = operation.rendered_path()
-    started = started_at.isoformat()
-
-    try:
-        payload = transport.get(path)
-    except Exception as exc:  # noqa: BLE001 - mapped to a closed reason below
-        reason = _closed_reason(exc)
-        return VersionDiscoveryResult(
-            observations={
-                code: Observation.probe_failed(reason) for code in operation.observation_field_codes
-            },
-            manifest=DiscoveryOperationManifest(
-                operations=(
-                    _evidence(
-                        operation=operation,
-                        target_authority_identity=target_authority_identity,
-                        status_classification="refused",
-                        content_type="",
-                        body=b"",
-                        started=started,
-                        completed=completed_at.isoformat(),
-                    ),
-                )
-            ),
-            failed=True,
-            failure_reason=reason,
-        )
-
-    raw = repr(payload).encode("utf-8")
-    evidence = _evidence(
-        operation=operation,
+    return run_operation_sequence(
+        transport=transport,
+        operations=(operation,),
         target_authority_identity=target_authority_identity,
-        status_classification="2xx",
-        content_type="application/json",
-        body=raw,
-        started=started,
-        completed=completed_at.isoformat(),
-    )
-
-    observations = observe(operation, payload)
-    return VersionDiscoveryResult(
-        observations=observations, manifest=DiscoveryOperationManifest(operations=(evidence,))
-    )
-
-
-def _evidence(
-    *,
-    operation: GetVersionOperation,
-    target_authority_identity: str,
-    status_classification: str,
-    content_type: str,
-    body: bytes,
-    started: str,
-    completed: str,
-) -> DiscoveryOperationEvidence:
-    return DiscoveryOperationEvidence(
-        operation_code=operation.operation_code,
-        transport_kind=PRODUCTION_TRANSPORT_KIND,
-        target_authority_identity=target_authority_identity,
-        request_method="GET",
-        canonical_path_template=operation.path_template,
-        canonical_rendered_path=operation.rendered_path(),
-        canonical_query_parameters=operation.query_parameters(),
-        request_body_present=False,
-        response_status_classification=status_classification,
-        response_content_type=content_type,
-        response_size=len(body),
-        response_digest=sha256_digest({"body": body.decode("utf-8", errors="replace")}),
-        parser_implementation_id=VERSION_PARSER_IMPLEMENTATION_ID,
-        normalizer_implementation_id=VERSION_NORMALIZER_IMPLEMENTATION_ID,
-        observation_field_codes=operation.observation_field_codes,
-        started_at=started,
-        completed_at=completed,
+        parse=observe,
+        started_at=started_at,
+        completed_at=completed_at,
     )
 
 

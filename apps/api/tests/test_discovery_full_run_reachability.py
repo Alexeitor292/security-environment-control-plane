@@ -1,9 +1,9 @@
 """The whole first-MVP discovery, driven end to end, with spies that fail by never being called.
 
 The recurring defect in this system is not a wrong component. It is a correct, tested, green
-component that nothing reaches — ``build_plan_document`` had no production caller, ``TargetObservation``
-had a reader and no writer, ``pveversion`` was allowlisted for a probe nobody emitted. Unit tests
-cannot see it, because a unit test calls the module directly.
+component that nothing reaches — ``build_plan_document`` had no production caller,
+``TargetObservation`` had a reader and no writer, ``pveversion`` was allowlisted for a probe nobody
+emitted. Unit tests cannot see it, because a unit test calls the module directly.
 
 So this file drives ``run_full_discovery`` against a bounded fake target and asserts that each
 guarded component was actually invoked and actually shaped the outcome: the guarded resolver, the
@@ -20,23 +20,26 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from secp_api.discovery_fact_projection import (
-    REQUIRED_FACT_PROJECTION_ID,
-    required_fact_states,
-    usable_fact_names,
-)
+from secp_api.discovery_fact_projection import REQUIRED_FACT_PROJECTION_ID, usable_fact_names
 from secp_api.discovery_observation import Observation
 from secp_api.discovery_operation_evidence import (
     FIRST_MVP_TRANSPORTS,
     active_transport_set,
     first_mvp_manifest_refusals,
 )
-from secp_api.discovery_required_facts import facts_required_before_compilation
+from secp_api.discovery_required_facts import (
+    facts_required_before_apply,
+    facts_required_before_compilation,
+)
 from secp_api.discovery_verification import (
-    DISCOVERY_CONTRACT_VERSION,
+    BINDING_MATCHED,
     DISCOVERY_SNAPSHOT_DOMAIN,
     DISCOVERY_SNAPSHOT_KIND,
-    DiscoverySnapshotBinding,
+    ELIGIBILITY_ELIGIBLE,
+    ELIGIBILITY_REFUSED,
+    SIGNATURE_VALID,
+    ExpectedWorkerRegistration,
+    verify_discovery_snapshot,
 )
 from secp_api.enums import DiscoveryObservationState as S
 from secp_commissioning.canonical import sha256_digest
@@ -154,7 +157,13 @@ class _SpyFactory:
         return self.target
 
 
+ROLE = "proxmox_privileged"
+RELEASE = "sha256:" + "r" * 64
+
+
 class _SpySigner:
+    """Stands in for the installed worker: its id, role, release and key are ITS properties."""
+
     def __init__(self, priv: str, pub: str, installation: str = WORKER) -> None:
         self._priv, self._pub, self._installation = priv, pub, installation
         self.signed_digests: list[str] = []
@@ -164,6 +173,12 @@ class _SpySigner:
 
     def key_fingerprint(self) -> str:
         return key_id_for(self._pub)
+
+    def role(self) -> str:
+        return ROLE
+
+    def release_fingerprint(self) -> str:
+        return RELEASE
 
     def sign_discovery_binding(self, *, digest: str):
         self.signed_digests.append(digest)
@@ -184,33 +199,6 @@ def _control_plane_facts() -> dict[str, Observation]:
         "worker_release_fingerprint": Observation.observed("sha256:" + "r" * 64),
         "target_tls_identity": Observation.observed("sha256:" + "t" * 64),
     }
-
-
-def _binding_factory(pub: str):
-    def _build(observations, manifest, required_facts) -> DiscoverySnapshotBinding:
-        return DiscoverySnapshotBinding(
-            discovery_contract_version=DISCOVERY_CONTRACT_VERSION,
-            operation_identity=OPERATION,
-            operation_generation=GENERATION,
-            organization_identity=str(ORG),
-            target_identity=str(TARGET_ID),
-            requested_target_authority=AUTHORITY,
-            worker_installation_id=WORKER,
-            worker_role="proxmox_privileged",
-            worker_release_fingerprint="sha256:" + "r" * 64,
-            signer_fingerprint=key_id_for(pub),
-            observation_started_at=(NOW - timedelta(seconds=30)).isoformat(),
-            observation_completed_at=(NOW - timedelta(seconds=10)).isoformat(),
-            freshness_bound_seconds=1800,
-            facts_hash=sha256_digest(
-                {"observations": sorted((k, v.state.value) for k, v in observations.items())}
-            ),
-            operation_manifest_hash=sha256_digest({"manifest": manifest.canonical()}),
-            projection_implementation_id=REQUIRED_FACT_PROJECTION_ID,
-            required_fact_observation_states=required_fact_states(required_facts),
-        )
-
-    return _build
 
 
 def _run(*, payloads=None, signer=None, keys=None, control_plane=None):
@@ -235,10 +223,10 @@ def _run(*, payloads=None, signer=None, keys=None, control_plane=None):
         base_url="https://pve.example.test:8006/api2/json",
         ca_path="/etc/secp/pve-ca.pem",
         target_authority_identity=AUTHORITY,
-        binding_factory=_binding_factory(pub),
         expected_worker_installation_id=WORKER,
         expected_worker_key_fingerprint=key_id_for(pub),
         control_plane_facts=(_control_plane_facts() if control_plane is None else control_plane),
+        freshness_bound_seconds=1800,
         now=NOW,
         started_at=NOW - timedelta(seconds=30),
         completed_at=NOW - timedelta(seconds=10),
@@ -371,6 +359,126 @@ def test_a_misbound_signer_never_contacts_the_target():
     assert target.calls == []
     assert factory.built_with == []
     assert signer.signed_digests == []
+
+
+# === the binding cannot be shaped by a caller =====================================================
+
+
+def test_the_run_takes_no_binding_factory_and_no_identity_parameters():
+    """The binding names the organization, the target, the operation, the worker, its role and its
+    release. A caller able to supply it — or any of them — could attest to any of them."""
+    import inspect
+
+    params = set(inspect.signature(run_full_discovery).parameters)
+    for banned in (
+        "binding_factory",
+        "binding",
+        "organization_identity",
+        "target_identity",
+        "worker_role",
+        "worker_release_fingerprint",
+        "operation_identity",
+        "operation_generation",
+        "signature",
+        "private_key",
+    ):
+        assert banned not in params, banned
+
+
+def test_the_binding_takes_identity_from_the_expectation_not_from_the_worker_request():
+    """The expectation is the contract the control plane derived independently. A worker that
+    resolved a credential for one target cannot attest about another."""
+    result, _target, _r, _f, _s, _pub = _run()
+    assert result.binding.organization_identity == str(ORG)
+    assert result.binding.target_identity == str(TARGET_ID)
+    assert result.binding.operation_identity == OPERATION
+    assert result.binding.operation_generation == GENERATION
+
+
+def test_the_binding_takes_role_and_release_from_the_installation():
+    """Both go inside the signature and are checked against the registered anchor, so a worker must
+    not be able to claim a role it was not enrolled with or a release it is not running."""
+    result, _target, _r, _f, signer, _pub = _run()
+    assert result.binding.worker_role == signer.role() == ROLE
+    assert result.binding.worker_release_fingerprint == signer.release_fingerprint() == RELEASE
+    assert result.binding.worker_installation_id == signer.installation_id()
+    assert result.binding.signer_fingerprint == signer.key_fingerprint()
+
+
+def test_the_two_hashes_cover_different_documents():
+    """Editing the facts and editing the request set are separately detectable tampering events."""
+    result, _target, _r, _f, _s, _pub = _run()
+    assert result.binding.facts_hash != result.binding.operation_manifest_hash
+    assert result.binding.operation_manifest_hash == sha256_digest(
+        {"manifest": result.manifest.canonical()}
+    )
+    assert result.binding.facts_hash == sha256_digest(
+        {"observations": sorted((k, v.state.value) for k, v in result.observations.items())}
+    )
+
+
+def test_the_signed_binding_verifies_against_the_registered_anchor_end_to_end():
+    """The last link: a control plane holding only the worker's registered anchor accepts it."""
+    result, _target, _r, _f, _s, pub = _run()
+    registration = ExpectedWorkerRegistration(
+        worker_installation_id=WORKER,
+        worker_role=ROLE,
+        worker_release_fingerprint=RELEASE,
+        verification_anchor_fingerprint=key_id_for(pub),
+        target_identity=str(TARGET_ID),
+        organization_identity=str(ORG),
+    )
+    projection, authority = verify_discovery_snapshot(
+        binding=result.binding,
+        attestation=result.attestation,
+        registration=registration,
+        expected_operation_identity=OPERATION,
+        expected_operation_generation=GENERATION,
+        expected_target_identity=str(TARGET_ID),
+        expected_organization_identity=str(ORG),
+        facts_hash=result.binding.facts_hash,
+        operation_manifest_hash=result.binding.operation_manifest_hash,
+        compilation_required_facts=facts_required_before_compilation(),
+        apply_required_facts=facts_required_before_apply(),
+        now=NOW,
+    )
+    assert projection.signature == SIGNATURE_VALID
+    assert projection.identity_and_target_binding == BINDING_MATCHED
+    # A fully answered cluster now clears the compilation gate through the REAL projection.
+    assert projection.compilation_eligibility == ELIGIBILITY_ELIGIBLE
+    assert authority is not None
+
+
+def test_a_refused_sdn_root_read_refuses_compilation_through_the_verifier():
+    result, _target, _r, _f, _s, pub = _run(payloads=_cluster_payloads(sdn_root_denied=True))
+    registration = ExpectedWorkerRegistration(
+        worker_installation_id=WORKER,
+        worker_role=ROLE,
+        worker_release_fingerprint=RELEASE,
+        verification_anchor_fingerprint=key_id_for(pub),
+        target_identity=str(TARGET_ID),
+        organization_identity=str(ORG),
+    )
+    projection, authority = verify_discovery_snapshot(
+        binding=result.binding,
+        attestation=result.attestation,
+        registration=registration,
+        expected_operation_identity=OPERATION,
+        expected_operation_generation=GENERATION,
+        expected_target_identity=str(TARGET_ID),
+        expected_organization_identity=str(ORG),
+        facts_hash=result.binding.facts_hash,
+        operation_manifest_hash=result.binding.operation_manifest_hash,
+        compilation_required_facts=facts_required_before_compilation(),
+        apply_required_facts=facts_required_before_apply(),
+        now=NOW,
+    )
+    # Authentic evidence and insufficient evidence are separate conclusions: the snapshot really
+    # was produced by the registered worker, and it still does not license compilation.
+    assert projection.signature == SIGNATURE_VALID
+    assert authority is not None
+    assert projection.compilation_eligibility == ELIGIBILITY_REFUSED
+    assert ("existing_sdn_zones", "permission_denied") in projection.missing_compilation_facts
 
 
 def test_the_signed_binding_covers_the_required_fact_states_not_the_raw_fields():

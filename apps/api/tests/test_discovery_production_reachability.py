@@ -1,13 +1,13 @@
-"""Every authority-bearing component has a production caller, proved by reaching it.
+"""The credential path, proved by reaching it — and by refusing before reaching anything else.
 
-The defect this file exists to catch has recurred throughout this system: a module that is correct,
-tested, green — and reached by nothing. `build_plan_document` had no production caller.
-`TargetObservation` had a reader and no writer. `pveversion` was allowlisted for a probe nobody
-emitted. Each was invisible to its own unit tests, because unit tests call the module directly.
+Companion to ``test_discovery_full_run_reachability``: that file proves the happy path wires every
+component together, this one proves the refusals happen in the right ORDER. Order is the whole
+property here. A credential resolved for the wrong target, or a signer that is not the selected
+worker, must stop the run BEFORE a request goes out — refusing afterwards would mean the target was
+already contacted with a credential nobody authorised for it.
 
-So these tests drive the real composition and assert that the guarded resolver, the worker-local
-signer and the control-plane verifier were actually invoked — with spies that fail the test by
-never being called, rather than text scans that fail when someone renames something.
+The spies fail the test by never being called, rather than by a text scan that breaks when somebody
+renames something.
 """
 
 from __future__ import annotations
@@ -16,22 +16,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from secp_api.discovery_required_facts import (
-    facts_required_before_apply,
-    facts_required_before_compilation,
-)
-from secp_api.discovery_verification import (
-    BINDING_MATCHED,
-    DISCOVERY_CONTRACT_VERSION,
-    DISCOVERY_SNAPSHOT_DOMAIN,
-    DISCOVERY_SNAPSHOT_KIND,
-    ELIGIBILITY_REFUSED,
-    SIGNATURE_VALID,
-    DiscoverySnapshotBinding,
-    ExpectedWorkerRegistration,
-    verify_discovery_snapshot,
-)
-from secp_commissioning.canonical import sha256_digest
+from secp_api.discovery_observation import Observation
+from secp_api.discovery_verification import DISCOVERY_SNAPSHOT_DOMAIN, DISCOVERY_SNAPSHOT_KIND
 from secp_commissioning.enrollment_attestation import key_id_for, sign_detached
 from secp_management.signing import generate_keypair
 from secp_worker.preflight.secret_resolution import (
@@ -44,7 +30,7 @@ from secp_worker.preflight.secret_resolution import (
     TrustedCredentialReference,
     build_discovery_resolution_request,
 )
-from secp_worker.proxmox_discovery_composition import run_signed_discovery
+from secp_worker.proxmox_discovery_composition import run_full_discovery
 
 NOW = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
 ORG = uuid.uuid4()
@@ -54,8 +40,8 @@ OPERATION = "op-1"
 GENERATION = 3
 AUTHORITY = "pve.example.test:8006"
 FAKE_TOKEN = "secpdisc@pve!discovery=00000000-0000-0000-0000-000000000000"
-
-_PAYLOAD = {"version": "9.1.1", "release": "9.1", "repoid": "abc1234567"}
+ROLE = "proxmox_privileged"
+RELEASE = "sha256:" + "r" * 64
 
 
 class _SpyResolver:
@@ -74,17 +60,20 @@ class _SpyResolver:
 
 
 class _SpyTransportFactory:
-    def __init__(self, payload=None) -> None:
-        self.payload = payload if payload is not None else dict(_PAYLOAD)
+    def __init__(self) -> None:
         self.built_with: list[dict] = []
+        self.requested: list[str] = []
 
     def build(self, *, base_url: str, ca_path: str, token: str):
         self.built_with.append({"base_url": base_url, "ca_path": ca_path, "token": token})
-        payload = self.payload
+        requested = self.requested
 
         class _T:
             def get(self, path, params=None):
-                return payload
+                requested.append(path)
+                if path == "/version":
+                    return {"version": "9.1.1", "release": "9.1", "repoid": "abc1234567"}
+                raise RuntimeError("proxmox_discovery_endpoint_absent")
 
         return _T()
 
@@ -99,6 +88,12 @@ class _SpySigner:
 
     def key_fingerprint(self) -> str:
         return key_id_for(self._pub)
+
+    def role(self) -> str:
+        return ROLE
+
+    def release_fingerprint(self) -> str:
+        return RELEASE
 
     def sign_discovery_binding(self, *, digest: str):
         self.signed_digests.append(digest)
@@ -123,30 +118,15 @@ def _resolution(**overrides):
     return build_discovery_resolution_request(**kwargs)
 
 
-def _binding_factory(pub: str):
-    def _build(observations, manifest) -> DiscoverySnapshotBinding:
-        states = tuple((code, obs.state.value) for code, obs in observations.items())
-        return DiscoverySnapshotBinding(
-            discovery_contract_version=DISCOVERY_CONTRACT_VERSION,
-            operation_identity=OPERATION,
-            operation_generation=GENERATION,
-            organization_identity=str(ORG),
-            target_identity=str(TARGET_ID),
-            requested_target_authority=AUTHORITY,
-            worker_installation_id=WORKER,
-            worker_role="proxmox_privileged",
-            worker_release_fingerprint="sha256:" + "r" * 64,
-            signer_fingerprint=key_id_for(pub),
-            observation_started_at=(NOW - timedelta(seconds=30)).isoformat(),
-            observation_completed_at=(NOW - timedelta(seconds=10)).isoformat(),
-            freshness_bound_seconds=1800,
-            facts_hash=sha256_digest({"observations": sorted(states)}),
-            operation_manifest_hash=sha256_digest({"manifest": manifest.canonical()}),
-            projection_implementation_id="secp-discovery/projection/v1",
-            required_fact_observation_states=states,
-        )
-
-    return _build
+def _control_plane_facts() -> dict[str, Observation]:
+    return {
+        "target_identity": Observation.observed(str(TARGET_ID)),
+        "observation_timestamp": Observation.observed(NOW.isoformat()),
+        "worker_identity": Observation.observed(WORKER),
+        "evidence_signature": Observation.observed("pending"),
+        "worker_release_fingerprint": Observation.observed(RELEASE),
+        "target_tls_identity": Observation.observed("sha256:" + "t" * 64),
+    }
 
 
 def _run(resolver=None, signer=None, factory=None, **overrides):
@@ -164,18 +144,19 @@ def _run(resolver=None, signer=None, factory=None, **overrides):
         base_url="https://pve.example.test:8006/api2/json",
         ca_path="/etc/secp/pve-ca.pem",
         target_authority_identity=AUTHORITY,
-        binding_factory=_binding_factory(pub),
         expected_worker_installation_id=WORKER,
         expected_worker_key_fingerprint=key_id_for(pub),
+        control_plane_facts=_control_plane_facts(),
+        freshness_bound_seconds=1800,
         now=NOW,
         started_at=NOW - timedelta(seconds=30),
         completed_at=NOW - timedelta(seconds=10),
     )
     kwargs.update(overrides)
-    return run_signed_discovery(**kwargs), resolver, signer, factory, pub
+    return run_full_discovery(**kwargs), resolver, signer, factory, pub
 
 
-# === the guarded resolver IS reached =============================================================
+# === the guarded resolver IS reached ==============================================================
 
 
 def test_the_production_path_calls_the_guarded_resolver():
@@ -184,7 +165,7 @@ def test_the_production_path_calls_the_guarded_resolver():
     purpose, worker, _now = resolver.calls[0]
     assert purpose is ResolutionPurpose.proxmox_readonly_discovery
     assert worker == WORKER
-    assert result.failed is False
+    assert result.binding is not None
 
 
 def test_the_resolved_token_reaches_the_transport_and_nowhere_else():
@@ -194,7 +175,11 @@ def test_the_resolved_token_reaches_the_transport_and_nowhere_else():
     assert FAKE_TOKEN not in repr(result.manifest.canonical())
     assert FAKE_TOKEN not in repr(result.binding.canonical())
     assert FAKE_TOKEN not in repr(result.observations)
+    assert FAKE_TOKEN not in repr(result.required_facts)
     assert FAKE_TOKEN not in repr(result.attestation)
+
+
+# === refusals happen BEFORE anything is contacted =================================================
 
 
 def test_a_resolution_failure_refuses_before_any_request():
@@ -204,6 +189,7 @@ def test_a_resolution_failure_refuses_before_any_request():
     assert result.failed is True
     assert result.failure_reason == "credential_unavailable"
     assert factory.built_with == [], "a transport was built despite no credential"
+    assert factory.requested == []
     assert result.manifest.operations == ()
     assert result.attestation is None
 
@@ -212,44 +198,17 @@ def test_the_sealed_default_resolver_fails_closed():
     result, _r, _s, factory, _pub = _run(resolver=SealedDiscoveryCredentialResolver())
     assert result.failed is True
     assert factory.built_with == []
+    assert factory.requested == []
 
 
-def test_a_mismatched_resolution_binding_refuses():
-    """Wrong worker, wrong org and wrong target each refuse before resolution."""
+def test_a_mismatched_resolution_binding_refuses_before_resolution():
+    """Wrong worker, org or target refuses before the credential is even fetched."""
     _req, expectation = _resolution()
     other_request, _e = _resolution(worker_installation_id="wk-9999")
     result, resolver, _s, factory, _pub = _run(resolution=(other_request, expectation))
     assert result.failed is True
     assert resolver.calls == [], "the resolver was called despite a binding mismatch"
     assert factory.built_with == []
-
-
-def test_the_builder_fixes_the_purpose_and_refuses_an_unbound_worker():
-    request, contract = _resolution()
-    assert contract.purpose is ResolutionPurpose.proxmox_readonly_discovery
-    assert contract.contract_version == DISCOVERY_RESOLUTION_CONTRACT_VERSION
-    with pytest.raises(ResolutionContractViolation, match="worker_unbound"):
-        _resolution(worker_installation_id="")
-    with pytest.raises(ResolutionContractViolation, match="operation_unbound"):
-        _resolution(operation_identity="")
-
-
-def test_the_request_cannot_be_constructed_directly():
-    from secp_worker.preflight.secret_resolution import TrustedDiscoveryResolutionRequest
-
-    _request, contract = _resolution()
-    with pytest.raises(TypeError, match="worker-constructed only"):
-        TrustedDiscoveryResolutionRequest(contract, token=object())
-
-
-# === the worker-local signer IS reached ==========================================================
-
-
-def test_the_production_path_calls_the_worker_local_signer():
-    result, _resolver, signer, _factory, _pub = _run()
-    assert signer.signed_digests, "the production composition never called the signer"
-    assert result.attestation is not None
-    assert signer.signed_digests[0] == result.binding.digest()
 
 
 def test_the_signer_is_checked_against_the_selected_worker_before_signing():
@@ -276,6 +235,32 @@ def test_a_signer_whose_key_is_not_the_enrolled_one_refuses():
     assert factory.built_with == []
 
 
+# === the resolution contract itself ===============================================================
+
+
+def test_the_builder_fixes_the_purpose_and_refuses_an_unbound_worker():
+    request, contract = _resolution()
+    assert contract.purpose is ResolutionPurpose.proxmox_readonly_discovery
+    assert contract.contract_version == DISCOVERY_RESOLUTION_CONTRACT_VERSION
+    assert request is not None
+    with pytest.raises(ResolutionContractViolation, match="worker_unbound"):
+        _resolution(worker_installation_id="")
+    with pytest.raises(ResolutionContractViolation, match="operation_unbound"):
+        _resolution(operation_identity="")
+
+
+def test_the_request_cannot_be_constructed_directly():
+    from secp_worker.preflight.secret_resolution import TrustedDiscoveryResolutionRequest
+
+    _request, contract = _resolution()
+    assert contract is not None
+    with pytest.raises(TypeError, match="worker-constructed only"):
+        TrustedDiscoveryResolutionRequest(contract, token=object())
+
+
+# === no key or signature may arrive from orchestration ============================================
+
+
 def test_the_signer_seam_takes_no_key_from_orchestration():
     """There is no key parameter, so a private key cannot arrive from a caller."""
     import inspect
@@ -286,72 +271,14 @@ def test_the_signer_seam_takes_no_key_from_orchestration():
     assert set(sig.parameters) == {"self", "digest"}
 
 
-def test_run_signed_discovery_accepts_no_signature_or_key_material():
+def test_the_production_run_accepts_no_signature_or_key_material():
     import inspect
 
-    params = set(inspect.signature(run_signed_discovery).parameters)
+    params = set(inspect.signature(run_full_discovery).parameters)
     for banned in ("private_key", "private_key_hex", "signature", "signature_valid", "signing_key"):
         assert banned not in params, banned
 
 
-# === the verifier IS reached, end to end =========================================================
-
-
-def test_the_signed_result_verifies_against_the_registered_anchor():
-    result, _resolver, _signer, _factory, pub = _run()
-    registration = ExpectedWorkerRegistration(
-        worker_installation_id=WORKER,
-        worker_role="proxmox_privileged",
-        worker_release_fingerprint="sha256:" + "r" * 64,
-        verification_anchor_fingerprint=key_id_for(pub),
-        target_identity=str(TARGET_ID),
-        organization_identity=str(ORG),
-    )
-    projection, authority = verify_discovery_snapshot(
-        binding=result.binding,
-        attestation=result.attestation,
-        registration=registration,
-        expected_operation_identity=OPERATION,
-        expected_operation_generation=GENERATION,
-        expected_target_identity=str(TARGET_ID),
-        expected_organization_identity=str(ORG),
-        facts_hash=result.binding.facts_hash,
-        operation_manifest_hash=result.binding.operation_manifest_hash,
-        compilation_required_facts=facts_required_before_compilation(),
-        apply_required_facts=facts_required_before_apply(),
-        now=NOW,
-    )
-    assert projection.signature == SIGNATURE_VALID
-    assert projection.identity_and_target_binding == BINDING_MATCHED
-    assert authority is not None
-    # Still refused: a `/version` run observed six facts, not twenty.
-    assert projection.compilation_eligibility == ELIGIBILITY_REFUSED
-
-
-def test_a_signature_over_a_tampered_manifest_does_not_verify():
-    """The whole chain in one case: sign, alter the manifest, verify."""
-    result, _resolver, _signer, _factory, pub = _run()
-    registration = ExpectedWorkerRegistration(
-        worker_installation_id=WORKER,
-        worker_role="proxmox_privileged",
-        worker_release_fingerprint="sha256:" + "r" * 64,
-        verification_anchor_fingerprint=key_id_for(pub),
-        target_identity=str(TARGET_ID),
-        organization_identity=str(ORG),
-    )
-    projection, authority = verify_discovery_snapshot(
-        binding=result.binding,
-        attestation=result.attestation,
-        registration=registration,
-        expected_operation_identity=OPERATION,
-        expected_operation_generation=GENERATION,
-        expected_target_identity=str(TARGET_ID),
-        expected_organization_identity=str(ORG),
-        facts_hash=result.binding.facts_hash,
-        operation_manifest_hash="sha256:" + "0" * 64,
-        compilation_required_facts=facts_required_before_compilation(),
-        apply_required_facts=facts_required_before_apply(),
-        now=NOW,
-    )
-    assert "discovery_operation_manifest_changed_after_signing" in projection.reasons
-    assert authority is None
+def test_the_worker_local_signer_is_reached_and_signs_the_binding_it_built():
+    result, _resolver, signer, _factory, _pub = _run()
+    assert signer.signed_digests == [result.binding.digest()]
