@@ -66,7 +66,26 @@ def _token(value: object, field: str) -> str:
 
 @dataclass(frozen=True)
 class ProbeVersion:
+    """``pvesh get /version`` — the API's own view of the version."""
+
     probe_code: ClassVar[str] = "version"
+
+
+@dataclass(frozen=True)
+class ProbeHostPackageVersion:
+    """``pveversion`` — the HOST PACKAGE version, from the pve-manager package itself.
+
+    A SEPARATE source from :class:`ProbeVersion`, deliberately not merged with it. The two can
+    disagree — a node whose packages were upgraded but whose services have not restarted reports one
+    version from the running API and another from the installed package — and that disagreement is
+    exactly the condition an operator needs told before a plan is compiled against either. Silently
+    preferring whichever looks newer would hide a half-upgraded node.
+
+    The executable has been in the read-only allowlist and in the host forced-command wrapper all
+    along; what was missing was a probe that emits it. Nothing about the grant changes here.
+    """
+
+    probe_code: ClassVar[str] = "host_package_version"
 
 
 @dataclass(frozen=True)
@@ -120,6 +139,7 @@ class ProbeCandidateLocatorPresence:
 
 ReadOnlyHostProbe = (
     ProbeVersion
+    | ProbeHostPackageVersion
     | ProbeClusterStatus
     | ProbeNodeIdentity
     | ProbeNodeCapacity
@@ -154,6 +174,11 @@ def render_probe_argv(probe: ReadOnlyHostProbe) -> tuple[str, ...]:
     verb."""
     if isinstance(probe, ProbeVersion):
         argv: tuple[str, ...] = (_PVESH, _PVESH_READ_VERB, "/version", *_JSON)
+    elif isinstance(probe, ProbeHostPackageVersion):
+        # Bare, with no arguments at all. `pveversion` takes an optional `-verbose`, which is NOT
+        # admitted: a caller-selectable flag is a caller-controlled argv, and the whole point of
+        # this grammar is that the argv is a property of the probe type rather than of its caller.
+        argv = (_PVEVERSION,)
     elif isinstance(probe, ProbeClusterStatus):
         argv = (_PVESH, _PVESH_READ_VERB, "/cluster/status", *_JSON)
     elif isinstance(probe, ProbeNodeIdentity):
@@ -254,15 +279,88 @@ def _int(value: object, *, lo: int = 0, hi: int = 10**15) -> int:
     return ivalue
 
 
+#: ``major.minor`` with an OPTIONAL patch. The patch group is what the original expression lacked:
+#: it matched only two groups, so an observed ``9.1.1`` was reduced to ``9.1`` at the regex and the
+#: loss was final by the time anything downstream could notice.
+_VERSION_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})(?:\.(\d{1,4}))?")
+
+#: ``pveversion`` prints e.g.
+#: ``pve-manager/9.1.1/abcdef1234567890 (running kernel: 6.14.11-1-pve)``. Captured as three
+#: optional parts so a format change degrades to a parse failure with the raw output still
+#: recorded, rather than to a confidently wrong version.
+_PVEVERSION_RE = re.compile(
+    r"^pve-manager/(\d{1,3}\.\d{1,3}(?:\.\d{1,4})?)"
+    r"(?:/([0-9a-fA-F]{6,64}))?"
+    r"(?:\s+\(running kernel:\s*([^)]{1,64})\))?"
+)
+
+
 def parse_version_major_minor(stdout: bytes) -> tuple[int, int]:
+    """Kept for callers needing only the coarse pair.
+
+    Derived from :func:`parse_api_version`, so the two can never disagree about one input.
+    """
+    major, minor, _patch = parse_api_version(stdout)
+    return major, minor
+
+
+def parse_api_version(stdout: bytes) -> tuple[int, int, int | None]:
+    """``(major, minor, patch)`` from ``pvesh get /version``.
+
+    ``patch`` is ``None`` only when the target genuinely reported a two-part version — never
+    because the parser dropped it. That distinction is the whole point: a discovery evidence record
+    saying ``9.1`` when the host said ``9.1.1`` is a quiet lie about which release was observed, and
+    provider compatibility is decided at the patch level.
+    """
     data = _load_json(stdout)
     version = data.get("version") if isinstance(data, dict) else None
     if not isinstance(version, str):
         raise ProbeError("malformed_probe_output")
-    match = re.match(r"^(\d{1,3})\.(\d{1,3})", version)
+    match = _VERSION_RE.match(version)
     if not match:
         raise ProbeError("malformed_probe_output")
-    return int(match.group(1)), int(match.group(2))
+    patch = int(match.group(3)) if match.group(3) is not None else None
+    return int(match.group(1)), int(match.group(2)), patch
+
+
+def parse_host_package_version(stdout: bytes) -> tuple[str, str, str]:
+    """``(version, build_id, kernel)`` from bare ``pveversion`` output.
+
+    Returns strings rather than parsed integers because this is the RAW product identity — the
+    exact ``pve-manager`` version string, the build/repo id and the running kernel — and every one
+    of the three is a value an operator compares against a release note verbatim. Parsing them into
+    numbers would discard the form they need to be compared in.
+
+    ``build_id`` and ``kernel`` are empty when the output did not carry them. Empty here means the
+    host did not print it, which the caller records as an observed-but-partial fact rather than as
+    an absent one.
+    """
+    text = stdout.decode("utf-8", errors="replace").strip()
+    if not text:
+        raise ProbeError("malformed_probe_output")
+    match = _PVEVERSION_RE.match(text)
+    if not match:
+        raise ProbeError("malformed_probe_output")
+    return match.group(1), match.group(2) or "", (match.group(3) or "").strip()
+
+
+def api_and_package_version_agree(api: tuple[int, int, int | None], package_version: str) -> bool:
+    """Whether the two independent version sources describe the same release.
+
+    Compared on the parts the API actually reported: when the API gave no patch component, the
+    comparison is major.minor, because demanding a patch the API never sent would report a
+    disagreement that does not exist. A real mismatch — 9.1.1 installed, 9.0.3 running — is what
+    this is for, and it is reported rather than resolved.
+    """
+    match = _VERSION_RE.match(package_version)
+    if not match:
+        return False
+    major, minor, patch = api
+    if int(match.group(1)) != major or int(match.group(2)) != minor:
+        return False
+    if patch is None:
+        return True
+    return match.group(3) is not None and int(match.group(3)) == patch
 
 
 def parse_is_clustered(stdout: bytes) -> bool:
