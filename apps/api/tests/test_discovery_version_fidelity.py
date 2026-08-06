@@ -94,16 +94,63 @@ def test_the_probe_union_does_not_admit_it():
     assert "ProbeVersion" in names
 
 
-def test_pveversion_is_not_in_the_read_only_executable_allowlist():
-    """The capability is withdrawn, not just unused.
+def test_neither_pveversion_nor_cat_is_in_the_executable_allowlist():
+    """Both capabilities are withdrawn, not just unused.
 
     An executable that stays allowlisted while nothing emits it is a granted-but-unreached
-    execution surface — the exact shape that gets quietly re-reached later.
+    execution surface — the exact shape that gets quietly re-reached later. ``cat`` existed solely
+    for the nested-virtualization sysfs read, which gates nothing.
     """
     from secp_worker.target_discovery.probes import _READ_ONLY_EXECUTABLES
 
-    assert _READ_ONLY_EXECUTABLES == frozenset({"pvesh", "cat"})
+    assert _READ_ONLY_EXECUTABLES == frozenset({"pvesh"})
     assert "pveversion" not in _READ_ONLY_EXECUTABLES
+    assert "cat" not in _READ_ONLY_EXECUTABLES
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("cat", "/sys/module/kvm_intel/parameters/nested"),
+        ("cat", "/sys/module/kvm_amd/parameters/nested"),
+        ("cat", "/etc/passwd"),
+        ("pveversion",),
+        ("sudo", "pvesh", "get", "/version"),
+        ("ssh", "root@pve", "id"),
+    ],
+)
+def test_no_host_local_command_is_renderable(argv):
+    with pytest.raises(ProbeError, match="executable_not_read_only"):
+        assert_read_only(argv)
+
+
+def test_the_nested_virtualization_probe_no_longer_exists():
+    """Removed from the module, not merely unscheduled.
+
+    Leaving a public constructor behind would keep the capability reachable by anyone who imported
+    it — "stopped scheduling it" is not the same as "cannot be used".
+    """
+    import secp_worker.target_discovery.probes as probes_module
+
+    assert not hasattr(probes_module, "ProbeNestedVirtualization")
+    assert not hasattr(probes_module, "parse_nested_enabled")
+    names = {t.__name__ for t in ReadOnlyHostProbe.__args__}
+    assert "ProbeNestedVirtualization" not in names
+
+
+def test_the_executor_cannot_schedule_a_nested_probe():
+    """The scheduler side. The removal has to reach the thing that ran it, not only the type."""
+    import secp_worker.target_discovery.probe_executor as executor_module
+
+    source = pathlib.Path(executor_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "_probe_nested" not in called
+    assert not hasattr(executor_module, "_NESTED_MODULES")
 
 
 def test_a_bare_pveversion_argv_is_now_refused():
@@ -120,7 +167,6 @@ def test_no_probe_renders_pveversion():
     from secp_worker.deployment.locators import BridgeLocator
     from secp_worker.target_discovery.probes import (
         ProbeClusterStatus,
-        ProbeNestedVirtualization,
         ProbeNodeCapacity,
         ProbeNodeIdentity,
         ProbeStorage,
@@ -135,12 +181,13 @@ def test_no_probe_renders_pveversion():
         ProbeNodeCapacity("pve-node-1"),
         ProbeStorage("pve-node-1"),
         ProbeVmidAvailability(),
-        ProbeNestedVirtualization("kvm_intel"),
         candidate_presence_probe(BridgeLocator("pve-node-1", "secpabcd1234br")),
     ]
     assert {type(p) for p in samples} == set(ReadOnlyHostProbe.__args__)
     for probe in samples:
-        assert "pveversion" not in render_probe_argv(probe)
+        argv = render_probe_argv(probe)
+        for banned in ("pveversion", "cat", "sudo", "ssh"):
+            assert banned not in argv, (banned, argv)
 
 
 def test_the_probe_module_names_no_sudo_or_root_escalation():

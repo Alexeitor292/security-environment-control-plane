@@ -30,26 +30,25 @@ from secp_worker.deployment.locators import (
     ServiceIdentityLocator,
 )
 
-# The CLOSED executable allowlist. Nothing else may ever be exec'd as a probe.
+# The CLOSED executable allowlist for FIRST-MVP discovery.
 #
-# ``pveversion`` was removed here, not merely left unused. It was allowlisted and accepted by the
-# host forced-command wrapper for a probe that no code ever emitted, and the facts it would have
-# supplied — exact patch version, build id, running kernel — are all available over the HTTPS API
-# without SSH and, for `/version`, without any privilege at all. Keeping a granted-but-unreached
-# execution capability because a parser for it is useful is exactly the kind of latent surface that
-# is hard to notice and easy to re-reach.
+# ``pveversion`` and ``cat`` are both gone, and the removals are withdrawals of capability rather
+# than tidy-ups. ``pveversion`` was allowlisted and accepted by the host forced-command wrapper for
+# a probe that no code ever emitted. ``cat`` existed solely for the nested-virtualization sysfs
+# read, which gates nothing: it is not a compilation-blocking fact, not an apply-blocking fact, and
+# has no bearing on provider compatibility, isolation or guest deployment.
+#
+# ``pvesh`` remains, and its removal is a different change with a different owner. This module is
+# the LEGACY SSH probe contract; the first-MVP production discovery composition is HTTPS-only and
+# renders none of these, which is a property of that composition and is asserted there. Emptying
+# this allowlist here would break the six remaining pvesh probes without removing them, leaving a
+# module that cannot execute its own contract — a worse state than an honest legacy one.
 _PVESH = "pvesh"
-_CAT = "cat"
-_READ_ONLY_EXECUTABLES = frozenset({_PVESH, _CAT})
+_READ_ONLY_EXECUTABLES = frozenset({_PVESH})
 # The ONLY pvesh verb permitted. ``create``/``set``/``delete``/``push``/``pull`` are not
 # representable.
 _PVESH_READ_VERB = "get"
 _JSON = ("--output-format", "json")
-# Fixed, closed sysfs kernel-parameter files for nested virtualization (read-only). The module name
-# is
-# from a CLOSED set — never free input — so no arbitrary path can be read.
-_NESTED_MODULES = ("kvm_intel", "kvm_amd")
-_NESTED_PATH_RE = re.compile(r"^/sys/module/(kvm_intel|kvm_amd)/parameters/nested$")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Any token reaching the runner must contain no whitespace or shell metacharacter (belt-and-braces
 # over shell=False). A pvesh path token must further be a strict slash-separated safe-token path.
@@ -111,16 +110,6 @@ class ProbeVmidAvailability:
 
 
 @dataclass(frozen=True)
-class ProbeNestedVirtualization:
-    module: str  # closed set: kvm_intel | kvm_amd
-    probe_code: ClassVar[str] = "nested_virtualization"
-
-    def __post_init__(self) -> None:
-        if self.module not in _NESTED_MODULES:
-            raise ProbeError("unsupported_nested_module")
-
-
-@dataclass(frozen=True)
 class ProbeCandidateLocatorPresence:
     locator: ResourceLocator
     probe_code: ClassVar[str] = "candidate_locator_presence"
@@ -133,7 +122,6 @@ ReadOnlyHostProbe = (
     | ProbeNodeCapacity
     | ProbeStorage
     | ProbeVmidAvailability
-    | ProbeNestedVirtualization
     | ProbeCandidateLocatorPresence
 )
 
@@ -172,8 +160,6 @@ def render_probe_argv(probe: ReadOnlyHostProbe) -> tuple[str, ...]:
         argv = (_PVESH, _PVESH_READ_VERB, f"/nodes/{probe.node}/storage", *_JSON)
     elif isinstance(probe, ProbeVmidAvailability):
         argv = (_PVESH, _PVESH_READ_VERB, "/cluster/resources", "--type", "vm", *_JSON)
-    elif isinstance(probe, ProbeNestedVirtualization):
-        argv = (_CAT, f"/sys/module/{probe.module}/parameters/nested")
     elif isinstance(probe, ProbeCandidateLocatorPresence):
         argv = (_PVESH, _PVESH_READ_VERB, _locator_get_path(probe.locator), *_JSON)
     else:  # pragma: no cover - exhaustiveness guard
@@ -211,10 +197,6 @@ def assert_read_only(argv: Sequence[str]) -> None:
                 raise ProbeError("pvesh_arg_not_path")
             if not _SAFE_PVESH_PATH_RE.match(tok):
                 raise ProbeError("pvesh_path_unsafe")
-    elif exe == _CAT:
-        # cat is restricted to the fixed nested-virt sysfs kernel parameter files ONLY.
-        if len(argv) != 2 or not _NESTED_PATH_RE.match(argv[1]):
-            raise ProbeError("cat_path_not_allowed")
 
 
 def candidate_presence_probe(locator: ResourceLocator) -> ProbeCandidateLocatorPresence:
@@ -378,11 +360,6 @@ def parse_used_vmids(stdout: bytes) -> frozenset[int]:
         if len(used) > 100_000:  # bounded
             raise ProbeError("probe_output_too_large")
     return frozenset(used)
-
-
-def parse_nested_enabled(stdout: bytes) -> bool:
-    # The sysfs file contains ``Y``/``1`` when nested virtualization is enabled.
-    return stdout.strip().lower() in (b"y", b"1")
 
 
 def parse_node_capacity(stdout: bytes) -> tuple[int, int, int]:

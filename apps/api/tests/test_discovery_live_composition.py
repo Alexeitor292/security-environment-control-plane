@@ -119,7 +119,9 @@ def test_live_composition_reads_inventory_via_read_only_ssh_only(tmp_path):
         host_key_verifier=FileKnownHostsBindingVerifier(),
     )
     facts = ex.read_inventory()
-    assert facts.node == "pve-a" and facts.nested_available is True and facts.cpu_total == 16
+    # `None`, not `True`: first-MVP discovery is HTTPS-only and has no host-local channel to read
+    # the sysfs kernel parameter. `False` would assert an absence nobody observed.
+    assert facts.node == "pve-a" and facts.nested_available is None and facts.cpu_total == 16
     # Contact happened ONLY via the fixed hardened ssh read-only probe path.
     assert runner.calls, "expected probes to run once the bundle + binding validated"
     for argv in runner.calls:

@@ -112,7 +112,9 @@ def test_executor_reads_inventory_with_read_only_argv_only():
     runner = _ReadOnlyFakeRunner()
     source = _FakeBundleSource()
     facts = _executor(runner, source).read_inventory()
-    assert facts.node == "pve-a" and facts.nested_available is True
+    # `None`, not `True`: first-MVP discovery has no host-local channel to read the sysfs kernel
+    # parameter, and `False` would assert an absence nobody observed.
+    assert facts.node == "pve-a" and facts.nested_available is None
     assert facts.cpu_total == 16 and facts.mem_free_mb == 32768
     assert facts.storages and facts.storages[0].storage == "local-lvm"
     assert source.disposed == 1  # disposed after the session

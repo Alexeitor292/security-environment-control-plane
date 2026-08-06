@@ -53,7 +53,6 @@ def _probe_samples() -> list[object]:
     )
     from secp_worker.target_discovery.probes import (
         ProbeClusterStatus,
-        ProbeNestedVirtualization,
         ProbeNodeCapacity,
         ProbeNodeIdentity,
         ProbeStorage,
@@ -69,8 +68,6 @@ def _probe_samples() -> list[object]:
         ProbeNodeCapacity("pve-node-1"),
         ProbeStorage("pve-node-1"),
         ProbeVmidAvailability(),
-        ProbeNestedVirtualization("kvm_intel"),
-        ProbeNestedVirtualization("kvm_amd"),
         candidate_presence_probe(BridgeLocator("pve-node-1", "secpabcd1234br")),
         candidate_presence_probe(FirewallGroupLocator("secpabcd1234fw")),
         candidate_presence_probe(ServiceIdentityLocator("secpabcd1234@pam")),
