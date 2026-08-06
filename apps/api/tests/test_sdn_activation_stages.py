@@ -90,7 +90,7 @@ def _proof(obj: PendingSdnObject, **overrides) -> OwnershipProofResult:
         stage1_workspace_hash="sha256:ws",
         stage1_plan_hash="sha256:plan",
         stage1_execution_receipt_digest="receipt-1",
-        pre_stage1_absence_proof_digest="sha256:absent",
+        pre_stage1_absence_evidence_digest="sha256:absent",
         target_identity="target-abc",
         cluster_fingerprint="sha256:cluster",
         proof_complete=True,
@@ -507,7 +507,7 @@ def test_a_secp_looking_identifier_with_no_evidence_is_unknown():
 
 
 def test_a_new_object_needs_pre_stage1_absence_proof():
-    proof = _proof(_ZONE, pre_stage1_absence_proof_digest="")
+    proof = _proof(_ZONE, pre_stage1_absence_evidence_digest="")
     assert classify_ownership(_ZONE, proof, OPERATION) is SdnObjectOwnership.unknown
 
 

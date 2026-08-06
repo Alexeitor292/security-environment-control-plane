@@ -203,7 +203,7 @@ class OwnershipProofResult:
     stage1_workspace_hash: str = ""
     stage1_plan_hash: str = ""
     stage1_execution_receipt_digest: str = ""
-    pre_stage1_absence_proof_digest: str = ""
+    pre_stage1_absence_evidence_digest: str = ""
     durable_ownership_provenance_digest: str = ""
     target_identity: str = ""
     cluster_fingerprint: str = ""
@@ -221,7 +221,7 @@ class OwnershipProofResult:
             "stage1_workspace_hash": self.stage1_workspace_hash,
             "stage1_plan_hash": self.stage1_plan_hash,
             "stage1_execution_receipt_digest": self.stage1_execution_receipt_digest,
-            "pre_stage1_absence_proof_digest": self.pre_stage1_absence_proof_digest,
+            "pre_stage1_absence_evidence_digest": self.pre_stage1_absence_evidence_digest,
             "durable_ownership_provenance_digest": self.durable_ownership_provenance_digest,
             "target_identity": self.target_identity,
             "cluster_fingerprint": self.cluster_fingerprint,
@@ -306,7 +306,7 @@ def classify_ownership(
         # Otherwise SECP could adopt somebody else's object that happened to share the identifier.
         return (
             SdnObjectOwnership.current_operation
-            if proof.pre_stage1_absence_proof_digest
+            if proof.pre_stage1_absence_evidence_digest
             else SdnObjectOwnership.unknown
         )
 
