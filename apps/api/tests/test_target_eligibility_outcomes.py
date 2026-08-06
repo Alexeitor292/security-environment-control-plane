@@ -280,7 +280,7 @@ def _owned_proof(obj: PendingSdnObject, **overrides) -> OwnershipProofResult:
         stage1_workspace_hash="sha256:ws",
         stage1_plan_hash="sha256:plan",
         stage1_execution_receipt_digest="receipt-1",
-        pre_stage1_absence_proof_digest="sha256:absent",
+        pre_stage1_absence_evidence_digest="sha256:absent",
         target_identity=TARGET,
         cluster_fingerprint="sha256:cluster",
         proof_complete=True,
@@ -377,7 +377,7 @@ def test_an_unknown_owner_pending_object_also_refuses():
                 mystery,
                 ownership=SdnObjectOwnership.unknown,
                 classification_reason="no_provenance",
-                pre_stage1_absence_proof_digest="",
+                pre_stage1_absence_evidence_digest="",
             ),
         )
     )

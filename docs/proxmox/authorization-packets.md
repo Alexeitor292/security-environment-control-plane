@@ -17,8 +17,8 @@ pinned to 9.1.x specifically — the two items that sit closest to the 9.1 bound
 
 `pvesh` refuses to run as a non-root uid **before any ACL is consulted**:
 `PVE/CLI/pvesh.pm` calls `setup_default_cli_env()` with no username; `PVE/RESTEnvironment.pm` then
-does `$username //= 'root@pam'` followed by
-`die "please run as root\n" if ($username eq 'root@pam') && ($> != 0)`.
+defaults the username to the PAM-realm superuser authid and dies unless the process euid is 0. The
+check is a string compare against that one authid, so no ACL grant can satisfy it.
 
 SECP creates its probe account as `useradd --system --create-home --shell /usr/sbin/nologin`
 (`discovery_bootstrap_contract.py:306`) and the wrapper runs `exec pvesh get …` bare, with no `sudo`
@@ -86,12 +86,26 @@ answer; it is an unknown one.
 
 **This is a Proxmox configuration mutation and requires explicit approval.**
 
+**The exact values are code, not prose.** `secp_api/proxmox_discovery_credential_proposal.py` holds
+the account, role and token names and renders the exact commands; the privilege list is computed by
+`privileges_required()` from the required-fact table. Read them with:
+
+```
+uv run python -c "from secp_api.proxmox_discovery_credential_proposal import *; \
+print(unauthorized_notice()); print(*provisioning_commands(), sep=chr(10))"
+```
+
+This document deliberately carries none of those literals: `docs/proxmox/*.md` is guarded against
+concrete infrastructure values, and an approval artifact made of literals cannot live here. Prose is
+also the wrong home for a derived privilege set — a hand-maintained list drifts from the fact table
+silently, and it always drifts toward asking for more.
+
 | | |
 | --- | --- |
-| Backing user | `secpdisc@pve` (a dedicated PVE-realm user, no shell, no SSH) |
+| Backing user | a dedicated realm user with no shell and no SSH — never a superuser |
 | Role name | `SECPDiscoveryReadOnly` |
-| Privilege set | `Sys.Audit`, `VM.Audit`, `Datastore.Audit`, `SDN.Audit` — and nothing else |
-| Token id | `secpdisc@pve!discovery` |
+| Privilege set | derived: exactly the audit privileges the required-fact table needs, nothing else |
+| Token id | `<discovery-user>!<token-name>` |
 | Privilege separation | `privsep=1` |
 | ACL path | `/` |
 | Propagation | `1` |
@@ -120,31 +134,23 @@ corresponding index response, so they are dropped rather than accommodated.
 
 ### Exact commands (NOT executed)
 
-```bash
-pveum user add secpdisc@pve --comment "SECP read-only discovery"
-pveum role add SECPDiscoveryReadOnly --privs "Sys.Audit,VM.Audit,Datastore.Audit,SDN.Audit"
-pveum acl modify / --user secpdisc@pve --role SECPDiscoveryReadOnly --propagate 1
-pveum user token add secpdisc@pve discovery --privsep 1
-pveum acl modify / --tokens 'secpdisc@pve!discovery' --role SECPDiscoveryReadOnly --propagate 1
-```
+Five `pveum` commands, rendered by `provisioning_commands()`. A test asserts every one of them
+begins with `pveum`, contains no `pvesh`, no shell chaining, and no pipe — and that nothing anywhere
+in the repository calls the renderer.
 
 The token needs **its own** ACL entry: under `privsep=1`, `roles` checks `$acl->{tokens}` before
 `$acl->{users}`, so a token with no entries of its own resolves to nothing. Effective permissions
 are then the **intersection** of the token's and the user's.
 
-> One caveat worth stating because it would silently defeat the design: the intersection is guarded
-> by `if ($username && $username ne 'root@pam')`. A privsep token backed by `root@pam` is **not**
-> intersected. That is why the backing user is a dedicated `secpdisc@pve`, never root.
+> One caveat worth stating because it would silently defeat the design: Proxmox skips the
+> intersection entirely when the backing user is the PAM-realm superuser. A privilege-separated
+> token backed by that account is **not** intersected. That is why the backing user is a dedicated,
+> purpose-made realm user — asserted by test, not by convention.
 
 ### Rollback (NOT executed)
 
-```bash
-pveum user token remove secpdisc@pve discovery
-pveum acl delete / --tokens 'secpdisc@pve!discovery' --role SECPDiscoveryReadOnly
-pveum acl delete / --user secpdisc@pve --role SECPDiscoveryReadOnly
-pveum user delete secpdisc@pve
-pveum role delete SECPDiscoveryReadOnly
-```
+Five commands, rendered by `rollback_commands()`. A test asserts they name every object
+provisioning creates, and that the token is removed before the user that owns it.
 
 ### Expected effective permissions
 
@@ -160,9 +166,9 @@ the preflight, not assumed** — S1 and S2 must agree before any index result is
 
 | | |
 | --- | --- |
-| API authority | `https://<enrolled target host>:8006/api2/json` — host and port come from the enrolled `ExecutionTarget`, never from a caller |
+| API authority | `<enrolled-target-host>:<api-port>` plus the `/api2/json` base path — host and port come from the enrolled `ExecutionTarget`, never from a caller |
 | TLS | pinned deployment-local CA bundle. **Not** ambient system trust |
-| Auth header | `Authorization: PVEAPIToken=secpdisc@pve!discovery=<uuid>` |
+| Auth header | Proxmox's API-token authorization scheme, carrying `<token-id>=<secret>`; the secret is never logged, chained into an exception, or written anywhere |
 | Credential | opaque `vault:` reference resolved **only** inside the privileged worker |
 | CSRF | not required — token auth short-circuits the check for every method, and GET never needs it |
 | Connect / read timeout | bounded, from `hardened_http` |
