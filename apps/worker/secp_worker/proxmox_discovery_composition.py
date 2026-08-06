@@ -22,7 +22,7 @@ HTTPS-shaped, and there is no branch that could produce anything else.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -98,7 +98,14 @@ class VersionDiscoveryResult:
 
 @dataclass(frozen=True)
 class SignedDiscoveryResult:
-    """A completed discovery run: observations, evidence, and the worker's detached signature."""
+    """A completed discovery run: observations, evidence, and the worker's detached signature.
+
+    ``observations`` are the RAW per-field observations and ``required_facts`` is their projection
+    into the vocabulary the compiler gates on. Both are carried because they answer different
+    questions: the raw set says what each endpoint reported, the projection says whether the cluster
+    as a whole is known — and the difference between them is where a one-node answer stops standing
+    in for a three-node cluster.
+    """
 
     observations: dict[str, Observation]
     manifest: DiscoveryOperationManifest
@@ -106,6 +113,7 @@ class SignedDiscoveryResult:
     attestation: object
     failed: bool = False
     failure_reason: str = ""
+    required_facts: dict[str, Observation] = field(default_factory=dict)
 
 
 def run_signed_discovery(
@@ -184,6 +192,174 @@ def run_signed_discovery(
     )
 
 
+def run_full_discovery(
+    *,
+    resolver,
+    resolution_request,
+    resolution_expectation,
+    transport_factory: TransportFactory,
+    signer: WorkerLocalSigner,
+    base_url: str,
+    ca_path: str,
+    target_authority_identity: str,
+    binding_factory,
+    expected_worker_installation_id: str,
+    expected_worker_key_fingerprint: str,
+    control_plane_facts,
+    now: datetime,
+    started_at: datetime,
+    completed_at: datetime,
+) -> SignedDiscoveryResult:
+    """The whole first-MVP discovery, end to end: resolve, plan, execute, project, bind, sign.
+
+    This is the ONLY production entry point that reaches every guarded component, and it exists in
+    that shape deliberately. Each of the resolver, the plan validator, the payload parsers, the
+    required-fact projection and the worker-local signer is individually correct and individually
+    tested; the recurring defect in this system has been a component that is all of those and
+    reached by nothing. A single composition that a test can drive with spies is how "it is wired"
+    becomes an observation rather than a claim.
+
+    The projection happens BEFORE signing, so what the worker attests to is the derived
+    required-fact state — not a raw field set that a later consumer would have to re-derive with
+    code the signature does not cover.
+    """
+    from secp_api.discovery_fact_projection import project_required_facts
+
+    prepared = _prepare_transport(
+        resolver=resolver,
+        resolution_request=resolution_request,
+        resolution_expectation=resolution_expectation,
+        transport_factory=transport_factory,
+        signer=signer,
+        base_url=base_url,
+        ca_path=ca_path,
+        expected_worker_installation_id=expected_worker_installation_id,
+        expected_worker_key_fingerprint=expected_worker_key_fingerprint,
+        now=now,
+    )
+    if isinstance(prepared, str):
+        return _resolution_failure(prepared)
+
+    execution = run_operation_plan(
+        transport=prepared,
+        target_authority_identity=target_authority_identity,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+    required_facts = project_required_facts(
+        execution.observations, control_plane_facts=control_plane_facts
+    )
+
+    binding = binding_factory(execution.observations, execution.manifest, required_facts)
+    attestation = signer.sign_discovery_binding(digest=binding.digest())
+
+    return SignedDiscoveryResult(
+        observations=execution.observations,
+        manifest=execution.manifest,
+        binding=binding,
+        attestation=attestation,
+        failed=execution.failed,
+        failure_reason=execution.failure_reason,
+        required_facts=required_facts,
+    )
+
+
+def _prepare_transport(
+    *,
+    resolver,
+    resolution_request,
+    resolution_expectation,
+    transport_factory: TransportFactory,
+    signer: WorkerLocalSigner,
+    base_url: str,
+    ca_path: str,
+    expected_worker_installation_id: str,
+    expected_worker_key_fingerprint: str,
+    now: datetime,
+) -> DiscoveryTransport | str:
+    """Resolve, check the signer, build the transport — or return a closed refusal reason.
+
+    Ordered so nothing exists before it is earned, and so the signer identity is checked BEFORE any
+    request goes out: a misbound worker must never contact the target at all, rather than contacting
+    it and producing a signature nobody can use.
+    """
+    from secp_worker.preflight.secret_resolution import (
+        SecretResolutionError,
+        assert_discovery_resolution_authorized,
+    )
+
+    try:
+        assert_discovery_resolution_authorized(resolution_request, resolution_expectation)
+        material = resolver.resolve(resolution_request, expectation=resolution_expectation, now=now)
+    except SecretResolutionError as exc:
+        return str(getattr(exc, "reason_code", "credential_unavailable"))
+    except Exception:  # noqa: BLE001 - never surface a resolver's raw error
+        return "credential_unavailable"
+
+    if signer.installation_id() != expected_worker_installation_id:
+        return "discovery_signer_installation_mismatch"
+    if signer.key_fingerprint() != expected_worker_key_fingerprint:
+        return "discovery_signer_key_mismatch"
+
+    return transport_factory.build(
+        base_url=base_url, ca_path=ca_path, token=material.reveal_secret()
+    )
+
+
+def run_operation_plan(
+    *,
+    transport: DiscoveryTransport,
+    target_authority_identity: str,
+    parse: Callable[[object, object], dict[str, Observation]] = observe,
+    started_at: datetime,
+    completed_at: datetime,
+    phases: Sequence[Callable[..., Sequence[object]]] | None = None,
+) -> VersionDiscoveryResult:
+    """Run every phase of the production plan against ONE manifest.
+
+    The phases exist because ``/nodes/{node}/storage`` needs a node name that does not exist before
+    the run starts. Each phase is planned from what the previous ones observed, and every dynamic
+    segment carries the response it came from — so a well-formed identifier nothing observed is
+    refused exactly like a malformed one.
+
+    A planning failure stops further phases but keeps everything already observed. Discarding the
+    evidence gathered so far would turn "the cluster is larger than this plan allows" into "nothing
+    is known about this cluster", which is a strictly worse answer to give an operator.
+    """
+    from secp_worker.proxmox_discovery_plan import PHASES, DiscoveryPlanError
+
+    observations: dict[str, Observation] = {}
+    records: list[DiscoveryOperationEvidence] = []
+    failure = ""
+
+    for index, plan in enumerate(phases if phases is not None else PHASES):
+        try:
+            operations = plan() if index == 0 else plan(observations)
+        except DiscoveryPlanError as exc:
+            failure = str(exc.args[0])
+            break
+        if not operations:
+            continue
+        reason = _execute_into(
+            observations=observations,
+            records=records,
+            transport=transport,
+            operations=operations,
+            target_authority_identity=target_authority_identity,
+            parse=parse,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+        failure = failure or reason
+
+    return VersionDiscoveryResult(
+        observations=observations,
+        manifest=DiscoveryOperationManifest(operations=tuple(records)),
+        failed=bool(failure),
+        failure_reason=failure,
+    )
+
+
 def run_operation_sequence(
     *,
     transport: DiscoveryTransport,
@@ -209,12 +385,44 @@ def run_operation_sequence(
     """
     observations: dict[str, Observation] = {}
     records: list[DiscoveryOperationEvidence] = []
-    any_failure = False
+    reason = _execute_into(
+        observations=observations,
+        records=records,
+        transport=transport,
+        operations=operations,
+        target_authority_identity=target_authority_identity,
+        parse=parse,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+    return VersionDiscoveryResult(
+        observations=observations,
+        manifest=DiscoveryOperationManifest(operations=tuple(records)),
+        failed=bool(reason),
+        failure_reason=reason,
+    )
+
+
+def _execute_into(
+    *,
+    observations: dict[str, Observation],
+    records: list[DiscoveryOperationEvidence],
+    transport: DiscoveryTransport,
+    operations: Sequence[object],
+    target_authority_identity: str,
+    parse: Callable[[object, object], dict[str, Observation]],
+    started_at: datetime,
+    completed_at: datetime,
+) -> str:
+    """Execute operations into an EXISTING observation set and manifest; return the first failure.
+
+    Accumulating in place is what lets several planning phases share one manifest and one merged
+    observation set. A manifest per phase would put the signature over three documents that could
+    each be swapped independently.
+    """
     first_reason = ""
 
     for operation in operations:
-        # Checked BEFORE the request: an operation that cannot name the code interpreting its
-        # payload must not reach the target at all, let alone produce evidence.
         # Checked BEFORE the request: an operation that cannot name the code interpreting its
         # payload must not reach the target at all, let alone produce evidence.
         _parser_identity(operation, "parser_implementation_id")
@@ -226,7 +434,6 @@ def run_operation_sequence(
             payload = transport.get(path, params)
         except Exception as exc:  # noqa: BLE001 - mapped to a closed reason
             reason = _closed_reason(exc)
-            any_failure = True
             first_reason = first_reason or reason
             for code in operation.observation_field_codes:  # type: ignore[attr-defined]
                 # Do NOT overwrite a field an earlier operation observed successfully: several
@@ -249,12 +456,7 @@ def run_operation_sequence(
         for code, obs in parse(operation, payload).items():
             observations[code] = _merge_observation(code, observations.get(code), obs)
 
-    return VersionDiscoveryResult(
-        observations=observations,
-        manifest=DiscoveryOperationManifest(operations=tuple(records)),
-        failed=any_failure,
-        failure_reason=first_reason,
-    )
+    return first_reason
 
 
 def _sequence_evidence(
