@@ -521,14 +521,29 @@ def _parse_sdn_root(operation: object, payload: object) -> dict[str, Observation
 
 
 def _parse_effective_permissions(operation: object, payload: object) -> dict[str, Observation]:
+    """The self-scoped effective permission map, read for the two authorities that need it.
+
+    The privilege KEY's presence is the grant; the value is the propagate flag, so a zero-valued
+    entry still means granted-at-this-path. Read from the map only — never inferred from the fact
+    that some other read succeeded, because a silently filtered index succeeds either way.
+    """
     body = _object(payload, "effective_permissions")
-    granted = False
-    for path in ("/sdn", "/"):
-        entry = body.get(path)
-        if isinstance(entry, dict) and _truthy(entry, "SDN.Audit"):
-            granted = True
-            break
-    return {"sdn_read_authority": Observation.observed({"sdn_audit_granted": granted})}
+
+    def _granted(privilege: str, paths: tuple[str, ...]) -> bool:
+        for path in paths:
+            entry = body.get(path)
+            if isinstance(entry, dict) and privilege in entry:
+                return True
+        return False
+
+    return {
+        "sdn_read_authority": Observation.observed(
+            {"sdn_audit_granted": _granted("SDN.Audit", ("/sdn", "/"))}
+        ),
+        "guest_read_authority": Observation.observed(
+            {"vm_audit_granted": _granted("VM.Audit", ("/vms", "/"))}
+        ),
+    }
 
 
 #: Which key identifies an object in each pending family. An object whose identifier key is absent

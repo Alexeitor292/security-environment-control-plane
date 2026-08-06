@@ -431,3 +431,34 @@ def test_firewall_capability_is_assembled_from_two_complementary_reads():
     groups = observe(GetClusterFirewallGroupsOperation(), [{"group": "secp-lab"}])
     assert options["firewall_capability"].value == {"cluster_options": {"enable": True}}
     assert groups["firewall_capability"].value == {"security_groups": ("secp-lab",)}
+
+
+def test_the_permission_map_is_read_for_guest_authority_as_well_as_sdn():
+    """Both authorities come from the same self-scoped read, and each must be read for its OWN
+    privilege — inferring one from the other is how a token that may see SDN is treated as one that
+    may see every guest."""
+    both = observe(
+        GetEffectivePermissionsOperation(),
+        {"/sdn": {"SDN.Audit": 1}, "/vms": {"VM.Audit": 1}},
+    )
+    assert both["sdn_read_authority"].value == {"sdn_audit_granted": True}
+    assert both["guest_read_authority"].value == {"vm_audit_granted": True}
+
+    sdn_only = observe(GetEffectivePermissionsOperation(), {"/sdn": {"SDN.Audit": 1}})
+    assert sdn_only["guest_read_authority"].value == {"vm_audit_granted": False}
+
+    vm_only = observe(GetEffectivePermissionsOperation(), {"/vms": {"VM.Audit": 1}})
+    assert vm_only["sdn_read_authority"].value == {"sdn_audit_granted": False}
+
+
+def test_a_privilege_granted_at_the_root_path_counts_for_both():
+    granted = observe(GetEffectivePermissionsOperation(), {"/": {"SDN.Audit": 1, "VM.Audit": 1}})
+    assert granted["sdn_read_authority"].value == {"sdn_audit_granted": True}
+    assert granted["guest_read_authority"].value == {"vm_audit_granted": True}
+
+
+def test_the_privilege_key_is_the_grant_and_the_value_is_only_the_propagate_flag():
+    """Proxmox returns ``{path: {Privilege: <propagate 0|1>}}``. A zero-valued entry still means
+    granted AT THIS PATH; reading the value as the grant would drop non-propagating grants."""
+    zero = observe(GetEffectivePermissionsOperation(), {"/vms": {"VM.Audit": 0}})
+    assert zero["guest_read_authority"].value == {"vm_audit_granted": True}

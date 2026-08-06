@@ -79,7 +79,7 @@ def _cluster_payloads(*, sdn_root_denied: bool = False) -> dict[str, object]:
         ],
         "/nodes": [{"node": n, "status": "online"} for n in NODES],
         "/cluster/sdn": [{"subdir": "zones"}],
-        "/access/permissions": {"/sdn": {"SDN.Audit": 1}},
+        "/access/permissions": {"/sdn": {"SDN.Audit": 1}, "/vms": {"VM.Audit": 1}},
         "/cluster/resources": [
             {"type": "qemu", "node": "pve-a", "vmid": 100},
             {"type": "qemu", "node": "pve-b", "vmid": 101},

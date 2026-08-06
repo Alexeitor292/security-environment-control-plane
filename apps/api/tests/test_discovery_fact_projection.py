@@ -65,6 +65,7 @@ def _raw(**overrides) -> dict[str, Observation]:
         "existing_lxc_ids": Observation.observed({n: () for n in NODES}),
         "firewall_capability": Observation.observed({"cluster_options": {"enable": True}}),
         "sdn_read_authority": _sdn_authority(),
+        "guest_read_authority": Observation.observed({"vm_audit_granted": True}),
         "existing_sdn_zones": Observation.observed({"z1": {}}),
         "existing_vnets": Observation.observed({"v1": {}}),
         "existing_subnets": Observation.observed({"s1": {}}),
@@ -475,7 +476,10 @@ def test_a_grant_claim_does_not_substitute_for_the_demonstrated_read():
 
 
 def test_the_refused_privilege_is_reported_once_for_the_operator():
-    raw = _raw(sdn_read_authority=None)
+    raw = _raw(
+        sdn_read_authority=None,
+        guest_read_authority=Observation.observed({"vm_audit_granted": True}),
+    )
     projected = project_required_facts(
         raw, control_plane_facts=_control_plane(), contributions=_contributions()
     )
@@ -569,3 +573,74 @@ def test_a_fact_this_run_did_not_ask_for_is_explained():
     assert projected["firewall_capability"].reason_code == (
         "firewall_capability_not_observed_by_this_run"
     )
+
+
+# === the VM.Audit visibility gate =================================================================
+
+
+def test_guest_facts_are_refused_without_vm_audit_even_when_rows_arrived():
+    """Proxmox FILTERS guest rows the caller may not see rather than refusing the read, so an index
+    that returns rows proves only that SOME guests are visible. That is exactly the claim which
+    permits a VMID or CTID collision with one that is not."""
+    raw = _raw(guest_read_authority=None)
+    projected = project_required_facts(
+        raw, control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    for fact in ("existing_vm_ids", "existing_lxc_ids", "templates"):
+        assert projected[fact].state is S.permission_denied, fact
+        assert projected[fact].missing_privilege == "VM.Audit"
+        assert projected[fact].reason_code == "vm_read_authority_not_established"
+    # ...while the raw observation really did carry rows.
+    assert raw["existing_vm_ids"].is_usable is True
+    assert raw["existing_vm_ids"].value
+
+
+def test_vm_audit_is_not_inferred_from_a_permission_map_that_grants_something_else():
+    raw = _raw(guest_read_authority=Observation.observed({"vm_audit_granted": False}))
+    projected = project_required_facts(
+        raw, control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    assert projected["existing_vm_ids"].state is S.permission_denied
+
+
+def test_vm_audit_is_not_inferred_from_an_unusable_permission_read():
+    """A permission map that could not be read is not a permission map that granted."""
+    raw = _raw(guest_read_authority=Observation.probe_failed("x"))
+    projected = project_required_facts(
+        raw, control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    assert projected["existing_vm_ids"].state is S.permission_denied
+
+
+def test_the_two_authority_gates_are_independent():
+    """SDN authority does not grant guest visibility, and neither grants the other."""
+    sdn_only = _raw(guest_read_authority=Observation.observed({"vm_audit_granted": False}))
+    projected = project_required_facts(
+        sdn_only, control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    assert projected["existing_sdn_zones"].is_usable is True
+    assert projected["existing_vm_ids"].is_usable is False
+
+    vm_only = _raw(sdn_read_authority=None)
+    projected = project_required_facts(
+        vm_only, control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    assert projected["existing_vm_ids"].is_usable is True
+    assert projected["existing_sdn_zones"].is_usable is False
+
+
+def test_granting_vm_audit_opens_the_gate():
+    """A gate that never opens is not a gate."""
+    projected = project_required_facts(
+        _raw(), control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    for fact in ("existing_vm_ids", "existing_lxc_ids", "templates"):
+        assert projected[fact].is_usable is True, fact
+
+
+def test_both_refused_privileges_are_reported_for_the_operator():
+    raw = _raw(sdn_read_authority=None, guest_read_authority=None)
+    projected = project_required_facts(
+        raw, control_plane_facts=_control_plane(), contributions=_contributions()
+    )
+    assert unobserved_privileges(projected) == ("SDN.Audit", "VM.Audit")

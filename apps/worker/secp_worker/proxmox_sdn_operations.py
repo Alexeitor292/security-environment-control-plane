@@ -75,7 +75,13 @@ class GetEffectivePermissionsOperation:
     path_template: ClassVar[str] = "/access/permissions"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.effective-permissions/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.effective-permissions/v1"
-    observation_field_codes: ClassVar[tuple[str, ...]] = ("sdn_read_authority",)
+    #: Guest read authority comes from the SAME self-scoped read. There is no VM.Audit equivalent of
+    #: GET /cluster/sdn — no declarative endpoint that 403s rather than filtering — so the effective
+    #: permission map is the only evidence, and it must be read rather than inferred.
+    observation_field_codes: ClassVar[tuple[str, ...]] = (
+        "sdn_read_authority",
+        "guest_read_authority",
+    )
 
     def rendered_path(self) -> str:
         return self.path_template

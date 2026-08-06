@@ -75,6 +75,17 @@ _DIRECT: frozenset[str] = frozenset(
     }
 )
 
+#: Guest facts that mean nothing unless VM.Audit was demonstrated.
+#:
+#: Proxmox filters guest rows the caller may not see rather than refusing the read, so an index that
+#: returns rows proves only that SOME guests are visible — never that all are. And unlike SDN there
+#: is no declarative endpoint that 403s outright, so the effective permission map is the only
+#: evidence. It is read, never inferred: a successful authentication proves the token works, and an
+#: unrelated successful read proves nothing at all about guests.
+_VM_GATED: frozenset[str] = frozenset({"existing_vm_ids", "existing_lxc_ids", "templates"})
+
+VM_AUDIT_PRIVILEGE = "VM.Audit"
+
 #: Facts that mean nothing unless the SDN read authority was demonstrated.
 _SDN_GATED: frozenset[str] = frozenset(
     {
@@ -207,6 +218,19 @@ def _sdn_authority_established(raw: Mapping[str, Observation]) -> bool:
     return isinstance(value, dict) and value.get("cluster_sdn_readable") is True
 
 
+def _vm_audit_established(raw: Mapping[str, Observation]) -> bool:
+    """Only the effective permission map counts.
+
+    Not "the guest index returned rows" — a filtered index returns rows either way — and not "the
+    token authenticated", which says nothing about what it may see.
+    """
+    authority = raw.get("guest_read_authority")
+    if authority is None or not authority.is_usable:
+        return False
+    value = authority.value
+    return isinstance(value, dict) and value.get("vm_audit_granted") is True
+
+
 def _known_nodes(raw: Mapping[str, Observation]) -> tuple[str, ...] | None:
     names = raw.get("node_names")
     if names is None or not names.is_usable or not isinstance(names.value, (tuple, list)):
@@ -314,6 +338,7 @@ def project_required_facts(
     sources = dict(contributions or {})
     nodes = _known_nodes(raw)
     sdn_authority = _sdn_authority_established(raw)
+    vm_audit = _vm_audit_established(raw)
     out: dict[str, Observation] = {}
 
     for fact in REQUIRED_FACTS:
@@ -329,6 +354,15 @@ def project_required_facts(
 
         if name == "exact_pve_version":
             out[name] = _exact_pve_version(raw)
+            continue
+
+        if name in _VM_GATED and not vm_audit:
+            # Rows may well have arrived. They establish that SOME guests are visible, which is
+            # exactly the claim that permits a VMID or CTID collision with one that is not.
+            out[name] = Observation.permission_denied(
+                missing_privilege=VM_AUDIT_PRIVILEGE,
+                reason_code="vm_read_authority_not_established",
+            )
             continue
 
         if name in _SDN_GATED and not sdn_authority:
