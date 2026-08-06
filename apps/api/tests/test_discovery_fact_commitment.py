@@ -20,6 +20,7 @@ from secp_api.discovery_fact_commitment import (
     build_fact_commitment,
     canonical_value,
     contribution_of,
+    node_accounting,
     scope_of,
 )
 from secp_api.discovery_observation import Observation
@@ -336,3 +337,90 @@ def test_a_value_the_canonicaliser_does_not_recognise_is_still_covered():
 def test_list_order_is_preserved_because_it_is_what_the_target_returned():
     assert canonical_value(["b", "a"]) == ["b", "a"]
     assert canonical_value(["b", "a"]) != canonical_value(["a", "b"])
+
+
+# === node accounting ==============================================================================
+
+
+def test_the_expected_node_set_is_inside_the_digest():
+    """What "complete" MEANT is part of the signature. Without it, a snapshot accounted against a
+    two-node cluster could later be read as complete for a three-node one."""
+    two = _commit(expected_node_identities=("pve-a", "pve-b"))
+    three = _commit(expected_node_identities=("pve-a", "pve-b", "pve-c"))
+    assert _states(two) == _states(three)
+    assert two.digest() != three.digest()
+
+
+def test_renaming_an_expected_node_moves_the_digest():
+    a = _commit(expected_node_identities=("pve-a", "pve-b"))
+    b = _commit(expected_node_identities=("pve-a", "pve-z"))
+    assert a.digest() != b.digest()
+
+
+def test_the_expected_node_set_is_bound_directly_and_not_only_through_the_accounting():
+    """With NO contributions the per-fact accounting is empty for both, so the only thing that can
+    distinguish these two commitments is the expected set itself. Without this the field could be
+    dropped from the canonical form and every other test would still pass — it would be carried
+    incidentally by the accounting block, which vanishes the moment a run contributes nothing."""
+    a = _commit(contributions={}, expected_node_identities=("pve-a", "pve-b"))
+    b = _commit(contributions={}, expected_node_identities=("pve-a", "pve-b", "pve-c"))
+    assert a.canonical()["node_accounting"] == b.canonical()["node_accounting"] == []
+    assert a.digest() != b.digest()
+
+
+def test_a_node_denied_by_one_source_stays_denied_when_another_succeeds():
+    """Worst outcome wins per node. One denied read about a node is not cured by another read
+    about the same node succeeding — the denied one covered something this one did not."""
+    contributions = {
+        "node_capacity": (
+            FactContribution(
+                operation_code="node_status",
+                rendered_path="/nodes/pve-a/status",
+                state="observed",
+                subject="pve-a",
+            ),
+            FactContribution(
+                operation_code="node_apt",
+                rendered_path="/nodes/pve-a/apt/versions",
+                state="permission_denied",
+                subject="pve-a",
+                missing_privilege="Sys.Audit",
+            ),
+        )
+    }
+    accounting = node_accounting(("pve-a",), contributions["node_capacity"])
+    assert accounting == {"pve-a": "denied"}
+
+
+def test_every_expected_node_lands_in_exactly_one_outcome():
+    contributions = (
+        FactContribution(operation_code="o", rendered_path="/p", state="observed", subject="n1"),
+        FactContribution(
+            operation_code="o", rendered_path="/p", state="permission_denied", subject="n2"
+        ),
+        FactContribution(
+            operation_code="o", rendered_path="/p", state="observed_unsupported", subject="n3"
+        ),
+        FactContribution(
+            operation_code="o", rendered_path="/p", state="probe_failed", subject="n4"
+        ),
+    )
+    accounting = node_accounting(("n1", "n2", "n3", "n4", "n5"), contributions)
+    assert accounting == {
+        "n1": "observed",
+        "n2": "denied",
+        "n3": "unsupported",
+        "n4": "failed",
+        "n5": "missing",
+    }
+
+
+def test_a_contribution_about_a_node_outside_the_expected_set_accounts_for_nothing():
+    """Accounting starts from the EXPECTED set: an answer about a node the cluster does not list
+    cannot make a listed node covered."""
+    contributions = (
+        FactContribution(
+            operation_code="o", rendered_path="/p", state="observed", subject="pve-ghost"
+        ),
+    )
+    assert node_accounting(("pve-a",), contributions) == {"pve-a": "missing"}

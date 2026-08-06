@@ -50,7 +50,11 @@ from secp_worker.preflight.secret_resolution import (
     TrustedCredentialReference,
     build_discovery_resolution_request,
 )
-from secp_worker.proxmox_discovery_composition import cluster_fingerprint_of, run_full_discovery
+from secp_worker.proxmox_discovery_composition import (
+    cluster_fingerprint_of,
+    expected_node_identities_of,
+    run_full_discovery,
+)
 from secp_worker.proxmox_discovery_plan import MAX_PLANNED_OPERATIONS, DiscoveryPlanError
 
 NOW = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
@@ -446,6 +450,7 @@ def test_the_signed_facts_hash_covers_the_observed_values_not_just_their_states(
             cluster_fingerprint=cluster_fingerprint_of(observations),
             operation_identity=OPERATION,
             operation_generation=GENERATION,
+            expected_node_identities=expected_node_identities_of(observations),
         )
 
     assert _commit(result.observations).digest() == result.binding.facts_hash
@@ -669,6 +674,7 @@ def test_an_omitted_negative_contribution_changes_the_signature():
         cluster_fingerprint=cluster_fingerprint_of(result.observations),
         operation_identity=OPERATION,
         operation_generation=GENERATION,
+        expected_node_identities=expected_node_identities_of(result.observations),
     )
     assert recomputed.digest() != result.binding.facts_hash
 

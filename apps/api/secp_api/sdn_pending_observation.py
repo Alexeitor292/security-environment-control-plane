@@ -109,6 +109,7 @@ def authenticate_pending_content(
         cluster_fingerprint=_signed_cluster_fingerprint(observations),
         operation_identity=binding.operation_identity,
         operation_generation=binding.operation_generation,
+        expected_node_identities=_expected_nodes(observations),
     )
     if commitment.digest() != binding.facts_hash:
         raise PendingObservationError("pending_content_does_not_match_the_signed_facts")
@@ -118,6 +119,14 @@ def authenticate_pending_content(
         facts_hash=binding.facts_hash,
         pending_sdn_state=_signed_state(binding, PENDING_SDN_FACT),
     )
+
+
+def _expected_nodes(observations: Mapping[str, Observation]) -> tuple[str, ...]:
+    """The worker's derivation, restated so the recomputed commitment can match. Pinned by test."""
+    names = observations.get("node_names")
+    if names is None or not names.is_usable or not isinstance(names.value, (tuple, list)):
+        return ()
+    return tuple(sorted(str(n) for n in names.value))
 
 
 def _signed_state(binding: object, fact: str) -> str:

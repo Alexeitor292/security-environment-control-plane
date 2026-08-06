@@ -30,8 +30,14 @@ is a different problem from a grant to request, and the distinction survives to 
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
+from secp_api.discovery_fact_commitment import (
+    NODE_DENIED,
+    NODE_OBSERVED,
+    FactContribution,
+    node_accounting,
+)
 from secp_api.discovery_observation import Observation
 from secp_api.discovery_required_facts import REQUIRED_FACTS
 from secp_api.enums import DiscoveryObservationState
@@ -209,34 +215,69 @@ def _known_nodes(raw: Mapping[str, Observation]) -> tuple[str, ...] | None:
 
 
 def _node_coverage(
-    name: str, observation: Observation, raw: Mapping[str, Observation], nodes: tuple[str, ...]
+    name: str,
+    observation: Observation,
+    raw: Mapping[str, Observation],
+    nodes: tuple[str, ...],
+    contributions: Mapping[str, Sequence[FactContribution]],
 ) -> Observation:
-    """Refuse a node-scoped fact that does not cover every node.
+    """Refuse a node-scoped fact that does not account for EVERY expected node.
 
-    A mapping covering one node of three is not a smaller answer. It is what a plan compiler reads
-    as "capacity is known" immediately before placing guests on the two nodes nobody looked at.
+    The rule this replaces asked whether any key beginning with a node's name appeared in the
+    value. That accepted one successful storage read as certifying a whole node, and it could not
+    see a node no operation was even planned for — an absence and an answer looked identical.
+
+    Accounting now starts from the expected node set (the observed cluster inventory) and assigns
+    every node exactly one outcome: observed, denied, unsupported, failed or missing. Anything but
+    ``observed`` for any expected node refuses the fact for CLUSTER-WIDE use, and the refusal names
+    the nodes and their outcomes so an operator knows whether to grant, retry or re-observe.
     """
     value = observation.value
     if not isinstance(value, dict):
         return Observation.malformed(f"{name}_is_not_a_node_keyed_mapping")
 
-    if name in _NODE_KEYED:
-        missing = [node for node in nodes if node not in value]
-    else:
-        container = raw.get(_NODE_PREFIXED[name])
-        container_value = container.value if container is not None and container.is_usable else {}
-        missing = []
-        for node in nodes:
-            if any(key.startswith(f"{node}/") for key in value):
-                continue
-            # Vacuously covered when the node has none of the things this fact describes.
-            if isinstance(container_value, dict) and container_value.get(node) == ():
-                continue
-            missing.append(node)
+    accounting = node_accounting(nodes, contributions.get(name, ()))
+    unaccounted = {
+        node: outcome for node, outcome in accounting.items() if outcome != NODE_OBSERVED
+    }
 
-    if missing:
-        return _unobserved(f"{name}_missing_for_nodes:{','.join(sorted(missing))}")
+    # A node whose outcome is `observed` must also actually appear in the merged value; a source
+    # that answered about a node without contributing a key for it has covered nothing.
+    for node in nodes:
+        if accounting.get(node) != NODE_OBSERVED:
+            continue
+        if not _value_covers(name, value, node, raw):
+            unaccounted[node] = "answered_without_covering"
+
+    if unaccounted:
+        detail = ",".join(f"{node}={outcome}" for node, outcome in sorted(unaccounted.items()))
+        if all(outcome == NODE_DENIED for outcome in unaccounted.values()):
+            return Observation.permission_denied(
+                missing_privilege=_denied_privilege(contributions.get(name, ())),
+                reason_code=f"{name}_not_accounted_for_every_node:{detail}",
+            )
+        return _unobserved(f"{name}_not_accounted_for_every_node:{detail}")
     return observation
+
+
+def _denied_privilege(contributions: Sequence[FactContribution]) -> str:
+    """The privilege the denials named, so a refusal tells an operator what to grant."""
+    named = sorted({c.missing_privilege for c in contributions if c.missing_privilege})
+    return named[0] if named else "unknown_privilege"
+
+
+def _value_covers(
+    name: str, value: Mapping[str, object], node: str, raw: Mapping[str, Observation]
+) -> bool:
+    """Whether the merged value actually says something about this node."""
+    if name in _NODE_KEYED:
+        return node in value
+    if any(str(key).startswith(f"{node}/") for key in value):
+        return True
+    # Vacuously covered when the node has none of the things this fact describes.
+    container = raw.get(_NODE_PREFIXED[name])
+    container_value = container.value if container is not None and container.is_usable else {}
+    return isinstance(container_value, dict) and container_value.get(node) == ()
 
 
 def _pending_sdn_completeness(observation: Observation, raw: Mapping[str, Observation]) -> str:
@@ -262,6 +303,7 @@ def project_required_facts(
     raw: Mapping[str, Observation],
     *,
     control_plane_facts: Mapping[str, Observation] | None = None,
+    contributions: Mapping[str, Sequence[FactContribution]] | None = None,
 ) -> dict[str, Observation]:
     """Every name in the required-fact table, with an observation for each. Never more, never less.
 
@@ -269,6 +311,7 @@ def project_required_facts(
     no reason, which is the one outcome an operator cannot act on.
     """
     supplied = dict(control_plane_facts or {})
+    sources = dict(contributions or {})
     nodes = _known_nodes(raw)
     sdn_authority = _sdn_authority_established(raw)
     out: dict[str, Observation] = {}
@@ -312,7 +355,7 @@ def project_required_facts(
             if nodes is None:
                 out[name] = _unobserved(f"{name}_cannot_be_completeness_checked_without_node_names")
                 continue
-            observation = _node_coverage(name, observation, raw, nodes)
+            observation = _node_coverage(name, observation, raw, nodes, sources)
 
         out[name] = observation
 

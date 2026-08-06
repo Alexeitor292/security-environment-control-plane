@@ -171,7 +171,13 @@ def test_a_transport_failure_produces_observations_not_an_exception():
     assert result.failed is True
     assert result.failure_reason == "proxmox_discovery_permission_denied"
     for obs in result.observations.values():
-        assert obs.state is S.probe_failed
+        # A 403 is a DENIAL naming the privilege to grant, not an anonymous probe failure. It used
+        # to arrive here as probe_failed, which is what made unobserved_privileges() empty.
+        assert obs.state is S.permission_denied
+        # /version is declared to need no privilege, so a 403 on it means SECP's model of the
+        # endpoint is wrong. "unknown_privilege" says exactly that rather than naming one we have
+        # no basis for — and Observation refuses a denial with no named privilege at all.
+        assert obs.missing_privilege == "unknown_privilege"
         assert obs.value is None
     # The failure is still recorded as an operation — a run that refused is evidence too.
     assert result.manifest.operations[0].response_status_classification == "refused"

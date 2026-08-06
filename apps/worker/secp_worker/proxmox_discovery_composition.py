@@ -202,7 +202,9 @@ def run_full_discovery(
         completed_at=completed_at,
     )
     required_facts = project_required_facts(
-        execution.observations, control_plane_facts=control_plane_facts
+        execution.observations,
+        control_plane_facts=control_plane_facts,
+        contributions=execution.contributions,
     )
 
     binding = build_discovery_binding(
@@ -230,6 +232,19 @@ def run_full_discovery(
         required_facts=required_facts,
         contributions=execution.contributions,
     )
+
+
+def expected_node_identities_of(observations: dict[str, Observation]) -> tuple[str, ...]:
+    """The node set every node-scoped fact is accounted against.
+
+    Taken from the observed cluster inventory rather than from a caller, and empty when that
+    inventory is not usable: an unknown node set makes "complete" unanswerable, and inventing one
+    would make every node-scoped fact vacuously complete.
+    """
+    names = observations.get("node_names")
+    if names is None or not names.is_usable or not isinstance(names.value, (tuple, list)):
+        return ()
+    return tuple(sorted(str(n) for n in names.value))
 
 
 def cluster_fingerprint_of(observations: dict[str, Observation]) -> str:
@@ -298,6 +313,7 @@ def build_discovery_binding(
         cluster_fingerprint=cluster_fingerprint,
         operation_identity=expectation.operation_identity,
         operation_generation=expectation.operation_generation,
+        expected_node_identities=expected_node_identities_of(observations),
     )
 
     return DiscoverySnapshotBinding(
@@ -526,6 +542,21 @@ def _execute_into(
     return first_reason
 
 
+def _operation_subject(operation: object) -> str:
+    """Which node (and thing) this operation spoke for. "" for a cluster-wide read.
+
+    Read off the operation's declared fields rather than parsed back out of the rendered path: the
+    path is a rendering of these, and re-deriving them from it would be a second answer to a
+    question the operation already knows.
+    """
+    node = str(getattr(operation, "node", "") or "")
+    for attribute in ("storage", "zone"):
+        thing = str(getattr(operation, attribute, "") or "")
+        if node and thing:
+            return f"{node}/{thing}"
+    return node
+
+
 def _record_contribution(
     contributions: dict[str, tuple[FactContribution, ...]],
     code: str,
@@ -537,6 +568,7 @@ def _record_contribution(
         operation_code=operation.operation_code,  # type: ignore[attr-defined]
         rendered_path=operation.rendered_path(),  # type: ignore[attr-defined]
         observation=observation,
+        subject=_operation_subject(operation),
     )
     contributions[code] = (*contributions.get(code, ()), entry)
 

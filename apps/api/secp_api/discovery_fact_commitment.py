@@ -94,6 +94,10 @@ class FactContribution:
     operation_code: str
     rendered_path: str
     state: str
+    #: The dynamic identifier this operation spoke for — the node, or ``node/thing`` — or "" for a
+    #: cluster-wide read. Without it, "which nodes did this fact actually cover" is only guessable
+    #: by parsing paths, and a fact covering one node of three is exactly what must not pass.
+    subject: str = ""
     reason_code: str = ""
     missing_privilege: str = ""
     #: Digest rather than the value: contributions are per-source and would otherwise duplicate the
@@ -106,6 +110,7 @@ class FactContribution:
             "operation_code": self.operation_code,
             "rendered_path": self.rendered_path,
             "state": self.state,
+            "subject": self.subject,
             "reason_code": self.reason_code,
             "missing_privilege": self.missing_privilege,
             "value_digest": self.value_digest,
@@ -114,13 +119,14 @@ class FactContribution:
 
 
 def contribution_of(
-    *, operation_code: str, rendered_path: str, observation: Observation
+    *, operation_code: str, rendered_path: str, observation: Observation, subject: str = ""
 ) -> FactContribution:
     """Build the record for one operation's answer about one fact."""
     return FactContribution(
         operation_code=operation_code,
         rendered_path=rendered_path,
         state=observation.state.value,
+        subject=subject,
         reason_code=observation.reason_code,
         missing_privilege=observation.missing_privilege,
         value_digest=(
@@ -130,6 +136,53 @@ def contribution_of(
         ),
         scope=scope_of(observation.value) if observation.is_usable else (),
     )
+
+
+#: Per-node outcomes for a node-scoped fact. Exhaustive on purpose: every expected node lands in
+#: exactly one of these, and ``missing`` is the one that a "did any node answer" check cannot see.
+NODE_OBSERVED = "observed"
+NODE_DENIED = "denied"
+NODE_UNSUPPORTED = "unsupported"
+NODE_FAILED = "failed"
+NODE_MISSING = "missing"
+
+_STATE_TO_NODE_OUTCOME: dict[str, str] = {
+    "observed": NODE_OBSERVED,
+    "permission_denied": NODE_DENIED,
+    "observed_unsupported": NODE_UNSUPPORTED,
+}
+
+
+def node_accounting(
+    expected_nodes: Sequence[str], contributions: Sequence[FactContribution]
+) -> dict[str, str]:
+    """Account for EVERY expected node, including the ones nothing spoke for.
+
+    The rule this replaces accepted a node as covered if any key beginning with its name appeared
+    anywhere in the value — so one successful storage read certified a whole node, and a node no
+    operation was even planned for was indistinguishable from one that answered. Accounting starts
+    from the EXPECTED set and assigns an outcome to each, so ``missing`` is a first-class result
+    rather than an absence nobody looks for.
+    """
+    by_subject: dict[str, list[str]] = {}
+    for contribution in contributions:
+        node = contribution.subject.split("/", 1)[0]
+        if node:
+            by_subject.setdefault(node, []).append(contribution.state)
+
+    out: dict[str, str] = {}
+    for node in expected_nodes:
+        states = by_subject.get(node)
+        if not states:
+            out[node] = NODE_MISSING
+            continue
+        # Worst outcome wins: one denied read about a node is not cured by another succeeding.
+        outcomes = {_STATE_TO_NODE_OUTCOME.get(state, NODE_FAILED) for state in states}
+        for outcome in (NODE_DENIED, NODE_FAILED, NODE_UNSUPPORTED, NODE_OBSERVED):
+            if outcome in outcomes:
+                out[node] = outcome
+                break
+    return out
 
 
 @dataclass(frozen=True)
@@ -145,6 +198,10 @@ class FactCommitment:
     observations: Mapping[str, Observation] = field(default_factory=dict)
     required_facts: Mapping[str, Observation] = field(default_factory=dict)
     contributions: Mapping[str, Sequence[FactContribution]] = field(default_factory=dict)
+    #: The node set every node-scoped fact is accounted against, taken from the observed cluster
+    #: inventory. Bound into the digest so a snapshot cannot later be read against a different
+    #: node set: adding, removing or renaming a node changes what "complete" meant.
+    expected_node_identities: tuple[str, ...] = ()
 
     def _fact_rows(self, facts: Mapping[str, Observation]) -> list[dict]:
         rows = []
@@ -169,6 +226,16 @@ class FactCommitment:
     def canonical(self) -> dict:
         return {
             "commitment_version": self.commitment_version,
+            "expected_node_identities": list(self.expected_node_identities),
+            "node_accounting": [
+                {
+                    "code": code,
+                    "nodes": node_accounting(
+                        self.expected_node_identities, self.contributions[code]
+                    ),
+                }
+                for code in sorted(self.contributions)
+            ],
             "binding": {
                 "organization_identity": self.organization_identity,
                 "target_identity": self.target_identity,
@@ -201,6 +268,7 @@ def build_fact_commitment(
     cluster_fingerprint: str,
     operation_identity: str,
     operation_generation: int,
+    expected_node_identities: Sequence[str] = (),
 ) -> FactCommitment:
     """Assemble the commitment. Takes no digest and no precomputed hash.
 
@@ -217,4 +285,5 @@ def build_fact_commitment(
         observations=dict(observations),
         required_facts=dict(required_facts),
         contributions={code: tuple(rows) for code, rows in contributions.items()},
+        expected_node_identities=tuple(expected_node_identities),
     )
