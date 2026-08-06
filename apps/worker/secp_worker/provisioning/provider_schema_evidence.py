@@ -1,29 +1,41 @@
-"""The only gate through which ``provider_schema_validation`` may read ``verified``.
+"""Two layers, because recording a fact and having authority over a claim are different jobs.
 
-``plan_document.py`` used to take a bare ``provider_schema_verified: bool``. A bool is exactly the
-wrong shape for this field: it lets a caller assert the conclusion, and the conclusion is a safety
-claim an operator acts on. What an operator needs to know when they read ``verified`` is not that
-somebody passed ``True`` — it is that a specific, pinned, offline toolchain was actually run against
-a specific rendered configuration and answered.
+``provider_schema_validation`` is a safety claim an operator acts on, so the question this module
+has to answer is not "did someone say the schema was validated" but "can anyone say it without
+having actually validated it". The first version of this module failed that test: it modelled the
+facts as one public frozen dataclass and derived the status from them, which removed the
+``provider_schema_verified=True`` escape hatch and replaced it with a slightly longer one. A caller
+could fill in truthful-looking digests, set four booleans, and get ``verified``. The test fixture
+that did exactly that was the proof.
 
-So this module models the FACTS and derives the status from them. Every fact is required, and the
-two that could most easily be faked by assertion are computed instead:
+So the layers are split by AUTHORITY, not by convenience:
 
-* schema coverage is a set comparison — the types the rendered modules use against the types the
-  provider's own schema reported — rather than a "we checked" flag;
-* the isolation proofs are four separate observations, because "it was isolated" as a single bool
-  is a summary of someone's reasoning, not evidence.
+:class:`ProviderSchemaObservation`
+    Public, freely constructible, deliberately incomplete-tolerant. Records what was seen — exit
+    statuses, parsed schema, missing types, versions, digests, partial isolation observations — and
+    explains what is missing. **It can never produce** ``verified``. Anyone may build one, which is
+    the point: an incomplete record is how an operator learns which step did not happen.
 
-The result is that producing ``verified`` requires having actually run the commands. There is no
-argument you can pass to this module that skips them.
+:class:`ProviderSchemaAttestation`
+    Opaque, token-gated, non-serializable. The ONLY thing that can produce ``verified``. Minting it
+    requires the module-private token, so a caller assembling ordinary dataclasses or dictionaries
+    cannot make one, and it binds the full provenance of the run that produced it — executor
+    identity, toolchain digests, the exact admitted command sequence, the command results, the
+    rendered workspace it validated, and the four isolation observations.
 
-Nothing here performs I/O, spawns a process or imports a transport. It is pure data plus one
-derivation, so it is testable without a toolchain and cannot itself become a way to reach one.
+Binding the workspace is what stops an attestation being reusable. A valid attestation for plan A
+says nothing about plan B, so :func:`schema_validation_status` requires the caller to state which
+workspace it is asking about and refuses on any mismatch. The same applies to the executor
+identity: an attestation minted against a boundary with a different command grammar is refused, not
+trusted.
+
+This module still performs no I/O and spawns no process. It defines who may speak, and about what.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from typing import NoReturn, SupportsIndex
 
 # The two literals the plan document may carry. There is deliberately no third value: an operator
 # reading this field is deciding whether to authorise an apply, and a middle term ("partial",
@@ -31,64 +43,176 @@ from dataclasses import dataclass
 SCHEMA_VALIDATION_VERIFIED = "verified"
 SCHEMA_VALIDATION_UNVERIFIED = "unverified"
 
-# The schema format version this evidence contract was written against. `tofu providers schema
-# -json` reports its own `format_version`, and a future format could move or rename the very keys
-# the coverage check reads. Pinning it means a format change fails closed as `unverified` with a
-# stated reason, rather than silently reporting coverage computed from a structure nobody checked.
+# The schema format version this contract was written against. `tofu providers schema -json`
+# reports its own `format_version`, and a future format could move or rename the very keys the
+# coverage check reads. Pinning it means a format change fails closed with a stated reason rather
+# than reporting coverage computed from a structure nobody checked.
 EXPECTED_SCHEMA_FORMAT_VERSION = "1.0"
 
+# The exact command sequence an attestation must record, in order. Schema inspection is meaningless
+# without the init that placed the pinned provider in the workspace, so the sequence is bound as a
+# whole rather than as three independent successes.
+REVIEWED_COMMAND_SEQUENCE = ("init", "validate", "providers")
 
-class ProviderSchemaEvidenceError(ValueError):
-    """A fact required to reason about schema validation is missing or self-contradictory."""
+# Module-private minting token. An attestation cannot be built without it, and it is not exported
+# by name from anywhere a caller would ordinarily look. `test_provider_schema_authority.py` asserts
+# that no shipped module outside this one reaches it — the same containment the plan-only
+# capability token relies on, reused rather than reinvented.
+_SCHEMA_ATTESTATION_TOKEN = object()
+
+
+class ProviderSchemaAttestationRefused(Exception):
+    """An attestation could not be minted, or does not bind the plan it was offered for."""
+
+
+# ==================================================================================================
+# Layer 1 — the public observation. Records; never authorises.
+# ==================================================================================================
 
 
 @dataclass(frozen=True)
-class IsolationProofs:
-    """The four negative facts, each observed separately.
+class IsolationObservations:
+    """The four negative facts, observed separately.
 
-    They are separate fields rather than one ``isolated: bool`` because they fail for different
-    reasons and a single flag hides which. ``providers schema`` in particular LAUNCHES THE PROVIDER
-    PLUGIN to ask for its schema, so provider code really does execute here — these four are what
-    make that acceptable, and collapsing them into a summary would obscure the one that matters.
+    Separate fields rather than one ``isolated: bool`` because they fail for different reasons and a
+    single flag hides which. ``providers schema -json`` LAUNCHES THE PROVIDER PLUGIN to ask for its
+    schema, so provider code really does execute — these four are what make that acceptable, and a
+    summary would obscure the one that matters.
+
+    Every field defaults to ``False``: an unobserved isolation property is not isolation.
     """
 
-    backend_disabled: bool
-    """``init`` ran with ``-backend=false``: no backend was configured, read, locked or written."""
-
-    no_provider_credentials_present: bool
-    """No Proxmox credential of any kind was placed in the child's environment or workspace."""
-
-    network_egress_denied: bool
-    """Egress was denied for the child process, not merely unused."""
-
-    no_proxmox_endpoint_configured: bool
-    """No Proxmox endpoint was configured, so there was nothing for the plugin to reach."""
+    backend_disabled: bool = False
+    no_provider_credentials_present: bool = False
+    network_egress_denied: bool = False
+    no_proxmox_endpoint_configured: bool = False
 
     def unmet(self) -> tuple[str, ...]:
-        """The names of the proofs that were not observed, in a stable order."""
-        return tuple(
-            name
-            for name, held in (
-                ("backend_disabled", self.backend_disabled),
-                ("no_provider_credentials_present", self.no_provider_credentials_present),
-                ("network_egress_denied", self.network_egress_denied),
-                ("no_proxmox_endpoint_configured", self.no_proxmox_endpoint_configured),
-            )
-            if not held
-        )
+        """The names of the proofs not observed, in a stable order."""
+        return tuple(f.name for f in fields(self) if not getattr(self, f.name))
 
 
 @dataclass(frozen=True)
-class ProviderSchemaEvidence:
-    """Everything that must hold before the plan document may say ``verified``.
+class ProviderSchemaObservation:
+    """What a schema-inspection run saw. Freely constructible, and authoritative over nothing.
 
-    Constructing this object does NOT mean the status is verified — :func:`schema_validation_status`
-    decides that, and it refuses on any unmet fact. The split is deliberate: evidence should be
-    recordable even when it is incomplete, because an incomplete record is how an operator learns
-    *which* step did not happen.
+    Every field has a default, because the honest record of a run that failed at step one is a
+    mostly-empty observation — not an exception, and not silence. :meth:`reasons` is what makes that
+    record useful.
     """
 
-    # --- the toolchain identity ------------------------------------------------------------------
+    opentofu_version: str = ""
+    opentofu_executable_digest: str = ""
+    provider_source: str = ""
+    provider_version: str = ""
+    provider_package_digest: str = ""
+    lockfile_digest: str = ""
+    mirror_digest: str = ""
+    rendered_workspace_hash: str = ""
+
+    offline_init_succeeded: bool = False
+    configuration_validation_succeeded: bool = False
+    schema_extraction_succeeded: bool = False
+    schema_format_version: str = ""
+
+    types_required_by_rendered_modules: frozenset[str] = frozenset()
+    types_present_in_provider_schema: frozenset[str] = frozenset()
+
+    isolation: IsolationObservations = IsolationObservations()
+
+    def missing_types(self) -> tuple[str, ...]:
+        """Types the rendered modules use that the pinned provider's schema does not offer.
+
+        The check the whole exercise exists for. A pin can satisfy every digest and still be the
+        wrong provider version — one that simply does not have
+        ``proxmox_virtual_environment_sdn_vnet``, say — and the failure would otherwise surface as
+        an apply-time error against real infrastructure rather than a refusal before the operator is
+        ever asked to authorise anything.
+        """
+        return tuple(
+            sorted(self.types_required_by_rendered_modules - self.types_present_in_provider_schema)
+        )
+
+    def reasons(self) -> tuple[str, ...]:
+        """Everything about this observation that falls short of a complete run.
+
+        An empty tuple means the observation is COMPLETE. It does not mean the status is
+        ``verified`` — only an attestation can say that, and this method deliberately cannot mint
+        one. Completeness is a precondition for minting, checked again at minting time.
+        """
+        reasons: list[str] = []
+
+        blanks = tuple(
+            name
+            for name, value in (
+                ("opentofu_version", self.opentofu_version),
+                ("opentofu_executable_digest", self.opentofu_executable_digest),
+                ("provider_source", self.provider_source),
+                ("provider_version", self.provider_version),
+                ("provider_package_digest", self.provider_package_digest),
+                ("lockfile_digest", self.lockfile_digest),
+                ("mirror_digest", self.mirror_digest),
+                ("rendered_workspace_hash", self.rendered_workspace_hash),
+            )
+            if not str(value).strip()
+        )
+        if blanks:
+            reasons.append("unpinned or unnamed toolchain identity: " + ", ".join(blanks))
+
+        if not self.offline_init_succeeded:
+            reasons.append("offline initialization did not succeed")
+        if not self.configuration_validation_succeeded:
+            reasons.append("`validate -json` did not succeed for the rendered configuration")
+        if not self.schema_extraction_succeeded:
+            reasons.append("`providers schema -json` did not produce a parseable schema")
+
+        if self.schema_format_version != EXPECTED_SCHEMA_FORMAT_VERSION:
+            reasons.append(
+                f"schema format version {self.schema_format_version!r} is not the expected "
+                f"{EXPECTED_SCHEMA_FORMAT_VERSION!r}"
+            )
+
+        # An empty required set is a failure, not trivially-satisfied coverage. A configuration that
+        # used no provider types would not need a provider at all, so an empty set means the
+        # collection step did not run — and "nothing was required, so everything is covered" is
+        # precisely the vacuous pass this must not give. Set subtraction alone would allow it.
+        if not self.types_required_by_rendered_modules:
+            reasons.append("no provider types were collected from the rendered modules")
+        else:
+            missing = self.missing_types()
+            if missing:
+                reasons.append(
+                    "the pinned provider schema is missing types the rendered modules use: "
+                    + ", ".join(missing)
+                )
+
+        unmet = self.isolation.unmet()
+        if unmet:
+            reasons.append("isolation was not proven: " + ", ".join(unmet))
+
+        return tuple(reasons)
+
+
+# ==================================================================================================
+# Layer 2 — the attestation. The only thing that can authorise `verified`.
+# ==================================================================================================
+
+
+@dataclass(frozen=True)
+class SchemaAttestationBinding:
+    """The provenance an attestation carries.
+
+    Constructing one of these is harmless: it is inert data and cannot authorise anything on its
+    own. Authority comes from :class:`ProviderSchemaAttestation`, which only the private token can
+    mint, and which re-checks this binding against the plan and the live executor identity at every
+    read.
+    """
+
+    # Who ran it — bound so an attestation cannot outlive the boundary it was reviewed against.
+    executor_implementation_id: str
+    executor_implementation_digest: str
+
+    # What ran it.
     opentofu_version: str
     opentofu_executable_digest: str
     provider_source: str
@@ -97,122 +221,273 @@ class ProviderSchemaEvidence:
     lockfile_digest: str
     mirror_digest: str
 
-    # --- what was actually validated -------------------------------------------------------------
+    # What it ran against, and what it did.
     rendered_workspace_hash: str
-    """The hash of the exact configuration that was validated. Binds the answer to the question."""
+    command_sequence: tuple[str, ...]
+    command_result_digests: tuple[str, ...]
 
-    # --- what the three commands did -------------------------------------------------------------
-    offline_init_succeeded: bool
-    configuration_validation_succeeded: bool
-    """``validate -json`` returned success for the exact rendered configuration."""
-    schema_extraction_succeeded: bool
-    """``providers schema -json`` returned a parseable document."""
+    # What it found.
     schema_format_version: str
-
-    # --- coverage, as sets rather than a claim ---------------------------------------------------
     types_required_by_rendered_modules: frozenset[str]
-    """Every provider resource and data-source type the rendered configuration actually uses."""
     types_present_in_provider_schema: frozenset[str]
-    """Every type the provider's own schema document reported."""
 
-    # --- the negative facts ----------------------------------------------------------------------
-    isolation: IsolationProofs
-
-    def missing_types(self) -> tuple[str, ...]:
-        """Types the rendered modules use that the pinned provider's schema does not offer.
-
-        This is the check the whole exercise exists for. A pin can satisfy every digest and still be
-        the wrong provider version — one that simply does not have ``proxmox_virtual_environment_
-        sdn_vnet``, say — and the failure would otherwise surface as an apply-time error against
-        real infrastructure instead of a refusal before the operator is ever asked to authorise.
-        """
-        return tuple(
-            sorted(self.types_required_by_rendered_modules - self.types_present_in_provider_schema)
-        )
+    # What it proved about the surroundings.
+    isolation: IsolationObservations
 
 
-def _blank_identity_fields(evidence: ProviderSchemaEvidence) -> tuple[str, ...]:
-    """Identity fields that are empty or whitespace, in declaration order.
+class ProviderSchemaAttestation:
+    """An opaque, non-serializable proof that a real schema inspection ran and answered.
 
-    Checked by value rather than by presence: a digest field carrying ``""`` is not an absent digest
-    that someone will fill in later, it is a plan document that would claim a pinned toolchain it
-    cannot name.
+    Modelled on ``PlanOnlyCapability`` deliberately: same private-token construction, same refusal
+    to serialize, same redacted repr. A second trust mechanism would be a second thing to get right.
+
+    Serialization is refused rather than merely unimplemented. A picklable authority object is a
+    file, and a file is a thing that can be produced by something other than the run it describes.
     """
-    return tuple(
-        name
-        for name, value in (
-            ("opentofu_version", evidence.opentofu_version),
-            ("opentofu_executable_digest", evidence.opentofu_executable_digest),
-            ("provider_source", evidence.provider_source),
-            ("provider_version", evidence.provider_version),
-            ("provider_package_digest", evidence.provider_package_digest),
-            ("lockfile_digest", evidence.lockfile_digest),
-            ("mirror_digest", evidence.mirror_digest),
-            ("rendered_workspace_hash", evidence.rendered_workspace_hash),
+
+    __slots__ = ("__binding",)
+
+    def __init__(self, token: object, binding: SchemaAttestationBinding) -> None:
+        if token is not _SCHEMA_ATTESTATION_TOKEN:
+            raise TypeError(
+                "ProviderSchemaAttestation cannot be constructed directly; it is minted only by "
+                "the attested schema-inspection producer, via issue_provider_schema_attestation"
+            )
+        object.__setattr__(self, "_ProviderSchemaAttestation__binding", binding)
+
+    @property
+    def binding(self) -> SchemaAttestationBinding:
+        return object.__getattribute__(self, "_ProviderSchemaAttestation__binding")  # type: ignore[no-any-return]
+
+    def __repr__(self) -> str:
+        return "ProviderSchemaAttestation(<redacted>)"
+
+    __str__ = __repr__
+
+    def __format__(self, format_spec: str) -> str:
+        return self.__repr__()
+
+    def __getstate__(self) -> NoReturn:
+        raise TypeError("ProviderSchemaAttestation cannot be serialized")
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("ProviderSchemaAttestation cannot be pickled")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
+        raise TypeError("ProviderSchemaAttestation cannot be pickled")
+
+
+def issue_provider_schema_attestation(
+    token: object,
+    binding: SchemaAttestationBinding,
+    *,
+    observation: ProviderSchemaObservation,
+    expected_executor_implementation_id: str,
+    expected_executor_implementation_digest: str,
+) -> ProviderSchemaAttestation:
+    """Mint an attestation, or refuse.
+
+    ``token`` is the module-private minting token. It is the first check rather than the last
+    because everything after it is only meaningful once the caller is the producer.
+
+    The observation is required alongside the binding and must be COMPLETE and must AGREE with it.
+    That redundancy is the point: the binding is what the attestation will assert, the observation
+    is what the run actually saw, and requiring both to say the same thing means a producer cannot
+    mint an attestation more confident than its own record.
+    """
+    if token is not _SCHEMA_ATTESTATION_TOKEN:
+        raise ProviderSchemaAttestationRefused(
+            "only the attested schema-inspection producer may mint a schema attestation"
         )
-        if not str(value).strip()
+
+    for f in fields(binding):
+        value = getattr(binding, f.name)
+        if isinstance(value, str) and not value.strip():
+            raise ProviderSchemaAttestationRefused(f"attestation field {f.name} is empty")
+
+    if binding.executor_implementation_id != expected_executor_implementation_id:
+        raise ProviderSchemaAttestationRefused("executor implementation id is not the reviewed one")
+    if binding.executor_implementation_digest != expected_executor_implementation_digest:
+        raise ProviderSchemaAttestationRefused(
+            "executor implementation digest is not the reviewed one"
+        )
+
+    if binding.command_sequence != REVIEWED_COMMAND_SEQUENCE:
+        raise ProviderSchemaAttestationRefused(
+            "attestation does not record the exact reviewed command sequence"
+        )
+    # One result digest per command: an attestation claiming three commands and carrying two
+    # results has not recorded what one of them returned.
+    if len(binding.command_result_digests) != len(REVIEWED_COMMAND_SEQUENCE):
+        raise ProviderSchemaAttestationRefused(
+            "attestation must carry one command-result digest per admitted command"
+        )
+    if any(not d.strip() for d in binding.command_result_digests):
+        raise ProviderSchemaAttestationRefused("attestation carries an empty command-result digest")
+
+    incomplete = observation.reasons()
+    if incomplete:
+        raise ProviderSchemaAttestationRefused(
+            "observation is incomplete: " + "; ".join(incomplete)
+        )
+
+    # The binding may not claim anything the observation did not see.
+    disagreements = tuple(
+        name
+        for name, mine, theirs in (
+            ("opentofu_version", binding.opentofu_version, observation.opentofu_version),
+            (
+                "opentofu_executable_digest",
+                binding.opentofu_executable_digest,
+                observation.opentofu_executable_digest,
+            ),
+            ("provider_source", binding.provider_source, observation.provider_source),
+            ("provider_version", binding.provider_version, observation.provider_version),
+            (
+                "provider_package_digest",
+                binding.provider_package_digest,
+                observation.provider_package_digest,
+            ),
+            ("lockfile_digest", binding.lockfile_digest, observation.lockfile_digest),
+            ("mirror_digest", binding.mirror_digest, observation.mirror_digest),
+            (
+                "rendered_workspace_hash",
+                binding.rendered_workspace_hash,
+                observation.rendered_workspace_hash,
+            ),
+            (
+                "schema_format_version",
+                binding.schema_format_version,
+                observation.schema_format_version,
+            ),
+            (
+                "types_required_by_rendered_modules",
+                binding.types_required_by_rendered_modules,
+                observation.types_required_by_rendered_modules,
+            ),
+            (
+                "types_present_in_provider_schema",
+                binding.types_present_in_provider_schema,
+                observation.types_present_in_provider_schema,
+            ),
+            ("isolation", binding.isolation, observation.isolation),
+        )
+        if mine != theirs
     )
+    if disagreements:
+        raise ProviderSchemaAttestationRefused(
+            "attestation disagrees with the observation it was minted from: "
+            + ", ".join(disagreements)
+        )
+
+    return ProviderSchemaAttestation(_SCHEMA_ATTESTATION_TOKEN, binding)
 
 
-def schema_validation_reasons(evidence: ProviderSchemaEvidence | None) -> tuple[str, ...]:
+# ==================================================================================================
+# The gate the plan document reads.
+# ==================================================================================================
+
+
+def schema_validation_reasons(
+    attestation: object | None,
+    observation: ProviderSchemaObservation | None = None,
+    *,
+    expected_workspace_hash: str = "",
+    expected_executor_implementation_id: str = "",
+    expected_executor_implementation_digest: str = "",
+) -> tuple[str, ...]:
     """Every reason the status is not ``verified``. Empty means it is.
 
-    Returning the reasons rather than a bool is what lets the plan document and the operator
-    manifest say *why* the provider schema is unverified. "unverified" with no reason is the
-    failure mode described in ``plan_document``'s own docstring: a field an operator cannot act on.
+    ``attestation`` is typed ``object`` on purpose. A caller offering a look-alike — a dataclass, a
+    dict, a namespace with a ``.binding`` — must be refused by TYPE rather than by duck-typed
+    attribute access, and a narrower annotation would only document that intent while the runtime
+    check is what enforces it.
+
+    ``observation`` contributes reasons but never authority, so an operator gets a useful
+    explanation in the ordinary case where the run happened and fell short.
     """
-    if evidence is None:
+    if attestation is None:
+        if observation is not None:
+            recorded = observation.reasons()
+            if recorded:
+                return recorded
+            # A complete observation with no attestation is the interesting case: the run looks
+            # finished, but nothing minted authority for it. Saying so is more useful than listing
+            # nothing.
+            return ("a complete observation was recorded but no attestation was minted for it",)
         return ("no schema-validation evidence was recorded",)
 
+    if not isinstance(attestation, ProviderSchemaAttestation):
+        return ("schema-validation authority was offered by something that is not an attestation",)
+
+    binding = attestation.binding
     reasons: list[str] = []
 
-    blanks = _blank_identity_fields(evidence)
-    if blanks:
-        reasons.append("unpinned or unnamed toolchain identity: " + ", ".join(blanks))
+    # Re-checked at READ time, not only at mint time. An attestation minted against an earlier
+    # boundary must not verify a plan produced by this one.
+    if binding.executor_implementation_id != expected_executor_implementation_id:
+        reasons.append("attestation was minted against a different executor implementation id")
+    if binding.executor_implementation_digest != expected_executor_implementation_digest:
+        reasons.append("attestation was minted against a different executor implementation digest")
 
-    if not evidence.offline_init_succeeded:
-        reasons.append("offline initialization did not succeed")
-    if not evidence.configuration_validation_succeeded:
-        reasons.append("`validate -json` did not succeed for the rendered configuration")
-    if not evidence.schema_extraction_succeeded:
-        reasons.append("`providers schema -json` did not produce a parseable schema")
+    # The binding that makes an attestation non-transferable: it names the workspace it validated.
+    if not expected_workspace_hash:
+        reasons.append("no workspace hash was supplied to check the attestation against")
+    elif binding.rendered_workspace_hash != expected_workspace_hash:
+        reasons.append("attestation was minted for a different rendered workspace")
 
-    if evidence.schema_format_version != EXPECTED_SCHEMA_FORMAT_VERSION:
+    if binding.command_sequence != REVIEWED_COMMAND_SEQUENCE:
+        reasons.append("attestation does not record the exact reviewed command sequence")
+    if binding.schema_format_version != EXPECTED_SCHEMA_FORMAT_VERSION:
         reasons.append(
-            f"schema format version {evidence.schema_format_version!r} is not the expected "
+            f"schema format version {binding.schema_format_version!r} is not the expected "
             f"{EXPECTED_SCHEMA_FORMAT_VERSION!r}"
         )
 
-    # An empty required set is treated as a failure, not as trivially-satisfied coverage. A rendered
-    # configuration that uses no provider types would not need a provider at all, so an empty set
-    # here means the extraction step did not run or did not find anything -- and "nothing was
-    # required, so everything is covered" is precisely the vacuous pass this check must not give.
-    if not evidence.types_required_by_rendered_modules:
+    if not binding.types_required_by_rendered_modules:
         reasons.append("no provider types were collected from the rendered modules")
     else:
-        missing = evidence.missing_types()
+        missing = tuple(
+            sorted(
+                binding.types_required_by_rendered_modules
+                - binding.types_present_in_provider_schema
+            )
+        )
         if missing:
             reasons.append(
                 "the pinned provider schema is missing types the rendered modules use: "
                 + ", ".join(missing)
             )
 
-    unmet = evidence.isolation.unmet()
+    unmet = binding.isolation.unmet()
     if unmet:
         reasons.append("isolation was not proven: " + ", ".join(unmet))
 
     return tuple(reasons)
 
 
-def schema_validation_status(evidence: ProviderSchemaEvidence | None) -> str:
-    """``"verified"`` only when every recorded fact holds; otherwise ``"unverified"``.
+def schema_validation_status(
+    attestation: object | None,
+    observation: ProviderSchemaObservation | None = None,
+    *,
+    expected_workspace_hash: str = "",
+    expected_executor_implementation_id: str = "",
+    expected_executor_implementation_digest: str = "",
+) -> str:
+    """``"verified"`` only from a valid attestation that binds THIS plan; otherwise
+    ``"unverified"``.
 
     Fail-closed by construction: the ``verified`` branch is reachable only through an empty reason
-    list, so a fact added to :func:`schema_validation_reasons` in future tightens this function
-    automatically rather than needing a matching edit here.
+    list, so a check added to :func:`schema_validation_reasons` tightens this automatically.
     """
     return (
         SCHEMA_VALIDATION_VERIFIED
-        if not schema_validation_reasons(evidence)
+        if not schema_validation_reasons(
+            attestation,
+            observation,
+            expected_workspace_hash=expected_workspace_hash,
+            expected_executor_implementation_id=expected_executor_implementation_id,
+            expected_executor_implementation_digest=expected_executor_implementation_digest,
+        )
         else SCHEMA_VALIDATION_UNVERIFIED
     )

@@ -41,7 +41,7 @@ from __future__ import annotations
 from secp_scenario_schema import content_hash
 
 from secp_worker.provisioning.provider_schema_evidence import (
-    ProviderSchemaEvidence,
+    ProviderSchemaObservation,
     schema_validation_reasons,
     schema_validation_status,
 )
@@ -100,18 +100,29 @@ def build_plan_document(
     change_set_hash_value: str,
     *,
     desired_state: dict,
-    schema_evidence: ProviderSchemaEvidence | None = None,
+    schema_observation: ProviderSchemaObservation | None = None,
+    schema_attestation: object | None = None,
+    expected_executor_implementation_id: str = "",
+    expected_executor_implementation_digest: str = "",
 ) -> dict:
     """Build the durable, secret-free plan document for operator review.
 
-    ``schema_evidence`` replaces the former ``provider_schema_verified: bool``. The bool was the
-    wrong shape: it let a caller assert the conclusion, and this field is a safety claim an operator
-    acts on. The status is now DERIVED from the recorded facts by
-    :func:`schema_validation_status`, so ``verified`` is reachable only by having actually run the
-    pinned offline toolchain against this exact rendered configuration.
+    Two schema arguments, split by authority, replacing the former
+    ``provider_schema_verified: bool``:
 
-    Omitting the argument yields ``unverified`` with a stated reason, which is the correct reading
-    for every caller that has not run the check.
+    ``schema_observation``
+        What the inspection run saw. Public, freely constructible, and unable to produce
+        ``verified`` on its own. It contributes the REASONS an operator reads.
+
+    ``schema_attestation``
+        The only thing that can produce ``verified``. Token-minted by the attested
+        schema-inspection producer, and re-checked here against this document's own workspace hash
+        and against the executor identity the caller is building under — so an attestation minted
+        for another plan, another toolchain, or an earlier command grammar is refused rather than
+        trusted. Typed ``object`` so a look-alike is rejected by type, not by duck typing.
+
+    Omitting both yields ``unverified`` with a stated reason, which is the correct reading for every
+    caller that has not run the check — today, all of them.
     """
     if not isinstance(change_set, dict):
         raise PlanDocumentError("change set must be an object")
@@ -142,12 +153,29 @@ def build_plan_document(
         "workspace_hash": change_set.get("workspace_hash"),
         "kind": change_set.get("kind"),
         "provenance": dict(change_set.get("provenance") or {}),
-        "provider_schema_validation": schema_validation_status(schema_evidence),
+        # The workspace hash is what makes an attestation non-transferable: it is read from THIS
+        # change set, so an attestation minted for a different rendered workspace cannot verify
+        # this document no matter how well-formed it is.
+        "provider_schema_validation": schema_validation_status(
+            schema_attestation,
+            schema_observation,
+            expected_workspace_hash=str(change_set.get("workspace_hash") or ""),
+            expected_executor_implementation_id=expected_executor_implementation_id,
+            expected_executor_implementation_digest=expected_executor_implementation_digest,
+        ),
         # Why it is not verified, in the operator's own document. An `unverified` with no reason is
         # a field nobody can act on: it does not distinguish "the check has not been built yet"
         # from "the pinned provider is missing a type this plan needs", and those call for opposite
         # responses. Empty exactly when the status is `verified`.
-        "provider_schema_validation_reasons": list(schema_validation_reasons(schema_evidence)),
+        "provider_schema_validation_reasons": list(
+            schema_validation_reasons(
+                schema_attestation,
+                schema_observation,
+                expected_workspace_hash=str(change_set.get("workspace_hash") or ""),
+                expected_executor_implementation_id=expected_executor_implementation_id,
+                expected_executor_implementation_digest=expected_executor_implementation_digest,
+            )
+        ),
         "summary": {
             "resource_count": summary.get("count", len(resources)),
             "by_action": dict(summary.get("by_action") or {}),
