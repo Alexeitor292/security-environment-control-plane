@@ -224,6 +224,70 @@ def test_the_sequencer_exposes_no_path_or_method_parameter():
     }
 
 
+# --- every operation names the code that interpreted ITS payload ----------------------------------
+
+
+def test_each_operation_records_its_own_parser_identity():
+    """One shared parser id across every operation would be a false statement in signed evidence."""
+    ops = [GetVersionOperation(), GetNodesOperation(), GetSdnZonesOperation()]
+    transport = _Fake({"/version": {}, "/nodes": [], "/cluster/sdn/zones": []})
+    result = _run(transport, ops)
+
+    parsers = [r.parser_implementation_id for r in result.manifest.operations]
+    normalizers = [r.normalizer_implementation_id for r in result.manifest.operations]
+    assert len(set(parsers)) == 3, f"operations share a parser identity: {parsers}"
+    assert len(set(normalizers)) == 3
+    assert all(p for p in parsers)
+    # And the recorded id is the operation's own, not a constant the composition chose.
+    for record, operation in zip(result.manifest.operations, ops, strict=True):
+        assert record.parser_implementation_id == operation.parser_implementation_id
+
+
+def test_a_refused_operation_still_records_its_own_parser_identity():
+    class _Denied(Exception):
+        pass
+
+    transport = _Fake({}, errors={"/cluster/sdn/zones": _Denied("x")})
+    result = _run(transport, [GetSdnZonesOperation()])
+    (record,) = result.manifest.operations
+    assert record.parser_implementation_id == GetSdnZonesOperation.parser_implementation_id
+
+
+def test_an_operation_that_names_no_parser_is_refused_before_the_request():
+    """Fail closed, and BEFORE contacting the target: an operation that cannot say which code
+    interprets its payload must not produce evidence at all, and a getattr default would let a newly
+    added operation silently inherit somebody else's identity."""
+    import pytest
+    from secp_worker.proxmox_discovery_composition import DiscoveryCompositionError
+
+    class _Unidentified:
+        operation_code = "unidentified"
+        path_template = "/version"
+        observation_field_codes = ("pve_version_full",)
+
+        def rendered_path(self):
+            return "/version"
+
+        def query_parameters(self):
+            return ()
+
+    transport = _Fake({"/version": {}})
+    with pytest.raises(DiscoveryCompositionError, match="operation_parser_unidentified"):
+        _run(transport, [_Unidentified()])
+    assert transport.calls == [], "an unidentified operation reached the target"
+
+
+def test_every_first_mvp_and_sdn_operation_declares_a_distinct_parser_identity():
+    from secp_worker.proxmox_discovery_operations import FIRST_MVP_OPERATIONS
+    from secp_worker.proxmox_sdn_operations import SDN_OPERATIONS
+
+    all_ops = FIRST_MVP_OPERATIONS + SDN_OPERATIONS
+    parsers = [op.parser_implementation_id for op in all_ops]
+    normalizers = [op.normalizer_implementation_id for op in all_ops]
+    assert len(set(parsers)) == len(all_ops), "two operations share a parser identity"
+    assert len(set(normalizers)) == len(all_ops)
+
+
 def test_every_recorded_operation_is_a_get_with_no_body():
     ops = [GetVersionOperation(), GetSdnZonesOperation(), GetNodeStatusOperation("pve-a", SRC)]
     transport = _Fake({"/version": {}, "/cluster/sdn/zones": [], "/nodes/pve-a/status": {}})

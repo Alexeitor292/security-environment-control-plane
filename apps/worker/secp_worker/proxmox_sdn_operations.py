@@ -25,6 +25,12 @@ from typing import ClassVar
 
 from secp_worker.proxmox_discovery_operations import validated_segment
 
+#: Same identity scheme as the non-SDN operations, and deliberately the same families: these run on
+#: the same engine, so their evidence must be readable by the same reviewer without a second
+#: vocabulary to learn.
+_PARSER = "secp.proxmox-discovery.parser"
+_NORMALIZER = "secp.proxmox-discovery.normalizer"
+
 #: The families whose pending state must ALL be enumerated before any pending claim is made.
 #: There is no read-only "does anything pend" boolean in the API, so completeness is the only way to
 #: know, and a partial enumeration is an unknown rather than a smaller answer.
@@ -41,6 +47,8 @@ class GetSdnRootOperation:
 
     operation_code: ClassVar[str] = "sdn_root_authority"
     path_template: ClassVar[str] = "/cluster/sdn"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-root-authority/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-root-authority/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("sdn_read_authority",)
 
     def rendered_path(self) -> str:
@@ -61,6 +69,8 @@ class GetEffectivePermissionsOperation:
 
     operation_code: ClassVar[str] = "effective_permissions"
     path_template: ClassVar[str] = "/access/permissions"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.effective-permissions/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.effective-permissions/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("sdn_read_authority",)
 
     def rendered_path(self) -> str:
@@ -76,6 +86,8 @@ class GetSdnZonesOperation:
 
     operation_code: ClassVar[str] = "sdn_zones_pending"
     path_template: ClassVar[str] = "/cluster/sdn/zones"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-zones-pending/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-zones-pending/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "existing_sdn_zones",
         "pending_sdn_state",
@@ -95,6 +107,8 @@ class GetSdnVnetsOperation:
 
     operation_code: ClassVar[str] = "sdn_vnets_pending"
     path_template: ClassVar[str] = "/cluster/sdn/vnets"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-vnets-pending/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-vnets-pending/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "existing_vnets",
         "pending_sdn_state",
@@ -122,6 +136,8 @@ class GetSdnSubnetsOperation:
 
     operation_code: ClassVar[str] = "sdn_subnets_pending"
     path_template: ClassVar[str] = "/cluster/sdn/vnets/{vnet}/subnets"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-subnets-pending/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-subnets-pending/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "existing_subnets",
         "pending_sdn_state",
@@ -143,6 +159,8 @@ class GetSdnControllersOperation:
 
     operation_code: ClassVar[str] = "sdn_controllers_pending"
     path_template: ClassVar[str] = "/cluster/sdn/controllers"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-controllers-pending/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-controllers-pending/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("pending_sdn_state",)
 
     def rendered_path(self) -> str:
@@ -162,6 +180,8 @@ class GetSdnIpamStatusOperation:
 
     operation_code: ClassVar[str] = "sdn_ipam_status"
     path_template: ClassVar[str] = "/cluster/sdn/ipams/pve/status"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-ipam-status/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-ipam-status/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("existing_subnets",)
 
     def rendered_path(self) -> str:
@@ -181,6 +201,8 @@ class GetSdnFabricsOperation:
 
     operation_code: ClassVar[str] = "sdn_fabrics"
     path_template: ClassVar[str] = "/cluster/sdn/fabrics/all"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.sdn-fabrics/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.sdn-fabrics/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("pending_sdn_state",)
 
     def rendered_path(self) -> str:
@@ -204,6 +226,8 @@ class GetNodeSdnZonesOperation:
 
     operation_code: ClassVar[str] = "node_sdn_zones"
     path_template: ClassVar[str] = "/nodes/{node}/sdn/zones"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-sdn-zones/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-sdn-zones/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("existing_sdn_zones",)
 
     def __post_init__(self) -> None:
@@ -230,6 +254,8 @@ class GetNodeSdnBridgesOperation:
 
     operation_code: ClassVar[str] = "node_sdn_bridges"
     path_template: ClassVar[str] = "/nodes/{node}/sdn/zones/{zone}/bridges"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-sdn-bridges/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-sdn-bridges/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "bridge_vlan_awareness",
         "existing_vlan_use",

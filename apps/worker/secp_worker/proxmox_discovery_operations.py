@@ -22,6 +22,13 @@ from typing import ClassVar
 VERSION_PARSER_IMPLEMENTATION_ID = "secp.proxmox-discovery.version-parser/v1"
 VERSION_NORMALIZER_IMPLEMENTATION_ID = "secp.proxmox-discovery.version-normalizer/v1"
 
+#: Each operation names the code that interprets ITS payload. One shared id across every operation
+#: would be a false statement in signed evidence — a snapshot claiming the version parser read the
+#: SDN zones response — and the ids exist precisely so a reviewer can tell two parses of identical
+#: bytes apart.
+_PARSER = "secp.proxmox-discovery.parser"
+_NORMALIZER = "secp.proxmox-discovery.normalizer"
+
 
 @dataclass(frozen=True)
 class GetVersionOperation:
@@ -35,6 +42,8 @@ class GetVersionOperation:
 
     operation_code: ClassVar[str] = "api_version"
     path_template: ClassVar[str] = "/version"
+    parser_implementation_id: ClassVar[str] = VERSION_PARSER_IMPLEMENTATION_ID
+    normalizer_implementation_id: ClassVar[str] = VERSION_NORMALIZER_IMPLEMENTATION_ID
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "pve_version_full",
         "pve_version_major",
@@ -95,6 +104,8 @@ class GetClusterStatusOperation:
 
     operation_code: ClassVar[str] = "cluster_status"
     path_template: ClassVar[str] = "/cluster/status"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-status/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-status/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("cluster_identity", "node_names")
 
     def rendered_path(self) -> str:
@@ -110,6 +121,8 @@ class GetNodesOperation:
 
     operation_code: ClassVar[str] = "node_index"
     path_template: ClassVar[str] = "/nodes"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-index/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-index/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("node_names", "node_online_state")
 
     def rendered_path(self) -> str:
@@ -128,6 +141,8 @@ class GetNodeStatusOperation:
 
     operation_code: ClassVar[str] = "node_status"
     path_template: ClassVar[str] = "/nodes/{node}/status"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-status/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-status/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "node_capacity",
         "kernel_version",
@@ -153,6 +168,8 @@ class GetNodeVersionOperation:
 
     operation_code: ClassVar[str] = "node_version"
     path_template: ClassVar[str] = "/nodes/{node}/version"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-version/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-version/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("node_versions",)
 
     def __post_init__(self) -> None:
@@ -174,6 +191,8 @@ class GetNodeAptVersionsOperation:
 
     operation_code: ClassVar[str] = "node_package_inventory"
     path_template: ClassVar[str] = "/nodes/{node}/apt/versions"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-package-inventory/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-package-inventory/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "raw_host_package_version",
         "release_build_identifier",
@@ -198,6 +217,8 @@ class GetNodeNetworkOperation:
 
     operation_code: ClassVar[str] = "node_network"
     path_template: ClassVar[str] = "/nodes/{node}/network"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-network/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-network/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "bridges",
         "bridge_vlan_awareness",
@@ -224,6 +245,8 @@ class GetNodeStorageOperation:
 
     operation_code: ClassVar[str] = "node_storage"
     path_template: ClassVar[str] = "/nodes/{node}/storage"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-storage/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-storage/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "storage_ids",
         "storage_types",
@@ -251,6 +274,8 @@ class GetStorageContentOperation:
 
     operation_code: ClassVar[str] = "storage_content"
     path_template: ClassVar[str] = "/nodes/{node}/storage/{storage}/content"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.storage-content/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.storage-content/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "iso_and_container_template_availability",
         "templates",
@@ -277,6 +302,8 @@ class GetClusterResourcesOperation:
 
     operation_code: ClassVar[str] = "cluster_resources_vm"
     path_template: ClassVar[str] = "/cluster/resources"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-resources/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-resources/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("existing_vm_ids", "existing_lxc_ids")
 
     def rendered_path(self) -> str:
@@ -292,6 +319,8 @@ class GetClusterFirewallOptionsOperation:
 
     operation_code: ClassVar[str] = "cluster_firewall_options"
     path_template: ClassVar[str] = "/cluster/firewall/options"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-firewall-options/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-firewall-options/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("firewall_capability",)
 
     def rendered_path(self) -> str:
@@ -307,6 +336,8 @@ class GetClusterFirewallGroupsOperation:
 
     operation_code: ClassVar[str] = "cluster_firewall_groups"
     path_template: ClassVar[str] = "/cluster/firewall/groups"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-firewall-groups/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-firewall-groups/v1"
     observation_field_codes: ClassVar[tuple[str, ...]] = ("firewall_capability",)
 
     def rendered_path(self) -> str:

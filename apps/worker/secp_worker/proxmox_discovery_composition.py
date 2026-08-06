@@ -212,6 +212,13 @@ def run_operation_sequence(
     first_reason = ""
 
     for operation in operations:
+        # Checked BEFORE the request: an operation that cannot name the code interpreting its
+        # payload must not reach the target at all, let alone produce evidence.
+        # Checked BEFORE the request: an operation that cannot name the code interpreting its
+        # payload must not reach the target at all, let alone produce evidence.
+        _parser_identity(operation, "parser_implementation_id")
+        _parser_identity(operation, "normalizer_implementation_id")
+
         path = operation.rendered_path()  # type: ignore[attr-defined]
         params = dict(operation.query_parameters()) or None  # type: ignore[attr-defined]
         try:
@@ -273,12 +280,27 @@ def _sequence_evidence(
         response_content_type="application/json" if status == "2xx" else "",
         response_size=len(body),
         response_digest=sha256_digest({"body": body.decode("utf-8", errors="replace")}),
-        parser_implementation_id=VERSION_PARSER_IMPLEMENTATION_ID,
-        normalizer_implementation_id=VERSION_NORMALIZER_IMPLEMENTATION_ID,
+        parser_implementation_id=_parser_identity(operation, "parser_implementation_id"),
+        normalizer_implementation_id=_parser_identity(operation, "normalizer_implementation_id"),
         observation_field_codes=operation.observation_field_codes,  # type: ignore[attr-defined]
         started_at=started_at.isoformat(),
         completed_at=completed_at.isoformat(),
     )
+
+
+def _parser_identity(operation: object, attribute: str) -> str:
+    """Read an operation's own parser identity, refusing rather than defaulting.
+
+    Every operation must name the code that interprets ITS payload. A shared constant across all of
+    them would put a false statement into signed evidence — a snapshot claiming the version parser
+    read the SDN zones response — and a ``getattr`` default would let a newly added operation
+    inherit somebody else's identity silently, which is the exact failure the ids exist to prevent.
+    """
+    value = getattr(operation, attribute, "")
+    if not isinstance(value, str) or not value:
+        code = getattr(operation, "operation_code", "unknown")
+        raise DiscoveryCompositionError(f"operation_parser_unidentified:{code}:{attribute}")
+    return value
 
 
 def _resolution_failure(reason: str) -> SignedDiscoveryResult:
