@@ -30,7 +30,11 @@ from secp_worker.proxmox_discovery_operations import (
     GetNodeVersionOperation,
     GetVersionOperation,
 )
-from secp_worker.proxmox_sdn_operations import GetSdnRootOperation, GetSdnZonesOperation
+from secp_worker.proxmox_sdn_operations import (
+    GetNodeSdnZonesOperation,
+    GetSdnRootOperation,
+    GetSdnZonesOperation,
+)
 
 START = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
 END = START + timedelta(seconds=1)
@@ -317,7 +321,47 @@ def test_mappings_that_collide_on_one_key_with_different_values_are_malformed():
 
     obs = result.observations["node_versions"]
     assert obs.state is S.observed_malformed
-    assert obs.reason_code == "source_disagreement:node_versions:pve-a"
+    assert obs.reason_code == "source_disagreement:node_versions.pve-a"
+
+
+def test_complementary_nested_views_of_one_object_merge_rather_than_contradict():
+    """The cluster SDN index and the per-node runtime view both describe zone ``z1``, each with its
+    own sub-keys. A shallow merge would compare the two sub-objects whole and call a complementary
+    pair a contradiction, destroying the partial-visibility differential that reading both is for.
+    """
+    ops = [GetSdnZonesOperation(), GetNodeSdnZonesOperation("pve-a", SRC)]
+    transport = _Fake({"/cluster/sdn/zones": [], "/nodes/pve-a/sdn/zones": []})
+    seen = iter(
+        [
+            {
+                "existing_sdn_zones": Observation.observed(
+                    {"z1": {"cluster_index": {"type": "vlan"}}}
+                )
+            },
+            {"existing_sdn_zones": Observation.observed({"z1": {"node_runtime": {"pve-a": "ok"}}})},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+
+    obs = result.observations["existing_sdn_zones"]
+    assert obs.is_usable is True
+    assert obs.value == {"z1": {"cluster_index": {"type": "vlan"}, "node_runtime": {"pve-a": "ok"}}}
+
+
+def test_a_disagreement_deep_inside_one_object_names_the_exact_path():
+    ops = [GetSdnZonesOperation(), GetNodeSdnZonesOperation("pve-a", SRC)]
+    transport = _Fake({"/cluster/sdn/zones": [], "/nodes/pve-a/sdn/zones": []})
+    seen = iter(
+        [
+            {"existing_sdn_zones": Observation.observed({"z1": {"shared": {"tag": 100}}})},
+            {"existing_sdn_zones": Observation.observed({"z1": {"shared": {"tag": 200}}})},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+
+    obs = result.observations["existing_sdn_zones"]
+    assert obs.state is S.observed_malformed
+    assert obs.reason_code == "source_disagreement:existing_sdn_zones.z1.shared.tag"
 
 
 def test_a_second_failure_does_not_relabel_the_first_reason():

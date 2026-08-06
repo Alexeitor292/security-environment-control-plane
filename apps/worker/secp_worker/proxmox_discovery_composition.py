@@ -39,6 +39,7 @@ from secp_worker.proxmox_discovery_operations import (
     VERSION_PARSER_IMPLEMENTATION_ID,
     GetVersionOperation,
 )
+from secp_worker.proxmox_discovery_projection import observe
 
 #: The transport this composition uses. A constant, not a setting: a deployment cannot select
 #: another, and a test asserting the production transport set reads this rather than a caller's
@@ -310,17 +311,43 @@ def _merge_observation(
     if not existing.is_usable:
         return incoming
 
-    old, new = existing.value, incoming.value
+    try:
+        merged = _deep_merge(existing.value, incoming.value, path=code)
+    except _Disagreement as exc:
+        return Observation.malformed(f"source_disagreement:{exc.path}")
+    return existing if merged == existing.value else Observation.observed(merged)
+
+
+class _Disagreement(Exception):
+    """Two sources gave different answers for the same path within one fact."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.path = path
+
+
+def _deep_merge(old: object, new: object, *, path: str) -> object:
+    """Merge two values for one fact, or raise at the exact path where they disagree.
+
+    Recursive rather than shallow because per-source structure nests: the cluster SDN index and the
+    per-node runtime view both describe zone ``z1``, contributing different sub-keys under it. A
+    shallow merge would compare the two sub-objects whole and call an entirely complementary pair of
+    observations a contradiction — turning the partial-visibility differential, which is the point
+    of reading both, into a malformed fact.
+
+    Disagreement is reported with the path so a reviewer is told which node, storage or zone the two
+    sources fell out over rather than only which fact.
+    """
     if isinstance(old, dict) and isinstance(new, dict):
         merged = dict(old)
         for key, value in new.items():
-            if key in merged and merged[key] != value:
-                return Observation.malformed(f"source_disagreement:{code}:{key}")
-            merged[key] = value
-        return Observation.observed(merged)
-    if old == new:
-        return existing
-    return Observation.malformed(f"source_disagreement:{code}")
+            merged[key] = (
+                _deep_merge(merged[key], value, path=f"{path}.{key}") if key in merged else value
+            )
+        return merged
+    if old != new:
+        raise _Disagreement(path)
+    return old
 
 
 def _parser_identity(operation: object, attribute: str) -> str:
@@ -367,8 +394,6 @@ def run_version_discovery(
     the distinction between "the probe failed" and "the fact is absent" is the whole point of the
     observation vocabulary, and an exception collapses it.
     """
-    from secp_worker.target_discovery.probes import ProbeError, parse_api_version
-
     path = operation.rendered_path()
     started = started_at.isoformat()
 
@@ -408,61 +433,10 @@ def run_version_discovery(
         completed=completed_at.isoformat(),
     )
 
-    observations = _observe_version(payload, parse_api_version, ProbeError)
+    observations = observe(operation, payload)
     return VersionDiscoveryResult(
         observations=observations, manifest=DiscoveryOperationManifest(operations=(evidence,))
     )
-
-
-def _observe_version(payload: object, parse_api_version, probe_error) -> dict[str, Observation]:
-    """Turn one ``/version`` payload into per-field observations.
-
-    A malformed or partial response yields ``observed_malformed`` — never an empty or default
-    version. A default would be a fact nobody observed, and a version is precisely the field where
-    an invented value silently changes provider compatibility.
-    """
-    if not isinstance(payload, dict):
-        return {
-            code: Observation.malformed("version_payload_not_an_object")
-            for code in GetVersionOperation.observation_field_codes
-        }
-
-    import json
-
-    try:
-        major, minor, patch = parse_api_version(json.dumps(payload).encode("utf-8"))
-    except probe_error as exc:
-        reason = str(getattr(exc, "args", ["malformed_probe_output"])[0])
-        return {
-            code: Observation.malformed(reason)
-            for code in GetVersionOperation.observation_field_codes
-        }
-
-    full = str(payload.get("version", ""))
-    release = payload.get("release")
-    repoid = payload.get("repoid")
-
-    return {
-        "pve_version_full": Observation.observed(full),
-        "pve_version_major": Observation.observed(major),
-        "pve_version_minor": Observation.observed(minor),
-        # `None` when the target genuinely reported two parts — never a fabricated 0.
-        "pve_version_patch": (
-            Observation.observed(patch)
-            if patch is not None
-            else Observation.malformed("version_reported_without_a_patch_component")
-        ),
-        "pve_release": (
-            Observation.observed(str(release))
-            if isinstance(release, str)
-            else Observation.malformed("release_absent_or_not_a_string")
-        ),
-        "pve_repoid": (
-            Observation.observed(str(repoid))
-            if isinstance(repoid, str)
-            else Observation.malformed("repoid_absent_or_not_a_string")
-        ),
-    }
 
 
 def _evidence(

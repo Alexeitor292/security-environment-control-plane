@@ -22,7 +22,9 @@ from secp_worker.proxmox_discovery_operations import (
     GetClusterResourcesOperation,
     GetClusterStatusOperation,
     GetNodeAptVersionsOperation,
+    GetNodeLxcOperation,
     GetNodeNetworkOperation,
+    GetNodeQemuOperation,
     GetNodesOperation,
     GetNodeStatusOperation,
     GetNodeStorageOperation,
@@ -68,9 +70,30 @@ def test_the_non_sdn_operation_inventory_is_the_reviewed_set():
         GetNodeStorageOperation,
         GetStorageContentOperation,
         GetClusterResourcesOperation,
+        GetNodeQemuOperation,
+        GetNodeLxcOperation,
         GetClusterFirewallOptionsOperation,
         GetClusterFirewallGroupsOperation,
     }
+
+
+def test_the_container_inventory_does_not_depend_on_the_type_vm_filter():
+    """``existing_lxc_ids`` blocks compilation, and an empty set read as "no containers" is how
+    SECP would allocate a CTID somebody already holds. Whether ``/cluster/resources?type=vm``
+    returns container rows is UNVERIFIED against a live target from this repository, so the cluster
+    read does not claim the fact at all and a dedicated per-node index answers it."""
+    assert "existing_lxc_ids" not in GetClusterResourcesOperation.observation_field_codes
+    assert GetNodeLxcOperation.observation_field_codes == ("existing_lxc_ids",)
+    assert GetNodeLxcOperation("pve-a", SRC).rendered_path() == "/nodes/pve-a/lxc"
+
+
+def test_guest_templates_are_a_guest_fact_and_not_a_storage_fact():
+    """The required-fact table gates ``templates`` on VM.Audit and describes cloning from an absent
+    guest template. Storage content answers a different question — which ISO and container-template
+    VOLUMES exist — and having one operation claim both made one code carry two meanings."""
+    assert "templates" not in GetStorageContentOperation.observation_field_codes
+    assert "templates" in GetClusterResourcesOperation.observation_field_codes
+    assert "templates" in GetNodeQemuOperation.observation_field_codes
 
 
 def test_the_sdn_operation_inventory_is_the_reviewed_set():

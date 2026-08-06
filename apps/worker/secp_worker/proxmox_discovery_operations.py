@@ -276,9 +276,12 @@ class GetStorageContentOperation:
     path_template: ClassVar[str] = "/nodes/{node}/storage/{storage}/content"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.storage-content/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.storage-content/v1"
+    #: ``templates`` is deliberately NOT here. The required-fact table gates it on ``VM.Audit`` and
+    #: describes cloning from an absent guest template, which is a guest-inventory fact; storage
+    #: content answers a different question (which ISO and container-template VOLUMES exist). Having
+    #: this operation claim both made one field code carry two unrelated meanings.
     observation_field_codes: ClassVar[tuple[str, ...]] = (
         "iso_and_container_template_availability",
-        "templates",
     )
 
     def __post_init__(self) -> None:
@@ -304,13 +307,78 @@ class GetClusterResourcesOperation:
     path_template: ClassVar[str] = "/cluster/resources"
     parser_implementation_id: ClassVar[str] = f"{_PARSER}.cluster-resources/v1"
     normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.cluster-resources/v1"
-    observation_field_codes: ClassVar[tuple[str, ...]] = ("existing_vm_ids", "existing_lxc_ids")
+    #: ``existing_lxc_ids`` is deliberately NOT here. Whether ``type=vm`` rows include containers is
+    #: UNVERIFIED against a live target from this repository, and the fact blocks compilation: an
+    #: empty container set read as "no containers" is how SECP would allocate a CTID somebody
+    #: already holds. :class:`GetNodeLxcOperation` answers it without the premise.
+    observation_field_codes: ClassVar[tuple[str, ...]] = ("existing_vm_ids", "templates")
 
     def rendered_path(self) -> str:
         return self.path_template
 
     def query_parameters(self) -> tuple[tuple[str, str], ...]:
         return (("type", "vm"),)
+
+
+@dataclass(frozen=True)
+class GetNodeQemuOperation:
+    """``GET /nodes/{node}/qemu`` — the per-node VM index.
+
+    An independent source for a fact ``/cluster/resources`` also supplies. Redundant on purpose: see
+    :class:`GetNodeLxcOperation` for why the container half cannot be trusted to one source.
+    """
+
+    node: str
+    sourced_from: str = ""
+
+    operation_code: ClassVar[str] = "node_qemu_index"
+    path_template: ClassVar[str] = "/nodes/{node}/qemu"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-qemu-index/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-qemu-index/v1"
+    observation_field_codes: ClassVar[tuple[str, ...]] = ("existing_vm_ids", "templates")
+
+    def __post_init__(self) -> None:
+        validated_segment(self.node, field="node", sourced_from=self.sourced_from)
+
+    def rendered_path(self) -> str:
+        return f"/nodes/{self.node}/qemu"
+
+    def query_parameters(self) -> tuple[tuple[str, str], ...]:
+        return ()
+
+
+@dataclass(frozen=True)
+class GetNodeLxcOperation:
+    """``GET /nodes/{node}/lxc`` — the per-node container index.
+
+    This endpoint exists because the container inventory must not depend on how
+    ``/cluster/resources?type=vm`` treats containers. Whether that filter's rows include ``lxc`` is
+    UNVERIFIED against a live target from this repository, and the consequence of guessing wrong is
+    not a missing display field: ``existing_lxc_ids`` blocks compilation, and an empty set read as
+    "no containers" is exactly how SECP would allocate a CTID somebody already holds.
+
+    A dedicated per-node index removes the question. Both sources produce a node-keyed mapping, so
+    the sequencer merges them and a disagreement about any single node surfaces as malformed rather
+    than as a quietly chosen winner.
+    """
+
+    node: str
+    sourced_from: str = ""
+
+    operation_code: ClassVar[str] = "node_lxc_index"
+    path_template: ClassVar[str] = "/nodes/{node}/lxc"
+    parser_implementation_id: ClassVar[str] = f"{_PARSER}.node-lxc-index/v1"
+    normalizer_implementation_id: ClassVar[str] = f"{_NORMALIZER}.node-lxc-index/v1"
+    observation_field_codes: ClassVar[tuple[str, ...]] = ("existing_lxc_ids",)
+
+    def __post_init__(self) -> None:
+        validated_segment(self.node, field="node", sourced_from=self.sourced_from)
+
+    def rendered_path(self) -> str:
+        return f"/nodes/{self.node}/lxc"
+
+    def query_parameters(self) -> tuple[tuple[str, str], ...]:
+        return ()
 
 
 @dataclass(frozen=True)
@@ -360,6 +428,8 @@ FIRST_MVP_OPERATIONS: tuple[type, ...] = (
     GetNodeStorageOperation,
     GetStorageContentOperation,
     GetClusterResourcesOperation,
+    GetNodeQemuOperation,
+    GetNodeLxcOperation,
     GetClusterFirewallOptionsOperation,
     GetClusterFirewallGroupsOperation,
 )
