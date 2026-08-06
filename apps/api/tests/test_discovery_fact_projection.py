@@ -173,16 +173,47 @@ def test_the_projection_names_itself():
 
 def test_a_required_fact_with_no_derivation_fails_at_import_rather_than_silently_refusing():
     """A fact added to the required table with no derivation here would project to not_requested
-    forever — an invisible permanent refusal, which is worse than either a crash or a gap."""
-    import secp_api.discovery_fact_projection as projection
+    forever — an invisible permanent refusal, which is worse than either a crash or a gap.
 
-    original = projection._ALL_DERIVATIONS
+    This RELOADS the module with the required table mutated, so it proves the check runs AT IMPORT.
+    Calling ``_assert_table_is_total()`` directly proves only that the function raises, which is
+    what the earlier version did — deleting the module-level call would have gone unnoticed.
+    """
+    import importlib
+
+    import secp_api.discovery_fact_projection as projection
+    import secp_api.discovery_required_facts as facts
+
+    original = facts.REQUIRED_FACTS
     try:
-        projection._ALL_DERIVATIONS = original - {"cluster_identity"}
-        with pytest.raises(projection.FactProjectionTableError, match="undeclared="):
-            projection._assert_table_is_total()
+        facts.REQUIRED_FACTS = original + (
+            facts.RequiredFact("undeclared_fact", facts.FactRequirement.optional),
+        )
+        # Matched on the message, not the class: reloading REBINDS FactProjectionTableError, so
+        # the exception raised during the reload is a different class object from the one captured
+        # before it — a `pytest.raises(projection.FactProjectionTableError)` would not catch it.
+        with pytest.raises(Exception, match="required_fact_derivation_mismatch"):
+            importlib.reload(projection)
     finally:
-        projection._ALL_DERIVATIONS = original
+        facts.REQUIRED_FACTS = original
+        importlib.reload(projection)
+
+
+def test_the_import_time_check_is_actually_invoked_at_module_level():
+    """Structural companion: the call must exist, not merely the function."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "secp_api" / "discovery_fact_projection.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    module_level_calls = {
+        node.value.func.id
+        for node in tree.body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+    }
+    assert "_assert_table_is_total" in module_level_calls
 
 
 def test_a_derivation_for_a_fact_the_table_does_not_name_also_fails():

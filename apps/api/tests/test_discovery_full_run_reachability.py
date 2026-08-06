@@ -284,15 +284,104 @@ def test_every_phase_appends_to_the_one_manifest():
 
 
 def test_no_identifier_reaches_the_target_that_did_not_come_from_a_prior_response():
-    """Every dynamic segment in the plan is a node, storage, vnet or zone the fake itself named."""
+    """Every dynamic segment the plan sent was named by an EARLIER response.
+
+    The previous version of this test looped over path segments, asserted node names against a
+    constant, and ended in a bare ``continue`` — a no-op. It exercised no provenance logic at all.
+    This builds the set of identifiers the fake actually disclosed and requires every dynamic
+    segment to be drawn from it.
+    """
     _result, target, _r, _f, _s, _pub = _run()
+    payloads = _cluster_payloads()
+
+    disclosed = {n["node"] for n in payloads["/nodes"]}
+    disclosed |= {r["storage"] for r in payloads["/nodes/pve-a/storage"]}
+    disclosed |= {z["zone"] for z in payloads["/cluster/sdn/zones"]}
+    disclosed |= {v["vnet"] for v in payloads["/cluster/sdn/vnets"]}
+
+    #: Segments that are part of a reviewed path TEMPLATE rather than dynamic identifiers.
+    fixed = {
+        "version",
+        "cluster",
+        "status",
+        "nodes",
+        "sdn",
+        "access",
+        "permissions",
+        "resources",
+        "firewall",
+        "options",
+        "groups",
+        "zones",
+        "vnets",
+        "subnets",
+        "controllers",
+        "ipams",
+        "pve",
+        "fabrics",
+        "all",
+        "qemu",
+        "lxc",
+        "network",
+        "storage",
+        "apt",
+        "versions",
+        "content",
+        "bridges",
+    }
+
+    dynamic = set()
     for path in target.calls:
-        segments = [s for s in path.split("/") if s]
-        for segment in segments:
-            if segment.startswith("pve-"):
-                assert segment in NODES, path
-            if segment in ("v1", "z1", "local"):
-                continue
+        for segment in (s for s in path.split("/") if s):
+            if segment not in fixed:
+                dynamic.add(segment)
+
+    assert dynamic, "the plan sent no dynamic identifiers at all; this test would prove nothing"
+    assert dynamic <= disclosed, sorted(dynamic - disclosed)
+
+
+def test_every_segment_taking_operation_refuses_an_unsourced_identifier():
+    """Provenance is enforced at construction, and it is enforced for EVERY operation that takes a
+    segment — not only the one that happened to be covered."""
+    from secp_worker.proxmox_discovery_operations import (
+        GetNodeAptVersionsOperation,
+        GetNodeLxcOperation,
+        GetNodeNetworkOperation,
+        GetNodeQemuOperation,
+        GetNodeStatusOperation,
+        GetNodeStorageOperation,
+        GetNodeVersionOperation,
+        GetStorageContentOperation,
+        OperationParameterError,
+    )
+    from secp_worker.proxmox_sdn_operations import (
+        GetNodeSdnBridgesOperation,
+        GetNodeSdnZonesOperation,
+        GetSdnSubnetsOperation,
+    )
+
+    single = (
+        GetNodeStatusOperation,
+        GetNodeVersionOperation,
+        GetNodeAptVersionsOperation,
+        GetNodeNetworkOperation,
+        GetNodeStorageOperation,
+        GetNodeQemuOperation,
+        GetNodeLxcOperation,
+        GetNodeSdnZonesOperation,
+        GetSdnSubnetsOperation,
+    )
+    for operation in single:
+        with pytest.raises(OperationParameterError, match="unsourced"):
+            operation("pve-a", "")
+        with pytest.raises(OperationParameterError, match="unsafe"):
+            operation("../etc", "prior:/nodes")
+
+    for operation in (GetStorageContentOperation, GetNodeSdnBridgesOperation):
+        with pytest.raises(OperationParameterError, match="unsourced"):
+            operation("pve-a", "thing", "")
+        with pytest.raises(OperationParameterError, match="unsafe"):
+            operation("pve-a", "../etc", "prior:/nodes")
 
 
 def test_the_resolved_token_appears_in_no_durable_product_of_the_run():

@@ -43,6 +43,44 @@ def test_no_privilege_is_write_class():
             assert marker not in privilege, (privilege, marker)
 
 
+def test_the_write_class_markers_are_applied_to_the_RENDERED_COMMANDS():
+    """The source says these are "checked against the rendered commands by a test, so a privilege
+    added to the fact table cannot smuggle a write in behind the derivation" — and no test did
+    that. It checked ``proposed_privileges()``, the same derived four the commands are built from,
+    so a marker appearing anywhere ELSE in a command was invisible.
+
+    This checks the strings an operator would actually run.
+    """
+    for command in provisioning_commands() + rollback_commands():
+        for marker in WRITE_CLASS_PRIVILEGE_MARKERS:
+            assert marker not in command, (command, marker)
+
+
+def test_a_write_privilege_reaching_the_fact_table_is_caught_in_the_rendered_command():
+    """The scenario the markers exist for, exercised rather than asserted: a write-class privilege
+    added to the required-fact table flows through the derivation into the command text."""
+    import secp_api.discovery_required_facts as facts
+    import secp_api.proxmox_discovery_credential_proposal as proposal
+
+    original = facts.REQUIRED_FACTS
+    try:
+        facts.REQUIRED_FACTS = original + (
+            facts.RequiredFact(
+                "smuggled", facts.FactRequirement.optional, privilege="SDN.Allocate"
+            ),
+        )
+        rendered = " ".join(proposal.provisioning_commands())
+        offending = [m for m in WRITE_CLASS_PRIVILEGE_MARKERS if m in rendered]
+        assert offending == ["Allocate"], rendered
+    finally:
+        facts.REQUIRED_FACTS = original
+
+    # And with the table restored, the commands are clean again.
+    assert not [
+        m for m in WRITE_CLASS_PRIVILEGE_MARKERS if m in " ".join(proposal.provisioning_commands())
+    ]
+
+
 def test_the_renderer_contains_no_literal_privilege_string():
     """A hardcoded privilege would satisfy every output comparison while ignoring the fact table."""
     tree = ast.parse(MODULE.read_text(encoding="utf-8"))
