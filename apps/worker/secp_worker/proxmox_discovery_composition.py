@@ -21,6 +21,7 @@ HTTPS-shaped, and there is no branch that could produce anything else.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -179,6 +180,104 @@ def run_signed_discovery(
         attestation=attestation,
         failed=execution.failed,
         failure_reason=execution.failure_reason,
+    )
+
+
+def run_operation_sequence(
+    *,
+    transport: DiscoveryTransport,
+    operations: Sequence[object],
+    target_authority_identity: str,
+    parse: Callable[[object, object], dict[str, Observation]],
+    started_at: datetime,
+    completed_at: datetime,
+) -> VersionDiscoveryResult:
+    """Execute a sequence of typed operations, appending each to ONE canonical manifest.
+
+    The manifest is shared on purpose. A second manifest per operation family would mean the
+    signature covers several documents that could each be swapped independently, and "which of the
+    four manifests was this fact in" is a question no operator should have to answer.
+
+    A failing operation does not abort the sequence. Its fields become ``probe_failed`` and the run
+    continues, because a discovery that stops at the first refusal reports a target as far less
+    observable than it is — and the required-fact evaluator needs to know which specific facts are
+    missing, not merely that something went wrong.
+
+    Later operations may depend on earlier results; that ordering is the caller's, and every dynamic
+    identifier is validated at operation construction rather than here.
+    """
+    observations: dict[str, Observation] = {}
+    records: list[DiscoveryOperationEvidence] = []
+    any_failure = False
+    first_reason = ""
+
+    for operation in operations:
+        path = operation.rendered_path()  # type: ignore[attr-defined]
+        params = dict(operation.query_parameters()) or None  # type: ignore[attr-defined]
+        try:
+            payload = transport.get(path, params)
+        except Exception as exc:  # noqa: BLE001 - mapped to a closed reason
+            reason = _closed_reason(exc)
+            any_failure = True
+            first_reason = first_reason or reason
+            for code in operation.observation_field_codes:  # type: ignore[attr-defined]
+                # Do NOT overwrite a field an earlier operation observed successfully: several
+                # operations contribute to the same fact, and one failing source must not erase a
+                # good answer from another.
+                observations.setdefault(code, Observation.probe_failed(reason))
+            records.append(
+                _sequence_evidence(
+                    operation, target_authority_identity, "refused", b"", started_at, completed_at
+                )
+            )
+            continue
+
+        raw = repr(payload).encode("utf-8")
+        records.append(
+            _sequence_evidence(
+                operation, target_authority_identity, "2xx", raw, started_at, completed_at
+            )
+        )
+        for code, obs in parse(operation, payload).items():
+            existing = observations.get(code)
+            # An observed value wins over a later unusable one, for the same reason as above.
+            if existing is None or (obs.is_usable and not existing.is_usable):
+                observations[code] = obs
+
+    return VersionDiscoveryResult(
+        observations=observations,
+        manifest=DiscoveryOperationManifest(operations=tuple(records)),
+        failed=any_failure,
+        failure_reason=first_reason,
+    )
+
+
+def _sequence_evidence(
+    operation: object,
+    target_authority_identity: str,
+    status: str,
+    body: bytes,
+    started_at: datetime,
+    completed_at: datetime,
+) -> DiscoveryOperationEvidence:
+    return DiscoveryOperationEvidence(
+        operation_code=operation.operation_code,  # type: ignore[attr-defined]
+        transport_kind=PRODUCTION_TRANSPORT_KIND,
+        target_authority_identity=target_authority_identity,
+        request_method="GET",
+        canonical_path_template=operation.path_template,  # type: ignore[attr-defined]
+        canonical_rendered_path=operation.rendered_path(),  # type: ignore[attr-defined]
+        canonical_query_parameters=operation.query_parameters(),  # type: ignore[attr-defined]
+        request_body_present=False,
+        response_status_classification=status,
+        response_content_type="application/json" if status == "2xx" else "",
+        response_size=len(body),
+        response_digest=sha256_digest({"body": body.decode("utf-8", errors="replace")}),
+        parser_implementation_id=VERSION_PARSER_IMPLEMENTATION_ID,
+        normalizer_implementation_id=VERSION_NORMALIZER_IMPLEMENTATION_ID,
+        observation_field_codes=operation.observation_field_codes,  # type: ignore[attr-defined]
+        started_at=started_at.isoformat(),
+        completed_at=completed_at.isoformat(),
     )
 
 
