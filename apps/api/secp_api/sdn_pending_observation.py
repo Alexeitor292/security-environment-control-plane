@@ -86,7 +86,7 @@ def build_pending_sdn_document(
         # Both derived, neither supplied.
         signature_verified=True,
         visibility_complete=visibility_complete,
-        unreadable_families=_unreadable(families, pending_fact),
+        unreadable_families=_unreadable(families, pending_fact, raw_observations),
     )
 
 
@@ -128,7 +128,9 @@ def _endpoint(scope: str) -> str:
 
 
 def _unreadable(
-    families: Mapping[str, object], pending_fact: Observation | None
+    families: Mapping[str, object],
+    pending_fact: Observation | None,
+    raw_observations: Mapping[str, Observation],
 ) -> tuple[tuple[str, str], ...]:
     """Every family that was NOT enumerated, with the state that explains why.
 
@@ -136,14 +138,30 @@ def _unreadable(
     refusal reason alone says only that something was missing.
     """
     state = pending_fact.state.value if pending_fact is not None else "not_requested"
-    missing = [family for family in PENDING_FAMILIES if not _covered(families, family)]
+    missing = [
+        family for family in PENDING_FAMILIES if not _covered(families, family, raw_observations)
+    ]
     return tuple((family, state) for family in missing)
 
 
-def _covered(families: Mapping[str, object], family: str) -> bool:
-    if family == "subnets":
-        return any(scope.startswith(_SUBNET_PREFIX) for scope in families)
-    return family in families
+def _covered(
+    families: Mapping[str, object], family: str, raw_observations: Mapping[str, Observation]
+) -> bool:
+    """Whether a family was enumerated, including the case where there was nothing to enumerate.
+
+    Subnets have no cluster-wide index, so coverage means "walked for every vnet". A cluster with no
+    vnets has no subnets to walk, and reporting that as unreadable would contradict the completeness
+    the required-fact projection computes from the same facts — a document that says visibility is
+    complete while naming a family as unreadable is one an operator is right not to trust.
+    """
+    if family != "subnets":
+        return family in families
+    if any(scope.startswith(_SUBNET_PREFIX) for scope in families):
+        return True
+    vnets = raw_observations.get("existing_vnets")
+    return (
+        vnets is not None and vnets.is_usable and isinstance(vnets.value, dict) and not vnets.value
+    )
 
 
 def _digest(value: object) -> str:

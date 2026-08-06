@@ -205,6 +205,44 @@ def test_subnets_count_as_covered_only_via_a_per_vnet_scope():
     assert set(PENDING_FAMILIES) == {"zones", "vnets", "subnets", "controllers"}
 
 
+def test_a_cluster_with_no_vnets_has_no_subnets_to_walk():
+    """The document must not contradict itself: reporting subnets unreadable while the required-fact
+    projection computes visibility as complete from the same facts is output an operator is right
+    not to trust. With zero vnets there is nothing to walk, and that is coverage."""
+    value = {"zones": (), "vnets": (), "controllers": ()}
+    document = _build(
+        raw_observations={
+            "pending_sdn_state": Observation.observed(value),
+            "existing_vnets": Observation.observed({}),
+        }
+    )
+    assert document.visibility_complete is True
+    assert document.unreadable_families == ()
+
+
+def test_an_unwalked_vnet_still_makes_subnets_unreadable():
+    """The complement, and the reason the rule above is about ZERO vnets specifically."""
+    value = {"zones": (), "vnets": (), "controllers": ()}
+    document = _build(
+        raw_observations={
+            "pending_sdn_state": Observation.observed(value),
+            "existing_vnets": Observation.observed({"v1": {}}),
+        }
+    )
+    assert ("subnets", "observed") in document.unreadable_families
+
+
+def test_subnets_are_unreadable_when_the_vnet_index_itself_was_not_observed():
+    value = {"zones": (), "vnets": (), "controllers": ()}
+    document = _build(
+        raw_observations={
+            "pending_sdn_state": Observation.observed(value),
+            "existing_vnets": Observation.probe_failed("x"),
+        }
+    )
+    assert ("subnets", "observed") in document.unreadable_families
+
+
 # === nothing observed is dropped ==================================================================
 
 
