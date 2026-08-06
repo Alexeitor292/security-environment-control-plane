@@ -17,16 +17,22 @@ grouping would fall:
 2. everything that needs a node name;
 3. everything that needs a storage id, a vnet id or a zone id.
 
-The plan is bounded. An enumeration is capped per list by :data:`MAX_DYNAMIC_EXPANSION`, and the
-whole plan by :data:`MAX_PLANNED_OPERATIONS` — a cluster reporting thousands of objects is a
-malformed or hostile answer, not a large cluster, and an unbounded expansion turns one authorised
-read into a stampede. Exceeding either raises rather than truncating: a silently shortened plan
-produces a snapshot that looks complete, which is the failure this whole layer exists to prevent.
+The plan is bounded, and NOTHING is silently shortened — a truncated inventory still reads as a
+complete answer, and the identifiers past the cut are exactly the ones a collision check would have
+caught. Exceeding a bound produces one of two visible outcomes and never a shorter list:
+
+* a whole-plan or node-list overflow RAISES :class:`DiscoveryPlanError`, which stops further phases
+  while keeping every observation already gathered;
+* a per-node inventory overflow produces a :class:`BoundedInventoryRefusal`, which skips that
+  node's dependent reads entirely, degrades every fact they would have fed, records the OBSERVED
+  size so a reader knows by how much the answer is incomplete, and travels into the signed
+  commitment as a contribution like any other.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from secp_api.discovery_observation import Observation
 
@@ -78,7 +84,45 @@ class DiscoveryPlanError(Exception):
     """The plan could not be built. A closed reason code, never a host or a path."""
 
 
-def phase_one_operations() -> tuple[object, ...]:
+@dataclass(frozen=True)
+class BoundedInventoryRefusal:
+    """An enumeration that exceeded its bound, recorded rather than shortened.
+
+    Truncating an inventory is the worst available option: the fact still reads ``observed``, the
+    shortened list still looks like a complete answer, and the identifiers past the cut are exactly
+    the ones a collision check would have caught. The refusal instead carries the OBSERVED size —
+    the minimum known count — so a reader knows both that the answer is incomplete and by how much.
+    """
+
+    subject: str
+    operation_code: str
+    rendered_path: str
+    field_codes: tuple[str, ...]
+    reason: str
+    observed_size: int
+
+
+def _bounded_refusal(
+    *,
+    subject: str,
+    operation_code: str,
+    rendered_path: str,
+    field_codes: tuple[str, ...],
+    observed_size: int,
+    bound: int,
+    kind: str,
+) -> BoundedInventoryRefusal:
+    return BoundedInventoryRefusal(
+        subject=subject,
+        operation_code=operation_code,
+        rendered_path=rendered_path,
+        field_codes=field_codes,
+        reason=(f"inventory_exceeds_bound:{kind}:{subject}:observed={observed_size}:bound={bound}"),
+        observed_size=observed_size,
+    )
+
+
+def phase_one_operations() -> tuple[tuple[object, ...], tuple[BoundedInventoryRefusal, ...]]:
     """Everything answerable without a discovered identifier.
 
     ``/cluster/sdn`` is here rather than with the SDN reads because it is the authority preflight:
@@ -98,10 +142,12 @@ def phase_one_operations() -> tuple[object, ...]:
         GetSdnControllersOperation(),
         GetSdnIpamStatusOperation(),
         GetSdnFabricsOperation(),
-    )
+    ), ()
 
 
-def phase_two_operations(observations: Mapping[str, Observation]) -> tuple[object, ...]:
+def phase_two_operations(
+    observations: Mapping[str, Observation],
+) -> tuple[tuple[object, ...], tuple[BoundedInventoryRefusal, ...]]:
     """Everything that needs a node name, for every node the target named."""
     nodes = _identifiers(observations, "node_names", source=SOURCE_NODE_INDEX)
     operations: list[object] = []
@@ -118,16 +164,38 @@ def phase_two_operations(observations: Mapping[str, Observation]) -> tuple[objec
                 GetNodeSdnZonesOperation(node, SOURCE_NODE_INDEX),
             )
         )
-    return _bounded(operations)
+    return _bounded(operations), ()
 
 
-def phase_three_operations(observations: Mapping[str, Observation]) -> tuple[object, ...]:
-    """Everything that needs a storage id, a vnet id or a zone id."""
+def phase_three_operations(
+    observations: Mapping[str, Observation],
+) -> tuple[tuple[object, ...], tuple[BoundedInventoryRefusal, ...]]:
+    """Everything that needs a storage id, a vnet id or a zone id.
+
+    Returns the operations AND any bounded refusals. A node whose storage list exceeds the bound
+    contributes NO storage-content operations and one refusal naming the observed size — it used to
+    contribute the first 64 silently, which left ``iso_and_container_template_availability`` reading
+    as a complete answer for a node whose remaining storages nobody looked at.
+    """
     operations: list[object] = []
+    refusals: list[BoundedInventoryRefusal] = []
 
     for node, storages in _node_keyed(observations, "storage_ids").items():
         checked_node = _segment(node, field="node", source=SOURCE_NODE_INDEX)
-        for storage in storages[:MAX_DYNAMIC_EXPANSION]:
+        if len(storages) > MAX_DYNAMIC_EXPANSION:
+            refusals.append(
+                _bounded_refusal(
+                    subject=checked_node,
+                    operation_code=GetStorageContentOperation.operation_code,
+                    rendered_path=GetStorageContentOperation.path_template,
+                    field_codes=GetStorageContentOperation.observation_field_codes,
+                    observed_size=len(storages),
+                    bound=MAX_DYNAMIC_EXPANSION,
+                    kind="storage",
+                )
+            )
+            continue
+        for storage in storages:
             checked = _segment(storage, field="storage", source=SOURCE_NODE_STORAGE)
             operations.append(
                 GetStorageContentOperation(checked_node, checked, SOURCE_NODE_STORAGE)
@@ -141,7 +209,7 @@ def phase_three_operations(observations: Mapping[str, Observation]) -> tuple[obj
         for zone in zones:
             operations.append(GetNodeSdnBridgesOperation(node, zone, SOURCE_SDN_ZONES))
 
-    return _bounded(operations)
+    return _bounded(operations), tuple(refusals)
 
 
 PHASES = (phase_one_operations, phase_two_operations, phase_three_operations)

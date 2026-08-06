@@ -50,6 +50,7 @@ from secp_commissioning.canonical import sha256_digest
 from secp_worker.proxmox_discovery_operations import (
     GetVersionOperation,
 )
+from secp_worker.proxmox_discovery_plan import BoundedInventoryRefusal
 from secp_worker.proxmox_discovery_projection import observe
 
 #: The transport this composition uses. A constant, not a setting: a deployment cannot select
@@ -386,7 +387,8 @@ def run_operation_plan(
     parse: Callable[[object, object], dict[str, Observation]] = observe,
     started_at: datetime,
     completed_at: datetime,
-    phases: Sequence[Callable[..., Sequence[object]]] | None = None,
+    phases: Sequence[Callable[..., tuple[Sequence[object], Sequence[BoundedInventoryRefusal]]]]
+    | None = None,
 ) -> VersionDiscoveryResult:
     """Run every phase of the production plan against ONE manifest.
 
@@ -408,10 +410,19 @@ def run_operation_plan(
 
     for index, plan in enumerate(phases if phases is not None else PHASES):
         try:
-            operations = plan() if index == 0 else plan(observations)
+            operations, bounded = plan() if index == 0 else plan(observations)
         except DiscoveryPlanError as exc:
             failure = str(exc.args[0])
             break
+
+        for refusal in bounded:
+            # An enumeration that exceeded its bound contributes a REFUSAL, not a shortened list.
+            # It degrades every fact the skipped operation would have fed, it names the observed
+            # size so a reader knows by how much the answer is incomplete, and it goes into the
+            # signed commitment like any other contribution.
+            failure = failure or refusal.reason
+            _record_bounded_refusal(observations, contributions, refusal)
+
         if not operations:
             continue
         reason = _execute_into(
@@ -555,6 +566,24 @@ def _operation_subject(operation: object) -> str:
         if node and thing:
             return f"{node}/{thing}"
     return node
+
+
+def _record_bounded_refusal(
+    observations: dict[str, Observation],
+    contributions: dict[str, tuple[FactContribution, ...]],
+    refusal: BoundedInventoryRefusal,
+) -> None:
+    """Fold a bounded-inventory refusal into the facts the skipped operation would have fed."""
+    observation: Observation = Observation.probe_refused(refusal.reason)
+    entry = contribution_of(
+        operation_code=refusal.operation_code,
+        rendered_path=refusal.rendered_path,
+        observation=observation,
+        subject=refusal.subject,
+    )
+    for code in refusal.field_codes:
+        contributions[code] = (*contributions.get(code, ()), entry)
+        observations[code] = _merge_observation(code, observations.get(code), observation)
 
 
 def _record_contribution(

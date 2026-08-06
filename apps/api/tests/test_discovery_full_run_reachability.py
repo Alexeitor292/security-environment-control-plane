@@ -55,6 +55,7 @@ from secp_worker.proxmox_discovery_composition import (
     expected_node_identities_of,
     run_full_discovery,
 )
+from secp_worker.proxmox_discovery_operations import MAX_DYNAMIC_EXPANSION
 from secp_worker.proxmox_discovery_plan import MAX_PLANNED_OPERATIONS, DiscoveryPlanError
 
 NOW = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
@@ -809,3 +810,89 @@ def test_an_identifier_the_target_did_not_name_is_refused_by_provenance():
 
     with pytest.raises(OperationParameterError, match="unsourced"):
         GetNodeStatusOperation("pve-a", "")
+
+
+# === no inventory is silently shortened ===========================================================
+
+
+def _many_storage_payloads(count: int, *, colliding_id: str = "secp-lab-storage") -> dict:
+    """A node reporting more storages than the plan may expand, with the COLLIDING one last."""
+    payloads = _cluster_payloads()
+    ids = [f"stor{i:03d}" for i in range(count - 1)] + [colliding_id]
+    payloads["/nodes/pve-a/storage"] = [
+        {"storage": s, "type": "dir", "content": "iso", "total": 10, "avail": 5} for s in ids
+    ]
+    for s in ids:
+        payloads[f"/nodes/pve-a/storage/{s}/content"] = []
+    return payloads
+
+
+def test_an_oversized_storage_list_refuses_instead_of_reading_the_first_sixty_four():
+    """The identifier past the cut is exactly the one a collision check would have caught.
+
+    The plan used to slice the list, so the node's storage-content fact still read as a complete
+    answer while the storages past the bound were never looked at — and the LAST one here is the
+    identifier the proposed plan wants to use.
+    """
+    colliding = "secp-lab-storage"
+    payloads = _many_storage_payloads(MAX_DYNAMIC_EXPANSION + 5, colliding_id=colliding)
+    result, target, _r, _f, _s, _pub = _run(payloads=payloads)
+
+    # No storage-content read was issued for that node at all — not a shortened set.
+    assert not [p for p in target.calls if p.startswith("/nodes/pve-a/storage/")]
+
+    fact = result.observations["iso_and_container_template_availability"]
+    assert fact.is_usable is False
+    assert fact.state is S.probe_refused
+    assert "inventory_exceeds_bound:storage:pve-a" in fact.reason_code
+    # The OBSERVED size is retained, so a reader knows by how much the answer is incomplete.
+    assert f"observed={MAX_DYNAMIC_EXPANSION + 5}" in fact.reason_code
+    assert f"bound={MAX_DYNAMIC_EXPANSION}" in fact.reason_code
+
+    # The colliding identifier IS in the observed storage list, so the collision is visible even
+    # though its content was never read — the inventory is incomplete, not silently shorter.
+    assert colliding in result.observations["storage_ids"].value["pve-a"]
+
+    # And the fact cannot support a placement decision.
+    assert result.required_facts["iso_and_container_template_availability"].is_usable is False
+    assert result.failed is True
+
+
+def test_the_bounded_refusal_is_in_the_signed_commitment():
+    payloads = _many_storage_payloads(MAX_DYNAMIC_EXPANSION + 5)
+    result, _t, _r, _f, _s, _pub = _run(payloads=payloads)
+
+    contributions = result.contributions["iso_and_container_template_availability"]
+    refusals = [c for c in contributions if c.state == "probe_refused"]
+    assert refusals, [c.state for c in contributions]
+    assert refusals[0].subject == "pve-a"
+    assert "inventory_exceeds_bound" in refusals[0].reason_code
+
+    # Removing it from provenance changes what was signed.
+    from secp_api.discovery_fact_commitment import build_fact_commitment
+
+    scrubbed = dict(result.contributions)
+    scrubbed["iso_and_container_template_availability"] = tuple(
+        c for c in contributions if c.state != "probe_refused"
+    )
+    recomputed = build_fact_commitment(
+        observations=result.observations,
+        required_facts=result.required_facts,
+        contributions=scrubbed,
+        organization_identity=str(ORG),
+        target_identity=str(TARGET_ID),
+        cluster_fingerprint=cluster_fingerprint_of(result.observations),
+        operation_identity=OPERATION,
+        operation_generation=GENERATION,
+        expected_node_identities=expected_node_identities_of(result.observations),
+    )
+    assert recomputed.digest() != result.binding.facts_hash
+
+
+def test_a_storage_list_within_the_bound_is_read_completely():
+    """The bound must not refuse ordinary clusters, or the refusal above proves nothing."""
+    payloads = _many_storage_payloads(4)
+    result, target, _r, _f, _s, _pub = _run(payloads=payloads)
+    reads = [p for p in target.calls if p.startswith("/nodes/pve-a/storage/")]
+    assert len(reads) == 4
+    assert result.observations["iso_and_container_template_availability"].is_usable is True
