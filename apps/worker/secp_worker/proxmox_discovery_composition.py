@@ -246,10 +246,7 @@ def run_operation_sequence(
             )
         )
         for code, obs in parse(operation, payload).items():
-            existing = observations.get(code)
-            # An observed value wins over a later unusable one, for the same reason as above.
-            if existing is None or (obs.is_usable and not existing.is_usable):
-                observations[code] = obs
+            observations[code] = _merge_observation(code, observations.get(code), obs)
 
     return VersionDiscoveryResult(
         observations=observations,
@@ -286,6 +283,44 @@ def _sequence_evidence(
         started_at=started_at.isoformat(),
         completed_at=completed_at.isoformat(),
     )
+
+
+def _merge_observation(
+    code: str, existing: Observation | None, incoming: Observation
+) -> Observation:
+    """Combine two observations of the SAME fact from two different operations.
+
+    "First usable wins" is wrong for the facts that matter most here. Per-node facts —
+    ``node_capacity``, ``bridges``, ``storage_ids`` — carry one field code but many nodes, so
+    keeping the first would silently report a three-node cluster's first node as the whole cluster.
+    A fact that looks complete and describes one node is worse than no fact at all.
+
+    So mappings MERGE: each operation contributes its own keys. Everything else must AGREE, and two
+    sources that disagree about one fact make it ``observed_malformed`` rather than picking a winner
+    — the disagreement is itself the finding, and silently preferring either source would hide a
+    target that is answering inconsistently.
+    """
+    if existing is None:
+        return incoming
+    if not incoming.is_usable:
+        # A failing source never overwrites — not a good answer from another source, and not an
+        # earlier failure either: the run reports the FIRST reason, and a second one for the same
+        # field would silently relabel why an operator is being asked to act.
+        return existing
+    if not existing.is_usable:
+        return incoming
+
+    old, new = existing.value, incoming.value
+    if isinstance(old, dict) and isinstance(new, dict):
+        merged = dict(old)
+        for key, value in new.items():
+            if key in merged and merged[key] != value:
+                return Observation.malformed(f"source_disagreement:{code}:{key}")
+            merged[key] = value
+        return Observation.observed(merged)
+    if old == new:
+        return existing
+    return Observation.malformed(f"source_disagreement:{code}")
 
 
 def _parser_identity(operation: object, attribute: str) -> str:

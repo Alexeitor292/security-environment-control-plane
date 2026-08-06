@@ -27,6 +27,7 @@ from secp_worker.proxmox_discovery_operations import (
     GetClusterStatusOperation,
     GetNodesOperation,
     GetNodeStatusOperation,
+    GetNodeVersionOperation,
     GetVersionOperation,
 )
 from secp_worker.proxmox_sdn_operations import GetSdnRootOperation, GetSdnZonesOperation
@@ -222,6 +223,121 @@ def test_the_sequencer_exposes_no_path_or_method_parameter():
         "started_at",
         "completed_at",
     }
+
+
+# --- two sources, one fact ------------------------------------------------------------------------
+
+
+def _keyed(mapping):
+    """A parser that returns exactly the observations it is handed, per operation code."""
+
+    def _parse(operation, payload):
+        return mapping[operation.operation_code]
+
+    return _parse
+
+
+def _run_with(transport, operations, parse):
+    return run_operation_sequence(
+        transport=transport,
+        operations=operations,
+        target_authority_identity=AUTHORITY,
+        parse=parse,
+        started_at=START,
+        completed_at=END,
+    )
+
+
+def test_per_node_mappings_merge_instead_of_the_first_node_winning():
+    """The defect this rule exists for: ``node_capacity`` carries one field code and many nodes.
+
+    Keeping the first would report a three-node cluster's first node as the whole cluster — a fact
+    that looks complete and describes one node, which is worse than no fact at all.
+    """
+    ops = [GetNodeStatusOperation("pve-a", SRC), GetNodeStatusOperation("pve-b", SRC)]
+    transport = _Fake({"/nodes/pve-a/status": {}, "/nodes/pve-b/status": {}})
+    seen = iter(
+        [
+            {"node_capacity": Observation.observed({"pve-a": {"cpus": 8}})},
+            {"node_capacity": Observation.observed({"pve-b": {"cpus": 16}})},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+
+    assert result.observations["node_capacity"].is_usable is True
+    assert result.observations["node_capacity"].value == {
+        "pve-a": {"cpus": 8},
+        "pve-b": {"cpus": 16},
+    }
+
+
+def test_two_sources_that_disagree_make_the_fact_malformed():
+    """Silently preferring either source would hide a target answering inconsistently."""
+    ops = [GetClusterStatusOperation(), GetNodesOperation()]
+    transport = _Fake({"/cluster/status": [], "/nodes": []})
+    seen = iter(
+        [
+            {"node_names": Observation.observed(("pve-a", "pve-b"))},
+            {"node_names": Observation.observed(("pve-a",))},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+
+    obs = result.observations["node_names"]
+    assert obs.is_usable is False
+    assert obs.state is S.observed_malformed
+    assert obs.reason_code == "source_disagreement:node_names"
+
+
+def test_two_sources_that_agree_leave_the_fact_observed():
+    ops = [GetClusterStatusOperation(), GetNodesOperation()]
+    transport = _Fake({"/cluster/status": [], "/nodes": []})
+    seen = iter(
+        [
+            {"node_names": Observation.observed(("pve-a", "pve-b"))},
+            {"node_names": Observation.observed(("pve-a", "pve-b"))},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+    assert result.observations["node_names"].value == ("pve-a", "pve-b")
+
+
+def test_mappings_that_collide_on_one_key_with_different_values_are_malformed():
+    """A merge is not a licence to disagree: the same node reported twice, differently, is a
+    disagreement even though the two mappings would otherwise combine cleanly."""
+    ops = [GetNodeStatusOperation("pve-a", SRC), GetNodeVersionOperation("pve-a", SRC)]
+    transport = _Fake({"/nodes/pve-a/status": {}, "/nodes/pve-a/version": {}})
+    seen = iter(
+        [
+            {"node_versions": Observation.observed({"pve-a": "9.1.1"})},
+            {"node_versions": Observation.observed({"pve-a": "8.4.0"})},
+        ]
+    )
+    result = _run_with(transport, ops, lambda operation, payload: next(seen))
+
+    obs = result.observations["node_versions"]
+    assert obs.state is S.observed_malformed
+    assert obs.reason_code == "source_disagreement:node_versions:pve-a"
+
+
+def test_a_second_failure_does_not_relabel_the_first_reason():
+    """The run reports the FIRST reason; a later failure for the same field must not silently
+    change what an operator is being told to act on."""
+
+    class _Denied(Exception):
+        pass
+
+    ops = [GetClusterStatusOperation(), GetNodesOperation()]
+    transport = _Fake(
+        {},
+        errors={
+            "/cluster/status": _Denied("proxmox_discovery_permission_denied"),
+            "/nodes": _Denied("proxmox_discovery_transport_failed"),
+        },
+    )
+    result = _run_with(transport, ops, _keyed({}))
+    assert result.observations["node_names"].reason_code == "proxmox_discovery_permission_denied"
+    assert result.failure_reason == "proxmox_discovery_permission_denied"
 
 
 # --- every operation names the code that interpreted ITS payload ----------------------------------
