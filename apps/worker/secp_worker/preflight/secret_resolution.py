@@ -41,14 +41,31 @@ if TYPE_CHECKING:  # imported for typing only — avoids a hard runtime import o
 
 
 class ResolutionPurpose(str, Enum):
-    """Closed catalog of secret-resolution purposes. Only one is permitted in this phase."""
+    """Closed catalog of secret-resolution purposes.
+
+    A purpose is a SEPARATION boundary, not a label. Two credentials that happen to authenticate to
+    the same host are different credentials when they are for different jobs, and a resolver that
+    accepts either for both has erased the boundary. So there is deliberately no generic
+    ``proxmox_token``: a read-only discovery token and a controlled-live apply credential would both
+    fit under one, and the first would silently become usable for the second.
+    """
 
     readonly_staging_preflight = "readonly_staging_preflight"
+    #: The read-only Proxmox HTTPS discovery API token. Authenticates GET requests against the
+    #: enrolled target's API and nothing else. Structurally distinct from provider execution,
+    #: OpenTofu planning, apply, destroy, reset, SDN activation, guest lifecycle and generic HTTP —
+    #: each of which needs its own member if it ever needs a credential, precisely so that
+    #: widening one does not widen the rest.
+    proxmox_readonly_discovery = "proxmox_readonly_discovery"
 
 
-# The only purpose a resolver may act on in this phase. A future purpose requires its own review.
+# The purposes a resolver may act on. A future purpose requires its own review; adding a member
+# above without adding it here resolves for nothing, which is the safe direction.
 SUPPORTED_PURPOSES: frozenset[ResolutionPurpose] = frozenset(
-    {ResolutionPurpose.readonly_staging_preflight}
+    {
+        ResolutionPurpose.readonly_staging_preflight,
+        ResolutionPurpose.proxmox_readonly_discovery,
+    }
 )
 
 
