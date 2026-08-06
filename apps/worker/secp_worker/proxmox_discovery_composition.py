@@ -54,11 +54,30 @@ class DiscoveryTransport(Protocol):
     def get(self, path: str, params: dict | None = None) -> object: ...
 
 
-class CredentialResolver(Protocol):
-    """Resolves an opaque reference to secret material. Implemented in production by the guarded
-    ``WorkerSecretResolver``; a test supplies an explicit fake."""
+class TransportFactory(Protocol):
+    """Builds the hardened transport from resolved material.
 
-    def resolve_for_discovery(self, *, credential_reference: str, target_identity: str) -> str: ...
+    A factory rather than a ready transport, because the token must not exist before it is needed
+    and must not outlive the call: the composition resolves, builds, uses and drops it inside one
+    function body.
+    """
+
+    def build(self, *, base_url: str, ca_path: str, token: str) -> DiscoveryTransport: ...
+
+
+class WorkerLocalSigner(Protocol):
+    """Signs a canonical binding digest with the installed worker's own key.
+
+    Deliberately NOT a generic ``sign(digest, key)``: there is no key parameter, because the key is
+    a property of the installation and must never arrive from orchestration. The production
+    implementation reads the enrolled worker's local key; a test injects an explicit fake.
+    """
+
+    def installation_id(self) -> str: ...
+
+    def key_fingerprint(self) -> str: ...
+
+    def sign_discovery_binding(self, *, digest: str) -> object: ...
 
 
 class DiscoveryCompositionError(Exception):
@@ -73,6 +92,109 @@ class VersionDiscoveryResult:
     manifest: DiscoveryOperationManifest
     failed: bool = False
     failure_reason: str = ""
+
+
+@dataclass(frozen=True)
+class SignedDiscoveryResult:
+    """A completed discovery run: observations, evidence, and the worker's detached signature."""
+
+    observations: dict[str, Observation]
+    manifest: DiscoveryOperationManifest
+    binding: object
+    attestation: object
+    failed: bool = False
+    failure_reason: str = ""
+
+
+def run_signed_discovery(
+    *,
+    resolver,
+    resolution_request,
+    resolution_expectation,
+    transport_factory: TransportFactory,
+    signer: WorkerLocalSigner,
+    base_url: str,
+    ca_path: str,
+    target_authority_identity: str,
+    binding_factory,
+    expected_worker_installation_id: str,
+    expected_worker_key_fingerprint: str,
+    now: datetime,
+    started_at: datetime,
+    completed_at: datetime,
+) -> SignedDiscoveryResult:
+    """The whole production path: resolve, execute, observe, bind, sign.
+
+    Ordered so nothing exists before it is earned. The credential is resolved immediately before the
+    transport is built and is not referenced again; the signer is checked against the selected
+    worker BEFORE it signs, so a mismatch refuses rather than producing a signature nobody can use.
+
+    There is no fallback at any step. A resolution failure does not try the environment, and a
+    transport failure does not try SSH — both would mean the safest configuration silently degrades
+    at exactly the moment something is already wrong.
+    """
+    from secp_worker.preflight.secret_resolution import (
+        SecretResolutionError,
+        assert_discovery_resolution_authorized,
+    )
+
+    # 1. The request must match the independently derived expectation before anything is resolved.
+    try:
+        assert_discovery_resolution_authorized(resolution_request, resolution_expectation)
+        material = resolver.resolve(resolution_request, expectation=resolution_expectation, now=now)
+    except SecretResolutionError as exc:
+        return _resolution_failure(str(getattr(exc, "reason_code", "credential_unavailable")))
+    except Exception:  # noqa: BLE001 - never surface a resolver's raw error
+        return _resolution_failure("credential_unavailable")
+
+    # 2. The signer must BE the selected worker. Checked before any request goes out, so a
+    #    misbound worker never contacts the target at all.
+    if signer.installation_id() != expected_worker_installation_id:
+        return _resolution_failure("discovery_signer_installation_mismatch")
+    if signer.key_fingerprint() != expected_worker_key_fingerprint:
+        return _resolution_failure("discovery_signer_key_mismatch")
+
+    # 3. Build the transport from the resolved token. The token exists only inside this call.
+    transport = transport_factory.build(
+        base_url=base_url, ca_path=ca_path, token=material.reveal_secret()
+    )
+
+    execution = run_version_discovery(
+        transport=transport,
+        operation=GetVersionOperation(),
+        target_authority_identity=target_authority_identity,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+
+    # 4. Bind and sign. The binding is built by the caller's factory from the observations and the
+    #    manifest, so the signature covers what actually happened rather than what was intended.
+    binding = binding_factory(execution.observations, execution.manifest)
+    attestation = signer.sign_discovery_binding(digest=binding.digest())
+
+    return SignedDiscoveryResult(
+        observations=execution.observations,
+        manifest=execution.manifest,
+        binding=binding,
+        attestation=attestation,
+        failed=execution.failed,
+        failure_reason=execution.failure_reason,
+    )
+
+
+def _resolution_failure(reason: str) -> SignedDiscoveryResult:
+    """Refuse before execution, with no manifest — nothing ran, so nothing is attested."""
+    return SignedDiscoveryResult(
+        observations={
+            code: Observation.source_unavailable(reason)
+            for code in GetVersionOperation.observation_field_codes
+        },
+        manifest=DiscoveryOperationManifest(),
+        binding=None,
+        attestation=None,
+        failed=True,
+        failure_reason=reason,
+    )
 
 
 def run_version_discovery(
