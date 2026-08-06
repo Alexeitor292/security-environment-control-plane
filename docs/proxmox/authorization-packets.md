@@ -222,9 +222,10 @@ The API supplies what SSH was reaching for, so the SSH channel is **dropped from
 | Package inventory | `pveversion -v` | `GET /nodes/{node}/apt/versions` | Sys.Audit |
 
 **One fact has no API equivalent: nested-virtualization support**
-(`cat /sys/module/kvm_intel/parameters/nested`). It is currently used for eligibility, not for any
-of the twelve unsafe conditions, so it does **not** block the first MVP. If it is later needed, it
-returns as a single fixed host-local read — never `pvesh`, never sudo, never root.
+(`cat /sys/module/kvm_intel/parameters/nested`). It gated no unsafe condition, so it was **removed**
+along with the `cat` capability that existed solely to read it — the probe, the eligibility gate and
+the allowlist entry are all gone (`target_discovery/probes.py`, `engine.py`). If it is ever needed
+again it returns as a single fixed host-local read — never `pvesh`, never sudo, never root.
 
 ### Data retained / discarded
 
@@ -256,3 +257,64 @@ configuration beyond identity, and anything not in the required-fact table.
 Any `POST`/`PUT`/`DELETE`; `PUT /cluster/sdn` (the SDN apply); any guest, storage, firewall or
 network change; any OpenTofu `init`, `plan` or `apply`; any provider plugin execution; any
 permission change.
+
+---
+
+# Open decisions blocking the last link — for Juan
+
+The discovery chain is complete from credential resolution to a signed snapshot, and
+`verify_discovery_snapshot` verifies one against an `ExpectedWorkerRegistration`. **What has no
+production caller is the code that loads that registration from the database**, and it is blocked on
+two questions rather than on effort. Both are recorded here rather than worked around, because every
+workaround available is the injectable-authority hole this whole chain exists to close.
+
+`ExpectedWorkerRegistration` has six fields. Four are already durable:
+
+| Field | Durable source |
+| --- | --- |
+| `worker_installation_id` | `WorkerEnrollmentState.worker_installation_id` |
+| `verification_anchor_fingerprint` | `WorkerEnrollmentState.worker_key_id` |
+| `worker_release_fingerprint` | `WorkerEnrollmentState.release_digest` |
+| `organization_identity` | `WorkerEnrollmentState.organization_id` |
+
+Two are not.
+
+### 1. `worker_role` has no durable home, and may not get one in enrollment
+
+The binding signs `worker_role` (`"proxmox_privileged"`) and the verifier compares it against the
+registration. No table stores it. The obvious place — the enrollment row — is closed to it: the
+management plane is provider-neutral by machine-enforced rule, and no Proxmox concept may appear in
+any management identity, release, evidence, enrollment or config surface
+(`tests/test_management_plane_boundary.py`).
+
+**Recommendation.** Treat `worker_role` as a constant the *discovery contract* declares rather than a
+per-worker database fact: every worker performing Proxmox discovery is `proxmox_privileged` by
+definition of the operation. The comparison still catches a signer claiming a different role, needs
+no column, and keeps the provider concept inside the provider-specific contract where it belongs.
+The alternative — a new column on a control-plane-side worker table — costs a migration and puts a
+provider string one import away from the neutral plane.
+
+### 2. `target_identity` needs a worker-to-target binding that does not exist
+
+`ExpectedWorkerRegistration.target_identity` asserts which target this worker is registered to act
+on. Nothing binds the two: `ExecutionTarget` (`models.py:627`) has no worker column,
+`TargetOnboarding` (`models.py:681`) carries only org and target, and `WorkerEnrollmentState`
+(`worker_enrollment_models.py:189`) carries only org and site label. The worker→target link exists
+today only inside a `DiscoveryResolutionContract`, which is per-operation and not durable.
+
+**Recommendation.** Derive it from the operation being verified rather than storing a new binding:
+the `WorkflowRun`/operation row already names the execution target, and the verifier already takes
+`expected_target_identity` separately. That makes the registration's `target_identity` redundant
+with a value the control plane holds anyway, and the field should be dropped from the registration
+rather than sourced. Dropping it changes the verifier's comparison set, which is a trust-contract
+change and therefore Juan's.
+
+### Why neither was implemented anyway
+
+Both have a "just pass it in" answer, and both of those answers reintroduce exactly the defect the
+rest of this work removed: a caller supplying the value that authority is checked against. The
+binding factory was removed for this reason; a caller-supplied expectation would be the same hole
+one layer up.
+
+**Nothing below this line is authorised, scheduled, or partially done.** No migration has been
+authored, no column added, no verifier field changed.
