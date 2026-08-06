@@ -361,8 +361,46 @@ def test_pending_state_is_keyed_per_vnet_for_subnets():
     )
     pending = produced["pending_sdn_state"].value
     assert set(pending) == {"subnets@v1"}
-    # The nested-pending rule survives the projection.
-    assert pending["subnets@v1"][0]["gateway"] == "10.0.0.1"
+    # The nested-pending rule survives the projection...
+    (row,) = pending["subnets@v1"]
+    assert row["observed"]["gateway"] == "10.0.0.1"
+    # ...and the running view is kept apart from the post-activation one.
+    assert "gateway" not in row["active"]
+    assert row["object_id"] == "s1"
+    assert row["state"] == "new"
+
+
+def test_a_changed_object_keeps_the_running_values_alongside_the_pending_ones():
+    """A merged-only record cannot say what activation would REPLACE, which is what an operator
+    reading the manifest needs to see."""
+    produced = observe(
+        GetSdnZonesOperation(),
+        [{"zone": "z1", "mtu": 1500, "state": "changed", "pending": {"mtu": 9000}}],
+    )
+    (row,) = produced["pending_sdn_state"].value["zones"]
+    assert row["observed"]["mtu"] == 9000
+    assert row["active"]["mtu"] == 1500
+
+
+def test_an_unidentifiable_pending_object_is_kept_rather_than_dropped():
+    """It still occupies the cluster. Dropping it would shrink the pending set that activation
+    exclusivity is judged on, turning a contaminated cluster into a clean-looking one.
+
+    Note the payload: one identifiable zone establishes that the response IS a zones list, so the
+    shape rule is satisfied and the nameless row is a pending object with no id rather than
+    evidence that this code misread the whole answer. A response where NOTHING is identifiable is
+    the other case, and it is malformed — see the shape tests above.
+    """
+    produced = observe(
+        GetSdnZonesOperation(),
+        [
+            {"zone": "z1", "type": "vlan"},
+            {"type": "vlan", "state": "new", "pending": {"tag": 5}},
+        ],
+    )
+    rows = produced["pending_sdn_state"].value["zones"]
+    assert [r["object_id"] for r in rows] == [""]
+    assert rows[0]["state"] == "new"
 
 
 def test_the_cluster_index_and_the_node_runtime_view_describe_a_zone_without_colliding():

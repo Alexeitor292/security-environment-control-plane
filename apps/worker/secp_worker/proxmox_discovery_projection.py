@@ -531,11 +531,60 @@ def _parse_effective_permissions(operation: object, payload: object) -> dict[str
     return {"sdn_read_authority": Observation.observed({"sdn_audit_granted": granted})}
 
 
+#: Which key identifies an object in each pending family. An object whose identifier key is absent
+#: is kept with an empty id rather than dropped: an unidentifiable pending change still occupies the
+#: cluster, and dropping it would shrink the pending set that activation exclusivity is judged on.
+_PENDING_ID_KEYS: dict[str, tuple[str, ...]] = {
+    "zones": ("zone",),
+    "vnets": ("vnet",),
+    "subnets": ("subnet", "cidr"),
+    "controllers": ("controller",),
+    "fabrics": ("fabric", "id", "name"),
+}
+
+
 def _pending(family: str, payload: object) -> tuple[dict, ...]:
+    """Pending objects with the running and post-activation views kept APART.
+
+    ``parse_pending_objects`` merges the nested ``pending`` block over the top level, which is the
+    view activation would produce. For a ``changed`` object the top level held the RUNNING values,
+    and a merged-only record cannot say what activation would replace — which is exactly what an
+    operator reading the manifest needs to see. Both are carried, under separate keys, so neither
+    can be mistaken for the other.
+    """
     try:
-        return parse_pending_objects(family, payload)
+        merged_rows = parse_pending_objects(family, payload)
     except ValueError as exc:
         raise _MalformedPayload(str(exc.args[0])) from None
+
+    running = {}
+    if isinstance(payload, list):
+        for row in payload:
+            if isinstance(row, dict):
+                identifier = _pending_identifier(family, row)
+                running[identifier] = {k: v for k, v in row.items() if k != "pending"}
+
+    out = []
+    for merged in merged_rows:
+        identifier = _pending_identifier(family, merged)
+        out.append(
+            {
+                "family": family,
+                "object_id": identifier,
+                "state": merged.get("state", ""),
+                "observed": merged,
+                "active": running.get(identifier, {}),
+            }
+        )
+    return tuple(out)
+
+
+def _pending_identifier(family: str, row: dict) -> str:
+    for key in _PENDING_ID_KEYS.get(family, ()):
+        value = _text(row, key)
+        if value:
+            return value
+    return ""
 
 
 def _parse_sdn_zones(operation: object, payload: object) -> dict[str, Observation]:
