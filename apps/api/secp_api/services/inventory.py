@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.db import session_scope
-from secp_api.enums import AuditAction, Permission, SnapshotStatus, TargetStatus
+from secp_api.enums import AuditAction, AuditOutcome, Permission, SnapshotStatus, TargetStatus
 from secp_api.errors import DomainError, NotFoundError
 from secp_api.models import (
     ExecutionTarget,
@@ -40,7 +40,7 @@ def _audit_provider_refusal(actor: Principal, target: ExecutionTarget, reason: s
             resource_id=target.id,
             organization_id=target.organization_id,
             actor=str(actor.user_id),
-            outcome="denied",
+            outcome=AuditOutcome.denied,
             data={"reason": reason},
         )
 
@@ -182,7 +182,7 @@ def fail_snapshot(
         resource_id=snap.id,
         organization_id=snap.organization_id,
         actor="worker",
-        outcome="failed",
+        outcome=AuditOutcome.failed,
         data={"error": error},
     )
     return snap

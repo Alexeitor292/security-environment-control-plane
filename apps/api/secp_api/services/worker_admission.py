@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from secp_api import audit
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     LiveReadAuthorizationStatus,
     OnboardingStatus,
     TargetStatus,
@@ -153,7 +154,7 @@ def _audit(
     *,
     action: AuditAction,
     reason_code: str,
-    outcome: str,
+    outcome: AuditOutcome,
 ) -> None:
     audit.record(
         session,
@@ -251,7 +252,7 @@ def issue_discovery_admission_challenge(
         admission,
         action=AuditAction.worker_discovery_admission_issued,
         reason_code="challenge_issued",
-        outcome="success",
+        outcome=AuditOutcome.success,
     )
     return admission
 
@@ -282,7 +283,7 @@ def complete_discovery_admission(
             admission,
             action=AuditAction.worker_discovery_admission_refused,
             reason_code=reason,
-            outcome="refused",
+            outcome=AuditOutcome.refused,
         )
         raise WorkerAdmissionRefused(reason)
 
@@ -330,7 +331,7 @@ def complete_discovery_admission(
         admission,
         action=AuditAction.worker_discovery_admission_issued,
         reason_code="admitted",
-        outcome="success",
+        outcome=AuditOutcome.success,
     )
     return admission
 
@@ -412,6 +413,6 @@ def consume_discovery_admission(
             admission,
             action=AuditAction.worker_discovery_admission_consumed,
             reason_code="consumed",
-            outcome="success",
+            outcome=AuditOutcome.success,
         )
     return result

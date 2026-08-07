@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from secp_api import audit
-from secp_api.enums import AuditAction, ResolutionLeaseReason, ResolutionLeaseStatus
+from secp_api.enums import AuditAction, AuditOutcome, ResolutionLeaseReason, ResolutionLeaseStatus
 from secp_api.models import ResolutionLease
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
@@ -119,7 +119,7 @@ def _audit(
         resource_id=row.id,
         organization_id=row.organization_id,
         actor="worker",
-        outcome="success" if action in _SUCCESS_ACTIONS else "denied",
+        outcome=AuditOutcome.success if action in _SUCCESS_ACTIONS else AuditOutcome.refused,
         data=data,
     )
 

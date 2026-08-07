@@ -46,6 +46,7 @@ from secp_api.eligibility_policy import (
 )
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     EligibilityOutcome,
     EligibilityReasonCategory,
     VerificationLevel,
@@ -306,7 +307,7 @@ def run_real_eligibility_preflight(
             resource_id=request.onboarding_id,
             organization_id=request.organization_id,
             actor="worker",
-            outcome="refused",
+            outcome=AuditOutcome.refused,
             data={
                 "execution_target_id": str(request.execution_target_id),
                 "authorization_id": str(request.authorization_id),
