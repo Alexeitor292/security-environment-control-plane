@@ -115,6 +115,12 @@
     "permissions": [],
     "state": "unknown"
   },
+  "GET /api/v1/manifests": {
+    "permissions": [
+      "provisioning_read"
+    ],
+    "state": "requires"
+  },
   "GET /api/v1/manifests/{manifest_id}": {
     "permissions": [
       "provisioning_read"
