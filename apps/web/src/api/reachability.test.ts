@@ -48,20 +48,26 @@ describe("the facts this analysis exists to get right", () => {
     );
   });
 
-  it("cannot reach manifests by reading, however many hops it tries", () => {
-    // The one real break. Every GET yielding a manifest id needs a manifest, a change-set or a
-    // provisioning-operation id, and those three form a closed cycle. The only way in is
-    // `POST /api/v1/plans/{plan_id}/manifest`, which CREATES one — and creating is not reading.
-    expect(reachability.producedBy.has("api/v1/manifests")).toBe(false);
+  it("reaches manifests now that a collection route exists, and still not provisioning-operations", () => {
+    // This assertion USED to be the one real break: every GET yielding a manifest id needed a
+    // manifest, a change-set or a provisioning-operation id, and those three formed a closed
+    // cycle, so the only way in was `POST /api/v1/plans/{plan_id}/manifest` — creating, not
+    // reading. `GET /api/v1/manifests` closed it.
+    //
+    // Kept rather than deleted, inverted, because it is the analysis's sharpest edge: the cycle
+    // it detects is real, and one collection route is what breaks a cycle. Provisioning
+    // operations are still inside one.
+    expect(reachability.producedBy.get("api/v1/manifests")).toBe("GET /api/v1/manifests");
     expect(reachability.producedBy.has("api/v1/provisioning-operations")).toBe(false);
   });
 
-  it("blocks the change-sets route at exactly one space", () => {
-    // Precision matters here: it is one missing collection route, not two. Reporting two would
-    // send the API owner to build something already reachable.
+  it("no longer blocks the change-sets route, because its one missing space was filled", () => {
+    // The precision this test was written for paid off: it said ONE missing collection route,
+    // not two, and exactly one route made the whole path reachable. Had it over-reported, an API
+    // owner would have built something already reachable.
     const path = "/api/v1/manifests/{manifest_id}/change-sets";
-    expect(reachability.isReachable(path)).toBe(false);
-    expect(reachability.unreachableSpacesOf(path)).toEqual(["api/v1/manifests"]);
+    expect(reachability.isReachable(path)).toBe(true);
+    expect(reachability.unreachableSpacesOf(path)).toEqual([]);
   });
 
   it("reaches teardown evidence, because ranges are enumerable", () => {

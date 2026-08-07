@@ -38,13 +38,9 @@ Evidence exists in three unrelated, differently-shaped, separately-scoped places
 
 **Unblocks** — An approvals inbox. Keep the six families DISTINCT in whatever is returned — they authorize different acts, and one flattened queue is how an approval for one operation gets read as authorizing another.
 
-**What exists today** — nothing
+**What exists today** — `/api/v1/manifests/{manifest_id}/change-sets`
 
-CORRECTED THREE TIMES, and the third correction is the interesting one. It said `absent`, which had stopped being true; then `shaped`, which overstated it; then that the parent was unreachable and "the fix is ONE collection route". **That route landed** (#131, `GET /api/v1/manifests`, `provisioning_read`), so the reachability half of this entry is now closed: an operator can enumerate manifests without having made one in the same session, and the plan -> manifest -> change-set chain is walkable end to end.
-
-**What is still absent is the inbox itself.** `GET /api/v1/manifests/{manifest_id}/change-sets` enumerates change-set approvals PER MANIFEST, so answering "what is waiting on me" means walking every manifest and merging the results client-side. The other five approval families (plan-secret, plan-generation, activation-dossier, readonly-preflight, resolver-activation) remain GET-by-id only; the manifest-scoped routes that mention them are POSTs that CREATE an authorization, not lists. So the sketch above stands, minus the reachability argument that used to justify it.
-
-Worth recording because it is the pattern: this entry was wrong the moment #131 merged, and it was caught by `tests/test_route_permissions.py` refusing a stale generated map rather than by anyone re-reading the prose. A specification that is only prose goes stale silently.
+CORRECTED THREE TIMES, and it moved BACK. It said `absent`, which had stopped being true; then `shaped`, which overstated it; then `parent-unreachable`, which was right until GET /api/v1/manifests landed. It is `shaped` again now, for the reason `shaped` originally overstated: the serving route works and the parent IS enumerable, so what remains is a shape problem rather than a reachability one. GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals PER MANIFEST, so 'what is waiting on me' means walking every manifest and merging client-side. The other five approval families (plan-secret, plan-generation, activation-dossier, readonly-preflight, resolver-activation) remain GET-by-id only; the manifest-scoped routes that mention them are POSTs that CREATE an authorization, not lists. So the inbox still cannot be built — but nothing is unreachable any more. Recorded because the churn is the lesson: this entry was wrong four times and every correction came from a COMPUTATION (analyseReachability, the generated route map) refusing to agree with it, never from re-reading the prose.
 
 ## `listEvents`
 
