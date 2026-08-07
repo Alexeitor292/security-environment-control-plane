@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from secp_api.auth import Principal
@@ -36,6 +36,32 @@ def generate_manifest(
     """Generate an immutable, secret-free provisioning manifest from an approved plan."""
     manifest = manifests.generate_manifest(session, principal, plan_id)
     return ManifestOut.model_validate(manifest)
+
+
+@router.get("/manifests", response_model=list[ManifestOut])
+def list_manifests(
+    deployment_plan_id: uuid.UUID | None = Query(default=None),
+    execution_target_id: uuid.UUID | None = Query(default=None),
+    session: Session = DB_SESSION,
+    principal: Principal = Depends(current_principal),
+) -> list[ManifestOut]:
+    """Enumerate the organization's provisioning manifests, newest first.
+
+    Declared BEFORE ``/manifests/{manifest_id}`` deliberately. FastAPI matches routes in
+    declaration order, and a literal path that follows a parameterised sibling is still reachable
+    here only because ``manifest_id`` is typed as a UUID — a rename to ``str`` would silently
+    capture this path and return a 404 for every list request. Ordering it first removes the
+    dependence on that coincidence.
+    """
+    return [
+        ManifestOut.model_validate(row)
+        for row in manifests.list_manifests(
+            session,
+            principal,
+            deployment_plan_id=deployment_plan_id,
+            execution_target_id=execution_target_id,
+        )
+    ]
 
 
 @router.get("/manifests/{manifest_id}", response_model=ManifestOut)

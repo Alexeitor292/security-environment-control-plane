@@ -551,6 +551,37 @@ def get_manifest(
     return manifest
 
 
+def list_manifests(
+    session: Session,
+    actor: Principal,
+    *,
+    deployment_plan_id: uuid.UUID | None = None,
+    execution_target_id: uuid.UUID | None = None,
+) -> list[ProvisioningManifest]:
+    """Every manifest in the actor's organization, newest first.
+
+    WHY THIS EXISTS. Manifests were reachable only by an id the caller already held: the id
+    returned by ``POST /plans/{plan_id}/manifest`` in the same session. Nothing enumerated them.
+    Change-set approvals hang off ``/manifests/{id}/change-sets``, so an approvals inbox was not
+    buildable at all — not "needs a selection step", but *unreachable*, because the id it needs
+    has no producer a client can call. That is a different category from a parent-scoped route,
+    and it is the category only a collection route closes.
+
+    Organization scope comes from the PRINCIPAL and is not a filter a caller can widen. The two
+    optional filters narrow within that scope and never escape it.
+    """
+    actor.require(Permission.provisioning_read)
+    stmt = select(ProvisioningManifest).where(
+        ProvisioningManifest.organization_id == actor.organization_id
+    )
+    if deployment_plan_id is not None:
+        stmt = stmt.where(ProvisioningManifest.deployment_plan_id == deployment_plan_id)
+    if execution_target_id is not None:
+        stmt = stmt.where(ProvisioningManifest.execution_target_id == execution_target_id)
+    stmt = stmt.order_by(ProvisioningManifest.created_at.desc(), ProvisioningManifest.id.desc())
+    return list(session.execute(stmt).scalars().all())
+
+
 def manifest_idempotency_key(content_hash_value: str, kind: ProvisioningOperationKind) -> str:
     import hashlib
 
