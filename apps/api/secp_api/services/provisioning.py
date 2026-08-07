@@ -26,11 +26,10 @@ from secp_api.enums import (
 from secp_api.errors import DomainError, NotFoundError
 from secp_api.models import ProvisioningManifest, ProvisioningOperation
 from secp_api.provisioning_lifecycle import transition
-from secp_api.services.provisioning_worker_selection import assert_dispatchable
 
-#: The statuses from which the worker may pick an operation up. Reaching one of these is the moment
-#: an operation stops being a record and starts being work, so it is the moment the durable
-#: worker binding has to already exist -- see :func:`advance`.
+#: The statuses from which a worker may pick an operation up. Reaching one of these is the moment an
+#: operation stops being a record and starts being work, so it is where the durable worker binding
+#: has to already exist -- see :func:`advance` for why the gate is not installed here yet.
 _DISPATCHABLE_STATUSES: frozenset[ProvisioningStatus] = frozenset(
     {ProvisioningStatus.queued, ProvisioningStatus.destroy_queued}
 )
@@ -152,18 +151,22 @@ def advance(
 ) -> ProvisioningOperation:
     """Apply an audited, validated lifecycle transition.
 
-    A transition INTO a dispatchable status additionally requires the operation to already name the
-    worker that may execute it (ADR-030 condition 2). The check lives here, in the single audited
-    transition function, rather than in the enqueue caller: a caller that forgot it would produce an
-    operation the execution authority must then refuse forever, and putting the gate in the
-    transition means no future enqueue path can reach ``queued`` without a binding. The binding is
-    written by ``services.provisioning_worker_selection.bind_provisioning_worker`` and persisted in
-    this same transaction, so it is durable before -- never after -- the operation becomes work.
+    NOT the place the ADR-030 condition-2 binding gate can live yet, and the reason is worth
+    recording rather than discovering again. A transition into :data:`_DISPATCHABLE_STATUSES` is the
+    moment an operation stops being a record and becomes work, so it is where
+    ``provisioning_worker_selection.assert_dispatchable`` belongs. But the SIMULATOR execution path
+    in ``secp_worker.provisioning.execution`` already drives operations into ``queued`` and
+    ``destroy_queued`` itself, for organizations with no enrolled worker — so installing the gate
+    here today refuses the shipped dev/test flow rather than a real dispatch.
+
+    That is a finding, not a reason to drop the gate: the existing path reaching ``queued`` unbound
+    is precisely the bypass condition 2 exists to close, and it has to be closed WITH the real
+    executor, together with the fixture enrollment that path then needs. Until then the binding is
+    enforced where it can be: ``bind_provisioning_worker`` is the only writer, the ORM refuses a
+    re-point, and the execution authority refuses a NULL binding outright — so an unbound operation
+    is unexecutable even though it can still reach ``queued``.
     """
-    next_status = transition(operation.status, target)
-    if next_status in _DISPATCHABLE_STATUSES:
-        assert_dispatchable(operation)
-    operation.status = next_status
+    operation.status = transition(operation.status, target)
     if finished:
         operation.finished_at = _utcnow()
     audit.record(

@@ -183,10 +183,17 @@ The properties that make it a binding rather than a field:
   selection would be fabricating an authorization record. `assert_dispatchable` refuses to let a
   NULL-bound operation reach `queued` or `destroy_queued`, and the derivation refuses a NULL binding
   outright, so a historical row is unexecutable rather than open to anyone;
-- **the gate is in the transition, not the caller.** `services/provisioning.advance` — the single
-  audited transition function, and the only importer of `provisioning_lifecycle.transition` in
-  non-test source — calls `assert_dispatchable` before applying a transition into a dispatchable
-  status. A future enqueue path therefore cannot reach `queued` unbound by forgetting a call;
+- **the dispatchability gate exists but is not yet installed in the transition, and that is a
+  finding.** `assert_dispatchable` refuses an unbound operation, and `services/provisioning.advance`
+  — the single audited transition function, and the only non-test importer of
+  `provisioning_lifecycle.transition` — is where it belongs. It is not called there today because
+  the **simulator** execution path in `secp_worker.provisioning.execution` already drives operations
+  into `queued` and `destroy_queued` itself, for organizations with no enrolled worker; installing
+  the gate now refuses the shipped dev/test flow rather than a real dispatch. That existing path
+  reaching `queued` unbound is precisely the bypass condition 2 exists to close, so it must be
+  closed **with** the real executor, together with the fixture enrollment that path then needs. A
+  test pins that `advance` and `mark_failed` are the only two functions assigning an operation
+  status, so there is exactly one place the gate will need to go;
 - **an exact retry keeps its binding, a new worker needs a new operation.** There is no path that
   changes a written binding, so "the worker that was authorized" and "the worker that executes"
   remain the same fact across a retry; re-selection is a new operation, which the existing

@@ -30,8 +30,8 @@ from sqlalchemy import inspect as sa_inspect
 
 
 def _operation(session, principal, **kw) -> ProvisioningOperation:
-    from conftest import build_provisioning_env
     from secp_api.models import ProvisioningManifest
+    from tests.conftest import build_provisioning_env  # type: ignore[import-not-found]
 
     env = build_provisioning_env(session, principal)
     manifest = ProvisioningManifest(
@@ -215,43 +215,37 @@ def test_every_refusal_reason_is_in_the_closed_set():
 # === the binding is durable BEFORE the operation becomes dispatchable ===========================
 
 
-def _advance(session, operation, target):
-    from secp_api.enums import AuditAction
-    from secp_api.services import provisioning as prov
+def test_an_unbound_operation_is_not_dispatchable(session, principal):
+    """NULL is not "open to any worker"; it is unexecutable.
 
-    return prov.advance(session, operation, target, action=AuditAction.provisioning_destroy_queued)
-
-
-@pytest.mark.parametrize(
-    "dispatchable",
-    [ProvisioningStatus.queued, ProvisioningStatus.destroy_queued],
-)
-def test_an_unbound_operation_cannot_reach_a_dispatchable_status(session, principal, dispatchable):
-    """The gate is in the transition, not in the caller.
-
-    An operation that reached ``queued`` with no binding would be work the execution authority must
-    refuse forever -- a queue entry that can never run and never visibly fails. So the check lives
-    in ``services.provisioning.advance``, the single audited transition function, and a future
-    enqueue path cannot route around it by forgetting to call something.
+    ``assert_dispatchable`` is the gate a real enqueue path must call before it transitions an
+    operation into ``queued`` or ``destroy_queued``. It is asserted directly rather than through
+    ``services.provisioning.advance`` because that function cannot host the gate yet -- the
+    simulator execution path already drives operations into ``queued`` for organizations with no
+    enrolled worker, so installing it there today would refuse the shipped dev/test flow rather
+    than a real dispatch. See ``advance``'s docstring.
     """
     op = _operation(session, principal, status=ProvisioningStatus.pending_approval)
-    if dispatchable is ProvisioningStatus.destroy_queued:
-        op.status = ProvisioningStatus.applied
-        session.flush()
     assert op.worker_installation_id is None
     with pytest.raises(ProvisioningWorkerSelectionRefused, match="binding_absent"):
-        _advance(session, op, dispatchable)
-    # And it did NOT move: a refused transition leaves the row where it was.
-    assert op.status is not dispatchable
+        assert_dispatchable(op)
 
 
-def test_a_bound_operation_reaches_a_dispatchable_status(session, principal):
+def test_a_bound_operation_is_dispatchable(session, principal):
     """The gate refuses the unbound case only -- it is not a blanket denial of dispatch."""
     op = _operation(session, principal, status=ProvisioningStatus.pending_approval)
     bind_provisioning_worker(session, operation=op, worker_installation_id="wk-dispatch-1")
-    _advance(session, op, ProvisioningStatus.queued)
-    assert op.status is ProvisioningStatus.queued
     assert assert_dispatchable(op) == "wk-dispatch-1"
+
+
+def test_the_dispatchable_statuses_are_exactly_the_ones_a_worker_picks_up():
+    """Pins WHICH statuses the gate has to cover, so a new queue-like status is a visible decision
+    rather than a silent hole."""
+    from secp_api.services.provisioning import _DISPATCHABLE_STATUSES
+
+    assert _DISPATCHABLE_STATUSES == frozenset(
+        {ProvisioningStatus.queued, ProvisioningStatus.destroy_queued}
+    )
 
 
 def test_no_second_path_can_make_an_operation_dispatchable():
@@ -263,11 +257,12 @@ def test_no_second_path_can_make_an_operation_dispatchable():
        is imported by exactly one non-test module, the one holding the gate. (The worker imports
        ``is_permitted``, a read-only predicate that assigns nothing.)
     2. inside that module, the functions that assign a status are exactly ``advance`` and
-       ``mark_failed``, and ``advance`` -- the only one that can reach a dispatchable status --
-       calls ``assert_dispatchable``. ``mark_failed`` only ever reaches ``failed``.
+       ``mark_failed``.
 
-    Naming ``mark_failed`` explicitly is deliberate: a NEW status-writing function has to be added
-    to this list by someone who then has to say why it does not need the gate.
+    Naming them explicitly is deliberate. When the real executor installs the binding gate in
+    ``advance``, this test is what proves there is no second function it would have to be installed
+    in as well -- and a NEW status-writing function has to be added to this list by someone who then
+    has to say why it does not need the gate.
     """
     import ast
     import pathlib
@@ -297,10 +292,3 @@ def test_no_second_path_can_make_an_operation_dispatchable():
             ):
                 writers.setdefault(func.name, func)
     assert set(writers) == {"advance", "mark_failed"}, set(writers)
-
-    gated = {
-        n.func.id
-        for n in ast.walk(writers["advance"])
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-    }
-    assert "assert_dispatchable" in gated

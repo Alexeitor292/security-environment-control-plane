@@ -16,7 +16,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import VALID_TOOLCHAIN_PROFILE, build_provisioning_env
 from secp_api.enums import (
     ChangeSetApprovalStatus,
     EvidenceStatus,
@@ -41,6 +40,10 @@ from secp_api.provisioning_execution_authority import (
 )
 from secp_api.services.provisioning_worker_selection import bind_provisioning_worker
 from sqlalchemy import update
+from tests.conftest import (  # type: ignore[import-not-found]
+    VALID_TOOLCHAIN_PROFILE,
+    build_provisioning_env,
+)
 
 NOW = datetime(2026, 8, 7, 12, 0, 0, tzinfo=UTC)
 WORKER = "wk-exec-1"
