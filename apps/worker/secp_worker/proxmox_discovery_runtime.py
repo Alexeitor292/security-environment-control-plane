@@ -165,7 +165,6 @@ def run_authorized_discovery(
     from secp_api.discovery_authority_loader import load_discovery_authority
 
     from secp_worker.preflight.secret_resolution import (
-        SealedDiscoveryCredentialResolver,
         TrustedCredentialReference,
         build_discovery_resolution_request,
     )
@@ -200,7 +199,7 @@ def run_authorized_discovery(
     )
 
     result = run_full_discovery(
-        resolver=resolver if resolver is not None else SealedDiscoveryCredentialResolver(),
+        resolver=resolver if resolver is not None else _default_discovery_resolver(),
         resolution_request=request,
         resolution_expectation=expectation,
         transport_factory=HardenedDiscoveryTransportFactory(),
@@ -226,6 +225,26 @@ def run_authorized_discovery(
         expected_operation_generation=operation.operation_generation,
         failed=bool(getattr(result, "failed", False)),
         failure_reason=str(getattr(result, "failure_reason", "")),
+    )
+
+
+def _default_discovery_resolver() -> object:
+    """The shipped discovery credential resolver.
+
+    :class:`ProxmoxOperationSecretResolver` constructed FOR the discovery purpose, with no backend
+    client — so the shipped posture is unchanged: an authorized run reaches the credential step and
+    refuses before a socket is opened. What changed is WHY it refuses. It is no longer a class whose
+    only behaviour is to fail; it is the real resolver, missing the one thing an operator supplies
+    after Authorization Packet 1.
+
+    Constructed per call rather than held as a module singleton, so a resolver never outlives the
+    run that needed it.
+    """
+    from secp_worker.preflight.proxmox_secret_resolver import ProxmoxOperationSecretResolver
+    from secp_worker.preflight.secret_resolution import ResolutionPurpose
+
+    return ProxmoxOperationSecretResolver(
+        purpose=ResolutionPurpose.proxmox_readonly_discovery, client=None
     )
 
 
