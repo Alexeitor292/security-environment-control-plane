@@ -41,14 +41,31 @@ if TYPE_CHECKING:  # imported for typing only — avoids a hard runtime import o
 
 
 class ResolutionPurpose(str, Enum):
-    """Closed catalog of secret-resolution purposes. Only one is permitted in this phase."""
+    """Closed catalog of secret-resolution purposes.
+
+    A purpose is a SEPARATION boundary, not a label. Two credentials that happen to authenticate to
+    the same host are different credentials when they are for different jobs, and a resolver that
+    accepts either for both has erased the boundary. So there is deliberately no generic
+    ``proxmox_token``: a read-only discovery token and a controlled-live apply credential would both
+    fit under one, and the first would silently become usable for the second.
+    """
 
     readonly_staging_preflight = "readonly_staging_preflight"
+    #: The read-only Proxmox HTTPS discovery API token. Authenticates GET requests against the
+    #: enrolled target's API and nothing else. Structurally distinct from provider execution,
+    #: OpenTofu planning, apply, destroy, reset, SDN activation, guest lifecycle and generic HTTP —
+    #: each of which needs its own member if it ever needs a credential, precisely so that
+    #: widening one does not widen the rest.
+    proxmox_readonly_discovery = "proxmox_readonly_discovery"
 
 
-# The only purpose a resolver may act on in this phase. A future purpose requires its own review.
+# The purposes a resolver may act on. A future purpose requires its own review; adding a member
+# above without adding it here resolves for nothing, which is the safe direction.
 SUPPORTED_PURPOSES: frozenset[ResolutionPurpose] = frozenset(
-    {ResolutionPurpose.readonly_staging_preflight}
+    {
+        ResolutionPurpose.readonly_staging_preflight,
+        ResolutionPurpose.proxmox_readonly_discovery,
+    }
 )
 
 
@@ -360,6 +377,185 @@ def assert_resolution_authorized(
     expiry = _parse_canonical_utc(candidate.authorization_expiry)
     if expiry <= now:
         raise ResolutionContractViolation("authorization_expired")
+
+
+@dataclass(frozen=True)
+class DiscoveryResolutionContract:
+    """The authoritative binding a Proxmox discovery credential resolution is tied to.
+
+    A SIBLING of :class:`ResolutionContract`, not a reuse of it, and the reason is honesty about
+    coordinates. That contract is keyed on ``onboarding_id``, ``preflight_id`` and
+    ``authorization_id`` — a discovery operation has none of those, and filling them with
+    plausible-looking values to fit the shape would sign a binding to work items that do not exist.
+    Everything that CAN be shared is: the purpose enum, the opaque credential reference, the
+    ``SecretMaterial`` return, the construction-token idiom, and the resolver protocol's refusal
+    semantics.
+    """
+
+    purpose: ResolutionPurpose
+    organization_id: uuid.UUID
+    execution_target_id: uuid.UUID
+    #: The privileged worker permitted to resolve this. A resolution for the right target by the
+    #: wrong worker is refused — the credential is bound to who may use it, not only to what for.
+    worker_installation_id: str
+    operation_identity: str
+    operation_generation: int
+    contract_version: str
+    credential_reference: TrustedCredentialReference
+
+    def __repr__(self) -> str:
+        return (
+            "DiscoveryResolutionContract("
+            f"purpose={self.purpose.value!r}, "
+            f"organization_id={self.organization_id!r}, "
+            f"execution_target_id={self.execution_target_id!r}, "
+            f"worker_installation_id={self.worker_installation_id!r}, "
+            f"operation_identity={self.operation_identity!r}, "
+            "credential_reference=<redacted>)"
+        )
+
+    __str__ = __repr__
+
+
+class TrustedDiscoveryResolutionRequest:
+    """Worker-constructed request for a discovery credential. Not directly instantiable.
+
+    Same rule as the preflight request: a caller-supplied request can never be a trust anchor, so
+    only :func:`build_discovery_resolution_request` may build one.
+    """
+
+    __slots__ = ("__contract",)
+
+    def __init__(self, contract: DiscoveryResolutionContract, *, token: object) -> None:
+        if token is not _CONSTRUCTION_TOKEN:
+            raise TypeError(
+                "TrustedDiscoveryResolutionRequest is worker-constructed only; call "
+                "build_discovery_resolution_request()"
+            )
+        self.__contract = contract
+
+    @property
+    def contract(self) -> DiscoveryResolutionContract:
+        return self.__contract
+
+    def __repr__(self) -> str:
+        return "TrustedDiscoveryResolutionRequest(<redacted>)"
+
+    __str__ = __repr__
+
+    def __getstate__(self):  # noqa: ANN201
+        raise TypeError("TrustedDiscoveryResolutionRequest cannot be serialized")
+
+    def __reduce__(self):  # noqa: ANN201
+        raise TypeError("TrustedDiscoveryResolutionRequest cannot be pickled")
+
+
+DISCOVERY_RESOLUTION_CONTRACT_VERSION = "secp.proxmox-discovery-resolution/v1"
+
+
+def build_discovery_resolution_request(
+    *,
+    organization_id: uuid.UUID,
+    execution_target_id: uuid.UUID,
+    worker_installation_id: str,
+    operation_identity: str,
+    operation_generation: int,
+    credential_reference: TrustedCredentialReference,
+) -> tuple[TrustedDiscoveryResolutionRequest, DiscoveryResolutionContract]:
+    """Build the request and the independently-derived expectation.
+
+    Both are returned so the resolver can be handed a request AND an expectation it must match,
+    which is the same shape the preflight seam uses: a resolver that trusts the request alone has
+    nothing to check it against.
+
+    The purpose is fixed here rather than taken as a parameter. A builder that accepted any purpose
+    would let a caller request a discovery credential for an apply, which is the exact confusion the
+    purpose separation exists to prevent.
+    """
+    if not worker_installation_id or not str(worker_installation_id).strip():
+        raise ResolutionContractViolation("discovery_resolution_worker_unbound")
+    if not operation_identity or not str(operation_identity).strip():
+        raise ResolutionContractViolation("discovery_resolution_operation_unbound")
+
+    contract = DiscoveryResolutionContract(
+        purpose=ResolutionPurpose.proxmox_readonly_discovery,
+        organization_id=organization_id,
+        execution_target_id=execution_target_id,
+        worker_installation_id=worker_installation_id,
+        operation_identity=operation_identity,
+        operation_generation=operation_generation,
+        contract_version=DISCOVERY_RESOLUTION_CONTRACT_VERSION,
+        credential_reference=credential_reference,
+    )
+    return TrustedDiscoveryResolutionRequest(contract, token=_CONSTRUCTION_TOKEN), contract
+
+
+class DiscoveryCredentialResolver(Protocol):
+    """The worker-only seam that turns an opaque discovery reference into secret material.
+
+    **There is no guarded implementation of this protocol in the repository.** The only
+    implementation is :class:`SealedDiscoveryCredentialResolver` below, which always fails closed;
+    tests inject an explicit fake. This docstring previously claimed "shipped production wiring
+    supplies the guarded implementation", which was not true when written and would have let a
+    reader conclude the credential path was complete.
+
+    Supplying a real backend is an operator decision that follows Authorization Packet 1, and the
+    canonical backend to extend when it arrives is
+    :mod:`secp_worker.plan_gen.openbao_plan_resolver` — not a fourth resolver family.
+
+    The signature mirrors :class:`WorkerSecretResolver` deliberately — request plus an
+    independently derived expectation, and a resolver that cannot match them refuses.
+    """
+
+    def resolve(
+        self,
+        request: TrustedDiscoveryResolutionRequest,
+        *,
+        expectation: DiscoveryResolutionContract,
+        now: datetime,
+    ) -> SecretMaterial: ...
+
+
+class SealedDiscoveryCredentialResolver:
+    """The shipped default: no discovery credential backend is configured. Always fails closed."""
+
+    def resolve(
+        self,
+        request: TrustedDiscoveryResolutionRequest,
+        *,
+        expectation: DiscoveryResolutionContract,
+        now: datetime,
+    ) -> SecretMaterial:
+        raise SecretResolutionUnavailable(
+            "no Proxmox discovery credential backend is configured (sealed default)"
+        )
+
+
+def assert_discovery_resolution_authorized(
+    request: TrustedDiscoveryResolutionRequest,
+    expectation: DiscoveryResolutionContract,
+) -> None:
+    """Every binding field must match. Raises a bounded violation otherwise.
+
+    Field-by-field rather than a single ``==`` so the refusal names WHICH binding disagreed — an
+    operator told only "contract violation" has to guess between a wrong org, a wrong target and a
+    wrong worker.
+    """
+    actual = request.contract
+    for label, left, right in (
+        ("purpose", actual.purpose, expectation.purpose),
+        ("organization", actual.organization_id, expectation.organization_id),
+        ("target", actual.execution_target_id, expectation.execution_target_id),
+        ("worker", actual.worker_installation_id, expectation.worker_installation_id),
+        ("operation", actual.operation_identity, expectation.operation_identity),
+        ("generation", actual.operation_generation, expectation.operation_generation),
+        ("contract_version", actual.contract_version, expectation.contract_version),
+        ("credential_reference", actual.credential_reference, expectation.credential_reference),
+    ):
+        if left != right:
+            raise ResolutionContractViolation(f"discovery_resolution_mismatch:{label}")
+    if actual.purpose is not ResolutionPurpose.proxmox_readonly_discovery:
+        raise ResolutionContractViolation("discovery_resolution_wrong_purpose")
 
 
 @runtime_checkable

@@ -48,6 +48,8 @@ OPERATOR_QUEUE = "secp-controlled-live"
 ORDINARY_UNIT = "secp-worker-ordinary.service"
 OPERATOR_UNIT = "secp-worker-infrastructure-operator.service"
 UNIT_DIR = "/etc/systemd/system"
+SYSUSERS_DIR = "/usr/lib/sysusers.d"
+SYSUSERS_PATH = f"{SYSUSERS_DIR}/secp-worker.conf"
 WORKER_EXE = "/opt/secp/worker/bin/secp-worker"
 IDENTITY_PATH = "/var/lib/secp/bootstrap/worker-installation-identity.json"
 
@@ -79,6 +81,9 @@ class FakeRunner:
             "restart": CommandResult(exit_code=0, stdout=""),
             "is-active": CommandResult(exit_code=0, stdout="active\n"),
             "is-enabled": CommandResult(exit_code=0, stdout="enabled\n"),
+            # `systemctl start systemd-sysusers.service` applies the account declaration the
+            # installer writes. The installer OWNS creating the account it requires.
+            "start": CommandResult(exit_code=0, stdout=""),
         }
         self._answers.update(answers)
 
@@ -151,6 +156,11 @@ def build_fs(*, worker_exe: bool = True) -> InMemoryFilesystem:
         "/etc",
         "/etc/systemd",
         UNIT_DIR,
+        # The installer now OWNS creating the dedicated account, declaratively, so the sysusers.d
+        # directory has to exist for it to install into.
+        "/usr",
+        "/usr/lib",
+        SYSUSERS_DIR,
         "/var",
         "/var/lib",
         "/var/lib/secp",
@@ -337,7 +347,9 @@ def test_install_writes_the_hardened_code_owned_unit():
     # no shell, no env indirection
     assert "/bin/sh" not in unit and "/usr/bin/env" not in unit
     # systemd is told about the new unit, and the unit is confirmed loadable
-    assert runner.verbs == ["daemon-reload", "is-enabled"]
+    # `start` comes FIRST and it is the account declaration being applied: the installer creates
+    # the unprivileged account before it installs a unit whose User=/Group= names it.
+    assert runner.verbs == ["start", "daemon-reload", "is-enabled"]
 
 
 def test_install_carries_no_enrollment_material_into_the_unit():
@@ -516,7 +528,11 @@ def test_the_systemctl_verb_set_is_closed():
         "restart",
         "is-active",
         "is-enabled",
+        # Applies the sysusers.d account declaration. NOT a general "start anything" verb: the
+        # only unit it is ever given is the fixed literal asserted below.
+        "start",
     }
+    assert wsa._SYSUSERS_APPLY_UNIT == "systemd-sysusers.service"
     # no destructive verb is reachable
     for forbidden in ("mask", "unmask", "kill", "isolate", "poweroff", "reboot", "set-property"):
         assert forbidden not in wsa._SYSTEMCTL_VERBS
@@ -649,6 +665,7 @@ def test_write_confirm_now_completes_a_real_installation():
     # the host really was mutated, in the reviewed order
     assert fs.lstat(f"{UNIT_DIR}/{ORDINARY_UNIT}") is not None
     assert runner.verbs == [
+        "start",  # install: apply the account declaration BEFORE the unit that runs as it
         "daemon-reload",
         "is-enabled",  # install: unit is loadable
         "enable",
@@ -930,3 +947,101 @@ def test_the_write_path_composes_the_real_posix_adapters(monkeypatch):
     assert captured["called"]
     assert isinstance(deps.services, wsa.PosixServiceManager)
     assert isinstance(deps.identities, wsa.PosixDurableIdentityStore)
+
+
+# --- the installer OWNS creating the account it requires -----------------------------------------
+
+
+def test_install_writes_the_account_declaration_at_the_one_fixed_path():
+    """Before this, the adapter merely refused ``installer_worker_account_absent`` and a comment
+    asserted the account "is expected to have been provisioned by the host image" — which made the
+    unit's User=/Group= hardening contingent on provisioning SECP neither performed nor verified."""
+    fs, runner = build_fs(), FakeRunner()
+    services(fs, runner).install(ORDINARY_UNIT, role="ordinary", task_queue=ORDINARY_QUEUE)
+
+    stat = fs.lstat(SYSUSERS_PATH)
+    assert stat is not None and not stat.is_symlink
+    assert stat.uid == 0 and stat.gid == 0 and (stat.mode & 0o777) == 0o644
+
+    body = fs.safe_read(SYSUSERS_PATH, max_bytes=64 * 1024, expected_uid=0).decode()
+    assert f'u {wsa._WORKER_USER} - "SECP worker" / {wsa._NOLOGIN_SHELL}' in body
+    assert f"g {wsa._WORKER_GROUP} -" in body
+
+
+def test_the_account_has_no_login_shell_and_no_home():
+    """A range platform's worker account is a service identity. A usable shell on it is a foothold,
+    and sysusers treats "-" as "the distribution default", which is usually a usable shell."""
+    fs = build_fs()
+    services(fs).install(ORDINARY_UNIT, role="ordinary", task_queue=ORDINARY_QUEUE)
+    body = fs.safe_read(SYSUSERS_PATH, max_bytes=64 * 1024, expected_uid=0).decode()
+    assert wsa._NOLOGIN_SHELL == "/usr/sbin/nologin"
+    assert "/bin/bash" not in body and "/bin/sh" not in body
+    # `/` is the home field: no home directory is created for it.
+    assert f'"SECP worker" / {wsa._NOLOGIN_SHELL}' in body
+
+
+def test_the_account_declaration_chooses_no_numeric_id():
+    """A hardcoded uid collides on exactly the hosts an operator cares about. sysusers assigns."""
+    fs = build_fs()
+    services(fs).install(ORDINARY_UNIT, role="ordinary", task_queue=ORDINARY_QUEUE)
+    body = fs.safe_read(SYSUSERS_PATH, max_bytes=64 * 1024, expected_uid=0).decode()
+    for line in body.splitlines():
+        if line.startswith(("u ", "g ")):
+            assert line.split()[2] == "-", line
+
+
+def test_start_is_only_ever_given_the_fixed_sysusers_unit():
+    """`start` is not a general "start anything" verb. If a future edit passed it a computed unit
+    name, this fails — which is the difference between one reviewed oneshot and an arbitrary
+    service-control primitive."""
+    fs, runner = build_fs(), FakeRunner()
+    services(fs, runner).install(ORDINARY_UNIT, role="ordinary", task_queue=ORDINARY_QUEUE)
+    started = [call for call in runner.calls if call[0] == "start"]
+    assert started == [("start", wsa._SYSUSERS_APPLY_UNIT)]
+
+
+def test_a_sysusers_path_that_is_not_the_fixed_one_is_refused():
+    """The sysusers write authority is held to the same "exactly one code-owned path" discipline as
+    the unit write authority — never a prefix, a wildcard or a caller filename."""
+    locations = ManagementLocations()
+    locations.assert_sysusers_writable(locations.worker_sysusers_path())
+    for foreign in (
+        "/usr/lib/sysusers.d/evil.conf",
+        "/usr/lib/sysusers.d/",
+        "/etc/sysusers.d/secp-worker.conf",
+        "/usr/lib/sysusers.d/secp-worker.conf.bak",
+    ):
+        with pytest.raises(Exception, match="layout_sysusers_path_not_fixed"):
+            locations.assert_sysusers_writable(foreign)
+
+
+def test_account_creation_failing_refuses_the_whole_install():
+    """A unit whose User= names an account that was not created starts as nobody, or not at all.
+
+    The refusal surfaces as ``ManagementError`` rather than ``WorkerInstallerError`` because a
+    non-zero systemctl exit is raised by the pinned runner itself, carrying the fault reason — it
+    never reaches ``_reject``. Asserted at the layer it actually fails on rather than wrapped.
+    """
+    from secp_management import ManagementError
+
+    runner = FakeRunner(start=CommandResult(exit_code=1, stdout=""))
+    fs = build_fs()
+    with pytest.raises(ManagementError, match="installer_worker_account_creation_failed"):
+        services(fs, runner).install(ORDINARY_UNIT, role="ordinary", task_queue=ORDINARY_QUEUE)
+    # And no unit was installed: a host that could not gain the account never gains a service.
+    assert fs.lstat(f"{UNIT_DIR}/{ORDINARY_UNIT}") is None
+
+
+def test_the_account_is_still_REQUIRED_after_being_provisioned():
+    """sysusers reporting success is not the same fact as the account being resolvable, and the
+    unit's User=/Group= depends on the second."""
+    absent = FakeAccounts(absent=True)
+    assert (
+        refusal(
+            services(build_fs(), FakeRunner(), absent).install,
+            ORDINARY_UNIT,
+            role="ordinary",
+            task_queue=ORDINARY_QUEUE,
+        )
+        == "installer_worker_account_absent"
+    )

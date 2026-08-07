@@ -40,6 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import NoReturn
 
 from secp_commissioning.canonical import sha256_digest
 
@@ -99,12 +100,22 @@ class PendingSdnObject:
 
     family: str
     object_id: str
-    action: str  # new | changed | deleted
+    #: The DERIVED action — create | change | delete | unchanged | ambiguous — not the target's own
+    #: annotation. Proxmox's ``state`` is one source's summary of the same pair of views; the pair
+    #: is what SECP classifies from, and the annotation is retained separately as evidence.
+    action: str
     normalized_active_representation: str = ""
     normalized_pending_representation: str = ""
     source_endpoint: str = ""
     observation_state: str = ""
     raw_result_digest: str = ""
+    #: What the target annotated the row with, kept apart from the derived action so a disagreement
+    #: between the two is visible rather than resolved silently.
+    target_state: str = ""
+    #: Why the action could not be resolved, when it is ``ambiguous``.
+    ambiguity_reason: str = ""
+    active_present: bool = False
+    pending_present: bool = False
 
     @property
     def key(self) -> tuple[str, str]:
@@ -116,6 +127,10 @@ class PendingSdnObject:
             "family": self.family,
             "object_id": self.object_id,
             "action": self.action,
+            "target_state": self.target_state,
+            "ambiguity_reason": self.ambiguity_reason,
+            "active_present": self.active_present,
+            "pending_present": self.pending_present,
             "active": self.normalized_active_representation,
             "pending": self.normalized_pending_representation,
             "source_endpoint": self.source_endpoint,
@@ -124,9 +139,101 @@ class PendingSdnObject:
         }
 
 
+_PENDING_CONTENT_TOKEN = object()
+
+
+def pending_content_token() -> object:
+    """Handed to the one function permitted to authenticate pending content.
+
+    A function rather than a public constant so the token is not importable as data; the module that
+    authenticates content calls it, and nothing else has a reason to.
+    """
+    return _PENDING_CONTENT_TOKEN
+
+
+class AuthenticatedPendingContent:
+    """Proof that a pending document's content is exactly what a registered worker signed.
+
+    This type exists because ``signature_verified: bool`` was a field, and a field is something a
+    caller assigns. It is produced only by
+    :func:`secp_api.sdn_pending_observation.authenticate_pending_content`, which recomputes the fact
+    commitment and refuses unless the digest equals the signed ``facts_hash``.
+
+    It carries ``pending_sdn_state`` — the state the WORKER signed for that fact — so the document's
+    visibility claim is read from inside the signature rather than recomputed by whoever is asking.
+    """
+
+    __slots__ = ("__facts_hash", "__pending_sdn_state")
+
+    def __init_subclass__(cls, **kwargs: object) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent cannot be subclassed")
+
+    def __new__(cls, token: object = None, **kwargs: object) -> AuthenticatedPendingContent:
+        if token is not _PENDING_CONTENT_TOKEN:
+            raise SdnActivationRefused(
+                "AuthenticatedPendingContent cannot be constructed directly; it is produced only "
+                "by authenticating content against a verified snapshot"
+            )
+        return super().__new__(cls)
+
+    def __init__(self, token: object, *, facts_hash: str, pending_sdn_state: str) -> None:
+        if token is not _PENDING_CONTENT_TOKEN:
+            raise SdnActivationRefused("AuthenticatedPendingContent cannot be constructed directly")
+        object.__setattr__(self, "_AuthenticatedPendingContent__facts_hash", facts_hash)
+        object.__setattr__(
+            self, "_AuthenticatedPendingContent__pending_sdn_state", pending_sdn_state
+        )
+
+    def __setattr__(self, name: str, value: object) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent is immutable")
+
+    def __delattr__(self, name: str) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent is immutable")
+
+    @property
+    def facts_hash(self) -> str:
+        return object.__getattribute__(self, "_AuthenticatedPendingContent__facts_hash")  # type: ignore[no-any-return]
+
+    @property
+    def pending_sdn_state(self) -> str:
+        return object.__getattribute__(  # type: ignore[no-any-return]
+            self, "_AuthenticatedPendingContent__pending_sdn_state"
+        )
+
+    def __repr__(self) -> str:
+        return f"AuthenticatedPendingContent(facts_hash={self.facts_hash!r})"
+
+    def __getstate__(self) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent cannot be serialized")
+
+    def __reduce__(self) -> NoReturn:
+        raise SdnActivationRefused("AuthenticatedPendingContent cannot be pickled")
+
+
+def _authenticated_facts_hash(authentication: object) -> str:
+    """The signed facts hash a real authentication carries, or "" for anything else.
+
+    Reading the slot is what distinguishes a genuinely issued carrier from an ``object.__new__``
+    allocation of the same type: the allocation passes ``isinstance`` and raises on every attribute.
+    """
+    if not isinstance(authentication, AuthenticatedPendingContent):
+        return ""
+    try:
+        return authentication.facts_hash
+    except AttributeError:
+        return ""
+
+
 @dataclass(frozen=True)
 class PendingSdnDocument:
-    """The complete cluster-wide pending state at one instant, with its own bindings."""
+    """The complete cluster-wide pending state at one instant, with its own bindings.
+
+    ``signature_verified`` and ``visibility_complete`` are PROPERTIES, not fields. They used to be
+    booleans a builder could stamp, and the activation gate reads both — so stamping them was the
+    whole attack. There is now no keyword to pass and no attribute to assign; both answer from an
+    :class:`AuthenticatedPendingContent` that only content matching a signed ``facts_hash``
+    produces.
+    """
 
     observed_at: datetime
     target_identity: str
@@ -135,9 +242,35 @@ class PendingSdnDocument:
     worker_installation_id: str
     worker_release_fingerprint: str
     objects: tuple[PendingSdnObject, ...] = ()
-    signature_verified: bool = False
-    visibility_complete: bool = False
+    authentication: AuthenticatedPendingContent | None = None
     unreadable_families: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def signature_verified(self) -> bool:
+        """True only when the content authenticated against a registered worker's signature.
+
+        ``isinstance`` alone is NOT the check, and that is not a nicety. ``object.__new__(cls)``
+        allocates an instance without running ``__new__`` or ``__init__`` — Python offers no way to
+        forbid it — and such an object satisfies every ``isinstance`` its consumers make. What it
+        cannot do is have its slots set, so the guard reads the state real construction produces
+        and treats an unreadable carrier as unauthenticated.
+        """
+        return bool(_authenticated_facts_hash(self.authentication))
+
+    @property
+    def visibility_complete(self) -> bool:
+        """True only when the WORKER SIGNED that the pending SDN read was observed.
+
+        Not the caller's projection of the same question. A binding declaring ``permission_denied``
+        cannot produce a document claiming complete pending visibility, because the claim is read
+        out of the signature rather than alongside it.
+        """
+        if not self.signature_verified:
+            return False
+        try:
+            return self.authentication.pending_sdn_state == "observed"  # type: ignore[union-attr]
+        except AttributeError:
+            return False
 
     def pending_sdn_hash(self) -> str:
         """Hash of what the TARGET reported. Nothing about ownership enters here.
@@ -307,8 +440,11 @@ def classify_ownership(
     ):
         return SdnObjectOwnership.unknown
 
-    if obj.action == "new":
+    if obj.action == "create":
         # Otherwise SECP could adopt somebody else's object that happened to share the identifier.
+        # Note this reads the DERIVED action, not the target's ``new`` annotation: an object the
+        # target labels new but whose active view is populated is not a create, and treating the
+        # label as the answer is how an adoption passes as a creation.
         return (
             SdnObjectOwnership.current_operation
             if proof.pre_stage1_absence_evidence_digest
@@ -357,10 +493,14 @@ _OWNERSHIP_FIELDS: tuple[tuple[str, SdnObjectOwnership], ...] = (
     ("unclassified", SdnObjectOwnership.unclassified),
 )
 
+#: The DERIVED action vocabulary. ``unchanged`` and ``ambiguous`` are counted too: an object whose
+#: effect nobody can state must appear in the operator's summary, not fall out of it.
 _ACTION_FIELDS: tuple[tuple[str, str], ...] = (
-    ("create", "new"),
-    ("change", "changed"),
-    ("delete", "deleted"),
+    ("create", "create"),
+    ("change", "change"),
+    ("delete", "delete"),
+    ("unchanged", "unchanged"),
+    ("ambiguous", "ambiguous"),
 )
 
 
@@ -553,6 +693,9 @@ def issue_activation_authorization(
     if document.cluster_fingerprint != operation.cluster_fingerprint:
         raise SdnActivationRefused("sdn_activation_cluster_mismatch")
 
+    for reason in sdn_differential_refusals(document, proofs):
+        raise SdnActivationRefused(reason)
+
     disclosure = derive_disclosure(document, proofs, operation)
 
     if not disclosure.classification_complete:
@@ -581,6 +724,54 @@ def issue_activation_authorization(
         worker_release_fingerprint=document.worker_release_fingerprint,
         observation_ttl=observation_ttl,
     )
+
+
+def sdn_differential_refusals(
+    document: PendingSdnDocument, proofs: PendingSdnOwnershipProofSet
+) -> tuple[str, ...]:
+    """Every reason this pending set's active/pending differential may not be acted on.
+
+    Separate from the ownership gate because they answer different questions: ownership asks WHOSE
+    an object is, the differential asks WHAT activation would do to it. An object can be provably
+    ours and still be one whose effect nobody can state.
+    """
+    from secp_api.discovery_fact_projection import safe_identifier
+    from secp_api.sdn_differential import ACTION_AMBIGUOUS, ACTION_CREATE, ACTION_DELETE
+
+    by_key = proofs.by_key()
+    reasons: list[str] = []
+    seen: dict[tuple[str, str], int] = {}
+
+    for obj in document.objects:
+        seen[obj.key] = seen.get(obj.key, 0) + 1
+
+        if obj.action == ACTION_AMBIGUOUS:
+            reasons.append(
+                f"sdn_object_action_ambiguous:{obj.family}:"
+                f"{safe_identifier(obj.object_id) if obj.object_id else '<unidentified>'}:"
+                f"{obj.ambiguity_reason or 'unclassified'}"
+            )
+        if obj.action == ACTION_CREATE:
+            proof = by_key.get(obj.key)
+            if proof is None or not proof.pre_stage1_absence_evidence_digest:
+                # Without proof it was absent before Stage 1, a "create" may be an existing object
+                # SECP is about to adopt because it happens to share an identifier.
+                reasons.append(f"sdn_create_without_absence_evidence:{obj.family}:{obj.object_id}")
+        if obj.action == ACTION_DELETE and not obj.normalized_active_representation:
+            reasons.append(
+                f"sdn_delete_without_active_evidence:{obj.family}:{safe_identifier(obj.object_id)}"
+            )
+
+    for (family, object_id), count in sorted(seen.items()):
+        if count > 1:
+            # The object-to-proof join is one-to-one by construction; a duplicated identifier
+            # cannot be matched to one proof and must not be resolved by picking either.
+            reasons.append(
+                f"sdn_identifier_not_unique:{family}:"
+                f"{safe_identifier(object_id) if object_id else '<unidentified>'}"
+            )
+
+    return tuple(dict.fromkeys(reasons))
 
 
 def _counts_detail(counts: dict[str, int]) -> str:
@@ -636,6 +827,8 @@ def activation_refusals(
         reasons.append("sdn_activation_pending_state_changed")
     if proofs.ownership_provenance_digest() != authorization.ownership_provenance_digest:
         reasons.append("sdn_activation_ownership_provenance_changed")
+
+    reasons.extend(sdn_differential_refusals(document, proofs))
 
     disclosure = derive_disclosure(document, proofs, operation)
     if not disclosure.exclusive_to_current_operation or not disclosure.classification_complete:

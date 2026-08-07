@@ -102,8 +102,22 @@ def _now() -> datetime:
 
 
 def test_resolution_purpose_catalog_is_closed_and_readonly_only():
-    assert [p.value for p in ResolutionPurpose] == ["readonly_staging_preflight"]
-    assert SUPPORTED_PURPOSES == frozenset({ResolutionPurpose.readonly_staging_preflight})
+    """Closed, and every member read-only. The list is exhaustive on purpose: a purpose added
+    without touching this test would be one nobody reviewed, and the catalog is the whole of what a
+    resolver may be asked to unlock."""
+    assert [p.value for p in ResolutionPurpose] == [
+        "readonly_staging_preflight",
+        "proxmox_readonly_discovery",
+    ]
+    assert SUPPORTED_PURPOSES == frozenset(
+        {
+            ResolutionPurpose.readonly_staging_preflight,
+            ResolutionPurpose.proxmox_readonly_discovery,
+        }
+    )
+    # The property the closed catalog exists to protect: no purpose names a write.
+    for purpose in ResolutionPurpose:
+        assert "readonly" in purpose.value or "read_only" in purpose.value, purpose
 
 
 # --- Contract gate: accepts a match, rejects every field mismatch --------------------------------

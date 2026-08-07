@@ -323,6 +323,25 @@ def test_shipped_worker_registers_only_the_ordinary_queue_with_the_sealed_set(
         # two registration points. It is a plain module-level function, not a composed instance, so
         # the bound-method control below (len(owners) == 5) is unaffected.
         T.range_operation_activity,
+        # The HTTPS Proxmox discovery run. Added here DELIBERATELY, because this guard is what makes
+        # "the shipped worker gained a capability" a decision rather than a diff nobody read — it
+        # caught this registration in CI on the commit that introduced it.
+        #
+        # Why the ordinary queue is correct for it: it is read-only by construction. The transport
+        # can express nothing but the twenty-four reviewed typed GET operations, and refuses
+        # anything the derived operation grammar does not describe — there is no method parameter,
+        # no raw path and no arbitrary query. It therefore needs none of the controlled-live
+        # operator machinery the plan/readiness activities need.
+        #
+        # Why it is nonetheless fail-closed here: its credential resolver default is
+        # SealedDiscoveryCredentialResolver, so a run reaches the credential step and refuses before
+        # a socket is opened. Reaching even that far additionally requires an approved worker
+        # identity registration, an approved live-read authorization, and a proof-of-possession
+        # verified admission — none of which any code path can mint without human approval.
+        #
+        # Like range_operation_activity it is a plain module-level function, so the bound-method
+        # control below is unaffected.
+        T.proxmox_discovery_activity,
     }
     registered_activities = set(captured["activities"])
     assert not (expected_activities - registered_activities), "intended activity NOT registered"

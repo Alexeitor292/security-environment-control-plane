@@ -130,9 +130,12 @@ def test_there_is_no_method_parameter_at_all():
     assert not hasattr(HardenedProxmoxDiscoveryTransport, "patch")
     assert not hasattr(HardenedProxmoxDiscoveryTransport, "delete")
 
-    params = inspect.signature(HardenedProxmoxDiscoveryTransport.get).parameters
-    assert "method" not in params
-    assert set(params) == {"self", "path", "params"}
+    assert not hasattr(HardenedProxmoxDiscoveryTransport, "get")
+
+    params = inspect.signature(HardenedProxmoxDiscoveryTransport.execute).parameters
+    assert set(params) == {"self", "operation"}
+    for banned in ("method", "path", "params", "query", "headers", "json", "data", "url"):
+        assert banned not in params, banned
 
 
 def test_the_public_surface_is_exactly_one_operation():
@@ -141,7 +144,7 @@ def test_the_public_surface_is_exactly_one_operation():
         for name in dir(HardenedProxmoxDiscoveryTransport)
         if not name.startswith("_") and callable(getattr(HardenedProxmoxDiscoveryTransport, name))
     }
-    assert public == {"get"}
+    assert public == {"execute"}
 
 
 # --- structural: what this module may not reach ---------------------------------------------------
@@ -193,23 +196,50 @@ def test_it_reuses_the_hardened_primitives_rather_than_redefining_them():
         assert primitive in imported, primitive
 
 
-def test_it_reuses_the_plugin_policy_rather_than_a_second_allowlist():
-    """The closed GET allowlist has one owner. A local copy here would drift from
-    PROXMOX_READONLY_POLICY_VERSION and nothing would notice."""
+def test_the_allowlist_has_one_owner_and_it_is_not_a_list_inside_this_module():
+    """The closed allowlist has ONE owner, and this pins that it is the derived operation grammar.
+
+    It used to be the plugin's ``readonly_policy``, and the reason it no longer is happened rather
+    than being anticipated: that hand-maintained twelve-template list had drifted from the
+    twenty-four reviewed operations, so the transport refused eighteen of them — including
+    ``GET /cluster/sdn``, the SDN authority preflight. Two lists, one wrong, nothing comparing them.
+
+    So the check is not "which module owns it" but "is it derived": the transport must call
+    :func:`discovery_request_grammar`, and must carry no path literal of its own for a second list
+    to be built out of.
+    """
+    import ast
     import pathlib
 
-    source = (
+    path = (
         pathlib.Path(__file__).resolve().parents[3]
         / "apps"
         / "worker"
         / "secp_worker"
         / "proxmox_discovery_transport.py"
-    ).read_text(encoding="utf-8")
-    assert "readonly_policy" in source
-    assert "assert_request_allowed" in source
-    assert "assert_no_params" in source
-    # And it does NOT define its own path allowlist.
+    )
+    source = path.read_text(encoding="utf-8")
+    assert "discovery_request_grammar" in source
+    assert "discovery_operation_types" in source
     assert "ALLOWED_PATH_TEMPLATES" not in source
+
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                docstrings.add(id(body[0].value))
+    offenders = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+        and node.value.startswith("/")
+        and len(node.value) > 1
+    ]
+    assert offenders == [], offenders
 
 
 # --- status mapping -------------------------------------------------------------------------------

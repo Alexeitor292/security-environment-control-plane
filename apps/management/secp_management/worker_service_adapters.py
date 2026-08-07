@@ -100,6 +100,10 @@ _ROOT_UID = 0
 _ROOT_GID = 0
 _IDENTITY_MODE = 0o600  # owner-only: the durable identity is root-readable and nothing else
 _UNIT_MODE = 0o644
+
+#: The account's login shell. A real path to a real refusing binary rather than an empty field:
+#: sysusers treats "-" as "the default", and on most distributions the default is a usable shell.
+_NOLOGIN_SHELL = "/usr/sbin/nologin"
 _STATE_MODE = 0o700
 _MAX_IDENTITY_BYTES = 64 * 1024
 _SYSTEMCTL_TIMEOUT = 30
@@ -114,7 +118,16 @@ _SYSTEMCTL_VERBS = (
     "restart",
     "is-active",
     "is-enabled",
+    # Applies a newly written sysusers.d file. `systemd-sysusers.service` is a systemd-owned
+    # oneshot; starting it is how the account the unit's User=/Group= names comes to exist. It is
+    # NOT a general "start anything" verb -- the unit name is a fixed constant below, and the verb
+    # set is closed, so a computed unit name cannot reach the runner.
+    "start",
 )
+
+#: The systemd-owned oneshot that applies sysusers.d. A fixed literal: the only unit this adapter
+#: may `start`, and never a name derived from an argument.
+_SYSUSERS_APPLY_UNIT = "systemd-sysusers.service"
 
 
 def _reject(reason_code: str) -> NoReturn:
@@ -259,8 +272,55 @@ class PosixServiceManager:
                 return role
         _reject("installer_service_name_not_fixed")
 
+    def _provision_worker_account(self) -> None:
+        """Create the dedicated unprivileged account, declaratively and idempotently.
+
+        The installer OWNS what it needs. Before this existed the adapter merely refused
+        ``installer_worker_account_absent`` and a comment asserted the account "is expected to have
+        been provisioned by the host image" -- which made the unit's ``User=``/``Group=`` hardening
+        contingent on out-of-band provisioning SECP neither performed nor verified.
+
+        systemd-sysusers is the mechanism rather than ``useradd`` for three reasons: it is
+        declarative, so applying it twice is a no-op and a reinstall is safe; it needs no fourth
+        pinned executable in the root-owned production pin file; and the same file documents the
+        intended account for anyone auditing the host.
+
+        The account is created with no shell and no home, and sysusers assigns the uid/gid -- this
+        never chooses a numeric id, because a hardcoded uid collides on exactly the hosts an
+        operator cares about.
+        """
+        path = self.ctx.locations.worker_sysusers_path()
+        try:
+            self.ctx.locations.assert_sysusers_writable(path)
+        except ManagementError:
+            _reject("installer_worker_account_path_not_fixed")
+
+        # A system user with a matching group, no home directory, and a refusing shell.
+        lines = (
+            "# Managed by SECP. The dedicated unprivileged account the worker unit runs as.",
+            f'u {_WORKER_USER} - "SECP worker" / {_NOLOGIN_SHELL}',
+            f"g {_WORKER_GROUP} -",
+            "",
+        )
+        content = "\n".join(lines).encode("utf-8")
+        if len(content) > _MAX_UNIT_BYTES:  # pragma: no cover - fixed content, bounded by literal
+            _reject("installer_worker_account_declaration_invalid")
+        try:
+            self.ctx.fs.atomic_install(path, content, uid=_ROOT_UID, gid=_ROOT_GID, mode=_UNIT_MODE)
+        except FilesystemError:
+            _reject("installer_worker_account_declaration_failed")
+
+        self._systemctl(
+            "start", _SYSUSERS_APPLY_UNIT, reason="installer_worker_account_creation_failed"
+        )
+
     def _require_worker_account(self) -> tuple[int, int]:
-        """The dedicated unprivileged account must already exist; refuse rather than fall back."""
+        """The dedicated unprivileged account must exist; refuse rather than fall back.
+
+        Called AFTER ``_provision_worker_account`` as its postcondition: sysusers reporting success
+        is not the same fact as the account being resolvable, and the unit's User=/Group= depends on
+        the second.
+        """
         try:
             uid, gid = self.accounts.resolve(_WORKER_USER, _WORKER_GROUP)
         except Exception:  # noqa: BLE001 - any resolution failure is "no usable worker account"
@@ -306,6 +366,7 @@ class PosixServiceManager:
             # never start; refuse now rather than discovering it at verify_service_health
             _reject("installer_worker_runtime_absent")
 
+        self._provision_worker_account()
         uid, gid = self._require_worker_account()
         state_dir = self._state_dir()
         self.ctx.locations.assert_writable(state_dir)

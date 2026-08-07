@@ -86,17 +86,25 @@ answer; it is an unknown one.
 
 **This is a Proxmox configuration mutation and requires explicit approval.**
 
-**The concrete values are deliberately not written here.** `docs/proxmox/*.md` is guarded against
-concrete infrastructure values — a numeric port, an authorization-header scheme, a realm account —
-and a guard that is true of eleven documents and waived for the twelfth is not a guard. So this
-packet carries the SHAPE of the credential and placeholders for the identifiers; the exact strings
-belong in code an operator can print, which is where the next PR in this stack puts them.
+**The exact values are code, not prose.** `secp_api/proxmox_discovery_credential_proposal.py` holds
+the account, role and token names and renders the exact commands; the privilege list is computed by
+`privileges_required()` from the required-fact table. Read them with:
+
+```
+uv run python -c "from secp_api.proxmox_discovery_credential_proposal import *; \
+print(unauthorized_notice()); print(*provisioning_commands(), sep=chr(10))"
+```
+
+This document deliberately carries none of those literals: `docs/proxmox/*.md` is guarded against
+concrete infrastructure values, and an approval artifact made of literals cannot live here. Prose is
+also the wrong home for a derived privilege set — a hand-maintained list drifts from the fact table
+silently, and it always drifts toward asking for more.
 
 | | |
 | --- | --- |
-| Backing user | `<discovery-user>` — a dedicated realm user, no shell, no SSH, never a superuser |
+| Backing user | a dedicated realm user with no shell and no SSH — never a superuser |
 | Role name | `SECPDiscoveryReadOnly` |
-| Privilege set | `Sys.Audit`, `VM.Audit`, `Datastore.Audit`, `SDN.Audit` — and nothing else |
+| Privilege set | derived: exactly the audit privileges the required-fact table needs, nothing else |
 | Token id | `<discovery-user>!<token-name>` |
 | Privilege separation | `privsep=1` |
 | ACL path | `/` |
@@ -110,12 +118,9 @@ at `/sdn` would **replace**, not union with, the role inherited from `/` for eve
 This is a decision, not a fact — it should be confirmed by the S1/S2 preflight before being relied
 on.
 
-**Privilege set should be derived, not chosen — and on this branch it is not yet.** The four
-privileges above are the ones the planned required-fact table needs, but that table and the code
-that computes the grant from it do not exist on this branch: they arrive later in the stack, along
-with the renderer that prints the exact commands and a test asserting no write-class privilege can
-reach them. Until then, treat the list above as a hand-written proposal — which is exactly the thing
-that drifts, and always drifts toward asking for more.
+**Privilege set is derived, not chosen.** It is computed from the required-fact table
+(`discovery_required_facts.py`), so the grant is exactly what the required facts need. A test
+asserts no write-class privilege appears anywhere in that table.
 
 **Explicitly NOT granted:** `Sys.Modify`, `VM.Allocate`, `VM.Config.*`, `VM.PowerMgmt`,
 `Datastore.Allocate`, `SDN.Allocate`, `Permissions.Modify`, `Realm.*`, `User.Modify`, or any
@@ -129,15 +134,9 @@ corresponding index response, so they are dropped rather than accommodated.
 
 ### Exact commands (NOT executed)
 
-Five `pveum` commands, in this order and with the placeholders above substituted:
-
-```bash
-pveum user add <discovery-user> --comment "SECP read-only discovery"
-pveum role add SECPDiscoveryReadOnly --privs "Sys.Audit,VM.Audit,Datastore.Audit,SDN.Audit"
-pveum acl modify / --user <discovery-user> --role SECPDiscoveryReadOnly --propagate 1
-pveum user token add <discovery-user> <token-name> --privsep 1
-pveum acl modify / --tokens '<discovery-user>!<token-name>' --role SECPDiscoveryReadOnly --propagate 1
-```
+Five `pveum` commands, rendered by `provisioning_commands()`. A test asserts every one of them
+begins with `pveum`, contains no `pvesh`, no shell chaining, and no pipe — and that nothing anywhere
+in the repository calls the renderer.
 
 The token needs **its own** ACL entry: under `privsep=1`, `roles` checks `$acl->{tokens}` before
 `$acl->{users}`, so a token with no entries of its own resolves to nothing. Effective permissions
@@ -145,20 +144,13 @@ are then the **intersection** of the token's and the user's.
 
 > One caveat worth stating because it would silently defeat the design: Proxmox skips the
 > intersection entirely when the backing user is the PAM-realm superuser. A privilege-separated
-> token backed by that account is **not** intersected. That is why the backing user must be a
-> dedicated, purpose-made realm user, never the superuser.
+> token backed by that account is **not** intersected. That is why the backing user is a dedicated,
+> purpose-made realm user — asserted by test, not by convention.
 
 ### Rollback (NOT executed)
 
-Reversed in the order that leaves nothing orphaned — the token before the user that owns it:
-
-```bash
-pveum user token remove <discovery-user> <token-name>
-pveum acl delete / --tokens '<discovery-user>!<token-name>' --role SECPDiscoveryReadOnly
-pveum acl delete / --user <discovery-user> --role SECPDiscoveryReadOnly
-pveum user delete <discovery-user>
-pveum role delete SECPDiscoveryReadOnly
-```
+Five commands, rendered by `rollback_commands()`. A test asserts they name every object
+provisioning creates, and that the token is removed before the user that owns it.
 
 ### Expected effective permissions
 
@@ -236,9 +228,10 @@ The API supplies what SSH was reaching for, so the SSH channel is **dropped from
 | Package inventory | `pveversion -v` | `GET /nodes/{node}/apt/versions` | Sys.Audit |
 
 **One fact has no API equivalent: nested-virtualization support**
-(`cat /sys/module/kvm_intel/parameters/nested`). It is currently used for eligibility, not for any
-of the twelve unsafe conditions, so it does **not** block the first MVP. If it is later needed, it
-returns as a single fixed host-local read — never `pvesh`, never sudo, never root.
+(`cat /sys/module/kvm_intel/parameters/nested`). It gated no unsafe condition, so it was **removed**
+along with the `cat` capability that existed solely to read it — the probe, the eligibility gate and
+the allowlist entry are all gone (`target_discovery/probes.py`, `engine.py`). If it is ever needed
+again it returns as a single fixed host-local read — never `pvesh`, never sudo, never root.
 
 ### Data retained / discarded
 
@@ -270,3 +263,64 @@ configuration beyond identity, and anything not in the required-fact table.
 Any `POST`/`PUT`/`DELETE`; `PUT /cluster/sdn` (the SDN apply); any guest, storage, firewall or
 network change; any OpenTofu `init`, `plan` or `apply`; any provider plugin execution; any
 permission change.
+
+---
+
+# Open decisions blocking the last link — for Juan
+
+The discovery chain is complete from credential resolution to a signed snapshot, and
+`verify_discovery_snapshot` verifies one against an `ExpectedWorkerRegistration`. **What has no
+production caller is the code that loads that registration from the database**, and it is blocked on
+two questions rather than on effort. Both are recorded here rather than worked around, because every
+workaround available is the injectable-authority hole this whole chain exists to close.
+
+`ExpectedWorkerRegistration` has six fields. Four are already durable:
+
+| Field | Durable source |
+| --- | --- |
+| `worker_installation_id` | `WorkerEnrollmentState.worker_installation_id` |
+| `verification_anchor_fingerprint` | `WorkerEnrollmentState.worker_key_id` |
+| `worker_release_fingerprint` | `WorkerEnrollmentState.release_digest` |
+| `organization_identity` | `WorkerEnrollmentState.organization_id` |
+
+Two are not.
+
+### 1. `worker_role` has no durable home, and may not get one in enrollment
+
+The binding signs `worker_role` (`"proxmox_privileged"`) and the verifier compares it against the
+registration. No table stores it. The obvious place — the enrollment row — is closed to it: the
+management plane is provider-neutral by machine-enforced rule, and no Proxmox concept may appear in
+any management identity, release, evidence, enrollment or config surface
+(`tests/test_management_plane_boundary.py`).
+
+**Recommendation.** Treat `worker_role` as a constant the *discovery contract* declares rather than a
+per-worker database fact: every worker performing Proxmox discovery is `proxmox_privileged` by
+definition of the operation. The comparison still catches a signer claiming a different role, needs
+no column, and keeps the provider concept inside the provider-specific contract where it belongs.
+The alternative — a new column on a control-plane-side worker table — costs a migration and puts a
+provider string one import away from the neutral plane.
+
+### 2. `target_identity` needs a worker-to-target binding that does not exist
+
+`ExpectedWorkerRegistration.target_identity` asserts which target this worker is registered to act
+on. Nothing binds the two: `ExecutionTarget` (`models.py:627`) has no worker column,
+`TargetOnboarding` (`models.py:681`) carries only org and target, and `WorkerEnrollmentState`
+(`worker_enrollment_models.py:189`) carries only org and site label. The worker→target link exists
+today only inside a `DiscoveryResolutionContract`, which is per-operation and not durable.
+
+**Recommendation.** Derive it from the operation being verified rather than storing a new binding:
+the `WorkflowRun`/operation row already names the execution target, and the verifier already takes
+`expected_target_identity` separately. That makes the registration's `target_identity` redundant
+with a value the control plane holds anyway, and the field should be dropped from the registration
+rather than sourced. Dropping it changes the verifier's comparison set, which is a trust-contract
+change and therefore Juan's.
+
+### Why neither was implemented anyway
+
+Both have a "just pass it in" answer, and both of those answers reintroduce exactly the defect the
+rest of this work removed: a caller supplying the value that authority is checked against. The
+binding factory was removed for this reason; a caller-supplied expectation would be the same hole
+one layer up.
+
+**Nothing below this line is authorised, scheduled, or partially done.** No migration has been
+authored, no column added, no verifier field changed.
