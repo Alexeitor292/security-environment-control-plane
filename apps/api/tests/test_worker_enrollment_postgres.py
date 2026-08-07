@@ -11,7 +11,7 @@ and concurrent-nonce single-winner; exact-retry with no second history row; conf
 refusal; cross-org / cross-
 site isolation; participant-key/installation collision and corrupt-digest/broken-chain rehydration
 refusals; rollback atomicity leaving no partial state/nonce/revision/receipt; and that the live
-schema head is exactly ``a1d4f7c2e9b6``.
+schema head is exactly ``e3b7a9c25f41``.
 """
 
 from __future__ import annotations
@@ -151,7 +151,7 @@ def test_live_schema_head_is_exactly_the_required_head(pg):
     factory, actor, _ = pg
     with factory() as s:
         head = s.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert head == RUNTIME_REQUIRED_MIGRATION_HEAD == "a1d4f7c2e9b6"
+    assert head == RUNTIME_REQUIRED_MIGRATION_HEAD == "e3b7a9c25f41"
 
 
 def test_two_concurrent_binds_exactly_one_commits(pg):

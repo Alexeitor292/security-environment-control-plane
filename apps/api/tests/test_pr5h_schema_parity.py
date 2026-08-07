@@ -21,8 +21,9 @@ from secp_api.models import Base
 from sqlalchemy import create_engine, inspect
 
 API_DIR = Path(__file__).resolve().parents[1]
-HEAD = "a1d4f7c2e9b6"  # PR5H-B2 sole head (controller-identity activation receipt)
-DOWN_REVISION = "c2f8e1a4b6d9"  # HEAD's immediate parent (PR5H-B1 controller-identity history)
+HEAD = "e3b7a9c25f41"  # SECP-M1 sole head (provisioning operation's selected worker, ADR-030 c2)
+PR5H_B2 = "a1d4f7c2e9b6"  # HEAD's immediate parent (PR5H-B2 controller-identity activation receipt)
+DOWN_REVISION = "c2f8e1a4b6d9"  # PR5H_B2's parent (PR5H-B1 controller-identity history)
 PR5H_B1_BASE = "b6e2f4a9c1d7"  # DOWN_REVISION's parent (PR5H-A enrollment foundation)
 PR5F_BASE = "d8f1a2b3c4e5"  # below all PR5H tables — the downgrade target that removes them
 
@@ -200,12 +201,15 @@ def test_tenancy_and_shadow_columns_exist_in_both(migrated_and_orm) -> None:
 # --- head chain ----------------------------------------------------------------------------
 
 
-def test_a1d4f7c2e9b6_is_the_sole_head_with_the_linear_pr5h_chain() -> None:
+def test_e3b7a9c25f41_is_the_sole_head_with_the_linear_chain() -> None:
+    """Renamed with the head it pins. A test named for a revision that is no longer the head is a
+    test whose name has to be read as history rather than as a statement."""
     script = ScriptDirectory.from_config(_alembic_config("sqlite+pysqlite:///:memory:"))
     heads = tuple(script.get_heads())
     assert heads == (HEAD,), f"expected the sole head {HEAD}, found {heads}"
-    # linear chain: d8f1a2b3c4e5 -> b6e2f4a9c1d7 -> c2f8e1a4b6d9 -> a1d4f7c2e9b6
-    assert script.get_revision(HEAD).down_revision == DOWN_REVISION
+    # linear: d8f1a2b3c4e5 -> b6e2f4a9c1d7 -> c2f8e1a4b6d9 -> a1d4f7c2e9b6 -> e3b7a9c25f41
+    assert script.get_revision(HEAD).down_revision == PR5H_B2
+    assert script.get_revision(PR5H_B2).down_revision == DOWN_REVISION
     assert script.get_revision(DOWN_REVISION).down_revision == PR5H_B1_BASE
     assert script.get_revision(PR5H_B1_BASE).down_revision == PR5F_BASE
 
@@ -238,7 +242,13 @@ def test_accepted_issued_and_runtime_heads_are_unchanged() -> None:
     )
 
     # the bounded rolling window holds the explicitly supported heads, in upgrade order
-    assert ACCEPTED_CONTROLLER_MIGRATION_HEADS == (PR5F_BASE, PR5H_B1_BASE, DOWN_REVISION, HEAD)
+    assert ACCEPTED_CONTROLLER_MIGRATION_HEADS == (
+        PR5F_BASE,
+        PR5H_B1_BASE,
+        DOWN_REVISION,
+        PR5H_B2,
+        HEAD,
+    )
     # issuance and live-schema readiness are new-head-only
     assert ISSUED_CONTROLLER_MIGRATION_HEAD == HEAD
     assert RUNTIME_REQUIRED_MIGRATION_HEAD == HEAD

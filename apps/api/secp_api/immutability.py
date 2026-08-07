@@ -41,6 +41,7 @@ from secp_api.models import (
     ProviderInventorySnapshot,
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
+    ProvisioningOperation,
     ReadonlyStagingPreflight,
     RemoteStateReadinessRecord,
     ResolverActivationAuthorization,
@@ -1005,6 +1006,28 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
                     "ProvisioningManifest is immutable after generation; "
                     f"attempted to change {changed}"
                 )
+        # ProvisioningOperation: the SELECTED WORKER is write-once (ADR-030 condition 2).
+        #
+        # Only this transition is guarded, and only in one direction: NULL -> a value is the
+        # legitimate binding write, and value -> anything else is a re-point of an execution
+        # authority that may already have been granted. Re-selecting a worker is a NEW operation,
+        # not an edit to this one. The rest of the row -- status, attempts, result, finished_at --
+        # is ordinary mutable lifecycle state and is deliberately untouched here.
+        if isinstance(obj, ProvisioningOperation):
+            if _attr_changed(obj, "worker_installation_id"):
+                # The previous value is observable here ONLY because the column declares
+                # ``active_history=True``. Without it, assigning after a commit (instance expired)
+                # produces ``added=['wk-b'], deleted=()`` and this reads None — allowing the exact
+                # re-point the rule refuses. ``load_history()`` does not rescue it: there is no
+                # pending load to resolve. Every other guard in this module compares WHICH FIELDS
+                # changed rather than what they were, so none was exposed; this is the first that
+                # depends on the previous value, and the flag is what makes it sound.
+                previous = _previous_value(obj, "worker_installation_id")
+                if previous not in (None, ""):
+                    raise ImmutableResourceError(
+                        "ProvisioningOperation.worker_installation_id is write-once; a different "
+                        "worker requires a new operation rather than re-pointing an authorized one"
+                    )
         # ToolchainProfile: provenance is immutable after creation (ADR-013).
         if isinstance(obj, ToolchainProfile):
             changed = [a for a in _TOOLCHAIN_PROFILE_PROTECTED if _attr_changed(obj, a)]

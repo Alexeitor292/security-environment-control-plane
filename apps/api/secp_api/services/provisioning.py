@@ -27,6 +27,13 @@ from secp_api.errors import DomainError, NotFoundError
 from secp_api.models import ProvisioningManifest, ProvisioningOperation
 from secp_api.provisioning_lifecycle import transition
 
+#: The statuses from which a worker may pick an operation up. Reaching one of these is the moment an
+#: operation stops being a record and starts being work, so it is where the durable worker binding
+#: has to already exist -- see :func:`advance` for why the gate is not installed here yet.
+_DISPATCHABLE_STATUSES: frozenset[ProvisioningStatus] = frozenset(
+    {ProvisioningStatus.queued, ProvisioningStatus.destroy_queued}
+)
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -142,7 +149,23 @@ def advance(
     data: dict | None = None,
     finished: bool = False,
 ) -> ProvisioningOperation:
-    """Apply an audited, validated lifecycle transition."""
+    """Apply an audited, validated lifecycle transition.
+
+    NOT the place the ADR-030 condition-2 binding gate can live yet, and the reason is worth
+    recording rather than discovering again. A transition into :data:`_DISPATCHABLE_STATUSES` is the
+    moment an operation stops being a record and becomes work, so it is where
+    ``provisioning_worker_selection.assert_dispatchable`` belongs. But the SIMULATOR execution path
+    in ``secp_worker.provisioning.execution`` already drives operations into ``queued`` and
+    ``destroy_queued`` itself, for organizations with no enrolled worker — so installing the gate
+    here today refuses the shipped dev/test flow rather than a real dispatch.
+
+    That is a finding, not a reason to drop the gate: the existing path reaching ``queued`` unbound
+    is precisely the bypass condition 2 exists to close, and it has to be closed WITH the real
+    executor, together with the fixture enrollment that path then needs. Until then the binding is
+    enforced where it can be: ``bind_provisioning_worker`` is the only writer, the ORM refuses a
+    re-point, and the execution authority refuses a NULL binding outright — so an unbound operation
+    is unexecutable even though it can still reach ``queued``.
+    """
     operation.status = transition(operation.status, target)
     if finished:
         operation.finished_at = _utcnow()
