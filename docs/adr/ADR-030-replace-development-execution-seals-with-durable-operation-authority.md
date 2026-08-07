@@ -144,6 +144,65 @@ review artifact. **All three changes landed together with this ADR's acceptance:
 gates inline in-process dispatch to the exact bootstrapped Simulator instance, which is a dev/test
 affordance rather than part of the real execution path this ADR opens.
 
+## Implementation status
+
+This section records what exists in the tree, with file references, and is the part of this ADR
+that must be re-checked rather than believed. A condition listed as *derived* means the check runs;
+it does **not** mean an execution path calls the derivation yet.
+
+`apps/api/secp_api/provisioning_execution_authority.py` holds the derivation.
+`authorize_provisioning_execution` takes six parameters — session, operation id, organization id,
+worker installation id, the worker's observed toolchain, and a clock — and returns an
+`AuthorizedExecution` or raises `ExecutionAuthorityRefused` with one of thirty closed reasons. It
+reads the target, manifest, change-set hash, approval, generation and release rather than accepting
+them, because an execution whose expected values a caller may choose is one that authorizes itself.
+
+**Condition 2 needed a schema change and got one.** Nothing in `provisioning_operation` recorded
+which worker an operation had selected, so condition 2 — the worker identity matches the durable
+operation — had no durable side to match against and the derivation refused every execution.
+Migration `e3b7a9c25f41` adds one nullable column, `provisioning_operation.worker_installation_id`.
+The properties that make it a binding rather than a field:
+
+- **selection is the control plane's.** `services/provisioning_worker_selection.py` exposes
+  `select_provisioning_worker(session, *, organization_id)`. There is no worker parameter anywhere
+  on that surface, so a request body, a Temporal payload, a worker's own claim, an environment
+  variable and the executor have nowhere to express a preference — which is stronger than a
+  preference being ignored. It is not derived from `WorkerDiscoveryAdmission` (that binds a worker
+  selected for a *read*, under its own nonce and expiry) and does not reuse `runner` (a
+  deterministic runner operation id, in which a worker identity would be indistinguishable from the
+  value already written);
+- **"any healthy enrolled worker" is explicitly not sufficient.** That authorizes every healthy
+  worker in the organization to execute every operation in it, which is the property condition 2
+  exists to remove. Selection happens once, is recorded, and is then compared;
+- **write-once, enforced at the ORM layer.** `bind_provisioning_worker` is the only writer and
+  refuses a different value; independently, `secp_api/immutability.py` refuses the transition
+  worker-A → worker-B and worker-A → NULL for any session, including one bypassing the service.
+  This required `active_history=True` on the column (`models.py`): without it a post-commit
+  assignment reports no previous value and the guard compares against `None`;
+- **NULL is honest and fails closed.** Rows predating the column were not backfilled — inventing a
+  selection would be fabricating an authorization record. `assert_dispatchable` refuses to let a
+  NULL-bound operation reach `queued` or `destroy_queued`, and the derivation refuses a NULL binding
+  outright, so a historical row is unexecutable rather than open to anyone;
+- **the gate is in the transition, not the caller.** `services/provisioning.advance` — the single
+  audited transition function, and the only importer of `provisioning_lifecycle.transition` in
+  non-test source — calls `assert_dispatchable` before applying a transition into a dispatchable
+  status. A future enqueue path therefore cannot reach `queued` unbound by forgetting a call;
+- **an exact retry keeps its binding, a new worker needs a new operation.** There is no path that
+  changes a written binding, so "the worker that was authorized" and "the worker that executes"
+  remain the same fact across a retry; re-selection is a new operation, which the existing
+  per-(manifest, kind) idempotency key already provides.
+
+Conditions 6 and 7 are derived from the latest `TargetEvidenceRecord` for the target — the latest
+rather than one a caller names, since a caller able to point at an older passing record could keep
+an expired observation alive indefinitely. `unverifiable` refuses distinctly from `fail`: they are
+different operator actions, and reporting the second as the first sends someone to fix a target that
+may be fine. The freshness bound is a property of the contract, not a caller's argument.
+
+**What is not yet true.** No production path calls `authorize_provisioning_execution`; there is no
+provisioning enqueue endpoint, and `advance` has no callers. The derivation and its gate exist and
+are tested; the executor that would consult them does not. Nothing in this section should be read
+as evidence that a real operation can run.
+
 ## Consequences
 
 **Positive.** Real execution becomes possible under a gate that is auditable per operation rather

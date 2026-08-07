@@ -68,7 +68,7 @@ def factory():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.exec_driver_sql("CREATE TABLE alembic_version (version_num varchar(32) primary key)")
-        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('a1d4f7c2e9b6')")
+        conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('e3b7a9c25f41')")
     yield sessionmaker(bind=engine, future=True)
     engine.dispose()
 

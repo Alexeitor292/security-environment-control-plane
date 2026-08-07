@@ -27,7 +27,7 @@ PG_URL = os.environ.get("SECP_TEST_POSTGRES_URL")
 # bump it, so a migration can never be added without a conscious decision. This suite verifies the
 # OIDC ``app_user`` unique index survives to the CURRENT head, so it tracks the head (not a pinned
 # historical revision); ``DOWN`` stays the OIDC migration's own down-revision (before the index).
-HEAD = "a1d4f7c2e9b6"
+HEAD = "e3b7a9c25f41"
 DOWN = "b2c9e5a1f4d7"
 INDEX_NAME = "uq_app_user_subject"
 

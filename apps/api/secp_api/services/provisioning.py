@@ -26,6 +26,14 @@ from secp_api.enums import (
 from secp_api.errors import DomainError, NotFoundError
 from secp_api.models import ProvisioningManifest, ProvisioningOperation
 from secp_api.provisioning_lifecycle import transition
+from secp_api.services.provisioning_worker_selection import assert_dispatchable
+
+#: The statuses from which the worker may pick an operation up. Reaching one of these is the moment
+#: an operation stops being a record and starts being work, so it is the moment the durable
+#: worker binding has to already exist -- see :func:`advance`.
+_DISPATCHABLE_STATUSES: frozenset[ProvisioningStatus] = frozenset(
+    {ProvisioningStatus.queued, ProvisioningStatus.destroy_queued}
+)
 
 
 def _utcnow() -> datetime:
@@ -142,8 +150,20 @@ def advance(
     data: dict | None = None,
     finished: bool = False,
 ) -> ProvisioningOperation:
-    """Apply an audited, validated lifecycle transition."""
-    operation.status = transition(operation.status, target)
+    """Apply an audited, validated lifecycle transition.
+
+    A transition INTO a dispatchable status additionally requires the operation to already name the
+    worker that may execute it (ADR-030 condition 2). The check lives here, in the single audited
+    transition function, rather than in the enqueue caller: a caller that forgot it would produce an
+    operation the execution authority must then refuse forever, and putting the gate in the
+    transition means no future enqueue path can reach ``queued`` without a binding. The binding is
+    written by ``services.provisioning_worker_selection.bind_provisioning_worker`` and persisted in
+    this same transaction, so it is durable before -- never after -- the operation becomes work.
+    """
+    next_status = transition(operation.status, target)
+    if next_status in _DISPATCHABLE_STATUSES:
+        assert_dispatchable(operation)
+    operation.status = next_status
     if finished:
         operation.finished_at = _utcnow()
     audit.record(

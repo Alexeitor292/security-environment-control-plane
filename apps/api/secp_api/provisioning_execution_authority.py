@@ -42,13 +42,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from secp_api.enums import (
     ChangeSetApprovalStatus,
+    EvidenceStatus,
     ProvisioningOperationKind,
     ProvisioningStatus,
     TargetStatus,
@@ -58,8 +59,14 @@ from secp_api.models import (
     ProvisioningChangeSetApproval,
     ProvisioningManifest,
     ProvisioningOperation,
+    TargetEvidenceRecord,
     ToolchainProfile,
 )
+
+#: How old the target observation a plan was compiled from may be, in seconds. A property of the
+#: contract rather than of a caller: an execution that could widen its own freshness window could
+#: apply a plan compiled from a cluster view of any age.
+OBSERVATION_FRESHNESS_BOUND_SECONDS = 3600
 
 #: Bound into nothing; an implementation id so a refusal is attributable to a known derivation.
 EXECUTION_AUTHORITY_VERSION = "secp.provisioning-execution-authority/v1"
@@ -187,12 +194,7 @@ def authorize_provisioning_execution(
     one of those is read, because an execution whose expected values a caller could choose is an
     execution that authorizes itself.
     """
-    # ``now`` is threaded through for ADR-030 conditions 6-7 (discovery evidence fresh, required
-    # facts complete), which land with the observation slice. Their reason codes are already in the
-    # closed set below and UNUSED — deliberately, so that adding the check later cannot invent a
-    # new vocabulary, and so that a reader can see which conditions this derivation does not yet
-    # enforce rather than having to infer it.
-    _ = now
+    moment = now or datetime.now(UTC)
 
     # --- the operation ---------------------------------------------------------------------------
     operation = session.get(ProvisioningOperation, operation_id)
@@ -242,6 +244,11 @@ def authorize_provisioning_execution(
         organization_id=organization_id,
         worker_installation_id=worker_installation_id,
         operation=operation,
+    )
+
+    # --- the observation ------------------------------------------------------------------------
+    _assert_observation_current(
+        session, execution_target_id=target.id, organization_id=organization_id, now=moment
     )
 
     _assert_toolchain_matches(profile, observed_toolchain)
@@ -326,6 +333,55 @@ def _assert_worker_authorized(
         raise ExecutionAuthorityRefused("execution_worker_selection_not_durable")
     if selected != candidate:
         raise ExecutionAuthorityRefused("execution_worker_not_the_selected_worker")
+
+
+def _assert_observation_current(
+    session: Session,
+    *,
+    execution_target_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    now: datetime,
+) -> None:
+    """ADR-030 conditions 6-7: the observation this plan rests on is verified, and still current.
+
+    A plan compiled from a stale or unverified view of the cluster is a plan for a cluster that no
+    longer exists. The check is on the LATEST evidence for the target rather than on whichever
+    record the caller might name — a caller able to point at an older passing record could keep an
+    expired observation alive indefinitely.
+
+    ``unverifiable`` is refused distinctly from ``fail``. They are different operator actions: a
+    failure says the target is wrong, an unverifiable says nobody could tell — and treating the
+    second as the first sends an operator to fix a target that may be fine.
+    """
+    record = (
+        session.execute(
+            select(TargetEvidenceRecord)
+            .where(TargetEvidenceRecord.execution_target_id == execution_target_id)
+            .where(TargetEvidenceRecord.organization_id == organization_id)
+            .order_by(TargetEvidenceRecord.collected_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+    if record is None:
+        raise ExecutionAuthorityRefused("execution_discovery_evidence_absent")
+    if record.status is not EvidenceStatus.passed:
+        # Both `fail` and `unverifiable` land here; the required-facts reason names the second
+        # case specifically below so the two are distinguishable to an operator.
+        if record.status is EvidenceStatus.unverifiable:
+            raise ExecutionAuthorityRefused("execution_required_facts_incomplete")
+        raise ExecutionAuthorityRefused("execution_discovery_evidence_absent")
+
+    collected = record.collected_at
+    if collected.tzinfo is None:
+        # SQLite hands back naive datetimes; comparing one to an aware `now` raises, and an
+        # exception here would read as a derivation bug rather than the refusal it is not.
+        collected = collected.replace(tzinfo=UTC)
+    age = (now - collected).total_seconds()
+    if age < 0 or age > OBSERVATION_FRESHNESS_BOUND_SECONDS:
+        # A NEGATIVE age is refused too: evidence stamped in the future is not fresh, it is wrong,
+        # and accepting it would let a forward-dated observation stay valid indefinitely.
+        raise ExecutionAuthorityRefused("execution_discovery_evidence_stale")
 
 
 def _assert_toolchain_matches(profile: ToolchainProfile, observed: ObservedToolchain) -> None:
