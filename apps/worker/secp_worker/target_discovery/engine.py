@@ -199,8 +199,10 @@ def _assess(facts: InventoryFacts, profile: str) -> str | None:
         return DiscoveryFailureCode.target_is_clustered.value
     if facts.node_count != 1:
         return DiscoveryFailureCode.ambiguous_node_selection.value
-    if not facts.nested_available:
-        return DiscoveryFailureCode.nested_virtualization_unavailable.value
+    # Nested virtualization is NOT an eligibility gate in the first MVP. It blocks no compilation
+    # decision and no apply decision, has no bearing on provider compatibility, isolation or guest
+    # deployment, and its only observation path was a host-local `cat` over SSH — which first-MVP
+    # HTTPS-only discovery does not have. A target is not ineligible for a fact nobody looks at.
     if facts.cpu_total < req["cpu"] or facts.mem_free_mb < req["mem_free_mb"]:
         return DiscoveryFailureCode.insufficient_capacity.value
     if _select_storage(facts, req["storage_avail_mb"]) is None:
