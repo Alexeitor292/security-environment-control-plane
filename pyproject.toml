@@ -41,6 +41,10 @@ dependencies = [
 secpctl = "secp_management.cli:main"
 secp-admission-proxy = "secp_discovery_activation.proxy:main"
 secp-discovery-activation = "secp_discovery_activation.cli:main"
+# The installed worker runtime. The systemd unit the management-plane installer renders runs
+# exactly this executable with --role and --task-queue; before it existed the installer refused
+# `installer_worker_runtime_absent` and an administrator had to build the tree by hand.
+secp-worker = "secp_worker.cli:main"
 
 [project.optional-dependencies]
 # Temporal is only needed to run the durable worker path. Tests and the inline

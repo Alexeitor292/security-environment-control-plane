@@ -1,7 +1,8 @@
 # ADR-030 — Replace the development execution seals with durable operation authority
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-07
+- **Accepted:** 2026-08-07 by Juan; the three governance changes it names landed with it
 - **Milestone:** SECP pre-live Proxmox readiness
 - **Deciders:** Juan (authorizing); implementation engineering (specifying)
 - **Related:** Charter §6 (invariants), §15; ADR-013 (isolated-lab activation), ADR-022
@@ -120,7 +121,7 @@ not
 production capability does not exist
 ```
 
-## The control that must change first, and why an agent cannot do it
+## The control that had to change first, and how it changed
 
 `CLAUDE.md` §2 lists these seals as an **unconditional hard-deny with no unlock path**, and
 `.claude/hooks/guard_writes.py:40-48,119-134` enforces that mechanically: any edit under
@@ -128,9 +129,9 @@ production capability does not exist
 committed hook. The rule exists specifically so that the seals cannot be opened by a conversation,
 and CLAUDE.md instructs agents never to wait for a human to approve past a hook denial.
 
-That control is doing its job here, and it must be retired the same way it was created — by a
-commit to the repository — not by an agent deciding a message outranks it. **The following three
-changes are Juan's to make**, and this ADR exists to be the review artifact for them:
+That control did its job: it refused to be opened by a conversation, and it was retired the same
+way it was created — by a commit to the repository, authorized by the owner, with this ADR as the
+review artifact. **All three changes landed together with this ADR's acceptance:**
 
 1. `.claude/hooks/guard_writes.py` — remove the retired literals from `SEAL_LITERALS`, keeping
    `SHIPPED_TRUST_ROOT`, `SealState` and `read_seals`, which this ADR does **not** propose to
@@ -139,9 +140,9 @@ changes are Juan's to make**, and this ADR exists to be the review artifact for 
    durable-authority requirement above, so the governing document describes the new invariant;
 3. this ADR — `Proposed` → `Accepted`.
 
-Until those land, an agent implementing this ADR can build every component *around* the seals —
-the authority derivation, the closed command grammar, the plan/apply separation, the evidence and
-postcondition verification — but cannot make the final connection.
+``assert_inline_execution_allowed`` was NOT retired, and the distinction is worth recording: it
+gates inline in-process dispatch to the exact bootstrapped Simulator instance, which is a dev/test
+affordance rather than part of the real execution path this ADR opens.
 
 ## Consequences
 
