@@ -1192,7 +1192,10 @@ class _ActivationProbeResult:
     bundle_prep_loop_started: bool = False
     key_metadata_safe: bool = False
     public_node_matches_local_keys: bool = False
-    seals_valid: bool = False
+    #: The per-seal states the probe reported, carried rather than folded. ``seals_valid`` is
+    #: DERIVED from this below — it used to be the stored field, which is where the per-seal truth
+    #: was first destroyed; the second fold then manufactured four booleans back out of it.
+    seal_states: tuple[tuple[str, str], ...] = ()
     operator_registration_absent: bool = False
     operator_queue_absent: bool = False
     public_node: WorkerPublicObservation | None = None
@@ -1202,6 +1205,44 @@ class _ActivationProbeResult:
     bundle_available: bool = False
     discovery_contacted: bool = False
     candidate_executable: bool | None = None
+
+    @property
+    def seals_valid(self) -> bool:
+        """Derived, one-directional. Empty is False rather than vacuously true."""
+        if not self.seal_states:
+            return False
+        return all(state == "sealed" for _, state in self.seal_states)
+
+
+def _journal_seal_states(previous_worker: dict) -> tuple[tuple[str, str], ...]:
+    """Restore per-seal states from a rollback journal, refusing to invent them.
+
+    The rollback journal is durable state on the worker host, so journals written before this
+    change exist and carry the OLD shape: four booleans that were all set from a single
+    ``seals_valid``. They were never four independent observations.
+
+    So an old journal yields ``()`` — no per-seal states — and NOT four states reconstructed from
+    those booleans. Reconstructing them would take fabricated structure and republish it in the new
+    shape, where it becomes indistinguishable from four real observations; the new format would
+    then be less trustworthy than the old one, which at least looked suspicious.
+
+    ``()`` is safe by construction because ``seals_valid`` treats empty as False. An old journal
+    therefore reads as "the seal posture is not established", which is true: what it recorded
+    cannot answer the question the new shape asks.
+    """
+    raw = previous_worker.get("seal_states")
+    if not isinstance(raw, list):
+        # Old-shape journal (or no seal record at all). Deliberately not reconstructed.
+        return ()
+    states: list[tuple[str, str]] = []
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            return ()
+        name, state = item
+        if not isinstance(name, str) or not isinstance(state, str):
+            return ()
+        states.append((name, state))
+    return tuple(sorted(states))
 
 
 @dataclass(frozen=True)
@@ -2171,10 +2212,11 @@ class LocalActivationAdapter:
                 operator_absent and probe.operator_registration_absent
             ),
             operator_queue_polled=not (operator_absent and probe.operator_queue_absent),
-            generic_activation_subprocess_sealed=probe.seals_valid,
-            generic_executor_subprocess_sealed=probe.seals_valid,
-            plan_only_process_sealed=not probe.seals_valid,
-            real_provisioning_enabled=not probe.seals_valid,
+            # The per-seal states, passed THROUGH. These four lines used to set four fields from
+            # one `probe.seals_valid` boolean, two of them inverted — manufacturing four values
+            # from information that had already been discarded one fold earlier. Anything reading
+            # them as independent observations was reading fabricated structure.
+            seal_states=probe.seal_states,
             # The proof parameters are durable transaction-local facts authenticated by the
             # controller offer.  Observation still performs a fresh live pinned handshake.
             tls_ready=coherent and tls_ready,
@@ -2480,10 +2522,7 @@ class LocalActivationAdapter:
             operator_container_present=observed.operator_container_present,
             operator_registration_present=observed.operator_registration_present,
             operator_queue_polled=observed.operator_queue_polled,
-            generic_activation_subprocess_sealed=(observed.generic_activation_subprocess_sealed),
-            generic_executor_subprocess_sealed=observed.generic_executor_subprocess_sealed,
-            plan_only_process_sealed=observed.plan_only_process_sealed,
-            real_provisioning_enabled=observed.real_provisioning_enabled,
+            seal_states=observed.seal_states,
             tls_ready=observed.tls_ready,
             keys_generated=observed.keys_generated,
             key_metadata_safe=observed.key_metadata_safe,
@@ -2645,10 +2684,7 @@ class LocalActivationAdapter:
             operator_container_present=before.operator_container_present,
             operator_registration_present=before.operator_registration_present,
             operator_queue_polled=before.operator_queue_polled,
-            generic_activation_subprocess_sealed=(before.generic_activation_subprocess_sealed),
-            generic_executor_subprocess_sealed=before.generic_executor_subprocess_sealed,
-            plan_only_process_sealed=before.plan_only_process_sealed,
-            real_provisioning_enabled=before.real_provisioning_enabled,
+            seal_states=before.seal_states,
             artifacts_prepared=before.artifacts_prepared,
             worker_config_installed=before.worker_config_installed,
             worker_recreation_required=before.worker_recreation_required,
@@ -3436,14 +3472,10 @@ class LocalActivationAdapter:
                 and observed_worker.operator_registration_present
                 == baseline_worker.operator_registration_present
                 and observed_worker.operator_queue_polled == baseline_worker.operator_queue_polled
-                and observed_worker.generic_activation_subprocess_sealed
-                == baseline_worker.generic_activation_subprocess_sealed
-                and observed_worker.generic_executor_subprocess_sealed
-                == baseline_worker.generic_executor_subprocess_sealed
-                and observed_worker.plan_only_process_sealed
-                == baseline_worker.plan_only_process_sealed
-                and observed_worker.real_provisioning_enabled
-                == baseline_worker.real_provisioning_enabled
+                # Compares the whole per-seal state tuple, so a change in WHICH seal holds is a
+                # difference. The four booleans this replaced were all set from one bool, so this
+                # comparison could only ever detect that one bool flipping.
+                and observed_worker.seal_states == baseline_worker.seal_states
                 and observed_worker.artifacts_prepared == baseline_worker.artifacts_prepared
                 and observed_worker.worker_config_installed
                 == baseline_worker.worker_config_installed
@@ -4090,7 +4122,9 @@ def _parse_activation_probe(raw: str) -> _ActivationProbeResult:
             bundle_prep_loop_started=health["bundle_prep_loop_started"],
             key_metadata_safe=worker_keys["metadata_safe"],
             public_node_matches_local_keys=worker_keys["public_node_matches_local_keys"],
-            seals_valid=seals == expected_seals,
+            # The states themselves, not a verdict about them. `seals_valid` is derived from this
+            # on the observation, so the fold happens once, late, and in one place.
+            seal_states=tuple(sorted(seals.items())),
             operator_registration_absent=effects["operator_registered"] is False,
             operator_queue_absent=effects["operator_queue_polled"] is False,
             public_node=public,
@@ -4959,14 +4993,10 @@ class PosixActivationArtifactStore:
                 "operator_container_present": before_worker.operator_container_present,
                 "operator_registration_present": before_worker.operator_registration_present,
                 "operator_queue_polled": before_worker.operator_queue_polled,
-                "generic_activation_subprocess_sealed": (
-                    before_worker.generic_activation_subprocess_sealed
-                ),
-                "generic_executor_subprocess_sealed": (
-                    before_worker.generic_executor_subprocess_sealed
-                ),
-                "plan_only_process_sealed": before_worker.plan_only_process_sealed,
-                "real_provisioning_enabled": before_worker.real_provisioning_enabled,
+                # A list of [name, state] pairs: JSON has no tuples, and the reader restores the
+                # tuple shape. Written under the journal's own version (see JOURNAL_SEAL_VERSION),
+                # so a journal written before this change is recognised rather than reinterpreted.
+                "seal_states": [list(pair) for pair in before_worker.seal_states],
                 "artifacts_prepared": before_worker.artifacts_prepared,
                 "worker_config_installed": before_worker.worker_config_installed,
                 "worker_recreation_required": before_worker.worker_recreation_required,
@@ -5623,14 +5653,7 @@ class PosixActivationArtifactStore:
                 operator_container_present=previous_worker["operator_container_present"],
                 operator_registration_present=previous_worker["operator_registration_present"],
                 operator_queue_polled=previous_worker["operator_queue_polled"],
-                generic_activation_subprocess_sealed=previous_worker[
-                    "generic_activation_subprocess_sealed"
-                ],
-                generic_executor_subprocess_sealed=previous_worker[
-                    "generic_executor_subprocess_sealed"
-                ],
-                plan_only_process_sealed=previous_worker["plan_only_process_sealed"],
-                real_provisioning_enabled=previous_worker["real_provisioning_enabled"],
+                seal_states=_journal_seal_states(previous_worker),
                 artifacts_prepared=previous_worker["artifacts_prepared"],
                 worker_config_installed=previous_worker["worker_config_installed"],
                 worker_recreation_required=previous_worker["worker_recreation_required"],
@@ -6283,10 +6306,6 @@ def _validate_journal(value: dict[str, Any]) -> None:
             "operator_container_present",
             "operator_registration_present",
             "operator_queue_polled",
-            "generic_activation_subprocess_sealed",
-            "generic_executor_subprocess_sealed",
-            "plan_only_process_sealed",
-            "real_provisioning_enabled",
             "artifacts_prepared",
             "worker_config_installed",
             "worker_recreation_required",
@@ -6298,10 +6317,28 @@ def _validate_journal(value: dict[str, Any]) -> None:
             "ordinary_queues",
             "configuration_artifact_digests",
             "runtime",
+            # NOT a bool key. `seal_states` is a list of `[name, state]` pairs and is validated
+            # below; leaving it in `worker_bool_keys` made the type check reject every correctly
+            # written journal, because a list is not a bool.
+            "seal_states",
         }:
             _closed("transaction_journal_malformed")
         if any(type(worker[key]) is not bool for key in worker_bool_keys):
             _closed("transaction_journal_malformed")
+        # An empty list is ACCEPTED here and is not the same as a held posture:
+        # `_journal_seal_states` yields `()` for it and `seals_valid` treats `()` as
+        # not-established. What is refused is a
+        # malformed entry, so a garbled journal cannot arrive as a plausible-looking posture.
+        journal_seals = worker["seal_states"]
+        if not isinstance(journal_seals, list):
+            _closed("transaction_journal_malformed")
+        for entry in journal_seals:
+            if (
+                not isinstance(entry, list)
+                or len(entry) != 2
+                or any(not isinstance(part, str) or not part for part in entry)
+            ):
+                _closed("transaction_journal_malformed")
         if (
             not isinstance(worker["image_digest"], str)
             or not _SHA256.fullmatch(worker["image_digest"])

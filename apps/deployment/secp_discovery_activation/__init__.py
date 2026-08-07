@@ -8,7 +8,14 @@ execution, or network contact.
 
 from __future__ import annotations
 
-PACKAGE_CONTRACT_VERSION = "secp.discovery-activation/v1alpha1"
+# v1alpha2: the activation evidence record carries per-seal STATES
+# (``seal_states: [[name, state], ...]``) instead of four booleans that were all manufactured from
+# a single ``seals_valid``. Bumped so a v1alpha1 record is REFUSED by ``ActivationEvidence``'s
+# validator rather than reinterpreted under the new shape — the four booleans it carries were never
+# four independent observations, and presenting them as four seal states would republish fabricated
+# structure where nothing could tell it from the real thing. Old records are deliberately not
+# migrated.
+PACKAGE_CONTRACT_VERSION = "secp.discovery-activation/v1alpha2"
 PACKAGE_VERSION = "0.1.0"
 PACKAGE_IMPLEMENTATION_ID = "secp-pr5f/discovery-activation/v1"
 

@@ -188,6 +188,21 @@ def _plan_only_gate_holds() -> bool:
 #: They had not drifted only because nobody had changed them yet. Importing this module is inert
 #: (every worker import below is function-local), so a consumer can share the vocabulary without
 #: pulling in anything that executes.
+#:
+#: A SECOND, DELIBERATE READER OF THIS REGION EXISTS AND IT IS NOT THIS ONE.
+#: ``secp_operator_deployment/verify.py:336-355`` (``_read_seals``) asks a DIFFERENT question about
+#: the same surfaces: it reads the module constants (``_OPERATOR_ACTIVATION_SEALED``,
+#: ``_PLAN_ONLY_PROCESS_SEALED``, and two ``_B1A_SUBPROCESS_SEALED``) and folds them into one
+#: ``seals_correct`` boolean for ``verify``'s prerequisite-F rung. This module instead EXERCISES
+#: each surface — it constructs an armed executor and requires a refusal — and reports a per-seal
+#: state. A constant can say "sealed" while the code path it is supposed to close still runs, and
+#: that disagreement is only visible because the two do not share an implementation. Keep both.
+#:
+#: They also do not share a vocabulary, and the overlap is a trap rather than a convenience:
+#: ``verify.py:350`` names the plan-only fact ``plan_only_process_sealed`` and requires it to be
+#: **False**, while this module names it ``plan_only_process_gated`` and requires it to be
+#: **sealed**. Same region, near-identical spelling, opposite polarity, different question. Neither
+#: is a rename of the other and neither may be mapped onto the other.
 REQUIRED_SEAL_NAMES: frozenset[str] = frozenset(
     {
         "generic_activation_subprocess_sealed",

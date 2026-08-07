@@ -41,6 +41,16 @@ from secp_discovery_activation.profile import parse_deployment_profile
 from secp_discovery_activation.state import InMemoryWorkerStateFilesystem
 from secp_discovery_activation.tls import generate_tls_material
 
+
+# The all-held posture, DERIVED from the probe that produces it rather than typed here. A fixture
+# that spells its own seal names cannot notice the probe adding, renaming or removing one -- and
+# `apply_execution_absent`, the seal the hold point actually needs, arrived exactly that way.
+def _sealed_states() -> tuple[tuple[str, str], ...]:
+    from secp_worker.safety_seal_probe import REQUIRED_SEAL_NAMES, SealState
+
+    return tuple(sorted((name, SealState.sealed.value) for name in REQUIRED_SEAL_NAMES))
+
+
 NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 INSTALL_GATE = WriteGate(write=True, confirm=True)
 
@@ -163,10 +173,7 @@ def _before(profile) -> HostObservation:  # noqa: ANN001
         operator_container_present=False,
         operator_registration_present=False,
         operator_queue_polled=False,
-        generic_activation_subprocess_sealed=True,
-        generic_executor_subprocess_sealed=True,
-        plan_only_process_sealed=False,
-        real_provisioning_enabled=False,
+        seal_states=_sealed_states(),
     )
 
 
@@ -201,10 +208,7 @@ def _after(profile, tls_material, **updates: object) -> HostObservation:  # noqa
         "operator_container_present": False,
         "operator_registration_present": False,
         "operator_queue_polled": False,
-        "generic_activation_subprocess_sealed": True,
-        "generic_executor_subprocess_sealed": True,
-        "plan_only_process_sealed": False,
-        "real_provisioning_enabled": False,
+        "seal_states": _sealed_states(),
         "tls_ready": True,
         "artifacts_prepared": True,
         "worker_config_installed": True,
@@ -378,7 +382,22 @@ def test_successful_transaction_stages_rollback_before_any_mutation_and_commits_
         ({"ordinary_queues": ("secp-controlled-live-v1",)}, "ordinary_queue_drift"),
         ({"state_mount_read_write_only_worker": False}, "worker_mount_isolation_failed"),
         ({"operator_service_present": True}, "operator_appeared"),
-        ({"generic_activation_subprocess_sealed": False}, "safety_seal_posture_invalid"),
+        # One seal exercised and NOT held. Under the old four booleans this was
+        # `generic_activation_subprocess_sealed=False`, which could not distinguish "the surface
+        # did not refuse" from "the derivation could not run" -- both were just False.
+        (
+            {"seal_states": (("generic_activation_subprocess_sealed", "unsealed"),)},
+            "safety_seal_posture_invalid",
+        ),
+        # The same seal UNDETERMINED. A different fact, and it must not read as held: a derivation
+        # that could not run is not evidence of safety. With booleans this case had no spelling.
+        (
+            {"seal_states": (("generic_activation_subprocess_sealed", "undetermined"),)},
+            "safety_seal_posture_invalid",
+        ),
+        # No posture at all. `all()` over nothing is True, so this is the case that would pass
+        # vacuously if emptiness were not refused explicitly.
+        ({"seal_states": ()}, "safety_seal_posture_invalid"),
         ({"configuration_artifact_digests": ()}, "configuration_artifact_drift"),
         ({"controlled_integration_enabled": False}, "b8_flags_not_enabled"),
         ({"bundle_prep_loop_started": False}, "bundle_prep_loop_not_started"),

@@ -116,10 +116,11 @@ class HostObservation:
     operator_container_present: bool = True
     operator_registration_present: bool = True
     operator_queue_polled: bool = True
-    generic_activation_subprocess_sealed: bool = False
-    generic_executor_subprocess_sealed: bool = False
-    plan_only_process_sealed: bool = True
-    real_provisioning_enabled: bool = True
+    #: The per-seal states the probe DERIVED, carried through rather than folded. See the note on
+    #: ``WorkerSealObservation.seal_states`` in ``split_adapters`` — this class and that one are the
+    #: same observation on either side of the engine split, and both carried the same four booleans
+    #: set from a SINGLE ``probe.seals_valid``, two of them inverted. Four names, one bool.
+    seal_states: tuple[tuple[str, str], ...] = ()
     tls_ready: bool = False
     artifacts_prepared: bool = False
     worker_config_installed: bool = False
@@ -148,12 +149,19 @@ class HostObservation:
         )
 
     def safety_seals_valid(self) -> bool:
-        return bool(
-            self.generic_activation_subprocess_sealed
-            and self.generic_executor_subprocess_sealed
-            and self.plan_only_process_sealed is False
-            and self.real_provisioning_enabled is False
-        )
+        """Every seal was exercised AND held. Empty is False, never vacuously true."""
+        if not self.seal_states:
+            return False
+        return all(state == "sealed" for _, state in self.seal_states)
+
+    def failing_seals(self) -> tuple[tuple[str, str], ...]:
+        """Which seals did not hold, and the state each is in.
+
+        The answer the evidence chain could not give before. ``unsealed`` and ``undetermined`` stay
+        distinguishable: exercised-and-did-not-refuse is a different problem from
+        could-not-be-exercised, and they call for different responses.
+        """
+        return tuple((name, state) for name, state in self.seal_states if state != "sealed")
 
     def status_observation(self, *, activation_enabled: bool) -> ActivationObservation:
         public = self.worker_public

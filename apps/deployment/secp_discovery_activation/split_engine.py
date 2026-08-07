@@ -1369,10 +1369,18 @@ def _build_worker_result(
         database_private_material_absent=True,
         operator_service_present=False,
         operator_queue_polled=after.operator_queue_polled,
-        generic_activation_subprocess_sealed=True,
-        generic_executor_subprocess_sealed=True,
-        plan_only_process_sealed=False,
-        real_provisioning_enabled=False,
+        # THE SEAL STATES THE WORKER HOST'S PROBE ACTUALLY OBSERVED.
+        #
+        # This is the SIGNED cross-host document, and until now these four fields were four
+        # hardcoded `True/True/False/False` literals. The worker host therefore signed an
+        # attestation of a safety posture that nothing on that host had observed — and
+        # `handoff.WorkerResult._v_semantics` "validated" it by requiring exactly those literals.
+        # The signature was genuine; what it attested was a constant checked against itself.
+        #
+        # Every other site in this change collapses information that was once true. This one
+        # never consulted the probe at all, which is why it is the worst of them: an operator
+        # reading a verified worker result was reading a claim with no producer behind it.
+        seal_states=after.seal_states,
         forbidden_infrastructure_contacts_performed=False,
         workflows_submitted=False,
         run_plan_generation_called=False,
@@ -1798,10 +1806,14 @@ def _aggregate_evidence(
         worker_installation_identity=result.installation_identity,
         operator_service_present=False,
         operator_queue_polled=result.operator_queue_polled,
-        generic_activation_subprocess_sealed=True,
-        generic_executor_subprocess_sealed=True,
-        plan_only_process_sealed=False,
-        real_provisioning_enabled=False,
+        # Carried from the worker's signed result, which is the ONLY worker-host carrier in this
+        # function's scope: `offer` is the controller's own document and `profile`/`rendered` are
+        # inputs. That is why the evidence record and the handoff document had to change together
+        # — they are two ends of one path, not two sites.
+        #
+        # These were four hardcoded True/True/False/False literals here too, so the durable
+        # evidence record asserted the posture regardless of what the probe observed.
+        seal_states=result.seal_states,
         forbidden_infrastructure_contacts_performed=False,
         workflows_submitted=False,
         run_plan_generation_called=False,

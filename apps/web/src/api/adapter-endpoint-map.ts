@@ -360,28 +360,29 @@ export const ADAPTER_ENDPOINT_MAP: readonly AdapterMapping[] = [
   },
   {
     method: "listApprovals",
-    status: "parent-unreachable",
+    status: "shaped",
     endpoints: ["/api/v1/manifests/{manifest_id}/change-sets"],
     note:
-      "CORRECTED TWICE. It said `absent`, which had stopped being true; then `shaped`, which "
-      + "overstated it. The route exists AND cannot be reached. "
-      + "GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals — but "
-      + "PER MANIFEST, so an operator must already know which manifest to ask about. The other "
-      + "five approval families (plan-secret, plan-generation, activation-dossier, "
-      + "readonly-preflight, resolver-activation) remain GET-by-id only; the manifest-scoped "
-      + "routes that mention them are POSTs that CREATE an authorization, not lists. So an "
-      + "approvals inbox — 'what is waiting on me' — still cannot be built. "
-      + "AND THE PARENT IS UNREACHABLE. Nothing enumerates manifests: every GET yielding a "
-      + "manifest id needs a manifest, a change-set or a provisioning-operation id, and those "
-      + "three form a closed cycle. The only way in is POST /api/v1/plans/{plan_id}/manifest, "
-      + "which CREATES one — so an operator reaches approvals only for a manifest made in the "
-      + "same session. Plans themselves ARE reachable, via GET /api/v1/exercises/{exercise_id}"
-      + "/plan, so the chain breaks at exactly ONE level and the fix is ONE collection route.",
+      "CORRECTED THREE TIMES, and it moved BACK. It said `absent`, which had stopped being "
+      + "true; then `shaped`, which overstated it; then `parent-unreachable`, which was right "
+      + "until GET /api/v1/manifests landed. It is `shaped` again now, for the reason `shaped` "
+      + "originally overstated: the serving route works and the parent IS enumerable, so what "
+      + "remains is a shape problem rather than a reachability one. "
+      + "GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals PER "
+      + "MANIFEST, so 'what is waiting on me' means walking every manifest and merging "
+      + "client-side. The other five approval families (plan-secret, plan-generation, "
+      + "activation-dossier, readonly-preflight, resolver-activation) remain GET-by-id only; "
+      + "the manifest-scoped routes that mention them are POSTs that CREATE an authorization, "
+      + "not lists. So the inbox still cannot be built — but nothing is unreachable any more. "
+      + "Recorded because the churn is the lesson: this entry was wrong four times and every "
+      + "correction came from a COMPUTATION (analyseReachability, the generated route map) "
+      + "refusing to agree with it, never from re-reading the prose.",
     unsourcedFields: ["title", "requestedBy", "riskLevel", "scope", "operation"],
     requires:
-      "GET /api/v1/manifests — a collection route so the parent can be listed. ONE route, not "
-      + "two: plans are already reachable through exercises. Do not rebuild "
-      + "/manifests/{manifest_id}/change-sets; it works, nothing can get to it. "
+      "A cross-manifest approvals collection. GET /api/v1/manifests landed, so the parent is "
+      + "enumerable and the collection route this entry used to ask for is DONE — do not add it "
+      + "again. What is still missing is one query that answers 'what is waiting on me' without "
+      + "walking every manifest. "
       + "Whatever is added must keep the six families DISTINCT rather than flattening them into "
       + "one queue: they authorize different acts, and a single 'approval' list is how an "
       + "approval for one operation gets read as authorizing another — the same property "

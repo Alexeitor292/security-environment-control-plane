@@ -42,6 +42,16 @@ from secp_discovery_activation.evidence import (
 )
 from secp_discovery_activation.layout import ORDINARY_TASK_QUEUE, PRODUCTION_LAYOUT
 
+
+# The all-held posture, DERIVED from the probe that produces it rather than typed here. A fixture
+# that spells its own seal names cannot notice the probe adding, renaming or removing one -- and
+# `apply_execution_absent`, the seal the hold point actually needs, arrived exactly that way.
+def _sealed_states() -> tuple[tuple[str, str], ...]:
+    from secp_worker.safety_seal_probe import REQUIRED_SEAL_NAMES, SealState
+
+    return tuple(sorted((name, SealState.sealed.value) for name in REQUIRED_SEAL_NAMES))
+
+
 SHA_A = "sha256:" + "a" * 64
 SHA_B = "sha256:" + "b" * 64
 SSH_FP = "SHA256:" + "A" * 43
@@ -186,10 +196,7 @@ def _evidence(*, classification: str = CLASSIFICATION_CREATED) -> ActivationEvid
         worker_installation_identity="worker.operator.test",
         operator_service_present=False,
         operator_queue_polled=False,
-        generic_activation_subprocess_sealed=True,
-        generic_executor_subprocess_sealed=True,
-        plan_only_process_sealed=False,
-        real_provisioning_enabled=False,
+        seal_states=_sealed_states(),
         forbidden_infrastructure_contacts_performed=False,
         workflows_submitted=False,
         run_plan_generation_called=False,

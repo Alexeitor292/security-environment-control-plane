@@ -129,10 +129,23 @@ class WorkerObservation:
     operator_container_present: bool = True
     operator_registration_present: bool = True
     operator_queue_polled: bool = True
-    generic_activation_subprocess_sealed: bool = False
-    generic_executor_subprocess_sealed: bool = False
-    plan_only_process_sealed: bool = True
-    real_provisioning_enabled: bool = True
+    #: The per-seal states the probe DERIVED, carried through rather than folded.
+    #:
+    #: This replaced four booleans — ``generic_activation_subprocess_sealed``,
+    #: ``generic_executor_subprocess_sealed``, ``plan_only_process_sealed`` and
+    #: ``real_provisioning_enabled`` — every one of which was set from a SINGLE
+    #: ``probe.seals_valid`` boolean, two of them inverted. They were not four observations; they
+    #: were one boolean wearing
+    #: four names, and anything reading them as independent was reading fabricated structure. The
+    #: probe computes each seal separately, so the collapse threw away information that existed.
+    #:
+    #: ``real_provisioning_enabled`` is NOT represented here under another name. Its concept was
+    #: retired: it asked about capability, and the posture now carries ``apply_execution_absent``,
+    #: which asks about history. Reusing the slot would re-conflate the two questions that were
+    #: conflated in the first place.
+    #:
+    #: An ordered tuple rather than a dict so the observation stays hashable and frozen.
+    seal_states: tuple[tuple[str, str], ...] = ()
     tls_ready: bool = False
     keys_generated: bool = False
     key_metadata_safe: bool = False
@@ -156,12 +169,26 @@ class WorkerObservation:
         )
 
     def safety_seals_valid(self) -> bool:
-        return bool(
-            self.generic_activation_subprocess_sealed
-            and self.generic_executor_subprocess_sealed
-            and self.plan_only_process_sealed is False
-            and self.real_provisioning_enabled is False
-        )
+        """Every seal was exercised AND held.
+
+        Empty is False, never vacuously true: ``all()`` over nothing is True, and an observation
+        that carries no seals has established nothing. The previous version could not express this
+        — with four booleans there was always something to fold, even when the values were
+        manufactured from one bool.
+        """
+        if not self.seal_states:
+            return False
+        return all(state == "sealed" for _, state in self.seal_states)
+
+    def failing_seals(self) -> tuple[tuple[str, str], ...]:
+        """The seals that did not hold, with the state each is actually in.
+
+        This is the answer the evidence chain could not give before. ``unsealed`` and
+        ``undetermined`` are both here and stay distinguishable: one means the surface was
+        exercised and did not refuse, the other means the derivation could not run at all, and they
+        call for different responses.
+        """
+        return tuple((name, state) for name, state in self.seal_states if state != "sealed")
 
 
 @dataclass(frozen=True)

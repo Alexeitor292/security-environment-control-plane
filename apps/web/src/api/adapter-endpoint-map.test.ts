@@ -150,14 +150,19 @@ describe("parent reachability is computed, not judged", () => {
     }
   });
 
-  it("names the one space that blocks approvals, and only that one", () => {
-    // One missing collection route, not two. Reporting two would send the API owner to build
-    // something that is already reachable — plans, via exercises.
+  it("no longer blocks approvals, because the one space it named was filled", () => {
+    // This named ONE missing collection route, not two — reporting two would have sent the API
+    // owner to build something already reachable (plans, via exercises). Exactly one route,
+    // `GET /api/v1/manifests`, made it reachable, so the precision was worth having.
+    //
+    // Inverted rather than deleted: what it now proves is that the approvals gap is a SHAPE
+    // problem, not a reachability one, which is a different job for a different owner.
     const approvals = ADAPTER_ENDPOINT_MAP.find((m) => m.method === "listApprovals");
     const blocked = (approvals?.endpoints ?? []).flatMap((p) =>
       reachability.unreachableSpacesOf(p),
     );
-    expect([...new Set(blocked)]).toEqual(["api/v1/manifests"]);
+    expect([...new Set(blocked)]).toEqual([]);
+    expect(approvals?.status).toBe("shaped");
   });
 
   it("keeps teardown evidence reachable, and the artifact index separate from it", () => {

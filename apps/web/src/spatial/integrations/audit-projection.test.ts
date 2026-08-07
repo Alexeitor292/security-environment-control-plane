@@ -8,13 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-  auditRow,
-  auditRows,
-  NOT_SUPPLIED,
-  outcomeView,
-  TONED_OUTCOMES,
-} from "./audit-projection";
+import { auditRow, auditRows, NOT_SUPPLIED } from "./audit-projection";
 
 /**
  * Every outcome the control plane writes from production code, measured from
@@ -48,30 +42,24 @@ function event(over: Partial<Record<string, unknown>> = {}) {
 describe("audit outcome projection", () => {
   it("carries every server outcome through verbatim", () => {
     // The load-bearing assertion. Not "the known ones survive" -- ALL of them,
-    // including the four with no tone, must arrive unchanged.
+    // including the four outside the migrated domain union, must arrive
+    // unchanged. This module classifies nothing; tone belongs to the renderer,
+    // and deciding it here is what once put `revoked` in a neutral badge.
     for (const raw of SERVER_OUTCOMES) {
-      expect(auditRow(event({ outcome: raw })).outcome.raw).toBe(raw);
+      expect(auditRow(event({ outcome: raw })).outcome).toBe(raw);
     }
   });
 
-  it("tones only the three the surface has tones for", () => {
-    for (const raw of SERVER_OUTCOMES) {
-      const view = outcomeView(raw);
-      const expected = (TONED_OUTCOMES as readonly string[]).includes(raw) ? raw : null;
-      expect(view.toned, `${raw} tone`).toBe(expected);
-    }
-  });
-
-  it("never coerces revoked, expired or refused into a toned outcome", () => {
+  it("never coerces revoked, expired or refused toward a familiar outcome", () => {
     // Each of these has a plausible-looking wrong answer. `revoked -> failed`
     // asserts a different fact; `refused -> failed` is the unknown-versus-
     // negative collapse. Asserting the absence is the point -- a coercion would
     // still render a badge and still look right.
     for (const raw of ["revoked", "expired", "refused"] as const) {
-      const view = auditRow(event({ outcome: raw })).outcome;
-      expect(view.toned, `${raw} must not be toned`).toBeNull();
-      expect(view.raw).toBe(raw);
-      expect(view.raw).not.toBe("failed");
+      const outcome = auditRow(event({ outcome: raw })).outcome;
+      expect(outcome).toBe(raw);
+      expect(outcome).not.toBe("failed");
+      expect(outcome).not.toBe("denied");
     }
   });
 
@@ -79,9 +67,8 @@ describe("audit outcome projection", () => {
     // Two spellings of one concept, written by different services. The ledger is
     // append-only, so both exist in it permanently and normalising here would
     // hide a data-quality defect from the only people who can fix it.
-    expect(outcomeView("failure").raw).toBe("failure");
-    expect(outcomeView("failure").toned).toBeNull();
-    expect(outcomeView("failed").toned).toBe("failed");
+    expect(auditRow(event({ outcome: "failure" })).outcome).toBe("failure");
+    expect(auditRow(event({ outcome: "failed" })).outcome).toBe("failed");
   });
 
   it("drops no row, whatever the outcome says", () => {
@@ -89,15 +76,14 @@ describe("audit outcome projection", () => {
     // so an unrecognised outcome must never filter a row out.
     const rows = auditRows(SERVER_OUTCOMES.map((o) => event({ outcome: o })));
     expect(rows).toHaveLength(SERVER_OUTCOMES.length);
-    expect(rows.map((r) => r.outcome.raw)).toEqual([...SERVER_OUTCOMES]);
+    expect(rows.map((r) => r.outcome)).toEqual([...SERVER_OUTCOMES]);
   });
 
   it("survives an outcome nobody has written yet", () => {
     // The property that makes this projection durable: an eighth value is a
-    // display question, not a correctness one.
-    const view = auditRow(event({ outcome: "quarantined" })).outcome;
-    expect(view.raw).toBe("quarantined");
-    expect(view.toned).toBeNull();
+    // display question, not a correctness one. It needs no entry here to pass
+    // through, which is the whole point of classifying nothing.
+    expect(auditRow(event({ outcome: "quarantined" })).outcome).toBe("quarantined");
   });
 });
 
