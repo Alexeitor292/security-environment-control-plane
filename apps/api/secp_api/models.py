@@ -1969,6 +1969,20 @@ class ProvisioningOperation(Base, TimestampMixin):
         nullable=False,
     )
     idempotency_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    # ADR-030 condition 2: the worker the CONTROL PLANE selected for this operation. Written by
+    # ``services.provisioning_worker_selection`` before (or atomically with) the transition that
+    # makes the operation dispatchable, and immutable thereafter.
+    #
+    # NULLABLE, deliberately: operations that predate this column stay NULL rather than being
+    # backfilled with a fabricated selection, and a NULL binding makes the operation
+    # UNDISPATCHABLE rather than open to any worker. "We do not know who was selected" is the
+    # honest value, and it fails closed.
+    #
+    # NOT ``runner``: that is a deterministic runner OPERATION id, and a worker identity stored
+    # there would be indistinguishable from the value already written. NOT derived from
+    # ``WorkerDiscoveryAdmission`` either: that binds a worker selected for a READ, under its own
+    # single-use nonce and expiry, and provisioning has its own authority domain.
+    worker_installation_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # Deterministic runner operation id (fake runner); no secrets.
     runner: Mapped[str] = mapped_column(String(60), default="")
     operation_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
