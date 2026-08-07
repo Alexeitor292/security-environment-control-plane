@@ -34,7 +34,6 @@ from secp_worker.target_discovery.probes import (
     ProbeCandidateLocatorPresence,
     ProbeClusterStatus,
     ProbeError,
-    ProbeNestedVirtualization,
     ProbeNodeCapacity,
     ProbeNodeIdentity,
     ProbeStorage,
@@ -43,7 +42,6 @@ from secp_worker.target_discovery.probes import (
     ReadOnlyHostProbe,
     parse_is_clustered,
     parse_locator_present,
-    parse_nested_enabled,
     parse_node_capacity,
     parse_node_identity,
     parse_owner_marker,
@@ -58,10 +56,6 @@ from secp_worker.target_discovery.seams import (
     ProbeSourceUnavailable,
     StorageOption,
 )
-
-# The closed nested-virtualization module set the executor probes (from the read-only probe
-# contract).
-_NESTED_MODULES = ("kvm_intel", "kvm_amd")
 
 
 class _ProbeSession:
@@ -163,7 +157,6 @@ class ReadOnlyProbeExecutor:
                     for sid, avail, usable in parse_storages(session.run_ok(ProbeStorage(node)))
                 )
                 used_vmids = parse_used_vmids(session.run_ok(ProbeVmidAvailability()))
-                nested = self._probe_nested(session)
         except ProbeError as exc:
             # Never surface a raw parse error; collapse to a closed malformed/unsupported reason.
             reason = getattr(exc, "args", ["malformed_probe_output"])[0]
@@ -177,17 +170,13 @@ class ReadOnlyProbeExecutor:
             cpu_total=cpu,
             mem_total_mb=mem_total,
             mem_free_mb=mem_free,
-            nested_available=nested,
+            # Never observed in first-MVP discovery: its only probe was a host-local `cat` over
+            # SSH, and HTTPS-only discovery has no such channel. `None` is the honest value —
+            # distinct from `False`, which would assert the target lacks the capability.
+            nested_available=None,
             storages=storages,
             used_vmids=used_vmids,
         )
-
-    def _probe_nested(self, session: _ProbeSession) -> bool:
-        for module in _NESTED_MODULES:
-            result = session.run(ProbeNestedVirtualization(module))
-            if result.exit_code == 0 and parse_nested_enabled(result.stdout):
-                return True
-        return False
 
     def probe_candidate_presence(
         self, locators: tuple[ResourceLocator, ...]

@@ -39,7 +39,12 @@ def _ed25519_pubkey(comment: str = "worker@secp") -> str:
     return f"{line} {comment}"
 
 
-def _all_worker_probe_commands() -> list[str]:
+def _probe_samples() -> list[object]:
+    """One constructed instance per probe type the contract can emit.
+
+    Hand-written because several probes take arguments. ``test_the_sample_set_covers_every_probe_
+    type_in_the_union`` is what keeps the hand-writing honest.
+    """
     from secp_worker.deployment.locators import (
         BridgeLocator,
         FirewallGroupLocator,
@@ -48,14 +53,12 @@ def _all_worker_probe_commands() -> list[str]:
     )
     from secp_worker.target_discovery.probes import (
         ProbeClusterStatus,
-        ProbeNestedVirtualization,
         ProbeNodeCapacity,
         ProbeNodeIdentity,
         ProbeStorage,
         ProbeVersion,
         ProbeVmidAvailability,
         candidate_presence_probe,
-        render_probe_argv,
     )
 
     probes = [
@@ -65,14 +68,18 @@ def _all_worker_probe_commands() -> list[str]:
         ProbeNodeCapacity("pve-node-1"),
         ProbeStorage("pve-node-1"),
         ProbeVmidAvailability(),
-        ProbeNestedVirtualization("kvm_intel"),
-        ProbeNestedVirtualization("kvm_amd"),
         candidate_presence_probe(BridgeLocator("pve-node-1", "secpabcd1234br")),
         candidate_presence_probe(FirewallGroupLocator("secpabcd1234fw")),
         candidate_presence_probe(ServiceIdentityLocator("secpabcd1234@pam")),
         candidate_presence_probe(GuestLocator("pve-node-1", 9001)),
     ]
-    return [" ".join(render_probe_argv(p)) for p in probes]
+    return probes
+
+
+def _all_worker_probe_commands():
+    from secp_worker.target_discovery.probes import render_probe_argv
+
+    return [" ".join(render_probe_argv(p)) for p in _probe_samples()]
 
 
 def test_allowlist_matches_every_worker_probe_command_no_drift():
@@ -80,6 +87,27 @@ def test_allowlist_matches_every_worker_probe_command_no_drift():
     # can emit — otherwise a legitimate read-only probe would be denied on the host.
     for cmd in _all_worker_probe_commands():
         assert command_is_allowed(cmd), f"worker probe command not allowed by bootstrap: {cmd}"
+
+
+def test_the_sample_set_covers_every_probe_type_in_the_union():
+    """The drift guard above is only as complete as its sample list, and the list is hand-written.
+
+    That is the failure this test closes: ``ProbeHostPackageVersion`` was added to the union and the
+    guard above stayed green while covering one probe fewer than the contract can emit — a closed
+    set that silently stopped being closed. Sample construction cannot be automated (several probes
+    take arguments), so instead the TYPES are derived from the union and checked against the
+    samples. Adding a probe type without adding a sample now fails here rather than passing
+    everywhere.
+    """
+    from secp_worker.target_discovery.probes import ReadOnlyHostProbe
+
+    sampled_types = {type(p) for p in _probe_samples()}
+    union_types = set(ReadOnlyHostProbe.__args__)
+    missing = union_types - sampled_types
+    assert missing == set(), (
+        f"probe types in the union with no sample in the drift guard: "
+        f"{sorted(t.__name__ for t in missing)}"
+    )
 
 
 @pytest.mark.parametrize(
