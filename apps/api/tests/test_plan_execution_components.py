@@ -85,27 +85,39 @@ def test_sealed_default_composition_refuses_before_any_contact():
     )
 
     comp = build_plan_execution_composition()
-    assert comp.gate.enabled is False
+    # Unusable because it is structurally EMPTY. `PlanExecutionGate` is retired (ADR-030) — a
+    # composition describes installed machinery and never carries its own permission.
+    assert not hasattr(comp, "gate")
+    assert comp.classification == ""
     assert comp.toolchain_layout is None
     assert comp.provider_resolver is None
     assert comp.trusted_workspace_root is None
-    with pytest.raises(PlanExecutionCompositionError, match="composition_sealed"):
+    with pytest.raises(PlanExecutionCompositionError, match="composition_classification_invalid"):
         verify_plan_execution_composition(comp)
 
 
 def test_no_env_flag_or_field_activates_the_composition():
-    # The factory ignores any settings object; it always returns the sealed default.
-    from secp_worker.plan_gen.composition import build_plan_execution_composition
+    """The factory ignores any settings object; it always returns the unconfigured default.
+
+    Asserted by exercising the validator rather than reading a field, because there is no longer a
+    field to read — which is the point. A settings key named `gate` or `enabled` now has nothing to
+    bind to even in principle.
+    """
+    from secp_worker.plan_gen.composition import (
+        PlanExecutionCompositionError,
+        build_plan_execution_composition,
+        verify_plan_execution_composition,
+    )
 
     for settings in (None, {"enabled": True}, object(), {"gate": {"enabled": True}}):
-        assert build_plan_execution_composition(settings).gate.enabled is False
+        with pytest.raises(PlanExecutionCompositionError):
+            verify_plan_execution_composition(build_plan_execution_composition(settings))
 
 
 def _activated_composition(*, classification="test_only", **over):
     """A minimal ACTIVATED composition (used only to exercise verify's per-binding refusals)."""
     from secp_worker.plan_gen.composition import (
         PlanExecutionComposition,
-        PlanExecutionGate,
         ProviderRuntimeInputSource,
         StateRuntimeInputSource,
     )
@@ -146,7 +158,6 @@ def _activated_composition(*, classification="test_only", **over):
         cli_config="meta/cli.tofurc",
     )
     base = dict(
-        gate=PlanExecutionGate(enabled=True),
         classification=classification,
         toolchain_layout=layout,
         trusted_workspace_root="/trusted/ws",
@@ -655,3 +666,123 @@ def test_orchestration_never_names_a_fake_or_apply_symbol():
         "destroy_prepared",
     ):
         assert forbidden not in names, forbidden
+
+
+# --- ADR-030: the composition is capability-neutral infrastructure -------------------------------
+
+
+def test_plan_execution_gate_no_longer_exists_anywhere_in_production_code():
+    """`PlanExecutionGate` is gone as a TYPE, not merely unused.
+
+    Scanned across the worker and deployment trees rather than asserted on one module, because the
+    failure this guards is a reintroduction somewhere convenient — a local dataclass in whichever
+    file needed a switch that day.
+
+    The scan walks the AST, not the text. A substring scan matches the docstrings that EXPLAIN the
+    retirement, which is how a guard ends up failing on the prose describing the thing it forbids.
+    Asking whether the code defines or calls the name is the property actually meant.
+    """
+    import ast
+    import pathlib
+
+    import secp_operator_deployment
+    import secp_worker
+
+    roots = [
+        pathlib.Path(secp_worker.__file__).parent,
+        pathlib.Path(secp_operator_deployment.__file__).parent,
+    ]
+    offenders = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and node.name == "PlanExecutionGate":
+                    offenders.append(f"{path}: class")
+                if isinstance(node, ast.Call):
+                    fn = node.func
+                    name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")
+                    if name == "PlanExecutionGate":
+                        offenders.append(f"{path}: call")
+                if isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        if alias.name == "PlanExecutionGate":
+                            offenders.append(f"{path}: import")
+    assert offenders == [], offenders
+
+
+def test_the_composition_carries_no_authority_bearing_field():
+    """Structural, and deliberately a NAME scan over the dataclass fields.
+
+    A composition describes installed machinery. The moment one of its fields answers "may this
+    execute?", a fully-configured worker becomes an authorized worker — which is the exact defect
+    ADR-030 §2 names. Catching the name is the earliest possible signal; by the time a boolean is
+    also being READ somewhere, it is already load-bearing.
+    """
+    import dataclasses
+
+    from secp_worker.plan_gen.composition import PlanExecutionComposition
+
+    banned = {
+        "gate",
+        "enabled",
+        "armed",
+        "real",
+        "live",
+        "activated",
+        "unsealed",
+        "gate_passed",
+        "allowed",
+        "authorized",
+        "permitted",
+    }
+    fields = {f.name for f in dataclasses.fields(PlanExecutionComposition)}
+    assert not (fields & banned), sorted(fields & banned)
+    # And no bare `bool` field at all: the type is the tell, regardless of what it is called.
+    for f in dataclasses.fields(PlanExecutionComposition):
+        assert f.type is not bool and f.type != "bool", f.name
+
+
+def test_a_complete_composition_is_not_permission_to_execute():
+    """The invariant the gate's removal is FOR.
+
+    A fully-populated controlled-live composition passes `verify_plan_execution_composition` — it
+    describes correct machinery — and that must still not be enough to execute anything. Permission
+    is the per-operation `PlanOnlyCapability`, and the executor issuer refuses without one.
+    """
+    from secp_worker.plan_gen.composition import verify_plan_execution_composition
+    from secp_worker.plan_gen.process_boundary import issue_plan_only_executor
+
+    complete = _activated_composition(classification="test_only")
+    verify_plan_execution_composition(complete)  # the machinery is verified...
+
+    # ...and the executor still cannot be obtained without a capability.
+    for absent in (None, object(), {"classification": "controlled_live"}):
+        with pytest.raises(Exception) as exc:
+            issue_plan_only_executor(absent)
+        assert exc.type is not AssertionError
+
+
+def test_a_caller_cannot_construct_or_serialize_a_plan_only_capability():
+    """The capability is the authority, so forging or replaying one must be impossible."""
+    import copy
+    import json
+    import pickle
+
+    from secp_worker.plan_gen.capability import PlanOnlyCapability, PlanOnlyCapabilityRefused
+
+    with pytest.raises((PlanOnlyCapabilityRefused, TypeError, ValueError)):
+        PlanOnlyCapability(object(), object())
+
+    # A capability that could be pickled could be smuggled through a Temporal history, and one
+    # that could be deep-copied could outlive its expiry. Asserted on the DEFINITIONS, because a
+    # valid instance cannot be constructed here to try it on — which is itself the first property.
+    # Asserted as BEHAVIOUR, not as a list of overridden dunders. `__deepcopy__` is deliberately
+    # not overridden — deepcopy routes through `__reduce_ex__`, which is — and a test naming the
+    # mechanism would fail on a correct implementation that closed the same hole differently.
+    orphan = PlanOnlyCapability.__new__(PlanOnlyCapability)
+    for attempt in (pickle.dumps, copy.deepcopy, copy.copy):
+        with pytest.raises(TypeError):
+            attempt(orphan)
+    with pytest.raises(TypeError):
+        json.dumps(orphan)

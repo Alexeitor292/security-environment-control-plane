@@ -1,14 +1,39 @@
-"""Default-sealed plan-execution composition (B1B-PR5B, ADR-022 §5) — worker-only.
+"""The plan-execution composition (B1B-PR5B, ADR-022 §5, ADR-030) — worker-only.
 
-The SHIPPED composition is fully **sealed**: the gate is disabled and it carries NO toolchain
-filesystem layout, NO trusted workspace root, NO controlled-live renderer/process registration, NO
-runtime-input source, NO plan-execution resolver, and NO resolver activation. The durable plan-only
-orchestration therefore refuses at the composition gate **before any filesystem access, secret
-contact, state-backend contact, rendering, executor construction, or process execution**.
+This module describes **what trusted machinery is installed on this worker**. It does not, and
+after ADR-030 cannot, describe what may execute.
 
-**The seal is the out-of-band reviewed composition, never an environment flag.** No environment
-variable, URL, backend kind, target row, ``PATH`` entry, installed binary, caller boolean, or API
-field can activate it. A separately reviewed deployment-local composition must supply the explicit
+The shipped composition is structurally incomplete: no classification, no toolchain filesystem
+layout, no trusted workspace root, no controlled-live renderer/process registration, no
+runtime-input source, no plan-execution resolver and no resolver activation. The durable plan-only
+orchestration therefore refuses **before any filesystem access, secret contact, state-backend
+contact, rendering, executor construction, or process execution** — and the refusal names the first
+missing seam.
+
+WHY THERE IS NO LONGER A GATE
+------------------------------
+``PlanExecutionGate`` — a single ``enabled: bool`` on this composition — was retired. ADR-030 §2
+forbids any constructor or configuration field whose value widens what may execute, and this was
+one: it made a fully-configured worker an authorized worker. Both halves of that are wrong. A
+worker with the reviewed toolchain installed has not thereby been authorized to touch a cluster,
+and an authorized operation does not become executable on a worker whose machinery is unverified.
+
+Nothing replaces it, because the thing it was standing in for already exists. Permission belongs to
+:class:`~secp_worker.plan_gen.capability.PlanOnlyCapability`, which is bound to the exact operation,
+worker, target, fresh toolchain attestation, provider pin, credential binding, execution lease and
+implementation digests, carries an expiry, cannot be constructed by a caller and raises on any
+attempt to serialize or pickle it — so it cannot be forged, and cannot be smuggled in through a
+Temporal history or an API field.
+
+    complete composition + no capability   -> no execution
+    valid capability + wrong composition   -> no execution
+    complete composition + valid capability -> plan-only execution
+
+The two are checked independently and neither substitutes for the other. Plan generation keeps its
+own authority domain: it happens *before* a reviewed apply change-set exists, so it is never routed
+through the apply-side ``AuthorizedExecution``.
+
+A separately reviewed deployment-local composition must still supply the explicit
 ``ToolchainFilesystemLayout``, the explicit POSIX trusted workspace root, the controlled-live
 renderer + process registrations bound to their EXACT reviewed implementation digests, the provider
 and state runtime-input sources, the SEPARATE provider and state resolver activations, the process
@@ -74,17 +99,22 @@ class StateRuntimeInputSource:
 
 
 @dataclass(frozen=True)
-class PlanExecutionGate:
-    """Default-**disabled** activation gate. A disabled gate refuses before any external contact."""
-
-    enabled: bool = False
-
-
-@dataclass(frozen=True)
 class PlanExecutionComposition:
-    """The reviewed set of injected plan-execution seams. The shipped default is fully sealed."""
+    """The trusted machinery installed on THIS worker. It is capability-neutral.
 
-    gate: PlanExecutionGate = PlanExecutionGate()
+    ADR-030 retired ``PlanExecutionGate`` from this record, and the deletion is the point rather
+    than a tidy-up. This type answers ONE question — *what reviewed machinery is installed on this
+    worker?* — and a boolean field on it was answering a different one: *may this operation
+    execute?* A composition carrying its own permission means a fully-configured worker is an
+    authorized worker, which is precisely the ambient authorization §2 forbids.
+
+    So a complete composition is now necessary and **not sufficient**. Permission for a specific
+    operation comes from :class:`~secp_worker.plan_gen.capability.PlanOnlyCapability`, which is
+    bound to the exact operation, worker, target, toolchain attestation, credential binding,
+    execution lease and implementation digests, carries an expiry, cannot be constructed by a
+    caller and cannot be serialized — so it can neither be forged nor smuggled through Temporal or
+    an API field. The two are checked independently and neither substitutes for the other.
+    """
 
     # --- fresh on-disk re-attestation (worker filesystem only, no execution) ---------------------
     toolchain_layout: ToolchainFilesystemLayout | None = None
@@ -129,34 +159,54 @@ class PlanExecutionComposition:
         return self.classification == TEST_ONLY_CLASSIFICATION
 
 
-def sealed_plan_execution_composition() -> PlanExecutionComposition:
-    """Shipped sealed composition: gate off; no layout, root, registration, resolver, or limit."""
+def unconfigured_plan_execution_composition() -> PlanExecutionComposition:
+    """The shipped composition: NO classification, layout, root, registration, resolver or limit.
+
+    Renamed from ``sealed_plan_execution_composition``. The old name asserted a property that is no
+    longer how this refuses and, more importantly, was never how it *should* have refused: "sealed"
+    described a boolean being off, and a boolean that can be off can be turned on. What makes this
+    value unusable is that it names none of the machinery required to run anything — a state no
+    configuration change can flip, because there is nothing to flip.
+    """
     return PlanExecutionComposition()
 
 
 def build_plan_execution_composition(settings=None) -> PlanExecutionComposition:  # noqa: ANN001
     """Deployment-local composition factory used by the durable orchestration.
 
-    SHIPPED DEFAULT: fully **sealed**. The orchestration refuses at the composition gate before any
-    filesystem access, secret-manager contact, rendering, executor construction, or process
-    execution. A future, separately reviewed activation injects the real, gated composition HERE —
-    behind out-of-band reviewed material — so no single configuration flag can enable it.
+    SHIPPED DEFAULT: structurally incomplete, and therefore unusable. The orchestration refuses
+    before any filesystem access, secret-manager contact, rendering, executor construction or
+    process execution — naming the first missing seam rather than reporting one opaque flag.
+
+    A separately reviewed deployment injects the real composition HERE, out of band. Note what that
+    injection buys and what it does not: a complete composition describes trusted machinery, and
+    machinery is not permission. Executing a specific operation still requires a valid
+    ``PlanOnlyCapability`` issued against durable rows for that exact operation.
     """
-    return sealed_plan_execution_composition()
+    return unconfigured_plan_execution_composition()
 
 
 def verify_plan_execution_composition(  # noqa: C901, PLR0912 - one explicit refusal per binding
     composition: PlanExecutionComposition,
 ) -> None:
-    """Refuse (bounded reason) unless ``composition`` is an enabled, fully-bound reviewed
-    composition.
+    """Refuse (bounded reason) unless ``composition`` is a fully-bound reviewed composition.
 
-    The shipped default (gate disabled) always raises ``composition_sealed`` — before any filesystem
-    or secret contact. When enabled, every seam must be present and each registration must equal its
-    EXACT reviewed implementation digest (a self-declared registration is never sufficient).
+    Every seam must be present and each registration must equal its EXACT reviewed implementation
+    digest (a self-declared registration is never sufficient).
+
+    WHAT THIS FUNCTION NO LONGER DOES. It used to begin ``if not composition.gate.enabled: raise
+    composition_sealed`` — one boolean standing in front of every structural check. ADR-030 retired
+    it, and no boolean replaces it: this function now answers only *is the installed machinery the
+    reviewed machinery*, and says nothing about whether anything may execute.
+
+    The shipped default still refuses, and refuses FIRST, because it is structurally incomplete — it
+    carries no classification, no layout, no trusted root and no registrations. That refusal names
+    the missing seam an operator must supply, which the old ``composition_sealed`` could not: a
+    single ambient flag reports the same thing whether one field is missing or fourteen are.
+
+    Passing here is NOT permission to execute. The caller must additionally hold a valid
+    ``PlanOnlyCapability`` for the exact operation.
     """
-    if not composition.gate.enabled:
-        raise PlanExecutionCompositionError("composition_sealed")
     if composition.classification not in _CLASSIFICATIONS:
         raise PlanExecutionCompositionError("composition_classification_invalid")
     # Bind the classification to the ACTUAL executor factory (adversarial-review §1 hardening): a

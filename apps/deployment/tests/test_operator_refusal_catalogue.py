@@ -12,8 +12,15 @@ closable when it is not. Two complementary guards keep it honest:
 Scope, stated plainly rather than implied, and MEASURED rather than estimated — the numbers below
 are asserted by :func:`test_the_scan_coverage_is_exactly_what_this_docstring_claims`, so they
 cannot rot into decoration. The scan recognises five syntactic shapes across the two source files
-and covers **27 of the 101** catalogued codes: 26 in ``verify.py``, and exactly one —
+and covers **26 of the 100** catalogued codes: 25 in ``verify.py``, and exactly one —
 ``operator_consumer_active`` — in ``queue_check.py``.
+
+The catalogue lost one net entry when ADR-030 retired ``PlanExecutionGate``. Two codes went —
+``plan_gate_disabled`` (returned by ``verify.py`` for a composition whose gate was off) and
+``composition_sealed`` (raised by ``verify_plan_execution_composition`` for the same reason) — and
+one arrived, ``plan_execution_composition_unconfigured``, the submission stop for a shipped
+composition that names no machinery. The composition still refuses when incomplete, with the
+specific missing-seam code the catalogue already carried. Fewer entries, not fewer checks.
 
 The ratio keeps getting WORSE as the catalogue grows, and that is the honest signal: every code
 added so far has been raised in a module the scan does not read. Read the coverage as "this scan
@@ -30,13 +37,15 @@ catalogue block itself:
   are filtered out DELIBERATELY because they double as status names. This measure OVER-COUNTS
   slightly and is left that way rather than tuned: ``operator_activation_sealed`` is matched
   because it is a report FIELD name in ``_read_seals``, not because ``verify.py`` refuses with it.
-* **5 appear only in ``queue_check.py``** — ``attestation_provider_not_reviewed`` and
-  ``controlled_live_runtime_not_provisioned``, passed positionally to ``SubmissionStop`` (the other
-  two stop codes also occur in ``verify.py`` and are counted above);
+* **6 appear only in ``queue_check.py``** — ``attestation_provider_not_reviewed``,
+  ``controlled_live_runtime_not_provisioned`` and, since ADR-030 retired ``PlanExecutionGate``,
+  ``plan_execution_composition_unconfigured``, all passed positionally to ``SubmissionStop``. That
+  last one moved into this bucket rather than being added to it: it replaced ``plan_gate_disabled``,
+  which ``verify.py`` used to RETURN and which was therefore counted in the bucket above;
   ``operator_consumer_unobservable`` as an ``x or "literal"`` fallback; ``submission_stop_open`` as
   a conditional dict-literal value; and ``submission_stop_unobservable`` reached through the
   ``STOP_UNOBSERVABLE`` module constant.
-* **46 are raised elsewhere** — ``identities.py``, ``profile.py``, ``manifest.py``,
+* **45 are raised elsewhere** — ``identities.py``, ``profile.py``, ``manifest.py``,
   ``compositions.py``, ``runtime_seams.py``, ``cli.py``, ``production_context.py``, ``runner.py``
   and ``secp_worker``. This bucket includes the four POSIX/backend refusals surfaced by the CLI's
   bounded guard and the nine ``expected_identities_*`` codes the pins reader raises — exactly the
@@ -48,7 +57,7 @@ catalogue block itself:
   raised from ``identities.py`` and guarded in ``test_operator_worker_queue_binding.py`` — another
   instance of the same pattern, and the reason this bucket is the one that keeps growing.
 
-This 23/5/46 split is re-measured on every run by
+This 23/6/45 split is re-measured on every run by
 :func:`test_the_blind_spot_breakdown_is_re_measured_not_remembered`, so the prose above cannot
 quietly stop describing the code.
 
@@ -93,9 +102,9 @@ _PKG = pathlib.Path(__file__).resolve().parents[1] / "secp_operator_deployment"
 _SCANNED_SOURCES = (_PKG / "verify.py", _PKG / "queue_check.py")
 
 # The measured coverage the module docstring states. Asserted below so the prose cannot drift.
-_EXPECTED_COVERAGE = (27, 101)
+_EXPECTED_COVERAGE = (26, 100)
 # The measured blind-spot split: (in verify.py, in queue_check.py only, elsewhere).
-_EXPECTED_BLIND_SPOTS = (23, 5, 46)
+_EXPECTED_BLIND_SPOTS = (23, 6, 45)
 
 # The exact shapes a bounded reason code is produced in inside the scanned sources.
 _REFUSAL_PATTERNS = (
@@ -135,7 +144,6 @@ _SCANNED_LITERALS = frozenset(
         "manifest_unavailable",
         "operator_consumer_active",  # queue_check.py — the only literal matched outside verify.py
         "plan_execution_composition_invalid",
-        "plan_gate_disabled",
         "process_digest_invalid",
         "process_registration_invalid",
         "profile_type_invalid",
@@ -246,8 +254,8 @@ def test_gaps_that_only_a_reviewed_code_change_can_close_are_marked_as_such():
     for code in (
         "seal_drift_detected",  # a seal constant drifted
         "attestation_provider_not_reviewed",  # the reviewed runtime-provider set is a code constant
-        "plan_gate_disabled",  # the plan-execution gate is a reviewed code default
-        "composition_sealed",
+        # the shipped composition names no machinery; only a reviewed change adds it
+        "plan_execution_composition_unconfigured",
         "readiness_gate_disabled",
         "eligibility_gate_disabled",
     ):

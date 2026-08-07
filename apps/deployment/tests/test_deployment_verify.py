@@ -268,10 +268,15 @@ def test_bad_provenance_digest_refuses():
     assert _prepared(compositions=bad)["compositions"]["verified"] is False
 
 
-def test_disabled_plan_gate_refuses():
-    from secp_worker.plan_gen.composition import PlanExecutionGate
+def test_a_composition_missing_its_machinery_refuses():
+    """Replaces `test_disabled_plan_gate_refuses`.
 
-    agg = _mutate_pe(_agg(), gate=PlanExecutionGate(enabled=False))
+    That test turned off one boolean and watched verification fail, which proved the flag was read
+    — not that anything structural was checked. `PlanExecutionGate` is retired (ADR-030), so the
+    refusal now has to come from a genuinely absent seam. Stripping the toolchain layout is the
+    same shape of defect the flag was standing in for, and it is one an operator can actually cause.
+    """
+    agg = _mutate_pe(_agg(), toolchain_layout=None)
     assert _prepared(compositions=agg)["compositions"]["verified"] is False
 
 

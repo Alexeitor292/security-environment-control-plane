@@ -24,7 +24,7 @@ from secp_worker.plan_gen.composition import (
     TEST_ONLY_CLASSIFICATION,
     PlanExecutionComposition,
     PlanExecutionCompositionError,
-    sealed_plan_execution_composition,
+    unconfigured_plan_execution_composition,
     verify_plan_execution_composition,
 )
 
@@ -69,7 +69,7 @@ class SealedPlanExecutionCompositionProvider(_NonSerializable):
     classification = SEALED_DEFAULT_PROVIDER
 
     def get(self) -> PlanExecutionComposition:
-        return sealed_plan_execution_composition()
+        return unconfigured_plan_execution_composition()
 
 
 class ControlledLivePlanExecutionCompositionProvider(_NonSerializable):
