@@ -28,12 +28,24 @@ hands the worker its invitation is now LOAD-BEARING for server authentication. A
 substitute the invitation substitutes the CA with it, and the worker will faithfully verify the
 attacker's TLS against the attacker's CA.
 
-Two things still bound that exposure, and neither is the CA: the controller OFFER is verified
-against ``controller_key_id`` pinned in the same invitation, and the worker's own key never leaves
-this process — so a substituted invitation yields a failed enrollment against an impostor, not a
-disclosed secret or a worker enrolled to the wrong controller under the right identity. Operators
-who cannot trust the hand-off channel should verify the ``controller_key_id`` fingerprint out of
-band; ``secpctl worker enroll`` displays it on first use for exactly that reason.
+One thing bounds that exposure at this layer, and it is not the CA: the worker's own key never
+leaves this process, so a substituted invitation cannot disclose a reusable secret.
+
+What this layer does NOT bound — corrected, because this docstring previously claimed it did — is a
+worker being enrolled to the wrong controller under a coherent identity. Verifying the offer against
+``controller_key_id`` proves only that whoever wrote the invitation also signed the offer; when the
+attacker wrote the invitation, that is the attacker. The invitation supplies the origin, the signing
+key AND the CA together, so every check at this layer passes against an identity the attacker chose.
+
+The fix lives one layer up, in :mod:`secp_worker.worker_ownership` and the driver's ownership gate:
+an UNOWNED worker requires an independently-supplied ``expected_controller_key_id`` before any
+packet leaves the host, and an OWNED worker refuses an invitation naming a different controller
+before contact. Neither fact travels in the invitation, which is what makes them load-bearing.
+
+Still open, and deliberately NOT claimed here: the controller's TLS trust anchor is not pinned in
+the ownership record, because no signed claim in the current exchange covers it. See
+:mod:`secp_worker.worker_ownership` for why pinning an unauthenticated value would be worse than
+not pinning it.
 
 This module lives at the worker TOP LEVEL on purpose (the ``httpx`` seam): the enrollment
 subpackages stay transport-free. The shipped default is :class:`SealedEnrollmentTransport`, which
