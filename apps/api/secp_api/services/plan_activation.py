@@ -33,6 +33,7 @@ from secp_api.enums import (
     ActivationDossierEvidenceStatus,
     ActivationDossierStatus,
     AuditAction,
+    AuditOutcome,
     Permission,
     PlanGenerationAuthorizationStatus,
     PlanGenerationPurpose,
@@ -672,7 +673,7 @@ def revoke_activation_dossier(
         resource_id=row.id,
         organization_id=row.organization_id,
         actor=str(actor.user_id),
-        outcome="revoked",
+        outcome=AuditOutcome.revoked,
         data={**_dossier_safe_audit(row), "reason_code": safe_reason},
     )
     return row
@@ -689,7 +690,7 @@ def _mark_dossier_expired(
             resource_id=row.id,
             organization_id=row.organization_id,
             actor=str(actor.user_id),
-            outcome="expired",
+            outcome=AuditOutcome.expired,
             data=_dossier_safe_audit(row),
         )
 
@@ -1028,7 +1029,7 @@ def revoke_plan_generation_authorization(
         resource_id=row.id,
         organization_id=row.organization_id,
         actor=str(actor.user_id),
-        outcome="revoked",
+        outcome=AuditOutcome.revoked,
         data={**_authz_safe_audit(row), "reason_code": safe_reason},
     )
     return row
@@ -1045,7 +1046,7 @@ def _mark_authz_expired(
             resource_id=row.id,
             organization_id=row.organization_id,
             actor=str(actor.user_id),
-            outcome="expired",
+            outcome=AuditOutcome.expired,
             data=_authz_safe_audit(row),
         )
 

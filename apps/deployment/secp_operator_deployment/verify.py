@@ -334,6 +334,25 @@ def classify_reason_code(code: str | None) -> dict[str, str] | None:
 
 
 def _read_seals() -> dict:
+    """Read the seal CONSTANTS and fold them to one verdict. This is not a probe, deliberately.
+
+    ``secp_worker/safety_seal_probe.py`` derives the same region by EXERCISING it — constructing an
+    armed executor and requiring a refusal — and reports a per-seal state (``sealed`` /
+    ``unsealed`` / ``undetermined``). This function reads the flags, because prerequisite F
+    consumes a single pass/fail rung and because "is the flag set" is a genuinely different
+    question from "does the surface actually refuse".
+
+    Keep both. A flag that is set while the path it guards still runs is exactly the disagreement
+    worth being able to see, and it is only visible because these two do not share an
+    implementation. This is the one place in the seal chain where a fold to one boolean survived
+    the per-seal collapse, and it survived on purpose.
+
+    The names below are LOCAL TO THIS FILE and do not match the probe's.
+    ``plan_only_process_sealed`` is required to be **False** here, whereas the probe's
+    ``plan_only_process_gated`` is required to
+    be **sealed** — same region, near-identical spelling, opposite polarity, different question. Do
+    not map one onto the other.
+    """
     from secp_worker.plan_gen import process_boundary as pb
     from secp_worker.provisioning import activation as act
     from secp_worker.provisioning import process_executor as pe

@@ -27,6 +27,7 @@ from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     Permission,
     StagingBootstrapArtifactProfile,
     StagingLabDecisionCode,
@@ -360,7 +361,7 @@ def generate_plan(session: Session, actor: Principal, lab_id: uuid.UUID) -> Stag
             resource_id=lab.id,
             organization_id=lab.organization_id,
             actor=str(actor.user_id),
-            outcome="denied",
+            outcome=AuditOutcome.denied,
             data=_safe_audit(lab, reason_code=exc.reason_code),
         )
         raise DomainError(f"staging-lab plan refused: {exc.reason_code}") from exc

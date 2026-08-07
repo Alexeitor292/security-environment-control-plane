@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from secp_api import audit
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     StagingLabDecisionCode,
     StagingLabStatus,
     StagingWorkFailureCode,
@@ -124,7 +125,7 @@ def _refuse(session: Session, item: StagingLabWorkItem, code: StagingWorkFailure
         resource_id=item.id,
         organization_id=item.organization_id,
         actor="worker",
-        outcome="denied",
+        outcome=AuditOutcome.denied,
         data={
             "staging_lab_id": str(item.staging_lab_id),
             "operation_kind": item.operation_kind.value,
@@ -271,7 +272,7 @@ def claim_and_process_one(session: Session) -> uuid.UUID | None:
             resource_id=candidate.id,
             organization_id=candidate.organization_id,
             actor="worker",
-            outcome="denied",
+            outcome=AuditOutcome.denied,
             data={
                 "staging_lab_id": str(lab.id),
                 "failure_code": StagingWorkFailureCode.blast_radius.value,
